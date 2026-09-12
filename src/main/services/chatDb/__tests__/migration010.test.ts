@@ -36,11 +36,12 @@ afterEach(() => {
 
 describe('010_sync_parent_order_frame', () => {
   it('is registered with correct additive DDL and registry count', () => {
-    expect(MIGRATIONS.length).toBe(13)
+    expect(MIGRATIONS.length).toBe(14)
     expect(MIGRATIONS[9].key).toBe('010_sync_parent_order_frame')
     expect(MIGRATIONS[10].key).toBe('011_sync_parent_order_frame_parent_id_unbounded')
     expect(MIGRATIONS[11].key).toBe('012_sync_frame_high_water')
     expect(MIGRATIONS[12].key).toBe('013_sync_stable_replace_register')
+    expect(MIGRATIONS[13].key).toBe('014_sync_resend_attempt')
     const joined = MIGRATIONS[9].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS sync_parent_order_frame')
     expect(joined).toContain("CHECK (kind IN ('topicMessage','messageBlock'))")

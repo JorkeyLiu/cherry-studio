@@ -4,7 +4,7 @@
  *   bounds, strict JSON active_block_ids_json, and payload_hash
  *   (SYNC-DATA-051 receiver-first slice)
  * - No backfill: messages without an accepted replacement have no row
- * - Registry count 13, idempotent, strict CHECKs, reopen durable
+ * - Registry count 14, idempotent, strict CHECKs, reopen durable
  */
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
@@ -35,8 +35,9 @@ afterEach(() => {
 
 describe('013_sync_stable_replace_register', () => {
   it('is registered as 13th migration with correct DDL and no backfill', () => {
-    expect(MIGRATIONS.length).toBe(13)
+    expect(MIGRATIONS.length).toBe(14)
     expect(MIGRATIONS[12].key).toBe('013_sync_stable_replace_register')
+    expect(MIGRATIONS[13].key).toBe('014_sync_resend_attempt')
     const joined = MIGRATIONS[12].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS sync_stable_replace_register')
     expect(joined).toContain('message_id TEXT PRIMARY KEY')
@@ -51,7 +52,7 @@ describe('013_sync_stable_replace_register', () => {
   it('fresh database creates an empty register table', () => {
     const db = drizzle(sqlite, {})
     const applied = runMigrations(db as never, sqlite)
-    expect(applied).toBe(13)
+    expect(applied).toBe(14)
     const tbl = sqlite
       .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_stable_replace_register'`)
       .get() as { sql: string }

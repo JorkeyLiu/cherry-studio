@@ -40,9 +40,10 @@ function highWaterRows(): Array<{ kind: string; parent_id: string; max_timestamp
 
 describe('012_sync_frame_high_water', () => {
   it('is registered as 12th migration with correct DDL and backfill', () => {
-    expect(MIGRATIONS.length).toBe(13)
+    expect(MIGRATIONS.length).toBe(14)
     expect(MIGRATIONS[11].key).toBe('012_sync_frame_high_water')
     expect(MIGRATIONS[12].key).toBe('013_sync_stable_replace_register')
+    expect(MIGRATIONS[13].key).toBe('014_sync_resend_attempt')
     const joined = MIGRATIONS[11].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS sync_frame_high_water')
     expect(joined).toContain("CHECK (kind IN ('topicMessage','messageBlock'))")
@@ -60,7 +61,7 @@ describe('012_sync_frame_high_water', () => {
   it('fresh database creates an empty high-water table', () => {
     const db = drizzle(sqlite, {})
     const applied = runMigrations(db as never, sqlite)
-    expect(applied).toBe(13)
+    expect(applied).toBe(14)
     const tbl = sqlite
       .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_frame_high_water'`)
       .get() as { sql: string }

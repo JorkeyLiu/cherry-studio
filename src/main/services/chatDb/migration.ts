@@ -1158,6 +1158,22 @@ export const MIGRATIONS: MigrationEntry[] = [
         payload_hash TEXT NOT NULL CHECK (length(payload_hash) > 0)
       )`
     ]
+  },
+  {
+    key: '014_sync_resend_attempt',
+    description:
+      'Additive local-only resend attempt intent (SYNC-DATA-055 intent slice): one row per resend message carrying the attempt identity plus topic/message/askId, the reset timestamp, and the removed old stable block IDs — never content, credentials, or paths. A new reset for the same message deterministically supersedes the prior row (message_id PK upsert). No backfill — messages never reset have no row. The intent is local-only lifecycle state: it is never read for outbox emission and never rides the wire (no issuer in this slice).',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_resend_attempt (
+        message_id TEXT PRIMARY KEY CHECK (length(message_id) > 0),
+        attempt_id TEXT NOT NULL CHECK (length(attempt_id) > 0 AND length(attempt_id) <= 256 AND attempt_id NOT LIKE '%:%'),
+        topic_id TEXT NOT NULL CHECK (length(topic_id) > 0),
+        ask_id TEXT CHECK (ask_id IS NULL OR length(ask_id) > 0),
+        reset_timestamp INTEGER NOT NULL CHECK (reset_timestamp >= 0 AND reset_timestamp <= 9007199254740991),
+        removed_block_ids_json TEXT NOT NULL CHECK (json_valid(removed_block_ids_json))
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_resend_attempt_topic_id_idx ON sync_resend_attempt(topic_id)`
+    ]
   }
 ]
 

@@ -314,3 +314,23 @@ export const syncStableReplaceRegister = sqliteTable('sync_stable_replace_regist
   activeBlockIdsJson: text('active_block_ids_json').notNull(),
   payloadHash: text('payload_hash').notNull()
 })
+
+// ---------------------------------------------------------------------------
+// sync resend attempt intent — additive, isolated (014)
+// Local-only per-message resend attempt intent (SYNC-DATA-055 intent slice):
+// one row per resend message with the attempt identity, topic/message/askId,
+// the reset timestamp, and the removed old stable block IDs as a strict JSON
+// array. Never content, credentials, or device-local paths. A new reset for
+// the same message deterministically supersedes the prior row (message_id PK
+// upsert). No backfill — messages never reset have no row. Local-only
+// lifecycle state: never an outbox source and never on the wire in this
+// slice (the stable_replace issuer is a later unit). See migration 014.
+// ---------------------------------------------------------------------------
+export const syncResendAttempt = sqliteTable('sync_resend_attempt', {
+  messageId: text('message_id').primaryKey(),
+  attemptId: text('attempt_id').notNull(),
+  topicId: text('topic_id').notNull(),
+  askId: text('ask_id'),
+  resetTimestamp: integer('reset_timestamp').notNull(),
+  removedBlockIdsJson: text('removed_block_ids_json').notNull()
+})

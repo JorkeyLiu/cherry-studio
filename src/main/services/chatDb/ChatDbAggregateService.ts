@@ -51,6 +51,13 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { logMainDiagnostic } from '../diagnostics'
 import { isPhaseAttrMainEnabled, recordMainPhaseDuration } from '../phaseTimingDiagnostics'
 import { spanCacheService } from '../SpanCacheService'
+import {
+  clearResendAttemptsForTopicInTx,
+  clearResendAttemptsInTx,
+  getResendAttemptInTx,
+  persistResendAttemptInTx,
+  type StoredResendAttempt
+} from '../sync/syncResendAttempt'
 import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
@@ -181,6 +188,102 @@ export class ChatDbAggregateService {
       name === 'ChatDbValidationError' ||
       (e instanceof Error && /belongs to topic|cannot reparent|Duplicate block ID/.test(e.message))
     )
+  }
+
+  // =========================================================================
+  // Local-only resend attempt intent guards (SYNC-DATA-055 intent slice)
+  //
+  // While an intent is active for a message, writes for that message stay
+  // local-only: sync capture (outbox + frame ops) is suppressed in-tx and a
+  // supplied non-matching attempt id fails closed. The optional
+  // `resendAttemptId` carrier is Main-internal only in this slice — the
+  // renderer/preload/IPC contracts are untouched, so legacy callers pass
+  // nothing and proceed locally with suppression (full attempt propagation
+  // is deferred to the issuer unit). Ordinary messages without an intent
+  // are completely unaffected.
+  // =========================================================================
+
+  /**
+   * Normalize the optional Main-internal attempt carrier. Returns the
+   * supplied id when it is a non-empty string, otherwise undefined (legacy
+   * caller without attempt identity — allowed locally, sync-suppressed).
+   */
+  private resendAttemptOf(options?: { resendAttemptId?: string }): string | undefined {
+    const v = options?.resendAttemptId
+    return typeof v === 'string' && v.length > 0 ? v : undefined
+  }
+
+  /**
+   * Fail closed on a stale attempt BEFORE any SQLite write transaction
+   * opens. Reads intent rows with root-bound reads only (no write tx).
+   * Throws ChatDbConflictError when a supplied attempt id does not match
+   * the stored intent for any covered message. Legacy calls without an
+   * attempt id pass here and are sync-suppressed inside the tx.
+   */
+  private assertResendAttemptPreTx(messageIds: string[], attemptId?: string): void {
+    const ids = [...new Set(messageIds.filter((id) => typeof id === 'string' && id.length > 0))]
+    if (ids.length === 0) return
+    for (const mid of ids) {
+      let stored: StoredResendAttempt | null
+      try {
+        stored = getResendAttemptInTx(this.db as unknown as SyncTxExecutor, mid)
+      } catch {
+        // Intent infrastructure unreadable: fail closed — a write that
+        // cannot prove it is not stale must not commit.
+        throw new ChatDbConflictError(`resend attempt guard unreadable for message ${mid}`)
+      }
+      if (!stored) continue
+      if (attemptId !== undefined && attemptId !== stored.attemptId) {
+        throw new ChatDbConflictError(`resend attempt mismatch for message ${mid}: stale attempt`)
+      }
+    }
+  }
+
+  /**
+   * Authoritative in-tx attempt check. Throws ChatDbConflictError (rolls
+   * back the enclosing mutation) on a stale supplied attempt. Returns true
+   * when an intent covers the message (caller must suppress sync capture
+   * and frame issuance for it — local-only).
+   */
+  private checkResendAttemptInTx(stx: SyncTxExecutor, messageId: string, attemptId?: string): boolean {
+    const stored = getResendAttemptInTx(stx, messageId)
+    if (!stored) return false
+    if (attemptId !== undefined && attemptId !== stored.attemptId) {
+      throw new ChatDbConflictError(`resend attempt mismatch for message ${messageId}: stale attempt`)
+    }
+    return true
+  }
+
+  /**
+   * Best-effort pre-tx parent resolution for block payloads: authoritative
+   * message ids for existing blocks plus wire-declared parents for creates.
+   * In-tx checks remain authoritative; this only enables the fail-closed
+   * guard before the write transaction opens.
+   */
+  private blockParentIdsPreTx(blocksJson: JsonObject[]): string[] {
+    const ids: string[] = []
+    if (blocksJson.length === 0) return ids
+    let repos: ChatDbRepositories | null = null
+    try {
+      repos = this.repos()
+    } catch {
+      return ids
+    }
+    for (const raw of blocksJson) {
+      if (!raw || typeof raw !== 'object') continue
+      const rec = raw as Record<string, unknown>
+      const bid = rec.id
+      const wireParent = rec.messageId
+      if (typeof wireParent === 'string' && wireParent.length > 0) ids.push(wireParent)
+      if (typeof bid !== 'string' || bid.length === 0 || !repos) continue
+      try {
+        const found = repos.blocks.getById(bid)
+        if (found.found) ids.push(found.data.messageId)
+      } catch {
+        // Best effort only — the in-tx check decides authoritatively.
+      }
+    }
+    return ids
   }
 
   /**
@@ -1363,7 +1466,8 @@ export class ChatDbAggregateService {
     messageJson: JsonObject,
     blocksJson: JsonObject[],
     insertIndex?: number,
-    diagnostics?: AppendDiagnostics
+    diagnostics?: AppendDiagnostics,
+    options?: { resendAttemptId?: string }
   ): ChatDbResult<null> {
     const correlationId = diagnostics?.correlationId
     const ordinal = diagnostics?.ordinal
@@ -1389,6 +1493,10 @@ export class ChatDbAggregateService {
         convertDurationMs = elapsedMs(tConvert)
 
         const tTx = performance.now()
+        const resendAttemptId = this.resendAttemptOf(options)
+        // Stale-attempt fail-closed before any SQLite write transaction
+        // opens (existing-id overwrites of a resend message).
+        this.assertResendAttemptPreTx([messageData.id, ...this.blockParentIdsPreTx(blocksJson)], resendAttemptId)
         const syncCtx = this.syncCtx('appendMessage')
         let syncNotify = false
         const unsupportedBlockIds: string[] = []
@@ -1397,6 +1505,10 @@ export class ChatDbAggregateService {
           txResult = this.db.transaction((tx) => {
             const repos = createRepositories(tx)
             const stx = tx as unknown as SyncTxExecutor
+
+            // Resend intent (SYNC-DATA-055): authoritative stale check —
+            // mismatch rolls back; a covered message stays local-only below.
+            const appendCovered = this.checkResendAttemptInTx(stx, messageData.id, resendAttemptId)
 
             const trackedTopicBefore = syncCtx ? syncService.isTrackedEntityInTx(stx, 'topic', topicId) : true
             // Ensure topic exists
@@ -1462,6 +1574,10 @@ export class ChatDbAggregateService {
             // creations capture; existing IDs emit intentional patches only
             // (LOCK-PERSONAL-005). A throw rolls back the whole append; the
             // outer catch records a durable capture failure outside the tx.
+            // Resend intent (SYNC-DATA-055): a covered message stays
+            // local-only — the row mutation above commits, no sync intent
+            // or frame op is minted here.
+            if (appendCovered) return null
             if (syncCtx) {
               const mrow = repos.messages.getById(messageData.id)
               if (!mrow.found) throw new Error(`appendMessage message ${messageData.id} missing in transaction`)
@@ -1697,13 +1813,22 @@ export class ChatDbAggregateService {
    * Supported stable field patches enqueue sync intent atomically in the
    * same tx (field patch only; transient statuses skip capture, no failure).
    */
-  updateMessage(topicId: string, messageId: string, updatesJson: JsonObject): ChatDbResult<null> {
+  updateMessage(
+    topicId: string,
+    messageId: string,
+    updatesJson: JsonObject,
+    options?: { resendAttemptId?: string }
+  ): ChatDbResult<null> {
     return wrapResult(() => {
       const patch = wireToMessagePatch(updatesJson)
       // Strip identity fields (defense in depth — contract already rejects)
       delete patch.id
       delete patch.topicId
       delete patch.sortOrder
+
+      const resendAttemptId = this.resendAttemptOf(options)
+      // Stale-attempt fail-closed before any SQLite write transaction opens.
+      this.assertResendAttemptPreTx([messageId], resendAttemptId)
 
       const ctx = this.syncCtx('updateMessage')
       // Empty patch (no mutable keys): no mutation intent; keep read-only.
@@ -1719,12 +1844,17 @@ export class ChatDbAggregateService {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+          // Resend intent (SYNC-DATA-055): authoritative stale check first —
+          // a mismatch rolls back before any mutation commits; a covered
+          // message stays local-only (mutation commits, sync suppressed).
+          const resendCovered = this.checkResendAttemptInTx(stx, messageId, resendAttemptId)
           // Pre-state for the final-transition rule: only a transient→stable
           // promotion of a never-tracked row creates full initial state.
           // Pre-sync stable rows keep patch-only semantics (established).
           const preRow = ctx ? repos.messages.getInTopic(messageId, topicId) : null
           const preStable = preRow && preRow.found ? isStableMessageStatus(preRow.data.status) : true
           repos.messages.update(topicId, messageId, patch)
+          if (resendCovered) return null
           if (ctx) {
             // Post-state proof inside the same tx: missing/foreign targets are
             // repository no-ops or throws — only capture when the owned row
@@ -1873,7 +2003,8 @@ export class ChatDbAggregateService {
     topicId: string,
     messageUpdatesJson: JsonObject,
     blocksToUpdateJson: JsonObject[],
-    blockIdsToDelete: string[] = []
+    blockIdsToDelete: string[] = [],
+    options?: { resendAttemptId?: string }
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
       const messageId = messageUpdatesJson.id as string
@@ -1883,6 +2014,22 @@ export class ChatDbAggregateService {
       delete messagePatch.sortOrder
 
       const blockDataList = blocksToUpdateJson.map(wireToBlock)
+      const resendAttemptId = this.resendAttemptOf(options)
+      // Stale-attempt fail-closed before any SQLite write transaction opens
+      // (best-effort delete-parent resolution; authoritative check is in-tx).
+      const deleteParentsPreTx: string[] = []
+      for (const bid of blockIdsToDelete) {
+        try {
+          const found = this.repos().blocks.getById(bid)
+          if (found.found) deleteParentsPreTx.push(found.data.messageId)
+        } catch {
+          // Best effort only.
+        }
+      }
+      this.assertResendAttemptPreTx(
+        [messageId, ...this.blockParentIdsPreTx(blocksToUpdateJson), ...deleteParentsPreTx],
+        resendAttemptId
+      )
       const syncCtx = this.syncCtx('updateMessageAndBlocks')
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
@@ -1892,6 +2039,11 @@ export class ChatDbAggregateService {
         txResult = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+
+          // Resend intent (SYNC-DATA-055): authoritative stale check first —
+          // a mismatch rolls back before any mutation commits; a covered
+          // message stays local-only (mutations commit, sync suppressed).
+          const messageCovered = this.checkResendAttemptInTx(stx, messageId, resendAttemptId)
 
           // Check message exists
           const existing = repos.messages.getInTopic(messageId, topicId)
@@ -1996,7 +2148,9 @@ export class ChatDbAggregateService {
           }
 
           // Transaction-bound sync intent (same atomic boundary).
-          if (syncCtx) {
+          // Resend intent (SYNC-DATA-055): a covered message stays
+          // local-only — no entity intent, no deletes, no frames.
+          if (syncCtx && !messageCovered) {
             const deletedOwned: string[] = []
             // Re-resolve owned deletes post-state: surviving rows are no-ops.
             for (const blockId of blockIdsToDelete) {
@@ -2104,8 +2258,9 @@ export class ChatDbAggregateService {
             // one messageBlock tryRefresh+enqueue attempt per tx for this
             // parent. Exclusion (stable→transient parent) only invalidates
             // with 0 op and is never overridden by a tail refresh; a
-            // non-stable parent never mints.
-            if (syncCtx) {
+            // non-stable parent never mints. Resend-covered parents
+            // (SYNC-DATA-055) stay local-only: no frame work here.
+            if (syncCtx && !messageCovered) {
               // Message inclusion transition (stable ↔ transient) handling for topicMessage and messageBlock
               const preMsgStable = isStableMessageStatus(existing.data.status)
               const mrowForFrame = repos.messages.getInTopic(messageId, topicId)
@@ -2298,6 +2453,9 @@ export class ChatDbAggregateService {
           if (!existing.found) return null // no-op for missing/foreign IDs
           const known = ctx ? syncService.isKnownEntityInTx(stx, 'message', messageId) : false
           repos.messages.delete(messageId)
+          // Resend intent (SYNC-DATA-055): a deleted message carries no
+          // unfinished attempt — clear in the same transaction.
+          clearResendAttemptsInTx(stx, [messageId])
           if (ctx && known) {
             syncService.enqueueDeleteInTx(stx, 'message', messageId, ctx.ts, ctx.deviceId)
             notify = true
@@ -2347,6 +2505,9 @@ export class ChatDbAggregateService {
           const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
           if (ownedIds.length > 0) {
             repos.messages.deleteMany(ownedIds)
+            // Resend intent (SYNC-DATA-055): deleted messages carry no
+            // unfinished attempt — clear in the same transaction.
+            clearResendAttemptsInTx(stx, ownedIds)
           }
           if (ctx) {
             for (const id of knownIds) {
@@ -2389,7 +2550,11 @@ export class ChatDbAggregateService {
    * `diagnostics` is optional measurement-only correlation metadata
    * (LOCK-STREAM-ATTR-001, PERF-STREAM-ATTR-001); never affects persistence.
    */
-  updateBlocks(blocksJson: JsonObject[], diagnostics?: StreamWriteDiagnostics): ChatDbResult<null> {
+  updateBlocks(
+    blocksJson: JsonObject[],
+    diagnostics?: StreamWriteDiagnostics,
+    options?: { resendAttemptId?: string }
+  ): ChatDbResult<null> {
     const isMeasured = isStreamAttrMeasureEnabled() && typeof diagnostics?.correlationId === 'string'
     const t0 = performance.now()
     let convertDurationMs = 0
@@ -2433,6 +2598,9 @@ export class ChatDbAggregateService {
       // wire->domain mapping done above); main.tx and existing semantics are
       // preserved.
       convertDurationMs = elapsedMs(tConvert)
+      const resendAttemptId = this.resendAttemptOf(options)
+      // Stale-attempt fail-closed before any SQLite write transaction opens.
+      this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
       const syncCtx = this.syncCtx('updateBlocks')
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
@@ -2467,6 +2635,10 @@ export class ChatDbAggregateService {
                 unsupportedBlockIds.push(block.id)
                 continue
               }
+              // Resend intent (SYNC-DATA-055): stale attempt throws (rolls
+              // back); a covered parent stays local-only. Placed before the
+              // parent closure so no covered intent can leak via closure.
+              if (this.checkResendAttemptInTx(stx, post.data.messageId, resendAttemptId)) continue
               const pre = preRows.get(block.id) ?? null
               const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
               const preStable = pre ? isStableBlockStatus(pre.status) : true
@@ -2544,11 +2716,15 @@ export class ChatDbAggregateService {
             }
             for (const pid of affectedParentsStrict) {
               if (affectedParentsHelper.has(pid)) continue // helper will handle (transition takes precedence)
+              // Resend-covered parents (SYNC-DATA-055) stay local-only.
+              if (getResendAttemptInTx(stx, pid)) continue
               if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
             }
             for (const pid of affectedParentsHelper) {
+              // Resend-covered parents (SYNC-DATA-055) stay local-only.
+              if (getResendAttemptInTx(stx, pid)) continue
               if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
@@ -2620,7 +2796,8 @@ export class ChatDbAggregateService {
   updateSingleBlock(
     blockId: string,
     updatesJson: JsonObject,
-    diagnostics?: StreamWriteDiagnostics
+    diagnostics?: StreamWriteDiagnostics,
+    options?: { resendAttemptId?: string }
   ): ChatDbResult<null> {
     const isMeasured = isStreamAttrMeasureEnabled() && typeof diagnostics?.correlationId === 'string'
     const t0 = performance.now()
@@ -2644,6 +2821,10 @@ export class ChatDbAggregateService {
       // wire->domain patch mapping done above); main.tx and existing semantics
       // are preserved.
       convertDurationMs = elapsedMs(tConvert)
+      const resendAttemptId = this.resendAttemptOf(options)
+      // Stale-attempt fail-closed before any SQLite write transaction opens
+      // (best-effort parent resolution; authoritative check is in-tx).
+      this.assertResendAttemptPreTx(this.blockParentIdsPreTx([{ id: blockId } as JsonObject]), resendAttemptId)
       const syncCtx = this.syncCtx('updateSingleBlock')
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
@@ -2697,36 +2878,47 @@ export class ChatDbAggregateService {
           // of a never-tracked block creates full state; otherwise intentional
           // patch keys. Transient skips, never a failure. Unsupported
           // structured/attachment rows skip without a partial shell.
+          // Resend intent (SYNC-DATA-055): stale attempt throws (rolls back);
+          // a covered parent stays local-only (before parent closure).
           if (syncCtx) {
             const post = repos.blocks.getById(blockId)
-            if (post.found && isStableBlockStatus(post.data.status)) {
-              if (this.isUnsupportedBlock(post.data)) {
-                unsupportedBlockIds.push(blockId)
-              } else {
-                this.ensureBlockParentClosureInTx(stx, blockId, syncCtx.ts, syncCtx.deviceId)
-                const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', blockId)
-                const preStable = isStableBlockStatus(existing.data.status)
-                if (!tracked && !preStable) {
-                  // Pre-existing transient->stable promotion: field sync only,
-                  // never fabricate membership (no trustworthy creation op).
-                  syncService.enqueueUpsertInTx(
-                    stx,
-                    'message_block',
-                    blockId,
-                    this.syncBlockPayloadFull(post.data),
-                    syncCtx.ts,
-                    syncCtx.deviceId
-                  )
-                  syncNotify = true
+            if (post.found && !this.checkResendAttemptInTx(stx, post.data.messageId, resendAttemptId)) {
+              if (isStableBlockStatus(post.data.status)) {
+                if (this.isUnsupportedBlock(post.data)) {
+                  unsupportedBlockIds.push(blockId)
                 } else {
-                  const payload = this.syncBlockPatchPayload(
-                    post.data.messageId,
-                    blockId,
-                    patch as unknown as Record<string, unknown>
-                  )
-                  if (payload) {
-                    syncService.enqueueUpsertInTx(stx, 'message_block', blockId, payload, syncCtx.ts, syncCtx.deviceId)
+                  this.ensureBlockParentClosureInTx(stx, blockId, syncCtx.ts, syncCtx.deviceId)
+                  const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', blockId)
+                  const preStable = isStableBlockStatus(existing.data.status)
+                  if (!tracked && !preStable) {
+                    // Pre-existing transient->stable promotion: field sync only,
+                    // never fabricate membership (no trustworthy creation op).
+                    syncService.enqueueUpsertInTx(
+                      stx,
+                      'message_block',
+                      blockId,
+                      this.syncBlockPayloadFull(post.data),
+                      syncCtx.ts,
+                      syncCtx.deviceId
+                    )
                     syncNotify = true
+                  } else {
+                    const payload = this.syncBlockPatchPayload(
+                      post.data.messageId,
+                      blockId,
+                      patch as unknown as Record<string, unknown>
+                    )
+                    if (payload) {
+                      syncService.enqueueUpsertInTx(
+                        stx,
+                        'message_block',
+                        blockId,
+                        payload,
+                        syncCtx.ts,
+                        syncCtx.deviceId
+                      )
+                      syncNotify = true
+                    }
                   }
                 }
               }
@@ -2736,7 +2928,9 @@ export class ChatDbAggregateService {
           // frame via the try helper (missing membership invalidates with 0
           // op; exclusion invalidates since transient/unsupported never rides
           // the wire). Ordinary included→included content edits mint nothing.
-          if (syncCtx) {
+          // Resend-covered parents (SYNC-DATA-055) stay local-only: no frame
+          // work here (a stale attempt would already have thrown above).
+          if (syncCtx && !getResendAttemptInTx(stx, existing.data.messageId)) {
             const postRow2 = repos.blocks.getById(blockId)
             if (postRow2.found) {
               const preIncluded = isStableBlockStatus(existing.data.status) && !this.isUnsupportedBlock(existing.data)
@@ -2810,9 +3004,12 @@ export class ChatDbAggregateService {
    * Atomicity: one root transaction with tx-bound repositories.
    * Duplicate IDs throw ChatDbConflictError (typed).
    */
-  bulkAddBlocks(blocksJson: JsonObject[]): ChatDbResult<null> {
+  bulkAddBlocks(blocksJson: JsonObject[], options?: { resendAttemptId?: string }): ChatDbResult<null> {
     return wrapResult(() => {
       const blockDataList = blocksJson.map(wireToBlock)
+      const resendAttemptId = this.resendAttemptOf(options)
+      // Stale-attempt fail-closed before any SQLite write transaction opens.
+      this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
       const syncCtx = this.syncCtx('bulkAddBlocks')
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
@@ -2853,6 +3050,9 @@ export class ChatDbAggregateService {
                 unsupportedBlockIds.push(bid)
                 continue
               }
+              // Resend intent (SYNC-DATA-055): stale attempt throws (rolls
+              // back); a covered parent stays local-only (before closure).
+              if (this.checkResendAttemptInTx(stx, brow.data.messageId, resendAttemptId)) continue
               this.ensureBlockParentClosureInTx(stx, bid, childTs, syncCtx.deviceId)
               const opId = syncService.enqueueUpsertInTx(
                 stx,
@@ -2869,7 +3069,8 @@ export class ChatDbAggregateService {
           // Ordinary bulk stable-supported creates issue exactly one
           // messageBlock frame per affected stable parent via the try helper
           // (missing membership invalidates with 0 op while the user mutation
-          // succeeds; malformed/MAX_SAFE rolls back).
+          // succeeds; malformed/MAX_SAFE rolls back). Resend-covered parents
+          // (SYNC-DATA-055) stay local-only.
           if (syncCtx) {
             const affectedParents = new Set<string>()
             for (const b of blockDataList) {
@@ -2879,6 +3080,7 @@ export class ChatDbAggregateService {
               }
             }
             for (const pid of affectedParents) {
+              if (getResendAttemptInTx(stx, pid)) continue
               if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
@@ -3468,6 +3670,9 @@ export class ChatDbAggregateService {
           // FK cascade: topic → messages → blocks → file_references
           // Also topic → topic_segments → topic_segment_messages
           repos.topics.hardDelete(topicId)
+          // Resend intent (SYNC-DATA-055): the wiped topic carries no
+          // unfinished attempt — clear in the same transaction.
+          clearResendAttemptsForTopicInTx(stx, topicId)
 
           // Transaction-bound sync intent: hard-delete tombstone in the same
           // atomic boundary (known entities only — unknown ids never emit).
@@ -3599,6 +3804,9 @@ export class ChatDbAggregateService {
 
             // FK cascade: hard delete
             repos.topics.hardDelete(topic.id)
+            // Resend intent (SYNC-DATA-055): the wiped topic carries no
+            // unfinished attempt — clear in the same transaction.
+            clearResendAttemptsForTopicInTx(stx, topic.id)
           }
 
           cursor = page.nextCursor
@@ -3678,6 +3886,9 @@ export class ChatDbAggregateService {
 
             // FK cascade: hard delete
             repos.topics.hardDelete(topic.id)
+            // Resend intent (SYNC-DATA-055): the wiped topic carries no
+            // unfinished attempt — clear in the same transaction.
+            clearResendAttemptsForTopicInTx(stx, topic.id)
           }
 
           cursor = page.nextCursor
@@ -3748,6 +3959,9 @@ export class ChatDbAggregateService {
             }
             syncService.invalidateParentFrameInTx(stx2, 'topicMessage', topic.id)
             repos.topics.hardDelete(topic.id)
+            // Resend intent (SYNC-DATA-055): the wiped topic carries no
+            // unfinished attempt — clear in the same transaction.
+            clearResendAttemptsForTopicInTx(stx2, topic.id)
           }
           activeCursor = activePage.nextCursor
           trashCursor = trashPage.nextCursor
@@ -4157,6 +4371,14 @@ export class ChatDbAggregateService {
    * - Deletes owned blocks and resets each message's status, sortOrder, and clears model.
    * - Returns file cleanup facts for deleted blocks.
    *
+   * Sync (SYNC-DATA-055 intent slice): in the same transaction, persists one
+   * local-only resend attempt intent per reset message (fresh attempt id,
+   * topic/message/askId, reset timestamp, removed old stable block IDs for
+   * that message — never content/paths). A new reset deterministically
+   * supersedes any prior intent for the same message (PK upsert). The intent
+   * emits no outbox, fabricates no error/final state, and is never consumed
+   * here (the stable_replace issuer is a later unit).
+   *
    * Atomicity: one root SQLite transaction.
    */
   resetMessagesForResend(
@@ -4191,9 +4413,15 @@ export class ChatDbAggregateService {
 
         // Capture parent messageIds for frame invalidation before deletion (still present)
         const ownedBlockParentIds = new Set<string>()
+        const removedByMessage = new Map<string, string[]>()
         for (const bid of ownedBlockIds) {
           const blk = repos.blocks.getById(bid)
-          if (blk.found) ownedBlockParentIds.add(blk.data.messageId)
+          if (blk.found) {
+            ownedBlockParentIds.add(blk.data.messageId)
+            const list = removedByMessage.get(blk.data.messageId)
+            if (list) list.push(bid)
+            else removedByMessage.set(blk.data.messageId, [bid])
+          }
         }
 
         // Phase 2: Collect affected file IDs from owned blocks only
@@ -4249,6 +4477,40 @@ export class ChatDbAggregateService {
         }
         for (const mid of resetMsgIds) {
           syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+        }
+
+        // Local-only resend attempt intent (SYNC-DATA-055 intent slice): one
+        // row per reset message in the same transaction. Fresh attempt id per
+        // message; askId from the reset payload when present, otherwise from
+        // the surviving row; removed ids are the owned deleted blocks for
+        // that message only. Strict validation throws roll back the whole
+        // reset. No outbox, no wire, no consumption here.
+        const stx = tx as unknown as SyncTxExecutor
+        const resetTimestamp = Date.now()
+        for (const item of messages) {
+          const rawMessage = typeof item === 'string' ? null : ((item as { message: JsonObject }).message ?? null)
+          const mid = typeof item === 'string' ? item : ((rawMessage as Record<string, unknown> | null)?.id as string)
+          if (typeof mid !== 'string' || mid.length === 0) {
+            throw new ChatDbConflictError(`resetMessagesForResend message without id in topic ${topicId}`)
+          }
+          let askId: string | null = null
+          const wireAsk = (rawMessage as Record<string, unknown> | null)?.askId
+          if (typeof wireAsk === 'string' && wireAsk.length > 0) {
+            askId = wireAsk
+          } else {
+            const surviving = repos.messages.getInTopic(mid, topicId)
+            if (surviving.found && typeof surviving.data.askId === 'string' && surviving.data.askId.length > 0) {
+              askId = surviving.data.askId
+            }
+          }
+          persistResendAttemptInTx(stx, {
+            messageId: mid,
+            attemptId: randomUUID(),
+            topicId,
+            askId,
+            resetTimestamp,
+            removedBlockIds: removedByMessage.get(mid) ?? []
+          })
         }
 
         return buildFileCleanupResult(repos, affectedFileIds)
@@ -4315,6 +4577,9 @@ export class ChatDbAggregateService {
           // Phase 4: Delete owned messages (FK cascade: blocks → file_references)
           if (ownedIds.length > 0) {
             repos.messages.deleteMany(ownedIds)
+            // Resend intent (SYNC-DATA-055): deleted messages carry no
+            // unfinished attempt — clear in the same transaction.
+            clearResendAttemptsInTx(stx, ownedIds)
           }
           if (ctx) {
             for (const id of knownIds) {

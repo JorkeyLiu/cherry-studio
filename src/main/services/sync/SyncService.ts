@@ -6509,6 +6509,9 @@ export class SyncService {
       try {
         db.delete(schema.syncStableReplaceRegister).run()
       } catch {}
+      try {
+        db.delete(schema.syncResendAttempt).run()
+      } catch {}
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CHANNEL_KEY)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_PAIRING_GENERATION)).run()

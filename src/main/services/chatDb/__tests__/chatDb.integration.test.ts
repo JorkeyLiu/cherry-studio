@@ -109,7 +109,7 @@ describe('ChatDbService Production-Path Integration', () => {
       const db = wrapDrizzle(sqlite)
 
       const count = runMigrations(db, sqlite)
-      expect(count).toBe(13)
+      expect(count).toBe(14)
 
       // Verify tables exist
       const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{
