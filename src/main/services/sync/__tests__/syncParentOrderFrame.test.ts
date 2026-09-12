@@ -479,7 +479,7 @@ describe('sync parent order frame — missing/malformed/exhaustion rollback', ()
 })
 
 describe('sync parent order frame — unsupported structural paths invalidate', () => {
-  it('reorderMessages issues order_frame when membership complete; branch/clone/reset still invalidate without frame ops; selectAnswer preserves', () => {
+  it('reorderMessages issues order_frame when membership complete; branch rides incremental sync while clone/reset still invalidate without frame ops; selectAnswer preserves', () => {
     const topicId = 't-unsupported'
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
@@ -544,7 +544,8 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     const frameAfterAppend = getFrame('topicMessage', topicId)!
     expect(frameAfterAppend.orderedChildIds).toEqual([m2, m1, m3])
 
-    // Test branchMessagesToTopic invalidates target frame
+    // Test branchMessagesToTopic participates in incremental sync: stable
+    // true-new clones refresh the target topic frame (no longer invalidate-only).
     const target = 't-branch-target'
     // First create a frame on target by appending a message
     vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_020)
@@ -558,8 +559,12 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     const outboxBeforeBranch = outboxCount()
     const branch = agg.branchMessagesToTopic(topicId, target, m1)
     expect(branch.ok).toBe(true)
-    expect(frameExists('topicMessage', target)).toBe(false)
-    expect(outboxCount()).toBe(outboxBeforeBranch) // branch added none (no frame op enqueued, no entity op)
+    // branchMessagesToTopic now participates in incremental sync: the stable
+    // prefix clones ([m2, m1] through the anchor) refresh the target frame.
+    const branchFrame = getFrame('topicMessage', target)!
+    expect(branchFrame.orderedChildIds.length).toBe(3)
+    expect(branchFrame.orderedChildIds[0]).toBe('m-branch-target-1')
+    expect(outboxCount()).toBeGreaterThan(outboxBeforeBranch) // branch mints entity + frame ops
 
     // Test cloneMessagesToTopic
     const cloneTarget = 't-clone-target'

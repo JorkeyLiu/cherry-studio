@@ -3822,112 +3822,213 @@ export class ChatDbAggregateService {
     assistantId?: string
   ): ChatDbResult<{ messages: JsonObject[]; blocks: JsonObject[] }> {
     return wrapResult(() => {
-      syncService.throwIfPublishBarrierHeld('branchMessagesToTopic')
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('branchMessagesToTopic')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: { messages: JsonObject[]; blocks: JsonObject[] }
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Validate source exists
-        const srcTopic = repos.topics.getById(sourceTopicId)
-        if (!srcTopic.found) {
-          throw new ChatDbNotFoundError(`Topic ${sourceTopicId} does not exist`)
-        }
+          // Validate source exists
+          const srcTopic = repos.topics.getById(sourceTopicId)
+          if (!srcTopic.found) {
+            throw new ChatDbNotFoundError(`Topic ${sourceTopicId} does not exist`)
+          }
 
-        // Ensure target (create-only)
-        repos.topics.ensure(targetTopicId, assistantId)
+          // Ensure target (create-only). A missing target topic is
+          // represented only via the existing topic upsert semantics (same
+          // payload as ensureTopic/appendMessage closure, same tx, no new
+          // semantics): true creation emits the topic upsert parent-first;
+          // an existing target emits no topic op.
+          const topicExistedBefore = repos.topics.getById(targetTopicId).found
+          repos.topics.ensure(targetTopicId, assistantId)
 
-        // Validate anchor belongs to source
-        const anchor = repos.messages.getInTopic(anchorMessageId, sourceTopicId)
-        if (!anchor.found) {
-          throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
-        }
+          // Validate anchor belongs to source
+          const anchor = repos.messages.getInTopic(anchorMessageId, sourceTopicId)
+          if (!anchor.found) {
+            throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
+          }
 
-        // Load source ordered deterministic
-        const allMessages = repos.messages.listByTopic(sourceTopicId)
-        const anchorIdx = allMessages.findIndex((m) => m.id === anchorMessageId)
-        if (anchorIdx === -1) {
-          throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
-        }
-        const prefixMessages = allMessages.slice(0, anchorIdx + 1)
-        const prefixIds = prefixMessages.map((m) => m.id)
-        const blockMap = repos.blocks.listByMessages(prefixIds)
+          // Load source ordered deterministic
+          const allMessages = repos.messages.listByTopic(sourceTopicId)
+          const anchorIdx = allMessages.findIndex((m) => m.id === anchorMessageId)
+          if (anchorIdx === -1) {
+            throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
+          }
+          const prefixMessages = allMessages.slice(0, anchorIdx + 1)
+          const prefixIds = prefixMessages.map((m) => m.id)
+          const blockMap = repos.blocks.listByMessages(prefixIds)
 
-        // Fresh ID generation preserving order
-        const idMap = new Map<string, string>()
-        for (const m of prefixMessages) {
-          idMap.set(m.id, randomUUID())
-        }
+          // Fresh ID generation preserving order
+          const idMap = new Map<string, string>()
+          for (const m of prefixMessages) {
+            idMap.set(m.id, randomUUID())
+          }
 
-        const newMessages: MessageData[] = []
-        const allNewBlocks: MessageBlockData[] = []
+          const newMessages: MessageData[] = []
+          const allNewBlocks: MessageBlockData[] = []
 
-        for (const oldMsg of prefixMessages) {
-          const newId = idMap.get(oldMsg.id)!
-          let newAskId: string | null | undefined
-          if (oldMsg.role === 'assistant' && oldMsg.askId) {
-            const mapped = idMap.get(oldMsg.askId)
-            if (mapped) newAskId = mapped
-            else newAskId = null
+          for (const oldMsg of prefixMessages) {
+            const newId = idMap.get(oldMsg.id)!
+            let newAskId: string | null | undefined
+            if (oldMsg.role === 'assistant' && oldMsg.askId) {
+              const mapped = idMap.get(oldMsg.askId)
+              if (mapped) newAskId = mapped
+              else newAskId = null
+            } else {
+              newAskId = oldMsg.askId ?? null
+              // For assistant messages whose askId was unset, keep null; for user messages, askId is null
+              if (oldMsg.role === 'assistant' && newAskId === null && oldMsg.askId) {
+                // already handled above (outside prefix) -> null
+              }
+              // For non-assistant, preserve original askId (usually null)
+              // But if original had askId and is assistant case already handled
+            }
+
+            // Clone message data: shallow copy, replace id/topicId/askId, preserve overflow and all columns except sortOrder (appendMany reassigns)
+            const cloned: MessageData = {
+              ...oldMsg,
+              id: newId,
+              topicId: targetTopicId,
+              askId: oldMsg.role === 'assistant' ? newAskId : (oldMsg.askId ?? null)
+            }
+            // Preserve overflow object reference safety: ensure overflow is cloned
+            cloned.overflow = { ...oldMsg.overflow }
+            newMessages.push(cloned)
+
+            const oldBlocks = blockMap.get(oldMsg.id) ?? []
+            // Preserve block order as stored (already sorted by sort_order ASC, id ASC via listByMessages ordering)
+            for (const oldBlk of oldBlocks) {
+              const newBlkId = randomUUID()
+              const clonedBlk: MessageBlockData = {
+                ...oldBlk,
+                id: newBlkId,
+                messageId: newId,
+                overflow: { ...oldBlk.overflow }
+              }
+              allNewBlocks.push(clonedBlk)
+            }
+          }
+
+          // Insert atomically using existing dense order semantics
+          if (newMessages.length > 0) {
+            repos.messages.appendMany(newMessages)
+          }
+          if (allNewBlocks.length > 0) {
+            // Group by new message for deterministic upsert order (original prefix order preserved)
+            repos.blocks.upsertMany(allNewBlocks)
+            this.syncFileReferences(repos, allNewBlocks)
+          }
+
+          // Transaction-bound sync intent (same atomic boundary, reused from
+          // pasteMessagesToTopic/insertMessagesAfterAnchor). Every cloned ID
+          // is a fresh Main-generated true create: stable cloned
+          // messages/blocks enqueue full-state upserts (sortOrder removed,
+          // final remapped askId verbatim) with true-create-only membership;
+          // transient/unsupported emit nothing (durable unsupported outcome
+          // for the latter). Source rows emit nothing and are untouched.
+          if (ctx) {
+            let tsOffset = 0
+            const nextTs = (): number => ctx.ts + tsOffset++
+            if (!topicExistedBefore) {
+              const created = repos.topics.getById(targetTopicId)
+              if (!created.found) throw new Error(`branchMessagesToTopic topic ${targetTopicId} missing after ensure`)
+              syncService.enqueueUpsertInTx(
+                stx,
+                'topic',
+                targetTopicId,
+                this.syncTopicPayload(created.data),
+                Math.max(0, ctx.ts - 2),
+                ctx.deviceId
+              )
+              syncNotify = true
+            }
+            let hasNewInclusion = false
+            for (const m of newMessages) {
+              const postRow = repos.messages.getById(m.id)
+              if (!postRow.found) throw new Error(`branchMessagesToTopic message ${m.id} missing in transaction`)
+              if (!isStableMessageStatus(postRow.data.status)) continue
+              hasNewInclusion = true
+              if (!this.shouldCaptureMessageCreate(postRow.data)) continue
+              const opTs = nextTs()
+              this.ensureTopicClosureInTx(stx, targetTopicId, opTs, ctx.deviceId)
+              const full = this.syncMessagePayloadFull(postRow.data)
+              delete full.sortOrder
+              const opId = syncService.enqueueUpsertInTx(stx, 'message', m.id, full, opTs, ctx.deviceId)
+              syncService.setMembershipClockInTx(stx, 'message', m.id, postRow.data.topicId, opTs, opId)
+              syncNotify = true
+            }
+            for (const blk of allNewBlocks) {
+              const postBlk = repos.blocks.getById(blk.id)
+              if (!postBlk.found) throw new Error(`branchMessagesToTopic block ${blk.id} missing in transaction`)
+              // Blocks under a transient parent never ride the wire: skip
+              // without closure (closure would fail closed). The per-parent
+              // frame decision below invalidates the transient parent.
+              const parentMsg = repos.messages.getById(postBlk.data.messageId)
+              if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) continue
+              if (!isStableBlockStatus(postBlk.data.status)) continue
+              if (this.isUnsupportedBlock(postBlk.data)) {
+                unsupportedBlockIds.push(blk.id)
+                continue
+              }
+              const opTs = nextTs()
+              this.ensureBlockParentClosureInTx(stx, blk.id, opTs, ctx.deviceId)
+              const full = this.syncBlockPayloadFull(postBlk.data)
+              delete full.sortOrder
+              const opId = syncService.enqueueUpsertInTx(stx, 'message_block', blk.id, full, opTs, ctx.deviceId)
+              syncService.setMembershipClockInTx(stx, 'message_block', blk.id, postBlk.data.messageId, opTs, opId)
+              syncNotify = true
+            }
+            // Local parent order frames — at most one topicMessage attempt
+            // plus one per new message parent where semantically required.
+            // Missing membership or excluded status invalidates with 0 op
+            // (truthful partial); malformed/clock/high-water throws and rolls
+            // back the whole branch including the ensured topic.
+            if (hasNewInclusion) {
+              if (
+                syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, targetTopicId, ctx.deviceId) === 'refreshed'
+              ) {
+                syncNotify = true
+              }
+            }
+            for (const m of newMessages) {
+              const postMsg = repos.messages.getById(m.id)
+              if (!postMsg.found) continue
+              if (!isStableMessageStatus(postMsg.data.status)) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', m.id)
+                continue
+              }
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, m.id, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
           } else {
-            newAskId = oldMsg.askId ?? null
-            // For assistant messages whose askId was unset, keep null; for user messages, askId is null
-            if (oldMsg.role === 'assistant' && newAskId === null && oldMsg.askId) {
-              // already handled above (outside prefix) -> null
+            // Capture disabled: preserve existing truthful invalidation, no ops.
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', targetTopicId)
+            {
+              const mids = new Set<string>()
+              for (const blk of allNewBlocks) mids.add(blk.messageId)
+              for (const mid of mids) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+              }
             }
-            // For non-assistant, preserve original askId (usually null)
-            // But if original had askId and is assistant case already handled
           }
 
-          // Clone message data: shallow copy, replace id/topicId/askId, preserve overflow and all columns except sortOrder (appendMany reassigns)
-          const cloned: MessageData = {
-            ...oldMsg,
-            id: newId,
-            topicId: targetTopicId,
-            askId: oldMsg.role === 'assistant' ? newAskId : (oldMsg.askId ?? null)
-          }
-          // Preserve overflow object reference safety: ensure overflow is cloned
-          cloned.overflow = { ...oldMsg.overflow }
-          newMessages.push(cloned)
-
-          const oldBlocks = blockMap.get(oldMsg.id) ?? []
-          // Preserve block order as stored (already sorted by sort_order ASC, id ASC via listByMessages ordering)
-          for (const oldBlk of oldBlocks) {
-            const newBlkId = randomUUID()
-            const clonedBlk: MessageBlockData = {
-              ...oldBlk,
-              id: newBlkId,
-              messageId: newId,
-              overflow: { ...oldBlk.overflow }
-            }
-            allNewBlocks.push(clonedBlk)
-          }
-        }
-
-        // Insert atomically using existing dense order semantics
-        if (newMessages.length > 0) {
-          repos.messages.appendMany(newMessages)
-        }
-        if (allNewBlocks.length > 0) {
-          // Group by new message for deterministic upsert order (original prefix order preserved)
-          repos.blocks.upsertMany(allNewBlocks)
-          this.syncFileReferences(repos, allNewBlocks)
-        }
-
-        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
-        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', targetTopicId)
-        {
-          const mids = new Set<string>()
-          for (const blk of allNewBlocks) mids.add(blk.messageId)
-          for (const mid of mids) {
-            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
-          }
-        }
-
-        // Build wire response for renderer projection (no second read)
-        const wireMessages = messagesToWire(newMessages)
-        const wireBlocks = blocksToWire(allNewBlocks)
-        const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
-        return { messages: messagesWithBlocks, blocks: wireBlocks }
-      })
+          // Build wire response for renderer projection (no second read)
+          const wireMessages = messagesToWire(newMessages)
+          const wireBlocks = blocksToWire(allNewBlocks)
+          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+          return { messages: messagesWithBlocks, blocks: wireBlocks }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('branchMessagesToTopic', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('branchMessagesToTopic', unsupportedBlockIds)
+      return result
     }, `branchMessagesToTopic(${sourceTopicId} -> ${targetTopicId}, anchor=${anchorMessageId})`)
   }
 
