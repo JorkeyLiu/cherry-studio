@@ -2232,7 +2232,11 @@ export class ChatDbAggregateService {
    * selected inclusion are the enforceable invariants.
    *
    * No timestamps/content/order changes: `foldSelected` is an existing
-   * persisted UI overflow field and the only field touched.
+   * persisted UI overflow field and the only field touched. It is
+   * wire-excluded and changes neither order, membership, nor synced fields:
+   * local-only and frame-preserving — any existing `topicMessage` frame and
+   * high-water are preserved with zero sync ops, and no missing frame is
+   * synthesized.
    */
   selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): ChatDbResult<null> {
     return wrapResult(() => {
@@ -2266,10 +2270,10 @@ export class ChatDbAggregateService {
           repos.messages.update(topicId, id, { overflow: { foldSelected: id === selectedMessageId } })
         }
 
-        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
-        // Local prerequisite only; even though foldSelected does not change order, we invalidate to avoid stale frame.
-        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
-
+        // Local-only overflow selection: `foldSelected` is wire-excluded and
+        // changes neither order, membership, nor synced fields, so the
+        // existing topicMessage frame/high-water is preserved with zero sync
+        // ops and no missing-frame synthesis.
         return null
       })
     }, `selectAnswerMessage(${topicId})`)

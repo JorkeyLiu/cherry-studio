@@ -5,7 +5,9 @@
  * - additions/deletions update final order atomically; deleted message frame removed; edits do not advance
  * - exact persist idempotence and lower/conflicting frame cannot overwrite
  * - missing/malformed membership or timestamp exhaustion rolls back
- * - unsupported structural paths invalidate prior frames atomically and do not enqueue invented ops
+ * - unsupported structural paths (branch/clone/reset) invalidate prior frames atomically and do not enqueue invented ops
+ * - selectAnswerMessage is local-only overflow selection (foldSelected
+ *   wire-excluded) and preserves prior frames with zero sync ops
  * - stable unsupported/transient blocks are excluded while diagnostics remain
  *
  * Local prerequisite only; not remote/wire/candidate integration.
@@ -34,6 +36,7 @@ import { chatDbService } from '../../chatDb'
 import { ChatDbAggregateService } from '../../chatDb/ChatDbAggregateService'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
+import { captureLocalSyncBaselineCandidate } from '../syncBaseline'
 import { syncService } from '../SyncService'
 import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
 
@@ -476,7 +479,7 @@ describe('sync parent order frame — missing/malformed/exhaustion rollback', ()
 })
 
 describe('sync parent order frame — unsupported structural paths invalidate', () => {
-  it('reorderMessages issues order_frame when membership complete; branch/clone/etc still invalidate without frame ops', () => {
+  it('reorderMessages issues order_frame when membership complete; branch/clone/reset still invalidate without frame ops; selectAnswer preserves', () => {
     const topicId = 't-unsupported'
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
@@ -664,11 +667,16 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
       } as never,
       []
     )
+    // selectAnswerMessage is local-only overflow selection (foldSelected
+    // wire-excluded): the existing topicMessage frame is preserved with
+    // zero sync ops.
     const selFrameBefore = getFrame('topicMessage', selTopic)
     expect(selFrameBefore).not.toBeNull()
+    const selOutboxBefore = outboxCount()
     const selRes = agg.selectAnswerMessage(selTopic, 'm-sel-2', ['m-sel-2', 'm-sel-3'])
     expect(selRes.ok).toBe(true)
-    expect(frameExists('topicMessage', selTopic)).toBe(false)
+    expect(getFrame('topicMessage', selTopic)).toEqual(selFrameBefore)
+    expect(outboxCount()).toBe(selOutboxBefore)
 
     // Test resetMessagesForResend and deleteMessagesWithSegments
     const resetTopic = 't-reset'
@@ -720,6 +728,179 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     expect(outboxCount()).toBe(delSegOutboxBefore + 2) // 1 message delete + 1 order_frame
     expect(frameExists('messageBlock', 'm-del-seg-1')).toBe(false)
 
+    vi.restoreAllMocks()
+  })
+})
+
+describe('sync parent order frame — selectAnswerMessage is local-only and frame-preserving', () => {
+  function highWaterOf(kind: string, parentId: string): number | undefined {
+    const r = sqlite
+      .prepare(`SELECT max_timestamp AS ts FROM sync_frame_high_water WHERE kind=? AND parent_id=?`)
+      .get(kind, parentId) as { ts: number } | undefined
+    return r?.ts
+  }
+  function topicOrderFrameOps(parentId: string): number {
+    return db
+      .select()
+      .from(schema.syncOutbox)
+      .all()
+      .filter((r) => r.op === 'order_frame' && r.entityId === parentId).length
+  }
+  function syncedMessageSnapshot(topicId: string): Array<Record<string, unknown>> {
+    const rows = sqlite
+      .prepare(
+        `SELECT id, role, content, status, ask_id AS askId, model, model_id AS modelId, assistant_id AS assistantId, sort_order AS sortOrder FROM messages WHERE topic_id=? ORDER BY sort_order ASC, id ASC`
+      )
+      .all(topicId) as Array<Record<string, unknown>>
+    return rows
+  }
+  function foldSelectedOf(messageId: string): unknown {
+    const row = sqlite.prepare(`SELECT extra FROM messages WHERE id=?`).get(messageId) as
+      | { extra: string | null }
+      | undefined
+    if (!row || row.extra === null) return undefined
+    return (JSON.parse(row.extra) as Record<string, unknown>).foldSelected
+  }
+  function setupSelectTopic(topicId: string): { frameBefore: NonNullable<ReturnType<typeof getFrame>> } {
+    sqlite
+      .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
+      .run(topicId, 'S', '2026-01-01', '2026-01-01')
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_100_000)
+    agg.appendMessage(
+      topicId,
+      { id: `${topicId}-m1`, topicId, role: 'user', content: 'q', status: 'success' } as never,
+      []
+    )
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_100_001)
+    agg.appendMessage(
+      topicId,
+      {
+        id: `${topicId}-m2`,
+        topicId,
+        role: 'assistant',
+        content: 'a1',
+        status: 'success',
+        askId: `${topicId}-m1`
+      } as never,
+      []
+    )
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_100_002)
+    agg.appendMessage(
+      topicId,
+      {
+        id: `${topicId}-m3`,
+        topicId,
+        role: 'assistant',
+        content: 'a2',
+        status: 'success',
+        askId: `${topicId}-m1`
+      } as never,
+      []
+    )
+    const frameBefore = getFrame('topicMessage', topicId)
+    expect(frameBefore).not.toBeNull()
+    return { frameBefore: frameBefore! }
+  }
+
+  it('preserves the existing frame byte-identically with unchanged high-water and zero new order_frame while flipping only local foldSelected', () => {
+    const topicId = 't-sel-preserve'
+    const { frameBefore } = setupSelectTopic(topicId)
+    expect(frameBefore.orderedChildIds).toEqual([`${topicId}-m1`, `${topicId}-m2`, `${topicId}-m3`])
+    const frameJsonBefore = JSON.stringify(frameBefore)
+    const highWaterBefore = highWaterOf('topicMessage', topicId)
+    const outboxBefore = outboxCount()
+    const orderFrameOpsBefore = topicOrderFrameOps(topicId)
+    const syncedBefore = syncedMessageSnapshot(topicId)
+    const candidateBefore = captureLocalSyncBaselineCandidate(db as never) as unknown as {
+      manifest: { digest: string }
+      completeness: { state: string; reasons: string[] }
+    }
+    const digestBefore = candidateBefore.manifest.digest
+    const reasonsBefore = [...candidateBefore.completeness.reasons].sort()
+
+    const res = agg.selectAnswerMessage(topicId, `${topicId}-m2`, [`${topicId}-m2`, `${topicId}-m3`])
+    expect(res.ok).toBe(true)
+
+    // Frame byte/semantic identical: orderedChildIds + frameClock unchanged.
+    const frameAfter = getFrame('topicMessage', topicId)
+    expect(frameAfter).not.toBeNull()
+    expect(JSON.stringify(frameAfter)).toBe(frameJsonBefore)
+    expect(frameAfter!.orderedChildIds).toEqual(frameBefore.orderedChildIds)
+    expect(frameAfter!.timestamp).toBe(frameBefore.timestamp)
+    expect(frameAfter!.operationId).toBe(frameBefore.operationId)
+    expect(frameExists('topicMessage', topicId)).toBe(true)
+    // High-water unchanged, outbox unchanged, zero new order_frame.
+    expect(highWaterOf('topicMessage', topicId)).toBe(highWaterBefore)
+    expect(outboxCount()).toBe(outboxBefore)
+    expect(topicOrderFrameOps(topicId)).toBe(orderFrameOpsBefore)
+    // Local selected flags change exactly; all synced fields/order unchanged.
+    expect(foldSelectedOf(`${topicId}-m2`)).toBe(true)
+    expect(foldSelectedOf(`${topicId}-m3`)).toBe(false)
+    expect(syncedMessageSnapshot(topicId)).toEqual(syncedBefore)
+    // foldSelected is wire-excluded: baseline payload/digest and completeness
+    // reasons are unchanged, and no missing-order-frame is introduced.
+    const candidateAfter = captureLocalSyncBaselineCandidate(db as never) as unknown as {
+      manifest: { digest: string }
+      completeness: { state: string; reasons: string[] }
+    }
+    expect(candidateAfter.manifest.digest).toBe(digestBefore)
+    expect([...candidateAfter.completeness.reasons].sort()).toEqual(reasonsBefore)
+    expect(candidateAfter.completeness.state).toBe(candidateBefore.completeness.state)
+    expect(candidateAfter.completeness.reasons).not.toContain('missing-order-frame')
+    vi.restoreAllMocks()
+  })
+
+  it('missing frame remains missing with no high-water or op synthesis and unchanged reasons', () => {
+    const topicId = 't-sel-missing'
+    setupSelectTopic(topicId)
+    sqlite.prepare(`DELETE FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id=?`).run(topicId)
+    expect(frameExists('topicMessage', topicId)).toBe(false)
+    const highWaterBefore = highWaterOf('topicMessage', topicId)
+    const outboxBefore = outboxCount()
+    const orderFrameOpsBefore = topicOrderFrameOps(topicId)
+    const candidateBefore = captureLocalSyncBaselineCandidate(db as never) as unknown as {
+      completeness: { state: string; reasons: string[] }
+    }
+    const reasonsBefore = [...candidateBefore.completeness.reasons].sort()
+
+    const res = agg.selectAnswerMessage(topicId, `${topicId}-m3`, [`${topicId}-m2`, `${topicId}-m3`])
+    expect(res.ok).toBe(true)
+
+    // No synthesis: frame still missing, high-water and outbox untouched.
+    expect(frameExists('topicMessage', topicId)).toBe(false)
+    expect(getFrame('topicMessage', topicId)).toBeNull()
+    expect(highWaterOf('topicMessage', topicId)).toBe(highWaterBefore)
+    expect(outboxCount()).toBe(outboxBefore)
+    expect(topicOrderFrameOps(topicId)).toBe(orderFrameOpsBefore)
+    // Local selection still applies.
+    expect(foldSelectedOf(`${topicId}-m3`)).toBe(true)
+    expect(foldSelectedOf(`${topicId}-m2`)).toBe(false)
+    const candidateAfter = captureLocalSyncBaselineCandidate(db as never) as unknown as {
+      completeness: { state: string; reasons: string[] }
+    }
+    expect([...candidateAfter.completeness.reasons].sort()).toEqual(reasonsBefore)
+    vi.restoreAllMocks()
+  })
+
+  it('capture-disabled selectAnswer preserves local writes with the frame unchanged and zero sync ops', () => {
+    const topicId = 't-sel-capoff'
+    setupSelectTopic(topicId)
+    const frameBefore = getFrame('topicMessage', topicId)!
+    const frameJsonBefore = JSON.stringify(frameBefore)
+    const outboxBefore = outboxCount()
+    const orderFrameOpsBefore = topicOrderFrameOps(topicId)
+    configStore.set('sync:enabled', false)
+    try {
+      const res = agg.selectAnswerMessage(topicId, `${topicId}-m3`, [`${topicId}-m2`, `${topicId}-m3`])
+      expect(res.ok).toBe(true)
+      expect(foldSelectedOf(`${topicId}-m3`)).toBe(true)
+      expect(foldSelectedOf(`${topicId}-m2`)).toBe(false)
+      expect(JSON.stringify(getFrame('topicMessage', topicId))).toBe(frameJsonBefore)
+      expect(outboxCount()).toBe(outboxBefore)
+      expect(topicOrderFrameOps(topicId)).toBe(orderFrameOpsBefore)
+    } finally {
+      configStore.set('sync:enabled', true)
+    }
     vi.restoreAllMocks()
   })
 })

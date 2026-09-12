@@ -7,6 +7,7 @@ import {
   isPayloadSafe,
   validateSyncPayloadAllowlist
 } from '../payloadFilter'
+import { SYNC_MESSAGE_PATCH_FIELDS } from '../types'
 
 describe('sync payload filter', () => {
   it('filters topic allowlist and strips file_path', () => {
@@ -72,5 +73,22 @@ describe('sync payload filter', () => {
       payload: { id: 'm1', contextWindowAnchor: 'x' } as any
     })
     expect(err).toContain('contextWindowAnchor')
+  })
+
+  it('foldSelected stays device-local: filtered from message payload and rejected by the allowlist', () => {
+    const out = filterMessagePayload({
+      id: 'm1',
+      topicId: 't1',
+      role: 'assistant',
+      content: 'hi',
+      foldSelected: true
+    } as unknown as Record<string, unknown>)!
+    expect('foldSelected' in out).toBe(false)
+    const err = validateSyncPayloadAllowlist({
+      entityType: 'message',
+      payload: { id: 'm1', topicId: 't1', foldSelected: true } as never
+    })
+    expect(err).toContain('not allowlisted')
+    expect((SYNC_MESSAGE_PATCH_FIELDS as readonly string[]).includes('foldSelected')).toBe(false)
   })
 })
