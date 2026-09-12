@@ -622,7 +622,10 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
       }
     ])
     expect(pasteRes.ok).toBe(true)
-    expect(frameExists('topicMessage', pasteTopic)).toBe(false)
+    // pasteMessagesToTopic now participates in incremental sync: stable
+    // true-new inclusion refreshes the topic frame (no longer invalidate-only).
+    expect(frameExists('topicMessage', pasteTopic)).toBe(true)
+    expect(getFrame('topicMessage', pasteTopic)!.orderedChildIds).toEqual(['m-paste-1', 'm-paste-2'])
 
     // Test selectAnswerMessage
     const selTopic = 't-select'
@@ -1210,7 +1213,10 @@ describe('sync parent order frame — fail-closed internals and compound parents
     ])
     expect(frameExists('messageBlock', 'm-comp-1')).toBe(true)
     expect(frameExists('messageBlock', 'm-comp-2')).toBe(true)
-    // pasteMessagesToTopic with blocks for both messages should invalidate both messageBlock parents plus topicMessage
+    // pasteMessagesToTopic pure stable→stable content patches advance no frames
+    const topicFrameBeforePaste = getFrame('topicMessage', topicId)!
+    const blkFrame1Before = getFrame('messageBlock', 'm-comp-1')!
+    const blkFrame2Before = getFrame('messageBlock', 'm-comp-2')!
     const pasteRes = agg.pasteMessagesToTopic(topicId, [
       {
         message: { id: 'm-comp-1', topicId, role: 'user', content: 'a edited', status: 'success' } as never,
@@ -1244,9 +1250,9 @@ describe('sync parent order frame — fail-closed internals and compound parents
       }
     ])
     expect(pasteRes.ok).toBe(true)
-    expect(frameExists('topicMessage', topicId)).toBe(false)
-    expect(frameExists('messageBlock', 'm-comp-1')).toBe(false)
-    expect(frameExists('messageBlock', 'm-comp-2')).toBe(false)
+    expect(getFrame('topicMessage', topicId)).toEqual(topicFrameBeforePaste)
+    expect(getFrame('messageBlock', 'm-comp-1')).toEqual(blkFrame1Before)
+    expect(getFrame('messageBlock', 'm-comp-2')).toEqual(blkFrame2Before)
     // Source-only untouched parent should not be invalidated — create another topic with message
     const srcTopic = 't-src-untouched'
     sqlite
