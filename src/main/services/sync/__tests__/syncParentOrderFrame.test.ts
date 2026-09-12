@@ -597,7 +597,10 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
       }
     ])
     expect(insRes.ok).toBe(true)
-    expect(frameExists('topicMessage', insertTopic)).toBe(false)
+    // insertMessagesAfterAnchor now participates in incremental sync: stable
+    // true-new inclusion refreshes the topic frame (no longer invalidate-only).
+    expect(frameExists('topicMessage', insertTopic)).toBe(true)
+    expect(getFrame('topicMessage', insertTopic)!.orderedChildIds).toEqual(['m-ins-1', 'm-ins-2'])
 
     // Test pasteMessagesToTopic
     const pasteTopic = 't-paste'

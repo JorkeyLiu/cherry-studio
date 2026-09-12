@@ -943,107 +943,318 @@ export class ChatDbAggregateService {
     entries: Array<{ message: JsonObject; blocks: JsonObject[] }>
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      syncService.throwIfPublishBarrierHeld('insertMessagesAfterAnchor')
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('insertMessagesAfterAnchor')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: FileCleanupResult
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Validate topic exists
-        const topic = repos.topics.getById(topicId)
-        if (!topic.found) {
-          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
-        }
-        // Validate anchor membership
-        const anchorRes = repos.messages.getInTopic(afterMessageId, topicId)
-        if (!anchorRes.found) {
-          throw new ChatDbNotFoundError(`Anchor message ${afterMessageId} does not belong to topic ${topicId}`)
-        }
-        const anchorData = anchorRes.data
-
-        // Ordered authority snapshot + group-tail resolution (single transaction, no second read)
-        const orderedMessages = repos.messages.listByTopic(topicId)
-        const resolvedInsertIndex = this.resolveInsertIndexAfterAnchor(orderedMessages, anchorData)
-
-        // Phase 1 — convert every entry, enforce block ownership, classify new vs existing
-        const newMessages: MessageData[] = []
-        const newMessageIds = new Set<string>()
-        const existingPlans: Array<{ id: string; patch: Record<string, unknown> }> = []
-        const phase4Plans: Array<{ blocks: MessageBlockData[]; harvest: boolean }> = []
-        const allAffectedFileIds: string[] = []
-
-        for (const entry of entries) {
-          const messageData = wireToMessage(entry.message)
-          messageData.topicId = topicId
-          const blockDataList = entry.blocks.map(wireToBlock)
-          for (const block of blockDataList) {
-            block.messageId = messageData.id
+          // Validate topic exists
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
-          const patch = wireToMessagePatch(entry.message)
-          delete patch.id
-          delete patch.topicId
-          delete patch.sortOrder
-
-          const existing = repos.messages.getById(messageData.id)
-          if (existing.found) {
-            if (existing.data.topicId !== topicId) {
-              throw new ChatDbConflictError(
-                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot insert into topic ${topicId}`
-              )
-            }
-            existingPlans.push({ id: messageData.id, patch })
-            phase4Plans.push({ blocks: blockDataList, harvest: true })
-          } else if (newMessageIds.has(messageData.id)) {
-            existingPlans.push({ id: messageData.id, patch })
-            phase4Plans.push({ blocks: blockDataList, harvest: true })
-          } else {
-            newMessageIds.add(messageData.id)
-            newMessages.push(messageData)
-            phase4Plans.push({ blocks: blockDataList, harvest: false })
+          // Validate anchor membership
+          const anchorRes = repos.messages.getInTopic(afterMessageId, topicId)
+          if (!anchorRes.found) {
+            throw new ChatDbNotFoundError(`Anchor message ${afterMessageId} does not belong to topic ${topicId}`)
           }
-        }
+          const anchorData = anchorRes.data
 
-        // Phase 2 — batch-insert all new messages at resolved anchor group tail
-        if (newMessages.length > 0) {
-          repos.messages.insertManyAt(newMessages, resolvedInsertIndex)
-        }
+          // Ordered authority snapshot + group-tail resolution (single transaction, no second read)
+          const orderedMessages = repos.messages.listByTopic(topicId)
+          const resolvedInsertIndex = this.resolveInsertIndexAfterAnchor(orderedMessages, anchorData)
 
-        // Phase 3 — metadata patches for existing rows / in-request duplicates
-        for (const plan of existingPlans) {
-          if (Object.keys(plan.patch).length > 0) {
-            repos.messages.update(topicId, plan.id, plan.patch)
-          }
-        }
-
-        // Phase 4 — harvest prior refs (existing entries only), then upsert blocks + sync file refs in ORIGINAL order
-        for (const plan of phase4Plans) {
-          if (plan.blocks.length === 0) continue
-          if (plan.harvest) {
-            for (const block of plan.blocks) {
-              const priorRefs = repos.fileRefs.listByBlock(block.id)
-              allAffectedFileIds.push(...collectAffectedFileIds(priorRefs))
+          // Phase 1 — convert every entry, enforce block ownership, classify new vs existing
+          // (DB-existence classification preserved exactly for chat writes).
+          const newMessages: MessageData[] = []
+          const newMessageIds = new Set<string>()
+          const existingPlans: Array<{ id: string; patch: Record<string, unknown> }> = []
+          const phase4Plans: Array<{ blocks: MessageBlockData[]; harvest: boolean }> = []
+          const allAffectedFileIds: string[] = []
+          // Pre-state snapshots for sync diffing (taken before any mutation in this tx).
+          const preMessageRows = new Map<string, MessageData>()
+          const preBlockRows = new Map<string, MessageBlockData>()
+          if (ctx) {
+            const seenMsg = new Set<string>()
+            for (const entry of entries) {
+              const mid = (entry.message as Record<string, unknown>).id as string
+              if (typeof mid === 'string' && mid.length > 0 && !seenMsg.has(mid)) {
+                seenMsg.add(mid)
+                const pre = repos.messages.getById(mid)
+                if (pre.found) preMessageRows.set(mid, { ...pre.data, overflow: { ...pre.data.overflow } })
+              }
+              for (const b of entry.blocks) {
+                const bid = (b as Record<string, unknown>).id as string
+                if (typeof bid === 'string' && bid.length > 0 && !preBlockRows.has(bid)) {
+                  const pre = repos.blocks.getById(bid)
+                  if (pre.found) preBlockRows.set(bid, { ...pre.data, overflow: { ...pre.data.overflow } })
+                }
+              }
             }
           }
-          repos.blocks.upsertMany(plan.blocks)
-          this.syncFileReferences(repos, plan.blocks)
-        }
 
-        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
-        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
-        // Compound affected parents: invalidate every existing messageBlock parent whose blocks may be inserted/replaced/changed
-        {
-          const affectedMids = new Set<string>()
+          for (const entry of entries) {
+            const messageData = wireToMessage(entry.message)
+            messageData.topicId = topicId
+            const blockDataList = entry.blocks.map(wireToBlock)
+            for (const block of blockDataList) {
+              block.messageId = messageData.id
+            }
+            const patch = wireToMessagePatch(entry.message)
+            delete patch.id
+            delete patch.topicId
+            delete patch.sortOrder
+
+            const existing = repos.messages.getById(messageData.id)
+            if (existing.found) {
+              if (existing.data.topicId !== topicId) {
+                throw new ChatDbConflictError(
+                  `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot insert into topic ${topicId}`
+                )
+              }
+              existingPlans.push({ id: messageData.id, patch })
+              phase4Plans.push({ blocks: blockDataList, harvest: true })
+            } else if (newMessageIds.has(messageData.id)) {
+              existingPlans.push({ id: messageData.id, patch })
+              phase4Plans.push({ blocks: blockDataList, harvest: true })
+            } else {
+              newMessageIds.add(messageData.id)
+              newMessages.push(messageData)
+              phase4Plans.push({ blocks: blockDataList, harvest: false })
+            }
+          }
+
+          // Phase 2 — batch-insert all new messages at resolved anchor group tail
+          if (newMessages.length > 0) {
+            repos.messages.insertManyAt(newMessages, resolvedInsertIndex)
+          }
+
+          // Phase 3 — metadata patches for existing rows / in-request duplicates
+          for (const plan of existingPlans) {
+            if (Object.keys(plan.patch).length > 0) {
+              repos.messages.update(topicId, plan.id, plan.patch)
+            }
+          }
+
+          // Phase 4 — harvest prior refs (existing entries only), then upsert blocks + sync file refs in ORIGINAL order
           for (const plan of phase4Plans) {
-            for (const blk of plan.blocks) {
-              affectedMids.add(blk.messageId)
+            if (plan.blocks.length === 0) continue
+            if (plan.harvest) {
+              for (const block of plan.blocks) {
+                const priorRefs = repos.fileRefs.listByBlock(block.id)
+                allAffectedFileIds.push(...collectAffectedFileIds(priorRefs))
+              }
+            }
+            repos.blocks.upsertMany(plan.blocks)
+            this.syncFileReferences(repos, plan.blocks)
+          }
+
+          // Transaction-bound sync intent (same atomic boundary). True-new
+          // stable messages/blocks enqueue full-state upserts with membership;
+          // existing rows enqueue allowlisted field diffs only with membership
+          // preserved (never backfilled); transient/unsupported emit nothing.
+          if (ctx) {
+            let tsOffset = 0
+            const nextTs = (): number => ctx.ts + tsOffset++
+            // Distinct message order (first occurrence) for deterministic parent-first timestamps.
+            const distinctMids: string[] = []
+            const seenMids = new Set<string>()
+            for (const entry of entries) {
+              const mid = (entry.message as Record<string, unknown>).id as string
+              if (typeof mid === 'string' && !seenMids.has(mid)) {
+                seenMids.add(mid)
+                distinctMids.push(mid)
+              }
+            }
+            let hasNewInclusion = false
+            let hasDemotion = false
+            for (const mid of distinctMids) {
+              const postRow = repos.messages.getById(mid)
+              if (!postRow.found) throw new Error(`insertMessagesAfterAnchor message ${mid} missing in transaction`)
+              const pre = preMessageRows.get(mid) ?? null
+              const isTrueCreate = !pre
+              const postStable = isStableMessageStatus(postRow.data.status)
+              const preStable = pre ? isStableMessageStatus(pre.status) : false
+              if (pre && preStable && !postStable) hasDemotion = true
+              if ((isTrueCreate && postStable) || (pre && !preStable && postStable)) hasNewInclusion = true
+              if (!postStable) continue
+              if (isTrueCreate) {
+                if (!this.shouldCaptureMessageCreate(postRow.data)) continue
+                const opTs = nextTs()
+                this.ensureTopicClosureInTx(stx, topicId, opTs, ctx.deviceId)
+                const full = this.syncMessagePayloadFull(postRow.data)
+                delete full.sortOrder
+                const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
+                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncNotify = true
+              } else {
+                const diff = this.diffMessagePayload(pre, postRow.data)
+                if (!diff) continue
+                delete diff.sortOrder
+                // Diff carries only allowlisted fields; empty diff means no op.
+                if (Object.keys(diff).length <= 2) continue
+                const opTs = nextTs()
+                this.ensureTopicClosureInTx(stx, topicId, opTs, ctx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message', mid, diff, opTs, ctx.deviceId)
+                syncNotify = true
+              }
+            }
+            // Distinct blocks in original entry order for parent-first timestamps.
+            const distinctBids: string[] = []
+            const seenBids = new Set<string>()
+            for (const plan of phase4Plans) {
+              for (const blk of plan.blocks) {
+                if (!seenBids.has(blk.id)) {
+                  seenBids.add(blk.id)
+                  distinctBids.push(blk.id)
+                }
+              }
+            }
+            for (const bid of distinctBids) {
+              const postBlk = repos.blocks.getById(bid)
+              if (!postBlk.found) throw new Error(`insertMessagesAfterAnchor block ${bid} missing in transaction`)
+              // Blocks under a transient parent never ride the wire: skip
+              // without closure (closure would fail closed). The per-parent
+              // frame decision below invalidates the transient parent.
+              const parentMsg = repos.messages.getById(postBlk.data.messageId)
+              if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) continue
+              if (!isStableBlockStatus(postBlk.data.status)) continue
+              if (this.isUnsupportedBlock(postBlk.data)) {
+                unsupportedBlockIds.push(bid)
+                continue
+              }
+              const pre = preBlockRows.get(bid) ?? null
+              if (!pre) {
+                const opTs = nextTs()
+                this.ensureBlockParentClosureInTx(stx, bid, opTs, ctx.deviceId)
+                const full = this.syncBlockPayloadFull(postBlk.data)
+                delete full.sortOrder
+                const opId = syncService.enqueueUpsertInTx(stx, 'message_block', bid, full, opTs, ctx.deviceId)
+                syncService.setMembershipClockInTx(stx, 'message_block', bid, postBlk.data.messageId, opTs, opId)
+                syncNotify = true
+              } else {
+                if (postBlk.data.messageId !== pre.messageId) continue
+                const diff = this.diffBlockPayload(pre, postBlk.data)
+                if (!diff) continue
+                delete diff.sortOrder
+                if (Object.keys(diff).length <= 2) continue
+                const opTs = nextTs()
+                this.ensureBlockParentClosureInTx(stx, bid, opTs, ctx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message_block', bid, diff, opTs, ctx.deviceId)
+                syncNotify = true
+              }
+            }
+            // Local parent order frames — exactly one topicMessage attempt
+            // when semantically required plus one per affected block parent
+            // where required. Pure stable→stable content patches advance
+            // nothing; inclusion/order changes use the existing try helpers
+            // (missing/excluded invalidates with 0 op, malformed rolls back).
+            if (hasDemotion) {
+              syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              for (const mid of distinctMids) {
+                const pre = preMessageRows.get(mid)
+                const postRow = repos.messages.getById(mid)
+                const preStable = pre ? isStableMessageStatus(pre.status) : false
+                const postStable = postRow.found ? isStableMessageStatus(postRow.data.status) : false
+                if (pre && preStable && !postStable) {
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+                }
+              }
+            } else if (hasNewInclusion) {
+              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+            // Per-parent block frames: newly included parents (even empty)
+            // plus any true-create or inclusion-transition block change.
+            const affectedParents = new Set<string>()
+            for (const mid of distinctMids) affectedParents.add(mid)
+            for (const bid of distinctBids) {
+              const pre = preBlockRows.get(bid)
+              const postBlk = repos.blocks.getById(bid)
+              if (pre) affectedParents.add(pre.messageId)
+              if (postBlk.found) affectedParents.add(postBlk.data.messageId)
+            }
+            for (const mid of affectedParents) {
+              const postMsg = repos.messages.getById(mid)
+              if (!postMsg.found) continue
+              const postStable = isStableMessageStatus(postMsg.data.status)
+              const pre = preMessageRows.get(mid) ?? null
+              const preStable = pre ? isStableMessageStatus(pre.status) : false
+              if (pre && preStable && !postStable) continue // already invalidated above
+              if (!postStable) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+                continue
+              }
+              const isNewlyIncludedParent = (!pre && postStable) || (!!pre && !preStable && postStable)
+              let needsBlockFrame = isNewlyIncludedParent
+              if (!needsBlockFrame) {
+                for (const bid of distinctBids) {
+                  const bPre = preBlockRows.get(bid)
+                  const bPost = repos.blocks.getById(bid)
+                  if (!bPost.found) continue
+                  // Scope to blocks currently under this parent.
+                  if (bPost.data.messageId !== mid && (!bPre || bPre.messageId !== mid)) continue
+                  if (!bPre) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  // Only blocks that belong to this parent transitionally.
+                  if (bPre.messageId !== mid && bPost.data.messageId !== mid) continue
+                  const preIncluded = isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre)
+                  const postIncluded = isStableBlockStatus(bPost.data.status) && !this.isUnsupportedBlock(bPost.data)
+                  if (bPre.messageId !== bPost.data.messageId) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  if (preIncluded !== postIncluded) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  // Excluded true-create under this parent must invalidate.
+                  if (!postIncluded) {
+                    needsBlockFrame = true
+                    break
+                  }
+                }
+                // A true-create message with no blocks still needs its empty frame.
+                // Covered by isNewlyIncludedParent above.
+              }
+              if (!needsBlockFrame) continue
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, mid, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+          } else {
+            // Capture disabled: preserve existing truthful invalidation, no ops.
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+            {
+              const affectedMids = new Set<string>()
+              for (const plan of phase4Plans) {
+                for (const blk of plan.blocks) {
+                  affectedMids.add(blk.messageId)
+                }
+              }
+              for (const mid of affectedMids) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+              }
             }
           }
-          for (const mid of affectedMids) {
-            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
-          }
-        }
 
-        const uniqueAffectedIds = [...new Set(allAffectedFileIds)].sort()
-        return buildFileCleanupResult(repos, uniqueAffectedIds)
-      })
+          const uniqueAffectedIds = [...new Set(allAffectedFileIds)].sort()
+          return buildFileCleanupResult(repos, uniqueAffectedIds)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('insertMessagesAfterAnchor', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('insertMessagesAfterAnchor', unsupportedBlockIds)
+      return result
     }, `insertMessagesAfterAnchor(${topicId}, ${afterMessageId}, ${entries.length} entries)`)
   }
 

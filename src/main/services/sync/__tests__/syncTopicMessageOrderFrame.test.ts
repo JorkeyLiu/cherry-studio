@@ -404,8 +404,11 @@ describe('aggregate issuance: atomic single-frame ops with mirrored clock', () =
       }
     ])
     expect(ins.ok).toBe(true)
-    expect(frameOf(sqlite, 't-compound')).toBeNull()
-    expect(frameOps(db).length).toBe(before)
+    // insertMessagesAfterAnchor now participates in incremental sync: stable
+    // true-new inclusion refreshes the topic frame plus the new parent's
+    // empty block frame (two frame ops total).
+    expect(frameOf(sqlite, 't-compound')!.orderedChildIds).toEqual(['m-c1', 'm-c2'])
+    expect(frameOps(db).length).toBe(before + 2)
   })
 })
 

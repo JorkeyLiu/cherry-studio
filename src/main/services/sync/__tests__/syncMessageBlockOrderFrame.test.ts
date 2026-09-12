@@ -290,13 +290,17 @@ describe('aggregate ordinary issuance: exact op/clock/atomicity', () => {
     // unsupported promotion path stays 0 op (transient streaming block, no membership): invalidate path
     const cand = captureLocalSyncBaselineCandidate(db as never)
     expect(cand.completeness).not.toBe('complete')
-    // compound path keeps 0 op
+    // insertMessagesAfterAnchor now participates in incremental sync: stable
+    // true-new inclusion refreshes the topic frame and mints the new parent's
+    // empty block frame; the excluded parent stays invalidated with 0 op.
     const beforeCompound = blockFrameOps(db).length
     const ins = agg.insertMessagesAfterAnchor('t-b3', 'm-b3', [
       { message: { id: 'm-b3x', topicId: 't-b3', role: 'user', content: 'x', status: 'success' } as never, blocks: [] }
     ])
     expect(ins.ok).toBe(true)
-    expect(blockFrameOps(db).length).toBe(beforeCompound)
+    expect(blockFrameOps(db).length).toBe(beforeCompound + 1)
+    expect(blockFrameOf(sqlite, 'm-b3x')!.orderedChildIds).toEqual([])
+    expect(blockFrameOf(sqlite, 'm-b3')).toBeNull()
 
     // missing membership try path: legacy unversioned sibling -> user mutation succeeds with 0 op + invalidate
     vi.spyOn(Date, 'now').mockReturnValue(6_000_000_000_300)
