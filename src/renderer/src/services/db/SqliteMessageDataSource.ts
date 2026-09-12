@@ -316,7 +316,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     message: Message,
     blocks: MessageBlock[],
     insertIndex?: number,
-    sendContext?: SendDiagnosticsContext
+    sendContext?: SendDiagnosticsContext,
+    resendAttemptId?: string
   ): Promise<void> {
     // LOCK-004: when this append belongs to the ordinary send path, consume
     // the ordinal from the CALLER'S OWN send context so renderer + main logs
@@ -335,7 +336,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
       message: cloneForWire(message as unknown as JsonObject),
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
       ...(sanitizedIndex !== undefined && { insertIndex: sanitizedIndex }),
-      ...(isDiagnosedAppend && { diagnostics: sendDiagnostics })
+      ...(isDiagnosedAppend && { diagnostics: sendDiagnostics }),
+      ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     const serializeDurationMs = elapsedMs(t0)
     if (isDiagnosedAppend) {
@@ -393,11 +395,17 @@ export class SqliteMessageDataSource implements MessageDataSource {
     dispatchTopicUpdatedAt(topicId)
   }
 
-  async updateMessage(topicId: string, messageId: string, updates: Partial<Message>): Promise<void> {
+  async updateMessage(
+    topicId: string,
+    messageId: string,
+    updates: Partial<Message>,
+    resendAttemptId?: string
+  ): Promise<void> {
     const request: UpdateMessageRequest = {
       topicId,
       messageId,
-      updates: cloneForWire(updates as unknown as JsonObject)
+      updates: cloneForWire(updates as unknown as JsonObject),
+      ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     unwrap(await this.api.updateMessage(request))
     dispatchTopicUpdatedAt(topicId)
@@ -407,7 +415,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     topicId: string,
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
     blocksToUpdate: MessageBlock[],
-    blockIdsToDelete: string[] = []
+    blockIdsToDelete: string[] = [],
+    resendAttemptId?: string
   ): Promise<FileCleanupResult> {
     // Clone and strip redundant identity/order fields for Dexie-compatible semantics
     const clonedUpdates = cloneForWire(messageUpdates as unknown as JsonObject) as Record<string, unknown>
@@ -418,7 +427,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
       topicId,
       messageUpdates: clonedUpdates as JsonObject,
       blocksToUpdate: cloneForWire(blocksToUpdate as unknown as JsonObject[]),
-      blockIdsToDelete: cloneForWire(blockIdsToDelete)
+      blockIdsToDelete: cloneForWire(blockIdsToDelete),
+      ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     const result = unwrap(await this.api.updateMessageAndBlocks(request))
     dispatchTopicUpdatedAt(topicId)
@@ -456,7 +466,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   // ============ Block Operations ============
 
-  async updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void> {
+  async updateBlocks(
+    blocks: MessageBlock[],
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string
+  ): Promise<void> {
     // PERF-STREAM-ATTR-001: resolve the per-call correlation context (explicit
     // context wins; otherwise auto-created when the renderer switch is on;
     // otherwise undefined — inert). Never affects persistence semantics.
@@ -466,7 +480,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const tSerialize = performance.now()
     const request: UpdateBlocksRequest = {
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
-      ...(ctx && { diagnostics: ctx })
+      ...(ctx && { diagnostics: ctx }),
+      ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     const blockCount = request.blocks.length
     const serializeDurationMs = elapsedMs(tSerialize)
@@ -543,7 +558,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async updateSingleBlock(
     blockId: string,
     updates: Partial<MessageBlock>,
-    streamDiag?: StreamWriteDiagnostics
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string
   ): Promise<void> {
     const ctx = resolveStreamWriteDiagnostics(streamDiag)
     const channel = 'chatdb:update-single-block'
@@ -552,7 +568,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const request: UpdateSingleBlockRequest = {
       blockId,
       updates: cloneForWire(updates as unknown as JsonObject),
-      ...(ctx && { diagnostics: ctx })
+      ...(ctx && { diagnostics: ctx }),
+      ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     const serializeDurationMs = elapsedMs(tSerialize)
     const tIpc = performance.now()
@@ -618,9 +635,10 @@ export class SqliteMessageDataSource implements MessageDataSource {
     // No topicUpdatedAt dispatch — block-only operation
   }
 
-  async bulkAddBlocks(blocks: MessageBlock[]): Promise<void> {
+  async bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string): Promise<void> {
     const request: BulkAddBlocksRequest = {
-      blocks: cloneForWire(blocks as unknown as JsonObject[])
+      blocks: cloneForWire(blocks as unknown as JsonObject[]),
+      ...(resendAttemptId !== undefined && { resendAttemptId })
     }
     unwrap(await this.api.bulkAddBlocks(request))
     // No topicUpdatedAt dispatch — block-only operation
@@ -853,7 +871,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     topicId: string,
     messages: MessageBlockEntry[],
     blockIdsToDelete: string[]
-  ): Promise<FileCleanupResult> {
+  ): Promise<ResetMessagesForResendResponse> {
     const request: ResetMessagesForResendRequest = cloneForWire({ topicId, messages, blockIdsToDelete })
     const result = unwrap(await this.api.resetMessagesForResend(request))
     dispatchTopicUpdatedAt(topicId)

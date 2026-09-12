@@ -8,6 +8,7 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   MessageBlockEntry,
+  ResetMessagesForResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 
@@ -79,20 +80,22 @@ class DbService implements MessageDataSource {
     message: Message,
     blocks: MessageBlock[],
     insertIndex?: number,
-    sendContext?: SendDiagnosticsContext
+    sendContext?: SendDiagnosticsContext,
+    resendAttemptId?: string
   ) {
-    return this.ordinarySource.appendMessage(topicId, message, blocks, insertIndex, sendContext)
+    return this.ordinarySource.appendMessage(topicId, message, blocks, insertIndex, sendContext, resendAttemptId)
   }
-  updateMessage(topicId: string, messageId: string, updates: Partial<Message>) {
-    return this.ordinarySource.updateMessage(topicId, messageId, updates)
+  updateMessage(topicId: string, messageId: string, updates: Partial<Message>, resendAttemptId?: string) {
+    return this.ordinarySource.updateMessage(topicId, messageId, updates, resendAttemptId)
   }
   updateMessageAndBlocks(
     topicId: string,
     updates: Partial<Message> & Pick<Message, 'id'>,
     blocks: MessageBlock[],
-    blockIdsToDelete: string[] = []
+    blockIdsToDelete: string[] = [],
+    resendAttemptId?: string
   ): Promise<FileCleanupResult> {
-    return this.ordinarySource.updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete)
+    return this.ordinarySource.updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete, resendAttemptId)
   }
   selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void> {
     return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId, messageIds)
@@ -113,15 +116,20 @@ class DbService implements MessageDataSource {
     return this.ordinarySource.ensureTopic(topicId, assistantId, name)
   }
 
-  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void> {
-    return this.ordinarySource.updateBlocks(blocks, streamDiag)
+  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics, resendAttemptId?: string): Promise<void> {
+    return this.ordinarySource.updateBlocks(blocks, streamDiag, resendAttemptId)
   }
 
-  updateSingleBlock(blockId: string, updates: Partial<MessageBlock>, streamDiag?: StreamWriteDiagnostics) {
-    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag)
+  updateSingleBlock(
+    blockId: string,
+    updates: Partial<MessageBlock>,
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string
+  ) {
+    return this.ordinarySource.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId)
   }
-  bulkAddBlocks(blocks: MessageBlock[]) {
-    return this.ordinarySource.bulkAddBlocks(blocks)
+  bulkAddBlocks(blocks: MessageBlock[], resendAttemptId?: string) {
+    return this.ordinarySource.bulkAddBlocks(blocks, resendAttemptId)
   }
   deleteBlocks(blockIds: string[]) {
     return this.ordinarySource.deleteBlocks(blockIds)
@@ -202,7 +210,7 @@ class DbService implements MessageDataSource {
     topicId: string,
     messages: Array<{ message: any; blocks: any[] }>,
     blockIdsToDelete: string[]
-  ) {
+  ): Promise<ResetMessagesForResendResponse> {
     return this.ordinarySource.resetMessagesForResend(topicId, messages, blockIdsToDelete)
   }
   deleteMessagesWithSegments(topicId: string, messageIds: string[]) {

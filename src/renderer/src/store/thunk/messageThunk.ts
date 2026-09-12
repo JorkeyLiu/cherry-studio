@@ -35,6 +35,7 @@ import {
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
 import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
 import {
   recordResidentReadDiscard,
@@ -125,6 +126,20 @@ const finishTopicLoading = async (topicId: string) => {
   store.dispatch(newMessagesActions.setTopicFulfilled({ topicId, fulfilled: true }))
 }
 
+/**
+ * Resend execution attempt threading (SYNC-DATA-055 issuer slice, F1).
+ *
+ * The Main-authoritative attempt id returned by `resetMessagesForResend` is
+ * captured into the resend/regenerate execution closure
+ * (`fetchAndProcessAssistantResponseImpl`) as an immutable value and threaded
+ * explicitly through BlockManager/callbacks/save helpers: every DB write the
+ * execution produces carries exactly that id. No messageId-keyed lookup is
+ * used as a write-path source, so a superseded execution's residual writes
+ * keep carrying their own (now stale) id and fail closed in Main instead of
+ * adopting the superseding execution's id. Ordinary executions pass
+ * `undefined` (carrier omitted).
+ */
+
 // TODO: 后续可以将db操作移到Listener Middleware中
 // export const saveMessageAndBlocksToDB = async (message: Message, blocks: MessageBlock[], messageIndex: number = -1) => {
 //   return saveMessageAndBlocksToDBV2(message.topicId, message, blocks, messageIndex)
@@ -132,12 +147,13 @@ const finishTopicLoading = async (topicId: string) => {
 
 const updateExistingMessageAndBlocksInDB = async (
   updatedMessage: Partial<Message> & Pick<Message, 'id' | 'topicId'>,
-  updatedBlocks: MessageBlock[]
+  updatedBlocks: MessageBlock[],
+  resendAttemptId?: string
 ) => {
   try {
     // Always update blocks if provided
     if (updatedBlocks.length > 0) {
-      await updateBlocks(updatedBlocks)
+      await updateBlocks(updatedBlocks, undefined, resendAttemptId)
     }
 
     // Check if there are message properties to update beyond id and topicId
@@ -149,7 +165,7 @@ const updateExistingMessageAndBlocksInDB = async (
         return acc
       }, {})
 
-      await updateMessage(updatedMessage.topicId, updatedMessage.id, messageUpdatesPayload)
+      await updateMessage(updatedMessage.topicId, updatedMessage.id, messageUpdatesPayload, resendAttemptId)
 
       store.dispatch(updateTopicUpdatedAt({ topicId: updatedMessage.topicId }))
     }
@@ -198,12 +214,24 @@ const blockUpdateRafs = new LRUCache<string, number>({
  */
 const blockThrottleArrivals = new Map<string, number>()
 
+/** Per-call execution context for a throttled block write (F1/F2). */
+export interface ThrottledBlockWriteContext {
+  /** Immutable execution attempt; absent for ordinary writes (carrier omitted). */
+  resendAttemptId?: string
+  /** Execution barrier tracking the produced DB-write promise. */
+  barrier?: WriteBarrier
+}
+
 /**
  * 获取或创建消息块专用的节流函数。
+ *
+ * The trailing invocation reuses the LATEST call args (lodash semantics), so
+ * the execution context travels with each call: a trailing write carries the
+ * attempt/barrier of the latest update for that block.
  */
 const getBlockThrottler = (id: string) => {
   if (!blockUpdateThrottlers.has(id)) {
-    const throttler = throttle(async (blockUpdate: any) => {
+    const throttler = throttle(async (blockUpdate: any, ctx?: ThrottledBlockWriteContext) => {
       const existingRAF = blockUpdateRafs.get(id)
       if (existingRAF) {
         cancelAnimationFrame(existingRAF)
@@ -236,7 +264,15 @@ const getBlockThrottler = (id: string) => {
         }
         blockThrottleArrivals.delete(id)
       }
-      await updateSingleBlock(id, blockUpdate, streamDiag)
+      // F1/F2: the DB write carries the calling execution's attempt, and the
+      // produced promise is tracked on the calling execution's barrier when
+      // present (flush-triggered trailing writes are therefore awaitable).
+      const write = updateSingleBlock(id, blockUpdate, streamDiag, ctx?.resendAttemptId)
+      if (ctx?.barrier) {
+        await ctx.barrier.track(write)
+      } else {
+        await write
+      }
     }, BLOCK_UPDATE_THROTTLE_MS)
 
     blockUpdateThrottlers.set(id, throttler)
@@ -248,13 +284,25 @@ const getBlockThrottler = (id: string) => {
 /**
  * 更新单个消息块。
  */
-export const throttledBlockUpdate = (id: string, blockUpdate: any) => {
+export const throttledBlockUpdate = (id: string, blockUpdate: any, ctx?: ThrottledBlockWriteContext) => {
   if (isStreamAttrRendererMeasureEnabled()) {
     blockThrottleArrivals.set(id, performance.now())
   }
   const throttler = getBlockThrottler(id)
   // store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
-  throttler(blockUpdate)
+  throttler(blockUpdate, ctx)
+}
+
+/**
+ * Flush (never drop) a block's pending throttled trailing write, preserving
+ * the last state. Used by F2 finalization quiescence and block completion
+ * paths. No-op when nothing is pending.
+ */
+export const flushThrottledBlockUpdate = (id: string): void => {
+  const throttler = blockUpdateThrottlers.get(id)
+  if (throttler) {
+    throttler.flush()
+  }
 }
 
 /**
@@ -277,11 +325,13 @@ export const cancelThrottledBlockUpdate = (id: string) => {
 }
 
 // 新增: 通用的、非节流的函数，用于保存消息和块的更新到数据库
-const saveUpdatesToDB = async (
+// resendAttemptId 来自调用执行的闭包（F1 显式线程化）；缺省 = 普通路径。
+export const saveUpdatesToDB = async (
   messageId: string,
   topicId: string,
   messageUpdates: Partial<Message>, // 需要更新的消息字段
-  blocksToUpdate: MessageBlock[] // 需要更新/创建的块
+  blocksToUpdate: MessageBlock[], // 需要更新/创建的块
+  resendAttemptId?: string
 ) => {
   try {
     const messageDataToSave: Partial<Message> & Pick<Message, 'id' | 'topicId'> = {
@@ -289,18 +339,19 @@ const saveUpdatesToDB = async (
       topicId,
       ...messageUpdates
     }
-    await updateExistingMessageAndBlocksInDB(messageDataToSave, blocksToUpdate)
+    await updateExistingMessageAndBlocksInDB(messageDataToSave, blocksToUpdate, resendAttemptId)
   } catch (error) {
     logger.error(`[DB Save Updates] Failed for message ${messageId}:`, error as Error)
   }
 }
 
 // 新增: 辅助函数，用于获取并保存单个更新后的 Block 到数据库
-const saveUpdatedBlockToDB = async (
+export const saveUpdatedBlockToDB = async (
   blockId: string | null,
   messageId: string,
   topicId: string,
-  getState: () => RootState
+  getState: () => RootState,
+  resendAttemptId?: string
 ) => {
   if (!blockId) {
     logger.warn('[DB Save Single Block] Received null/undefined blockId. Skipping save.')
@@ -309,7 +360,7 @@ const saveUpdatedBlockToDB = async (
   const state = getState()
   const blockToSave = state.messageBlocks.entities[blockId]
   if (blockToSave) {
-    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave]) // Pass messageId, topicId, empty message updates, and the block
+    await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId)
   } else {
     logger.warn(`[DB Save Single Block] Block ${blockId} not found in state. Cannot save.`)
   }
@@ -407,7 +458,13 @@ const fetchAndProcessAssistantResponseImpl = async (
   getState: () => RootState,
   topicId: string,
   origAssistant: Assistant,
-  assistantMessage: Message // Pass the prepared assistant message (new or reset)
+  assistantMessage: Message, // Pass the prepared assistant message (new or reset)
+  /**
+   * Immutable execution attempt for resend/regenerate (F1): captured from the
+   * reset response into this execution closure. Every DB write below carries
+   * exactly this id; ordinary executions pass undefined (carrier omitted).
+   */
+  resendAttemptId?: string
 ) => {
   // Re-read the assistant from the store: the caller may have captured a
   // snapshot that predates the first-establishment anchor dispatch in
@@ -425,6 +482,22 @@ const fetchAndProcessAssistantResponseImpl = async (
   const assistant = mergeRequestAssistantSnapshot(origAssistant, freshAssistant, topicId)
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
+  // F2: one write barrier per execution; all persistence this execution
+  // produces is tracked here for finalization quiescence.
+  const writeBarrier = new WriteBarrier()
+  // F1: execution-scoped save wrappers binding the immutable closure attempt.
+  const saveUpdatesToDBForExec = (
+    messageId: string,
+    execTopicId: string,
+    messageUpdates: Partial<Message>,
+    blocksToUpdate: MessageBlock[]
+  ): Promise<void> => saveUpdatesToDB(messageId, execTopicId, messageUpdates, blocksToUpdate, resendAttemptId)
+  const saveUpdatedBlockToDBForExec = (
+    blockId: string | null,
+    messageId: string,
+    execTopicId: string,
+    execGetState: () => RootState
+  ): Promise<void> => saveUpdatedBlockToDB(blockId, messageId, execTopicId, execGetState, resendAttemptId)
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
@@ -432,11 +505,18 @@ const fetchAndProcessAssistantResponseImpl = async (
     const blockManager = new BlockManager({
       dispatch,
       getState,
-      saveUpdatedBlockToDB,
-      saveUpdatesToDB,
+      saveUpdatedBlockToDB: saveUpdatedBlockToDBForExec,
+      saveUpdatesToDB: saveUpdatesToDBForExec,
       assistantMsgId,
       topicId,
-      throttledBlockUpdate,
+      resendAttemptId,
+      barrier: writeBarrier,
+      throttledBlockUpdate: (id: string, blockUpdate: any, attemptId?: string, barrier?: WriteBarrier) =>
+        throttledBlockUpdate(id, blockUpdate, {
+          resendAttemptId: attemptId ?? resendAttemptId,
+          barrier: barrier ?? writeBarrier
+        }),
+      flushThrottledBlockUpdate,
       cancelThrottledBlockUpdate
     })
 
@@ -476,7 +556,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       getState,
       topicId,
       assistantMsgId,
-      saveUpdatesToDB,
+      saveUpdatesToDB: saveUpdatesToDBForExec,
       assistant
     })
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
@@ -517,6 +597,9 @@ const fetchAndProcessAssistantResponseImpl = async (
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
     }
   }
+  // No execution-attempt cleanup needed: the attempt lives only in this
+  // execution closure (F1) — later ordinary edits never see it, and a
+  // post-issuance stale duplicate fails closed in Main.
 }
 
 /**
@@ -721,6 +804,9 @@ export const resendMessageThunk =
 
       // 处理存在相关的助手消息的情况
       const allBlockIdsToDelete: string[] = []
+      // F1: thunk-scoped immutable capture of the reset attempt mapping; each
+      // queued execution closure below reads exactly its own message's entry.
+      const attemptByMessage = new Map<string, string>()
       // 先处理已有的重传
       for (const originalMsg of assistantMessagesToReset) {
         const modelToSet =
@@ -752,11 +838,25 @@ export const resendMessageThunk =
       }
 
       try {
-        const cleanup = await dbService.resetMessagesForResend(
+        const resetResult = await dbService.resetMessagesForResend(
           topicId,
           resetDataList.map((message) => ({ message, blocks: [] })),
           allBlockIdsToDelete
         )
+        // F1: fill the thunk-scoped map from the Main-authoritative mapping.
+        // Each queued execution closure receives exactly its own message's id
+        // below — never a live lookup — so a later superseding reset cannot
+        // reroute this execution's residual writes. Legacy responses without
+        // a mapping yield undefined (carrier omitted, local-only).
+        const rawAttempts = (resetResult as { attempts?: unknown })?.attempts
+        if (Array.isArray(rawAttempts)) {
+          for (const entry of rawAttempts as Array<{ messageId?: unknown; attemptId?: unknown }>) {
+            if (typeof entry?.messageId === 'string' && typeof entry?.attemptId === 'string') {
+              attemptByMessage.set(entry.messageId, entry.attemptId)
+            }
+          }
+        }
+        const cleanup = resetResult
         const currentMessages = selectMessagesForTopic(getState(), topicId)
         for (const message of resetDataList) {
           if (currentMessages.some((existing) => existing.id === message.id)) {
@@ -787,8 +887,17 @@ export const resendMessageThunk =
           ...assistant,
           ...(resetMsg.model ? { model: resetMsg.model } : {})
         }
+        // F1: the execution closure owns this message's attempt immutably.
+        const attemptForExec = attemptByMessage.get(resetMsg.id)
         void queue.add(async () => {
-          await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistantConfigForThisRegen, resetMsg)
+          await fetchAndProcessAssistantResponseImpl(
+            dispatch,
+            getState,
+            topicId,
+            assistantConfigForThisRegen,
+            resetMsg,
+            attemptForExec
+          )
         })
       }
     } catch (error) {
@@ -885,11 +994,21 @@ export const regenerateAssistantResponseThunk =
             }
       )
 
-      const cleanup = await dbService.resetMessagesForResend(
+      const resetResult = await dbService.resetMessagesForResend(
         topicId,
         [{ message: resetAssistantMsg, blocks: [] }],
         blockIdsToDelete
       )
+      // F1: capture this message's attempt into the execution closure below.
+      const rawAttempts = (resetResult as { attempts?: unknown })?.attempts
+      const matchedAttempt = Array.isArray(rawAttempts)
+        ? (rawAttempts as Array<{ messageId?: unknown; attemptId?: unknown }>).find(
+            (e) => e?.messageId === resetAssistantMsg.id && typeof e?.attemptId === 'string'
+          )
+        : undefined
+      const attemptForExec =
+        matchedAttempt && typeof matchedAttempt.attemptId === 'string' ? matchedAttempt.attemptId : undefined
+      const cleanup = resetResult
       await consumeFileCleanupResult(cleanup)
       // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
       blockIdsToDelete.forEach((id) => cancelThrottledBlockUpdate(id))
@@ -912,7 +1031,8 @@ export const regenerateAssistantResponseThunk =
           getState,
           topicId,
           assistantConfigForRegen,
-          resetAssistantMsg
+          resetAssistantMsg,
+          attemptForExec
         )
       })
     } catch (error) {
@@ -2142,9 +2262,14 @@ export const saveMessageAndBlocksToDB = async (
 /**
  * Update a message in the database
  */
-export const updateMessage = async (topicId: string, messageId: string, updates: Partial<Message>): Promise<void> => {
+export const updateMessage = async (
+  topicId: string,
+  messageId: string,
+  updates: Partial<Message>,
+  resendAttemptId?: string
+): Promise<void> => {
   try {
-    await dbService.updateMessage(topicId, messageId, updates)
+    await dbService.updateMessage(topicId, messageId, updates, resendAttemptId)
     logger.silly('Updated message via DbService', { topicId, messageId })
   } catch (error) {
     logger.error('Failed to update message:', { topicId, messageId, error })
@@ -2158,10 +2283,11 @@ export const updateMessage = async (topicId: string, messageId: string, updates:
 export const updateSingleBlock = async (
   blockId: string,
   updates: Partial<MessageBlock>,
-  streamDiag?: StreamWriteDiagnostics
+  streamDiag?: StreamWriteDiagnostics,
+  resendAttemptId?: string
 ): Promise<void> => {
   try {
-    await dbService.updateSingleBlock(blockId, updates, streamDiag)
+    await dbService.updateSingleBlock(blockId, updates, streamDiag, resendAttemptId)
     logger.silly('Updated single block via DbService', { blockId })
   } catch (error) {
     logger.error('Failed to update single block:', { blockId, error })
@@ -2172,9 +2298,9 @@ export const updateSingleBlock = async (
 /**
  * Bulk add message blocks (for new blocks)
  */
-export const bulkAddBlocks = async (blocks: MessageBlock[]): Promise<void> => {
+export const bulkAddBlocks = async (blocks: MessageBlock[], resendAttemptId?: string): Promise<void> => {
   try {
-    await dbService.bulkAddBlocks(blocks)
+    await dbService.bulkAddBlocks(blocks, resendAttemptId)
     logger.silly('Bulk added blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to bulk add blocks:', { count: blocks.length, error })
@@ -2185,9 +2311,13 @@ export const bulkAddBlocks = async (blocks: MessageBlock[]): Promise<void> => {
 /**
  * Update multiple message blocks (upsert operation)
  */
-export const updateBlocks = async (blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void> => {
+export const updateBlocks = async (
+  blocks: MessageBlock[],
+  streamDiag?: StreamWriteDiagnostics,
+  resendAttemptId?: string
+): Promise<void> => {
   try {
-    await dbService.updateBlocks(blocks, streamDiag)
+    await dbService.updateBlocks(blocks, streamDiag, resendAttemptId)
     logger.silly('Updated blocks via DbService', { count: blocks.length })
   } catch (error) {
     logger.error('Failed to update blocks:', { count: blocks.length, error })
@@ -2307,6 +2437,9 @@ export const setupChannelStream = (
 
   const assistant: Assistant = { id: agentId, name: '', prompt: '', topics: [], type: 'claude-code', model }
 
+  // Ordinary IM channel execution: no resend attempt, but still wired with a
+  // barrier + flush so completion paths share the same quiescence semantics.
+  const channelBarrier = new WriteBarrier()
   const blockManager = new BlockManager({
     dispatch,
     getState,
@@ -2314,7 +2447,10 @@ export const setupChannelStream = (
     saveUpdatesToDB,
     assistantMsgId: assistantMessage.id,
     topicId,
-    throttledBlockUpdate,
+    barrier: channelBarrier,
+    throttledBlockUpdate: (id: string, blockUpdate: any, _attemptId?: string, barrier?: WriteBarrier) =>
+      throttledBlockUpdate(id, blockUpdate, { barrier: barrier ?? channelBarrier }),
+    flushThrottledBlockUpdate,
     cancelThrottledBlockUpdate
   })
 

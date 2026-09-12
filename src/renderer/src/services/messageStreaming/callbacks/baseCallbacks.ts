@@ -309,6 +309,14 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         }
       }
 
+      // F2 finalization quiescence: drain every throttled trailing write and
+      // in-flight DB write this execution produced BEFORE the success-final
+      // message write, so the Main issuer (which re-verifies DB post-state in
+      // the same transaction) can never observe a partially flushed state.
+      // Scoped to this execution's blocks via the BlockManager barrier — no
+      // global wait, no cross-message blocking.
+      await blockManager.quiesceWrites()
+
       const messageUpdates = { status, metrics: response?.metrics, usage: response?.usage }
       dispatch(
         newMessagesActions.updateMessage({

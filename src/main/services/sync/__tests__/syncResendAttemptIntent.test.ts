@@ -265,15 +265,17 @@ describe('sync resend attempt intent — stale fail-closed and local-only stream
     expect(row.content).toBe('x')
   })
 
-  it('matching attempt writes succeed locally with no outbox and no fabricated terminal state', () => {
+  it('matching attempt streams locally; success final consumes the intent with exactly one stable_replace', () => {
     const { topicId, assistantId, attemptId } = setupCovered()
-    // Streaming intermediate (transient) with the matching attempt
+    // Streaming intermediate (transient) with the matching attempt: local-only, intent retained, 0 op
     expect(
       agg.updateMessage(topicId, assistantId, { status: 'streaming', content: 'partial…' } as never, {
         resendAttemptId: attemptId
       }).ok
     ).toBe(true)
-    // Final stable checkpoint in this slice: commits locally, emits nothing
+    expect(stableReplaceOps()).toBe(0)
+    expect(getIntent(assistantId)).toBeDefined()
+    // Success final via the issuer: exactly one stable_replace, intent cleared
     expect(
       agg.updateMessageAndBlocks(
         topicId,
@@ -288,9 +290,10 @@ describe('sync resend attempt intent — stale fail-closed and local-only stream
       content: string
     }
     expect(msg).toEqual({ status: 'success', content: 'done' })
-    expect(outboxFor(assistantId)).toEqual([])
+    expect(outboxFor(assistantId)).toEqual([{ op: 'message_stable_replace' }])
     expect(outboxFor('b-final-1')).toEqual([])
-    expect(stableReplaceOps()).toBe(0)
+    expect(stableReplaceOps()).toBe(1)
+    expect(getIntent(assistantId)).toBeUndefined()
   })
 
   it('legacy writes without an attempt still commit locally but never sync while covered', () => {

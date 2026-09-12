@@ -1051,14 +1051,16 @@ describe('contract allowedKeys', () => {
     expect(keys).toEqual(new Set(['topicId']))
   })
 
-  it('append-message has exactly topicId, message, blocks, insertIndex, diagnostics', () => {
+  it('append-message has exactly topicId, message, blocks, insertIndex, diagnostics, resendAttemptId', () => {
     const keys = getContract('chatdb:append-message').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'message', 'blocks', 'insertIndex', 'diagnostics']))
+    expect(keys).toEqual(new Set(['topicId', 'message', 'blocks', 'insertIndex', 'diagnostics', 'resendAttemptId']))
   })
 
-  it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate, blockIdsToDelete', () => {
+  it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate, blockIdsToDelete, resendAttemptId', () => {
     const keys = getContract('chatdb:update-message-and-blocks').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete']))
+    expect(keys).toEqual(
+      new Set(['topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete', 'resendAttemptId'])
+    )
   })
 
   it('select-answer-message has exactly topicId, selectedMessageId, messageIds', () => {
@@ -1071,14 +1073,14 @@ describe('contract allowedKeys', () => {
     expect(keys).toEqual(new Set(['topicId', 'assistantId', 'name']))
   })
 
-  it('update-blocks has exactly blocks and diagnostics', () => {
+  it('update-blocks has exactly blocks, diagnostics, and resendAttemptId', () => {
     const keys = getContract('chatdb:update-blocks').allowedKeys
-    expect(keys).toEqual(new Set(['blocks', 'diagnostics']))
+    expect(keys).toEqual(new Set(['blocks', 'diagnostics', 'resendAttemptId']))
   })
 
-  it('update-single-block has exactly blockId, updates, and diagnostics', () => {
+  it('update-single-block has exactly blockId, updates, diagnostics, and resendAttemptId', () => {
     const keys = getContract('chatdb:update-single-block').allowedKeys
-    expect(keys).toEqual(new Set(['blockId', 'updates', 'diagnostics']))
+    expect(keys).toEqual(new Set(['blockId', 'updates', 'diagnostics', 'resendAttemptId']))
   })
 })
 
@@ -1785,13 +1787,24 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:clone-messages-to-topic', { ok: true, value: null })).not.toThrow()
   })
 
-  it('reset-messages-for-resend: returns file cleanup result', () => {
+  it('reset-messages-for-resend: returns file cleanup result plus the strictly-closed attempt mapping', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reset-messages-for-resend', {
+        ok: true,
+        value: {
+          affectedFileIds: ['f1'],
+          remainingReferenceCounts: { f1: 0 },
+          attempts: [{ messageId: 'm-1', attemptId: 'attempt-1' }]
+        }
+      })
+    ).not.toThrow()
+    // Unknown value keys (e.g. deletedTopicIds) fail closed under the new response shape.
     expect(() =>
       validateChatDbResult('chatdb:reset-messages-for-resend', {
         ok: true,
         value: { affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, deletedTopicIds: [] }
       })
-    ).not.toThrow()
+    ).toThrow(ValidationError)
   })
 
   it('delete-messages-with-segments: returns file cleanup result', () => {

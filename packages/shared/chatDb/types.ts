@@ -120,8 +120,27 @@ export interface AppendDiagnostics {
   ordinal?: number
 }
 
+/**
+ * Optional Main-internal resend attempt carrier (SYNC-DATA-055 issuer slice).
+ *
+ * Carries the Main-authoritative per-message attempt id minted by
+ * `resetMessagesForResend` for exactly one resend/regenerate execution.
+ * Ordinary paths omit it. Never reuses askId, Message.extra/overflow, or
+ * diagnostics correlationId. Unknown keys elsewhere still fail closed.
+ */
+export type ResendAttemptIdCarrier = {
+  /** Main-authoritative attempt id for the covered message (absent = legacy/ordinary). */
+  resendAttemptId?: string
+}
+
+/** Strictly-closed per-message attempt mapping entry (only messageId + attemptId). */
+export interface ResendAttemptMapping {
+  messageId: string
+  attemptId: string
+}
+
 /** @see IpcChannel.ChatDb_AppendMessage */
-export interface AppendMessageRequest {
+export interface AppendMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
   /** Full message entity as JSON. Must contain at least `id`. */
   message: JsonObject
@@ -134,7 +153,7 @@ export interface AppendMessageRequest {
 }
 
 /** @see IpcChannel.ChatDb_UpdateMessage */
-export interface UpdateMessageRequest {
+export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
   messageId: string
   /**
@@ -146,7 +165,7 @@ export interface UpdateMessageRequest {
 }
 
 /** @see IpcChannel.ChatDb_UpdateMessageAndBlocks */
-export interface UpdateMessageAndBlocksRequest {
+export interface UpdateMessageAndBlocksRequest extends ResendAttemptIdCarrier {
   topicId: string
   /**
    * Partial message patch with required `id` field.
@@ -214,7 +233,7 @@ export interface StreamWriteDiagnostics {
 }
 
 /** @see IpcChannel.ChatDb_UpdateBlocks */
-export interface UpdateBlocksRequest {
+export interface UpdateBlocksRequest extends ResendAttemptIdCarrier {
   /** Block entities to upsert. Each must contain `id` and `messageId`. */
   blocks: JsonObject[]
   /**
@@ -225,7 +244,7 @@ export interface UpdateBlocksRequest {
 }
 
 /** @see IpcChannel.ChatDb_UpdateSingleBlock */
-export interface UpdateSingleBlockRequest {
+export interface UpdateSingleBlockRequest extends ResendAttemptIdCarrier {
   blockId: string
   /**
    * Partial block patch. Absent keys are unchanged.
@@ -240,7 +259,7 @@ export interface UpdateSingleBlockRequest {
 }
 
 /** @see IpcChannel.ChatDb_BulkAddBlocks */
-export interface BulkAddBlocksRequest {
+export interface BulkAddBlocksRequest extends ResendAttemptIdCarrier {
   /** Full block entities to insert. Each must contain `id` and `messageId`. */
   blocks: JsonObject[]
 }
@@ -734,8 +753,17 @@ export interface ResetMessagesForResendRequest {
   blockIdsToDelete: string[]
 }
 
-/** @see IpcChannel.ChatDb_ResetMessagesForResend */
-export type ResetMessagesForResendResponse = FileCleanupResult
+/**
+ * @see IpcChannel.ChatDb_ResetMessagesForResend
+ *
+ * Existing file-cleanup facts plus the Main-authoritative per-message attempt
+ * mapping (SYNC-DATA-055 issuer slice). Each mapping entry is strictly closed
+ * (only messageId + attemptId). IpcChannel string unchanged.
+ */
+export interface ResetMessagesForResendResponse extends FileCleanupResult {
+  /** Per-message attempt mapping, one entry per reset message (strictly closed entries). */
+  attempts: ResendAttemptMapping[]
+}
 
 /** @see IpcChannel.ChatDb_DeleteMessagesWithSegments */
 export interface DeleteMessagesWithSegmentsRequest {

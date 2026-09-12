@@ -77,6 +77,8 @@ export type {
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
+  ResendAttemptIdCarrier,
+  ResendAttemptMapping,
   ResetAssistantTopicsRequest,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,

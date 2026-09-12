@@ -396,17 +396,21 @@ export function registerChatDbIpc(): () => void {
 
   // 5. append-message
   handleCommand(IpcChannel.ChatDb_AppendMessage, (agg, req: AppendMessageRequest) => {
-    return agg.appendMessage(req.topicId, req.message, req.blocks, req.insertIndex, req.diagnostics)
+    return agg.appendMessage(req.topicId, req.message, req.blocks, req.insertIndex, req.diagnostics, {
+      resendAttemptId: req.resendAttemptId
+    })
   })
 
   // 6. update-message
   handleCommand(IpcChannel.ChatDb_UpdateMessage, (agg, req: UpdateMessageRequest) => {
-    return agg.updateMessage(req.topicId, req.messageId, req.updates)
+    return agg.updateMessage(req.topicId, req.messageId, req.updates, { resendAttemptId: req.resendAttemptId })
   })
 
   // 7. update-message-and-blocks
   handleCommand(IpcChannel.ChatDb_UpdateMessageAndBlocks, (agg, req: UpdateMessageAndBlocksRequest) => {
-    return agg.updateMessageAndBlocks(req.topicId, req.messageUpdates, req.blocksToUpdate, req.blockIdsToDelete)
+    return agg.updateMessageAndBlocks(req.topicId, req.messageUpdates, req.blocksToUpdate, req.blockIdsToDelete, {
+      resendAttemptId: req.resendAttemptId
+    })
   })
 
   // 7b. select-answer-message (PERF-100): one atomic multi-model answer
@@ -428,17 +432,19 @@ export function registerChatDbIpc(): () => void {
 
   // 10. update-blocks
   handleCommand(IpcChannel.ChatDb_UpdateBlocks, (agg, req: UpdateBlocksRequest) => {
-    return agg.updateBlocks(req.blocks, req.diagnostics)
+    return agg.updateBlocks(req.blocks, req.diagnostics, { resendAttemptId: req.resendAttemptId })
   })
 
   // 11. update-single-block
   handleCommand(IpcChannel.ChatDb_UpdateSingleBlock, (agg, req: UpdateSingleBlockRequest) => {
-    return agg.updateSingleBlock(req.blockId, req.updates, req.diagnostics)
+    return agg.updateSingleBlock(req.blockId, req.updates, req.diagnostics, {
+      resendAttemptId: req.resendAttemptId
+    })
   })
 
   // 12. bulk-add-blocks
   handleCommand(IpcChannel.ChatDb_BulkAddBlocks, (agg, req: BulkAddBlocksRequest) => {
-    return agg.bulkAddBlocks(req.blocks)
+    return agg.bulkAddBlocks(req.blocks, { resendAttemptId: req.resendAttemptId })
   })
 
   // 13. delete-blocks

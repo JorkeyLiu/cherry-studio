@@ -874,12 +874,47 @@ describe('SqliteMessageDataSource', () => {
 
     it('resetMessagesForResend calls api and dispatches', async () => {
       api.resetMessagesForResend.mockResolvedValue(
-        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 } })
+        successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, attempts: [] })
       )
       const result = await ds.resetMessagesForResend('t-1', [{ message: { id: 'm1' }, blocks: [] }], ['b1'])
       expect(api.resetMessagesForResend).toHaveBeenCalledOnce()
       expect(mockDispatch).toHaveBeenCalledOnce()
       expect(result.affectedFileIds).toEqual(['f1'])
+    })
+
+    it('resetMessagesForResend forwards the attempt mapping without touching the wire shape', async () => {
+      api.resetMessagesForResend.mockResolvedValue(
+        successResult({
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          attempts: [{ messageId: 'm1', attemptId: 'attempt-1' }]
+        })
+      )
+      const result = await ds.resetMessagesForResend('t-1', [{ message: { id: 'm1' }, blocks: [] }], [])
+      expect(result.attempts).toEqual([{ messageId: 'm1', attemptId: 'attempt-1' }])
+    })
+
+    it('write requests forward resendAttemptId only when supplied (ordinary path omits it)', async () => {
+      api.updateMessage.mockResolvedValue(successResult(null))
+      await ds.updateMessage('t-1', 'm-1', { content: 'x' } as never)
+      expect(api.updateMessage).toHaveBeenLastCalledWith({
+        topicId: 't-1',
+        messageId: 'm-1',
+        updates: expect.anything()
+      })
+      await ds.updateMessage('t-1', 'm-1', { content: 'y' } as never, 'attempt-1')
+      expect(api.updateMessage).toHaveBeenLastCalledWith({
+        topicId: 't-1',
+        messageId: 'm-1',
+        updates: expect.anything(),
+        resendAttemptId: 'attempt-1'
+      })
+      api.bulkAddBlocks.mockResolvedValue(successResult(null))
+      await ds.bulkAddBlocks([{ id: 'b-1', messageId: 'm-1' }] as never, 'attempt-1')
+      expect(api.bulkAddBlocks).toHaveBeenLastCalledWith({
+        blocks: expect.anything(),
+        resendAttemptId: 'attempt-1'
+      })
     })
 
     it('deleteMessagesWithSegments calls api and dispatches', async () => {

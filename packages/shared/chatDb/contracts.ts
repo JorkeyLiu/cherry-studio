@@ -250,7 +250,7 @@ const ensureTopicContract: ChatDbContract = {
 }
 
 const appendMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'message', 'blocks', 'insertIndex', 'diagnostics'),
+  allowedKeys: keySet('topicId', 'message', 'blocks', 'insertIndex', 'diagnostics', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, appendMessageContract.allowedKeys)
     const req = value as AppendMessageRequest
@@ -274,6 +274,7 @@ const appendMessageContract: ChatDbContract = {
     if (req.insertIndex !== undefined) {
       validateIndex(req.insertIndex, 'request.insertIndex')
     }
+    validateResendAttemptId(req.resendAttemptId)
     // LOCK-004: optional diagnostic-only correlation metadata. JSON-safety is
     // already enforced by validateRequest; only shape/type bounds are needed
     // here. Never validated against message content.
@@ -315,12 +316,13 @@ const appendMessageContract: ChatDbContract = {
 }
 
 const updateMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageId', 'updates'),
+  allowedKeys: keySet('topicId', 'messageId', 'updates', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageContract.allowedKeys)
     const req = value as UpdateMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateNonEmptyString(req.messageId, 'request.messageId')
+    validateResendAttemptId(req.resendAttemptId)
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary
     validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'sortOrder']), 'request.updates')
@@ -377,11 +379,12 @@ const selectAnswerMessageContract: ChatDbContract = {
 }
 
 const updateMessageAndBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete'),
+  allowedKeys: keySet('topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageAndBlocksContract.allowedKeys)
     const req = value as UpdateMessageAndBlocksRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateResendAttemptId(req.resendAttemptId)
     if (req.blockIdsToDelete !== undefined) validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
     validateJsonObject(req.messageUpdates, 'request.messageUpdates')
     validateIdField(req.messageUpdates, 'request.messageUpdates')
@@ -427,6 +430,27 @@ const deleteMessagesContract: ChatDbContract = {
 }
 
 /**
+ * Optional Main-internal resend attempt carrier (SYNC-DATA-055 issuer slice).
+ *
+ * Absent = legacy/ordinary path (unchanged). When present it must be the
+ * Main-authoritative colon-free attempt id (1..256 chars, no ':', no lone
+ * surrogates) — never askId, Message.extra/overflow, or diagnostics
+ * correlationId. Unknown request keys still fail closed via validateRequest.
+ */
+function validateResendAttemptId(value: unknown, at = 'request.resendAttemptId'): void {
+  if (value === undefined) return
+  if (typeof value !== 'string' || value.length < 1 || value.length > 256) {
+    throw new ValidationError(at, 'Expected a non-empty string up to 256 characters')
+  }
+  if (value.includes(':')) {
+    throw new ValidationError(at, 'Attempt id must not contain ":"')
+  }
+  if (/[\uD800-\uDFFF]/.test(value)) {
+    throw new ValidationError(at, 'Attempt id must not contain lone surrogates')
+  }
+}
+
+/**
  * Shared validation for optional measurement-only correlation metadata
  * (PERF-STREAM-ATTR-001, LOCK-STREAM-ATTR-001). Mirrors the append-message
  * `diagnostics` validation (LOCK-004): JSON-safety is already enforced by
@@ -458,10 +482,11 @@ function validateStreamWriteDiagnostics(diagnostics: unknown, at = 'request.diag
 }
 
 const updateBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks', 'diagnostics'),
+  allowedKeys: keySet('blocks', 'diagnostics', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, updateBlocksContract.allowedKeys)
     const req = value as UpdateBlocksRequest
+    validateResendAttemptId(req.resendAttemptId)
     validateStreamWriteDiagnostics(req.diagnostics)
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
@@ -475,11 +500,12 @@ const updateBlocksContract: ChatDbContract = {
 }
 
 const updateSingleBlockContract: ChatDbContract = {
-  allowedKeys: keySet('blockId', 'updates', 'diagnostics'),
+  allowedKeys: keySet('blockId', 'updates', 'diagnostics', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, updateSingleBlockContract.allowedKeys)
     const req = value as UpdateSingleBlockRequest
     validateNonEmptyString(req.blockId, 'request.blockId')
+    validateResendAttemptId(req.resendAttemptId)
     validateStreamWriteDiagnostics(req.diagnostics)
     // updates is a partial patch, not a full block — no messageId required
     validateJsonObject(req.updates, 'request.updates')
@@ -490,10 +516,11 @@ const updateSingleBlockContract: ChatDbContract = {
 }
 
 const bulkAddBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('blocks'),
+  allowedKeys: keySet('blocks', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, bulkAddBlocksContract.allowedKeys)
     const req = value as BulkAddBlocksRequest
+    validateResendAttemptId(req.resendAttemptId)
     // Validate blocks is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocks, 'request.blocks')
     // Blocks are full entities: require both id and messageId
@@ -1151,6 +1178,9 @@ const branchMessagesToTopicContract: ChatDbContract = {
   }
 }
 
+const RESET_RESEND_VALUE_KEYS = new Set(['affectedFileIds', 'remainingReferenceCounts', 'attempts'])
+const RESET_RESEND_ATTEMPT_KEYS = new Set(['messageId', 'attemptId'])
+
 const resetMessagesForResendContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'messages', 'blockIdsToDelete'),
   validate(value: unknown): void {
@@ -1160,7 +1190,93 @@ const resetMessagesForResendContract: ChatDbContract = {
     validateEntries(req.messages, 'request.messages')
     validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
   },
-  validateResult: fileCleanupResultValidator('chatdb:reset-messages-for-resend')
+  validateResult(result: unknown): void {
+    // File-cleanup facts plus the strictly-closed per-message attempt mapping
+    // (SYNC-DATA-055 issuer slice). Unknown value keys fail closed; each
+    // mapping entry carries only messageId + attemptId.
+    validateResultEnvelope(result, 'chatdb:reset-messages-for-resend')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:reset-messages-for-resend] Expected ResetMessagesForResendResponse object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!RESET_RESEND_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:reset-messages-for-resend] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+      validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+      const counts = v.remainingReferenceCounts as Record<string, unknown>
+      for (const key of Object.keys(counts)) {
+        if (key.length === 0) {
+          throw new ValidationError(
+            'result.value.remainingReferenceCounts',
+            '[chatdb:reset-messages-for-resend] remainingReferenceCounts key must be a non-empty string'
+          )
+        }
+        validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+      }
+      if (!Array.isArray(v.attempts)) {
+        throw new ValidationError('result.value.attempts', '[chatdb:reset-messages-for-resend] Expected attempts array')
+      }
+      const seen = new Set<string>()
+      for (let i = 0; i < (v.attempts as unknown[]).length; i++) {
+        const entry = (v.attempts as unknown[])[i]
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+          throw new ValidationError(
+            `result.value.attempts[${i}]`,
+            '[chatdb:reset-messages-for-resend] Expected attempt mapping object'
+          )
+        }
+        const rec = entry as Record<string, unknown>
+        for (const key of Object.keys(rec)) {
+          if (!RESET_RESEND_ATTEMPT_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.attempts[${i}].${key}`,
+              `[chatdb:reset-messages-for-resend] Unknown key in attempt mapping: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(rec.messageId, `result.value.attempts[${i}].messageId`)
+        const attemptId = rec.attemptId
+        if (typeof attemptId !== 'string' || attemptId.length < 1 || attemptId.length > 256) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].attemptId`,
+            '[chatdb:reset-messages-for-resend] Expected a non-empty string up to 256 characters'
+          )
+        }
+        if (attemptId.includes(':')) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].attemptId`,
+            '[chatdb:reset-messages-for-resend] Attempt id must not contain ":"'
+          )
+        }
+        if (/[\uD800-\uDFFF]/.test(attemptId)) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].attemptId`,
+            '[chatdb:reset-messages-for-resend] Attempt id must not contain lone surrogates'
+          )
+        }
+        const mid = rec.messageId as string
+        if (seen.has(mid)) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].messageId`,
+            '[chatdb:reset-messages-for-resend] Duplicate attempt messageId'
+          )
+        }
+        seen.add(mid)
+      }
+    }
+  }
 }
 
 const deleteMessagesWithSegmentsContract: ChatDbContract = {

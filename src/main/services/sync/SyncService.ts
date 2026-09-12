@@ -12,6 +12,7 @@ import type {
   SyncStatus
 } from '@shared/sync'
 import {
+  compareUtf8ByteLex,
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
@@ -19,6 +20,7 @@ import {
   isStableMessageStatus,
   isUnsupportedBlockForSync,
   isValidSyncDeviceAuth,
+  MESSAGE_STABLE_REPLACE_VERSION,
   SYNC_BLOCK_PATCH_FIELDS,
   SYNC_CONFLICT_LOG_MAX,
   SYNC_MESSAGE_PATCH_FIELDS,
@@ -42,6 +44,7 @@ import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import { compareClock as compareFrameClock, evaluateEffectiveOrder } from './syncFrameEvaluation'
 import { advanceFrameHighWater, getFrameHighWater } from './syncFrameHighWater'
+import { clearResendAttemptsInTx, getResendAttemptInTx, parseRemovedBlockIds } from './syncResendAttempt'
 import {
   formatSyncTombstoneValue,
   parseSyncChannelKeyValue,
@@ -1135,6 +1138,543 @@ export class SyncService {
       .onConflictDoNothing()
       .run()
     return true
+  }
+
+  /**
+   * Normal `message_stable_replace` issuer consuming the landed SYNC-DATA-055
+   * intent (second natural work unit). Runs ENTIRELY inside the caller's
+   * aggregate transaction (no BEGIN/COMMIT here): a throw rolls back the
+   * enclosing chat mutation with no intent clear and no op.
+   *
+   * Caller contract (ChatDbAggregateService success-final paths only):
+   * - The resend attempt pre-tx + in-tx checks already passed for
+   *   `messageId`/`attemptId` (stale/legacy never reach here as issuers).
+   * - Capture is enabled and `deviceId` is the durable device identity.
+   * - The chat row mutation for this finalization is already applied in `tx`;
+   *   post-state reads below observe it.
+   *
+   * Gate (all inside the same tx):
+   * - Exact active intent with matching attempt; topic binding match.
+   * - Post-state message status exactly `success` (error/paused stable
+   *   checkpoints never consume — local-only, intent retained, 0 op).
+   * - Every current block for the message is stable-supported with status
+   *   exactly `success` (transient/unsupported/non-success → local-only).
+   * - Message membership present with parent match (absent → local-only, no
+   *   fabrication for the pre-existing row); missing block memberships are
+   *   minted at the replacement clock (resend-generation creation); any
+   *   parent mismatch or malformed overflow/clock → throw (rollback).
+   * - All stable sibling messages in the topic carry complete real
+   *   memberships (else local-only); topic row present (else throw).
+   * - Single replacementClock allocated above every relevant clock
+   *   (register, both existing frames, all included memberships, wall clock);
+   *   MAX_SAFE exhaustion → throw.
+   * - Strict shared validation of the constructed op (no copied rules); any
+   *   failure → throw.
+   * - Winning register LWW: the allocated clock always wins a present
+   *   register by construction; a non-winning comparison throws fail-closed
+   *   (never a second op under the same clock).
+   *
+   * Effect (same tx, symmetric with the receiver apply semantics):
+   * - Local entity + field clocks for the bundled message/blocks advance to
+   *   the replacement clock; missing block memberships minted; retirement
+   *   tombstone barriers at the replacement clock for omitted same-message
+   *   stable-supported children (current rows plus previous-register plus
+   *   intent removed ids) with membership <= clock; winning register
+   *   persisted; both winning frames persisted (high-water advanced) with
+   *   dense sortOrder materialization; exactly one stable_replace enqueued;
+   *   intent cleared. Commit notification stays the caller's responsibility.
+   *
+   * Returns `{ issued: true }` on emission, `{ issued: false, reason }` for
+   * local-only retention (mutation commits, intent retained, 0 op).
+   */
+  tryIssueStableReplaceInTx(
+    tx: SyncTxExecutor,
+    args: { messageId: string; attemptId: string; deviceId: string }
+  ): { issued: boolean; reason: string } {
+    const { messageId, attemptId, deviceId } = args
+    if (typeof messageId !== 'string' || messageId.length === 0)
+      throw new Error('stable replace issuer requires messageId')
+    if (typeof attemptId !== 'string' || attemptId.length === 0)
+      throw new Error('stable replace issuer requires attemptId')
+    if (typeof deviceId !== 'string' || deviceId.length === 0)
+      throw new Error('stable replace issuer requires deviceId')
+
+    const stored = getResendAttemptInTx(tx, messageId)
+    if (!stored) return { issued: false, reason: 'no-intent' }
+    if (stored.attemptId !== attemptId) throw new Error(`stable replace issuer stale attempt for message ${messageId}`)
+    const topicId = stored.topicId
+    if (typeof topicId !== 'string' || topicId.length === 0) {
+      throw new Error(`stable replace issuer malformed intent topic for message ${messageId}`)
+    }
+
+    const msgRow = tx.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get() as
+      | {
+          id: string
+          topicId: string
+          role: string | null
+          content: string | null
+          status: string | null
+          askId: string | null
+          model: string | null
+          modelId: string | null
+          assistantId: string | null
+          createdAt: string | null
+          updatedAt: string | null
+          sortOrder: number
+          extra: string | null
+        }
+      | undefined
+    if (!msgRow) throw new Error(`stable replace issuer message ${messageId} missing in transaction`)
+    if (msgRow.topicId !== topicId) {
+      throw new Error(`stable replace issuer message ${messageId} topic mismatch (${msgRow.topicId} vs ${topicId})`)
+    }
+    // Only the true success final converges peers: error/paused stable
+    // checkpoints (and any non-success terminal) stay local-only with the
+    // intent retained so a later success final can still consume it.
+    if (msgRow.status !== 'success') return { issued: false, reason: 'message-not-success' }
+
+    const topicRow = tx.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
+    if (!topicRow) throw new Error(`stable replace issuer topic ${topicId} missing in transaction`)
+
+    const blockRows = tx
+      .select()
+      .from(schema.messageBlocks)
+      .where(eq(schema.messageBlocks.messageId, messageId))
+      .all() as Array<{
+      id: string
+      messageId: string
+      type: string | null
+      content: string | null
+      status: string | null
+      createdAt: string | null
+      updatedAt: string | null
+      sortOrder: number
+      extra: string | null
+    }>
+    for (const b of blockRows) {
+      if (b.messageId !== messageId) throw new Error(`stable replace issuer block ${b.id} binding mismatch`)
+      if (!isStableBlockStatus(b.status)) return { issued: false, reason: 'transient-block' }
+      let overflow: Record<string, unknown> = {}
+      if (b.extra) {
+        try {
+          const parsed: unknown = JSON.parse(b.extra)
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('not an object')
+          }
+          overflow = parsed as Record<string, unknown>
+        } catch (e) {
+          throw new Error(
+            `stable replace issuer malformed block extra JSON for ${b.id}: ${e instanceof Error ? e.message : String(e)}`
+          )
+        }
+      }
+      if (isUnsupportedBlockForSync({ type: b.type, overflow })) return { issued: false, reason: 'unsupported-block' }
+      if (b.status !== 'success') return { issued: false, reason: 'block-not-success' }
+    }
+
+    // Business order for activeBlockIds: current user-visible order
+    // (sortOrder ASC, id ASC). Canonical id-sorted array is derived
+    // separately for the wire messageBlocks array.
+    const byBusiness = [...blockRows].sort((a, b) => {
+      if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
+    const activeBlockIds = byBusiness.map((b) => b.id)
+    const byCanonical = [...blockRows].sort((a, b) => compareUtf8ByteLex(a.id, b.id))
+
+    // Membership prerequisites. The message row predates the resend (reset
+    // updates, never recreates), so an absent message membership means a
+    // pre-sync unversioned row — local-only without fabrication. Resend
+    // generation blocks mint absent memberships at the replacement clock;
+    // any parent mismatch fails closed.
+    const msgMem = this.getMembershipClockInTx(tx, 'message', messageId)
+    if (!msgMem) return { issued: false, reason: 'message-membership-missing' }
+    if (msgMem.parentId !== topicId) {
+      throw new Error(`stable replace issuer membership parent mismatch for message ${messageId}`)
+    }
+    const blockMems = new Map<string, { timestamp: number; operationId: string }>()
+    for (const b of blockRows) {
+      const mem = this.getMembershipClockInTx(tx, 'message_block', b.id)
+      if (mem) {
+        if (mem.parentId !== messageId) {
+          throw new Error(`stable replace issuer membership parent mismatch for block ${b.id}`)
+        }
+        blockMems.set(b.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+      }
+    }
+
+    // Sibling completeness for the bundled topic frame: every stable message
+    // in the topic must carry a real membership with parent match, otherwise
+    // the frame prerequisites are incomplete → local-only (no fabrication,
+    // no invalidation here — the user mutation still commits).
+    const siblingRows = tx.select().from(schema.messages).where(eq(schema.messages.topicId, topicId)).all() as Array<{
+      id: string
+      status: string | null
+      sortOrder: number
+    }>
+    const topicOrderedIds: string[] = [...siblingRows]
+      .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      })
+      .filter((r) => isStableMessageStatus(r.status))
+      .map((r) => r.id)
+    if (!topicOrderedIds.includes(messageId)) {
+      throw new Error(`stable replace issuer topic order omits message ${messageId}`)
+    }
+    for (const r of siblingRows) {
+      if (!isStableMessageStatus(r.status)) continue
+      const mem = this.getMembershipClockInTx(tx, 'message', r.id)
+      if (!mem) return { issued: false, reason: 'sibling-membership-missing' }
+      if (mem.parentId !== topicId) {
+        throw new Error(`stable replace issuer membership parent mismatch for sibling ${r.id}`)
+      }
+    }
+
+    // Single replacement clock above every relevant clock (register, both
+    // existing frames, all included memberships, wall clock).
+    const existingReg = this.readStableReplaceRegister(tx as unknown as BetterSQLite3Database<typeof schema>, messageId)
+    const existingTopicFrame = this.getParentFrameInTx(tx, 'topicMessage', topicId)
+    const existingMessageFrame = this.getParentFrameInTx(tx, 'messageBlock', messageId)
+    let maxTs = Date.now()
+    if (!Number.isSafeInteger(maxTs) || maxTs < 0) throw new Error('stable replace issuer wall clock invalid')
+    if (existingReg) maxTs = Math.max(maxTs, existingReg.timestamp)
+    if (existingTopicFrame) maxTs = Math.max(maxTs, existingTopicFrame.timestamp)
+    if (existingMessageFrame) maxTs = Math.max(maxTs, existingMessageFrame.timestamp)
+    maxTs = Math.max(maxTs, msgMem.timestamp)
+    for (const mem of blockMems.values()) maxTs = Math.max(maxTs, mem.timestamp)
+    for (const r of siblingRows) {
+      if (!isStableMessageStatus(r.status)) continue
+      const mem = this.getMembershipClockInTx(tx, 'message', r.id)
+      if (mem) maxTs = Math.max(maxTs, mem.timestamp)
+    }
+    if (maxTs >= FRAME_MAX_SAFE_TIMESTAMP) {
+      throw new Error(`stable replace issuer clock exhaustion for message ${messageId}`)
+    }
+    const replacementTimestamp = maxTs + 1
+    const replacementOpId = randomUUID()
+    try {
+      parseSyncOperationIdShape(replacementOpId)
+    } catch (e) {
+      throw new Error(`stable replace issuer bad operation id: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    const rc = { timestamp: replacementTimestamp, operationId: replacementOpId }
+    const clockWire = { timestamp: rc.timestamp, operationId: rc.operationId }
+
+    if (existingReg) {
+      const cmp = this.compareLww(rc.timestamp, rc.operationId, existingReg.timestamp, existingReg.operationId)
+      if (cmp <= 0) throw new Error(`stable replace issuer clock does not win register for ${messageId}`)
+    } else {
+      const applied = tx
+        .select()
+        .from(schema.syncApplied)
+        .where(eq(schema.syncApplied.operationId, rc.operationId))
+        .get()
+      if (applied) throw new Error(`stable replace issuer id reuse without register state for ${messageId}`)
+    }
+
+    const fieldClockWire = (keys: string[]): Record<string, unknown> => {
+      const out: Record<string, unknown> = {}
+      for (const k of keys) out[k] = { ...clockWire }
+      return out
+    }
+    const wireMessage: Record<string, unknown> = {
+      id: messageId,
+      topicId,
+      role: msgRow.role ?? null,
+      content: msgRow.content ?? null,
+      status: msgRow.status ?? null,
+      askId: msgRow.askId ?? null,
+      model: msgRow.model ?? null,
+      modelId: msgRow.modelId ?? null,
+      assistantId: msgRow.assistantId ?? null,
+      createdAt: msgRow.createdAt ?? null,
+      updatedAt: msgRow.updatedAt ?? null,
+      entityClock: { ...clockWire },
+      fieldClocks: fieldClockWire([
+        'role',
+        'content',
+        'status',
+        'askId',
+        'model',
+        'modelId',
+        'assistantId',
+        'createdAt',
+        'updatedAt'
+      ]),
+      parentMembershipClock: { timestamp: msgMem.timestamp, operationId: msgMem.operationId }
+    }
+    const wireBlocks: Array<Record<string, unknown>> = byCanonical.map((b) => {
+      const mem = blockMems.get(b.id)
+      return {
+        id: b.id,
+        messageId,
+        type: b.type ?? null,
+        content: b.content ?? null,
+        status: b.status ?? null,
+        createdAt: b.createdAt ?? null,
+        updatedAt: b.updatedAt ?? null,
+        entityClock: { ...clockWire },
+        fieldClocks: fieldClockWire(['type', 'content', 'status', 'createdAt', 'updatedAt']),
+        parentMembershipClock: mem ? { timestamp: mem.timestamp, operationId: mem.operationId } : { ...clockWire }
+      }
+    })
+
+    const op = {
+      id: replacementOpId,
+      entityType: 'message',
+      op: 'message_stable_replace',
+      entityId: messageId,
+      timestamp: replacementTimestamp,
+      deviceId,
+      payload: {
+        replaceVersion: MESSAGE_STABLE_REPLACE_VERSION,
+        messageId,
+        replacementClock: { ...clockWire },
+        message: wireMessage,
+        messageBlocks: wireBlocks,
+        activeBlockIds: [...activeBlockIds],
+        topicFrame: {
+          frameVersion: PARENT_ORDER_FRAME_VERSION,
+          kind: 'topicMessage',
+          parentId: topicId,
+          orderedChildIds: [...topicOrderedIds],
+          frameClock: { ...clockWire }
+        },
+        messageFrame: {
+          frameVersion: PARENT_ORDER_FRAME_VERSION,
+          kind: 'messageBlock',
+          parentId: messageId,
+          orderedChildIds: [...activeBlockIds],
+          frameClock: { ...clockWire }
+        }
+      }
+    } as unknown as SyncOperation
+    const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
+    if (strictErr) throw new Error(`stable replace issuer invalid op: ${strictErr}`)
+
+    // Local convergence, symmetric with the receiver apply path: entity +
+    // field clocks advance to the replacement clock; absent block memberships
+    // mint at the replacement clock (existing ones already proven matching).
+    this.advanceEntityClock(
+      tx as unknown as BetterSQLite3Database<typeof schema>,
+      'message',
+      messageId,
+      rc.timestamp,
+      rc.operationId
+    )
+    this.updateFieldClocksInDb(
+      tx as unknown as BetterSQLite3Database<typeof schema>,
+      'message',
+      messageId,
+      {
+        role: wireMessage.role,
+        content: wireMessage.content,
+        status: wireMessage.status,
+        askId: wireMessage.askId,
+        model: wireMessage.model,
+        modelId: wireMessage.modelId,
+        assistantId: wireMessage.assistantId,
+        createdAt: wireMessage.createdAt,
+        updatedAt: wireMessage.updatedAt
+      },
+      rc.timestamp,
+      rc.operationId
+    )
+    for (const b of byCanonical) {
+      this.advanceEntityClock(
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        'message_block',
+        b.id,
+        rc.timestamp,
+        rc.operationId
+      )
+      this.updateFieldClocksInDb(
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        'message_block',
+        b.id,
+        {
+          type: b.type ?? null,
+          content: b.content ?? null,
+          status: b.status ?? null,
+          createdAt: b.createdAt ?? null,
+          updatedAt: b.updatedAt ?? null
+        },
+        rc.timestamp,
+        rc.operationId
+      )
+      if (!blockMems.has(b.id)) {
+        this.setMembershipClockInTx(tx, 'message_block', b.id, messageId, rc.timestamp, rc.operationId)
+      }
+    }
+
+    // Retirement barriers at the replacement clock for omitted same-message
+    // stable-supported children: current rows outside the active set (none by
+    // construction, kept for symmetry), previous-register actives, and intent
+    // removed ids. Membership > clock survives for the deterministic suffix.
+    const activeSet = new Set<string>(activeBlockIds)
+    const retireCandidates = new Map<string, { timestamp: number; operationId: string } | null>()
+    for (const b of blockRows) {
+      if (activeSet.has(b.id)) continue
+      retireCandidates.set(b.id, this.getMembershipClockInTx(tx, 'message_block', b.id))
+    }
+    if (existingReg) {
+      try {
+        const prevActive: unknown = JSON.parse(existingReg.activeBlockIdsJson)
+        if (Array.isArray(prevActive)) {
+          for (const pid of prevActive) {
+            if (typeof pid !== 'string' || activeSet.has(pid) || retireCandidates.has(pid)) continue
+            retireCandidates.set(pid, this.getMembershipClockInTx(tx, 'message_block', pid))
+          }
+        }
+      } catch {
+        throw new Error(`stable replace issuer malformed stored register for ${messageId}`)
+      }
+    }
+    try {
+      const removedIds = parseRemovedBlockIds(stored)
+      for (const pid of removedIds) {
+        if (activeSet.has(pid) || retireCandidates.has(pid)) continue
+        retireCandidates.set(pid, this.getMembershipClockInTx(tx, 'message_block', pid))
+      }
+    } catch (e) {
+      throw new Error(
+        `stable replace issuer malformed intent removed ids for ${messageId}: ${e instanceof Error ? e.message : String(e)}`
+      )
+    }
+    for (const [bid, mem] of retireCandidates) {
+      if (mem && this.compareLww(mem.timestamp, mem.operationId, rc.timestamp, rc.operationId) > 0) continue
+      tx.delete(schema.messageBlocks).where(eq(schema.messageBlocks.id, bid)).run()
+      this.setTombstoneInDb(
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        'message_block',
+        bid,
+        rc.timestamp,
+        rc.operationId
+      )
+    }
+
+    const opPayload = op.payload as unknown as Record<string, unknown>
+    const winnerHash = stableReplaceWinnerHash({
+      message: wireMessage,
+      messageBlocks: wireBlocks,
+      activeBlockIds: [...activeBlockIds],
+      topicFrame: opPayload.topicFrame,
+      messageFrame: opPayload.messageFrame
+    })
+    this.writeStableReplaceRegister(
+      tx as unknown as BetterSQLite3Database<typeof schema>,
+      messageId,
+      rc.timestamp,
+      rc.operationId,
+      JSON.stringify(activeBlockIds),
+      winnerHash
+    )
+
+    // Both winning frames under the single replacement clock (persist
+    // advances the high-water mark in the same tx), then dense projection.
+    // Effective-order evaluation mirrors the receiver: our lists are complete
+    // by construction (gated above), so effective equals listed; any
+    // incompleteness here is a fail-closed construction error.
+    const topicLive = new Map<string, { timestamp: number; operationId: string }>()
+    for (const r of siblingRows) {
+      if (!isStableMessageStatus(r.status)) continue
+      const mem = this.getMembershipClockInTx(tx, 'message', r.id)
+      if (!mem) throw new Error(`stable replace issuer sibling ${r.id} lost membership before frame persist`)
+      topicLive.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const blockLive = new Map<string, { timestamp: number; operationId: string }>()
+    for (const b of byCanonical) {
+      const mem = this.getMembershipClockInTx(tx, 'message_block', b.id)
+      if (!mem) throw new Error(`stable replace issuer block ${b.id} lost membership before frame persist`)
+      blockLive.set(b.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const topicEvaluated = evaluateEffectiveOrder({
+      kind: 'topicMessage',
+      parentId: topicId,
+      orderedChildIds: [...topicOrderedIds],
+      frameClock: { ...rc },
+      liveChildren: topicLive,
+      childParentLookup: (childId: string) => {
+        const row = tx.select().from(schema.messages).where(eq(schema.messages.id, childId)).get() as
+          | { topicId: string }
+          | undefined
+        if (row) return { parentId: row.topicId, exists: true, isLiveForThisParent: row.topicId === topicId }
+        const tomb = this.getTombstoneInTx(tx, 'message', childId)
+        if (tomb) return { parentId: null, exists: true }
+        return null
+      }
+    })
+    if (topicEvaluated.incomplete) {
+      throw new Error(
+        `stable replace issuer topic frame incomplete: missing ${topicEvaluated.missingIds.slice(0, 5).join(',')} for ${topicId}`
+      )
+    }
+    const messageEvaluated = evaluateEffectiveOrder({
+      kind: 'messageBlock',
+      parentId: messageId,
+      orderedChildIds: [...activeBlockIds],
+      frameClock: { ...rc },
+      liveChildren: blockLive,
+      childParentLookup: (childId: string) => {
+        const row = tx.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, childId)).get() as
+          | { messageId: string }
+          | undefined
+        if (row) return { parentId: row.messageId, exists: true, isLiveForThisParent: row.messageId === messageId }
+        const tomb = this.getTombstoneInTx(tx, 'message_block', childId)
+        if (tomb) return { parentId: null, exists: true }
+        return null
+      }
+    })
+    if (messageEvaluated.incomplete) {
+      throw new Error(
+        `stable replace issuer message frame incomplete: missing ${messageEvaluated.missingIds.slice(0, 5).join(',')} for ${messageId}`
+      )
+    }
+    this.persistParentFrameInTx(tx, {
+      kind: 'topicMessage',
+      parentId: topicId,
+      frameVersion: PARENT_ORDER_FRAME_VERSION,
+      orderedChildIds: topicEvaluated.effective,
+      timestamp: rc.timestamp,
+      operationId: rc.operationId
+    })
+    this.materializeTopicMessageOrder(
+      tx as unknown as BetterSQLite3Database<typeof schema>,
+      topicId,
+      topicEvaluated.effective
+    )
+    this.persistParentFrameInTx(tx, {
+      kind: 'messageBlock',
+      parentId: messageId,
+      frameVersion: PARENT_ORDER_FRAME_VERSION,
+      orderedChildIds: messageEvaluated.effective,
+      timestamp: rc.timestamp,
+      operationId: rc.operationId
+    })
+    this.materializeMessageBlockOrder(tx as unknown as BetterSQLite3Database<typeof schema>, messageEvaluated.effective)
+
+    this.enqueueStableReplaceInTx(tx, op)
+    clearResendAttemptsInTx(tx, [messageId])
+    return { issued: true, reason: 'issued' }
+  }
+
+  /** Tx-bound tombstone read (fail-closed on malformed stored value, like the root read). */
+  private getTombstoneInTx(
+    tx: SyncTxExecutor,
+    entityType: 'topic' | 'message' | 'message_block',
+    entityId: string
+  ): { timestamp: number; operationId: string | null } | null {
+    const row = tx
+      .select()
+      .from(schema.syncState)
+      .where(eq(schema.syncState.key, this.tombstoneKey(entityType, entityId)))
+      .get()
+    if (!row) return null
+    if (row.value === null || row.value === undefined) {
+      throw new SyncTombstoneError(`malformed tombstone value for ${entityType}/${entityId}: missing`)
+    }
+    return this.parseTombstone(row.value)
   }
 
   // -------------------------------------------------------------------------
