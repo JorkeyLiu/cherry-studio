@@ -3943,12 +3943,23 @@ export class ChatDbAggregateService {
   /**
    * Delete a batch of messages with segment membership cleanup in the
    * same transaction. Segment memberships are removed; empty segments
-   * are deleted per existing repository semantics.
+   * are deleted per existing repository semantics. Segment membership
+   * changes stay local-only (no segment wire fields/ops).
    *
    * Ownership enforcement: only messages owned by the request topic are
    * processed. Foreign/missing IDs are silently skipped (consistent with
    * deleteMessages semantics). File refs are collected from owned IDs
    * only, so foreign IDs never appear in the cleanup result.
+   *
+   * Sync (SYNC-DATA-048): for each owned/known message actually deleted,
+   * enqueue the existing message delete/tombstone intent with the same
+   * semantics as deleteMessages; deleted messageBlock parent frames are
+   * removed; the surviving topic attempts the existing topicMessage frame
+   * refresh+enqueue via the try helper (complete membership: exactly one
+   * updated winning frame + one matching order_frame op; missing/
+   * unversioned membership: user mutation succeeds, frame invalidated,
+   * zero frame op). Malformed/high-water/transactional errors roll back
+   * rows, segment memberships, outbox/tombstones/frames together.
    *
    * Returns file cleanup facts for blocks whose file_references cascade.
    *
@@ -3956,45 +3967,74 @@ export class ChatDbAggregateService {
    */
   deleteMessagesWithSegments(topicId: string, messageIds: string[]): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      syncService.throwIfPublishBarrierHeld('deleteMessagesWithSegments')
-      return this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('deleteMessagesWithSegments')
+      let notify = false
+      let result: FileCleanupResult
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Phase 1: Filter to owned messages BEFORE collecting refs
-        const ownedIds: string[] = []
-        for (const id of messageIds) {
-          const existing = repos.messages.getInTopic(id, topicId)
-          if (existing.found) ownedIds.push(id)
-        }
-
-        // Phase 2: Collect affected file IDs from owned messages only
-        const refs = repos.fileRefs.listByMessages(ownedIds)
-        const affectedFileIds = collectAffectedFileIds(refs)
-
-        // Phase 3: Remove segment memberships for owned messages
-        for (const seg of repos.segments.listByTopic(topicId)) {
-          const segMsgIds = repos.segments.getMessageIds(seg.id)
-          const toRemove = ownedIds.filter((id) => segMsgIds.includes(id))
-          if (toRemove.length > 0) {
-            repos.segments.removeMessages(seg.id, toRemove)
+          // Phase 1: Filter to owned messages BEFORE collecting refs
+          const ownedIds: string[] = []
+          for (const id of messageIds) {
+            const existing = repos.messages.getInTopic(id, topicId)
+            if (existing.found) ownedIds.push(id)
           }
-        }
+          const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
 
-        // Phase 4: Delete owned messages (FK cascade: blocks → file_references)
-        if (ownedIds.length > 0) {
-          repos.messages.deleteMany(ownedIds)
-        }
+          // Phase 2: Collect affected file IDs from owned messages only
+          const refs = repos.fileRefs.listByMessages(ownedIds)
+          const affectedFileIds = collectAffectedFileIds(refs)
 
-        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
-        if (ownedIds.length > 0) {
-          for (const did of ownedIds) {
-            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', did)
+          // Phase 3: Remove segment memberships for owned messages (local-only)
+          for (const seg of repos.segments.listByTopic(topicId)) {
+            const segMsgIds = repos.segments.getMessageIds(seg.id)
+            const toRemove = ownedIds.filter((id) => segMsgIds.includes(id))
+            if (toRemove.length > 0) {
+              repos.segments.removeMessages(seg.id, toRemove)
+            }
           }
-          syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
-        }
 
-        return buildFileCleanupResult(repos, affectedFileIds)
-      })
+          // Phase 4: Delete owned messages (FK cascade: blocks → file_references)
+          if (ownedIds.length > 0) {
+            repos.messages.deleteMany(ownedIds)
+          }
+          if (ctx) {
+            for (const id of knownIds) {
+              syncService.enqueueDeleteInTx(stx, 'message', id, ctx.ts, ctx.deviceId)
+              notify = true
+            }
+          }
+
+          // Phase 5: Frames — deleted messageBlock parents removed as today;
+          // surviving topic uses the existing try-helper fail-safe.
+          if (ownedIds.length > 0) {
+            for (const did of ownedIds) {
+              syncService.invalidateParentFrameInTx(stx, 'messageBlock', did)
+            }
+            if (ctx) {
+              const topicRow = repos.topics.getById(topicId)
+              if (topicRow.found) {
+                if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+                  notify = true
+                }
+              } else {
+                syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              }
+            } else {
+              syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+            }
+          }
+
+          return buildFileCleanupResult(repos, affectedFileIds)
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('deleteMessagesWithSegments', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
     }, `deleteMessagesWithSegments(${topicId}, ${messageIds.length} msgs)`)
   }
 

@@ -702,9 +702,17 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     )
     const delSegFrameBefore = getFrame('topicMessage', delSegTopic)
     expect(delSegFrameBefore).not.toBeNull()
+    const delSegOutboxBefore = outboxCount()
     const delSegRes = agg.deleteMessagesWithSegments(delSegTopic, ['m-del-seg-1'])
     expect(delSegRes.ok).toBe(true)
-    expect(frameExists('topicMessage', delSegTopic)).toBe(false)
+    // deleteMessagesWithSegments now closes incremental sync: complete
+    // membership refreshes the surviving topic to empty [] with one frame op.
+    const delSegFrameAfter = getFrame('topicMessage', delSegTopic)
+    expect(delSegFrameAfter).not.toBeNull()
+    expect(delSegFrameAfter!.orderedChildIds).toEqual([])
+    expect(delSegFrameAfter!.timestamp).toBeGreaterThan(delSegFrameBefore!.timestamp)
+    expect(outboxCount()).toBe(delSegOutboxBefore + 2) // 1 message delete + 1 order_frame
+    expect(frameExists('messageBlock', 'm-del-seg-1')).toBe(false)
 
     vi.restoreAllMocks()
   })
