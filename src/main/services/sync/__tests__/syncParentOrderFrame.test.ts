@@ -755,9 +755,10 @@ describe('sync parent order frame — stable unsupported/transient exclusion', (
       [stableBlock, unsupportedBlock, transientBlock]
     )
     expect(res.ok).toBe(true)
-    const frame = getFrame('messageBlock', msgId)!
-    // Only stable supported block should be in orderedChildIds
-    expect(frame.orderedChildIds).toEqual(['b-stable'])
+    // Exclusion (messageBlock extension): a parent holding any
+    // transient/unsupported row never mints a frame — frames carry no
+    // exclusion authority. Truthful invalidate with 0 op; candidate partial.
+    expect(getFrame('messageBlock', msgId)).toBeNull()
     // Ensure unsupported and transient blocks exist in DB but are excluded
     const allBlocks = sqlite
       .prepare(`SELECT id FROM message_blocks WHERE message_id=? ORDER BY sort_order, id`)
@@ -1104,12 +1105,12 @@ describe('sync parent order frame — inclusion transitions and ordinary edits',
     expect(edit.ok).toBe(true)
     const fAfterEdit = getFrame('messageBlock', 'm-bt-1')!
     expect(fAfterEdit.timestamp).toBe(tsBefore)
-    // Supported→unsupported: change type to tool
+    // Supported→unsupported exclusion: invalidate with 0 op (no empty mint;
+    // transient/unsupported never rides the wire, frames carry no exclusion
+    // authority).
     const toUnsupported = agg.updateSingleBlock('b-bt-1', { type: 'tool' } as never)
     expect(toUnsupported.ok).toBe(true)
-    const fAfterUnsupported = getFrame('messageBlock', 'm-bt-1')!
-    // Frame should become empty [] but via helper (still valid, since remaining included children (none) all have membership)
-    expect(fAfterUnsupported.orderedChildIds).toEqual([])
+    expect(getFrame('messageBlock', 'm-bt-1')).toBeNull()
     // Unsupported→supported: add membership? But promotion of existing block without membership stays unversioned; helper will invalidate if missing
     // First, make it supported again but this block now is unsupported→supported transition; it has retained membership from before (original), so helper should refresh to include it
     const toSupported = agg.updateSingleBlock('b-bt-1', { type: 'main_text' } as never)
@@ -1405,31 +1406,29 @@ describe('sync parent order frame — task-specific inclusion gating', () => {
         sortOrder: 2
       } as never
     ])
-    const frameBefore = getFrame('messageBlock', m1)!
-    expect(frameBefore.orderedChildIds).toEqual([bIncluded])
-    const tsBefore = frameBefore.timestamp
+    // Exclusion extension: append with any transient/unsupported row
+    // invalidates (no filtered mint); candidate stays partial.
+    expect(getFrame('messageBlock', m1)).toBeNull()
 
-    // Delete transient block -> must NOT advance frame
+    // Delete transient block -> stays invalidated (never mints)
     const resDelTrans = agg.updateMessageAndBlocks(topicId, { id: m1 } as never, [], [bTransient])
     expect(resDelTrans.ok).toBe(true)
-    const frameAfterTrans = getFrame('messageBlock', m1)!
-    expect(frameAfterTrans.timestamp).toBe(tsBefore)
-    expect(frameAfterTrans.orderedChildIds).toEqual([bIncluded])
+    expect(getFrame('messageBlock', m1)).toBeNull()
 
-    // Delete unsupported block -> must NOT advance frame
+    // Delete unsupported block -> stays invalidated (never mints)
     const resDelUnsup = agg.updateMessageAndBlocks(topicId, { id: m1 } as never, [], [bUnsupported])
     expect(resDelUnsup.ok).toBe(true)
-    const frameAfterUnsup = getFrame('messageBlock', m1)!
-    expect(frameAfterUnsup.timestamp).toBe(tsBefore)
-    expect(frameAfterUnsup.orderedChildIds).toEqual([bIncluded])
+    expect(getFrame('messageBlock', m1)).toBeNull()
 
-    // Delete included block -> must advance (become empty [])
+    // Delete included block -> after removing the last excluded rows the
+    // parent holds only the included deletion; remaining excluded rows still
+    // block minting until they are gone. Here transient+unsupported were
+    // already deleted, so deleting the last included block mints empty [].
     vi.spyOn(Date, 'now').mockReturnValue(3_100_000_000_010)
     const resDelInc = agg.updateMessageAndBlocks(topicId, { id: m1 } as never, [], [bIncluded])
     expect(resDelInc.ok).toBe(true)
     const frameAfterInc = getFrame('messageBlock', m1)!
     expect(frameAfterInc.orderedChildIds).toEqual([])
-    expect(frameAfterInc.timestamp).toBeGreaterThan(tsBefore)
     vi.restoreAllMocks()
   })
 

@@ -165,7 +165,6 @@ function validateOrderFramePayloadStrict(
   op: { id?: unknown; entityType?: unknown; entityId?: unknown; timestamp?: unknown; deviceId?: unknown },
   payload: unknown
 ): string | null {
-  if (op.entityType !== 'topic') return 'order_frame only supports entityType topic'
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return 'order_frame missing payload'
   const p = payload as Record<string, unknown>
   const keys = Object.keys(p).sort()
@@ -174,7 +173,10 @@ function validateOrderFramePayloadStrict(
     return 'order_frame payload must be exactly {frameVersion,kind,parentId,orderedChildIds,frameClock}'
   }
   if (p.frameVersion !== 'parent-order-frame-v1') return 'order_frame unknown frameVersion'
-  if (p.kind !== 'topicMessage') return 'order_frame unknown kind'
+  if (p.kind !== 'topicMessage' && p.kind !== 'messageBlock') return 'order_frame unknown kind'
+  // Two legal pairs only; any cross combination fails closed with no new spelling.
+  if (p.kind === 'topicMessage' && op.entityType !== 'topic') return 'order_frame entityType/kind mismatch'
+  if (p.kind === 'messageBlock' && op.entityType !== 'message') return 'order_frame entityType/kind mismatch'
   if (typeof p.parentId !== 'string' || p.parentId.length === 0 || !isValidUnicodeScalarStringLocal(p.parentId)) {
     return 'order_frame invalid parentId'
   }

@@ -9,6 +9,8 @@ export type SyncOperationKind = 'upsert' | 'delete' | 'order_frame'
 
 export const PARENT_ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
 export const ORDER_FRAME_KIND_TOPIC_MESSAGE = 'topicMessage' as const
+export const ORDER_FRAME_KIND_MESSAGE_BLOCK = 'messageBlock' as const
+export type SyncOrderFrameKind = typeof ORDER_FRAME_KIND_TOPIC_MESSAGE | typeof ORDER_FRAME_KIND_MESSAGE_BLOCK
 
 export interface SyncOrderFrameClock {
   timestamp: number
@@ -17,7 +19,7 @@ export interface SyncOrderFrameClock {
 
 export interface SyncOrderFramePayload {
   frameVersion: typeof PARENT_ORDER_FRAME_VERSION
-  kind: typeof ORDER_FRAME_KIND_TOPIC_MESSAGE
+  kind: SyncOrderFrameKind
   parentId: string
   orderedChildIds: string[]
   frameClock: SyncOrderFrameClock

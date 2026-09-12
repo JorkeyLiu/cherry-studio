@@ -152,21 +152,70 @@ describe('blocker 3: existing-ID append emits patches (LOCK-PERSONAL-005)', () =
     expect(agg.ensureTopic('t-patch', 'a1', 'T').ok).toBe(true)
     expect(agg.appendMessage('t-patch', msgJson('m-patch', 't-patch', { content: 'v1' }) as any, []).ok).toBe(true)
     const firstOps = syncService.listOutbox()
-    const firstMsg = firstOps.find((o) => o.entityType === 'message' && o.entityId === 'm-patch')
+    const firstMsg = firstOps.find((o) => o.op === 'upsert' && o.entityType === 'message' && o.entityId === 'm-patch')
     expect(firstMsg?.payload).toMatchObject({ content: 'v1' })
-    const outboxLen = firstOps.length
-    void outboxLen
-    // Existing-ID append: only content changes
+    // First stable creation mints the empty messageBlock frame (no blocks):
+    // entityType 'message' + kind 'messageBlock', parentId === entityId.
+    const firstBlockFrames = firstOps.filter(
+      (o) => o.op === 'order_frame' && o.entityType === 'message' && o.entityId === 'm-patch'
+    )
+    expect(firstBlockFrames.length).toBe(1)
+    expect(firstBlockFrames[0].payload).toMatchObject({
+      frameVersion: 'parent-order-frame-v1',
+      kind: 'messageBlock',
+      parentId: 'm-patch',
+      orderedChildIds: []
+    })
+    const firstTopicFrames = firstOps.filter(
+      (o) => o.op === 'order_frame' && o.entityType === 'topic' && o.entityId === 't-patch'
+    ).length
+    // Existing-ID append: only content changes (same empty block list — no
+    // membership/order change, so no new frame is minted by this append).
     expect(agg.appendMessage('t-patch', msgJson('m-patch', 't-patch', { content: 'v2' }) as any, []).ok).toBe(true)
     const ops = syncService.listOutbox()
-    const msgOps = ops.filter((o) => o.entityType === 'message' && o.entityId === 'm-patch')
-    expect(msgOps.length).toBe(2)
-    const second = msgOps[msgOps.length - 1]
+    // Entity upserts for m-patch: exactly the v1 full snapshot + the v2 patch.
+    // The order_frame op reuses entityType 'message' and must be excluded here.
+    const msgUpserts = ops.filter((o) => o.op === 'upsert' && o.entityType === 'message' && o.entityId === 'm-patch')
+    expect(msgUpserts.length).toBe(2)
+    const second = msgUpserts[msgUpserts.length - 1]
     expect(second.payload).toMatchObject({ id: 'm-patch', topicId: 't-patch', content: 'v2' })
     // Patch-only: unchanged allowlisted keys (role/status/model) must not be re-contested
     expect(second.payload).not.toHaveProperty('role')
     expect(second.payload).not.toHaveProperty('status')
     expect(second.payload).not.toHaveProperty('sortOrder')
+    // No extra block/entity resend: append carried [] blocks both times.
+    expect(ops.filter((o) => o.entityType === 'message_block').length).toBe(0)
+    // Stable→stable content-only with the same (empty) block list mints no new
+    // frame: exactly one messageBlock frame total, still the empty winning frame
+    // from the first creation, with envelope id/timestamp mirroring frameClock.
+    const blockFrames = ops.filter(
+      (o) => o.op === 'order_frame' && o.entityType === 'message' && o.entityId === 'm-patch'
+    )
+    expect(blockFrames.length).toBe(1)
+    expect(blockFrames[0].payload).toMatchObject({
+      frameVersion: 'parent-order-frame-v1',
+      kind: 'messageBlock',
+      parentId: 'm-patch',
+      orderedChildIds: []
+    })
+    const frameClock = (blockFrames[0].payload as Record<string, any>).frameClock as {
+      timestamp: number
+      operationId: string
+    }
+    expect(blockFrames[0].id).toBe(frameClock.operationId)
+    expect(blockFrames[0].timestamp).toBe(frameClock.timestamp)
+    const stored = sqlite
+      .prepare(
+        `SELECT ordered_child_ids_json AS json, timestamp, operation_id AS operationId FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id=?`
+      )
+      .get('m-patch') as { json: string; timestamp: number; operationId: string } | undefined
+    expect(stored).toBeTruthy()
+    expect(JSON.parse(stored!.json) as string[]).toEqual([])
+    expect({ timestamp: stored!.timestamp, operationId: stored!.operationId }).toEqual(frameClock)
+    // The second append also advances no topicMessage frame (stable→stable).
+    expect(
+      ops.filter((o) => o.op === 'order_frame' && o.entityType === 'topic' && o.entityId === 't-patch').length
+    ).toBe(firstTopicFrames)
   })
 })
 

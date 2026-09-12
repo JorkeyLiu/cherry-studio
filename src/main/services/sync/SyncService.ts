@@ -1167,6 +1167,51 @@ export class SyncService {
   }
 
   /**
+   * Generic refresh+enqueue for either legal order_frame pair (SYNC-DATA-048
+   * extension): topicMessage (entityType topic) or messageBlock (entityType
+   * message). Strict: missing membership, malformed overflow, or timestamp
+   * exhaustion throws so the enclosing chat mutation rolls back. The enqueued
+   * op reuses the persisted winning frameClock verbatim (id/time mirror,
+   * deviceId envelope-only). Same tx, exactly one op. No new endpoint/relay
+   * schema/baseline wireVersion.
+   * Returns true when a new outbox row was inserted.
+   */
+  refreshParentFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string,
+    deviceId: string
+  ): boolean {
+    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    if (kind === 'messageBlock') {
+      const parent = this.getMessageRowInTx(tx, parentId)
+      if (!parent) throw new SyncFrameError(`missing messageBlock parent message ${parentId}`)
+      if (!isStableMessageStatus(parent.status ?? null)) {
+        throw new SyncFrameError(`messageBlock parent ${parentId} not stable`)
+      }
+    }
+    this.refreshParentFrameInTx(tx, kind, parentId)
+    const frame = this.getParentFrameInTx(tx, kind, parentId)
+    if (!frame) throw new SyncFrameError(`missing ${kind} frame for ${parentId} after refresh`)
+    const op: SyncOperation = {
+      id: frame.operationId,
+      entityType: entityType as SyncOperation['entityType'],
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: frame.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind,
+        parentId,
+        orderedChildIds: [...frame.orderedChildIds],
+        frameClock: { timestamp: frame.timestamp, operationId: frame.operationId }
+      }
+    }
+    return this.enqueueOrderFrameInTx(tx, op)
+  }
+
+  /**
    * Refresh the topicMessage winning frame for a live topic and enqueue the
    * matching order_frame op in the same aggregate transaction
    * (SYNC-DATA-048). Strict: missing membership, malformed overflow, or
@@ -1175,25 +1220,124 @@ export class SyncService {
    * Returns true when a new outbox row was inserted.
    */
   refreshTopicMessageFrameAndEnqueueInTx(tx: SyncTxExecutor, parentId: string, deviceId: string): boolean {
-    this.refreshParentFrameInTx(tx, 'topicMessage', parentId)
-    const frame = this.getParentFrameInTx(tx, 'topicMessage', parentId)
-    if (!frame) throw new SyncFrameError(`missing topicMessage frame for ${parentId} after refresh`)
+    return this.refreshParentFrameAndEnqueueInTx(tx, 'topicMessage', parentId, deviceId)
+  }
+
+  /**
+   * Strict messageBlock refresh+enqueue (ordinary stable-supported inclusion
+   * paths). Same-tx single op reusing the winning frameClock. Throws
+   * fail-closed on missing membership/malformed/MAX_SAFE (rolls back).
+   */
+  refreshMessageBlockFrameAndEnqueueInTx(tx: SyncTxExecutor, parentId: string, deviceId: string): boolean {
+    return this.refreshParentFrameAndEnqueueInTx(tx, 'messageBlock', parentId, deviceId)
+  }
+
+  /** Tx-bound message row read for messageBlock parent gating (no throw on miss). */
+  private getMessageRowInTx(tx: SyncTxExecutor, messageId: string): { status: string | null } | null {
+    try {
+      const row = tx.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get() as
+        | { status: string | null }
+        | undefined
+      return row ? { status: row.status ?? null } : null
+    } catch (e) {
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_005_KEY)) return null
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /**
+   * True when a messageBlock parent holds any inventory-excluded block row
+   * (transient status or unsupported type/overflow). Such parents must never
+   * mint a frame: transient/unsupported never rides the wire and frames carry
+   * no exclusion authority — invalidate with 0 op, candidate stays partial.
+   * Malformed extra remains fail-closed (throws).
+   */
+  private hasExcludedBlockRowsInTx(tx: SyncTxExecutor, parentId: string): boolean {
+    const rows = tx
+      .select({
+        status: schema.messageBlocks.status,
+        type: schema.messageBlocks.type,
+        extra: schema.messageBlocks.extra
+      })
+      .from(schema.messageBlocks)
+      .where(eq(schema.messageBlocks.messageId, parentId))
+      .all()
+    for (const r of rows) {
+      if (!isStableBlockStatus(r.status)) return true
+      let overflow: Record<string, unknown> = {}
+      if (r.extra) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(r.extra)
+        } catch (e) {
+          throw new SyncFrameError(
+            `malformed block extra JSON for excluded check: ${e instanceof Error ? e.message : String(e)}`
+          )
+        }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new SyncFrameError('malformed block extra JSON for excluded check: not an object')
+        }
+        overflow = parsed as Record<string, unknown>
+      }
+      if (isUnsupportedBlockForSync({ type: r.type, overflow })) return true
+    }
+    return false
+  }
+
+  /**
+   * Generic try helper: mint/persist the winning frame and enqueue the
+   * matching order_frame in the same transaction (returns 'refreshed').
+   * Missing membership (or excluded messageBlock parent/children)
+   * truthfully invalidates the frame and continues the user mutation without
+   * any op (returns 'invalidated'). Malformed overflow/extra, parent
+   * mismatch, timestamp exhaustion, and malformed clocks remain fail-closed.
+   */
+  tryRefreshParentFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string,
+    deviceId: string
+  ): 'refreshed' | 'invalidated' {
+    if (kind === 'messageBlock') {
+      const parent = this.getMessageRowInTx(tx, parentId)
+      if (!parent || !isStableMessageStatus(parent.status ?? null)) {
+        this.invalidateParentFrameInTx(tx, kind, parentId)
+        return 'invalidated'
+      }
+      if (this.hasExcludedBlockRowsInTx(tx, parentId)) {
+        this.invalidateParentFrameInTx(tx, kind, parentId)
+        return 'invalidated'
+      }
+    }
+    try {
+      this.refreshParentFrameInTx(tx, kind, parentId)
+    } catch (e) {
+      if (e instanceof SyncFrameError && e.message.includes('missing membership clock for included child')) {
+        this.invalidateParentFrameInTx(tx, kind, parentId)
+        return 'invalidated'
+      }
+      throw e
+    }
+    const frame = this.getParentFrameInTx(tx, kind, parentId)
+    if (!frame) throw new SyncFrameError(`missing ${kind} frame for ${parentId} after refresh`)
+    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
     const op: SyncOperation = {
       id: frame.operationId,
-      entityType: 'topic',
+      entityType: entityType as SyncOperation['entityType'],
       op: 'order_frame',
       entityId: parentId,
       timestamp: frame.timestamp,
       deviceId,
       payload: {
         frameVersion: 'parent-order-frame-v1',
-        kind: 'topicMessage',
+        kind,
         parentId,
         orderedChildIds: [...frame.orderedChildIds],
         frameClock: { timestamp: frame.timestamp, operationId: frame.operationId }
       }
     }
-    return this.enqueueOrderFrameInTx(tx, op)
+    this.enqueueOrderFrameInTx(tx, op)
+    return 'refreshed'
   }
 
   /**
@@ -1209,34 +1353,21 @@ export class SyncService {
     parentId: string,
     deviceId: string
   ): 'refreshed' | 'invalidated' {
-    try {
-      this.refreshParentFrameInTx(tx, 'topicMessage', parentId)
-    } catch (e) {
-      if (e instanceof SyncFrameError && e.message.includes('missing membership clock for included child')) {
-        this.invalidateParentFrameInTx(tx, 'topicMessage', parentId)
-        return 'invalidated'
-      }
-      throw e
-    }
-    const frame = this.getParentFrameInTx(tx, 'topicMessage', parentId)
-    if (!frame) throw new SyncFrameError(`missing topicMessage frame for ${parentId} after refresh`)
-    const op: SyncOperation = {
-      id: frame.operationId,
-      entityType: 'topic',
-      op: 'order_frame',
-      entityId: parentId,
-      timestamp: frame.timestamp,
-      deviceId,
-      payload: {
-        frameVersion: 'parent-order-frame-v1',
-        kind: 'topicMessage',
-        parentId,
-        orderedChildIds: [...frame.orderedChildIds],
-        frameClock: { timestamp: frame.timestamp, operationId: frame.operationId }
-      }
-    }
-    this.enqueueOrderFrameInTx(tx, op)
-    return 'refreshed'
+    return this.tryRefreshParentFrameAndEnqueueInTx(tx, 'topicMessage', parentId, deviceId)
+  }
+
+  /**
+   * Ordinary messageBlock try helper: complete stable-supported membership
+   * refreshes + enqueues exactly one messageBlock frame; missing membership
+   * or excluded (non-stable/absent) parent invalidates with 0 op while the
+   * user mutation succeeds; malformed/MAX_SAFE still rolls back.
+   */
+  tryRefreshMessageBlockFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    parentId: string,
+    deviceId: string
+  ): 'refreshed' | 'invalidated' {
+    return this.tryRefreshParentFrameAndEnqueueInTx(tx, 'messageBlock', parentId, deviceId)
   }
 
   /** Tx-bound tracked check (clock or pending outbox via the same executor). */
@@ -2520,7 +2651,6 @@ export class SyncService {
    * membership, equal-clock divergence) throw fail-closed.
    */
   private applyOrderFrame(op: SyncOperation): boolean {
-    const db = this.getDb()
     const payload = op.payload as unknown as {
       frameVersion: string
       kind: string
@@ -2528,8 +2658,36 @@ export class SyncService {
       orderedChildIds: string[]
       frameClock: { timestamp: number; operationId: string }
     }
-    const parentId = payload.parentId
-    const frameClock = { timestamp: payload.frameClock.timestamp, operationId: payload.frameClock.operationId }
+    // Closed pair check (defense in depth; strict validator already enforces):
+    // topic/topicMessage vs message/messageBlock; any cross fails closed.
+    if (payload.kind === 'topicMessage') {
+      if (op.entityType !== 'topic' || op.entityId !== payload.parentId) {
+        throw new Error(`order_frame ${op.id}: entityType/entityId must pair with topicMessage parent`)
+      }
+      return this.applyTopicMessageOrderFrame(op, payload.parentId, [...payload.orderedChildIds], {
+        timestamp: payload.frameClock.timestamp,
+        operationId: payload.frameClock.operationId
+      })
+    }
+    if (payload.kind === 'messageBlock') {
+      if (op.entityType !== 'message' || op.entityId !== payload.parentId) {
+        throw new Error(`order_frame ${op.id}: entityType/entityId must pair with messageBlock parent`)
+      }
+      return this.applyMessageBlockOrderFrame(op, payload.parentId, [...payload.orderedChildIds], {
+        timestamp: payload.frameClock.timestamp,
+        operationId: payload.frameClock.operationId
+      })
+    }
+    throw new Error(`order_frame ${op.id}: unknown kind ${String(payload.kind)}`)
+  }
+
+  private applyTopicMessageOrderFrame(
+    op: SyncOperation,
+    parentId: string,
+    orderedChildIds: string[],
+    frameClock: { timestamp: number; operationId: string }
+  ): boolean {
+    const db = this.getDb()
     // Parent liveness: a present topic row (including soft-deleted deletedAt)
     // is live; an absent row with an exact topic tombstone is deleted
     // (consume without materializing); an absent row without tombstone is an
@@ -2578,7 +2736,7 @@ export class SyncService {
     // Listed-but-unknown members are arrival gaps (orphan). Tombstoned listed
     // members filter below; wrong-parent listed members fail closed inside
     // evaluateEffectiveOrder via the lookup above.
-    for (const cid of payload.orderedChildIds) {
+    for (const cid of orderedChildIds) {
       const row = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
       if (row) {
         if (row.topicId !== parentId) {
@@ -2593,7 +2751,7 @@ export class SyncService {
     const evaluated = evaluateEffectiveOrder({
       kind: 'topicMessage',
       parentId,
-      orderedChildIds: [...payload.orderedChildIds],
+      orderedChildIds: [...orderedChildIds],
       frameClock,
       liveChildren,
       childParentLookup
@@ -2680,6 +2838,171 @@ export class SyncService {
   ): void {
     for (let i = 0; i < effective.length; i++) {
       db.update(schema.messages).set({ sortOrder: i }).where(eq(schema.messages.id, effective[i])).run()
+    }
+  }
+
+  /**
+   * Incremental messageBlock order_frame apply. Same LWW/equal-divergent/
+   * high-water/cursor semantics as topicMessage: parent must be a live
+   * stable message; children are live stable supported message_blocks of the
+   * same message with membership gating; frame only materializes dense block
+   * sortOrder (never creates/deletes/reparents, never overwrites content).
+   * Unknown parent/listed child uses the existing orphan buffer; a
+   * receiver-alive child omitted by the frame fails closed incomplete.
+   */
+  private applyMessageBlockOrderFrame(
+    op: SyncOperation,
+    parentId: string,
+    orderedChildIds: string[],
+    frameClock: { timestamp: number; operationId: string }
+  ): boolean {
+    const db = this.getDb()
+    const parentRow = db.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+    if (!parentRow) {
+      const parentTomb = this.getTombstone('message', parentId)
+      if (parentTomb) {
+        logger.warn(`[applyOrderFrame] parent message ${parentId} tombstoned: frame ${op.id} suppressed`)
+        return false
+      }
+      throw new SyncOrphanError(`orphan order_frame ${op.id} parent ${parentId} missing`)
+    }
+    if (!isStableMessageStatus(parentRow.status)) {
+      throw new Error(`order_frame ${op.id}: messageBlock parent ${parentId} not stable`)
+    }
+    const blockRows = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.messageId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of blockRows) {
+      if (!isStableBlockStatus(row.status)) continue
+      let overflow: Record<string, unknown> = {}
+      if (row.extra) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(row.extra)
+        } catch {
+          throw new Error(`order_frame ${op.id}: malformed block extra JSON for ${row.id}`)
+        }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error(`order_frame ${op.id}: malformed block extra JSON for ${row.id}`)
+        }
+        overflow = parsed as Record<string, unknown>
+      }
+      if (isUnsupportedBlockForSync({ type: row.type, overflow })) continue
+      const ownTomb = this.getTombstone('message_block', row.id)
+      const mem = this.getMembershipClock('message_block', row.id)
+      if (ownTomb) {
+        if (!mem) {
+          throw new Error(`order_frame ${op.id}: live child ${row.id} has tombstone but no membership clock`)
+        }
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, ownTomb)) continue
+      }
+      if (!mem) {
+        throw new Error(`order_frame ${op.id}: live child ${row.id} missing membership clock`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(`order_frame ${op.id}: membership parent mismatch for ${row.id}`)
+      }
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const childParentLookup = (
+      childId: string
+    ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+      const row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, childId)).get()
+      if (row) return { parentId: row.messageId, exists: true, isLiveForThisParent: row.messageId === parentId }
+      const tomb = this.getTombstone('message_block', childId)
+      if (tomb) return { parentId: null, exists: true }
+      return null
+    }
+    for (const cid of orderedChildIds) {
+      const row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
+      if (row) {
+        if (row.messageId !== parentId) {
+          throw new Error(`order_frame ${op.id}: child ${cid} belongs to ${row.messageId}, not ${parentId}`)
+        }
+        continue
+      }
+      const tomb = this.getTombstone('message_block', cid)
+      if (tomb) continue
+      throw new SyncOrphanError(`orphan order_frame ${op.id} member ${cid} missing`)
+    }
+    const evaluated = evaluateEffectiveOrder({
+      kind: 'messageBlock',
+      parentId,
+      orderedChildIds: [...orderedChildIds],
+      frameClock,
+      liveChildren,
+      childParentLookup
+    })
+    if (evaluated.incomplete) {
+      throw new Error(
+        `order_frame ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
+      )
+    }
+    const effective = evaluated.effective
+    const existing = this.getParentFrame('messageBlock', parentId)
+    if (!existing) {
+      this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+        kind: 'messageBlock',
+        parentId,
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIds: effective,
+        timestamp: frameClock.timestamp,
+        operationId: frameClock.operationId
+      })
+      this.materializeMessageBlockOrder(db, effective)
+      return true
+    }
+    const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
+    if (cmp < 0) {
+      logger.info(`[applyOrderFrame] older frame ${op.id} loses to ${existing.operationId} for ${parentId}`)
+      return false
+    }
+    if (cmp === 0) {
+      const existingEvaluated = evaluateEffectiveOrder({
+        kind: 'messageBlock',
+        parentId,
+        orderedChildIds: [...existing.orderedChildIds],
+        frameClock: { timestamp: existing.timestamp, operationId: existing.operationId },
+        liveChildren,
+        childParentLookup
+      })
+      if (existingEvaluated.incomplete) {
+        throw new Error(`order_frame ${op.id}: existing frame for ${parentId} is incomplete under merged state`)
+      }
+      const same =
+        existingEvaluated.effective.length === effective.length &&
+        existingEvaluated.effective.every((id, i) => id === effective[i])
+      if (same) {
+        if (JSON.stringify(existing.orderedChildIds) !== JSON.stringify(effective)) {
+          this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+            kind: 'messageBlock',
+            parentId,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIds: effective,
+            timestamp: existing.timestamp,
+            operationId: existing.operationId
+          })
+          this.materializeMessageBlockOrder(db, effective)
+        }
+        return false
+      }
+      throw new Error(`order_frame ${op.id}: equal-clock divergence for ${parentId}`)
+    }
+    this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+      kind: 'messageBlock',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: effective,
+      timestamp: frameClock.timestamp,
+      operationId: frameClock.operationId
+    })
+    this.materializeMessageBlockOrder(db, effective)
+    return true
+  }
+
+  /** Dense sortOrder projection for a messageBlock effective order (local projection only). */
+  private materializeMessageBlockOrder(db: BetterSQLite3Database<typeof schema>, effective: string[]): void {
+    for (let i = 0; i < effective.length; i++) {
+      db.update(schema.messageBlocks).set({ sortOrder: i }).where(eq(schema.messageBlocks.id, effective[i])).run()
     }
   }
 

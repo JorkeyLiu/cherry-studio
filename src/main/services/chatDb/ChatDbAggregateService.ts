@@ -400,15 +400,22 @@ export class ChatDbAggregateService {
 
   /**
    * Stable-promotion descendant backfill (LOCK-PERSONAL-004): when a transient
-   * assistant parent becomes stable, every committed stable block descendant
-   * that was never tracked must join the same stable checkpoint. Parent
-   * (topic/message) intent is already enqueued by the caller with an earlier
-   * timestamp, so per-block +1 offsets preserve parent-before-child order.
-   * Only stable + untracked + unexcluded + supported rows enqueue; transient
-   * rows never emit; unsupported structured/attachment-bearing rows never
-   * emit a partial shell (collected for a durable unsupported outcome).
-   * Throws fail-closed (rolls back the promotion) on infrastructure
-   * failure. Returns true when at least one descendant was captured.
+   * parent becomes stable, every committed stable block descendant that was
+   * never tracked joins the same stable checkpoint. Parent (topic/message)
+   * intent is already enqueued by the caller with an earlier timestamp, so
+   * per-block +1 offsets preserve parent-before-child order. Only stable +
+   * untracked + unexcluded + supported rows enqueue; transient rows never
+   * emit; unsupported structured/attachment-bearing rows never emit a partial
+   * shell (collected for a durable unsupported outcome). Entity-only rescan:
+   * each backfilled row gets its entity upsert/field evidence only — never a
+   * parentMembershipClock (009/SYNC-DATA-035: membership comes only from
+   * child creation in the same tx or explicitly governed reparent;
+   * pre-existing/closure/promotion rows stay unversioned, no backfill/guess).
+   * A later single messageBlock try-refresh in the same tx therefore
+   * invalidates with 0 op while the user mutation succeeds when any included
+   * block lacks trustworthy membership. Throws fail-closed (rolls back the
+   * promotion) on infrastructure failure. Returns true when at least one
+   * descendant was captured.
    */
   private captureUntrackedStableBlocksInTx(
     tx: SyncTxExecutor,
@@ -1372,7 +1379,12 @@ export class ChatDbAggregateService {
                   }
                   const parentMsg = repos.messages.getById(messageData.id)
                   if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
-                    syncService.refreshParentFrameInTx(stx, 'messageBlock', messageData.id)
+                    if (
+                      syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageData.id, syncCtx.deviceId) ===
+                      'refreshed'
+                    ) {
+                      syncNotify = true
+                    }
                   } else if (parentMsg.found) {
                     syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
                   }
@@ -1396,12 +1408,22 @@ export class ChatDbAggregateService {
                   if (hasTrueCreateIncluded && !hasBlockInclusionTransition) {
                     const parentMsg = repos.messages.getById(messageData.id)
                     if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
-                      syncService.refreshParentFrameInTx(stx, 'messageBlock', messageData.id)
+                      if (
+                        syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageData.id, syncCtx.deviceId) ===
+                        'refreshed'
+                      ) {
+                        syncNotify = true
+                      }
                     } else if (parentMsg.found) {
                       syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
                     }
                   } else if (hasBlockInclusionTransition) {
-                    syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
+                    if (
+                      syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageData.id, syncCtx.deviceId) ===
+                      'refreshed'
+                    ) {
+                      syncNotify = true
+                    }
                   }
                 } else if (messageExistedBefore && preStableForFrame && !postStableForFrame) {
                   // Stable→transient overwrite exclusion via appendMessage
@@ -1503,7 +1525,12 @@ export class ChatDbAggregateService {
               return null
             }
             const postStable = isStableMessageStatus(row.data.status)
-            // Inclusion transition handling (stable↔transient) with truthful membership gating
+            // Inclusion transition handling (stable↔transient) with truthful membership gating.
+            // Entity-first order (F2): the messageBlock frame decision runs
+            // once per parent AFTER message/block entity upsert (entity-only
+            // rescan, never membership backfill per 009), so a pre-existing
+            // stable block lacking membership try-invalidates with 0 op while
+            // the user mutation succeeds (candidate truthful partial).
             if (preStable && !postStable) {
               // Stable→transient exclusion (SYNC-DATA-048 errata): transient
               // status never rides the wire, so the frame has no
@@ -1515,20 +1542,14 @@ export class ChatDbAggregateService {
               syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
               return null
             }
-            if (!preStable && postStable) {
-              // Transient→stable inclusion (SYNC-DATA-048): refresh + exactly
-              // one order_frame reusing the winning clock, else truthful
-              // invalidate with 0 op; messageBlock parent refresh gated on block membership
-              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
-                notify = true
+            const isPromotion = !preStable && postStable
+            if (!isPromotion) {
+              if (preStable && postStable) {
+                // Ordinary stable→stable content edits do not advance frames — skip frame maintenance
+              } else {
+                // Transient→transient: no frame
+                return null
               }
-              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
-              // Continue to sync capture below for stable row
-            } else if (preStable && postStable) {
-              // Ordinary stable→stable content edits do not advance frames — skip frame maintenance
-            } else {
-              // Transient→transient: no frame
-              return null
             }
             if (!postStable) return null
             this.ensureTopicClosureInTx(stx, topicId, ctx.ts, ctx.deviceId)
@@ -1596,6 +1617,20 @@ export class ChatDbAggregateService {
                   unsupportedBlockIds
                 )
               ) {
+                notify = true
+              }
+            }
+            // Single per-parent frame decision AFTER all entity
+            // work (F2): promotion mints at most one topic frame and one
+            // messageBlock try-refresh; only complete trustworthy membership
+            // yields exactly 1 op, otherwise truthful invalidate with 0 op
+            // (promotion rescan is entity-only, never membership backfill).
+            // Stable→stable edits mint nothing.
+            if (isPromotion) {
+              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+                notify = true
+              }
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageId, ctx.deviceId) === 'refreshed') {
                 notify = true
               }
             }
@@ -1851,13 +1886,21 @@ export class ChatDbAggregateService {
               syncService.enqueueDeleteInTx(stx, 'message_block', bid, syncCtx.ts, syncCtx.deviceId)
               syncNotify = true
             }
-            // Local parent order frame (010) — inclusion-aware maintenance
+            // Local parent order frame (010) — single per-parent decision (F1):
+            // all message/block entity upsert (true-create membership mint
+            // plus entity-only promotion rescan, never membership backfill)
+            // and delete/transition handling above complete first; then at most
+            // one messageBlock tryRefresh+enqueue attempt per tx for this
+            // parent. Exclusion (stable→transient parent) only invalidates
+            // with 0 op and is never overridden by a tail refresh; a
+            // non-stable parent never mints.
             if (syncCtx) {
               // Message inclusion transition (stable ↔ transient) handling for topicMessage and messageBlock
               const preMsgStable = isStableMessageStatus(existing.data.status)
               const mrowForFrame = repos.messages.getInTopic(messageId, topicId)
               const postMsgStable = mrowForFrame.found ? isStableMessageStatus(mrowForFrame.data.status) : false
               let messageTransitionHandled = false
+              let promotionNeedsBlockFrame = false
               if (preMsgStable && !postMsgStable) {
                 // Stable→transient exclusion (SYNC-DATA-048 errata): transient
                 // status never rides the wire, so no frame op is minted —
@@ -1867,15 +1910,16 @@ export class ChatDbAggregateService {
                 syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
                 messageTransitionHandled = true
               } else if (!preMsgStable && postMsgStable) {
-                // Transient→stable inclusion (SYNC-DATA-048): topic refresh +
-                // exactly one order_frame reusing the winning clock, else
-                // truthful invalidate with 0 op; messageBlock helper unchanged
+                // Transient→stable inclusion (SYNC-DATA-048 extension):
+                // topic frame now; messageBlock defers to the single unified
+                // decision below so promotion + true-create/inclusion share
+                // exactly one attempt (message op precedes frame).
                 if (
                   syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId) === 'refreshed'
                 ) {
                   syncNotify = true
                 }
-                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
+                promotionNeedsBlockFrame = true
                 messageTransitionHandled = true
               } else if (preMsgStable && postMsgStable) {
                 // Stable→stable: ordinary content edits do not advance topic frame
@@ -1884,27 +1928,28 @@ export class ChatDbAggregateService {
                 messageTransitionHandled = true
               }
 
-              // Block inclusion transitions (stable && supported) — helper path; ordinary included→included does not advance
-              // Deletion handling uses pre-state inclusion captured before delete (fail-closed on malformed overflow).
-              // Only previously included deletions count as frame membership transition; transient/unsupported deletes must not mint/advance.
+              // Block inclusion transitions (stable && supported) — collected
+              // here, minted once below. Pure included→included content edits
+              // mint nothing. Deletion handling uses pre-state inclusion
+              // captured before delete (fail-closed on malformed overflow).
+              // Only previously included deletions count;
+              // transient/unsupported deletes never mint.
               let hasBlockInclusionChange = false
               if (!messageTransitionHandled) {
                 if (deletedPreIncluded.size > 0) {
-                  const mrow2 = repos.messages.getInTopic(messageId, topicId)
-                  if (mrow2.found && isStableMessageStatus(mrow2.data.status)) {
-                    syncService.refreshParentFrameInTx(stx, 'messageBlock', messageId)
-                  } else if (mrow2.found) {
-                    syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
-                  }
                   hasBlockInclusionChange = true
                 }
+              } else if (promotionNeedsBlockFrame && deletedPreIncluded.size > 0) {
+                // Promotion tx that also deletes previously included blocks:
+                // covered by the single promotion frame below (final order).
+                promotionNeedsBlockFrame = true
               }
               // Check block upserts for inclusion changes (existing blocks)
               let hasTrueCreateStrict = false
               for (const b of blockDataList) {
                 const pre = preBlockRows.get(b.id) ?? null
                 if (!pre) {
-                  // True create: if post included, strict refresh path (keep rollback)
+                  // True create: if post included, candidate for the single refresh below
                   const brow = repos.blocks.getById(b.id)
                   if (brow.found && isStableBlockStatus(brow.data.status) && !this.isUnsupportedBlock(brow.data)) {
                     hasTrueCreateStrict = true
@@ -1920,17 +1965,27 @@ export class ChatDbAggregateService {
                   hasBlockInclusionChange = true
                 }
               }
-              if (hasTrueCreateStrict && !hasBlockInclusionChange) {
-                // Strict refresh for true-create stable supported blocks (keep rollback on missing membership)
-                const mrow2 = repos.messages.getInTopic(messageId, topicId)
-                if (mrow2.found && isStableMessageStatus(mrow2.data.status)) {
-                  syncService.refreshParentFrameInTx(stx, 'messageBlock', messageId)
-                } else if (mrow2.found) {
-                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
+              // Unified single messageBlock attempt: promotion, true-create,
+              // or inclusion transition share exactly one tryRefresh+enqueue.
+              // Exclusion paths (transient/unsupported present) invalidate
+              // with 0 op via the try helper since transient/unsupported
+              // never rides the wire and frames carry no exclusion authority.
+              // Stable→transient parent exclusion above never reaches here.
+              const needsBlockFrame = promotionNeedsBlockFrame || hasTrueCreateStrict || hasBlockInclusionChange
+              if (needsBlockFrame && !messageTransitionHandled) {
+                if (
+                  syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageId, syncCtx.deviceId) ===
+                  'refreshed'
+                ) {
+                  syncNotify = true
                 }
-              } else if (hasBlockInclusionChange) {
-                // Inclusion transition helper: refresh only if all post-state included children have membership else invalidate
-                syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', messageId)
+              } else if (needsBlockFrame && promotionNeedsBlockFrame) {
+                if (
+                  syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageId, syncCtx.deviceId) ===
+                  'refreshed'
+                ) {
+                  syncNotify = true
+                }
               }
               // Ordinary included→included content edits: no frame advance (do nothing)
             }
@@ -2245,7 +2300,13 @@ export class ChatDbAggregateService {
               syncNotify = true
             }
           }
-          // Local parent order frame (010) — inclusion-aware
+          // Ordinary messageBlock inclusion paths issue exactly one frame
+          // via the try helper (missing membership invalidates with 0 op
+          // while the user mutation succeeds; malformed/MAX_SAFE rolls
+          // back). Pure included→included content edits mint nothing.
+          // Exclusion (stable→transient/supported→unsupported) never mints:
+          // transient/unsupported never rides the wire and frames carry no
+          // exclusion authority — invalidate only.
           if (syncCtx) {
             const affectedParentsStrict = new Set<string>()
             const affectedParentsHelper = new Set<string>()
@@ -2268,24 +2329,14 @@ export class ChatDbAggregateService {
             }
             for (const pid of affectedParentsStrict) {
               if (affectedParentsHelper.has(pid)) continue // helper will handle (transition takes precedence)
-              const parentMsg = repos.messages.getById(pid)
-              if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
-                syncService.refreshParentFrameInTx(stx, 'messageBlock', pid)
-              } else if (parentMsg.found) {
-                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
+                syncNotify = true
               }
             }
             for (const pid of affectedParentsHelper) {
-              const parentMsg = repos.messages.getById(pid)
-              if (!parentMsg.found) {
-                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
-                continue
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
+                syncNotify = true
               }
-              if (!isStableMessageStatus(parentMsg.data.status)) {
-                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
-                continue
-              }
-              syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', pid)
             }
           }
         })
@@ -2466,19 +2517,24 @@ export class ChatDbAggregateService {
               }
             }
           }
-          // Local parent order frame — block inclusion transition (stable && supported) with helper; ordinary included→included does not advance
+          // Ordinary messageBlock inclusion transition issues exactly one
+          // frame via the try helper (missing membership invalidates with 0
+          // op; exclusion invalidates since transient/unsupported never rides
+          // the wire). Ordinary included→included content edits mint nothing.
           if (syncCtx) {
             const postRow2 = repos.blocks.getById(blockId)
             if (postRow2.found) {
               const preIncluded = isStableBlockStatus(existing.data.status) && !this.isUnsupportedBlock(existing.data)
               const postIncluded = isStableBlockStatus(postRow2.data.status) && !this.isUnsupportedBlock(postRow2.data)
               if (preIncluded !== postIncluded) {
-                const parentId = postRow2.data.messageId
-                const parentMsg = repos.messages.getById(parentId)
-                if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) {
-                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', parentId)
-                } else {
-                  syncService.tryRefreshOrInvalidateParentFrameInTx(stx, 'messageBlock', parentId)
+                if (
+                  syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(
+                    stx,
+                    postRow2.data.messageId,
+                    syncCtx.deviceId
+                  ) === 'refreshed'
+                ) {
+                  syncNotify = true
                 }
               }
             } else {
@@ -2595,7 +2651,10 @@ export class ChatDbAggregateService {
               syncNotify = true
             }
           }
-          // Local parent order frame (010) — truthful refresh for each affected messageBlock parent (local prerequisite only)
+          // Ordinary bulk stable-supported creates issue exactly one
+          // messageBlock frame per affected stable parent via the try helper
+          // (missing membership invalidates with 0 op while the user mutation
+          // succeeds; malformed/MAX_SAFE rolls back).
           if (syncCtx) {
             const affectedParents = new Set<string>()
             for (const b of blockDataList) {
@@ -2605,11 +2664,8 @@ export class ChatDbAggregateService {
               }
             }
             for (const pid of affectedParents) {
-              const parentMsg = repos.messages.getById(pid)
-              if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
-                syncService.refreshParentFrameInTx(stx, 'messageBlock', pid)
-              } else if (parentMsg.found) {
-                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
+                syncNotify = true
               }
             }
           }
@@ -2649,11 +2705,16 @@ export class ChatDbAggregateService {
                   typeof bid === 'string' && bid.length > 0 && syncService.isKnownEntityInTx(stx, 'message_block', bid)
               )
             : []
-          // Collect affected parent messageIds before deletion for frame invalidation/refresh
+          // Collect affected parent messageIds before deletion, but only when
+          // the deleted row was previously inventory-included
+          // (stable + supported). Transient/unsupported deletes never mint:
+          // they only invalidate via the try helper's excluded check.
           const affectedParentIds = new Set<string>()
           for (const bid of blockIds) {
             const blk = repos.blocks.getById(bid)
-            if (blk.found) affectedParentIds.add(blk.data.messageId)
+            if (blk.found && isStableBlockStatus(blk.data.status) && !this.isUnsupportedBlock(blk.data)) {
+              affectedParentIds.add(blk.data.messageId)
+            }
           }
           const affectedFileIds = collectAffectedFileIds(
             blockIds.flatMap((blockId) => repos.fileRefs.listByBlock(blockId))
@@ -2668,17 +2729,14 @@ export class ChatDbAggregateService {
               syncNotify = true
             }
           }
-          // Local parent order frame (010) — truthful refresh for each surviving messageBlock parent (local prerequisite only)
+          // Ordinary block deletes issue exactly one messageBlock frame per
+          // surviving stable parent via the try helper (missing membership
+          // invalidates with 0 op; malformed/MAX_SAFE rolls back). Deleted
+          // parent or transient parent only invalidates.
           if (syncCtx && affectedParentIds.size > 0) {
             for (const pid of affectedParentIds) {
-              const parentMsg = repos.messages.getById(pid)
-              if (parentMsg.found && isStableMessageStatus(parentMsg.data.status)) {
-                syncService.refreshParentFrameInTx(stx, 'messageBlock', pid)
-              } else if (parentMsg.found) {
-                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
-              } else {
-                // Parent message was deleted (should not happen for block delete), ensure no orphan frame
-                syncService.invalidateParentFrameInTx(stx, 'messageBlock', pid)
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, pid, syncCtx.deviceId) === 'refreshed') {
+                syncNotify = true
               }
             }
           }

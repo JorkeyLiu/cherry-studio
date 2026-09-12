@@ -295,7 +295,7 @@ describe('aggregate issuance: atomic single-frame ops with mirrored clock', () =
     const appendOp = ops[ops.length - 1]
     expect(appendOp.id).toBe(frame.operationId)
     expect(appendOp.timestamp).toBe(frame.timestamp)
-    expect(db.select().from(schema.syncOutbox).all().length).toBe(outboxAfterTopic + 2) // 1 message upsert + 1 frame
+    expect(db.select().from(schema.syncOutbox).all().length).toBe(outboxAfterTopic + 3) // 1 message upsert + 1 topic frame + 1 empty messageBlock frame
     // membership persisted for the new child in the same tx
     const mem = sqlite
       .prepare(`SELECT parent_id AS parentId FROM sync_membership_clock WHERE child_entity_id='m-a'`)
