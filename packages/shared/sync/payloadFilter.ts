@@ -3,6 +3,8 @@
  * Strips credentials, FTS, UI state, contextWindowAnchor, file_path binary etc.
  */
 
+import { validateStableReplacePayloadStrict } from './stableReplace'
+
 // Allowlisted topic fields — deletedAt included for soft-delete sync (hard delete uses op=delete)
 // pinned/prompt/isNameManuallyEdited are syncable mutable topic metadata
 // (overflow keys surfaced top-level). contextWindowAnchor and all other
@@ -233,7 +235,8 @@ export function validateSyncOperationStrict(op: {
   if (op.entityType !== 'topic' && op.entityType !== 'message' && op.entityType !== 'message_block') {
     return `invalid entityType ${String(op.entityType)}`
   }
-  if (op.op !== 'upsert' && op.op !== 'delete' && op.op !== 'order_frame') return `invalid op ${String(op.op)}`
+  if (op.op !== 'upsert' && op.op !== 'delete' && op.op !== 'order_frame' && op.op !== 'message_stable_replace')
+    return `invalid op ${String(op.op)}`
   if (!isNonEmptyString(op.entityId)) return 'invalid entityId'
   if (typeof op.timestamp !== 'number' || !Number.isFinite(op.timestamp)) return 'invalid timestamp'
   if (!isNonEmptyString(op.deviceId)) return 'invalid deviceId'
@@ -242,6 +245,11 @@ export function validateSyncOperationStrict(op: {
   const payload = op.payload as Record<string, unknown> | undefined | null
   if (kind === 'order_frame') {
     return validateOrderFramePayloadStrict(op, payload)
+  }
+  if (kind === 'message_stable_replace') {
+    // Dedicated strictly-closed stable-replace contract (SYNC-DATA-050):
+    // single shared source of truth in stableReplace.ts — never reimplemented here.
+    return validateStableReplacePayloadStrict(op)
   }
   if (kind === 'delete') {
     if (payload !== undefined && payload !== null) {

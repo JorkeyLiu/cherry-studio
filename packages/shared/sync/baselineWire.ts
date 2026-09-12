@@ -422,7 +422,7 @@ function validateTopic(value: unknown, path: string): void {
   validateFieldClocks(obj.fieldClocks, TOPIC_FIELD_CLOCK_KEYS, `${path}.fieldClocks`)
 }
 
-function validateMessage(value: unknown, path: string): void {
+export function validateMessage(value: unknown, path: string): void {
   const obj = assertPlainObject(value, path)
   assertExactKeys(obj, MESSAGE_KEYS, path)
   assertNonEmptyValidUnicodeScalarString(obj.id, `${path}.id`)
@@ -444,7 +444,7 @@ function validateMessage(value: unknown, path: string): void {
   validateClock(obj.parentMembershipClock, `${path}.parentMembershipClock`, false)
 }
 
-function validateMessageBlock(value: unknown, path: string): void {
+export function validateMessageBlock(value: unknown, path: string): void {
   const obj = assertPlainObject(value, path)
   assertExactKeys(obj, MESSAGE_BLOCK_KEYS, path)
   assertNonEmptyValidUnicodeScalarString(obj.id, `${path}.id`)
@@ -506,7 +506,7 @@ function validateTombstone(value: unknown, path: string): void {
   }
 }
 
-function validateOrderFrame(value: unknown, path: string): void {
+export function validateOrderFrame(value: unknown, path: string): void {
   const obj = assertPlainObject(value, path)
   assertExactKeys(obj, ORDER_FRAME_KEYS, path)
   if (obj.frameVersion !== ORDER_FRAME_VERSION) {

@@ -1134,7 +1134,7 @@ export const MIGRATIONS: MigrationEntry[] = [
   {
     key: '012_sync_frame_high_water',
     description:
-      'Additive sync frame timestamp high-water: per-(kind, parent_id) monotonic guard for winning-frame clocks (SYNC-DATA-048 local implementation invariant). Creates sync_frame_high_water with (kind, parent_id) PK and safe-nonnegative max_timestamp, backfilled from current sync_parent_order_frame timestamps so the first post-upgrade invalidate cannot drop an old high-water mark. Invalidation deletes winning frames but never lowers this mark; later re-mints allocate strictly above it. Only max timestamp stored (no operationId); never on wire; never affects candidate completeness/authority.',
+      'Additive sync frame timestamp high-water: per-(kind, parent_id) monotonic guard for winning-frame clocks (SYNC-DATA-048 local implementation invariant). Creates sync_frame_high_water with (kind, parent_id) PK and safe-nonnegative max_timestamp, backfilled from current winning-frame timestamps so the first post-upgrade invalidate cannot drop an old high-water mark. Invalidation deletes winning frames but never lowers this mark; later re-mints allocate strictly above it. Only max timestamp stored (no operationId); never on wire; never affects candidate completeness/authority.',
     sql: [
       `CREATE TABLE IF NOT EXISTS sync_frame_high_water (
         kind TEXT NOT NULL CHECK (kind IN ('topicMessage','messageBlock')),
@@ -1143,6 +1143,20 @@ export const MIGRATIONS: MigrationEntry[] = [
         PRIMARY KEY (kind, parent_id)
       )`,
       `INSERT INTO sync_frame_high_water (kind, parent_id, max_timestamp) SELECT kind, parent_id, timestamp FROM sync_parent_order_frame AS f WHERE NOT EXISTS (SELECT 1 FROM sync_frame_high_water AS h WHERE h.kind = f.kind AND h.parent_id = f.parent_id)`
+    ]
+  },
+  {
+    key: '013_sync_stable_replace_register',
+    description:
+      'Additive sync stable-replace register: per-message winning stable-replacement register (SYNC-DATA-051 receiver-first slice). Creates sync_stable_replace_register with message_id PK, winning replacementClock (safe-nonnegative timestamp + non-empty colon-free operationId 1..256), active_block_ids_json strict JSON array, and payload_hash canonical bundled-winner hash for equal-clock semantic-divergence rejection. No backfill — messages without an accepted replacement have no row. Retirement barriers reuse the existing sync_state tombstone rows at replacementClock (no new table).',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_stable_replace_register (
+        message_id TEXT PRIMARY KEY CHECK (length(message_id) > 0),
+        timestamp INTEGER NOT NULL CHECK (timestamp >= 0 AND timestamp <= 9007199254740991),
+        operation_id TEXT NOT NULL CHECK (length(operation_id) > 0 AND length(operation_id) <= 256 AND operation_id NOT LIKE '%:%'),
+        active_block_ids_json TEXT NOT NULL CHECK (json_valid(active_block_ids_json)),
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) > 0)
+      )`
     ]
   }
 ]

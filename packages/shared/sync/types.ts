@@ -5,7 +5,7 @@
 
 export type SyncEntityType = 'topic' | 'message' | 'message_block'
 
-export type SyncOperationKind = 'upsert' | 'delete' | 'order_frame'
+export type SyncOperationKind = 'upsert' | 'delete' | 'order_frame' | 'message_stable_replace'
 
 export const PARENT_ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
 export const ORDER_FRAME_KIND_TOPIC_MESSAGE = 'topicMessage' as const

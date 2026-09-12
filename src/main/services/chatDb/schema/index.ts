@@ -294,3 +294,23 @@ export const syncFrameHighWater = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.kind, table.parentId] })]
 )
+
+// ---------------------------------------------------------------------------
+// sync stable-replace register — additive, isolated (013)
+// Per-message winning stable-replacement register (SYNC-DATA-051): one row
+// per messageId with the winning replacementClock, the winning
+// activeBlockIds (business order, JSON array), and a canonical hash of the
+// bundled winner sufficient to reject equal-clock semantic divergence
+// fail-closed. Merge uses the current timestamp+operationId total order; no
+// new ordering key. Local table/column mapping is implementation projection
+// (wire spelling locked lowerCamelCase only where registers ride baseline v2).
+// No backfill — messages without an accepted replacement have no row.
+// See migration 013.
+// ---------------------------------------------------------------------------
+export const syncStableReplaceRegister = sqliteTable('sync_stable_replace_register', {
+  messageId: text('message_id').primaryKey(),
+  timestamp: integer('timestamp').notNull(),
+  operationId: text('operation_id').notNull(),
+  activeBlockIdsJson: text('active_block_ids_json').notNull(),
+  payloadHash: text('payload_hash').notNull()
+})

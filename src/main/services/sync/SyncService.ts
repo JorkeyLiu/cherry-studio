@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { loggerService } from '@logger'
 import { configManager } from '@main/services/ConfigManager'
@@ -86,7 +86,46 @@ const ENTITY_PUSH_PRIORITY: Record<string, number> = { topic: 0, message: 1, mes
 
 function pushPriorityOf(op: { entityType: string; op: string }): number {
   if (op.op === 'order_frame') return 3
+  if (op.op === 'message_stable_replace') return 4
   return ENTITY_PUSH_PRIORITY[op.entityType] ?? 9
+}
+
+/**
+ * Deterministic canonical JSON for stable-replace bundled-winner comparison
+ * (SYNC-DATA-051 equal-clock semantic check). Object keys sorted recursively;
+ * arrays preserve order (messageBlocks canonical order and activeBlockIds
+ * business order are semantically significant). Undefined never appears on
+ * validated wire payloads; functions are out of scope and fail closed.
+ */
+function stableCanonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map((v) => stableCanonicalJson(v)).join(',')}]`
+  const obj = value as Record<string, unknown>
+  const keys = Object.keys(obj).sort()
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableCanonicalJson(obj[k])}`).join(',')}}`
+}
+
+/**
+ * Canonical bundled-winner hash for the stable-replace register
+ * (SYNC-DATA-051): covers the full bundled message state, the full bundled
+ * block array, activeBlockIds order, and both bundled frames. Equal-clock
+ * exact replay matches; equal-clock semantic divergence fails closed.
+ */
+function stableReplaceWinnerHash(payload: {
+  message: unknown
+  messageBlocks: unknown
+  activeBlockIds: unknown
+  topicFrame: unknown
+  messageFrame: unknown
+}): string {
+  const canonical = stableCanonicalJson({
+    activeBlockIds: payload.activeBlockIds,
+    message: payload.message,
+    messageBlocks: payload.messageBlocks,
+    messageFrame: payload.messageFrame,
+    topicFrame: payload.topicFrame
+  })
+  return createHash('sha256').update(canonical, 'utf8').digest('hex')
 }
 
 export class SyncOrphanError extends Error {
@@ -228,6 +267,7 @@ const MIGRATION_005_KEY = '005_sync_metadata'
 const MIGRATION_006_KEY = '006_sync_field_merge'
 const MIGRATION_009_KEY = '009_sync_membership_clock'
 const MIGRATION_010_KEY = '010_sync_parent_order_frame'
+const MIGRATION_013_KEY = '013_sync_stable_replace_register'
 
 /**
  * Local frame persistence prerequisite (SYNC-DATA-033..036/044).
@@ -900,6 +940,10 @@ export class SyncService {
       this.enqueueOrderFrameRaw(op)
       return
     }
+    if (op.op === 'message_stable_replace') {
+      this.enqueueStableReplaceRaw(op)
+      return
+    }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) {
       logger.warn(`[enqueueOperation] payload allowlist rejected: ${allowErr}`)
@@ -1019,6 +1063,80 @@ export class SyncService {
     }
   }
 
+  /**
+   * Raw outbox-only insert for a message_stable_replace op (no entity/field
+   * clock, no tombstone, no frame state). Producer safety (receiver-first
+   * slice): no local aggregate emits this op — the branch exists only so a
+   * crafted op passed explicitly (tests) is strictly accepted instead of
+   * falling through into the upsert field allowlist. Mirrors the order_frame
+   * raw path.
+   */
+  private enqueueStableReplaceRaw(op: SyncOperation): void {
+    const db = this.getDb()
+    const sqlite = this.getSqlite()
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      db.insert(schema.syncOutbox)
+        .values({
+          id: op.id,
+          entityType: op.entityType,
+          op: op.op,
+          entityId: op.entityId,
+          timestamp: op.timestamp,
+          deviceId: op.deviceId,
+          payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+          createdAt: new Date().toISOString()
+        })
+        .onConflictDoNothing()
+        .run()
+      const ch = sqlite.prepare('SELECT changes() as c').get() as { c: number }
+      const inserted = ch.c > 0
+      sqlite.exec('COMMIT')
+      if (!inserted) {
+        logger.warn(`[enqueueOperation] duplicate id ${op.id} ignored`)
+        return
+      }
+      this.emitEnqueue()
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e
+    }
+  }
+
+  /**
+   * Tx-bound outbox-only insert for a message_stable_replace op. Same
+   * producer-safety contract as the raw path above: strictly validated,
+   * outbox-only, never touching entity/field clocks or tombstones, never
+   * entering the upsert field allowlist. Returns true on new insert.
+   */
+  enqueueStableReplaceInTx(tx: SyncTxExecutor, op: SyncOperation): boolean {
+    const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
+    if (strictErr) throw new Error(strictErr)
+    if (op.op !== 'message_stable_replace')
+      throw new Error('enqueueStableReplaceInTx requires op message_stable_replace')
+    const existing = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
+    if (existing) {
+      logger.warn(`[enqueueStableReplaceInTx] duplicate id ${op.id} ignored`)
+      return false
+    }
+    tx.insert(schema.syncOutbox)
+      .values({
+        id: op.id,
+        entityType: op.entityType,
+        op: op.op,
+        entityId: op.entityId,
+        timestamp: op.timestamp,
+        deviceId: op.deviceId,
+        payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+        createdAt: new Date().toISOString()
+      })
+      .onConflictDoNothing()
+      .run()
+    return true
+  }
+
   // -------------------------------------------------------------------------
   // Transaction-bound capture (LOCK-PERSONAL-006): the aggregate owns the
   // atomic mutation boundary and calls these helpers INSIDE its existing
@@ -1039,6 +1157,9 @@ export class SyncService {
     if (strictErr) throw new Error(strictErr)
     if (op.op === 'order_frame') {
       return this.enqueueOrderFrameInTx(tx, op)
+    }
+    if (op.op === 'message_stable_replace') {
+      return this.enqueueStableReplaceInTx(tx, op)
     }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) throw new Error(allowErr)
@@ -2531,15 +2652,17 @@ export class SyncService {
     const sqlite = this.getSqlite()
 
     const already = db.select().from(schema.syncApplied).where(eq(schema.syncApplied.operationId, op.id)).get()
-    if (already && op.op !== 'order_frame') {
+    if (already && op.op !== 'order_frame' && op.op !== 'message_stable_replace') {
       logger.info(`[applyIncoming] duplicate ${op.id} skipped`)
       return false
     }
-    // order_frame duplicates bypass the blind skip: the same (timestamp,
-    // operationId) clock with different orderedChildIds is an equal-clock
-    // divergence and must fail closed, not silently pass as idempotent. The
-    // frame path below re-evaluates LWW + semantic effective comparison, and
-    // its applied insert is conflict-tolerant (see commit below).
+    // order_frame and message_stable_replace duplicates bypass the blind
+    // skip: the same (timestamp, operationId) clock with different bundled
+    // content is an equal-clock divergence and must fail closed, not silently
+    // pass as idempotent. The frame path below re-evaluates LWW + semantic
+    // effective comparison, and the stable-replace path re-evaluates register
+    // LWW + bundled-winner comparison; both applied inserts are
+    // conflict-tolerant (see commit below).
 
     // Defense-in-depth: validate before LWW so a malformed old operation
     // that loses LWW is rejected (throws) rather than being marked applied
@@ -2553,7 +2676,7 @@ export class SyncService {
       throw new Error(`malformed sync operation ${op.id}: ${strictErr}`)
     }
 
-    if (op.op !== 'order_frame') {
+    if (op.op !== 'order_frame' && op.op !== 'message_stable_replace') {
       const allowErr = validateSyncPayloadAllowlist(op)
       if (allowErr) {
         logger.warn(`[applyIncoming] payload rejected ${op.id}: ${allowErr}`)
@@ -2577,6 +2700,8 @@ export class SyncService {
     try {
       if (op.op === 'order_frame') {
         appliedEntity = this.applyOrderFrame(op)
+      } else if (op.op === 'message_stable_replace') {
+        appliedEntity = this.applyStableReplace(op)
       } else if (op.op === 'upsert') {
         appliedEntity = this.applyUpsert(op)
       } else if (op.op === 'delete') {
@@ -2611,7 +2736,7 @@ export class SyncService {
             .run()
         }
       }
-      if (op.op === 'order_frame') {
+      if (op.op === 'order_frame' || op.op === 'message_stable_replace') {
         db.insert(schema.syncApplied)
           .values({ operationId: op.id, appliedAt: new Date().toISOString() })
           .onConflictDoNothing()
@@ -3004,6 +3129,763 @@ export class SyncService {
     for (let i = 0; i < effective.length; i++) {
       db.update(schema.messageBlocks).set({ sortOrder: i }).where(eq(schema.messageBlocks.id, effective[i])).run()
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Dedicated message_stable_replace apply (SYNC-DATA-050–054, receiver-first
+  // slice). Runs inside the caller's apply transaction
+  // (BEGIN IMMEDIATE...COMMIT in applyIncomingOperation): message/block
+  // entity + field clocks, parentMembershipClocks/memberships,
+  // tombstones/retirement barriers, the per-message winning register, both
+  // winning frames, dense sortOrder for the affected topic/message parents,
+  // and the sync_applied row commit atomically; any throw rolls back all of
+  // them so the cursor never advances past an unapplied replacement. The
+  // source outbox is never touched here. Shared validator runs before
+  // branching (applyIncomingOperation); this is the explicit new branch and
+  // never falls through to upsert/delete handling.
+  //
+  // Returns true when the replacement won and materialized, false for
+  // consumed no-ops (losing clock, exact-replay idempotent, covering
+  // tombstone suppression, tombstoned-parent suppression). Throws
+  // SyncOrphanError for the retryable unknown-topic case (no covering
+  // tombstone) and fail-closed Error for every other mismatch/incomplete/
+  // high-water/divergence case.
+  // -------------------------------------------------------------------------
+
+  private readStableReplaceRegister(
+    db: BetterSQLite3Database<typeof schema>,
+    messageId: string
+  ): { timestamp: number; operationId: string; activeBlockIdsJson: string; payloadHash: string } | null {
+    try {
+      const row = db
+        .select()
+        .from(schema.syncStableReplaceRegister)
+        .where(eq(schema.syncStableReplaceRegister.messageId, messageId))
+        .get() as typeof schema.syncStableReplaceRegister.$inferSelect | undefined
+      if (!row) return null
+      return {
+        timestamp: row.timestamp,
+        operationId: row.operationId,
+        activeBlockIdsJson: row.activeBlockIdsJson,
+        payloadHash: row.payloadHash
+      }
+    } catch (e) {
+      if (isMissingSyncTableError(e)) {
+        throw new Error(
+          `message_stable_replace requires migration ${MIGRATION_013_KEY} (sync_stable_replace_register missing)`
+        )
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  private writeStableReplaceRegister(
+    db: BetterSQLite3Database<typeof schema>,
+    messageId: string,
+    timestamp: number,
+    operationId: string,
+    activeBlockIdsJson: string,
+    payloadHash: string
+  ): void {
+    try {
+      db.insert(schema.syncStableReplaceRegister)
+        .values({ messageId, timestamp, operationId, activeBlockIdsJson, payloadHash })
+        .onConflictDoUpdate({
+          target: schema.syncStableReplaceRegister.messageId,
+          set: { timestamp, operationId, activeBlockIdsJson, payloadHash }
+        })
+        .run()
+    } catch (e) {
+      if (isMissingSyncTableError(e)) {
+        throw new Error(
+          `message_stable_replace requires migration ${MIGRATION_013_KEY} (sync_stable_replace_register missing)`
+        )
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  private parseBlockOverflowExtra(extra: string | null): Record<string, unknown> {
+    if (!extra) return {}
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(extra)
+    } catch {
+      throw new Error('message_stable_replace malformed block extra JSON')
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('message_stable_replace malformed block extra JSON')
+    }
+    return parsed as Record<string, unknown>
+  }
+
+  /**
+   * Retirement-aware live-message set for the bundled topicFrame (mirrors the
+   * incremental topicMessage scan, except blocks/messages retired by this
+   * replacement — tombstoned at replacementClock without a versioned
+   * membership — are suppressed as retired rather than throwing). LWW,
+   * validity filtering, deterministic suffix, incompleteness, and dense
+   * materialization all reuse `evaluateEffectiveOrder` / `compareFrameClock` /
+   * `persistParentFrameInTx` / `materializeTopicMessageOrder` with no copied
+   * divergent rules.
+   */
+  private applyBundledTopicFrame(
+    op: SyncOperation,
+    parentId: string,
+    orderedChildIds: string[],
+    frameClock: { timestamp: number; operationId: string }
+  ): boolean {
+    const db = this.getDb()
+    const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
+    if (!topicRow) {
+      const topicTomb = this.getTombstone('topic', parentId)
+      if (topicTomb) {
+        logger.warn(`[applyStableReplace] parent ${parentId} tombstoned: bundled topicFrame suppressed`)
+        return false
+      }
+      throw new SyncOrphanError(`orphan message_stable_replace ${op.id} topicFrame parent ${parentId} missing`)
+    }
+    const messageRows = db.select().from(schema.messages).where(eq(schema.messages.topicId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of messageRows) {
+      if (!isStableMessageStatus(row.status)) continue
+      const ownTomb = this.getTombstone('message', row.id)
+      const mem = this.getMembershipClock('message', row.id)
+      if (ownTomb) {
+        if (!mem) {
+          // Retired-by-replacement (or newer delete) without versioned
+          // membership: suppressed when the tombstone covers the bundled
+          // frame clock, fail-closed otherwise (same strictness as the
+          // incremental path for genuinely ambiguous state).
+          if (this.isSuppressedByTombstone(frameClock.timestamp, frameClock.operationId, ownTomb)) continue
+          throw new Error(`message_stable_replace ${op.id}: live child ${row.id} has tombstone but no membership clock`)
+        }
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, ownTomb)) continue
+      }
+      if (!mem) {
+        throw new Error(`message_stable_replace ${op.id}: live child ${row.id} missing membership clock`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(`message_stable_replace ${op.id}: membership parent mismatch for ${row.id}`)
+      }
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const childParentLookup = (
+      childId: string
+    ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, childId)).get()
+      if (row) return { parentId: row.topicId, exists: true, isLiveForThisParent: row.topicId === parentId }
+      const tomb = this.getTombstone('message', childId)
+      if (tomb) return { parentId: null, exists: true }
+      return null
+    }
+    for (const cid of orderedChildIds) {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+      if (row) {
+        if (row.topicId !== parentId) {
+          throw new Error(`message_stable_replace ${op.id}: child ${cid} belongs to ${row.topicId}, not ${parentId}`)
+        }
+        continue
+      }
+      const tomb = this.getTombstone('message', cid)
+      if (tomb) continue
+      throw new SyncOrphanError(`orphan message_stable_replace ${op.id} topicFrame member ${cid} missing`)
+    }
+    const evaluated = evaluateEffectiveOrder({
+      kind: 'topicMessage',
+      parentId,
+      orderedChildIds: [...orderedChildIds],
+      frameClock,
+      liveChildren,
+      childParentLookup
+    })
+    if (evaluated.incomplete) {
+      throw new Error(
+        `message_stable_replace ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
+      )
+    }
+    const effective = evaluated.effective
+    const existing = this.getParentFrame('topicMessage', parentId)
+    if (!existing) {
+      this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+        kind: 'topicMessage',
+        parentId,
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIds: effective,
+        timestamp: frameClock.timestamp,
+        operationId: frameClock.operationId
+      })
+      this.materializeTopicMessageOrder(db, parentId, effective)
+      return true
+    }
+    const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
+    if (cmp < 0) {
+      logger.info(`[applyStableReplace] bundled topicFrame ${op.id} loses to ${existing.operationId} for ${parentId}`)
+      return false
+    }
+    if (cmp === 0) {
+      const existingEvaluated = evaluateEffectiveOrder({
+        kind: 'topicMessage',
+        parentId,
+        orderedChildIds: [...existing.orderedChildIds],
+        frameClock: { timestamp: existing.timestamp, operationId: existing.operationId },
+        liveChildren,
+        childParentLookup
+      })
+      if (existingEvaluated.incomplete) {
+        throw new Error(
+          `message_stable_replace ${op.id}: existing frame for ${parentId} is incomplete under merged state`
+        )
+      }
+      const same =
+        existingEvaluated.effective.length === effective.length &&
+        existingEvaluated.effective.every((id, i) => id === effective[i])
+      if (same) {
+        if (JSON.stringify(existing.orderedChildIds) !== JSON.stringify(effective)) {
+          this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+            kind: 'topicMessage',
+            parentId,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIds: effective,
+            timestamp: existing.timestamp,
+            operationId: existing.operationId
+          })
+          this.materializeTopicMessageOrder(db, parentId, effective)
+        }
+        return false
+      }
+      throw new Error(`message_stable_replace ${op.id}: equal-clock divergence for ${parentId}`)
+    }
+    this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+      kind: 'topicMessage',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: effective,
+      timestamp: frameClock.timestamp,
+      operationId: frameClock.operationId
+    })
+    this.materializeTopicMessageOrder(db, parentId, effective)
+    return true
+  }
+
+  /**
+   * Retirement-aware live-block set for the bundled messageFrame. Same reuse
+   * contract as the bundled topicFrame above: `evaluateEffectiveOrder` for
+   * filtering/suffix/completeness, `compareFrameClock` for LWW,
+   * `persistParentFrameInTx` for the winning persist (which advances the
+   * frame high-water mark in the same transaction so future frame clocks
+   * cannot regress), `materializeMessageBlockOrder` for dense projection.
+   */
+  private applyBundledMessageFrame(
+    op: SyncOperation,
+    parentId: string,
+    orderedChildIds: string[],
+    frameClock: { timestamp: number; operationId: string }
+  ): boolean {
+    const db = this.getDb()
+    const parentRow = db.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+    if (!parentRow) {
+      const parentTomb = this.getTombstone('message', parentId)
+      if (parentTomb) {
+        logger.warn(`[applyStableReplace] parent message ${parentId} tombstoned: bundled messageFrame suppressed`)
+        return false
+      }
+      throw new SyncOrphanError(`orphan message_stable_replace ${op.id} messageFrame parent ${parentId} missing`)
+    }
+    if (!isStableMessageStatus(parentRow.status)) {
+      throw new Error(`message_stable_replace ${op.id}: messageFrame parent ${parentId} not stable`)
+    }
+    const blockRows = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.messageId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of blockRows) {
+      if (!isStableBlockStatus(row.status)) continue
+      if (isUnsupportedBlockForSync({ type: row.type, overflow: this.parseBlockOverflowExtra(row.extra) })) continue
+      const ownTomb = this.getTombstone('message_block', row.id)
+      const mem = this.getMembershipClock('message_block', row.id)
+      if (ownTomb) {
+        if (!mem) {
+          if (this.isSuppressedByTombstone(frameClock.timestamp, frameClock.operationId, ownTomb)) continue
+          throw new Error(`message_stable_replace ${op.id}: live child ${row.id} has tombstone but no membership clock`)
+        }
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, ownTomb)) continue
+      }
+      if (!mem) {
+        throw new Error(`message_stable_replace ${op.id}: live child ${row.id} missing membership clock`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(`message_stable_replace ${op.id}: membership parent mismatch for ${row.id}`)
+      }
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const childParentLookup = (
+      childId: string
+    ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+      const row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, childId)).get()
+      if (row) return { parentId: row.messageId, exists: true, isLiveForThisParent: row.messageId === parentId }
+      const tomb = this.getTombstone('message_block', childId)
+      if (tomb) return { parentId: null, exists: true }
+      return null
+    }
+    for (const cid of orderedChildIds) {
+      const row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
+      if (row) {
+        if (row.messageId !== parentId) {
+          throw new Error(`message_stable_replace ${op.id}: child ${cid} belongs to ${row.messageId}, not ${parentId}`)
+        }
+        continue
+      }
+      const tomb = this.getTombstone('message_block', cid)
+      if (tomb) continue
+      throw new SyncOrphanError(`orphan message_stable_replace ${op.id} messageFrame member ${cid} missing`)
+    }
+    const evaluated = evaluateEffectiveOrder({
+      kind: 'messageBlock',
+      parentId,
+      orderedChildIds: [...orderedChildIds],
+      frameClock,
+      liveChildren,
+      childParentLookup
+    })
+    if (evaluated.incomplete) {
+      throw new Error(
+        `message_stable_replace ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
+      )
+    }
+    const effective = evaluated.effective
+    const existing = this.getParentFrame('messageBlock', parentId)
+    if (!existing) {
+      this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+        kind: 'messageBlock',
+        parentId,
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIds: effective,
+        timestamp: frameClock.timestamp,
+        operationId: frameClock.operationId
+      })
+      this.materializeMessageBlockOrder(db, effective)
+      return true
+    }
+    const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
+    if (cmp < 0) {
+      logger.info(`[applyStableReplace] bundled messageFrame ${op.id} loses to ${existing.operationId} for ${parentId}`)
+      return false
+    }
+    if (cmp === 0) {
+      const existingEvaluated = evaluateEffectiveOrder({
+        kind: 'messageBlock',
+        parentId,
+        orderedChildIds: [...existing.orderedChildIds],
+        frameClock: { timestamp: existing.timestamp, operationId: existing.operationId },
+        liveChildren,
+        childParentLookup
+      })
+      if (existingEvaluated.incomplete) {
+        throw new Error(
+          `message_stable_replace ${op.id}: existing frame for ${parentId} is incomplete under merged state`
+        )
+      }
+      const same =
+        existingEvaluated.effective.length === effective.length &&
+        existingEvaluated.effective.every((id, i) => id === effective[i])
+      if (same) {
+        if (JSON.stringify(existing.orderedChildIds) !== JSON.stringify(effective)) {
+          this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+            kind: 'messageBlock',
+            parentId,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIds: effective,
+            timestamp: existing.timestamp,
+            operationId: existing.operationId
+          })
+          this.materializeMessageBlockOrder(db, effective)
+        }
+        return false
+      }
+      throw new Error(`message_stable_replace ${op.id}: equal-clock divergence for ${parentId}`)
+    }
+    this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+      kind: 'messageBlock',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: effective,
+      timestamp: frameClock.timestamp,
+      operationId: frameClock.operationId
+    })
+    this.materializeMessageBlockOrder(db, effective)
+    return true
+  }
+
+  /**
+   * Atomic apply of one `message_stable_replace` op (SYNC-DATA-052). One
+   * receiver-visible SQLite transaction (owned by applyIncomingOperation)
+   * covers: message/block entity + field clocks, parentMembershipClocks /
+   * memberships, tombstones/retirement barriers for retired old blocks,
+   * the replacement register, both winning frames, dense sortOrder for the
+   * affected topic/message parents, and sync_applied. Failure anywhere rolls
+   * back the whole transaction with no cursor advance and no partial
+   * register/frame persist.
+   */
+  private applyStableReplace(op: SyncOperation): boolean {
+    const db = this.getDb()
+    // Shape is already proven by the shared strict validator before
+    // branching; extract defensively so any drift fails closed here.
+    const payload = op.payload as unknown as Record<string, unknown> | undefined
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error(`message_stable_replace ${op.id}: missing payload`)
+    }
+    const messageId = payload.messageId
+    if (typeof messageId !== 'string' || messageId.length === 0 || messageId !== op.entityId) {
+      throw new Error(`message_stable_replace ${op.id}: messageId binding mismatch`)
+    }
+    const rc = { timestamp: op.timestamp, operationId: op.id }
+    const message = payload.message as Record<string, unknown> | undefined
+    const messageBlocks = payload.messageBlocks as Array<Record<string, unknown>> | undefined
+    const activeBlockIds = payload.activeBlockIds as string[] | undefined
+    const topicFrame = payload.topicFrame as Record<string, unknown> | undefined
+    const messageFrame = payload.messageFrame as Record<string, unknown> | undefined
+    if (!message || typeof message !== 'object' || !Array.isArray(messageBlocks) || !Array.isArray(activeBlockIds)) {
+      throw new Error(`message_stable_replace ${op.id}: bundled state incomplete`)
+    }
+    if (!topicFrame || typeof topicFrame !== 'object' || !messageFrame || typeof messageFrame !== 'object') {
+      throw new Error(`message_stable_replace ${op.id}: bundled frames incomplete`)
+    }
+    const topicId = message.topicId
+    if (typeof topicId !== 'string' || topicId.length === 0) {
+      throw new Error(`message_stable_replace ${op.id}: bundled message missing topicId`)
+    }
+    const nowIso = new Date().toISOString()
+
+    // Winning-register LWW (SYNC-DATA-051, current timestamp+operationId
+    // total order via compareLww — no new ordering key, no UTF-8-vs-JS
+    // tie-break beyond the existing shared compare contract).
+    const winnerHash = stableReplaceWinnerHash({
+      message,
+      messageBlocks,
+      activeBlockIds,
+      topicFrame,
+      messageFrame
+    })
+    const activeJson = JSON.stringify(activeBlockIds)
+    const existingReg = this.readStableReplaceRegister(db, messageId)
+    if (existingReg) {
+      const cmp = this.compareLww(rc.timestamp, rc.operationId, existingReg.timestamp, existingReg.operationId)
+      if (cmp < 0) {
+        // Losing replacement: consumed without changing user-visible state.
+        logger.info(`[applyStableReplace] losing replacement ${op.id} for ${messageId} consumed`)
+        return false
+      }
+      if (cmp === 0) {
+        if (existingReg.payloadHash === winnerHash && existingReg.activeBlockIdsJson === activeJson) {
+          return false
+        }
+        throw new Error(`message_stable_replace ${op.id}: equal-clock divergence for ${messageId}`)
+      }
+    } else {
+      // Same op id previously applied without register state for this
+      // message means id reuse across divergent content — fail closed.
+      const applied = db.select().from(schema.syncApplied).where(eq(schema.syncApplied.operationId, op.id)).get()
+      if (applied) {
+        throw new Error(`message_stable_replace ${op.id}: id reuse without register state for ${messageId}`)
+      }
+    }
+
+    // Topic-parent disposition (existing orphan contract vocabulary):
+    // unknown topic with no covering tombstone => retryable orphan for the
+    // whole op; covering topic tombstone => consumed with no materialization;
+    // a newer recreated topic resolves under the current LWW (row present).
+    const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
+    if (!topicRow) {
+      const topicTomb = this.getTombstone('topic', topicId)
+      if (topicTomb) {
+        logger.warn(`[applyStableReplace] topic ${topicId} tombstoned: replacement ${op.id} consumed`)
+        return false
+      }
+      throw new SyncOrphanError(`orphan message_stable_replace ${op.id} topic ${topicId} missing`)
+    }
+
+    // Message tombstone precedence with the legacy-null strong barrier: a
+    // delete/tombstone covering the message suppresses the replacement
+    // outcome (consumed); a higher replacement wins and materializes.
+    const msgTomb = this.getTombstone('message', messageId)
+    if (msgTomb && this.isSuppressedByTombstone(rc.timestamp, rc.operationId, msgTomb)) {
+      logger.warn(`[applyStableReplace] message ${messageId} suppressed by tombstone: replacement ${op.id} consumed`)
+      return false
+    }
+
+    // Message full-state materialization (no placeholder topics, no
+    // reparent: existing rows must match, otherwise fail closed).
+    const MESSAGE_FIELDS = [
+      'role',
+      'content',
+      'status',
+      'askId',
+      'model',
+      'modelId',
+      'assistantId',
+      'createdAt',
+      'updatedAt'
+    ] as const
+    const existingMsg = db.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get()
+    if (existingMsg && existingMsg.topicId !== topicId) {
+      throw new Error(`message_stable_replace ${op.id}: message ${messageId} reparent rejected`)
+    }
+    if (!existingMsg) {
+      const retained = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', messageId)
+      if (retained && retained.parentId !== topicId) {
+        throw new SyncTombstoneError(
+          `membership clock conflict for message/${messageId}: retained parent ${retained.parentId} vs incoming ${topicId}`
+        )
+      }
+      db.insert(schema.messages)
+        .values({
+          id: messageId,
+          topicId,
+          role: (message.role as string | null) ?? null,
+          content: (message.content as string | null) ?? null,
+          status: (message.status as string | null) ?? null,
+          askId: (message.askId as string | null) ?? null,
+          model: (message.model as string | null) ?? null,
+          modelId: (message.modelId as string | null) ?? null,
+          assistantId: (message.assistantId as string | null) ?? null,
+          createdAt: (message.createdAt as string | null) ?? nowIso,
+          updatedAt: (message.updatedAt as string | null) ?? nowIso,
+          sortOrder: 0,
+          extra: null
+        })
+        .run()
+      const provided: Record<string, unknown> = {}
+      for (const f of MESSAGE_FIELDS) provided[f] = (message[f] ?? null) as unknown
+      this.updateFieldClocksInDb(db, 'message', messageId, provided, rc.timestamp, rc.operationId)
+      this.advanceEntityClock(db, 'message', messageId, rc.timestamp, rc.operationId)
+      if (!retained) {
+        const bundledMem = message.parentMembershipClock as { timestamp: unknown; operationId: unknown } | undefined
+        const memTs = typeof bundledMem?.timestamp === 'number' ? bundledMem.timestamp : rc.timestamp
+        const memOp = typeof bundledMem?.operationId === 'string' ? bundledMem.operationId : rc.operationId
+        this.setMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', messageId, topicId, memTs, memOp)
+      }
+    } else {
+      const fieldClocks = this.getFieldClocksInDb(db, 'message', messageId)
+      const won: Record<string, unknown> = {}
+      const colSet: Record<string, unknown> = {}
+      for (const f of MESSAGE_FIELDS) {
+        const incomingVal: unknown = message[f] ?? null
+        const prior = fieldClocks.get(f)
+        if (!prior || this.compareLww(rc.timestamp, rc.operationId, prior.timestamp, prior.operationId) > 0) {
+          const cur = ((existingMsg as unknown as Record<string, unknown>)[f] ?? null) as unknown
+          if (!this.fieldValuesEqual(incomingVal, cur)) {
+            colSet[f] = incomingVal
+          }
+          won[f] = message[f] ?? null
+        }
+      }
+      if (Object.keys(colSet).length > 0) {
+        db.update(schema.messages).set(colSet).where(eq(schema.messages.id, messageId)).run()
+      }
+      if (Object.keys(won).length > 0) {
+        this.updateFieldClocksInDb(db, 'message', messageId, won, rc.timestamp, rc.operationId)
+      }
+      this.advanceEntityClock(db, 'message', messageId, rc.timestamp, rc.operationId)
+      // Existing membership must match (no reparent); absent membership is
+      // minted from the bundled parentMembershipClock.
+      const mem = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', messageId)
+      if (mem) {
+        if (mem.parentId !== topicId) {
+          throw new SyncTombstoneError(
+            `membership clock conflict for message/${messageId}: retained parent ${mem.parentId} vs incoming ${topicId}`
+          )
+        }
+      } else {
+        const bundledMem = message.parentMembershipClock as { timestamp: unknown; operationId: unknown } | undefined
+        const memTs = typeof bundledMem?.timestamp === 'number' ? bundledMem.timestamp : rc.timestamp
+        const memOp = typeof bundledMem?.operationId === 'string' ? bundledMem.operationId : rc.operationId
+        this.setMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', messageId, topicId, memTs, memOp)
+      }
+    }
+
+    // Block full-state materialization for every bundled (active) block.
+    const BLOCK_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt'] as const
+    const activeSet = new Set<string>(activeBlockIds)
+    for (const b of messageBlocks) {
+      const bid = b.id
+      if (typeof bid !== 'string' || bid.length === 0 || !activeSet.has(bid)) {
+        throw new Error(`message_stable_replace ${op.id}: block binding mismatch for ${String(bid)}`)
+      }
+      // Own-tombstone delete-wins for direct block deletes (same LWW rule as
+      // ordinary upserts): a covering tombstone suppresses this block's
+      // materialization without failing the whole replacement.
+      const ownBlockTomb = this.getTombstone('message_block', bid)
+      if (ownBlockTomb && this.isSuppressedByTombstone(rc.timestamp, rc.operationId, ownBlockTomb)) {
+        logger.warn(`[applyStableReplace] block ${bid} suppressed by own tombstone`)
+        continue
+      }
+      const existingBlk = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, bid)).get()
+      if (existingBlk && existingBlk.messageId !== messageId) {
+        throw new Error(`message_stable_replace ${op.id}: block ${bid} reparent rejected`)
+      }
+      if (!existingBlk) {
+        const retainedBlk = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message_block', bid)
+        if (retainedBlk && retainedBlk.parentId !== messageId) {
+          throw new SyncTombstoneError(
+            `membership clock conflict for message_block/${bid}: retained parent ${retainedBlk.parentId} vs incoming ${messageId}`
+          )
+        }
+        db.insert(schema.messageBlocks)
+          .values({
+            id: bid,
+            messageId,
+            type: (b.type as string | null) ?? null,
+            content: (b.content as string | null) ?? null,
+            status: (b.status as string | null) ?? null,
+            createdAt: (b.createdAt as string | null) ?? nowIso,
+            updatedAt: (b.updatedAt as string | null) ?? nowIso,
+            sortOrder: 0,
+            extra: null
+          })
+          .run()
+        const provided: Record<string, unknown> = {}
+        for (const f of BLOCK_FIELDS) provided[f] = (b[f] ?? null) as unknown
+        this.updateFieldClocksInDb(db, 'message_block', bid, provided, rc.timestamp, rc.operationId)
+        this.advanceEntityClock(db, 'message_block', bid, rc.timestamp, rc.operationId)
+        if (!retainedBlk) {
+          const bundledMem = b.parentMembershipClock as { timestamp: unknown; operationId: unknown } | undefined
+          const memTs = typeof bundledMem?.timestamp === 'number' ? bundledMem.timestamp : rc.timestamp
+          const memOp = typeof bundledMem?.operationId === 'string' ? bundledMem.operationId : rc.operationId
+          this.setMembershipClockInTx(db as unknown as SyncTxExecutor, 'message_block', bid, messageId, memTs, memOp)
+        }
+      } else {
+        const fieldClocks = this.getFieldClocksInDb(db, 'message_block', bid)
+        const won: Record<string, unknown> = {}
+        const colSet: Record<string, unknown> = {}
+        for (const f of BLOCK_FIELDS) {
+          const incomingVal: unknown = b[f] ?? null
+          const prior = fieldClocks.get(f)
+          if (!prior || this.compareLww(rc.timestamp, rc.operationId, prior.timestamp, prior.operationId) > 0) {
+            const cur = ((existingBlk as unknown as Record<string, unknown>)[f] ?? null) as unknown
+            if (!this.fieldValuesEqual(incomingVal, cur)) {
+              colSet[f] = incomingVal
+            }
+            won[f] = b[f] ?? null
+          }
+        }
+        if (Object.keys(colSet).length > 0) {
+          db.update(schema.messageBlocks).set(colSet).where(eq(schema.messageBlocks.id, bid)).run()
+        }
+        if (Object.keys(won).length > 0) {
+          this.updateFieldClocksInDb(db, 'message_block', bid, won, rc.timestamp, rc.operationId)
+        }
+        this.advanceEntityClock(db, 'message_block', bid, rc.timestamp, rc.operationId)
+        const mem = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message_block', bid)
+        if (mem) {
+          if (mem.parentId !== messageId) {
+            throw new SyncTombstoneError(
+              `membership clock conflict for message_block/${bid}: retained parent ${mem.parentId} vs incoming ${messageId}`
+            )
+          }
+        } else {
+          const bundledMem = b.parentMembershipClock as { timestamp: unknown; operationId: unknown } | undefined
+          const memTs = typeof bundledMem?.timestamp === 'number' ? bundledMem.timestamp : rc.timestamp
+          const memOp = typeof bundledMem?.operationId === 'string' ? bundledMem.operationId : rc.operationId
+          this.setMembershipClockInTx(db as unknown as SyncTxExecutor, 'message_block', bid, messageId, memTs, memOp)
+        }
+      }
+    }
+
+    // Retirement (SYNC-DATA-053): for the winning replacement, any
+    // same-message stable-supported block with membershipClock <=
+    // replacementClock omitted from activeBlockIds is retired at
+    // replacementClock: the local row is removed (same visible-projection
+    // contract as hard deletes, so no stale sortOrder survives alongside the
+    // dense rematerialization below) and a tombstone barrier is persisted so
+    // the retirement cannot be resurrected by an old-generation upsert (the
+    // barrier suppresses upserts whose clock is <= replacementClock for
+    // retired ids). Blocks with membershipClock > replacementClock survive
+    // for the SYNC-DATA-035 deterministic suffix. Missing old rows derivable
+    // from the previous register are idempotently tombstoned. No explicit
+    // old-block-ID wire list is used: the active set plus the membership
+    // cutoff uniquely derives retirement. Membership clocks are retained
+    // (deterministic history, same as the delete path).
+    const retireCandidates = new Map<string, { timestamp: number; operationId: string } | null>()
+    const currentBlockRows = db
+      .select()
+      .from(schema.messageBlocks)
+      .where(eq(schema.messageBlocks.messageId, messageId))
+      .all()
+    for (const row of currentBlockRows) {
+      if (activeSet.has(row.id)) continue
+      if (!isStableBlockStatus(row.status)) continue
+      if (isUnsupportedBlockForSync({ type: row.type, overflow: this.parseBlockOverflowExtra(row.extra) })) continue
+      retireCandidates.set(row.id, this.getMembershipClock('message_block', row.id))
+    }
+    if (existingReg) {
+      let prevActive: unknown = null
+      try {
+        prevActive = JSON.parse(existingReg.activeBlockIdsJson)
+      } catch {
+        throw new Error(`message_stable_replace ${op.id}: malformed stored register for ${messageId}`)
+      }
+      if (Array.isArray(prevActive)) {
+        for (const pid of prevActive) {
+          if (typeof pid !== 'string' || activeSet.has(pid) || retireCandidates.has(pid)) continue
+          retireCandidates.set(pid, this.getMembershipClock('message_block', pid))
+        }
+      }
+    }
+    for (const [bid, mem] of retireCandidates) {
+      if (mem && this.compareLww(mem.timestamp, mem.operationId, rc.timestamp, rc.operationId) > 0) continue
+      db.delete(schema.messageBlocks).where(eq(schema.messageBlocks.id, bid)).run()
+      this.setTombstoneInDb(db, 'message_block', bid, rc.timestamp, rc.operationId)
+    }
+
+    // Winning register LWW persist (atomic inside this transaction).
+    this.writeStableReplaceRegister(db, messageId, rc.timestamp, rc.operationId, activeJson, winnerHash)
+
+    // Both winning frames under current frame rules (SYNC-DATA-035/036 LWW
+    // and coverage; a losing bundled frame never overwrites a newer winning
+    // frame). Accepted persists advance the frame high-water mark in the same
+    // transaction via persistParentFrameInTx, preventing future frame clock
+    // regression.
+    const topicChildren = topicFrame.orderedChildIds as unknown[]
+    const messageChildren = messageFrame.orderedChildIds as unknown[]
+    if (!Array.isArray(topicChildren) || !Array.isArray(messageChildren)) {
+      throw new Error(`message_stable_replace ${op.id}: bundled frame children incomplete`)
+    }
+    const frameClock = { timestamp: rc.timestamp, operationId: rc.operationId }
+    const topicParentId = topicFrame.parentId
+    const messageParentId = messageFrame.parentId
+    if (typeof topicParentId !== 'string' || typeof messageParentId !== 'string') {
+      throw new Error(`message_stable_replace ${op.id}: bundled frame parent incomplete`)
+    }
+    this.applyBundledTopicFrame(op, topicParentId, [...(topicChildren as string[])], frameClock)
+    this.applyBundledMessageFrame(op, messageParentId, [...(messageChildren as string[])], frameClock)
+    return true
+  }
+
+  /**
+   * Conditional entity-clock advance (LWW): advances only when the incoming
+   * clock wins the stored clock. Shared by stable-replace materialization so
+   * ordinary later edits keep their existing per-field LWW standing.
+   */
+  private advanceEntityClock(
+    db: BetterSQLite3Database<typeof schema>,
+    entityType: SyncOperation['entityType'],
+    entityId: string,
+    timestamp: number,
+    operationId: string
+  ): void {
+    const clockRow = db
+      .select()
+      .from(schema.syncEntityClock)
+      .where(eq(schema.syncEntityClock.entityType, entityType))
+      .all()
+      .find((r) => r.entityId === entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+    if (clockRow && this.compareLww(timestamp, operationId, clockRow.timestamp, clockRow.operationId) <= 0) return
+    db.insert(schema.syncEntityClock)
+      .values({ entityType, entityId, timestamp, operationId })
+      .onConflictDoUpdate({
+        target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+        set: { timestamp, operationId }
+      })
+      .run()
   }
 
   /**
@@ -5623,6 +6505,9 @@ export class SyncService {
       } catch {}
       try {
         db.delete(schema.syncFrameHighWater).run()
+      } catch {}
+      try {
+        db.delete(schema.syncStableReplaceRegister).run()
       } catch {}
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).run()
       db.delete(schema.syncState).where(eq(schema.syncState.key, STATE_CHANNEL_KEY)).run()
