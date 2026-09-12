@@ -40,7 +40,8 @@ import {
   SCOPE,
   validateEnvelope,
   verifyEnvelopeDigest,
-  WIRE_VERSION
+  WIRE_VERSION,
+  WIRE_VERSION_V2
 } from '@shared/sync'
 import { eq } from 'drizzle-orm'
 
@@ -255,7 +256,7 @@ describe('SyncClient.publishBaseline', () => {
   it('invalid envelope never reaches transport', async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{}' }) as never)
     vi.stubGlobal('fetch', fetchMock)
-    const bad = { wireVersion: WIRE_VERSION, channelId: CHANNEL } as never
+    const bad = { wireVersion: WIRE_VERSION_V2, channelId: CHANNEL } as never
     await expect(syncClient.publishBaseline(ENDPOINT, undefined, bad, CODE, SECRET)).rejects.toThrow(
       /baseline publish envelope invalid/
     )
@@ -321,7 +322,7 @@ describe('publishBaseline barrier', () => {
       payload: never
     }
     expect(Object.keys(env)).toEqual(['wireVersion', 'channelId', 'watermark', 'digestScheme', 'digest', 'payload'])
-    expect(env.wireVersion).toBe(WIRE_VERSION)
+    expect(env.wireVersion).toBe(WIRE_VERSION_V2)
     expect(env.channelId).toBe(CHANNEL)
     expect(env.watermark).toBe(CURSOR_N)
     expect(env.digestScheme).toBe(DIGEST_SCHEME)

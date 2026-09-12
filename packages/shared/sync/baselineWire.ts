@@ -36,6 +36,13 @@ export const SCOPE = 'chat-core-baseline-v1:topic-message-stable-block-order-v1'
 export const DIGEST_SCHEME = 'jcs-sha256-v1' as const
 export const COMPLETENESS_COMPLETE = 'complete' as const
 
+// Baseline v2 literals (SYNC-DATA-056 / §10B): outer wire + payload triple +
+// scope. Order-frame family stays parent-order-frame-v1 (object unchanged).
+export const WIRE_VERSION_V2 = 'sync-baseline-wire-v2' as const
+export const PAYLOAD_SCHEMA_V2 = 'chat-core-baseline-v2' as const
+export const INVENTORY_VERSION_V2 = 'topic-message-stable-block-order-v2' as const
+export const SCOPE_V2 = 'chat-core-baseline-v2:topic-message-stable-block-order-v2' as const
+
 export const MAX_SAFE_INT = Number.MAX_SAFE_INTEGER
 export const OPERATION_ID_MAX_LENGTH = 256
 
@@ -174,6 +181,60 @@ export interface SyncEnvelope {
   digest: string
   payload: SyncPayload
 }
+
+// Baseline v2 types (SYNC-DATA-056 / §10B): same v1 content plus a
+// strictly-closed replacementRegisters array. Each entry carries exactly the
+// locked keys {messageId, replacementClock, activeBlockIds} with
+// activeBlockIds in business order. The manifest gains replacementCount.
+export interface ReplacementRegister {
+  messageId: string
+  replacementClock: SyncClock
+  activeBlockIds: string[]
+}
+
+export interface ManifestV2 {
+  payloadSchema: typeof PAYLOAD_SCHEMA_V2
+  inventoryVersion: typeof INVENTORY_VERSION_V2
+  orderFrameVersion: typeof ORDER_FRAME_VERSION
+  scope: typeof SCOPE_V2
+  liveCounts: { topic: number; message: number; messageBlock: number }
+  tombstoneCounts: { topic: number; message: number; messageBlock: number }
+  frameCounts: { topicMessage: number; messageBlock: number }
+  replacementCount: number
+  completeness: typeof COMPLETENESS_COMPLETE
+}
+
+export interface SyncPayloadV2 {
+  payloadSchema: typeof PAYLOAD_SCHEMA_V2
+  inventoryVersion: typeof INVENTORY_VERSION_V2
+  orderFrameVersion: typeof ORDER_FRAME_VERSION
+  scope: typeof SCOPE_V2
+  topics: TopicEntity[]
+  messages: MessageEntity[]
+  messageBlocks: MessageBlockEntity[]
+  tombstones: Tombstone[]
+  orderFrames: OrderFrame[]
+  replacementRegisters: ReplacementRegister[]
+  manifest: ManifestV2
+}
+
+export interface SyncEnvelopeV2 {
+  wireVersion: typeof WIRE_VERSION_V2
+  channelId: string
+  watermark: number
+  digestScheme: typeof DIGEST_SCHEME
+  digest: string
+  payload: SyncPayloadV2
+}
+
+export type SyncPayloadAny = SyncPayload | SyncPayloadV2
+export type SyncEnvelopeAny = SyncEnvelope | SyncEnvelopeV2
+export type ValidatedSyncPayloadAny =
+  | ValidatedSyncPayload
+  | (SyncPayloadV2 & { readonly [ValidatedPayloadBrand]: true })
+export type ValidatedSyncEnvelopeAny =
+  | ValidatedSyncEnvelope
+  | (SyncEnvelopeV2 & { readonly [ValidatedEnvelopeBrand]: true })
 
 // Branded validated types: ensures only strictly validated values are used for digest.
 // The brand is compile-time only; runtime validation is still enforced in digest helpers.
@@ -1047,6 +1108,239 @@ function validateManifestRecompute(payload: SyncPayload, path: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Baseline v2: replacement registers (SYNC-DATA-056 / §10B)
+// ---------------------------------------------------------------------------
+
+const REPLACEMENT_REGISTER_KEYS = new Set<string>(['messageId', 'replacementClock', 'activeBlockIds'])
+const PAYLOAD_V2_KEYS = new Set<string>([
+  'payloadSchema',
+  'inventoryVersion',
+  'orderFrameVersion',
+  'scope',
+  'topics',
+  'messages',
+  'messageBlocks',
+  'tombstones',
+  'orderFrames',
+  'replacementRegisters',
+  'manifest'
+])
+const MANIFEST_V2_KEYS = new Set<string>([
+  'payloadSchema',
+  'inventoryVersion',
+  'orderFrameVersion',
+  'scope',
+  'liveCounts',
+  'tombstoneCounts',
+  'frameCounts',
+  'replacementCount',
+  'completeness'
+])
+
+export function validateReplacementRegister(value: unknown, path: string): void {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, REPLACEMENT_REGISTER_KEYS, path)
+  assertNonEmptyValidUnicodeScalarString(obj.messageId, `${path}.messageId`)
+  validateClock(obj.replacementClock, `${path}.replacementClock`, false)
+  const arr = assertPlainArray(obj.activeBlockIds, `${path}.activeBlockIds`)
+  const seen = new Set<string>()
+  for (let i = 0; i < arr.length; i++) {
+    const id = arr[i]
+    const p = `${path}.activeBlockIds[${i}]`
+    assertNonEmptyValidUnicodeScalarString(id, p)
+    if (seen.has(id as string)) throw new ValidationError(`duplicate activeBlockIds "${id}"`, p)
+    seen.add(id as string)
+  }
+}
+
+function validateManifestV2(value: unknown, path: string): void {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, MANIFEST_V2_KEYS, path)
+  if (obj.payloadSchema !== PAYLOAD_SCHEMA_V2)
+    throw new ValidationError(`payloadSchema must be "${PAYLOAD_SCHEMA_V2}"`, `${path}.payloadSchema`)
+  if (obj.inventoryVersion !== INVENTORY_VERSION_V2)
+    throw new ValidationError(`inventoryVersion must be "${INVENTORY_VERSION_V2}"`, `${path}.inventoryVersion`)
+  if (obj.orderFrameVersion !== ORDER_FRAME_VERSION)
+    throw new ValidationError(`orderFrameVersion must be "${ORDER_FRAME_VERSION}"`, `${path}.orderFrameVersion`)
+  if (obj.scope !== SCOPE_V2) throw new ValidationError(`scope must be "${SCOPE_V2}"`, `${path}.scope`)
+  const liveCounts = assertPlainObject(obj.liveCounts, `${path}.liveCounts`)
+  assertExactKeys(liveCounts, LIVE_COUNTS_KEYS, `${path}.liveCounts`)
+  for (const k of LIVE_COUNTS_KEYS) assertSafeNonNegativeInt(liveCounts[k], `${path}.liveCounts.${k}`)
+  const tCounts = assertPlainObject(obj.tombstoneCounts, `${path}.tombstoneCounts`)
+  assertExactKeys(tCounts, TOMBSTONE_COUNTS_KEYS, `${path}.tombstoneCounts`)
+  for (const k of TOMBSTONE_COUNTS_KEYS) assertSafeNonNegativeInt(tCounts[k], `${path}.tombstoneCounts.${k}`)
+  const fCounts = assertPlainObject(obj.frameCounts, `${path}.frameCounts`)
+  assertExactKeys(fCounts, FRAME_COUNTS_KEYS, `${path}.frameCounts`)
+  for (const k of FRAME_COUNTS_KEYS) assertSafeNonNegativeInt(fCounts[k], `${path}.frameCounts.${k}`)
+  assertSafeNonNegativeInt(obj.replacementCount, `${path}.replacementCount`)
+  if (obj.completeness !== COMPLETENESS_COMPLETE)
+    throw new ValidationError('completeness must be "complete"', `${path}.completeness`)
+}
+
+function validatePayloadV2Structure(value: unknown, path: string): SyncPayloadV2 {
+  const obj = assertPlainObject(value, path)
+  assertExactKeys(obj, PAYLOAD_V2_KEYS, path)
+  if (obj.payloadSchema !== PAYLOAD_SCHEMA_V2)
+    throw new ValidationError(`payloadSchema must be "${PAYLOAD_SCHEMA_V2}"`, `${path}.payloadSchema`)
+  if (obj.inventoryVersion !== INVENTORY_VERSION_V2)
+    throw new ValidationError(`inventoryVersion must be "${INVENTORY_VERSION_V2}"`, `${path}.inventoryVersion`)
+  if (obj.orderFrameVersion !== ORDER_FRAME_VERSION)
+    throw new ValidationError(`orderFrameVersion must be "${ORDER_FRAME_VERSION}"`, `${path}.orderFrameVersion`)
+  if (obj.scope !== SCOPE_V2) throw new ValidationError(`scope must be "${SCOPE_V2}"`, `${path}.scope`)
+
+  const topics = assertPlainArray(obj.topics, `${path}.topics`)
+  topics.forEach((t, idx) => validateTopic(t, `${path}.topics[${idx}]`))
+  const messages = assertPlainArray(obj.messages, `${path}.messages`)
+  messages.forEach((m, idx) => validateMessage(m, `${path}.messages[${idx}]`))
+  const blocks = assertPlainArray(obj.messageBlocks, `${path}.messageBlocks`)
+  blocks.forEach((b, idx) => validateMessageBlock(b, `${path}.messageBlocks[${idx}]`))
+  const tombstones = assertPlainArray(obj.tombstones, `${path}.tombstones`)
+  tombstones.forEach((t, idx) => validateTombstone(t, `${path}.tombstones[${idx}]`))
+  const frames = assertPlainArray(obj.orderFrames, `${path}.orderFrames`)
+  frames.forEach((f, idx) => validateOrderFrame(f, `${path}.orderFrames[${idx}]`))
+  const registers = assertPlainArray(obj.replacementRegisters, `${path}.replacementRegisters`)
+  registers.forEach((r, idx) => validateReplacementRegister(r, `${path}.replacementRegisters[${idx}]`))
+
+  validateManifestV2(obj.manifest, `${path}.manifest`)
+
+  assertStrictlySortedByUtf8(topics as TopicEntity[], (v) => v.id, `${path}.topics`)
+  assertStrictlySortedByUtf8(messages as MessageEntity[], (v) => v.id, `${path}.messages`)
+  assertStrictlySortedByUtf8(blocks as MessageBlockEntity[], (v) => v.id, `${path}.messageBlocks`)
+  // Tombstone + frame ordering rules are shared with v1 (rank + lex).
+  const tombRank = (t: Tombstone): number => {
+    if (t.entityType === 'topic') return 0
+    if (t.entityType === 'message') return 1
+    return 2
+  }
+  for (let i = 1; i < tombstones.length; i++) {
+    const prev = tombstones[i - 1] as Tombstone
+    const cur = tombstones[i] as Tombstone
+    const pr = tombRank(prev)
+    const cr = tombRank(cur)
+    if (cr < pr) throw new ValidationError('tombstones not sorted by type rank', `${path}.tombstones`)
+    if (cr === pr) {
+      const cmp = compareUtf8ByteLex(prev.entityId, cur.entityId)
+      if (cmp >= 0) {
+        if (cmp === 0)
+          throw new ValidationError(`duplicate tombstone ${cur.entityType}:${cur.entityId}`, `${path}.tombstones[${i}]`)
+        throw new ValidationError('tombstones not sorted by entityId', `${path}.tombstones`)
+      }
+    }
+  }
+  const frameRank = (f: OrderFrame): number => (f.kind === 'topicMessage' ? 0 : 1)
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1] as OrderFrame
+    const cur = frames[i] as OrderFrame
+    const pr = frameRank(prev)
+    const cr = frameRank(cur)
+    if (cr < pr) throw new ValidationError('orderFrames not sorted by kind rank', `${path}.orderFrames`)
+    if (cr === pr) {
+      const cmp = compareUtf8ByteLex(prev.parentId, cur.parentId)
+      if (cmp >= 0) {
+        if (cmp === 0)
+          throw new ValidationError(`duplicate frame ${cur.kind}:${cur.parentId}`, `${path}.orderFrames[${i}]`)
+        throw new ValidationError('orderFrames not sorted by parentId', `${path}.orderFrames`)
+      }
+    }
+  }
+  // replacementRegisters: messageId UTF-8 byte lex strictly increasing, duplicates fail-closed.
+  assertStrictlySortedByUtf8(registers as ReplacementRegister[], (v) => v.messageId, `${path}.replacementRegisters`)
+
+  // Shared v1 closure/frame-coverage rules apply unchanged to the v1 content subset.
+  validatePayloadClosure(obj as unknown as SyncPayload, path)
+
+  // Manifest recompute: v1 counts plus replacementCount == registers.length.
+  validateManifestRecompute(obj as unknown as SyncPayload, path)
+  const manifest = obj.manifest as ManifestV2
+  if (manifest.replacementCount !== registers.length) {
+    throw new ValidationError(
+      `manifest replacementCount mismatch: expected ${registers.length} got ${manifest.replacementCount}`,
+      `${path}.manifest.replacementCount`
+    )
+  }
+  return obj as unknown as SyncPayloadV2
+}
+
+function isV2PayloadLike(value: unknown): boolean {
+  if (!isPlainObject(value)) return false
+  const obj = value as Record<string, unknown>
+  return obj.payloadSchema === PAYLOAD_SCHEMA_V2 || obj.inventoryVersion === INVENTORY_VERSION_V2
+}
+
+export function isV2EnvelopeLike(value: unknown): boolean {
+  if (!isPlainObject(value)) return false
+  return (value as Record<string, unknown>).wireVersion === WIRE_VERSION_V2
+}
+
+export function validatePayloadV1(value: unknown): ValidatedSyncPayload {
+  return validatePayloadStructure(value, 'payload') as ValidatedSyncPayload
+}
+
+export function validatePayloadV2(value: unknown): SyncPayloadV2 & { readonly [ValidatedPayloadBrand]: true } {
+  return validatePayloadV2Structure(value, 'payload') as SyncPayloadV2 & {
+    readonly [ValidatedPayloadBrand]: true
+  }
+}
+
+export function validatePayloadAny(value: unknown): ValidatedSyncPayloadAny {
+  if (isV2PayloadLike(value)) return validatePayloadV2(value) as ValidatedSyncPayloadAny
+  return validatePayloadStructure(value, 'payload') as ValidatedSyncPayload
+}
+
+export function validateEnvelopeV1(value: unknown): ValidatedSyncEnvelope {
+  const obj = assertPlainObject(value, '$')
+  assertExactKeys(obj, ENVELOPE_KEYS, '$')
+  if (obj.wireVersion !== WIRE_VERSION)
+    throw new ValidationError(`wireVersion must be "${WIRE_VERSION}"`, '$.wireVersion')
+  assertNonEmptyValidUnicodeScalarString(obj.channelId, '$.channelId')
+  assertSafeNonNegativeInt(obj.watermark, '$.watermark')
+  if (obj.digestScheme !== DIGEST_SCHEME)
+    throw new ValidationError(`digestScheme must be "${DIGEST_SCHEME}"`, '$.digestScheme')
+  if (typeof obj.digest !== 'string' || !/^[0-9a-f]{64}$/.test(obj.digest)) {
+    throw new ValidationError('digest must be lowercase 64hex', '$.digest')
+  }
+  const payload = validatePayloadStructure(obj.payload, '$.payload')
+  return {
+    wireVersion: obj.wireVersion as typeof WIRE_VERSION,
+    channelId: obj.channelId as string,
+    watermark: obj.watermark as number,
+    digestScheme: obj.digestScheme as typeof DIGEST_SCHEME,
+    digest: obj.digest,
+    payload
+  } as ValidatedSyncEnvelope
+}
+
+export function validateEnvelopeV2(value: unknown): SyncEnvelopeV2 & { readonly [ValidatedEnvelopeBrand]: true } {
+  const obj = assertPlainObject(value, '$')
+  assertExactKeys(obj, ENVELOPE_KEYS, '$')
+  if (obj.wireVersion !== WIRE_VERSION_V2)
+    throw new ValidationError(`wireVersion must be "${WIRE_VERSION_V2}"`, '$.wireVersion')
+  assertNonEmptyValidUnicodeScalarString(obj.channelId, '$.channelId')
+  assertSafeNonNegativeInt(obj.watermark, '$.watermark')
+  if (obj.digestScheme !== DIGEST_SCHEME)
+    throw new ValidationError(`digestScheme must be "${DIGEST_SCHEME}"`, '$.digestScheme')
+  if (typeof obj.digest !== 'string' || !/^[0-9a-f]{64}$/.test(obj.digest)) {
+    throw new ValidationError('digest must be lowercase 64hex', '$.digest')
+  }
+  const payload = validatePayloadV2Structure(obj.payload, '$.payload')
+  return {
+    wireVersion: obj.wireVersion as typeof WIRE_VERSION_V2,
+    channelId: obj.channelId as string,
+    watermark: obj.watermark as number,
+    digestScheme: obj.digestScheme as typeof DIGEST_SCHEME,
+    digest: obj.digest,
+    payload
+  } as SyncEnvelopeV2 & { readonly [ValidatedEnvelopeBrand]: true }
+}
+
+export function validateEnvelopeAny(value: unknown): ValidatedSyncEnvelopeAny {
+  if (isV2EnvelopeLike(value)) return validateEnvelopeV2(value) as ValidatedSyncEnvelopeAny
+  // Version-dispatched: unknown wireVersion fails closed inside the v1 path
+  // (which strictly requires the v1 literal); v2 is handled above.
+  return validateEnvelopeV1(value)
+}
+
+// ---------------------------------------------------------------------------
 // Strict JSON parse API (duplicate keys + JSON.parse syntax)
 // Protocol notes:
 // - JSON grammar is fully delegated to JSON.parse (spec-compliant). Trailing
@@ -1118,41 +1412,35 @@ function scanForIllegalScalars(value: unknown, path: string): void {
 // High-level validators / parsers
 // ---------------------------------------------------------------------------
 
-export function validatePayload(value: unknown): ValidatedSyncPayload {
-  return validatePayloadStructure(value, 'payload') as ValidatedSyncPayload
+export function validatePayload(value: unknown): ValidatedSyncPayloadAny {
+  // Version-dispatched: v1 strict semantics preserved; v2 validated by its own
+  // strict literals/types. New callers may use validatePayloadV1/V2/Any explicitly.
+  return validatePayloadAny(value)
 }
 
-export function validateEnvelope(value: unknown): ValidatedSyncEnvelope {
-  const obj = assertPlainObject(value, '$')
-  assertExactKeys(obj, ENVELOPE_KEYS, '$')
-  if (obj.wireVersion !== WIRE_VERSION)
-    throw new ValidationError(`wireVersion must be "${WIRE_VERSION}"`, '$.wireVersion')
-  assertNonEmptyValidUnicodeScalarString(obj.channelId, '$.channelId')
-  assertSafeNonNegativeInt(obj.watermark, '$.watermark')
-  if (obj.digestScheme !== DIGEST_SCHEME)
-    throw new ValidationError(`digestScheme must be "${DIGEST_SCHEME}"`, '$.digestScheme')
-  if (typeof obj.digest !== 'string' || !/^[0-9a-f]{64}$/.test(obj.digest)) {
-    throw new ValidationError('digest must be lowercase 64hex', '$.digest')
-  }
-  const payload = validatePayloadStructure(obj.payload, '$.payload')
-  return {
-    wireVersion: obj.wireVersion as typeof WIRE_VERSION,
-    channelId: obj.channelId as string,
-    watermark: obj.watermark as number,
-    digestScheme: obj.digestScheme as typeof DIGEST_SCHEME,
-    digest: obj.digest,
-    payload
-  } as ValidatedSyncEnvelope
+export function validateEnvelope(value: unknown): ValidatedSyncEnvelopeAny {
+  // Version-dispatched: v1 current row stays valid; v2 validated strictly.
+  return validateEnvelopeAny(value)
 }
 
-export function parseEnvelopeJson(json: string): ValidatedSyncEnvelope {
+export function parseEnvelopeJson(json: string): ValidatedSyncEnvelopeAny {
   const parsed = parseStrictJson(json)
   return validateEnvelope(parsed)
 }
 
-export function parsePayloadJson(json: string): ValidatedSyncPayload {
+export function parsePayloadJson(json: string): ValidatedSyncPayloadAny {
   const parsed = parseStrictJson(json)
   return validatePayload(parsed)
+}
+
+export function parseEnvelopeJsonAny(json: string): ValidatedSyncEnvelopeAny {
+  const parsed = parseStrictJson(json)
+  return validateEnvelopeAny(parsed)
+}
+
+export function parsePayloadJsonAny(json: string): ValidatedSyncPayloadAny {
+  const parsed = parseStrictJson(json)
+  return validatePayloadAny(parsed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,10 +1449,11 @@ export function parsePayloadJson(json: string): ValidatedSyncPayload {
 // canonical UTF-8 bytes (TextEncoder) and must return lowercase 64hex.
 // ---------------------------------------------------------------------------
 
-export function canonicalizePayload(payload: SyncPayload): string {
+export function canonicalizePayload(payload: SyncPayloadAny): string {
   // Strict validation before canonicalize ensures lone-surrogate gap in
   // canonicalize@2.1.0 is unreachable (all strings are valid scalars).
-  validatePayload(payload)
+  // Digest still jcs-sha256-v1 covering only the payload object (both versions).
+  validatePayloadAny(payload)
   const canonical = canonicalize(payload)
   if (typeof canonical !== 'string') {
     throw new ValidationError('payload not canonicalizable (non-I-JSON)', 'payload')
@@ -1172,7 +1461,7 @@ export function canonicalizePayload(payload: SyncPayload): string {
   return canonical
 }
 
-export function computeSyncDigest(payload: SyncPayload, hashHex: (canonicalUtf8: Uint8Array) => string): string {
+export function computeSyncDigest(payload: SyncPayloadAny, hashHex: (canonicalUtf8: Uint8Array) => string): string {
   const canonical = canonicalizePayload(payload)
   const bytes = new TextEncoder().encode(canonical)
   const digest = hashHex(bytes)
@@ -1183,7 +1472,7 @@ export function computeSyncDigest(payload: SyncPayload, hashHex: (canonicalUtf8:
 }
 
 export function verifySyncDigest(
-  payload: SyncPayload,
+  payload: SyncPayloadAny,
   expectedDigest: string,
   hashHex: (canonicalUtf8: Uint8Array) => string
 ): boolean {
@@ -1196,22 +1485,25 @@ export function verifySyncDigest(
   return actual === expectedDigest
 }
 
-export function verifyEnvelopeDigest(envelope: SyncEnvelope, hashHex: (canonicalUtf8: Uint8Array) => string): boolean {
-  const validated = validateEnvelope(envelope)
-  const canonical = canonicalizePayload(validated.payload)
+export function verifyEnvelopeDigest(
+  envelope: SyncEnvelopeAny,
+  hashHex: (canonicalUtf8: Uint8Array) => string
+): boolean {
+  const validated = validateEnvelopeAny(envelope)
+  const canonical = canonicalizePayload(validated.payload as SyncPayloadAny)
   const bytes = new TextEncoder().encode(canonical)
   const computed = hashHex(bytes)
   if (typeof computed !== 'string' || !/^[0-9a-f]{64}$/.test(computed)) {
     throw new ValidationError('hashHex must return lowercase 64hex', 'digest')
   }
-  return computed === validated.digest
+  return computed === (validated as { digest: string }).digest
 }
 
 // ---------------------------------------------------------------------------
 // Type guards
 // ---------------------------------------------------------------------------
 
-export function isSyncPayload(value: unknown): value is SyncPayload {
+export function isSyncPayload(value: unknown): value is SyncPayloadAny {
   try {
     validatePayload(value)
     return true
@@ -1220,9 +1512,27 @@ export function isSyncPayload(value: unknown): value is SyncPayload {
   }
 }
 
-export function isSyncEnvelope(value: unknown): value is SyncEnvelope {
+export function isSyncEnvelope(value: unknown): value is SyncEnvelopeAny {
   try {
     validateEnvelope(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function isSyncPayloadV1(value: unknown): value is SyncPayload {
+  try {
+    validatePayloadV1(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function isSyncPayloadV2(value: unknown): value is SyncPayloadV2 {
+  try {
+    validatePayloadV2(value)
     return true
   } catch {
     return false

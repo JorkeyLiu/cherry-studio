@@ -257,3 +257,48 @@ export function validateStableReplacePayloadStrict(op: {
 export function isStableReplaceOperation(op: { op?: unknown }): boolean {
   return (op as { op?: unknown }).op === MESSAGE_STABLE_REPLACE_OP
 }
+
+// ---------------------------------------------------------------------------
+// Baseline-register sentinel (SYNC-DATA-056 follow-up).
+//
+// The wire `replacementRegisters` carry only the three locked keys
+// {messageId, replacementClock, activeBlockIds} (SYNC-DATA-051 wire register
+// is exactly these three keys). A baseline bootstrap therefore cannot
+// reconstruct the full bundled-winner hash (`payload_hash` is a local
+// auxiliary column, existing TEXT NOT NULL carries the sentinel, no
+// migration). The bootstrap writes this source-prefixed sentinel instead of
+// impersonating a winner hash; the first same-clock / same-active valid
+// `message_stable_replace` op upgrades it to the real bundled-winner hash.
+//
+// The prefix contains non-hex characters (`-`, `:` and letters beyond `f`),
+// so a sentinel is unmistakable next to a normal lowercase 64hex SHA-256
+// winner hash. Content deterministically covers the three locked keys with
+// fixed key order; no crypto import (JSON-only module).
+// ---------------------------------------------------------------------------
+
+/** Source prefix for baseline-derived register markers. Single owner of the literal. */
+export const BASELINE_REGISTER_SENTINEL_PREFIX = 'baseline-register-v1:' as const
+
+/**
+ * Encode a baseline-register sentinel deterministically covering the three
+ * locked wire keys. Fixed key order; `activeBlockIds` order is significant
+ * (business order) and preserved as-is.
+ */
+export function encodeBaselineRegisterSentinel(
+  messageId: string,
+  timestamp: number,
+  operationId: string,
+  activeBlockIds: string[]
+): string {
+  const body = JSON.stringify({
+    activeBlockIds,
+    messageId,
+    replacementClock: { operationId, timestamp }
+  })
+  return `${BASELINE_REGISTER_SENTINEL_PREFIX}${body}`
+}
+
+/** True when the stored `payload_hash` is a baseline-register sentinel (not a real winner hash). */
+export function isBaselineRegisterSentinel(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith(BASELINE_REGISTER_SENTINEL_PREFIX)
+}

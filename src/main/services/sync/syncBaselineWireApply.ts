@@ -14,7 +14,7 @@
 
 import { createHash } from 'node:crypto'
 
-import { type SyncEnvelope, validateEnvelope, ValidationError, verifyEnvelopeDigest } from '@shared/sync'
+import { type SyncEnvelopeAny, validateEnvelope, ValidationError, verifyEnvelopeDigest } from '@shared/sync'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import type * as schema from '../chatDb/schema'
@@ -49,9 +49,9 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
   watermark: number
   channelId: string
 } {
-  let envelope: SyncEnvelope
+  let envelope: SyncEnvelopeAny
   try {
-    envelope = validateEnvelope(envelopeUnknown)
+    envelope = validateEnvelope(envelopeUnknown) as SyncEnvelopeAny
   } catch (e) {
     if (e instanceof ValidationError) fail(`wire baseline envelope invalid: ${e.message}`, e)
     throw e instanceof Error ? e : new Error(String(e))
@@ -159,7 +159,30 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
     frameClock: { timestamp: f.frameClock.timestamp, operationId: f.frameClock.operationId }
   }))
 
-  return { input: { entities, tombstones, orderFrames }, watermark: envelope.watermark, channelId: envelope.channelId }
+  // Baseline v2 registers ride the wire with exactly the locked three keys;
+  // v1 payloads carry none. No wire sortOrder, no fabricated diagnostics.
+  const rawRegisters = (payload as { replacementRegisters?: unknown }).replacementRegisters
+  const replacementRegisters =
+    rawRegisters === undefined
+      ? undefined
+      : (
+          rawRegisters as Array<{
+            messageId: string
+            replacementClock: { timestamp: number; operationId: string }
+            activeBlockIds: string[]
+          }>
+        ).map((r) => ({
+          messageId: r.messageId,
+          timestamp: r.replacementClock.timestamp,
+          operationId: r.replacementClock.operationId,
+          activeBlockIds: [...r.activeBlockIds]
+        }))
+
+  const input: ValidatedBaselineMergeInput =
+    replacementRegisters === undefined
+      ? { entities, tombstones, orderFrames }
+      : { entities, tombstones, orderFrames, replacementRegisters }
+  return { input, watermark: envelope.watermark, channelId: envelope.channelId }
 }
 
 /**

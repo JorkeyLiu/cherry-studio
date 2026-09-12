@@ -22,11 +22,12 @@ import { createHash } from 'node:crypto'
 
 import {
   DIGEST_SCHEME,
-  type SyncEnvelope,
+  type SyncEnvelopeAny,
+  type SyncEnvelopeV2,
   validateEnvelope,
   ValidationError,
   verifyEnvelopeDigest,
-  WIRE_VERSION
+  WIRE_VERSION_V2
 } from '@shared/sync'
 
 import type { LocalSyncBaselineCandidate } from './syncBaseline'
@@ -107,7 +108,7 @@ export function buildPublishEnvelope(
   candidate: LocalSyncBaselineCandidate,
   channelId: string,
   watermarkN: number
-): { envelope: SyncEnvelope; digest: string } {
+): { envelope: SyncEnvelopeV2; digest: string } {
   if (typeof channelId !== 'string' || channelId.length === 0) {
     fail('publish blocked: channel binding missing')
   }
@@ -128,14 +129,17 @@ export function buildPublishEnvelope(
   }
   const digest = computeWirePayloadDigest(payload)
   // Locked outer key order: wireVersion/channelId/watermark/digestScheme/digest/payload.
+  // Baseline v2 (SYNC-DATA-056): publish always emits sync-baseline-wire-v2.
   const envelope = {
-    wireVersion: WIRE_VERSION,
+    wireVersion: WIRE_VERSION_V2,
     channelId,
     watermark: watermarkN,
     digestScheme: DIGEST_SCHEME,
     digest,
     payload
-  } as SyncEnvelope
+  } as SyncEnvelopeV2
+  // Keep the Any alias usable for transport signatures without reopening v1 publish.
+  void (null as unknown as SyncEnvelopeAny)
   try {
     validateEnvelope(envelope)
   } catch (e) {

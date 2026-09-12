@@ -1,5 +1,5 @@
 import type {
-  SyncEnvelope,
+  SyncEnvelopeAny,
   SyncIncomingPairRequest,
   SyncOutgoingPairRequest,
   SyncPullResponse,
@@ -49,10 +49,10 @@ export interface SyncPairStateResponse {
   incoming: SyncIncomingPairRequest[]
 }
 
-export type BaselineFetchResult = { found: false } | { found: true; envelope: SyncEnvelope; rawText: string }
+export type BaselineFetchResult = { found: false } | { found: true; envelope: SyncEnvelopeAny; rawText: string }
 
 export interface BaselinePublishResult {
-  envelope: SyncEnvelope
+  envelope: SyncEnvelopeAny
   rawText: string
 }
 
@@ -356,9 +356,9 @@ export class SyncClient {
         throw this.relayFailure('baseline fetch', res.status, text)
       }
       const rawText = await res.text()
-      let envelope: SyncEnvelope
+      let envelope: SyncEnvelopeAny
       try {
-        envelope = parseEnvelopeJson(rawText)
+        envelope = parseEnvelopeJson(rawText) as SyncEnvelopeAny
       } catch (e) {
         throw new Error(`baseline fetch response malformed: ${e instanceof Error ? e.message : String(e)}`)
       }
@@ -394,7 +394,7 @@ export class SyncClient {
   async publishBaseline(
     endpoint: string,
     token: string | undefined,
-    envelope: SyncEnvelope,
+    envelope: SyncEnvelopeAny,
     deviceCode: string,
     deviceSecret: string,
     externalSignal?: AbortSignal
@@ -438,9 +438,9 @@ export class SyncClient {
         throw this.relayFailure('baseline publish', res.status, text)
       }
       const rawText = await res.text()
-      let returned: SyncEnvelope
+      let returned: SyncEnvelopeAny
       try {
-        returned = parseEnvelopeJson(rawText)
+        returned = parseEnvelopeJson(rawText) as SyncEnvelopeAny
       } catch (e) {
         throw new Error(`baseline publish response malformed: ${e instanceof Error ? e.message : String(e)}`)
       }

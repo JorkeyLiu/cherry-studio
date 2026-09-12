@@ -26,6 +26,7 @@
  */
 
 import {
+  encodeBaselineRegisterSentinel,
   isStableBlockStatus,
   isStableMessageStatus,
   isUnsupportedBlockForSync,
@@ -1407,6 +1408,18 @@ export interface ValidatedBaselineMergeInput {
   entities: LocalSyncBaselineEntity[]
   tombstones: LocalSyncBaselineTombstone[]
   orderFrames: LocalSyncBaselineOrderFrame[]
+  /**
+   * Baseline v2 replacement registers (SYNC-DATA-056). Absent/empty for v1.
+   * Merged atomically in the same transaction with the existing
+   * replacementClock LWW: higher wins, equal-clock exact replay idempotent,
+   * equal-clock semantic divergence fail-closed with whole-transaction rollback.
+   */
+  replacementRegisters?: Array<{
+    messageId: string
+    timestamp: number
+    operationId: string
+    activeBlockIds: string[]
+  }>
 }
 
 /**
@@ -2901,7 +2914,125 @@ export function mergeValidatedBaselineInTx(
     }
   }
 
+  // Baseline v2 replacement registers (SYNC-DATA-056): atomic LWW merge in the
+  // same transaction. Higher replacementClock wins; equal-clock exact replay
+  // (same clock + same activeBlockIds order) is idempotent; equal-clock
+  // semantic divergence fails closed with whole-transaction rollback. Losing
+  // clocks are consumed without change. Retirement barriers and frames are
+  // already covered by the merged entities/tombstones/frames above; no
+  // guessed rules are added here.
+  mergeBaselineReplacementRegisters(inner, input.replacementRegisters)
+
   return result
+}
+
+function mergeBaselineReplacementRegisters(
+  inner: BaselineTx,
+  registers: ValidatedBaselineMergeInput['replacementRegisters']
+): void {
+  if (!registers || registers.length === 0) return
+  const seen = new Set<string>()
+  for (const r of registers) {
+    if (!r || typeof r.messageId !== 'string' || r.messageId.length === 0) {
+      fail(`baseline apply malformed replacement register messageId`)
+    }
+    if (!isValidOrdinaryId(r.messageId)) fail(`baseline apply malformed replacement register id ${r.messageId}`)
+    try {
+      requireOrdinaryId(r.messageId, `register/${r.messageId}`)
+    } catch (e) {
+      throw e
+    }
+    if (seen.has(r.messageId)) fail(`baseline apply duplicate replacement register ${r.messageId}`)
+    seen.add(r.messageId)
+    if (!isValidTimestamp(r.timestamp)) fail(`baseline apply malformed replacement register clock for ${r.messageId}`)
+    requireOperationId(r.operationId, `register/${r.messageId}`)
+    if (!Array.isArray(r.activeBlockIds)) fail(`baseline apply malformed replacement activeBlockIds for ${r.messageId}`)
+    const seenActive = new Set<string>()
+    for (const bid of r.activeBlockIds) {
+      if (!isValidOrdinaryId(bid)) fail(`baseline apply malformed replacement block id for ${r.messageId}`)
+      requireOrdinaryId(bid, `register/${r.messageId}/block`)
+      if (seenActive.has(bid)) fail(`baseline apply duplicate replacement activeBlockId for ${r.messageId}`)
+      seenActive.add(bid)
+    }
+  }
+  for (const r of registers) {
+    let existing: {
+      timestamp: number
+      operationId: string
+      activeBlockIdsJson: string
+      payloadHash: string
+    } | null = null
+    try {
+      const row = inner
+        .select()
+        .from(schema.syncStableReplaceRegister)
+        .where(eq(schema.syncStableReplaceRegister.messageId, r.messageId))
+        .get() as typeof schema.syncStableReplaceRegister.$inferSelect | undefined
+      if (row) {
+        existing = {
+          timestamp: row.timestamp,
+          operationId: row.operationId,
+          activeBlockIdsJson: row.activeBlockIdsJson,
+          payloadHash: row.payloadHash
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (/no such table/i.test(msg)) {
+        fail(`baseline apply replacement register requires migration 013 (sync_stable_replace_register missing)`, e)
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+    const activeJson = JSON.stringify(r.activeBlockIds)
+    if (!existing) {
+      // Baseline bootstrap writes the source-prefixed sentinel (never a
+      // winner hash): the three locked wire keys cannot reconstruct the full
+      // bundled-winner hash. The first same-clock / same-active valid op
+      // upgrades it via the incremental receiver path.
+      const payloadHash = encodeBaselineRegisterSentinel(r.messageId, r.timestamp, r.operationId, r.activeBlockIds)
+      try {
+        inner
+          .insert(schema.syncStableReplaceRegister)
+          .values({
+            messageId: r.messageId,
+            timestamp: r.timestamp,
+            operationId: r.operationId,
+            activeBlockIdsJson: activeJson,
+            payloadHash
+          })
+          .run()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (/no such table/i.test(msg)) {
+          fail(`baseline apply replacement register requires migration 013 (sync_stable_replace_register missing)`, e)
+        }
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      continue
+    }
+    const cmp = compareLww(r.timestamp, r.operationId, existing.timestamp, existing.operationId)
+    if (cmp < 0) continue
+    if (cmp === 0) {
+      if (existing.activeBlockIdsJson !== activeJson) {
+        fail(`baseline apply equal-clock replacement divergence for ${r.messageId}`)
+      }
+      // Equal clock + same active (order-sensitive): idempotent. The stored
+      // row is kept as-is so an existing real winner is never overwritten by
+      // the baseline sentinel; when both sides are markers the deterministic
+      // keep-existing is the stable outcome (sentinel encoding is
+      // deterministic over the same three keys, so equal keys imply equal
+      // markers).
+      continue
+    }
+    // Higher baseline clock wins per LWW and carries the sentinel (limited
+    // three-key semantics, not a full bundled-winner claim).
+    const payloadHash = encodeBaselineRegisterSentinel(r.messageId, r.timestamp, r.operationId, r.activeBlockIds)
+    inner
+      .update(schema.syncStableReplaceRegister)
+      .set({ timestamp: r.timestamp, operationId: r.operationId, activeBlockIdsJson: activeJson, payloadHash })
+      .where(eq(schema.syncStableReplaceRegister.messageId, r.messageId))
+      .run()
+  }
 }
 
 /**
@@ -2917,10 +3048,21 @@ export function applyLocalSyncBaselineCandidate(
   validatePureCandidate(candidate)
   let out: LocalSyncBaselineApplyResult | undefined
   db.transaction((tx) => {
+    const registers = (
+      candidate as {
+        replacementRegisters?: Array<{
+          messageId: string
+          timestamp: number
+          operationId: string
+          activeBlockIds: string[]
+        }>
+      }
+    ).replacementRegisters
     out = mergeValidatedBaselineInTx(tx as unknown as BaselineTx, {
       entities: candidate.entities,
       tombstones: candidate.tombstones,
-      orderFrames: candidate.orderFrames
+      orderFrames: candidate.orderFrames,
+      replacementRegisters: registers
     })
   })
   if (!out) fail('baseline apply transaction produced no result')

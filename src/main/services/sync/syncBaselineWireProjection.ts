@@ -28,14 +28,15 @@ import {
   compareUtf8ByteLex,
   COMPLETENESS_COMPLETE,
   computeSyncDigest,
-  INVENTORY_VERSION,
+  INVENTORY_VERSION_V2,
   type MessageBlockEntity,
   type MessageEntity,
   ORDER_FRAME_VERSION,
   type OrderFrame,
-  PAYLOAD_SCHEMA,
-  SCOPE,
-  type SyncPayload,
+  PAYLOAD_SCHEMA_V2,
+  type ReplacementRegister,
+  SCOPE_V2,
+  type SyncPayloadV2,
   type Tombstone,
   type TopicEntity,
   validatePayload,
@@ -107,11 +108,14 @@ function hashHex(canonicalUtf8: Uint8Array): string {
 
 /**
  * Project a complete local baseline candidate to the locked wire `payload`.
- * Self-validates via the shared strict `validatePayload` before returning.
+ * Baseline v2 (SYNC-DATA-056): the output is the `chat-core-baseline-v2`
+ * payload carrying the same v1 content plus the strictly-closed
+ * `replacementRegisters` array read in the same snapshot. Self-validates via
+ * the shared strict `validatePayload` (version-dispatched) before returning.
  * Throws `SyncBaselineWireProjectionError` (with `ValidationError` cause where
  * applicable) for any illegal or incomplete candidate.
  */
-export function projectLocalBaselineToWirePayload(candidate: LocalSyncBaselineCandidate): SyncPayload {
+export function projectLocalBaselineToWirePayload(candidate: LocalSyncBaselineCandidate): SyncPayloadV2 {
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
     fail('candidate must be a plain object')
   }
@@ -318,24 +322,57 @@ export function projectLocalBaselineToWirePayload(candidate: LocalSyncBaselineCa
     else frameCounts.messageBlock += 1
   }
 
-  const payload: SyncPayload = {
-    payloadSchema: PAYLOAD_SCHEMA,
-    inventoryVersion: INVENTORY_VERSION,
+  // Baseline v2 registers: carried as-is from the same snapshot, sorted by
+  // messageId UTF-8 byte lex. Local candidate order is lexical; wire order is
+  // enforced here. Duplicates fail closed via the shared validator.
+  const rawRegisters = (c as { replacementRegisters?: unknown }).replacementRegisters
+  const registerList: ReplacementRegister[] = []
+  if (rawRegisters !== undefined) {
+    if (!Array.isArray(rawRegisters)) fail('candidate replacementRegisters must be an array')
+    for (const r of rawRegisters as unknown[]) {
+      if (!r || typeof r !== 'object' || Array.isArray(r)) fail('candidate replacementRegister must be an object')
+      const rec = r as { messageId?: unknown; timestamp?: unknown; operationId?: unknown; activeBlockIds?: unknown }
+      if (typeof rec.messageId !== 'string' || rec.messageId.length === 0) {
+        fail(`candidate replacementRegister messageId must be a non-empty string`)
+      }
+      if (typeof rec.timestamp !== 'number' || !Number.isSafeInteger(rec.timestamp) || rec.timestamp < 0) {
+        fail(`candidate replacementRegister timestamp malformed for ${String(rec.messageId)}`)
+      }
+      if (typeof rec.operationId !== 'string' || rec.operationId.length === 0) {
+        fail(`candidate replacementRegister operationId malformed for ${String(rec.messageId)}`)
+      }
+      if (!Array.isArray(rec.activeBlockIds)) {
+        fail(`candidate replacementRegister activeBlockIds must be an array for ${String(rec.messageId)}`)
+      }
+      registerList.push({
+        messageId: rec.messageId,
+        replacementClock: { timestamp: rec.timestamp, operationId: rec.operationId },
+        activeBlockIds: [...(rec.activeBlockIds as string[])]
+      })
+    }
+  }
+  registerList.sort((a, b) => compareUtf8ByteLex(a.messageId, b.messageId))
+
+  const payload: SyncPayloadV2 = {
+    payloadSchema: PAYLOAD_SCHEMA_V2,
+    inventoryVersion: INVENTORY_VERSION_V2,
     orderFrameVersion: ORDER_FRAME_VERSION,
-    scope: SCOPE,
+    scope: SCOPE_V2,
     topics,
     messages,
     messageBlocks,
     tombstones,
     orderFrames,
+    replacementRegisters: registerList,
     manifest: {
-      payloadSchema: PAYLOAD_SCHEMA,
-      inventoryVersion: INVENTORY_VERSION,
+      payloadSchema: PAYLOAD_SCHEMA_V2,
+      inventoryVersion: INVENTORY_VERSION_V2,
       orderFrameVersion: ORDER_FRAME_VERSION,
-      scope: SCOPE,
+      scope: SCOPE_V2,
       liveCounts: { topic: topics.length, message: messages.length, messageBlock: messageBlocks.length },
       tombstoneCounts,
       frameCounts,
+      replacementCount: registerList.length,
       completeness: COMPLETENESS_COMPLETE
     }
   }
@@ -410,7 +447,7 @@ function toClockMap(
  * Payload-only `jcs-sha256-v1` digest over the projected wire `payload`.
  * Uses the shared canonicalizer/digest; hash is SHA-256 over JCS UTF-8 bytes.
  */
-export function computeWirePayloadDigest(payload: SyncPayload): string {
+export function computeWirePayloadDigest(payload: SyncPayloadV2): string {
   try {
     return computeSyncDigest(payload, hashHex)
   } catch (e) {
@@ -426,7 +463,7 @@ export function computeWirePayloadDigest(payload: SyncPayload): string {
  * mismatch or digest mismatch; throws only when the payload itself is not
  * wire-valid (fail-closed, never hashed around).
  */
-export function verifyWirePayloadDigest(payload: SyncPayload, expectedDigest: string): boolean {
+export function verifyWirePayloadDigest(payload: SyncPayloadV2, expectedDigest: string): boolean {
   try {
     validatePayload(payload)
   } catch (e) {

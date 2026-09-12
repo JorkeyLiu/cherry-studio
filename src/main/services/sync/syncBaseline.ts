@@ -163,6 +163,13 @@ export interface LocalSyncBaselineManifest {
   digest: string
 }
 
+export interface LocalSyncBaselineReplacementRegister {
+  messageId: string
+  timestamp: number
+  operationId: string
+  activeBlockIds: string[]
+}
+
 export interface LocalSyncBaselineCandidate {
   kind: string
   schemaVersion: string
@@ -174,6 +181,14 @@ export interface LocalSyncBaselineCandidate {
   tombstones: LocalSyncBaselineTombstone[]
   /** Deterministic order: kind rank then parentId UTF-8 lex. */
   orderFrames: LocalSyncBaselineOrderFrame[]
+  /**
+   * Full current winning stable-replace registers read in the same SQLite
+   * snapshot (SYNC-DATA-056 baseline v2 input). Carried as-is; the existing
+   * completeness gate keeps sole authority over coverage insufficiency — no
+   * guessed rules are added here. Sorted by messageId lexical (wire projection
+   * re-sorts to UTF-8 byte lex). Empty when no row exists or the table is absent.
+   */
+  replacementRegisters: LocalSyncBaselineReplacementRegister[]
   /**
    * Provisional local watermark OBSERVATION (current channel key), not an
    * authoritative reserved watermark. Null when unbound.
@@ -278,6 +293,7 @@ export function computeLocalSyncBaselineDigest(candidate: LocalSyncBaselineCandi
     entities: candidate.entities,
     tombstones: candidate.tombstones,
     orderFrames: candidate.orderFrames,
+    replacementRegisters: (candidate as { replacementRegisters?: unknown }).replacementRegisters ?? [],
     observedLocalChannelKey: candidate.observedLocalChannelKey,
     observedLocalCursor: candidate.observedLocalCursor,
     observationBinding: candidate.observationBinding,
@@ -457,6 +473,76 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     const msg = e instanceof Error ? e.message : String(e)
     if (/no such table/i.test(msg)) {
       frameRows = []
+    } else {
+      throw e
+    }
+  }
+  // Stable-replace registers in the same snapshot (SYNC-DATA-056): full set,
+  // carried as-is for baseline v2. Missing table (pre-013) means zero rows.
+  // Malformed rows fail closed; no guessing, no backfill.
+  let replacementRegisters: LocalSyncBaselineReplacementRegister[] = []
+  try {
+    const registerRows = tx.select().from(schema.syncStableReplaceRegister).all()
+    const seenRegisterIds = new Set<string>()
+    for (const row of registerRows) {
+      const messageId = (row as { messageId?: unknown }).messageId
+      const timestamp = (row as { timestamp?: unknown }).timestamp
+      const operationId = (row as { operationId?: unknown }).operationId
+      const activeJson = (row as { activeBlockIdsJson?: unknown }).activeBlockIdsJson
+      try {
+        validateOrdinaryIdStrict(messageId, `register/${String(messageId)}`)
+      } catch (e) {
+        fail(`baseline malformed replacement register id: ${e instanceof Error ? e.message : String(e)}`, e)
+      }
+      if (seenRegisterIds.has(messageId as string)) fail(`baseline duplicate replacement register ${String(messageId)}`)
+      seenRegisterIds.add(messageId as string)
+      if (typeof timestamp !== 'number' || !Number.isSafeInteger(timestamp) || timestamp < 0) {
+        fail(`baseline malformed replacement register timestamp for ${String(messageId)}`)
+      }
+      try {
+        const parsedOp = parseSyncOperationIdShape(operationId)
+        if (!isValidUnicodeScalarString(parsedOp)) throw new Error('malformed operationId unicode scalar')
+      } catch (e) {
+        fail(
+          `baseline malformed replacement register operationId for ${String(messageId)}: ${e instanceof Error ? e.message : String(e)}`,
+          e
+        )
+      }
+      if (typeof activeJson !== 'string')
+        fail(`baseline malformed replacement register blocks for ${String(messageId)}`)
+      let active: unknown
+      try {
+        active = JSON.parse(activeJson)
+      } catch (e) {
+        fail(`baseline malformed replacement register blocks JSON for ${String(messageId)}`, e)
+      }
+      if (!Array.isArray(active)) fail(`baseline malformed replacement register blocks for ${String(messageId)}`)
+      const activeIds: string[] = []
+      const seenActive = new Set<string>()
+      for (const bid of active as unknown[]) {
+        try {
+          validateOrdinaryIdStrict(bid, `register/${String(messageId)}/block`)
+        } catch (e) {
+          fail(`baseline malformed replacement register block id: ${e instanceof Error ? e.message : String(e)}`, e)
+        }
+        if (seenActive.has(bid as string))
+          fail(`baseline duplicate replacement register block for ${String(messageId)}`)
+        seenActive.add(bid as string)
+        activeIds.push(bid as string)
+      }
+      replacementRegisters.push({
+        messageId: messageId as string,
+        timestamp: timestamp,
+        operationId: operationId as string,
+        activeBlockIds: activeIds
+      })
+    }
+    replacementRegisters.sort((a, b) => compareLexical(a.messageId, b.messageId))
+  } catch (e) {
+    if (e instanceof SyncBaselineError) throw e
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) {
+      replacementRegisters = []
     } else {
       throw e
     }
@@ -1302,6 +1388,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     entities,
     tombstones,
     orderFrames: sortedFrames,
+    replacementRegisters,
     observedLocalChannelKey,
     observedLocalCursor,
     observationBinding,

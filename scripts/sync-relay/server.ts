@@ -1551,13 +1551,24 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
       try {
         const txn = db.transaction(() => {
           const head = channelMaxSeqOrThrow(db, channelId)
+          const current = getBaselineRowOrThrow(db, channelId)
+          // Baseline v2 transition lock first: once current is v2, any v1
+          // publish is 409 baseline-conflict independent of watermark (never
+          // downgrades, even when N would otherwise be above head).
+          if (
+            current &&
+            current.wire_version === 'sync-baseline-wire-v2' &&
+            envelope.wireVersion === 'sync-baseline-wire-v1'
+          ) {
+            throw { status: 409, error: 'baseline-conflict' }
+          }
           if (envelope.watermark > head) {
             throw { status: 400, error: 'watermark-above-head' }
           }
-          const current = getBaselineRowOrThrow(db, channelId)
           if (!current) {
             // Empty state: the first legal N (relay-confirmed, at most head)
-            // is accepted; coverage holds under full retention.
+            // is accepted; coverage holds under full retention. Either strict
+            // version (v1 or v2) may establish current.
             const nowIso = new Date().toISOString()
             const payloadJson = JSON.stringify(envelope.payload)
             const envelopeJson = serializeBaselineEnvelope(envelope)

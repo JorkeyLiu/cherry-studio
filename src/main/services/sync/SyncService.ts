@@ -16,6 +16,7 @@ import {
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
+  isBaselineRegisterSentinel,
   isStableBlockStatus,
   isStableMessageStatus,
   isUnsupportedBlockForSync,
@@ -4115,10 +4116,25 @@ export class SyncService {
         return false
       }
       if (cmp === 0) {
-        if (existingReg.payloadHash === winnerHash && existingReg.activeBlockIdsJson === activeJson) {
-          return false
+        // Order-sensitive active comparison first: any activeBlockIds order
+        // difference fails closed with whole-transaction rollback (no cursor
+        // advance — the throw rolls back the applyIncomingOperation tx).
+        if (existingReg.activeBlockIdsJson !== activeJson) {
+          throw new Error(`message_stable_replace ${op.id}: equal-clock divergence for ${messageId}`)
         }
-        throw new Error(`message_stable_replace ${op.id}: equal-clock divergence for ${messageId}`)
+        if (isBaselineRegisterSentinel(existingReg.payloadHash)) {
+          // Baseline sentinel + same clock + same active: the sentinel carries
+          // only the three locked wire keys, never a bundled-winner claim.
+          // Fall through to the full apply below so the legal op upgrades
+          // payloadHash to its real bundled-winner hash (entity/frames per the
+          // existing rules — no early continue that would skip the upgrade).
+          // The next replay of the same op then hits the real-winner
+          // idempotent branch below.
+        } else if (existingReg.payloadHash === winnerHash) {
+          return false
+        } else {
+          throw new Error(`message_stable_replace ${op.id}: equal-clock divergence for ${messageId}`)
+        }
       }
     } else {
       // Same op id previously applied without register state for this

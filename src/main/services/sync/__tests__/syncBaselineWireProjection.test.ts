@@ -1,6 +1,6 @@
 /**
  * Baseline wire payload projection tests: pure local candidate -> locked
- * `sync-baseline-wire-v1` payload. No transport, no relay, no IPC/UI.
+ * `sync-baseline-wire-v2` payload. No transport, no relay, no IPC/UI.
  */
 import { createHash } from 'node:crypto'
 
@@ -219,6 +219,7 @@ describe('wire projection exact shape and stripping', () => {
         'orderFrameVersion',
         'orderFrames',
         'payloadSchema',
+        'replacementRegisters',
         'scope',
         'tombstones',
         'topics'
@@ -245,16 +246,18 @@ describe('wire projection exact shape and stripping', () => {
     ]) {
       expect(json).not.toContain(banned)
     }
-    expect(payload.payloadSchema).toBe('chat-core-baseline-v1')
-    expect(payload.inventoryVersion).toBe('topic-message-stable-block-order-v1')
+    expect(payload.payloadSchema).toBe('chat-core-baseline-v2')
+    expect(payload.inventoryVersion).toBe('topic-message-stable-block-order-v2')
     expect(payload.orderFrameVersion).toBe('parent-order-frame-v1')
-    expect(payload.scope).toBe('chat-core-baseline-v1:topic-message-stable-block-order-v1')
+    expect(payload.scope).toBe('chat-core-baseline-v2:topic-message-stable-block-order-v2')
     expect(payload.manifest).toMatchObject({
       liveCounts: { topic: 1, message: 1, messageBlock: 1 },
       tombstoneCounts: { topic: 0, message: 0, messageBlock: 0 },
       frameCounts: { topicMessage: 1, messageBlock: 1 },
+      replacementCount: 0,
       completeness: 'complete'
     })
+    expect(payload.replacementRegisters).toEqual([])
     expect(payload.topics).toHaveLength(1)
     expect(payload.messages[0].parentMembershipClock).toEqual({ timestamp: T, operationId: 'op-m-p1' })
     expect(payload.messageBlocks[0].parentMembershipClock).toEqual({ timestamp: T, operationId: 'op-b-p1' })
