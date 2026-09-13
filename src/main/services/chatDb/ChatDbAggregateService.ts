@@ -591,9 +591,10 @@ export class ChatDbAggregateService {
    * transient rows never emit; unsupported structured/attachment-bearing rows
    * never emit a partial shell (collected for a durable unsupported outcome).
    * No-backfill boundary (009/SYNC-DATA-035): this rescan never mints
-   * parentMembershipClock. Sibling rows stable before the current tx began
-   * have no trustworthy creation source in this tx — versioning them with
-   * the current rescan op clock would be a guess (not createdAt,
+   * parentMembershipClock, except for the narrow promotion-scoped supplement
+   * below. Sibling rows stable before the current tx began have no
+   * trustworthy creation source in this tx — versioning them with the
+   * current rescan op clock would be a guess (not createdAt,
    * entityClock, fieldClock, or current time either). They stay
    * entity-only/unversioned; only explicitly requested blocks (true-create
    * or transient→stable promotion with pre-state evidence, via their own
@@ -603,6 +604,17 @@ export class ChatDbAggregateService {
    * trustworthy membership. Throws fail-closed (rolls back the promotion) on
    * infrastructure failure. Returns true when at least one descendant was
    * captured.
+   *
+   * Promotion-scoped supplement: when `mintMissingSuccessMembership` is true
+   * (the same atomic tx minted an ordinary transient→success supported block
+   * promotion for this parent), ordinary `success` + supported siblings that
+   * are missing membership are captured AND versioned with their own same-tx
+   * upsert clock via mintPromotionMembershipInTx (existing clocks are never
+   * rewritten — insert-if-absent only; different-parent conflicts fail
+   * closed). Non-success terminals (error/paused), unsupported/compound
+   * rows, and rows that already carry a clock keep the entity-only/skip
+   * behavior above. Clone/reset/full-backfill/startup scans never set this
+   * flag.
    */
   private captureUntrackedStableBlocksInTx(
     tx: SyncTxExecutor,
@@ -611,7 +623,8 @@ export class ChatDbAggregateService {
     baseTs: number,
     deviceId: string,
     excludeIds: ReadonlySet<string>,
-    unsupportedIds?: string[]
+    unsupportedIds?: string[],
+    mintMissingSuccessMembership = false
   ): boolean {
     const siblings = repos.blocks.listByMessage(messageId)
     let captured = false
@@ -623,21 +636,72 @@ export class ChatDbAggregateService {
         unsupportedIds?.push(b.id)
         continue
       }
-      if (syncService.isTrackedEntityInTx(tx, 'message_block', b.id)) continue
-      // No-backfill: ordinary sibling rescan is entity-only only. Never mint
-      // membership from the rescan op clock for rows stable before this tx.
-      syncService.enqueueUpsertInTx(
-        tx,
-        'message_block',
-        b.id,
-        this.syncBlockPayloadFull(b),
-        Math.max(0, baseTs + offset + 1),
-        deviceId
+      // Unified promotion supplement: any sibling that already carries a
+      // membership clock is never rewritten and emits no extra outbox.
+      // Tracked-but-unversioned (entity clock/outbox without membership)
+      // stays skipped for ordinary rescan, but joins the supplement when
+      // this tx carries an ordinary transient→success supported promotion
+      // (same success + supported gate as the block-write supplement).
+      if (syncService.getMembershipClockInTx(tx, 'message_block', b.id)) continue
+      if (
+        syncService.isTrackedEntityInTx(tx, 'message_block', b.id) &&
+        (!mintMissingSuccessMembership || b.status !== 'success')
       )
+        continue
+      // No-backfill: ordinary sibling rescan is entity-only only. Never mint
+      // membership from the rescan op clock for rows stable before this tx,
+      // unless this tx is a promotion-scoped supplement (see above).
+      const ts = Math.max(0, baseTs + offset + 1)
+      const opId = syncService.enqueueUpsertInTx(tx, 'message_block', b.id, this.syncBlockPayloadFull(b), ts, deviceId)
+      if (
+        mintMissingSuccessMembership &&
+        b.status === 'success' &&
+        !syncService.getMembershipClockInTx(tx, 'message_block', b.id)
+      ) {
+        this.mintPromotionMembershipInTx(tx, 'message_block', b.id, b.messageId, ts, opId)
+      }
       offset += 1
       captured = true
     }
     return captured
+  }
+
+  /**
+   * Promotion-scoped sibling supplement for block-write transactions that
+   * carry no descendant rescan (updateBlocks/updateSingleBlock): when the
+   * same atomic tx minted at least one ordinary transient→success supported
+   * block promotion under `parentMessageId`, every other ordinary `success`
+   * + supported sibling under the same parent that is missing membership is
+   * captured (full payload) AND versioned with its own same-tx upsert clock.
+   * Existing clocks are never rewritten (insert-if-absent only; a retained
+   * different-parent clock fails closed via mintPromotionMembershipInTx and
+   * rolls back the tx). Non-success terminals, transient rows, and
+   * unsupported/compound rows are skipped without any outbox row. Resend-
+   * covered parents stay local-only. Per-sibling +1 offsets off `baseTs`
+   * preserve parent-before-child order. Returns the number of supplemented
+   * siblings (0 when nothing qualified).
+   */
+  private backfillMissingSuccessSiblingMembershipInTx(
+    tx: SyncTxExecutor,
+    repos: ChatDbRepositories,
+    parentMessageId: string,
+    baseTs: number,
+    deviceId: string,
+    excludeIds: ReadonlySet<string>
+  ): number {
+    const siblings = repos.blocks.listByMessage(parentMessageId)
+    let supplemented = 0
+    for (const b of siblings) {
+      if (excludeIds.has(b.id)) continue
+      if (b.status !== 'success') continue
+      if (this.isUnsupportedBlock(b)) continue
+      if (syncService.getMembershipClockInTx(tx, 'message_block', b.id)) continue
+      const ts = Math.max(0, baseTs + supplemented + 1)
+      const opId = syncService.enqueueUpsertInTx(tx, 'message_block', b.id, this.syncBlockPayloadFull(b), ts, deviceId)
+      this.mintPromotionMembershipInTx(tx, 'message_block', b.id, parentMessageId, ts, opId)
+      supplemented += 1
+    }
+    return supplemented
   }
 
   /**
@@ -2296,17 +2360,32 @@ export class ChatDbAggregateService {
                 // Promotion rescan + deterministic rescan (LOCK-PERSONAL-004):
                 // committed stable descendants created with the transient stub
                 // (outside this request's block list) join the stable
-                // checkpoint parent-first as entity-only evidence only (never
-                // membership backfill — pre-existing stable siblings stay
-                // unversioned/partial). Only explicitly requested blocks
-                // (true-create or promotion with pre-state evidence, each via
-                // its own same-tx upsert clock below) mint membership. Every
-                // stable message capture rescans all stable descendants
-                // against tracked/outbox state, even when the parent is
-                // already tracked, so a prior partial rescan is retried
-                // instead of silently abandoned. Fail closed on error.
+                // checkpoint parent-first as entity-only evidence, except
+                // inside a promotion-scoped supplement: when this same tx
+                // carries an ordinary transient→success supported block
+                // promotion, ordinary success + supported siblings missing
+                // membership are versioned with their own same-tx upsert
+                // clock (existing clocks never rewritten). Only explicitly
+                // requested blocks (true-create or promotion with pre-state
+                // evidence, each via its own same-tx upsert clock below)
+                // otherwise mint membership. Every stable message capture
+                // rescans all stable descendants against tracked/outbox
+                // state, even when the parent is already tracked, so a prior
+                // partial rescan is retried instead of silently abandoned.
+                // Fail closed on error.
                 if (isStableMessageStatus(mrow.data.status)) {
                   const requestedIds = new Set(blockDataList.map((b) => b.id))
+                  let ordinaryBlockPromotionInTx = false
+                  for (const block of blockDataList) {
+                    const preForTrigger = preBlockRows.get(block.id) ?? null
+                    if (!preForTrigger || isStableBlockStatus(preForTrigger.status)) continue
+                    const postForTrigger = repos.blocks.getById(block.id)
+                    if (!postForTrigger.found || postForTrigger.data.messageId !== messageId) continue
+                    if (postForTrigger.data.status !== 'success') continue
+                    if (this.isUnsupportedBlock(postForTrigger.data)) continue
+                    ordinaryBlockPromotionInTx = true
+                    break
+                  }
                   if (
                     this.captureUntrackedStableBlocksInTx(
                       stx,
@@ -2315,7 +2394,8 @@ export class ChatDbAggregateService {
                       syncCtx.ts,
                       syncCtx.deviceId,
                       requestedIds,
-                      unsupportedBlockIds
+                      unsupportedBlockIds,
+                      ordinaryBlockPromotionInTx
                     )
                   ) {
                     syncNotify = true
@@ -2383,7 +2463,8 @@ export class ChatDbAggregateService {
             // Local parent order frame (010) — single per-parent decision (F1):
             // all message/block entity upsert (explicit true-create plus
             // explicit promotion-time membership mint; sibling rescan stays
-            // entity-only) and
+            // entity-only except inside a promotion-scoped supplement where
+            // missing ordinary success siblings were versioned above) and
             // delete/transition handling above complete first; then at most
             // one messageBlock tryRefresh+enqueue attempt per tx for this
             // parent. Exclusion (stable→transient parent) only invalidates
@@ -2749,6 +2830,7 @@ export class ChatDbAggregateService {
       const syncCtx = this.syncCtx('updateBlocks')
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
+      const ordinaryPromotionParents = new Set<string>()
       try {
         this.db.transaction((tx) => {
           const repos = createRepositories(tx)
@@ -2832,7 +2914,18 @@ export class ChatDbAggregateService {
                   promoOpId
                 )
                 syncNotify = true
+                // Ordinary promotion trigger for the same-tx sibling
+                // supplement below (only success + supported qualify).
+                if (post.data.status === 'success') {
+                  ordinaryPromotionParents.add(post.data.messageId)
+                }
                 continue
+              }
+              // Tracked transient→stable re-promotion to ordinary success is
+              // also a promotion checkpoint for sibling supplement purposes
+              // (own membership is retained/reused); it never mints here.
+              if (pre && !preStable && post.data.status === 'success') {
+                ordinaryPromotionParents.add(post.data.messageId)
               }
               if (post.data.messageId !== pre.messageId) continue
               const patchPayload = this.diffBlockPayload(pre, post.data)
@@ -2840,6 +2933,29 @@ export class ChatDbAggregateService {
               this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
               syncService.enqueueUpsertInTx(stx, 'message_block', block.id, patchPayload, syncCtx.ts, syncCtx.deviceId)
               syncNotify = true
+            }
+            // Promotion-scoped sibling supplement (same atomic tx): each
+            // ordinary promotion parent versions its missing ordinary
+            // success + supported siblings so the single frame decision below
+            // can complete. Resend-covered parents stay local-only; any
+            // conflict/malformed failure rolls back the whole tx.
+            if (ordinaryPromotionParents.size > 0) {
+              const requestedIds = new Set(blockDataList.map((b) => b.id))
+              for (const pid of ordinaryPromotionParents) {
+                if (getResendAttemptInTx(stx, pid)) continue
+                if (
+                  this.backfillMissingSuccessSiblingMembershipInTx(
+                    stx,
+                    repos,
+                    pid,
+                    syncCtx.ts,
+                    syncCtx.deviceId,
+                    requestedIds
+                  ) > 0
+                ) {
+                  syncNotify = true
+                }
+              }
             }
           }
           // Ordinary messageBlock inclusion paths issue exactly one frame
@@ -2982,6 +3098,7 @@ export class ChatDbAggregateService {
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx([{ id: blockId } as JsonObject]), resendAttemptId)
       const syncCtx = this.syncCtx('updateSingleBlock')
       let syncNotify = false
+      let singlePromotionTriggered = false
       const unsupportedBlockIds: string[] = []
       try {
         this.db.transaction((tx) => {
@@ -3067,7 +3184,17 @@ export class ChatDbAggregateService {
                       promoOpId
                     )
                     syncNotify = true
+                    // Ordinary promotion trigger for the same-tx sibling
+                    // supplement below (only success + supported qualify).
+                    if (post.data.status === 'success') {
+                      singlePromotionTriggered = true
+                    }
                   } else {
+                    // Tracked transient→success re-promotion is also a
+                    // promotion checkpoint for sibling supplement purposes.
+                    if (!preStable && post.data.status === 'success') {
+                      singlePromotionTriggered = true
+                    }
                     const payload = this.syncBlockPatchPayload(
                       post.data.messageId,
                       blockId,
@@ -3085,6 +3212,28 @@ export class ChatDbAggregateService {
                       syncNotify = true
                     }
                   }
+                }
+              }
+            }
+            // Promotion-scoped sibling supplement (same atomic tx): an
+            // ordinary transient→success supported promotion versions the
+            // missing ordinary success + supported siblings so the single
+            // frame decision below can complete. Resend-covered parents stay
+            // local-only; any conflict/malformed failure rolls back the tx.
+            if (syncCtx && singlePromotionTriggered) {
+              const postForSiblings = repos.blocks.getById(blockId)
+              if (postForSiblings.found && !getResendAttemptInTx(stx, postForSiblings.data.messageId)) {
+                if (
+                  this.backfillMissingSuccessSiblingMembershipInTx(
+                    stx,
+                    repos,
+                    postForSiblings.data.messageId,
+                    syncCtx.ts,
+                    syncCtx.deviceId,
+                    new Set([blockId])
+                  ) > 0
+                ) {
+                  syncNotify = true
                 }
               }
             }
