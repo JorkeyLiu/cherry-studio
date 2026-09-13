@@ -461,7 +461,12 @@ describe('reset adoption — success final mints the missing target membership',
     )
   })
 
-  it('another stable sibling without membership keeps the final local-only with zero partial writes', () => {
+  it('another ordinary success sibling without membership is supplemented (not local-only)', () => {
+    // Reset-final sibling supplement: a plain `success` sibling missing
+    // membership is versioned in the same final tx (ordinary upsert +
+    // insert-if-absent membership) and the replacement issues. Local-only
+    // with zero writes now applies only to intent/register siblings (covered
+    // in the sibling-supplement suite).
     seedVersionedUser('t-a-5', 'u-a-5')
     seedVersionedAssistant('t-a-5', 'm-a-5', 'u-a-5', 'b-a5-old')
     insertUnversionedMessage('t-a-5', 'm-sib-missing', 'u-a-5')
@@ -483,13 +488,12 @@ describe('reset adoption — success final mints the missing target membership',
         resendAttemptId: attemptId
       }).ok
     ).toBe(true)
-    expect(stableReplaceRows()).toHaveLength(0)
-    expect(getIntentRow('m-a-5')).toBeDefined()
-    // Zero partial writes: no register, no new frames, no outbox, sibling still missing.
-    expect(sqlite.prepare(`SELECT * FROM sync_stable_replace_register WHERE message_id='m-a-5'`).get()).toBeUndefined()
-    expect(sqlite.prepare(`SELECT * FROM sync_outbox`).all()).toHaveLength(0)
-    expect(syncService.getMembershipClock('message', 'm-sib-missing')).toBeNull()
-    expect(syncService.getParentFrame('topicMessage', 't-a-5')).toBeNull()
+    expect(stableReplaceRows()).toHaveLength(1)
+    expect(getIntentRow('m-a-5')).toBeUndefined()
+    expect(syncService.getMembershipClock('message', 'm-sib-missing')).not.toBeNull()
+    expect(syncService.getMembershipClock('message', 'm-sib-missing')?.parentId).toBe('t-a-5')
+    expect(sqlite.prepare(`SELECT * FROM sync_stable_replace_register WHERE message_id='m-a-5'`).get()).toBeDefined()
+    expect(syncService.getParentFrame('topicMessage', 't-a-5')).not.toBeNull()
   })
 
   it('adoption negatives stay local-only: non-success, unsupported, stale', () => {

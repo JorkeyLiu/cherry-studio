@@ -1325,62 +1325,163 @@ export class SyncService {
       }
     }
 
-    // Sibling completeness for the bundled topic frame: every stable message
-    // in the topic must carry a real membership with parent match, otherwise
-    // the frame prerequisites are incomplete → local-only (no fabrication,
-    // no invalidation here — the user mutation still commits).
-    const siblingRows = tx.select().from(schema.messages).where(eq(schema.messages.topicId, topicId)).all() as Array<{
+    // Reset-final stable-wide topic-frame completion with ordinary success
+    // sibling supplement: reuse promotion supplement semantics in this stable
+    // replacement issuer tx.
+    // - Topic frame ordered/live inventory covers every stable live
+    //   non-tombstoned sibling with valid same-parent membership
+    //   (`isStableMessageStatus`), not success-only: stable non-success
+    //   siblings (`error`/`paused`/`sent`/legacy) with existing membership are
+    //   retained unchanged in the frame and contribute to the clock floor.
+    // - Only other message siblings with status==='success' and no existing
+    //   membership qualify for supplement; existing memberships are preserved
+    //   exactly.
+    // - Guard pass is read-only before any writes: tombstoned/transient
+    //   siblings are excluded; a live stable non-success sibling missing
+    //   membership is not ordinary → local-only `sibling-membership-missing`
+    //   with zero writes (never supplemented); a missing `success` sibling
+    //   carrying an active resend intent or a stable-replace register is not
+    //   ordinary → local-only before any writes; only remaining ordinary
+    //   `success` missing siblings qualify.
+    // - Sibling block subtrees are never validated (topic-message frame
+    //   closure only).
+    // - An existing stable sibling membership with a different parent throws
+    //   and rolls back the whole tx.
+    // - Monotonic same-tx clocks: each qualifying sibling gets its own
+    //   increasing clock + ordinary full message upsert before insert-if-absent
+    //   membership; replacementClock allocates strictly above all of them.
+    const fullSiblingRows = tx
+      .select()
+      .from(schema.messages)
+      .where(eq(schema.messages.topicId, topicId))
+      .all() as Array<{
       id: string
+      topicId: string
+      role: string | null
+      content: string | null
       status: string | null
+      askId: string | null
+      model: string | null
+      modelId: string | null
+      assistantId: string | null
+      createdAt: string | null
+      updatedAt: string | null
       sortOrder: number
+      extra: string | null
     }>
-    const topicOrderedIds: string[] = [...siblingRows]
+    // Guard pass (read-only, before any writes): classify siblings.
+    // Tombstoned siblings are excluded outright. Existing stable memberships
+    // with a different parent fail closed; existing transient memberships stay
+    // excluded. A live stable non-success sibling missing membership is not
+    // supplementable → local-only `sibling-membership-missing` (checked before
+    // intent/register so the stable-wide verdict is preserved). Otherwise a
+    // missing sibling carrying an active resend intent or a stable-replace
+    // register is not ordinary and forces local-only before any writes — this
+    // intentionally applies even when the sibling currently reads
+    // transient/pending (reset intermediate); remaining transient missing
+    // siblings stay excluded; only remaining ordinary `success` missing
+    // siblings qualify for supplement.
+    const qualifyingSiblings: Array<(typeof fullSiblingRows)[number]> = []
+    for (const r of fullSiblingRows) {
+      if (r.id === messageId) continue
+      const tomb = this.getTombstoneInTx(tx, 'message', r.id)
+      if (tomb) continue
+      const stable = isStableMessageStatus(r.status)
+      const mem = this.getMembershipClockInTx(tx, 'message', r.id)
+      if (mem) {
+        if (!stable) continue
+        if (mem.parentId !== topicId) {
+          throw new Error(`stable replace issuer membership parent mismatch for sibling ${r.id}`)
+        }
+        continue
+      }
+      if (stable && r.status !== 'success') return { issued: false, reason: 'sibling-membership-missing' }
+      const intent = getResendAttemptInTx(tx, r.id)
+      if (intent) return { issued: false, reason: 'sibling-resend-intent' }
+      const sibReg = this.readStableReplaceRegister(tx as unknown as BetterSQLite3Database<typeof schema>, r.id)
+      if (sibReg) return { issued: false, reason: 'sibling-replacement-register' }
+      if (!stable) continue
+      qualifyingSiblings.push(r)
+    }
+    qualifyingSiblings.sort((a, b) => {
+      if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
+    // Topic frame covers every stable live non-tombstoned sibling
+    // (success plus error/paused/sent/legacy); existing memberships preserved,
+    // qualifying ordinary success missing supplemented below so the frame is
+    // complete by construction.
+    const topicOrderedIds: string[] = [...fullSiblingRows]
+      .filter((r) => {
+        if (!isStableMessageStatus(r.status)) return false
+        if (r.id === messageId) return true
+        const tomb = this.getTombstoneInTx(tx, 'message', r.id)
+        return !tomb
+      })
       .sort((a, b) => {
         if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
       })
-      .filter((r) => isStableMessageStatus(r.status))
       .map((r) => r.id)
     if (!topicOrderedIds.includes(messageId)) {
       throw new Error(`stable replace issuer topic order omits message ${messageId}`)
     }
-    for (const r of siblingRows) {
-      if (!isStableMessageStatus(r.status)) continue
-      if (needsTargetAdoption && r.id === messageId) continue
-      const mem = this.getMembershipClockInTx(tx, 'message', r.id)
-      if (!mem) return { issued: false, reason: 'sibling-membership-missing' }
-      if (mem.parentId !== topicId) {
-        throw new Error(`stable replace issuer membership parent mismatch for sibling ${r.id}`)
-      }
-    }
 
-    // Single replacement clock strictly above every existing relevant clock
-    // (register, both existing frames, both high-waters, all included block
-    // memberships, all sibling memberships except the adopted missing
-    // target, wall clock). The missing target clock is excluded by
-    // construction; the target membership is minted at the replacement
-    // clock afterwards so payload membership equals both frame clocks.
+    // Existing observed floors (excluding the adopted missing target and the
+    // qualifying missing siblings which have no clock yet).
     const existingReg = this.readStableReplaceRegister(tx as unknown as BetterSQLite3Database<typeof schema>, messageId)
     const existingTopicFrame = this.getParentFrameInTx(tx, 'topicMessage', topicId)
     const existingMessageFrame = this.getParentFrameInTx(tx, 'messageBlock', messageId)
-    let maxTs = Date.now()
-    if (!Number.isSafeInteger(maxTs) || maxTs < 0) throw new Error('stable replace issuer wall clock invalid')
-    if (existingReg) maxTs = Math.max(maxTs, existingReg.timestamp)
-    if (existingTopicFrame) maxTs = Math.max(maxTs, existingTopicFrame.timestamp)
-    if (existingMessageFrame) maxTs = Math.max(maxTs, existingMessageFrame.timestamp)
-    maxTs = Math.max(maxTs, getFrameHighWater(tx, 'topicMessage', topicId))
-    maxTs = Math.max(maxTs, getFrameHighWater(tx, 'messageBlock', messageId))
-    if (msgMem) maxTs = Math.max(maxTs, msgMem.timestamp)
-    for (const mem of blockMems.values()) maxTs = Math.max(maxTs, mem.timestamp)
-    for (const r of siblingRows) {
+    let baseMaxTs = Date.now()
+    if (!Number.isSafeInteger(baseMaxTs) || baseMaxTs < 0) throw new Error('stable replace issuer wall clock invalid')
+    if (existingReg) baseMaxTs = Math.max(baseMaxTs, existingReg.timestamp)
+    if (existingTopicFrame) baseMaxTs = Math.max(baseMaxTs, existingTopicFrame.timestamp)
+    if (existingMessageFrame) baseMaxTs = Math.max(baseMaxTs, existingMessageFrame.timestamp)
+    baseMaxTs = Math.max(baseMaxTs, getFrameHighWater(tx, 'topicMessage', topicId))
+    baseMaxTs = Math.max(baseMaxTs, getFrameHighWater(tx, 'messageBlock', messageId))
+    if (msgMem) baseMaxTs = Math.max(baseMaxTs, msgMem.timestamp)
+    for (const mem of blockMems.values()) baseMaxTs = Math.max(baseMaxTs, mem.timestamp)
+    for (const r of fullSiblingRows) {
+      if (r.id === messageId) continue
       if (!isStableMessageStatus(r.status)) continue
-      if (needsTargetAdoption && r.id === messageId) continue
+      const tomb = this.getTombstoneInTx(tx, 'message', r.id)
+      if (tomb) continue
       const mem = this.getMembershipClockInTx(tx, 'message', r.id)
-      if (mem) maxTs = Math.max(maxTs, mem.timestamp)
+      if (mem) baseMaxTs = Math.max(baseMaxTs, mem.timestamp)
     }
+    if (baseMaxTs + qualifyingSiblings.length + 1 > FRAME_MAX_SAFE_TIMESTAMP) {
+      throw new Error(`stable replace issuer clock exhaustion for message ${messageId}`)
+    }
+    // Supplement pass (same tx, entity-before-frame): ordinary full message
+    // upsert then insert-if-absent membership at the sibling's own clock.
+    // Any later failure rolls back these rows with the intent retained.
+    for (let i = 0; i < qualifyingSiblings.length; i++) {
+      const sib = qualifyingSiblings[i]
+      const sibTs = baseMaxTs + 1 + i
+      const payload = {
+        id: sib.id,
+        topicId: sib.topicId,
+        role: sib.role ?? null,
+        content: sib.content ?? null,
+        status: sib.status ?? null,
+        askId: sib.askId ?? null,
+        model: sib.model ?? null,
+        modelId: sib.modelId ?? null,
+        assistantId: sib.assistantId ?? null,
+        createdAt: sib.createdAt ?? null,
+        updatedAt: sib.updatedAt ?? null,
+        sortOrder: sib.sortOrder
+      }
+      const sibOpId = this.enqueueUpsertInTx(tx, 'message', sib.id, payload, sibTs, deviceId)
+      this.setMembershipClockInTx(tx, 'message', sib.id, topicId, sibTs, sibOpId)
+    }
+    const maxTs = baseMaxTs + qualifyingSiblings.length
     if (maxTs >= FRAME_MAX_SAFE_TIMESTAMP) {
       throw new Error(`stable replace issuer clock exhaustion for message ${messageId}`)
     }
+    // Single replacement clock strictly above all supplemented clocks and all
+    // existing relevant clocks (register, both existing frames, both
+    // high-waters, target/block/sibling memberships, wall clock).
     const replacementTimestamp = maxTs + 1
     const replacementOpId = randomUUID()
     try {
@@ -1615,10 +1716,15 @@ export class SyncService {
     // by construction (gated above), so effective equals listed; any
     // incompleteness here is a fail-closed construction error.
     const topicLive = new Map<string, { timestamp: number; operationId: string }>()
-    for (const r of siblingRows) {
+    for (const r of fullSiblingRows) {
       if (!isStableMessageStatus(r.status)) continue
+      const tomb = this.getTombstoneInTx(tx, 'message', r.id)
+      if (tomb) continue
       const mem = this.getMembershipClockInTx(tx, 'message', r.id)
       if (!mem) throw new Error(`stable replace issuer sibling ${r.id} lost membership before frame persist`)
+      if (mem.parentId !== topicId) {
+        throw new Error(`stable replace issuer membership parent mismatch for sibling ${r.id}`)
+      }
       topicLive.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
     }
     const blockLive = new Map<string, { timestamp: number; operationId: string }>()
