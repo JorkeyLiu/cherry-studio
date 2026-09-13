@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  applyTopicSyncDefaults,
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
   isPayloadSafe,
+  TOPIC_SYNC_DEFAULTS,
   validateSyncPayloadAllowlist
 } from '../payloadFilter'
 import { SYNC_MESSAGE_PATCH_FIELDS } from '../types'
@@ -90,5 +92,73 @@ describe('sync payload filter', () => {
     })
     expect(err).toContain('not allowlisted')
     expect((SYNC_MESSAGE_PATCH_FIELDS as readonly string[]).includes('foldSelected')).toBe(false)
+  })
+})
+
+describe('topic canonical sync defaults', () => {
+  it('exposes the single shared default triple', () => {
+    expect({ ...TOPIC_SYNC_DEFAULTS }).toEqual({
+      pinned: false,
+      prompt: null,
+      isNameManuallyEdited: false
+    })
+  })
+
+  it('materializes absent defaults for a sparse topic payload', () => {
+    const payload: Record<string, unknown> = {
+      id: 't1',
+      name: 'T',
+      assistantId: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      deletedAt: null
+    }
+    const out = applyTopicSyncDefaults(payload)
+    expect(out.pinned).toBe(false)
+    expect(out.prompt).toBeNull()
+    expect(out.isNameManuallyEdited).toBe(false)
+    expect(Object.keys(out).sort()).toEqual(
+      [
+        'assistantId',
+        'createdAt',
+        'deletedAt',
+        'id',
+        'isNameManuallyEdited',
+        'name',
+        'pinned',
+        'prompt',
+        'updatedAt'
+      ].sort()
+    )
+  })
+
+  it('preserves explicit values including explicit null and never overwrites', () => {
+    const payload: Record<string, unknown> = {
+      id: 't1',
+      name: 'T',
+      assistantId: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      deletedAt: null,
+      pinned: true,
+      prompt: null,
+      isNameManuallyEdited: true
+    }
+    const out = applyTopicSyncDefaults({ ...payload })
+    expect(out.pinned).toBe(true)
+    expect(out.prompt).toBeNull()
+    expect(out.isNameManuallyEdited).toBe(true)
+  })
+
+  it('treats undefined as absent but keeps explicit false/null', () => {
+    const out = applyTopicSyncDefaults({
+      id: 't1',
+      pinned: undefined,
+      prompt: 'keep',
+      isNameManuallyEdited: false
+    })
+    expect(out.pinned).toBe(false)
+    expect(out.prompt).toBe('keep')
+    expect(out.isNameManuallyEdited).toBe(false)
   })
 })

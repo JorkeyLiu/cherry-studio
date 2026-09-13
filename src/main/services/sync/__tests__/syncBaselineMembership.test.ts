@@ -116,7 +116,16 @@ function seedFieldClock(type: string, id: string, field: string, ts: number, op:
     .values({ entityType: type, entityId: id, field, timestamp: ts, operationId: op })
     .run()
 }
-const TOPIC_CLOCKED = ['name', 'assistantId', 'createdAt', 'updatedAt', 'deletedAt']
+const TOPIC_CLOCKED = [
+  'name',
+  'assistantId',
+  'createdAt',
+  'updatedAt',
+  'deletedAt',
+  'pinned',
+  'prompt',
+  'isNameManuallyEdited'
+]
 const MESSAGE_CLOCKED = [
   'role',
   'content',

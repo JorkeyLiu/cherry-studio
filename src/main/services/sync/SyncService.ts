@@ -2260,12 +2260,16 @@ export class SyncService {
   /**
    * Fail-closed, idempotent parent-membership clock for a true child creation.
    * Only a row inserted by the SAME current aggregate transaction with a real
-   * creation sync operation may get membership. Insert when absent; when present,
-   * accept only exact child type/id + parentId + timestamp + operationId match
-   * (idempotent retry); any difference throws so the enclosing transaction rolls
-   * back (no partial business/sync mutation survives). Supported only for
-   * message/message_block creation paths carrying a trustworthy creation
-   * operation (appendMessage new row, bulkAddBlocks new row, remote true-create).
+   * creation sync operation may get membership via this primitive. Insert when
+   * absent; when present, accept only exact child type/id + parentId +
+   * timestamp + operationId match (idempotent retry); any difference throws so
+   * the enclosing transaction rolls back (no partial business/sync mutation
+   * survives). Supported only for message/message_block creation paths
+   * carrying a trustworthy creation operation (appendMessage new row,
+   * bulkAddBlocks new row, remote true-create). Promotion-time first
+   * checkpoints use the aggregate-side mint helper (same-tx stable upsert
+   * clock, same-parent reuse, different-parent conflict) instead of calling
+   * this primitive with a fresh clock over an existing same-parent tuple.
    * Currently skipped compound/branch/clone/paste/reset operations remain
    * explicitly unversioned in this unit rather than fabricating clocks.
    */

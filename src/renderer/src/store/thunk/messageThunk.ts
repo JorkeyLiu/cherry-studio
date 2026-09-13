@@ -366,6 +366,45 @@ export const saveUpdatedBlockToDB = async (
   }
 }
 
+/**
+ * Final atomic persist for streaming onComplete (Fix B).
+ *
+ * Commits the assistant message final patch (status/metrics/usage/blocks)
+ * together with ALL of its final blocks in ONE `updateMessageAndBlocks`
+ * SQLite aggregate transaction, so Main verifies closure and mints
+ * promotion membership atomically: no cross-transaction window where block
+ * success is committed while a transient parent closure rolls back.
+ * Unsupported tool/file blocks ride along as ordinary chat data in the same
+ * tx; Main sync filtering semantics are unchanged.
+ *
+ * Explicitly fail-loud (never swallows like the intermediate
+ * fire-and-forget helpers): the FileCleanupResult is consumed post-commit
+ * per the existing paradigm, and any persistence failure is logged and
+ * rethrown so onComplete never dispatches success Redux forked from DB.
+ */
+export const saveFinalMessageAndBlocksAtomically = async (
+  topicId: string,
+  messageId: string,
+  messageUpdates: Partial<Message>,
+  blocksToUpdate: MessageBlock[],
+  resendAttemptId?: string
+): Promise<FileCleanupResult> => {
+  try {
+    const cleanup = await dbService.updateMessageAndBlocks(
+      topicId,
+      { id: messageId, ...messageUpdates } as Partial<Message> & Pick<Message, 'id'>,
+      blocksToUpdate,
+      [],
+      resendAttemptId
+    )
+    await consumeFileCleanupResult(cleanup)
+    return cleanup
+  } catch (error) {
+    logger.error(`[DB Save Final] Failed atomic final persist for message ${messageId}:`, error as Error)
+    throw error
+  }
+}
+
 // Removed persistAgentExchange and createPersistedMessagePayload functions
 // These are no longer needed since messages are saved immediately via appendMessage
 // and updated during streaming via updateMessageAndBlocks
@@ -498,6 +537,16 @@ const fetchAndProcessAssistantResponseImpl = async (
     execTopicId: string,
     execGetState: () => RootState
   ): Promise<void> => saveUpdatedBlockToDB(blockId, messageId, execTopicId, execGetState, resendAttemptId)
+  // F1/Fix B: execution-scoped final atomic persist binding the immutable
+  // closure attempt. onComplete's success-final checkpoint carries exactly
+  // this id; ordinary executions pass undefined (carrier omitted).
+  const saveFinalUpdatesAtomicallyForExec = (
+    messageId: string,
+    execTopicId: string,
+    messageUpdates: Partial<Message>,
+    blocksToUpdate: MessageBlock[]
+  ): Promise<FileCleanupResult> =>
+    saveFinalMessageAndBlocksAtomically(execTopicId, messageId, messageUpdates, blocksToUpdate, resendAttemptId)
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
@@ -557,6 +606,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       topicId,
       assistantMsgId,
       saveUpdatesToDB: saveUpdatesToDBForExec,
+      saveFinalUpdatesAtomically: saveFinalUpdatesAtomicallyForExec,
       assistant
     })
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
@@ -2461,6 +2511,15 @@ export const setupChannelStream = (
     topicId,
     assistantMsgId: assistantMessage.id,
     saveUpdatesToDB,
+    // Ordinary IM channel execution: no resend attempt (carrier omitted), but
+    // the same single-transaction final checkpoint as ordinary chat.
+    saveFinalUpdatesAtomically: (
+      messageId: string,
+      channelTopicId: string,
+      messageUpdates: Partial<Message>,
+      blocksToUpdate: MessageBlock[]
+    ): Promise<FileCleanupResult> =>
+      saveFinalMessageAndBlocksAtomically(channelTopicId, messageId, messageUpdates, blocksToUpdate),
     assistant
   })
 

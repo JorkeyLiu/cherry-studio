@@ -377,6 +377,7 @@ describe('F2: success-final awaits quiescence', () => {
     mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
     mocks.updateBlocks.mockResolvedValue(undefined)
     mocks.updateMessage.mockResolvedValue(undefined)
+    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
   })
 
   it('quiesce flushes touched throttlers and resolves only after pending writes settle', async () => {
@@ -417,7 +418,7 @@ describe('F2: success-final awaits quiescence', () => {
     expect(barrier.pendingCount).toBe(0)
   })
 
-  it('onComplete holds the success-final message write until the suspended block write lands', async () => {
+  it('onComplete holds the success-final atomic commit until the suspended block write lands', async () => {
     const assistantMsg = createMessage({
       id: 'assistant-1',
       status: AssistantMessageStatus.SUCCESS,
@@ -437,7 +438,9 @@ describe('F2: success-final awaits quiescence', () => {
     const gate = deferred<void>()
     mocks.updateBlocks.mockReturnValueOnce(gate.promise)
 
-    const { saveUpdatesToDB, saveUpdatedBlockToDB } = await import('../messageThunk')
+    const { saveUpdatesToDB, saveUpdatedBlockToDB, saveFinalMessageAndBlocksAtomically } = await import(
+      '../messageThunk'
+    )
     const attempt = 'attempt-F2'
     const manager = new BlockManager({
       dispatch: vi.fn(),
@@ -460,6 +463,9 @@ describe('F2: success-final awaits quiescence', () => {
       assistantMsgId: 'assistant-1',
       saveUpdatesToDB: (mid: string, tid: string, mu: any, blocks: any[]) =>
         saveUpdatesToDB(mid, tid, mu, blocks, attempt),
+      // Fix B: the success-final checkpoint is the single-transaction helper.
+      saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
+        saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, attempt),
       assistant: { id: 'assistant-1', settings: {}, topics: [] } as never
     })
 
@@ -480,21 +486,25 @@ describe('F2: success-final awaits quiescence', () => {
     } as never)
     await flushMicrotasks()
     expect(mocks.updateMessage).not.toHaveBeenCalled()
+    expect(mocks.updateMessageAndBlocks).not.toHaveBeenCalled()
 
-    // Release: the block write lands first, then the success-final follows.
+    // Release: the block write lands first, then the single atomic
+    // success-final commit (message success + all final blocks) follows.
     gate.resolve()
     await done
     const firstBlockCall = mocks.updateBlocks.mock.calls[0] as unknown[]
     expect((firstBlockCall[0] as Array<{ content: string }>)[0].content).toBe('final answer')
     expect(firstBlockCall[2]).toBe(attempt)
-    expect(mocks.updateMessage).toHaveBeenCalledTimes(1)
-    const [, , updates, finalAttempt] = mocks.updateMessage.mock.calls[0] as unknown as [
-      string,
-      string,
-      Record<string, unknown>,
-      string
-    ]
-    expect(updates.status).toBe(AssistantMessageStatus.SUCCESS)
+    // No message-only final save: exactly one atomic commit.
+    expect(mocks.updateMessage).not.toHaveBeenCalled()
+    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
+    const [atomicTopic, atomicUpdates, atomicBlocks, atomicDeletes, finalAttempt] = mocks.updateMessageAndBlocks.mock
+      .calls[0] as unknown as [string, Record<string, unknown>, Array<Record<string, unknown>>, string[], string]
+    expect(atomicTopic).toBe('topic-1')
+    expect(atomicUpdates.id).toBe('assistant-1')
+    expect(atomicUpdates.status).toBe(AssistantMessageStatus.SUCCESS)
+    expect(atomicBlocks.map((b) => b.id)).toEqual(['b-final'])
+    expect(atomicDeletes).toEqual([])
     expect(finalAttempt).toBe(attempt)
   })
 })

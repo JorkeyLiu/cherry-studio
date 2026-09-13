@@ -52,6 +52,9 @@ const createMockCallbacks = (
     topicId: mockTopicId,
     assistantMsgId: mockAssistantMsgId,
     saveUpdatesToDB: vi.fn(),
+    // Fix B single-transaction final checkpoint: resolve without touching the
+    // DB so these integration tests keep asserting pure Redux end-state.
+    saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} }),
     assistant: mockAssistant
   })
 
@@ -242,7 +245,10 @@ vi.mock('@renderer/utils/messageUtils/find', () => ({
   default: {},
   findMainTextBlocks: vi.fn(() => []),
   getMainTextContent: vi.fn(() => 'Test content'),
-  findAllBlocks: vi.fn(() => [])
+  // Terminal ordering fail-closed needs the completion fallback to resolve the
+  // last referenced block. Return block refs from message.blocks (id-only is
+  // enough for findBlockIdForCompletion); never a hard-coded empty list.
+  findAllBlocks: vi.fn((message: any) => (message?.blocks ?? []).map((id: string) => ({ id })))
 }))
 
 vi.mock('i18next', () => {
@@ -427,6 +433,13 @@ describe('streamCallback Integration Tests', () => {
     ]
 
     await processChunks(chunks, callbacks)
+
+    // Terminal commit is DB-first after quiesce: the message SUCCESS dispatch
+    // lands after the async atomic persist, not synchronously with the
+    // BLOCK_COMPLETE chunk. Wait for convergence instead of asserting stale state.
+    await vi.waitFor(() => {
+      expect(getState().messages.entities[mockAssistantMsgId]?.status).toBe(AssistantMessageStatus.SUCCESS)
+    })
 
     // 验证 Redux 状态
     const state = getState()

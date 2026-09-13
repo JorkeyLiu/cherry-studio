@@ -469,7 +469,7 @@ describe('membership clock — closure and promotion do not fabricate, idempoten
     expect(membershipRow('message', 'm-closure')).toBeNull()
   })
 
-  it('transient->stable promotion of pre-existing row does not fabricate membership', () => {
+  it('transient->stable promotion mints first membership from the same-tx stable upsert clock', () => {
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
       .run('t-promo2', 'TP', '2026-01-01', '2026-01-01')
@@ -479,13 +479,21 @@ describe('membership clock — closure and promotion do not fabricate, idempoten
       )
       .run('m-promo2', 't-promo2', 'assistant', 'transient', 'pending', '2026-01-01', '2026-01-01', 0)
     expect(membershipRow('message', 'm-promo2')).toBeNull()
-    // Promote via updateMessage (transient pending -> success)
+    // Promote via updateMessage (transient pending -> success): this same-tx
+    // stable upsert is the first trustworthy sync operation, so its real
+    // clock mints the first membership (never createdAt/entityClock/guess).
     const upd = agg.updateMessage('t-promo2', 'm-promo2', { status: 'success', content: 'now stable' } as never)
     expect(upd.ok).toBe(true)
-    // Membership must remain absent: only rows inserted by same tx with real creation may get it
-    expect(membershipRow('message', 'm-promo2')).toBeNull()
+    const memMsg = membershipRow('message', 'm-promo2')
+    expect(memMsg).not.toBeNull()
+    expect(memMsg!.parentId).toBe('t-promo2')
+    const outMsg = outboxFor('m-promo2')
+    expect(outMsg).not.toBeNull()
+    expect(memMsg!.timestamp).toBe(outMsg!.timestamp)
+    expect(memMsg!.operationId).toBe(outMsg!.id)
 
-    // Block promotion similarly: legacy block with transient status then promote
+    // Block promotion similarly: transient block then promote mints from its
+    // own same-tx stable upsert clock.
     sqlite
       .prepare(
         `INSERT INTO messages (id, topic_id, role, content, status, created_at, updated_at, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -499,7 +507,13 @@ describe('membership clock — closure and promotion do not fabricate, idempoten
     expect(membershipRow('message_block', 'b-promo2')).toBeNull()
     const updBlk = agg.updateSingleBlock('b-promo2', { status: 'success', content: 'now stable blk' } as never)
     expect(updBlk.ok).toBe(true)
-    expect(membershipRow('message_block', 'b-promo2')).toBeNull()
+    const memBlk = membershipRow('message_block', 'b-promo2')
+    expect(memBlk).not.toBeNull()
+    expect(memBlk!.parentId).toBe('m-promo-blk-parent')
+    const outBlk = outboxFor('b-promo2')
+    expect(outBlk).not.toBeNull()
+    expect(memBlk!.timestamp).toBe(outBlk!.timestamp)
+    expect(memBlk!.operationId).toBe(outBlk!.id)
   })
 
   it('exact repeated tuple is idempotent', () => {

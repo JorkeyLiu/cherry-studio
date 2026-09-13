@@ -23,6 +23,7 @@
 import { createHash } from 'node:crypto'
 
 import {
+  applyTopicSyncDefaults,
   filterBlockPayload,
   filterMessagePayload,
   filterTopicPayload,
@@ -358,6 +359,10 @@ function buildTopicPayload(data: {
       if (value !== undefined) raw[key] = value
     }
   }
+  // Canonical absent defaults (shared helper, same as capture path):
+  // pinned=false, prompt=null, isNameManuallyEdited=false. Explicit values
+  // including null are preserved, never overwritten.
+  applyTopicSyncDefaults(raw)
   const filtered = filterTopicPayload(raw)
   if (!filtered) fail(`baseline topic payload filter rejected entity ${data.id}`)
   const allowErr = validateSyncPayloadAllowlist({ entityType: 'topic', payload: filtered })

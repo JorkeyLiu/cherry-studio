@@ -740,17 +740,28 @@ describe('pasteMessagesToTopic audit edge cases', () => {
     const blkFrames0 = ops.filter((r) => r.op === 'order_frame' && r.entityType === 'message' && r.entityId === 'm-pm0')
     expect(blkFrames0.length).toBe(1)
     expect(blockFrameOf(sqlite, 'm-pm0')!.orderedChildIds).toEqual([])
-    // Exact allowlisted topic payload: no sortOrder, no invented keys.
+    // Exact allowlisted topic payload with canonical defaults: no sortOrder, no invented keys.
     const topicPayload = JSON.parse(topicUps[0].payloadJson as string) as Record<string, unknown>
     expect(Object.keys(topicPayload).sort()).toEqual([
       'assistantId',
       'createdAt',
       'deletedAt',
       'id',
+      'isNameManuallyEdited',
       'name',
+      'pinned',
+      'prompt',
       'updatedAt'
     ])
-    expect(topicPayload).toMatchObject({ id: 't-pmissing', name: null, assistantId: null, deletedAt: null })
+    expect(topicPayload).toMatchObject({
+      id: 't-pmissing',
+      name: null,
+      assistantId: null,
+      deletedAt: null,
+      isNameManuallyEdited: false,
+      pinned: false,
+      prompt: null
+    })
     expect(topicPayload).not.toHaveProperty('sortOrder')
     // Strict parent-first timestamp order: topic < messages < block < frames.
     const msg0Up = ops.filter((r) => r.op === 'upsert' && r.entityType === 'message' && r.entityId === 'm-pm0')

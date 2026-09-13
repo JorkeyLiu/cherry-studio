@@ -46,6 +46,7 @@ import type { ChatDbResult } from '@shared/chatDb'
 import type { SearchMessagesRequest, SearchMessagesResponse } from '@shared/chatDb'
 import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendTiming'
 import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
+import { applyTopicSyncDefaults } from '@shared/sync'
 import type Database from 'better-sqlite3'
 import { eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
@@ -371,7 +372,9 @@ export class ChatDbAggregateService {
         if (v !== undefined) payload[k] = v
       }
     }
-    return payload
+    // Canonical absent defaults (shared helper): pinned=false, prompt=null,
+    // isNameManuallyEdited=false. Explicit values including null preserved.
+    return applyTopicSyncDefaults(payload)
   }
 
   private syncMessagePayloadFull(data: MessageData): Record<string, unknown> {
@@ -488,8 +491,10 @@ export class ChatDbAggregateService {
     }
     // Closure emits a snapshot for field-clock sync only; it must never
     // fabricate a parent-membership clock for a pre-existing untracked parent.
-    // Only a row inserted by the SAME current aggregate transaction with a real
-    // creation operation may get membership (see appendMessage/bulkAddBlocks).
+    // Membership is minted only by a true first creation in the SAME current
+    // transaction (see appendMessage/bulkAddBlocks) or by a transient→stable
+    // promotion's own same-tx stable upsert (see mintPromotionMembershipInTx);
+    // closure snapshots stay entity-only.
     syncService.enqueueUpsertInTx(
       tx,
       'message',
@@ -547,23 +552,57 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Stable-promotion descendant backfill (LOCK-PERSONAL-004): when a transient
-   * parent becomes stable, every committed stable block descendant that was
-   * never tracked joins the same stable checkpoint. Parent (topic/message)
-   * intent is already enqueued by the caller with an earlier timestamp, so
-   * per-block +1 offsets preserve parent-before-child order. Only stable +
-   * untracked + unexcluded + supported rows enqueue; transient rows never
-   * emit; unsupported structured/attachment-bearing rows never emit a partial
-   * shell (collected for a durable unsupported outcome). Entity-only rescan:
-   * each backfilled row gets its entity upsert/field evidence only — never a
-   * parentMembershipClock (009/SYNC-DATA-035: membership comes only from
-   * child creation in the same tx or explicitly governed reparent;
-   * pre-existing/closure/promotion rows stay unversioned, no backfill/guess).
-   * A later single messageBlock try-refresh in the same tx therefore
-   * invalidates with 0 op while the user mutation succeeds when any included
-   * block lacks trustworthy membership. Throws fail-closed (rolls back the
-   * promotion) on infrastructure failure. Returns true when at least one
-   * descendant was captured.
+   * Promotion-time membership mint (same-tx first stable checkpoint): when a
+   * transient child becomes stable+supported via a trustworthy same-tx stable
+   * upsert, that upsert's real {timestamp, operationId} establishes the first
+   * membership clock. Same-parent re-promotion (stable→transient→stable)
+   * reuses the first tuple without re-minting; different-parent retained
+   * metadata fails closed via the existing conflict path (rolls back).
+   * Never guesses from createdAt/entityClock/fieldClock/current time.
+   */
+  private mintPromotionMembershipInTx(
+    tx: SyncTxExecutor,
+    childEntityType: 'message' | 'message_block',
+    childEntityId: string,
+    parentId: string,
+    timestamp: number,
+    operationId: string
+  ): void {
+    const existing = syncService.getMembershipClockInTx(tx, childEntityType, childEntityId)
+    if (!existing) {
+      syncService.setMembershipClockInTx(tx, childEntityType, childEntityId, parentId, timestamp, operationId)
+      return
+    }
+    if (existing.parentId !== parentId) {
+      // Different-parent retained metadata: fail closed (throws, rolls back).
+      syncService.setMembershipClockInTx(tx, childEntityType, childEntityId, parentId, timestamp, operationId)
+      return
+    }
+    // Same-parent re-promotion: reuse the first membership, no re-mint.
+  }
+
+  /**
+   * Stable-promotion descendant rescan (LOCK-PERSONAL-004): when a transient
+   * parent becomes stable, committed stable block descendants that were
+   * never tracked join the same stable checkpoint as entity-only evidence.
+   * Parent (topic/message) intent is already enqueued by the caller with an
+   * earlier timestamp, so per-block +1 offsets preserve parent-before-child
+   * order. Only stable + untracked + unexcluded + supported rows enqueue;
+   * transient rows never emit; unsupported structured/attachment-bearing rows
+   * never emit a partial shell (collected for a durable unsupported outcome).
+   * No-backfill boundary (009/SYNC-DATA-035): this rescan never mints
+   * parentMembershipClock. Sibling rows stable before the current tx began
+   * have no trustworthy creation source in this tx — versioning them with
+   * the current rescan op clock would be a guess (not createdAt,
+   * entityClock, fieldClock, or current time either). They stay
+   * entity-only/unversioned; only explicitly requested blocks (true-create
+   * or transient→stable promotion with pre-state evidence, via their own
+   * same-tx stable upsert clock) mint membership. A later single
+   * messageBlock try-refresh in the same tx therefore invalidates with 0 op
+   * while the user mutation succeeds when any included block lacks
+   * trustworthy membership. Throws fail-closed (rolls back the promotion) on
+   * infrastructure failure. Returns true when at least one descendant was
+   * captured.
    */
   private captureUntrackedStableBlocksInTx(
     tx: SyncTxExecutor,
@@ -585,12 +624,8 @@ export class ChatDbAggregateService {
         continue
       }
       if (syncService.isTrackedEntityInTx(tx, 'message_block', b.id)) continue
-      // Intentionally no membership clock for promotion-rescanned siblings:
-      // these are existing rows with no trustworthy creation source (append
-      // while parent transient or legacy pre-sync). Fabricating a clock from
-      // the promotion timestamp would be a guess (no real operationId).
-      // They remain absent/unversioned per 009 semantics; only true first
-      // creations via direct aggregate paths get a membership clock.
+      // No-backfill: ordinary sibling rescan is entity-only only. Never mint
+      // membership from the rescan op clock for rows stable before this tx.
       syncService.enqueueUpsertInTx(
         tx,
         'message_block',
@@ -1964,11 +1999,12 @@ export class ChatDbAggregateService {
             // patch-only.
             const tracked = syncService.isTrackedEntityInTx(stx, 'message', messageId)
             if (!tracked && !preStable) {
-              // Transient->stable promotion of a pre-existing row: emit field-clock
-              // snapshot for sync, but never fabricate a parent-membership clock.
-              // Only rows inserted by the SAME current transaction with a real
-              // creation operation may get membership (appendMessage/bulkAddBlocks).
-              syncService.enqueueUpsertInTx(
+              // Transient->stable promotion of a never-tracked row: this
+              // same-tx stable upsert is the first trustworthy sync operation
+              // for the child, so its real clock mints the first membership
+              // (same-parent re-promotion reuses, different-parent fails
+              // closed; never createdAt/entityClock/fieldClock/current time).
+              const msgOpId = syncService.enqueueUpsertInTx(
                 stx,
                 'message',
                 messageId,
@@ -1976,10 +2012,15 @@ export class ChatDbAggregateService {
                 ctx.ts,
                 ctx.deviceId
               )
+              this.mintPromotionMembershipInTx(stx, 'message', messageId, row.data.topicId, ctx.ts, msgOpId)
               notify = true
-              // Promotion backfill: stable blocks committed with the transient
+              // Promotion rescan: stable blocks committed with the transient
               // stub (appendMessage skips all intent while transient) join this
-              // stable checkpoint parent-first. Fail closed on error.
+              // stable checkpoint parent-first as entity-only evidence (no
+              // membership backfill — pre-existing stable siblings stay
+              // unversioned/partial). Explicitly requested blocks mint via
+              // their own same-tx upsert clock in updateMessageAndBlocks.
+              // Fail closed on error.
               // Unsupported structured/attachment descendants skip without a
               // partial shell (durable outcome recorded after commit).
               if (
@@ -2029,7 +2070,7 @@ export class ChatDbAggregateService {
             // work (F2): promotion mints at most one topic frame and one
             // messageBlock try-refresh; only complete trustworthy membership
             // yields exactly 1 op, otherwise truthful invalidate with 0 op
-            // (promotion rescan is entity-only, never membership backfill).
+            // (ordinary rescan stays entity-only without membership backfill).
             // Stable→stable edits mint nothing.
             if (isPromotion) {
               if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
@@ -2235,20 +2276,35 @@ export class ChatDbAggregateService {
                 : this.diffMessagePayload(existing.data, mrow.data)
               if (msgPayload && isStableMessageStatus(mrow.data.status)) {
                 this.ensureTopicClosureInTx(stx, topicId, syncCtx.ts, syncCtx.deviceId)
-                // Promotion of pre-existing row must not fabricate membership;
-                // only true inserts by same tx get membership (handled in
-                // appendMessage/bulkAddBlocks). All promotion paths remain
-                // unversioned for parent-membership.
-                syncService.enqueueUpsertInTx(stx, 'message', messageId, msgPayload, syncCtx.ts, syncCtx.deviceId)
+                // Promotion of a never-tracked transient row mints its first
+                // membership from this same-tx stable upsert clock
+                // (same-parent re-promotion reuses, different-parent fails
+                // closed); ordinary stable rows keep patch semantics without
+                // backfill.
+                const msgOpId = syncService.enqueueUpsertInTx(
+                  stx,
+                  'message',
+                  messageId,
+                  msgPayload,
+                  syncCtx.ts,
+                  syncCtx.deviceId
+                )
+                if (isPromotion) {
+                  this.mintPromotionMembershipInTx(stx, 'message', messageId, mrow.data.topicId, syncCtx.ts, msgOpId)
+                }
                 syncNotify = true
-                // Promotion backfill + deterministic rescan (LOCK-PERSONAL-004):
+                // Promotion rescan + deterministic rescan (LOCK-PERSONAL-004):
                 // committed stable descendants created with the transient stub
                 // (outside this request's block list) join the stable
-                // checkpoint parent-first. Every stable message capture
-                // rescans all stable descendants against tracked/outbox state,
-                // even when the parent is already tracked, so a prior partial
-                // backfill is retried instead of silently abandoned.
-                // Fail closed on error.
+                // checkpoint parent-first as entity-only evidence only (never
+                // membership backfill — pre-existing stable siblings stay
+                // unversioned/partial). Only explicitly requested blocks
+                // (true-create or promotion with pre-state evidence, each via
+                // its own same-tx upsert clock below) mint membership. Every
+                // stable message capture rescans all stable descendants
+                // against tracked/outbox state, even when the parent is
+                // already tracked, so a prior partial rescan is retried
+                // instead of silently abandoned. Fail closed on error.
                 if (isStableMessageStatus(mrow.data.status)) {
                   const requestedIds = new Set(blockDataList.map((b) => b.id))
                   if (
@@ -2275,10 +2331,10 @@ export class ChatDbAggregateService {
                   unsupportedBlockIds.push(block.id)
                   continue
                 }
-                // Field patch via pre/post diff; only a row inserted by the SAME
-                // current transaction (pre == null) may get parent-membership.
-                // Transient->stable promotion of a pre-existing row remains
-                // unversioned for membership (no fabrication).
+                // Field patch via pre/post diff; a true insert (pre == null) or
+                // a transient→stable promotion of a never-tracked row mints
+                // its first membership from this same-tx stable upsert clock
+                // (same-parent reuse, different-parent fail-closed).
                 const pre = preBlockRows.get(block.id) ?? null
                 const blockTracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
                 const preBlockStable = pre ? isStableBlockStatus(pre.status) : true
@@ -2307,6 +2363,15 @@ export class ChatDbAggregateService {
                     syncCtx.ts,
                     blkOpId
                   )
+                } else if (isPromotion) {
+                  this.mintPromotionMembershipInTx(
+                    stx,
+                    'message_block',
+                    block.id,
+                    brow.data.messageId,
+                    syncCtx.ts,
+                    blkOpId
+                  )
                 }
                 syncNotify = true
               }
@@ -2316,9 +2381,10 @@ export class ChatDbAggregateService {
               syncNotify = true
             }
             // Local parent order frame (010) — single per-parent decision (F1):
-            // all message/block entity upsert (true-create membership mint
-            // plus entity-only promotion rescan, never membership backfill)
-            // and delete/transition handling above complete first; then at most
+            // all message/block entity upsert (explicit true-create plus
+            // explicit promotion-time membership mint; sibling rescan stays
+            // entity-only) and
+            // delete/transition handling above complete first; then at most
             // one messageBlock tryRefresh+enqueue attempt per tx for this
             // parent. Exclusion (stable→transient parent) only invalidates
             // with 0 op and is never overridden by a tail refresh; a
@@ -2744,16 +2810,26 @@ export class ChatDbAggregateService {
                 continue
               }
               if (!tracked && !preStable) {
-                // Pre-existing transient->stable promotion: emit field snapshot
-                // but never fabricate membership (no trustworthy creation op).
+                // Transient->stable promotion of a never-tracked row: this
+                // same-tx stable upsert is the first trustworthy sync
+                // operation, so its real clock mints the first membership
+                // (same-parent reuse, different-parent fail-closed).
                 this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
-                syncService.enqueueUpsertInTx(
+                const promoOpId = syncService.enqueueUpsertInTx(
                   stx,
                   'message_block',
                   block.id,
                   this.syncBlockPayloadFull(post.data),
                   syncCtx.ts,
                   syncCtx.deviceId
+                )
+                this.mintPromotionMembershipInTx(
+                  stx,
+                  'message_block',
+                  block.id,
+                  post.data.messageId,
+                  syncCtx.ts,
+                  promoOpId
                 )
                 syncNotify = true
                 continue
@@ -2970,15 +3046,25 @@ export class ChatDbAggregateService {
                   const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', blockId)
                   const preStable = isStableBlockStatus(existing.data.status)
                   if (!tracked && !preStable) {
-                    // Pre-existing transient->stable promotion: field sync only,
-                    // never fabricate membership (no trustworthy creation op).
-                    syncService.enqueueUpsertInTx(
+                    // Transient->stable promotion of a never-tracked row: this
+                    // same-tx stable upsert mints the first membership from
+                    // its real clock (same-parent reuse, different-parent
+                    // fail-closed).
+                    const promoOpId = syncService.enqueueUpsertInTx(
                       stx,
                       'message_block',
                       blockId,
                       this.syncBlockPayloadFull(post.data),
                       syncCtx.ts,
                       syncCtx.deviceId
+                    )
+                    this.mintPromotionMembershipInTx(
+                      stx,
+                      'message_block',
+                      blockId,
+                      post.data.messageId,
+                      syncCtx.ts,
+                      promoOpId
                     )
                     syncNotify = true
                   } else {

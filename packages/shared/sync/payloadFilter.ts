@@ -41,6 +41,28 @@ const BLOCK_ALLOW = new Set(['id', 'messageId', 'type', 'content', 'status', 'cr
 // Denied substrings (defense-in-depth)
 const DENIED_KEYS = new Set(['file_path', 'filePath', 'credentials', 'token', 'password', 'secret'])
 
+/**
+ * Canonical absent defaults for the three syncable topic overflow metadata
+ * fields. Single source of truth shared by Main capture (`syncTopicPayload`)
+ * and baseline capture (`buildTopicPayload`) so the two can never drift.
+ * Absent/undefined materializes the default; any present value including
+ * explicit null is preserved (never overwritten).
+ */
+export const TOPIC_SYNC_DEFAULTS = {
+  pinned: false,
+  prompt: null,
+  isNameManuallyEdited: false
+} as const
+
+export type TopicSyncDefaultField = keyof typeof TOPIC_SYNC_DEFAULTS
+
+export function applyTopicSyncDefaults(payload: Record<string, unknown>): Record<string, unknown> {
+  for (const [key, defaultValue] of Object.entries(TOPIC_SYNC_DEFAULTS)) {
+    if (payload[key] === undefined) payload[key] = defaultValue
+  }
+  return payload
+}
+
 export function filterTopicPayload(raw: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!raw) return undefined
   const out: Record<string, unknown> = {}

@@ -645,7 +645,9 @@ describe('field clocks and unversioned entities', () => {
       ['message_block', 'b-c']
     ] as const) {
       seedEntityClock(type, id, T, `op-${id}`)
-      seedFullFieldClocks(type, id, T, `op-${id}`)
+      // Canonical topic capture always carries all 8 clocked fields
+      // (required + pinned/prompt/isNameManuallyEdited defaults).
+      seedFullFieldClocks(type, id, T, `op-${id}`, type === 'topic' ? ['pinned', 'prompt', 'isNameManuallyEdited'] : [])
     }
     seedMembership('message', 'm-c', 't-c', T, 'op-m-c')
     seedMembership('message_block', 'b-c', 'm-c', T, 'op-b-c')
@@ -664,7 +666,7 @@ describe('field clocks and unversioned entities', () => {
     insertMessage('m-uf', 't-uf')
     seedEntityClock('topic', 't-uf', T, 'op-t-uf')
     seedEntityClock('message', 'm-uf', T, 'op-m-uf')
-    seedFullFieldClocks('topic', 't-uf', T, 'op-t-uf')
+    seedFullFieldClocks('topic', 't-uf', T, 'op-t-uf', ['pinned', 'prompt', 'isNameManuallyEdited'])
     seedFieldClock('message', 'm-uf', 'content', T, 'op-m-uf')
     seedBoundWatermark()
     const candidate = captureLocalSyncBaselineCandidate(db)
@@ -710,7 +712,7 @@ describe('operation ID shape validation', () => {
     insertMessage('m-max', 't-max')
     seedEntityClock('topic', 't-max', T, maxId)
     seedEntityClock('message', 'm-max', T, maxId)
-    seedFullFieldClocks('topic', 't-max', T, maxId)
+    seedFullFieldClocks('topic', 't-max', T, maxId, ['pinned', 'prompt', 'isNameManuallyEdited'])
     seedFullFieldClocks('message', 'm-max', T, maxId)
     seedMembership('message', 'm-max', 't-max', T, maxId)
     seedState('tombstone:message:m-max-gone', `${T}:${maxId}`)
@@ -740,7 +742,7 @@ describe('observed watermark binding', () => {
   it('reports bound observation when both channel key and strict cursor are present', () => {
     insertTopic('t-w')
     seedEntityClock('topic', 't-w', T, 'op-t-w')
-    seedFullFieldClocks('topic', 't-w', T, 'op-t-w')
+    seedFullFieldClocks('topic', 't-w', T, 'op-t-w', ['pinned', 'prompt', 'isNameManuallyEdited'])
     seedFrame('topicMessage', 't-w', [], T + 10, 'op-frame-tw')
     seedBoundWatermark('12', 'chan-abc')
     const candidate = captureLocalSyncBaselineCandidate(db)

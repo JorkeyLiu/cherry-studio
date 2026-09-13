@@ -227,10 +227,12 @@ export const syncConflictLog = sqliteTable(
 // Dedicated parent-membership clock keyed by child entity type+id, storing
 // parent id + creation timestamp + operationId. Restricted to message and
 // message_block — never a substitute for entityClock/field clocks and never
-// updated by ordinary edits. Clock is set only on true first creation (local
-// or remote) atomically in the same transaction; existing rows without a
-// trustworthy creation source remain absent (no backfill/guess). Tombstones
-// retain clock metadata (smallest state — deterministic history preserved).
+// updated by ordinary edits. Clock is set on true first creation (local or
+// remote) or on a transient→stable first promotion's own same-tx stable upsert
+// clock, atomically in the same transaction; existing rows without a
+// trustworthy same-tx source (pre-existing stable, closure, ordinary rescan)
+// remain absent (no backfill/guess). Tombstones retain clock metadata
+// (smallest state — deterministic history preserved).
 // ---------------------------------------------------------------------------
 export const syncMembershipClock = sqliteTable(
   'sync_membership_clock',

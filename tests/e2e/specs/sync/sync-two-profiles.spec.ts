@@ -13,7 +13,7 @@
 import type { Page } from '@playwright/test'
 import { createServer as createTcpServer } from 'node:net'
 
-import { expect, test } from '../../fixtures/electron.fixture'
+import { expect, test, findProductRequestAfter, getRequestSequence } from '../../fixtures/electron.fixture'
 import {
   closeSecondSyncProfile,
   launchSecondSyncProfile,
@@ -36,6 +36,7 @@ import {
   listTrashTopicIdsViaApi,
   restoreTopicViaApi,
   connectViaApi,
+  getDeviceCodeViaApi,
   pairProfilesViaApi,
   provisionObserverViaRaw,
   RAW_OBSERVER_CLIENT_DEVICE_ID,
@@ -187,37 +188,110 @@ async function pollForConvergence(
   expectedContent: string,
   timeoutMs = 30000
 ): Promise<void> {
+  // Strict synthetic path: message.content === block.content === expected.
+  // Timeout output is a per-condition summary only (no secret/path/content).
   const deadline = Date.now() + timeoutMs
   let lastError: string | null = null
   while (Date.now() < deadline) {
     try {
       const exists = await topicExistsViaApi(page, topicId)
       if (!exists) {
-        lastError = 'topic missing'
+        lastError = 'topicOk=false msgFound=false blkFound=false messages=0 blocks=0'
       } else {
         const { messages, blocks } = await fetchMessagesViaApi(page, topicId)
-        const msg = messages.find((m: any) => m?.id === messageId)
-        const blk = blocks.find((b: any) => b?.id === blockId)
-        if (
-          msg &&
-          blk &&
-          (msg as any)?.id === messageId &&
-          (msg as any)?.topicId === topicId &&
-          (msg as any)?.content === expectedContent &&
-          (blk as any)?.id === blockId &&
-          (blk as any)?.content === expectedContent &&
-          (blk as any)?.messageId === messageId
-        ) {
+        const msg = messages.find((m: any) => m?.id === messageId) as any
+        const blk = blocks.find((b: any) => b?.id === blockId) as any
+        const msgFound = Boolean(msg)
+        const blkFound = Boolean(blk)
+        const msgTopicOk = msg?.topicId === topicId
+        const msgContentOk = msg?.content === expectedContent
+        const blkRelOk = blk?.messageId === messageId
+        const blkContentOk = blk?.content === expectedContent
+        if (msgFound && blkFound && msgTopicOk && msgContentOk && blkRelOk && blkContentOk) {
           return
         }
-        lastError = `message/block not converged (messages=${messages.length}, blocks=${blocks.length})`
+        lastError =
+          `topicOk=true msgFound=${msgFound} msgTopicOk=${msgTopicOk} msgContentOk=${msgContentOk} ` +
+          `blkFound=${blkFound} blkRelOk=${blkRelOk} blkContentOk=${blkContentOk} ` +
+          `messages=${messages.length} blocks=${blocks.length}`
       }
     } catch (e) {
-      lastError = String((e as Error).message)
+      lastError = `fetchError=true`
+      void e
     }
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error(`convergence timeout for ${topicId}/${messageId}/${blockId}: ${lastError}`)
+}
+
+/**
+ * Real-streaming convergence: message text lives on the block, not the row.
+ * Requires message id/topic/role/status + blocks containing the target, plus
+ * target block id/messageId/type/status/content exact. Message.content must
+ * stay null (never equal to the block text). Timeout output is a
+ * per-condition summary only (no secret/path/content text).
+ */
+async function pollForStreamingConvergence(
+  page: Page,
+  topicId: string,
+  messageId: string,
+  blockId: string,
+  expectedContent: string,
+  timeoutMs = 30000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: string | null = null
+  while (Date.now() < deadline) {
+    try {
+      const exists = await topicExistsViaApi(page, topicId)
+      if (!exists) {
+        lastError = 'topicOk=false msgFound=false blkFound=false messages=0 blocks=0'
+      } else {
+        const { messages, blocks } = await fetchMessagesViaApi(page, topicId)
+        const msg = messages.find((m: any) => m?.id === messageId) as any
+        const blk = blocks.find((b: any) => b?.id === blockId) as any
+        const msgFound = Boolean(msg)
+        const blkFound = Boolean(blk)
+        const msgTopicOk = msg?.topicId === topicId
+        const msgRoleOk = msg?.role === 'assistant'
+        const msgStatusOk = msg?.status === 'success'
+        const msgBlocksOk = Array.isArray(msg?.blocks) ? (msg.blocks as unknown[]).includes(blockId) : false
+        const blkRelOk = blk?.messageId === messageId
+        const blkTypeOk = blk?.type === 'main_text' || blk?.type === 'text'
+        const blkStatusOk = blk?.status === 'success'
+        const blkContentOk = blk?.content === expectedContent
+        const msgContentNull = msg?.content === null || msg?.content === undefined
+        const msgContentNotBlock = msg?.content !== expectedContent
+        if (
+          msgFound &&
+          blkFound &&
+          msgTopicOk &&
+          msgRoleOk &&
+          msgStatusOk &&
+          msgBlocksOk &&
+          blkRelOk &&
+          blkTypeOk &&
+          blkStatusOk &&
+          blkContentOk &&
+          msgContentNull &&
+          msgContentNotBlock
+        ) {
+          return
+        }
+        lastError =
+          `topicOk=true msgFound=${msgFound} msgTopicOk=${msgTopicOk} msgRoleOk=${msgRoleOk} ` +
+          `msgStatusOk=${msgStatusOk} msgBlocksOk=${msgBlocksOk} blkFound=${blkFound} blkRelOk=${blkRelOk} ` +
+          `blkTypeOk=${blkTypeOk} blkStatusOk=${blkStatusOk} blkContentOk=${blkContentOk} ` +
+          `msgContentNull=${msgContentNull} msgContentNotBlock=${msgContentNotBlock} ` +
+          `messages=${messages.length} blocks=${blocks.length}`
+      }
+    } catch (e) {
+      lastError = `fetchError=true`
+      void e
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`streaming-convergence timeout for ${topicId}/${messageId}/${blockId}: ${lastError}`)
 }
 
 /**
@@ -289,6 +363,18 @@ async function pollForPendingDrained(page: Page, timeoutMs = 60000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error(`pending-drain timeout: ${last}`)
+}
+
+/**
+ * Historical capture-error tolerance for real streaming paths.
+ * `lastCaptureError` is durable transient-defer history (streaming parent
+ * defer), never a convergence blocker. Authoritative gates stay
+ * pending=0, lastError=null, cursor advance, and ChatDb convergence. When
+ * non-null, it must match transient/defer history only (no fragile ID text).
+ */
+function assertTolerantCaptureHistory(value: string | null, _label: string): void {
+  if (value === null) return
+  expect(value).toMatch(/transient|defer/i)
 }
 
 test.describe('Sync MVP two-profile real path', () => {
@@ -2781,6 +2867,517 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       try {
         relay?.setPullPaused(false)
       } catch {}
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+})
+
+/**
+ * Real streaming transient→success promotion convergence (promotion-time
+ * membership diff regression).
+ *
+ * Proves: A sends via the real UI through the existing mock OpenAI streaming
+ * path; the assistant completes to status success with terminal blocks; the
+ * authoritative A ChatDb row (dynamic IDs/content) syncs A→B through the
+ * operation log; B converges on the exact same message/block IDs, relation,
+ * and content with pending=0 and lastError=null.
+ *
+ * Baseline bootstrap is covered by the next test in this describe: the
+ * test-owned relay mirrors the reference GET/PUT `/sync/baseline` contract,
+ * so a cursor0 receiver can bootstrap from an auto-published baseline. This
+ * test asserts the operation-log convergence path only; no third profile is
+ * launched in either test.
+ */
+test.describe('Sync streaming promotion convergence', () => {
+  test.setTimeout(300000)
+
+  /**
+   * Local minimal copies of the ordinary-chat.spec.ts verified helpers, kept
+   * in-spec (no cross-spec extraction, no fixture/relay change):
+   * active context, real textarea send, and the assistant-terminal wait that
+   * confirms the target assistant message reached success, all its blocks
+   * are terminal, and the topic queue drained.
+   */
+  async function getStreamingActiveContext(page: Page): Promise<{ assistantId: string; topicId: string }> {
+    return page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const assistant = s.assistants.assistants[0]
+      const topic = assistant?.topics?.[0]
+      return {
+        assistantId: assistant?.id || '',
+        topicId: topic?.id || ''
+      }
+    })
+  }
+
+  async function uiSendStreamingMessage(page: Page, text: string): Promise<void> {
+    const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+    await textarea.waitFor({ state: 'visible', timeout: 15000 })
+    await textarea.click()
+    await page.evaluate(
+      ({ selector, text }: { selector: string; text: string }) => {
+        const el = document.querySelector(selector) as HTMLTextAreaElement
+        if (!el) throw new Error('Textarea not found')
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (!nativeSetter) throw new Error('No native textarea setter')
+        nativeSetter.call(el, text)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      { selector: '.inputbar textarea, textarea[placeholder]', text }
+    )
+    await expect(textarea).toHaveValue(text, { timeout: 5000 })
+    await textarea.press('Enter')
+  }
+
+  async function countTopicAssistants(page: Page, topicId: string): Promise<number> {
+    return page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const msgIds = s.messages.messageIdsByTopic[topicId] || []
+      let count = 0
+      for (const id of msgIds) {
+        if (s.messages.entities[id]?.role === 'assistant') count++
+      }
+      return count
+    }, topicId)
+  }
+
+  async function waitForStreamingComplete(
+    page: Page,
+    topicId: string,
+    previousAssistantCount: number,
+    timeout = 90000
+  ): Promise<number> {
+    await page.waitForFunction(
+      ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+        let count = 0
+        for (const id of msgIds) {
+          const msg = s.messages.entities?.[id]
+          if (msg?.role === 'assistant') count++
+        }
+        return count > prevCount
+      },
+      { topicId, prevCount: previousAssistantCount },
+      { timeout }
+    )
+    await page.waitForFunction(
+      ({ topicId }: { topicId: string }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        if (s.messages?.loadingByTopic?.[topicId]) return false
+        const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+        let latestAssistantId: string | null = null
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities?.[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            latestAssistantId = msgIds[i]
+            break
+          }
+        }
+        if (!latestAssistantId) return false
+        const assistantMsg = s.messages.entities[latestAssistantId]
+        const terminalStatuses = ['success', 'error']
+        if (!terminalStatuses.includes(assistantMsg.status)) return false
+        const blocks = assistantMsg.blocks || []
+        if (blocks.length === 0) return false
+        for (const blockId of blocks) {
+          const block = s.messageBlocks?.entities?.[blockId]
+          if (!block) return false
+          if (block.status !== 'success' && block.status !== 'error') return false
+        }
+        return true
+      },
+      { topicId },
+      { timeout }
+    )
+    return countTopicAssistants(page, topicId)
+  }
+
+  test('real streaming assistant promotion converges A to B via operation log', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
+      const cursorA0 = (await getSyncStatusViaApi(pageA)).cursor
+      const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
+
+      // Settle timing interference before the real send: profile B just
+      // booted and pairing just completed, so drain automation on both
+      // profiles and the relay. The streaming finalization window must run
+      // without in-flight sync churn; both drains also prove automation is
+      // healthy (pending 0, no durable errors) before the turn starts.
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      await relay.waitForQuiescent()
+
+      // Real streaming turn on A: active context, sequence-scoped mock
+      // binding, real UI send, verified terminal wait (target assistant
+      // success + terminal blocks + queue drained).
+      const ctx = await getStreamingActiveContext(pageA)
+      expect(ctx.topicId.length).toBeGreaterThan(0)
+      const prevAssistantCount = await countTopicAssistants(pageA, ctx.topicId)
+      const userText = 'e2e streaming promotion probe hello'
+      const seq0 = getRequestSequence()
+      await uiSendStreamingMessage(pageA, userText)
+      await waitForStreamingComplete(pageA, ctx.topicId, prevAssistantCount)
+
+      // Target IDs bound by the exact Redux-resolved assistant (never an
+      // older message): dynamic latest assistant id plus its entity-type
+      // main_text block (legacy text compatible), fail-closed when absent.
+      const target = await pageA.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            // Entity-type target: first main_text block in message order,
+            // legacy text compatible; fail-closed when no target exists.
+            const ids = Array.isArray(msg?.blocks) ? msg.blocks : []
+            let blockId = ''
+            for (const id of ids) {
+              const blk = s.messageBlocks?.entities?.[id]
+              if (blk?.type === 'main_text' || blk?.type === 'text') {
+                blockId = String(id)
+                break
+              }
+            }
+            return { assistantId: String(msgIds[i]), blockId }
+          }
+        }
+        return { assistantId: '', blockId: '' }
+      }, ctx.topicId)
+      expect(target.assistantId.length).toBeGreaterThan(0)
+      expect(target.blockId.length).toBeGreaterThan(0)
+
+      // The product request traversed the existing mock OpenAI streaming
+      // path (no live provider): sequence-scoped to this send, stream:true,
+      // mock-model, carrying the user text.
+      const productReq = findProductRequestAfter(seq0)
+      expect(productReq).not.toBeNull()
+      expect(productReq!.method).toBe('POST')
+      expect(productReq!.url).toBe('/v1/chat/completions')
+      expect((productReq!.parsed as any)?.model).toBe('mock-model')
+      expect((productReq!.parsed as any)?.stream).toBe(true)
+      const sentMessages = (productReq!.parsed as any)?.messages as Array<{ role: string; content: string }>
+      expect(Array.isArray(sentMessages)).toBe(true)
+      expect(sentMessages.some((m) => m?.role === 'user' && m?.content === userText)).toBe(true)
+
+      // Authoritative A ChatDb: the exact target rows are stable with the
+      // mock-echo text content and the correct parent relation.
+      const localA = await fetchMessagesViaApi(pageA, ctx.topicId)
+      const assistantMsg = (localA.messages as any[]).find((m: any) => m?.id === target.assistantId) as any
+      const assistantBlock = (localA.blocks as any[]).find((b: any) => b?.id === target.blockId) as any
+      expect(assistantMsg?.topicId).toBe(ctx.topicId)
+      expect(assistantMsg?.status).toBe('success')
+      expect(assistantBlock?.messageId).toBe(target.assistantId)
+      expect(['main_text', 'text']).toContain(assistantBlock?.type)
+      expect(assistantBlock?.status).toBe('success')
+      expect(String(assistantBlock?.content)).toContain('Mock')
+      expect(String(assistantBlock?.content)).toContain(userText)
+      const assistantContent = String(assistantBlock.content)
+      // The user turn that triggered the stream is present (text lives on
+      // the message blocks for real UI sends).
+      expect(
+        (localA.messages as any[]).some(
+          (m: any) =>
+            m?.role === 'user' &&
+            (m?.content === userText ||
+              (localA.blocks as any[]).some((b: any) => b?.messageId === m?.id && b?.content === userText))
+        )
+      ).toBe(true)
+
+      // The real promotion entered the operation log: A syncs clean, cursor
+      // advances, outbox drains; B syncs and converges on the exact dynamic
+      // IDs, parent relation, and content.
+      const syncA = await runSyncViaApi(pageA)
+      expect(syncA.threw).toBeNull()
+      expect(syncA.status.lastError).toBeNull()
+      const statusAAfter = await getSyncStatusViaApi(pageA)
+      expect(statusAAfter.lastError).toBeNull()
+      // Historical capture history is non-blocking: transient streaming defer
+      // may persist as durable history while convergence gates stay authoritative.
+      assertTolerantCaptureHistory(statusAAfter.lastCaptureError, 'statusAAfter')
+      expect(statusAAfter.pendingCount).toBe(0)
+      expect(statusAAfter.cursor).toBeGreaterThan(cursorA0)
+
+      const syncB = await runSyncViaApi(pageB)
+      expect(syncB.threw).toBeNull()
+      expect(syncB.status.lastError).toBeNull()
+      await pollForStreamingConvergence(pageB, ctx.topicId, target.assistantId, target.blockId, assistantContent)
+      const afterB = await fetchMessagesViaApi(pageB, ctx.topicId)
+      const msgB = (afterB.messages as any[]).find((m: any) => m?.id === target.assistantId) as any
+      const blkB = (afterB.blocks as any[]).find((b: any) => b?.id === target.blockId) as any
+      expect(msgB?.topicId).toBe(ctx.topicId)
+      expect(msgB?.role).toBe('assistant')
+      expect(msgB?.status).toBe('success')
+      expect(Array.isArray(msgB?.blocks) ? msgB.blocks.includes(target.blockId) : false).toBe(true)
+      expect(blkB?.messageId).toBe(target.assistantId)
+      expect(['main_text', 'text']).toContain(blkB?.type)
+      expect(blkB?.status).toBe('success')
+      expect(blkB?.content).toBe(assistantContent)
+      // Real streaming row carries no text: content stays null, never the block text.
+      expect(msgB?.content === null || msgB?.content === undefined).toBe(true)
+      expect(msgB?.content).not.toBe(assistantContent)
+      expect(
+        (afterB.messages as any[]).some(
+          (m: any) =>
+            m?.role === 'user' &&
+            (m?.content === userText ||
+              (afterB.blocks as any[]).some((b: any) => b?.messageId === m?.id && b?.content === userText))
+        )
+      ).toBe(true)
+
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      // Historical capture history is non-blocking on the real streaming
+      // operation-log path; authoritative gates are pending/lastError/cursor/data.
+      assertTolerantCaptureHistory(statusA.lastCaptureError, 'streaming-op-log-A')
+      assertTolerantCaptureHistory(statusB.lastCaptureError, 'streaming-op-log-B')
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
+      expect(statusB.cursor).toBeGreaterThan(cursorB0)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  /**
+   * Real streaming baseline bootstrap for a cursor0 receiver (SYNC-CC-023).
+   *
+   * Proves: A pairs with a raw observer first (channel exists before any
+   * chat data; the observer proves baseline absence over raw HTTP), A sends
+   * via the real UI through the existing mock OpenAI streaming path to
+   * terminal success, automation pushes the turn and auto-publishes a
+   * baseline (raw GET 200 with watermark>0 before B ever pairs), then a
+   * freshly launched cursor0 B joins the same channel and its first syncs
+   * bootstrap GET 200 to the exact same message/block, and a later N+1 edit
+   * still converges. No third profile is launched; the observer is a raw
+   * HTTP channel member only. The relay is never paused during streaming;
+   * the test reuses the real terminal wait above.
+   */
+  test('real streaming baseline bootstrap converges cursor0 receiver B then N+1 edit', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      const endpoint = relay.endpoint
+
+      // Channel first, data later: A configures + connects, then a raw
+      // observer pairs with A so the channel exists while it is still empty.
+      await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await connectViaApi(pageA)
+      const observer = await provisionObserverViaRaw(endpoint, RELAY_TOKEN, pageA)
+      const observerHeaders = {
+        Authorization: `Bearer ${RELAY_TOKEN}`,
+        'x-sync-device-code': observer.code,
+        'x-sync-device-secret': observer.secret
+      }
+      const rawBaselineGet = async (): Promise<{ status: number; body: any }> => {
+        const res = await fetch(`${endpoint}/sync/baseline`, { headers: observerHeaders })
+        return { status: res.status, body: await res.json().catch(() => ({})) }
+      }
+      // Empty channel: strict 404 before any data exists.
+      const empty = await rawBaselineGet()
+      expect(empty.status).toBe(404)
+      expect(empty.body).toEqual({ error: 'baseline-not-found' })
+
+      await pollForPendingDrained(pageA, 90000)
+      await relay.waitForQuiescent()
+
+      // Real streaming turn on A: active context, sequence-scoped mock
+      // binding, real UI send, verified terminal wait (target assistant
+      // success + terminal blocks + queue drained).
+      const ctx = await getStreamingActiveContext(pageA)
+      expect(ctx.topicId.length).toBeGreaterThan(0)
+      const prevAssistantCount = await countTopicAssistants(pageA, ctx.topicId)
+      const userText = 'e2e streaming baseline bootstrap probe hello'
+      const seq0 = getRequestSequence()
+      await uiSendStreamingMessage(pageA, userText)
+      await waitForStreamingComplete(pageA, ctx.topicId, prevAssistantCount)
+
+      // Target IDs bound by the exact Redux-resolved assistant (never an
+      // older message): dynamic latest assistant id plus its entity-type
+      // main_text block (legacy text compatible), fail-closed when absent.
+      const target = await pageA.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            // Entity-type target: first main_text block in message order,
+            // legacy text compatible; fail-closed when no target exists.
+            const ids = Array.isArray(msg?.blocks) ? msg.blocks : []
+            let blockId = ''
+            for (const id of ids) {
+              const blk = s.messageBlocks?.entities?.[id]
+              if (blk?.type === 'main_text' || blk?.type === 'text') {
+                blockId = String(id)
+                break
+              }
+            }
+            return { assistantId: String(msgIds[i]), blockId }
+          }
+        }
+        return { assistantId: '', blockId: '' }
+      }, ctx.topicId)
+      expect(target.assistantId.length).toBeGreaterThan(0)
+      expect(target.blockId.length).toBeGreaterThan(0)
+
+      // The product request traversed the existing mock OpenAI streaming
+      // path (no live provider): sequence-scoped to this send, stream:true,
+      // mock-model, carrying the user text.
+      const productReq = findProductRequestAfter(seq0)
+      expect(productReq).not.toBeNull()
+      expect(productReq!.method).toBe('POST')
+      expect(productReq!.url).toBe('/v1/chat/completions')
+      expect((productReq!.parsed as any)?.model).toBe('mock-model')
+      expect((productReq!.parsed as any)?.stream).toBe(true)
+      const sentMessages = (productReq!.parsed as any)?.messages as Array<{ role: string; content: string }>
+      expect(Array.isArray(sentMessages)).toBe(true)
+      expect(sentMessages.some((m) => m?.role === 'user' && m?.content === userText)).toBe(true)
+
+      // Authoritative A ChatDb: the exact target rows are stable with the
+      // mock-echo text content and the correct parent relation.
+      const localA = await fetchMessagesViaApi(pageA, ctx.topicId)
+      const assistantMsg = (localA.messages as any[]).find((m: any) => m?.id === target.assistantId) as any
+      const assistantBlock = (localA.blocks as any[]).find((b: any) => b?.id === target.blockId) as any
+      expect(assistantMsg?.topicId).toBe(ctx.topicId)
+      expect(assistantMsg?.status).toBe('success')
+      expect(assistantBlock?.messageId).toBe(target.assistantId)
+      expect(['main_text', 'text']).toContain(assistantBlock?.type)
+      expect(assistantBlock?.status).toBe('success')
+      expect(String(assistantBlock?.content)).toContain('Mock')
+      expect(String(assistantBlock?.content)).toContain(userText)
+      const assistantContent = String(assistantBlock.content)
+
+      // Automation (never a manual sync, which never PUTs, and never a
+      // paused relay) pushes the turn and auto-publishes the baseline: poll
+      // the raw baseline until GET 200 carries a positive watermark.
+      await pollForPendingDrained(pageA, 120000)
+      await relay.waitForQuiescent()
+      let published: { status: number; body: any } | null = null
+      let lastBaselineStatus = -1
+      const publishDeadline = Date.now() + 120000
+      while (Date.now() < publishDeadline) {
+        const got = await rawBaselineGet()
+        lastBaselineStatus = got.status
+        if (got.status === 200 && typeof got.body?.watermark === 'number' && got.body.watermark > 0) {
+          published = got
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+      }
+      if (!published) {
+        throw new Error(`baseline auto-publish timeout (lastBaselineStatus=${lastBaselineStatus})`)
+      }
+      const watermark = published.body.watermark as number
+      expect(watermark).toBeGreaterThan(0)
+      expect(relay.getOperationCount()).toBeGreaterThan(0)
+      expect(relay.getCursor()).toBeGreaterThan(0)
+
+      // Cursor0 receiver B joins the same channel only now (fresh disposable
+      // profile, never synced). Pairing-time cursor is recorded, not
+      // asserted exact: automation may advance it before the first manual
+      // sync reads it.
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
+      const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
+      // Public device code only (never the secret); per-device baseline GET
+      // 200 baseline recorded before B's first sync.
+      const bDevice = await getDeviceCodeViaApi(pageB)
+      expect(bDevice.deviceCode).not.toBeNull()
+      const bCode = bDevice.deviceCode as string
+      const bBaselineBefore = relay.getBaselineGet200CountForTests(bCode)
+
+      // First B syncs bootstrap from the pre-existing baseline (GET 200 was
+      // proven above before B paired) and converge on the exact dynamic IDs,
+      // parent relation, and content; cursor adopts at least the watermark.
+      const syncB = await runSyncViaApi(pageB)
+      expect(syncB.threw).toBeNull()
+      expect(syncB.status.lastError).toBeNull()
+      await pollForStreamingConvergence(pageB, ctx.topicId, target.assistantId, target.blockId, assistantContent)
+      const afterB = await fetchMessagesViaApi(pageB, ctx.topicId)
+      const msgB = (afterB.messages as any[]).find((m: any) => m?.id === target.assistantId) as any
+      const blkB = (afterB.blocks as any[]).find((b: any) => b?.id === target.blockId) as any
+      expect(msgB?.topicId).toBe(ctx.topicId)
+      expect(msgB?.role).toBe('assistant')
+      expect(msgB?.status).toBe('success')
+      expect(Array.isArray(msgB?.blocks) ? msgB.blocks.includes(target.blockId) : false).toBe(true)
+      expect(blkB?.messageId).toBe(target.assistantId)
+      expect(['main_text', 'text']).toContain(blkB?.type)
+      expect(blkB?.status).toBe('success')
+      expect(blkB?.content).toBe(assistantContent)
+      // Real streaming row carries no text: content stays null, never the block text.
+      expect(msgB?.content === null || msgB?.content === undefined).toBe(true)
+      expect(msgB?.content).not.toBe(assistantContent)
+      const statusBAfter = await getSyncStatusViaApi(pageB)
+      expect(statusBAfter.lastError).toBeNull()
+      expect(statusBAfter.pendingCount).toBe(0)
+      expect(statusBAfter.cursor).toBeGreaterThan(cursorB0)
+      expect(statusBAfter.cursor).toBeGreaterThanOrEqual(watermark)
+      // Baseline bootstrap proof per device: B's first syncs performed at
+      // least one successful baseline GET 200 past the pre-sync watermark.
+      expect(relay.getBaselineGet200CountForTests(bCode)).toBeGreaterThanOrEqual(bBaselineBefore + 1)
+      // Observer isolation: a raw observer GET 200 leaves B's counter pinned.
+      const bCountAfterSync = relay.getBaselineGet200CountForTests(bCode)
+      const observerProbe = await rawBaselineGet()
+      expect(observerProbe.status).toBe(200)
+      expect(relay.getBaselineGet200CountForTests(bCode)).toBe(bCountAfterSync)
+
+      // N+1 edit after the bootstrap still converges through the op log.
+      const n1MsgId = 'e2e-bl-boot-n1-msg'
+      const n1BlkId = 'e2e-bl-boot-n1-blk'
+      const n1Content = 'e2e baseline bootstrap n+1 probe'
+      await appendMessageViaApi(pageA, ctx.topicId, messageJson(n1MsgId, ctx.topicId, n1Content), [
+        blockJson(n1BlkId, n1MsgId, n1Content)
+      ])
+      const syncA2 = await runSyncViaApi(pageA)
+      expect(syncA2.threw).toBeNull()
+      expect(syncA2.status.lastError).toBeNull()
+      const syncB2 = await runSyncViaApi(pageB)
+      expect(syncB2.threw).toBeNull()
+      expect(syncB2.status.lastError).toBeNull()
+      await pollForConvergence(pageB, ctx.topicId, n1MsgId, n1BlkId, n1Content)
+
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      // Same historical tolerance as the operation-log streaming path:
+      // bootstrap convergence is gated by pending/lastError/cursor/data.
+      assertTolerantCaptureHistory(statusA.lastCaptureError, 'streaming-bootstrap-A')
+      assertTolerantCaptureHistory(statusB.lastCaptureError, 'streaming-bootstrap-B')
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
+      expect(statusB.cursor).toBeGreaterThan(statusBAfter.cursor)
+    } finally {
       await closeProfileAndRelay(profileB, relay)
     }
   })

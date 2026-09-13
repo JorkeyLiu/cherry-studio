@@ -174,11 +174,15 @@ function seedFullFieldsOn(
   op: string,
   extraTopicFields: string[] = []
 ): void {
-  // Topics: required clocked always; optional only when present in payload.
-  // Messages/blocks: full required sets always materialized.
+  // Topics: canonical capture always materializes all 8 clocked fields
+  // (required + pinned/prompt/isNameManuallyEdited defaults), so a complete
+  // candidate requires all 8 clocks. An empty extra list means full 8;
+  // callers testing legacy sparse rows pass an explicit subset.
   const fields =
     type === 'topic'
-      ? [...TOPIC_REQUIRED_CLOCKED, ...extraTopicFields.filter((f) => TOPIC_OPTIONAL_CLOCKED.includes(f))]
+      ? extraTopicFields.length === 0
+        ? [...TOPIC_REQUIRED_CLOCKED, ...TOPIC_OPTIONAL_CLOCKED]
+        : [...TOPIC_REQUIRED_CLOCKED, ...extraTopicFields.filter((f) => TOPIC_OPTIONAL_CLOCKED.includes(f))]
       : type === 'message'
         ? MESSAGE_CLOCKED
         : BLOCK_CLOCKED
@@ -395,11 +399,12 @@ describe('independent union', () => {
 describe('field merge', () => {
   it('merges independent fields when both sides have trustworthy clocks', () => {
     // Source: name newer, pinned older. Target: name older, pinned newer.
-    // Present optional overflow: pinned only (prompt/isNameManuallyEdited absent).
+    // Canonical capture always materializes all 8 topic fields (required +
+    // pinned/prompt/isNameManuallyEdited defaults), so all 8 clocks are seeded.
     insertTopicOn(srcSqlite, 't-merge', 'SourceName', { pinned: false })
     seedEntityClockOn(srcDb, 'topic', 't-merge', T + 10, 'op-src-t')
     // Seed field clocks: name newer on source, pinned older; required rest at T.
-    for (const f of [...TOPIC_REQUIRED_CLOCKED, 'pinned']) {
+    for (const f of [...TOPIC_REQUIRED_CLOCKED, 'pinned', 'prompt', 'isNameManuallyEdited']) {
       const ts = f === 'name' ? T + 10 : T
       const op = f === 'name' ? 'op-src-name' : 'op-old-pin'
       seedFieldClockOn(srcDb, 'topic', 't-merge', f, ts, op)
@@ -413,7 +418,7 @@ describe('field merge', () => {
     // Target with opposite versions.
     insertTopicOn(dstSqlite, 't-merge', 'TargetName', { pinned: true })
     seedEntityClockOn(dstDb, 'topic', 't-merge', T + 10, 'op-dst-t')
-    for (const f of [...TOPIC_REQUIRED_CLOCKED, 'pinned']) {
+    for (const f of [...TOPIC_REQUIRED_CLOCKED, 'pinned', 'prompt', 'isNameManuallyEdited']) {
       const ts = f === 'pinned' ? T + 20 : T
       const op = f === 'pinned' ? 'op-dst-pin' : 'op-old-name'
       seedFieldClockOn(dstDb, 'topic', 't-merge', f, ts, op)
@@ -670,7 +675,7 @@ describe('absence and tombstones', () => {
         .insert(schema.syncEntityClock)
         .values({ entityType: 'topic', entityId: 't-both2', timestamp: T, operationId: 'op-aaa-live' })
         .run()
-      for (const f of TOPIC_REQUIRED_CLOCKED)
+      for (const f of [...TOPIC_REQUIRED_CLOCKED, ...TOPIC_OPTIONAL_CLOCKED])
         db2
           .insert(schema.syncFieldClock)
           .values({ entityType: 'topic', entityId: 't-both2', field: f, timestamp: T, operationId: 'op-aaa-live' })
@@ -1116,15 +1121,16 @@ describe('F1 canonical full payload', () => {
     expect(snapshotTarget()).toBe(before)
   })
 
-  it('proves optional topic overflow rule: absent means null/no-overflow, present requires clock', () => {
-    // Source with pinned present.
+  it('proves optional topic overflow rule: absent materializes canonical defaults, present requires clock', () => {
+    // Source with pinned/prompt present, isNameManuallyEdited absent in DB extra.
+    // Canonical capture materializes the absent default (false) in payload.
     insertTopicOn(srcSqlite, 't-opt', 'Opt', { pinned: true, prompt: 'p' })
     insertMessageOn(srcSqlite, 'm-opt', 't-opt')
     insertBlockOn(srcSqlite, 'b-opt', 'm-opt')
     seedEntityClockOn(srcDb, 'topic', 't-opt', T, 'op-opt-t')
     seedEntityClockOn(srcDb, 'message', 'm-opt', T, 'op-opt-m')
     seedEntityClockOn(srcDb, 'message_block', 'b-opt', T, 'op-opt-b')
-    seedFullFieldsOn(srcDb, 'topic', 't-opt', T, 'op-opt-t', ['pinned', 'prompt'])
+    seedFullFieldsOn(srcDb, 'topic', 't-opt', T, 'op-opt-t', ['pinned', 'prompt', 'isNameManuallyEdited'])
     seedFullFieldsOn(srcDb, 'message', 'm-opt', T, 'op-opt-m')
     seedFullFieldsOn(srcDb, 'message_block', 'b-opt', T, 'op-opt-b')
     seedMembershipOn(srcDb, 'message', 'm-opt', 't-opt', T, 'op-opt-m')
@@ -1136,24 +1142,26 @@ describe('F1 canonical full payload', () => {
     const tPayload = withOpt.entities.find((e) => e.entityId === 't-opt')!.payload
     expect(tPayload.pinned).toBe(true)
     expect(tPayload.prompt).toBe('p')
-    expect(Object.prototype.hasOwnProperty.call(tPayload, 'isNameManuallyEdited')).toBe(false)
-    // Extra clock for absent optional fails.
+    expect(tPayload.isNameManuallyEdited).toBe(false)
+    // Extra clock for a non-payload field still fails.
     const extraClock = cloneCandidate(withOpt)
     const tExtra = extraClock.entities.find((e) => e.entityId === 't-opt')!
-    tExtra.fieldClocks.push({ field: 'isNameManuallyEdited', timestamp: T, operationId: 'op-opt-t' })
+    tExtra.fieldClocks.push({ field: 'sortOrder', timestamp: T, operationId: 'op-opt-t' })
     tExtra.fieldClocks.sort((a, b) => (a.field < b.field ? -1 : 1))
     refreshDigest(extraClock)
     const before = snapshotTarget()
-    expect(() => applyLocalSyncBaselineCandidate(dstDb, extraClock)).toThrow(/without payload field/)
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, extraClock)).toThrow(
+      /without payload field|unexpected.*sortOrder|not allowlisted/
+    )
     expect(snapshotTarget()).toBe(before)
-    // Valid applies with overflow mapping preserved.
+    // Valid applies with overflow mapping preserved (defaults materialized).
     const res = applyLocalSyncBaselineCandidate(dstDb, withOpt)
     expect(res.inserted).toBe(3)
     const row = dstSqlite.prepare('SELECT extra FROM topics WHERE id=?').get('t-opt') as { extra: string | null }
     const overflow = JSON.parse(row.extra ?? '{}') as Record<string, unknown>
     expect(overflow.pinned).toBe(true)
     expect(overflow.prompt).toBe('p')
-    expect(Object.prototype.hasOwnProperty.call(overflow, 'isNameManuallyEdited')).toBe(false)
+    expect(overflow.isNameManuallyEdited).toBe(false)
   })
 })
 
@@ -1579,7 +1587,12 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
           .insert(schema.syncEntityClock)
           .values({ entityType: type, entityId: id, timestamp: T, operationId: `op-b-${id}` })
           .run()
-        const fields = type === 'topic' ? TOPIC_REQUIRED_CLOCKED : type === 'message' ? MESSAGE_CLOCKED : BLOCK_CLOCKED
+        const fields =
+          type === 'topic'
+            ? [...TOPIC_REQUIRED_CLOCKED, ...TOPIC_OPTIONAL_CLOCKED]
+            : type === 'message'
+              ? MESSAGE_CLOCKED
+              : BLOCK_CLOCKED
         for (const f of fields)
           db3
             .insert(schema.syncFieldClock)

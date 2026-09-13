@@ -38,6 +38,17 @@ interface BaseCallbacksDependencies {
   topicId: string
   assistantMsgId: string
   saveUpdatesToDB: any
+  /**
+   * Single-transaction final checkpoint for onComplete (Fix B). Fail-loud:
+   * rejects on DB failure so the success-final Redux commit below never runs
+   * forked from DB. Execution-attempt binding lives in the closure.
+   */
+  saveFinalUpdatesAtomically: (
+    messageId: string,
+    topicId: string,
+    messageUpdates: any,
+    blocksToUpdate: MessageBlock[]
+  ) => Promise<unknown>
   assistant: Assistant
   getCurrentThinkingInfo?: () => { blockId: string | null; millsec: number }
 }
@@ -50,6 +61,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
     topicId,
     assistantMsgId,
     saveUpdatesToDB,
+    saveFinalUpdatesAtomically,
     assistant,
     getCurrentThinkingInfo
   } = deps
@@ -233,11 +245,57 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
     },
 
     onComplete: async (status: AssistantMessageStatus, response?: Response) => {
-      const finalStateOnComplete = getState()
-      const finalAssistantMsg = finalStateOnComplete.messages.entities[assistantMsgId]
+      // Terminal write ordering: quiesce FIRST, before any terminal block
+      // marking or atomic persist. A pre-quiesce smartBlockUpdate(SUCCESS)
+      // would dispatch SUCCESS and then let a trailing throttled RAF flushed
+      // inside quiesce overwrite Redux back to STREAMING; the post-quiesce
+      // reader would then persist STREAMING while Redux already showed
+      // SUCCESS (and Main would legally skip the non-terminal write).
+      // So no smartBlockUpdate/dispatch of terminal state happens before the
+      // barrier below — DB-first after quiesce is the only terminal commit.
+      // F2 finalization quiescence: drain every throttled trailing write and
+      // in-flight DB write this execution produced BEFORE the success-final
+      // message write, so the Main issuer (which re-verifies DB post-state in
+      // the same transaction) can never observe a partially flushed state.
+      // Scoped to this execution's blocks via the BlockManager barrier — no
+      // global wait, no cross-message blocking.
+      await blockManager.quiesceWrites()
 
-      if (status === 'success' && finalAssistantMsg) {
-        const orderedMsgs = selectMessagesForTopic(finalStateOnComplete, topicId)
+      if (response && response.metrics) {
+        if (response.metrics.completion_tokens === 0 && response.usage?.completion_tokens) {
+          response = {
+            ...response,
+            metrics: {
+              ...response.metrics,
+              completion_tokens: response.usage.completion_tokens
+            }
+          }
+        }
+      }
+
+      // Fix B: single-transaction success-final checkpoint. Re-read the
+      // LATEST Redux AFTER quiesce (never a pre-quiesce snapshot):
+      // the assistant message's current block list (this round's dynamic ids,
+      // in order) plus every associated block entity become ONE
+      // updateMessageAndBlocks call, so Main verifies closure and mints
+      // promotion membership atomically — no cross-tx window where block
+      // success is committed while a transient parent closure rolls back.
+      // Unsupported tool/file blocks ride along as ordinary chat data in the
+      // same tx; Main sync filtering semantics are unchanged. Fail-loud: a
+      // persistence failure is logged and rethrown, so the success Redux
+      // commit and MESSAGE_COMPLETE below never run forked from DB.
+      const latestState = getState()
+      const latestAssistantMsg = latestState.messages.entities[assistantMsgId]
+      if (!latestAssistantMsg) {
+        const missingError = new Error(
+          `[onComplete] Assistant message ${assistantMsgId} missing from Redux after quiesce; skipping final persist`
+        )
+        logger.error(missingError.message, missingError)
+        throw missingError
+      }
+
+      if (status === 'success') {
+        const orderedMsgs = selectMessagesForTopic(latestState, topicId)
         let contextMsgs = orderedMsgs
         const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
         if (anchorGroupKey) {
@@ -248,19 +306,37 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           }
         }
         const { uiMessages } = computeContextInfo(contextMsgs, assistant, topicId)
-        const finalContextWithAssistant = [...uiMessages, finalAssistantMsg]
+        const finalContextWithAssistant = [...uiMessages, latestAssistantMsg]
 
-        const possibleBlockId = findBlockIdForCompletion(finalAssistantMsg)
+        const possibleBlockId = findBlockIdForCompletion(latestAssistantMsg)
 
-        if (possibleBlockId) {
-          const changes = {
-            status: MessageBlockStatus.SUCCESS
+        // Fail-closed terminal target validation: the target must be a live
+        // member of message.blocks with a live entity. Never warn+omit, never
+        // overwrite message.blocks with a filtered list that drops the
+        // reference.
+        const latestBlockEntities = latestState.messageBlocks.entities
+        const referencedIds = [...(latestAssistantMsg.blocks ?? [])]
+        if (!possibleBlockId || !referencedIds.includes(possibleBlockId) || !latestBlockEntities[possibleBlockId]) {
+          const missingTargetError = new Error(
+            `[onComplete] Terminal block ${possibleBlockId ?? '<none>'} missing from message ${assistantMsgId} blocks after quiesce; refusing final persist`
+          )
+          logger.error(missingTargetError.message, missingTargetError)
+          throw missingTargetError
+        }
+        // Every referenced block must resolve — no silent omission that would
+        // fork message.blocks from the persisted block set.
+        for (const blockId of referencedIds) {
+          if (!latestBlockEntities[blockId]) {
+            const missingRefError = new Error(
+              `[onComplete] Block ${blockId} missing from Redux after quiesce; refusing final persist without dropping the reference`
+            )
+            logger.error(missingRefError.message, missingRefError)
+            throw missingRefError
           }
-          blockManager.smartBlockUpdate(possibleBlockId, changes, blockManager.lastBlockType!, true)
         }
 
         const duration = Date.now() - startTime
-        const content = getMainTextContent(finalAssistantMsg)
+        const content = getMainTextContent(latestAssistantMsg)
 
         const timeOut = duration > 30 * 1000
         // 发送长时间运行消息的成功通知
@@ -295,37 +371,81 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           const usage = await estimateMessagesUsage({ assistant, messages: finalContextWithAssistant })
           response.usage = usage
         }
+
+        // Final payload: keep every latest block in message order; force the
+        // terminal target to SUCCESS in the COMMITTED payload only (Redux
+        // still shows whatever quiesce left until the DB-first commit below
+        // succeeds). Other blocks keep their latest terminal state as-is.
+        const finalBlocks: MessageBlock[] = referencedIds.map((blockId) => {
+          const block = latestBlockEntities[blockId] as MessageBlock
+          if (blockId === possibleBlockId) {
+            return { ...block, status: MessageBlockStatus.SUCCESS } as MessageBlock
+          }
+          return block
+        })
+        const finalMessageUpdates = {
+          status,
+          metrics: response?.metrics,
+          usage: response?.usage,
+          blocks: referencedIds
+        }
+        try {
+          await saveFinalUpdatesAtomically(assistantMsgId, topicId, finalMessageUpdates, finalBlocks)
+        } catch (error) {
+          logger.error(`[onComplete] Final atomic persist failed for message ${assistantMsgId}:`, error as Error)
+          throw error
+        }
+        // Redux AFTER the successful commit (DB-first): block first, then
+        // message — exactly what the single transaction persisted.
+        dispatch(updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }))
+        dispatch(
+          newMessagesActions.updateMessage({
+            topicId,
+            messageId: assistantMsgId,
+            updates: finalMessageUpdates
+          })
+        )
+
+        void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
+        logger.debug('onComplete finished')
+        return
       }
 
-      if (response && response.metrics) {
-        if (response.metrics.completion_tokens === 0 && response.usage?.completion_tokens) {
-          response = {
-            ...response,
-            metrics: {
-              ...response.metrics,
-              completion_tokens: response.usage.completion_tokens
-            }
-          }
+      const latestBlockEntities = latestState.messageBlocks.entities
+      const finalBlocks: MessageBlock[] = []
+      for (const blockId of latestAssistantMsg.blocks ?? []) {
+        const block = latestBlockEntities[blockId]
+        if (block) {
+          finalBlocks.push(block)
+        } else {
+          const missingRefError = new Error(
+            `[onComplete] Block ${blockId} missing from Redux after quiesce; refusing final persist without dropping the reference`
+          )
+          logger.error(missingRefError.message, missingRefError)
+          throw missingRefError
         }
       }
-
-      // F2 finalization quiescence: drain every throttled trailing write and
-      // in-flight DB write this execution produced BEFORE the success-final
-      // message write, so the Main issuer (which re-verifies DB post-state in
-      // the same transaction) can never observe a partially flushed state.
-      // Scoped to this execution's blocks via the BlockManager barrier — no
-      // global wait, no cross-message blocking.
-      await blockManager.quiesceWrites()
-
-      const messageUpdates = { status, metrics: response?.metrics, usage: response?.usage }
+      const finalMessageUpdates = {
+        status,
+        metrics: response?.metrics,
+        usage: response?.usage,
+        blocks: [...(latestAssistantMsg.blocks ?? [])]
+      }
+      try {
+        await saveFinalUpdatesAtomically(assistantMsgId, topicId, finalMessageUpdates, finalBlocks)
+      } catch (error) {
+        logger.error(`[onComplete] Final atomic persist failed for message ${assistantMsgId}:`, error as Error)
+        throw error
+      }
+      // Redux AFTER the successful commit (DB-first): the store converges to
+      // exactly what the single transaction persisted.
       dispatch(
         newMessagesActions.updateMessage({
           topicId,
           messageId: assistantMsgId,
-          updates: messageUpdates
+          updates: finalMessageUpdates
         })
       )
-      await saveUpdatesToDB(assistantMsgId, topicId, messageUpdates, [])
 
       void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
       logger.debug('onComplete finished')

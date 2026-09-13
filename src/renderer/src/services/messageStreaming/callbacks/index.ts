@@ -16,11 +16,33 @@ interface CallbacksDependencies {
   topicId: string
   assistantMsgId: string
   saveUpdatesToDB: any
+  /**
+   * Single-transaction final checkpoint for onComplete (Fix B): persists the
+   * message final patch together with all final blocks via
+   * `updateMessageAndBlocks`. Fail-loud (rejects on DB failure). Bound to the
+   * execution's resend attempt by the caller; ordinary executions omit the
+   * carrier inside the closure.
+   */
+  saveFinalUpdatesAtomically: (
+    messageId: string,
+    topicId: string,
+    messageUpdates: any,
+    blocksToUpdate: any[]
+  ) => Promise<unknown>
   assistant: Assistant
 }
 
 export const createCallbacks = (deps: CallbacksDependencies) => {
-  const { blockManager, dispatch, getState, topicId, assistantMsgId, saveUpdatesToDB, assistant } = deps
+  const {
+    blockManager,
+    dispatch,
+    getState,
+    topicId,
+    assistantMsgId,
+    saveUpdatesToDB,
+    saveFinalUpdatesAtomically,
+    assistant
+  } = deps
 
   // 首先创建 thinkingCallbacks ，以便传递 getCurrentThinkingInfo 给 baseCallbacks
   const thinkingCallbacks = createThinkingCallbacks({
@@ -36,6 +58,7 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     topicId,
     assistantMsgId,
     saveUpdatesToDB,
+    saveFinalUpdatesAtomically,
     assistant,
     getCurrentThinkingInfo: thinkingCallbacks.getCurrentThinkingInfo
   })

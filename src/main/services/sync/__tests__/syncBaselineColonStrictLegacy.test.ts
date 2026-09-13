@@ -93,7 +93,16 @@ function seedFieldClock(type: string, id: string, field: string, ts: number, op:
     .values({ entityType: type, entityId: id, field, timestamp: ts, operationId: op })
     .run()
 }
-const TOPIC_FIELDS = ['name', 'assistantId', 'createdAt', 'updatedAt', 'deletedAt']
+const TOPIC_FIELDS = [
+  'name',
+  'assistantId',
+  'createdAt',
+  'updatedAt',
+  'deletedAt',
+  'pinned',
+  'prompt',
+  'isNameManuallyEdited'
+]
 const MSG_FIELDS = ['role', 'content', 'status', 'askId', 'model', 'modelId', 'assistantId', 'createdAt', 'updatedAt']
 const BLOCK_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt']
 function seedFull(type: string, id: string, ts: number, op: string): void {

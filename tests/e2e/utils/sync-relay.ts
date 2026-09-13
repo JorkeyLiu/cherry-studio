@@ -4,10 +4,12 @@
  * Per-spec, in-process, loopback-bound to an ephemeral port, token-protected,
  * fully closed/cleaned in teardown. Mirrors the transport contract of
  * scripts/sync-relay/server.ts (auth, limits, registration, channel pairing,
- * per-channel push/pull framing) WITHOUT loading better-sqlite3 in the
+ * per-channel push/pull framing, per-channel current-effective
+ * GET/PUT /sync/baseline) WITHOUT loading better-sqlite3 in the
  * Playwright runner process — the runner must stay ABI-neutral (the native
  * binding belongs to the Electron lane; E2E SQLite access goes through the
- * Electron binary only).
+ * Electron binary only). Baseline state is a single-current in-memory map per
+ * channel; hashing uses Node crypto only (no native ABI).
  *
  * Operation shape validation delegates to the shared strict validator
  * (packages/shared/sync/payloadFilter) as the single source of truth.
@@ -16,6 +18,12 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 
+import {
+  canonicalizePayload as canonicalizeBaselinePayloadShared,
+  parseEnvelopeJson as parseBaselineEnvelopeJsonShared,
+  verifyEnvelopeDigest as verifyBaselineEnvelopeDigestShared,
+  WIRE_VERSION_V2 as BASELINE_WIRE_VERSION_V2
+} from '../../../packages/shared/sync/baselineWire'
 import { normalizePairingCode, validatePairingCode } from '../../../packages/shared/sync/pairing'
 import { validateSyncOperationStrict } from '../../../packages/shared/sync/payloadFilter'
 
@@ -69,6 +77,14 @@ export interface TestRelayHandle {
    * only; single-channel tests equal that channel's cursor).
    */
   getCursor: () => number
+  /**
+   * Test-only per-device count of successful (200) GET /sync/baseline reads.
+   * Closure-local, secret-safe: keyed by the normalized caller device code
+   * only; secrets are never stored. Incremented only in the success-200
+   * branch (404/4xx never count). Never touches protocol, state machine,
+   * cursor, inFlight, or pause semantics.
+   */
+  getBaselineGet200CountForTests: (deviceCode: string) => number
   /**
    * Test-only registration/pairing observers (never over HTTP): device codes
    * are public by design; secrets are never exposed here.
@@ -180,6 +196,56 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
   // Per-channel operation logs with contiguous per-channel sequences.
   const channelOps = new Map<string, StoredOperation[]>()
   const channelByOpId = new Map<string, Map<string, StoredOperation>>()
+  // Per-channel single current-effective baseline envelope (SYNC-CC-022
+  // mirror of `sync_channel_baselines`): one current row per channel holding
+  // watermark/digestScheme/digest/wireVersion plus the canonical payload and
+  // the stored envelope JSON served verbatim on GET/PUT success.
+  interface StoredBaseline {
+    watermark: number
+    digestScheme: string
+    digest: string
+    wireVersion: string
+    payloadJson: string
+    envelopeJson: string
+  }
+  const channelBaselines = new Map<string, StoredBaseline>()
+  // Closure-local, secret-safe per-device baseline GET 200 counter: device
+  // code (normalized caller) -> successful GET count. Only the success-200
+  // branch increments; 404/4xx never count. No request records retained.
+  const baselineGet200Counts = new Map<string, number>()
+  const baselineHashHex = (canonicalUtf8: Uint8Array): string =>
+    createHash('sha256').update(canonicalUtf8).digest('hex')
+  const serializeBaselineEnvelope = (envelope: {
+    wireVersion: string
+    channelId: string
+    watermark: number
+    digestScheme: string
+    digest: string
+    payload: unknown
+  }): string =>
+    JSON.stringify({
+      wireVersion: envelope.wireVersion,
+      channelId: envelope.channelId,
+      watermark: envelope.watermark,
+      digestScheme: envelope.digestScheme,
+      digest: envelope.digest,
+      payload: envelope.payload
+    })
+  const readRawBaselineBody = (req: IncomingMessage): Promise<string> =>
+    new Promise((resolveBody, reject) => {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk: Buffer) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      })
+      req.on('end', () => {
+        try {
+          resolveBody(Buffer.concat(chunks).toString('utf8'))
+        } catch (e) {
+          reject(e)
+        }
+      })
+      req.on('error', reject)
+    })
   let paused = false
   let pushPaused = false
   let pullPaused = false
@@ -318,7 +384,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `http://${host}`)
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Sync-Device-Code,X-Sync-Device-Secret')
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -933,6 +999,187 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       return
     }
 
+    // ---- Per-channel current-effective baseline resource (SYNC-CC-022) ----
+    // `PUT /sync/baseline` publishes (idempotent replace) and
+    // `GET /sync/baseline` fetches the single current-effective envelope for
+    // the caller's channel. Contract mirror of scripts/sync-relay/server.ts:
+    // Bearer 401, device credential 403, unpaired 403 pairing-required,
+    // cross-channel 403 channel-mismatch, strict envelope 400
+    // invalid-envelope (exact keys/versions/duplicate-key rejection via the
+    // shared baselineWire parser), digest 400 digest-mismatch, watermark
+    // above head 400 watermark-above-head, stale/divergent 409
+    // baseline-conflict, same-N full-match idempotent 200, N>current replace,
+    // v1 publish over v2 current 409 (never downgrades), empty GET strict 404
+    // {error:'baseline-not-found'}, success serves the stored envelope JSON
+    // verbatim. Pause/pushPaused/pullPaused never gate this resource (the
+    // reference has no such 503 semantics).
+    if (req.method === 'PUT' && url.pathname === '/sync/baseline') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      let rawText: string
+      try {
+        rawText = await readRawBaselineBody(req)
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'store-unavailable' }))
+        return
+      }
+      let envelope: {
+        wireVersion: string
+        channelId: string
+        watermark: number
+        digestScheme: string
+        digest: string
+        payload: unknown
+      }
+      try {
+        envelope = parseBaselineEnvelopeJsonShared(rawText) as unknown as typeof envelope
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid-envelope' }))
+        return
+      }
+      const channel = memberships.get(caller) ?? null
+      if (!channel) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'pairing-required' }))
+        return
+      }
+      const channelId: string = channel
+      if (envelope.channelId !== channelId) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'channel-mismatch' }))
+        return
+      }
+      let digestOk = false
+      try {
+        digestOk = verifyBaselineEnvelopeDigestShared(envelope as never, baselineHashHex)
+      } catch {
+        digestOk = false
+      }
+      if (!digestOk) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'digest-mismatch' }))
+        return
+      }
+      // Serialized per-channel decision (single-threaded in-memory: read and
+      // conditional write commit with no interleaving await).
+      const ops = channelOps.get(channelId) ?? []
+      const head = ops.length > 0 ? ops[ops.length - 1].seq : 0
+      const current = channelBaselines.get(channelId) ?? null
+      // Baseline v2 transition lock first: once current is v2, any v1
+      // publish is 409 baseline-conflict independent of watermark (never
+      // downgrades, even when N would otherwise be above head).
+      if (
+        current &&
+        current.wireVersion === BASELINE_WIRE_VERSION_V2 &&
+        envelope.wireVersion !== BASELINE_WIRE_VERSION_V2
+      ) {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'baseline-conflict' }))
+        return
+      }
+      if (envelope.watermark > head) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'watermark-above-head' }))
+        return
+      }
+      if (!current) {
+        const payloadJson = JSON.stringify(envelope.payload)
+        const envelopeJson = serializeBaselineEnvelope(envelope)
+        channelBaselines.set(channelId, {
+          watermark: envelope.watermark,
+          digestScheme: envelope.digestScheme,
+          digest: envelope.digest,
+          wireVersion: envelope.wireVersion,
+          payloadJson,
+          envelopeJson
+        })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(envelopeJson)
+        return
+      }
+      if (envelope.watermark < current.watermark) {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'baseline-conflict' }))
+        return
+      }
+      if (envelope.watermark === current.watermark) {
+        // Idempotent 200 only on full match (channel binding already equal,
+        // plus digest scheme, digest, canonical payload).
+        let currentCanonical: string
+        let incomingCanonical: string
+        try {
+          currentCanonical = canonicalizeBaselinePayloadShared(JSON.parse(current.payloadJson) as never)
+          incomingCanonical = canonicalizeBaselinePayloadShared(envelope.payload as never)
+        } catch {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'store-unavailable' }))
+          return
+        }
+        if (
+          envelope.digestScheme === current.digestScheme &&
+          envelope.digest === current.digest &&
+          incomingCanonical === currentCanonical
+        ) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(current.envelopeJson)
+          return
+        }
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'baseline-conflict' }))
+        return
+      }
+      // N > current: replace when the coverage gate holds (N <= head,
+      // checked above; full op-log retention keeps the N+1 replay path).
+      const payloadJson = JSON.stringify(envelope.payload)
+      const envelopeJson = serializeBaselineEnvelope(envelope)
+      channelBaselines.set(channelId, {
+        watermark: envelope.watermark,
+        digestScheme: envelope.digestScheme,
+        digest: envelope.digest,
+        wireVersion: envelope.wireVersion,
+        payloadJson,
+        envelopeJson
+      })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(envelopeJson)
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/sync/baseline') {
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      const channel = memberships.get(caller) ?? null
+      if (!channel) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'pairing-required' }))
+        return
+      }
+      const row = channelBaselines.get(channel) ?? null
+      if (!row) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'baseline-not-found' }))
+        return
+      }
+      // Success-200 only: count the normalized caller. No secret/path/content
+      // retained; counters never affect protocol/cursor/inFlight/pause.
+      baselineGet200Counts.set(caller, (baselineGet200Counts.get(caller) ?? 0) + 1)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(row.envelopeJson)
+      return
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ok: true }))
@@ -1010,6 +1257,12 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         },
         isPushPaused: () => paused || pushPaused,
         isPullPaused: () => paused || pullPaused,
+        getBaselineGet200CountForTests: (deviceCode: string) => {
+          const key = typeof deviceCode === 'string' ? deviceCode : ''
+          // Callers pass the public device code (already normalized); fall
+          // back to the raw key so unknown/unpaired codes read 0 fail-closed.
+          return baselineGet200Counts.get(key) ?? 0
+        },
         getOperationCount: () => {
           let n = 0
           for (const ops of channelOps.values()) n += ops.length
