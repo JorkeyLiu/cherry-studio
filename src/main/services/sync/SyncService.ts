@@ -2723,7 +2723,8 @@ export class SyncService {
     tx: SyncTxExecutor,
     kind: 'topicMessage' | 'messageBlock',
     parentId: string,
-    includedChildIds: string[]
+    includedChildIds: string[],
+    extraFloorClocks?: Array<{ timestamp: number; operationId: string }>
   ): { timestamp: number; operationId: string } {
     if (!this.isValidFrameKind(kind)) throw new SyncFrameError(`invalid frame kind ${kind}`)
     if (typeof parentId !== 'string' || parentId.length === 0) throw new SyncFrameError(`invalid parentId ${parentId}`)
@@ -2749,6 +2750,29 @@ export class SyncService {
         throw new SyncFrameError(`existing frame timestamp malformed for ${kind}/${parentId}`)
       }
       maxTs = Math.max(maxTs, existing.timestamp)
+    }
+    // Known-incoming floor (frame-arrival repair only): an explicitly passed
+    // incoming frameClock is included so the repair strictly dominates it
+    // (timestamp max-plus-one, no wall dependency). Other callers pass no
+    // extra floor and keep the original max(high-water, existing, included
+    // memberships)+1 semantics. Wall clock is never a correctness floor.
+    if (extraFloorClocks) {
+      for (const floor of extraFloorClocks) {
+        if (
+          !floor ||
+          !Number.isSafeInteger(floor.timestamp) ||
+          floor.timestamp < 0 ||
+          floor.timestamp > FRAME_MAX_SAFE_TIMESTAMP
+        ) {
+          throw new SyncFrameError(`extra floor clock invalid for frame allocation ${kind}/${parentId}`)
+        }
+        try {
+          parseSyncOperationIdShape(floor.operationId)
+        } catch (e) {
+          throw new SyncFrameError(e instanceof Error ? e.message : String(e))
+        }
+        maxTs = Math.max(maxTs, floor.timestamp)
+      }
     }
     const childType = kind === 'topicMessage' ? 'message' : 'message_block'
     for (const childId of includedChildIds) {
@@ -3283,6 +3307,13 @@ export class SyncService {
         appliedEntity = this.applyStableReplace(op)
       } else if (op.op === 'upsert') {
         appliedEntity = this.applyUpsert(op)
+        if (appliedEntity) {
+          // Incremental remote-upsert union repair (SYNC-DATA-035/036/048/058):
+          // only message/message_block remote upserts that won in this tx may
+          // mint; topic/stable_replace/delete/bootstrap never enter here.
+          // Any throw rolls back the whole apply tx (cursor not advanced).
+          this.tryRepairUnionFrameAfterRemoteUpsert(op)
+        }
       } else if (op.op === 'delete') {
         this.applyDelete(op)
         appliedEntity = true
@@ -3336,6 +3367,322 @@ export class SyncService {
       logger.error(`[applyIncoming] tx failed ${op.id}`, e as Error)
       throw e
     }
+  }
+
+  /**
+   * Incremental remote-upsert union-frame repair (SYNC-DATA-035/036/048/058).
+   * Runs inside the caller's apply transaction (BEGIN IMMEDIATE...COMMIT in
+   * applyIncomingOperation) immediately after a winning remote message or
+   * message_block upsert. Entity/field/membership writes from applyUpsert
+   * precede this frame work; persist+enqueue+materialize commit atomically
+   * with sync_applied or roll back whole with no cursor advance.
+   *
+   * Narrow scope only: op must be upsert for message/message_block that won
+   * in this tx (caller gates on appliedEntity); topic upserts, deletes,
+   * order_frame, message_stable_replace, and bootstrap merges never enter.
+   * Own echo (op.deviceId === local deviceId) never mints. Remote/SSE paths
+   * still never PUT a baseline and no repair UI is introduced.
+   *
+   * Guards (no mint, no throw — upsert commit stands, later frames keep
+   * existing fail-closed): parent missing/not-stable, child or parent
+   * tombstone winning, transient/unsupported child, any live eligible child
+   * missing membership or with parent mismatch, excluded block rows under a
+   * message parent, malformed sibling extra, stored-frame evaluation
+   * parent-mismatch, or remote child already covered by stored effective.
+   * Historic incomplete (membership<=storedFrameClock yet absent) is not
+   * relaxed as a general rule; this path only mints when the live set adds
+   * coverage beyond stored effective, especially the current remote child,
+   * using the complete live set so a subsequent remote old frame cannot
+   * deadlock. No reorder of stored prefix; suffix sorted by membership clock
+   * then childId UTF-8. No stored frame orders all live by that sort.
+   * Frame clock is the original max(high-water, stored, all live
+   * memberships)+1 with no wall floor (latency optimization only — final
+   * cross-device convergence is guaranteed by the frame-arrival
+   * known-incoming-clock repair, which strictly dominates any skewed
+   * obsolete frame; this path alone does not claim skew safety).
+   * DeviceId is fetched before any
+   * frame persist so identity failure rolls back instead of one-sided order.
+   * Idempotence/stop: same incoming op deduped by syncApplied; a repair frame
+   * covering the full live set mints nothing further; older/newer/equal walk
+   * existing LWW/strict equal divergence on receipt.
+   */
+  private tryRepairUnionFrameAfterRemoteUpsert(op: SyncOperation): boolean {
+    if (op.op !== 'upsert') return false
+    if (op.entityType !== 'message' && op.entityType !== 'message_block') return false
+    const db = this.getDb()
+    const tx = db as unknown as SyncTxExecutor
+    // Fallible identity first: any failure throws and rolls back the whole
+    // apply tx (no partial entity/clock/frame, cursor not advanced).
+    const deviceId = this.getDeviceId()
+    if (typeof deviceId !== 'string' || deviceId.length === 0) {
+      throw new Error(`upsert repair ${op.id}: deviceId unavailable`)
+    }
+    // Own echo never repairs (pull loop already skips, defense in depth for
+    // direct applyIncomingOperation callers).
+    if (op.deviceId === deviceId) return false
+    if (op.entityType === 'message') return this.repairTopicMessageAfterMessageUpsert(tx, db, op, deviceId)
+    return this.repairMessageBlockAfterBlockUpsert(tx, db, op, deviceId)
+  }
+
+  private repairTopicMessageAfterMessageUpsert(
+    tx: SyncTxExecutor,
+    db: BetterSQLite3Database<typeof schema>,
+    op: SyncOperation,
+    deviceId: string
+  ): boolean {
+    const childId = op.entityId
+    const childRow = db.select().from(schema.messages).where(eq(schema.messages.id, childId)).get()
+    if (!childRow) return false
+    const parentId = childRow.topicId
+    if (typeof parentId !== 'string' || parentId.length === 0) return false
+    // Final child must be alive ordinary stable: tombstone winning suppresses.
+    const ownTomb = this.getTombstone('message', childId)
+    if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) return false
+    if (!isStableMessageStatus(childRow.status)) return false
+    // Parent must exist/live; any parent tombstone skips (never resurrect).
+    const parentRow = db.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
+    if (!parentRow) return false
+    if (this.getTombstone('topic', parentId)) return false
+    // Child membership must be established/confirmed same-parent in this tx.
+    const childMem = this.getMembershipClockInTx(tx, 'message', childId)
+    if (!childMem || childMem.parentId !== parentId) return false
+    // Collect current parent's complete live eligible set; every live child
+    // must carry legal same-parent membership or no repair is attempted.
+    const rows = db.select().from(schema.messages).where(eq(schema.messages.topicId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of rows) {
+      if (!isStableMessageStatus(row.status)) continue
+      const tomb = this.getTombstone('message', row.id)
+      const mem = this.getMembershipClockInTx(tx, 'message', row.id)
+      if (tomb) {
+        if (!mem) return false
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, tomb)) continue
+      }
+      if (!mem) return false
+      if (mem.parentId !== parentId) return false
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    if (!liveChildren.has(childId)) return false
+    const stored = this.getParentFrameInTx(tx, 'topicMessage', parentId)
+    let storedPrefix: string[] = []
+    let storedClock: { timestamp: number; operationId: string } | null = null
+    let rawSet = new Set<string>()
+    if (stored) {
+      storedClock = { timestamp: stored.timestamp, operationId: stored.operationId }
+      rawSet = new Set(stored.orderedChildIds)
+      // Stop condition on raw coverage: remote already in stored raw needs no union.
+      if (rawSet.has(childId)) return false
+      const childParentLookup = (
+        cid: string
+      ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+        const r = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+        if (r) return { parentId: r.topicId, exists: true, isLiveForThisParent: r.topicId === parentId }
+        const tomb = this.getTombstone('message', cid)
+        if (tomb) return { parentId: null, exists: true }
+        return null
+      }
+      try {
+        const evaluated = evaluateEffectiveOrder({
+          kind: 'topicMessage',
+          parentId,
+          orderedChildIds: [...stored.orderedChildIds],
+          frameClock: storedClock,
+          liveChildren,
+          childParentLookup
+        })
+        // Preserve stored effective prefix order for live members (raw order for
+        // filtered winners); suffix members already in effective via clock remain
+        // part of missing below since gating is raw-based, ensuring a complete
+        // union even when the newcomer would already suffix-append.
+        storedPrefix = [...evaluated.filtered]
+      } catch {
+        return false
+      }
+    } else {
+      storedPrefix = []
+      rawSet = new Set()
+    }
+    const missing = [...liveChildren.keys()].filter((id) => !rawSet.has(id))
+    if (missing.length === 0) return false
+    if (!missing.includes(childId)) return false
+    // Preserve stored prefix; suffix deterministic by membership then childId.
+    const suffix = missing
+      .map((id) => ({ id, clock: liveChildren.get(id)! }))
+      .sort((a, b) => {
+        const c = compareFrameClock(a.clock, b.clock)
+        if (c !== 0) return c
+        return compareUtf8ByteLex(a.id, b.id)
+      })
+      .map((e) => e.id)
+    const nextEffective = [...storedPrefix, ...suffix]
+    const mergeClock = this.allocateWinningFrameClockInTx(tx, 'topicMessage', parentId, [...liveChildren.keys()])
+    if (storedClock && compareFrameClock(mergeClock, storedClock) <= 0) {
+      throw new Error(`upsert repair ${op.id}: merge clock does not win stored for ${parentId}`)
+    }
+    this.persistParentFrameInTx(tx, {
+      kind: 'topicMessage',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...nextEffective],
+      timestamp: mergeClock.timestamp,
+      operationId: mergeClock.operationId
+    })
+    const frameOp: SyncOperation = {
+      id: mergeClock.operationId,
+      entityType: 'topic',
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: mergeClock.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind: 'topicMessage',
+        parentId,
+        orderedChildIds: [...nextEffective],
+        frameClock: { timestamp: mergeClock.timestamp, operationId: mergeClock.operationId }
+      }
+    }
+    this.enqueueOrderFrameInTx(tx, frameOp)
+    this.materializeTopicMessageOrder(db, parentId, [...nextEffective])
+    logger.info(
+      `[applyUpsert] union repair emitted for ${parentId}: new=${missing.length} mergeTs=${mergeClock.timestamp} from=${op.id.slice(0, 8)}`
+    )
+    return true
+  }
+
+  private repairMessageBlockAfterBlockUpsert(
+    tx: SyncTxExecutor,
+    db: BetterSQLite3Database<typeof schema>,
+    op: SyncOperation,
+    deviceId: string
+  ): boolean {
+    const childId = op.entityId
+    const childRow = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, childId)).get()
+    if (!childRow) return false
+    const parentId = childRow.messageId
+    if (typeof parentId !== 'string' || parentId.length === 0) return false
+    const ownTomb = this.getTombstone('message_block', childId)
+    if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) return false
+    if (!isStableBlockStatus(childRow.status)) return false
+    try {
+      if (isUnsupportedBlockForSync({ type: childRow.type, overflow: this.parseBlockOverflowExtra(childRow.extra) }))
+        return false
+    } catch {
+      return false
+    }
+    const parentRow = db.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+    if (!parentRow) return false
+    if (!isStableMessageStatus(parentRow.status)) return false
+    if (this.getTombstone('message', parentId)) return false
+    const childMem = this.getMembershipClockInTx(tx, 'message_block', childId)
+    if (!childMem || childMem.parentId !== parentId) return false
+    // Excluded rows under this parent must never mint (truthful partial).
+    try {
+      if (this.hasExcludedBlockRowsInTx(tx, parentId)) return false
+    } catch {
+      return false
+    }
+    const rows = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.messageId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of rows) {
+      if (!isStableBlockStatus(row.status)) continue
+      let overflow: Record<string, unknown>
+      try {
+        overflow = this.parseBlockOverflowExtra(row.extra)
+      } catch {
+        return false
+      }
+      if (isUnsupportedBlockForSync({ type: row.type, overflow })) continue
+      const tomb = this.getTombstone('message_block', row.id)
+      const mem = this.getMembershipClockInTx(tx, 'message_block', row.id)
+      if (tomb) {
+        if (!mem) return false
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, tomb)) continue
+      }
+      if (!mem) return false
+      if (mem.parentId !== parentId) return false
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    if (!liveChildren.has(childId)) return false
+    const stored = this.getParentFrameInTx(tx, 'messageBlock', parentId)
+    let storedPrefix: string[] = []
+    let storedClock: { timestamp: number; operationId: string } | null = null
+    let rawSet = new Set<string>()
+    if (stored) {
+      storedClock = { timestamp: stored.timestamp, operationId: stored.operationId }
+      rawSet = new Set(stored.orderedChildIds)
+      if (rawSet.has(childId)) return false
+      const childParentLookup = (
+        cid: string
+      ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+        const r = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
+        if (r) return { parentId: r.messageId, exists: true, isLiveForThisParent: r.messageId === parentId }
+        const tomb = this.getTombstone('message_block', cid)
+        if (tomb) return { parentId: null, exists: true }
+        return null
+      }
+      try {
+        const evaluated = evaluateEffectiveOrder({
+          kind: 'messageBlock',
+          parentId,
+          orderedChildIds: [...stored.orderedChildIds],
+          frameClock: storedClock,
+          liveChildren,
+          childParentLookup
+        })
+        storedPrefix = [...evaluated.filtered]
+      } catch {
+        return false
+      }
+    } else {
+      storedPrefix = []
+      rawSet = new Set()
+    }
+    const missing = [...liveChildren.keys()].filter((id) => !rawSet.has(id))
+    if (missing.length === 0) return false
+    if (!missing.includes(childId)) return false
+    const suffix = missing
+      .map((id) => ({ id, clock: liveChildren.get(id)! }))
+      .sort((a, b) => {
+        const c = compareFrameClock(a.clock, b.clock)
+        if (c !== 0) return c
+        return compareUtf8ByteLex(a.id, b.id)
+      })
+      .map((e) => e.id)
+    const nextEffective = [...storedPrefix, ...suffix]
+    const mergeClock = this.allocateWinningFrameClockInTx(tx, 'messageBlock', parentId, [...liveChildren.keys()])
+    if (storedClock && compareFrameClock(mergeClock, storedClock) <= 0) {
+      throw new Error(`upsert repair ${op.id}: merge clock does not win stored for ${parentId}`)
+    }
+    this.persistParentFrameInTx(tx, {
+      kind: 'messageBlock',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...nextEffective],
+      timestamp: mergeClock.timestamp,
+      operationId: mergeClock.operationId
+    })
+    const frameOp: SyncOperation = {
+      id: mergeClock.operationId,
+      entityType: 'message',
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: mergeClock.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind: 'messageBlock',
+        parentId,
+        orderedChildIds: [...nextEffective],
+        frameClock: { timestamp: mergeClock.timestamp, operationId: mergeClock.operationId }
+      }
+    }
+    this.enqueueOrderFrameInTx(tx, frameOp)
+    this.materializeMessageBlockOrder(db, [...nextEffective])
+    logger.info(
+      `[applyUpsert] union repair emitted for ${parentId}: new=${missing.length} mergeTs=${mergeClock.timestamp} from=${op.id.slice(0, 8)}`
+    )
+    return true
   }
 
   /**
@@ -3497,6 +3844,181 @@ export class SyncService {
     return true
   }
 
+  /**
+   * Deterministic known-incoming-clock complete-union repair for an incomplete
+   * incoming order_frame (SYNC-DATA-035/036/048/058 correctness core).
+   *
+   * Narrow scope only: caller has already strict-validated the frame, gated
+   * parent/live/membership legality, evaluated with `evaluateEffectiveOrder`
+   * to incomplete, and handled the stored-covering consume / equal-idempotent
+   * / equal-divergence cases. This helper mints only when every missing child
+   * is locally alive same-parent with a legal membership, no winning
+   * tombstone, stable (topicMessage) or stable-supported (messageBlock), with
+   * no excluded rows and no malformed overflow — i.e. the incoming frame is
+   * incomplete only because absence != deletion.
+   *
+   * Union construction: incoming effective (filtered + >incoming suffix, dead
+   * filtered without resurrection) as prefix, missing locals sorted by
+   * membership full clock then childId UTF-8 as suffix — covering the full
+   * live set deterministically. Frame clock is max(incoming, stored/high-water,
+   * all live memberships)+1 via the existing allocator with the incoming
+   * clock as an explicit floor (no wall dependency), so the repair strictly
+   * dominates even an extremely skewed obsolete peer frame. DeviceId is
+   * fetched before any persist; allocate/persist/enqueue/materialize failure
+   * throws with whole-tx rollback and no cursor advance (incoming op not
+   * consumed). On success the incoming op is consumed (caller returns true)
+   * and the repair op propagates to the peer.
+   *
+   * Any ineligible missing (no clock, parent mismatch, tombstone-suppressed,
+   * transient/unsupported/non-success, excluded, malformed) throws
+   * fail-closed; general incomplete is never relaxed.
+   *
+   * Stop/no-ping-pong: a complete covering stored frame consumes old
+   * incompletes without minting; a complete incoming needs no repair (suffix
+   * path only); duplicates are deduped by syncApplied; two sides each minting
+   * a complete union converge via larger-complete-clock LWW to full identity
+   * (timestamp+operationId+orderedChildIds) with no further mint.
+   */
+  private emitIncompleteUnionRepairInApply(
+    db: BetterSQLite3Database<typeof schema>,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string,
+    liveChildren: Map<string, { timestamp: number; operationId: string }>,
+    incomingEffective: string[],
+    missingIds: string[],
+    incomingClock: { timestamp: number; operationId: string },
+    opIdForLog: string
+  ): boolean {
+    if (missingIds.length === 0) return false
+    // Fallible identity first: never leave a persisted frame without outbox.
+    const deviceId = this.getDeviceId()
+    if (typeof deviceId !== 'string' || deviceId.length === 0) {
+      throw new Error(`order_frame ${opIdForLog}: incomplete union deviceId unavailable for ${parentId}`)
+    }
+    const tx = db as unknown as SyncTxExecutor
+    const childType = kind === 'topicMessage' ? 'message' : 'message_block'
+    // Authoritative revalidation of every missing child in the same tx.
+    // liveChildren is advisory only; any ineligible missing throws.
+    const missingClocks = new Map<string, { timestamp: number; operationId: string }>()
+    if (kind === 'messageBlock') {
+      try {
+        if (this.hasExcludedBlockRowsInTx(tx, parentId)) {
+          throw new Error(`order_frame ${opIdForLog}: incomplete union excluded rows for ${parentId}`)
+        }
+      } catch (e) {
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+    }
+    for (const mid of missingIds) {
+      const mem = this.getMembershipClockInTx(tx, childType, mid)
+      if (!mem) {
+        throw new Error(`order_frame ${opIdForLog}: incomplete union missing membership for ${childType}/${mid}`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(`order_frame ${opIdForLog}: incomplete union parent mismatch for ${mid}`)
+      }
+      missingClocks.set(mid, { timestamp: mem.timestamp, operationId: mem.operationId })
+      if (kind === 'topicMessage') {
+        const row = db.select().from(schema.messages).where(eq(schema.messages.id, mid)).get()
+        if (!row || row.topicId !== parentId || !isStableMessageStatus(row.status)) {
+          throw new Error(`order_frame ${opIdForLog}: incomplete union ineligible message ${mid}`)
+        }
+        const tomb = this.getTombstone('message', mid)
+        if (tomb && this.isSuppressedByTombstone(mem.timestamp, mem.operationId, tomb)) {
+          throw new Error(`order_frame ${opIdForLog}: incomplete union tombstone-suppressed ${mid}`)
+        }
+      } else {
+        const row = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, mid)).get()
+        if (!row || row.messageId !== parentId || !isStableBlockStatus(row.status)) {
+          throw new Error(`order_frame ${opIdForLog}: incomplete union ineligible block ${mid}`)
+        }
+        let overflow: Record<string, unknown>
+        try {
+          overflow = this.parseBlockOverflowExtra(row.extra)
+        } catch (e) {
+          throw new Error(
+            `order_frame ${opIdForLog}: incomplete union malformed extra for ${mid}: ${(e as Error).message}`
+          )
+        }
+        if (isUnsupportedBlockForSync({ type: row.type, overflow })) {
+          throw new Error(`order_frame ${opIdForLog}: incomplete union unsupported block ${mid}`)
+        }
+        const tomb = this.getTombstone('message_block', mid)
+        if (tomb && this.isSuppressedByTombstone(mem.timestamp, mem.operationId, tomb)) {
+          throw new Error(`order_frame ${opIdForLog}: incomplete union tombstone-suppressed ${mid}`)
+        }
+      }
+    }
+    // Deterministic suffix: missing sorted by membership full clock then childId.
+    const suffix = [...missingIds]
+      .map((id) => ({ id, clock: missingClocks.get(id)! }))
+      .sort((a, b) => {
+        const c = compareFrameClock(a.clock, b.clock)
+        if (c !== 0) return c
+        return compareUtf8ByteLex(a.id, b.id)
+      })
+      .map((e) => e.id)
+    const union = [...incomingEffective, ...suffix]
+    // Union must cover the full live set exactly once (no resurrection, no dup).
+    const unionSet = new Set(union)
+    if (unionSet.size !== union.length) {
+      throw new Error(`order_frame ${opIdForLog}: incomplete union duplicate for ${parentId}`)
+    }
+    for (const lid of liveChildren.keys()) {
+      if (!unionSet.has(lid)) {
+        throw new Error(`order_frame ${opIdForLog}: incomplete union does not cover live ${lid}`)
+      }
+    }
+    const mergeClock = this.allocateWinningFrameClockInTx(
+      tx,
+      kind,
+      parentId,
+      [...liveChildren.keys()],
+      [{ timestamp: incomingClock.timestamp, operationId: incomingClock.operationId }]
+    )
+    if (compareFrameClock(mergeClock, incomingClock) <= 0) {
+      throw new Error(`order_frame ${opIdForLog}: incomplete union clock does not win incoming for ${parentId}`)
+    }
+    const stored = this.getParentFrameInTx(tx, kind, parentId)
+    if (
+      stored &&
+      compareFrameClock(mergeClock, { timestamp: stored.timestamp, operationId: stored.operationId }) <= 0
+    ) {
+      throw new Error(`order_frame ${opIdForLog}: incomplete union clock does not win stored for ${parentId}`)
+    }
+    this.persistParentFrameInTx(tx, {
+      kind,
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...union],
+      timestamp: mergeClock.timestamp,
+      operationId: mergeClock.operationId
+    })
+    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    const frameOp: SyncOperation = {
+      id: mergeClock.operationId,
+      entityType: entityType as SyncOperation['entityType'],
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: mergeClock.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind,
+        parentId,
+        orderedChildIds: [...union],
+        frameClock: { timestamp: mergeClock.timestamp, operationId: mergeClock.operationId }
+      }
+    }
+    this.enqueueOrderFrameInTx(tx, frameOp)
+    if (kind === 'topicMessage') this.materializeTopicMessageOrder(db, parentId, [...union])
+    else this.materializeMessageBlockOrder(db, [...union])
+    logger.info(
+      `[applyOrderFrame] incomplete union emitted for ${parentId}: missing=${missingIds.length} mergeTs=${mergeClock.timestamp} incomingTs=${incomingClock.timestamp} from=${opIdForLog.slice(0, 8)}`
+    )
+    return true
+  }
+
   private applyTopicMessageOrderFrame(
     op: SyncOperation,
     parentId: string,
@@ -3573,12 +4095,79 @@ export class SyncService {
       childParentLookup
     })
     if (evaluated.incomplete) {
-      // Fail-closed coverage gate (SYNC-DATA-035): a frame must never exclude
-      // a member the receiver still holds alive/stable — frames carry no
-      // member-exclusion authority over such children. SyncOrphanError stays
-      // reserved for genuinely resolvable arrival gaps (unknown parent or a
-      // listed member not yet arrived); incompleteness fails closed with
-      // rollback and no cursor advance.
+      // Narrow union-repair coexistence with complete-clock semantics
+      // (timestamp,operationId via compareFrameClock, symmetric for both pairs):
+      // stored covering clock > incoming may safely consume the old incomplete
+      // when the stored union is complete and covers every missing id; equal
+      // complete clock consumes only when effective order semantics are fully
+      // identical under the current live set (idempotent), otherwise the
+      // existing equal-clock divergence throws; covering clock < incoming is
+      // stronger and must never be swallowed (falls through to fail-closed).
+      const covering = this.getParentFrame('topicMessage', parentId)
+      if (covering) {
+        const coveringClock = { timestamp: covering.timestamp, operationId: covering.operationId }
+        const cmpCover = compareFrameClock(coveringClock, frameClock)
+        if (cmpCover > 0) {
+          try {
+            const coveringEvaluated = evaluateEffectiveOrder({
+              kind: 'topicMessage',
+              parentId,
+              orderedChildIds: [...covering.orderedChildIds],
+              frameClock: coveringClock,
+              liveChildren,
+              childParentLookup
+            })
+            if (!coveringEvaluated.incomplete) {
+              const coveringSet = new Set(coveringEvaluated.effective)
+              if (evaluated.missingIds.every((id) => coveringSet.has(id))) {
+                logger.info(
+                  `[applyOrderFrame] older incomplete ${op.id} covered by ${covering.operationId} for ${parentId}, consumed`
+                )
+                return false
+              }
+            }
+          } catch {}
+        } else if (cmpCover === 0) {
+          let same = false
+          try {
+            const coveringEvaluated = evaluateEffectiveOrder({
+              kind: 'topicMessage',
+              parentId,
+              orderedChildIds: [...covering.orderedChildIds],
+              frameClock: coveringClock,
+              liveChildren,
+              childParentLookup
+            })
+            same =
+              coveringEvaluated.effective.length === evaluated.effective.length &&
+              coveringEvaluated.effective.every((id, i) => id === evaluated.effective[i])
+            if (same) {
+              logger.info(`[applyOrderFrame] equal-clock idempotent ${op.id} for ${parentId}, consumed`)
+              return false
+            }
+          } catch {}
+          throw new Error(`order_frame ${op.id}: equal-clock divergence for ${parentId}`)
+        }
+      }
+      // Known-incoming complete-union repair (correctness core): the frame is
+      // strict-valid with legal parent/live/membership, and every missing id
+      // is a locally alive same-parent eligible child (absence != deletion).
+      // Mint a covering union in the same tx with a clock strictly above the
+      // known incoming clock (no wall dependency). Ineligible missing or
+      // unexplainable equal-clock divergence still throws below.
+      // Fail-closed coverage gate (SYNC-DATA-035) otherwise: a frame must
+      // never exclude a member the receiver still holds alive/stable.
+      const repaired = this.emitIncompleteUnionRepairInApply(
+        db,
+        'topicMessage',
+        parentId,
+        liveChildren,
+        [...evaluated.effective],
+        [...evaluated.missingIds],
+        frameClock,
+        op.id
+      )
+      if (repaired) return true
       throw new Error(
         `order_frame ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
       )
@@ -3807,6 +4396,68 @@ export class SyncService {
       childParentLookup
     })
     if (evaluated.incomplete) {
+      // Same complete-clock semantics as topicMessage (symmetric): stored >
+      // incoming may consume a covered old incomplete; equal consumes only on
+      // identical effective order, otherwise equal-clock divergence throws;
+      // covering < incoming never swallows (fail-closed below).
+      const covering = this.getParentFrame('messageBlock', parentId)
+      if (covering) {
+        const coveringClock = { timestamp: covering.timestamp, operationId: covering.operationId }
+        const cmpCover = compareFrameClock(coveringClock, frameClock)
+        if (cmpCover > 0) {
+          try {
+            const coveringEvaluated = evaluateEffectiveOrder({
+              kind: 'messageBlock',
+              parentId,
+              orderedChildIds: [...covering.orderedChildIds],
+              frameClock: coveringClock,
+              liveChildren,
+              childParentLookup
+            })
+            if (!coveringEvaluated.incomplete) {
+              const coveringSet = new Set(coveringEvaluated.effective)
+              if (evaluated.missingIds.every((id) => coveringSet.has(id))) {
+                logger.info(
+                  `[applyOrderFrame] older incomplete ${op.id} covered by ${covering.operationId} for ${parentId}, consumed`
+                )
+                return false
+              }
+            }
+          } catch {}
+        } else if (cmpCover === 0) {
+          let same = false
+          try {
+            const coveringEvaluated = evaluateEffectiveOrder({
+              kind: 'messageBlock',
+              parentId,
+              orderedChildIds: [...covering.orderedChildIds],
+              frameClock: coveringClock,
+              liveChildren,
+              childParentLookup
+            })
+            same =
+              coveringEvaluated.effective.length === evaluated.effective.length &&
+              coveringEvaluated.effective.every((id, i) => id === evaluated.effective[i])
+            if (same) {
+              logger.info(`[applyOrderFrame] equal-clock idempotent ${op.id} for ${parentId}, consumed`)
+              return false
+            }
+          } catch {}
+          throw new Error(`order_frame ${op.id}: equal-clock divergence for ${parentId}`)
+        }
+      }
+      // Same known-incoming complete-union repair as topicMessage (symmetric).
+      const repaired = this.emitIncompleteUnionRepairInApply(
+        db,
+        'messageBlock',
+        parentId,
+        liveChildren,
+        [...evaluated.effective],
+        [...evaluated.missingIds],
+        frameClock,
+        op.id
+      )
+      if (repaired) return true
       throw new Error(
         `order_frame ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
       )

@@ -472,7 +472,7 @@ describe('remote apply: kind branch with same LWW/highwater semantics', () => {
     })
     expect(() => ctx.svc.applyIncomingOperation(wrongParent as never)).not.toThrowError(SyncOrphanError)
     expect(() => ctx.svc.applyIncomingOperation(wrongParent as never)).toThrow()
-    // incomplete (receiver alive b-2 omitted) -> fail closed
+    // eligible incomplete now heals via known-incoming union (symmetric).
     ctx.sqlite
       .prepare(
         `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order) VALUES (?,?,?,?,?,?,?,?)`
@@ -490,8 +490,10 @@ describe('remote apply: kind branch with same LWW/highwater semantics', () => {
       deviceId: 'd-x',
       orderedChildIds: ['b-1']
     })
-    expect(() => ctx.svc.applyIncomingOperation(incomplete as never)).toThrow(/incomplete/)
-    // suffix: concurrent child with membership > frameClock is appended deterministically
+    expect(ctx.svc.applyIncomingOperation(incomplete as never)).toBe(true)
+    expect(blockOrder(ctx.sqlite, 'm-g')).toEqual(expect.arrayContaining(['b-1', 'b-2']))
+    // The healed union already covers b-2 with a higher clock, so an older
+    // suffix frame is a consumed loser with order already converged.
     const suffixFrame = makeBlockFrameOp({
       id: 'f-suf',
       parentId: 'm-g',
@@ -499,8 +501,8 @@ describe('remote apply: kind branch with same LWW/highwater semantics', () => {
       deviceId: 'd-x',
       orderedChildIds: ['b-1']
     })
-    expect(ctx.svc.applyIncomingOperation(suffixFrame as never)).toBe(true)
-    expect(blockOrder(ctx.sqlite, 'm-g')).toEqual(['b-1', 'b-2'])
+    expect(ctx.svc.applyIncomingOperation(suffixFrame as never)).toBe(false)
+    expect(blockOrder(ctx.sqlite, 'm-g')).toEqual(expect.arrayContaining(['b-1', 'b-2']))
     // tombstoned parent consumes without materializing
     const ctx2 = freshApplyDb()
     ctx2.sqlite.prepare(`INSERT INTO sync_state (key, value) VALUES (?,?)`).run('tombstone:message:m-del', '35:f-del')

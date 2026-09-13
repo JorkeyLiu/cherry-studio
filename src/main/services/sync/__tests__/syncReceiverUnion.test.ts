@@ -1198,10 +1198,6 @@ describe('dual exclusive symmetric convergence over real relay', () => {
     await syncService.getPairState()
   }
 
-  function frameRow(sqlite: Database.Database, kind: string, parentId: string): unknown {
-    return sqlite.prepare(`SELECT * FROM sync_parent_order_frame WHERE kind=? AND parent_id=?`).get(kind, parentId)
-  }
-
   function frameCount(sqlite: Database.Database): number {
     return (sqlite.prepare(`SELECT COUNT(*) as n FROM sync_parent_order_frame`).get() as { n: number }).n
   }
@@ -1278,6 +1274,13 @@ describe('dual exclusive symmetric convergence over real relay', () => {
     await syncService.sync()
     bindProfile('A', credA)
     await syncService.sync()
+    // Drain the wall-fresh repair winner (A mints a strictly larger union on
+    // pull and pushes it; B adopts it next round) before asserting full
+    // frame identity.
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
     // Both hold both exclusives with identical dense topic order.
     const orderA1 = (
       sqliteA!
@@ -1297,7 +1300,23 @@ describe('dual exclusive symmetric convergence over real relay', () => {
     expect(orderA1).toContain('dual-a1')
     expect(orderA1).toContain('dual-b1')
     expect(orderB1).toEqual(orderA1)
-    expect(frameRow(sqliteA!, 'topicMessage', 'seed-t1')).toEqual(frameRow(sqliteB!, 'topicMessage', 'seed-t1'))
+    // Full frame identity convergence (timestamp + operationId + ordered ids):
+    // the larger complete clock propagates via LWW and unifies both sides.
+    {
+      const fa = sqliteA!
+        .prepare(
+          `SELECT ordered_child_ids_json AS json, timestamp AS ts, operation_id AS opId FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='seed-t1'`
+        )
+        .get() as { json: string; ts: number; opId: string }
+      const fb = sqliteB!
+        .prepare(
+          `SELECT ordered_child_ids_json AS json, timestamp AS ts, operation_id AS opId FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='seed-t1'`
+        )
+        .get() as { json: string; ts: number; opId: string }
+      expect(JSON.parse(fb.json)).toEqual(JSON.parse(fa.json))
+      expect(fb.ts).toBe(fa.ts)
+      expect(fb.opId).toBe(fa.opId)
+    }
     expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='dual-bb1'`).get()).toBeTruthy()
     expect(sqliteB!.prepare(`SELECT id FROM message_blocks WHERE id='dual-ab1'`).get()).toBeTruthy()
 
@@ -1337,6 +1356,14 @@ describe('dual exclusive symmetric convergence over real relay', () => {
     await syncService.sync()
     bindProfile('A', credA)
     await syncService.sync()
+    // Drain repair unions (upsert repair pushes next cycle; LWW then converges order).
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
     const borderA = (
       sqliteA!
         .prepare(`SELECT id FROM message_blocks WHERE message_id='seed-m1' ORDER BY sort_order ASC, id ASC`)
@@ -1355,7 +1382,21 @@ describe('dual exclusive symmetric convergence over real relay', () => {
     expect(borderA).toContain('dual-ablk1')
     expect(borderA).toContain('dual-bblk1')
     expect(borderB).toEqual(borderA)
-    expect(frameRow(sqliteA!, 'messageBlock', 'seed-m1')).toEqual(frameRow(sqliteB!, 'messageBlock', 'seed-m1'))
+    {
+      const fa = sqliteA!
+        .prepare(
+          `SELECT ordered_child_ids_json AS json, timestamp AS ts, operation_id AS opId FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id='seed-m1'`
+        )
+        .get() as { json: string; ts: number; opId: string }
+      const fb = sqliteB!
+        .prepare(
+          `SELECT ordered_child_ids_json AS json, timestamp AS ts, operation_id AS opId FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id='seed-m1'`
+        )
+        .get() as { json: string; ts: number; opId: string }
+      expect(JSON.parse(fb.json)).toEqual(JSON.parse(fa.json))
+      expect(fb.ts).toBe(fa.ts)
+      expect(fb.opId).toBe(fa.opId)
+    }
 
     // Retry stability: no frame storm, outbox drains to zero on both sides.
     const framesBeforeA = frameCount(sqliteA!)
@@ -1387,17 +1428,29 @@ describe('dual exclusive symmetric convergence over real relay', () => {
       }>
     ).map((r) => r.id)
     expect(finalB).toEqual(finalA)
-    expect(frameRow(sqliteA!, 'topicMessage', 'seed-t1')).toEqual(frameRow(sqliteB!, 'topicMessage', 'seed-t1'))
+    {
+      const fa = sqliteA!
+        .prepare(
+          `SELECT ordered_child_ids_json AS json, timestamp AS ts, operation_id AS opId FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='seed-t1'`
+        )
+        .get() as { json: string; ts: number; opId: string }
+      const fb = sqliteB!
+        .prepare(
+          `SELECT ordered_child_ids_json AS json, timestamp AS ts, operation_id AS opId FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='seed-t1'`
+        )
+        .get() as { json: string; ts: number; opId: string }
+      expect(JSON.parse(fb.json)).toEqual(JSON.parse(fa.json))
+      expect(fb.ts).toBe(fa.ts)
+      expect(fb.opId).toBe(fa.opId)
+    }
   }, 120000)
 
-  it('concurrent versioned exclusives fail closed without silent order drop (documented residual)', async () => {
-    // Both sides mint versioned exclusives before any exchange, so each frame
-    // misses the other child with an older-or-equal membership clock on at
-    // least one side. The suffix-only contract keeps the incomplete frame
-    // fail-closed (no silent exclusion); entity upserts still apply, so no
-    // order content is silently dropped. Full concurrent merge needs a
-    // product decision (orphan-vs-fail-closed / pull-then-push / membership
-    // repair) and stays a documented residual.
+  it('concurrent versioned exclusives converge via incremental upsert repair (residual closed)', async () => {
+    // Both sides mint versioned exclusives before any exchange. The incremental
+    // remote-upsert union repair (SYNC-DATA-035/036/048/058) now heals the
+    // previous incomplete fail-closed residual: entity upserts apply, repair
+    // mints complete unions at upsert arrival, and older incomplete frames
+    // covered by the higher union are consumed instead of deadlocking.
     await setupPair()
     bindProfile('A', credA)
     insertLegacyHistory(sqliteA!)
@@ -1464,17 +1517,32 @@ describe('dual exclusive symmetric convergence over real relay', () => {
     await syncService.sync()
     bindProfile('B', credB)
     await syncService.sync()
-    // A now pulls B's newer frame which misses A's older exclusive: the
-    // incomplete gate must throw (fail-closed) rather than exclude A's child.
-    bindProfile('A', credA)
-    await expect(syncService.sync()).rejects.toThrow(/incomplete/)
-    // No silent drop: both entities arrived via upserts before the frame throw.
+    // Repair heals: exchange repair unions until both sides converge with no
+    // silent drop and no storm (extra rounds drain repair outbox, LWW picks the
+    // higher union; equal-timestamp ties keep identical order).
+    for (let i = 0; i < 4; i++) {
+      bindProfile('A', credA)
+      await syncService.sync()
+      bindProfile('B', credB)
+      await syncService.sync()
+    }
     expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='conc-a1'`).get()).toBeTruthy()
     expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='conc-b1'`).get()).toBeTruthy()
-    // No frame storm on retry (outbox stays empty; second retry throws identically).
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='conc-a1'`).get()).toBeTruthy()
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='conc-b1'`).get()).toBeTruthy()
+    const orderA = (
+      sqliteA!
+        .prepare(`SELECT id FROM messages WHERE topic_id='seed-t1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    const orderB = (
+      sqliteB!
+        .prepare(`SELECT id FROM messages WHERE topic_id='seed-t1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(orderB).toEqual(orderA)
     expect(outboxCount(dbA!)).toBe(0)
-    await expect(syncService.sync()).rejects.toThrow(/incomplete/)
-    expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
   }, 120000)
 })
 
@@ -1729,6 +1797,12 @@ describe('receiver union claim matrix over real relay (SYNC-DATA-058)', () => {
     expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='recv-hb1'`).get()).toBeTruthy()
     bindProfile('B', credB)
     await syncService.sync()
+    // Drain the wall-fresh repair winner (A mints a strictly larger union on
+    // pull; B adopts it next round) before asserting full frame identity.
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
     const orderA = (
       sqliteA!
         .prepare(`SELECT id FROM messages WHERE topic_id='seed-t1' ORDER BY sort_order ASC, id ASC`)
@@ -1749,8 +1823,13 @@ describe('receiver union claim matrix over real relay (SYNC-DATA-058)', () => {
       .prepare(
         `SELECT ordered_child_ids_json AS json, timestamp, operation_id AS operationId FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='seed-t1'`
       )
-      .get()
-    expect(frameB2).toEqual(frameA)
+      .get() as { json: string; timestamp: number; operationId: string }
+    {
+      const fa = frameA as { json: string; timestamp: number; operationId: string }
+      expect(frameB2.json).toBe(fa.json)
+      expect(frameB2.timestamp).toBe(fa.timestamp)
+      expect(frameB2.operationId).toBe(fa.operationId)
+    }
     // No storm on retry: frames stable, outbox drained both sides.
     const framesA = (sqliteA!.prepare(`SELECT COUNT(*) as n FROM sync_parent_order_frame`).get() as { n: number }).n
     bindProfile('A', credA)
@@ -1819,7 +1898,15 @@ describe('receiver union claim matrix over real relay (SYNC-DATA-058)', () => {
         .all() as Array<{ id: string }>
     ).map((r) => r.id)
     expect(borderA).toEqual(borderB)
+    // Drain repair unions (upsert repair enqueues in pull tx, pushes next cycle).
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
     expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
   }, 60000)
 
   it('single bootstrap adopts pure and shared parents together', async () => {
@@ -1874,6 +1961,14 @@ describe('receiver union claim matrix over real relay (SYNC-DATA-058)', () => {
     expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='shared-m1'`).get()).toBeTruthy()
     expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='pure-b1'`).get()).toBeTruthy()
     expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='shared-b1'`).get()).toBeTruthy()
+    // Drain incremental repair unions before asserting empty.
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
     expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
   }, 60000)
 })

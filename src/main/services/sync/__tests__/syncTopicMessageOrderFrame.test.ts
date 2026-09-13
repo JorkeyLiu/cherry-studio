@@ -601,9 +601,8 @@ describe('remote apply: LWW winner, gating, dense order, no poison', () => {
       expect(messageOrder(ctx.sqlite, 't-suffix')).toEqual(['m-1', 'm-2'])
       expect(frameOf(ctx.sqlite, 't-suffix')!.orderedChildIds).toEqual(['m-1', 'm-2'])
 
-      // incomplete: m-1 membership (10) <= frameClock (500) but omitted ->
-      // fail-closed coverage gate (frames carry no member-exclusion authority
-      // over receiver-alive children; rollback, nothing recorded)
+      // eligible incomplete now heals via known-incoming union: empty frame
+      // omitting live m-1/m-2 mints a covering union with clock > incoming.
       const incomplete = makeOrderFrameOp({
         id: 'dddddddd-0000-0000-0000-000000000001',
         parentId: 't-suffix',
@@ -611,14 +610,15 @@ describe('remote apply: LWW winner, gating, dense order, no poison', () => {
         deviceId: 'd-x',
         orderedChildIds: []
       })
-      expect(() => ctx.svc.applyIncomingOperation(incomplete as never)).toThrow()
+      expect(ctx.svc.applyIncomingOperation(incomplete as never)).toBe(true)
       expect(messageOrder(ctx.sqlite, 't-suffix')).toEqual(['m-1', 'm-2'])
       expect(
         ctx.sqlite
           .prepare(`SELECT operation_id FROM sync_applied WHERE operation_id='dddddddd-0000-0000-0000-000000000001'`)
           .get()
-      ).toBeUndefined()
+      ).toBeTruthy()
       expect(frameOf(ctx.sqlite, 't-suffix')!.orderedChildIds).toEqual(['m-1', 'm-2'])
+      expect(frameOf(ctx.sqlite, 't-suffix')!.timestamp).toBeGreaterThan(500)
     } finally {
       try {
         ctx.sqlite.close()
@@ -662,7 +662,10 @@ describe('remote apply: LWW winner, gating, dense order, no poison', () => {
         deviceId: 'd-x',
         payload: { id: 'm-2', topicId: 't-ooo', role: 'user', content: 'c2', status: 'success' }
       } as never)
-      // retry of the buffered frame now converges
+      // Wall-independent upsert repair covers both lives with a small clock;
+      // the buffered complete frame (ts 100) is stronger and wins, converging
+      // order via the normal complete path (no wall dependency).
+      expect(messageOrder(ctx.sqlite, 't-ooo')).toEqual(['m-1', 'm-2'])
       expect(ctx.svc.applyIncomingOperation(early as never)).toBe(true)
       expect(messageOrder(ctx.sqlite, 't-ooo')).toEqual(['m-1', 'm-2'])
     } finally {

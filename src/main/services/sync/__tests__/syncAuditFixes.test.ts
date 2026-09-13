@@ -165,14 +165,31 @@ describe('blocker 2: capture reflects actual changed entities', () => {
       deviceId: 'd1',
       payload: { id: 'm-known', topicId: 't-known', role: 'user', content: 'hi' }
     } as any)
-    const before = syncService.listOutbox().length
+    const beforeOutbox = syncService.listOutbox()
+    const beforeDeleteCount = beforeOutbox.filter(
+      (o) => o.op === 'delete' && o.entityType === 'message' && o.entityId === 'm-known'
+    ).length
+    const beforeTopicFrameCount = beforeOutbox.filter(
+      (o) => o.op === 'order_frame' && o.entityType === 'topic' && o.entityId === 't-known'
+    ).length
     // Simulate the aggregate having deleted the row before the hook runs
     // (real IPC order): post-state row gone + tracked clock -> emit.
     sqlite.prepare('DELETE FROM messages WHERE id=?').run('m-known')
     handleChatDbSuccessForSync(IpcChannel.ChatDb_DeleteMessage, { topicId: 't-known', messageId: 'm-known' })
     const after = syncService.listOutbox()
-    expect(after.length).toBe(before + 1)
-    expect(after[after.length - 1]).toMatchObject({ entityType: 'message', op: 'delete', entityId: 'm-known' })
+    expect(after.length).toBe(beforeOutbox.length + 1)
+    const afterDeleteCount = after.filter(
+      (o) => o.op === 'delete' && o.entityType === 'message' && o.entityId === 'm-known'
+    ).length
+    expect(afterDeleteCount).toBe(beforeDeleteCount + 1)
+    // Local delete must not mint a topic order_frame repair (setup repair frames stay as-is).
+    const afterTopicFrameCount = after.filter(
+      (o) => o.op === 'order_frame' && o.entityType === 'topic' && o.entityId === 't-known'
+    ).length
+    expect(afterTopicFrameCount).toBe(beforeTopicFrameCount)
+    expect(
+      after.find((o) => o.op === 'delete' && o.entityType === 'message' && o.entityId === 'm-known')
+    ).toMatchObject({ entityType: 'message', op: 'delete', entityId: 'm-known' })
   })
 
   it('hard-delete no-op (empty deletedTopicIds) emits nothing', async () => {

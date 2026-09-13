@@ -223,11 +223,15 @@ describe('full update semantics', () => {
     }
     syncService.recordUpsert('message', 'm-full', updatedPayload, Date.now())
     const outbox = syncService.listOutbox()
-    const last = outbox[outbox.length - 1]
-    expect(last.payload?.content).toBe('updated')
-    expect(last.payload?.role).toBe('user')
+    // Outbox is dependency-priority sorted (topic < message < block <
+    // order_frame), so the message upsert is not the last entry when a
+    // setup/refresh order_frame repair is present. Locate by identity.
+    const target = outbox.find((o) => o.op === 'upsert' && o.entityType === 'message' && o.entityId === 'm-full')
+    expect(target).toBeTruthy()
+    expect(target!.payload?.content).toBe('updated')
+    expect(target!.payload?.role).toBe('user')
     // Ensure not just partial
-    expect(last.payload?.topicId).toBe('t-full')
+    expect(target!.payload?.topicId).toBe('t-full')
   })
 })
 

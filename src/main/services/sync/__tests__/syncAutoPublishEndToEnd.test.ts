@@ -451,6 +451,51 @@ describe('auto local mutation -> debounce/drain -> publish -> B bootstrap -> N+1
       await syncService.sync()
       expect(lastError('B')).toBeNull()
 
+      // Single-round push→pull: pull-phase union repair is minted into the
+      // outbox and needs the next push. B's pull minted exactly the two
+      // covering repairs (topic parent + message parent).
+      bindProfile('B')
+      const bRepairEntityIds = syncService
+        .listOutbox()
+        .filter((o) => o.op === 'order_frame')
+        .map((o) => o.entityId)
+        .sort()
+      expect(bRepairEntityIds).toEqual(['auto-m4', 'auto-topic-1'])
+      // B pushes repairs, A receives, then drain to stillness. Single-round
+      // push→pull means each pull-minted repair needs the next push, and the
+      // other side's pull may mint its own covering repair (A has no frames
+      // for B's keep-topic parents yet). Alternate B/A with a bound until
+      // both outboxes are drained and both cursors stop moving.
+      // Explicit manual sync only (repair rides op push, never baseline PUT);
+      // the stopped auto service is not restarted.
+      for (let round = 0; round < 4; round++) {
+        bindProfile('B')
+        await syncService.sync()
+        expect(lastError('B')).toBeNull()
+        bindProfile('A')
+        await syncService.sync()
+        expect(lastError('A')).toBeNull()
+        if (outboxCount('A') === 0 && outboxCount('B') === 0) {
+          const steadyA = readCursor('A')
+          const steadyB = readCursor('B')
+          bindProfile('B')
+          await syncService.sync()
+          bindProfile('A')
+          await syncService.sync()
+          expect(lastError('A')).toBeNull()
+          expect(lastError('B')).toBeNull()
+          if (
+            outboxCount('A') === 0 &&
+            outboxCount('B') === 0 &&
+            readCursor('A') === steadyA &&
+            readCursor('B') === steadyB
+          ) {
+            break
+          }
+        }
+      }
+      expect(baselinePutCount).toBe(1)
+
       // Representative convergence: baseline rows + N+1, tombstone, order, membership/frames.
       const bTopic1 = sqliteB!.prepare("SELECT id FROM topics WHERE id='auto-topic-1'").get() as
         | { id: string }
@@ -507,6 +552,41 @@ describe('auto local mutation -> debounce/drain -> publish -> B bootstrap -> N+1
         .find((r) => r.kind === 'topicMessage' && r.parentId === 'auto-topic-2')
       expect(frameEmpty).toBeTruthy()
       expect(JSON.parse(frameEmpty!.orderedChildIdsJson)).toEqual([])
+      // Repair closure: A and B winning frames share full identity (order + clock).
+      const frameTopicA = dbA!
+        .select()
+        .from(schema.syncParentOrderFrame)
+        .all()
+        .find((r) => r.kind === 'topicMessage' && r.parentId === 'auto-topic-1')
+      expect(frameTopicA).toBeTruthy()
+      expect(frameTopicA!.orderedChildIdsJson).toBe(frameTopic!.orderedChildIdsJson)
+      expect(frameTopicA!.timestamp).toBe(frameTopic!.timestamp)
+      expect(frameTopicA!.operationId).toBe(frameTopic!.operationId)
+      const frameMsgB = dbB!
+        .select()
+        .from(schema.syncParentOrderFrame)
+        .all()
+        .find((r) => r.kind === 'messageBlock' && r.parentId === 'auto-m4')
+      expect(frameMsgB).toBeTruthy()
+      expect(JSON.parse(frameMsgB!.orderedChildIdsJson)).toEqual(['auto-b4'])
+      const frameMsgA = dbA!
+        .select()
+        .from(schema.syncParentOrderFrame)
+        .all()
+        .find((r) => r.kind === 'messageBlock' && r.parentId === 'auto-m4')
+      expect(frameMsgA).toBeTruthy()
+      expect(frameMsgA!.orderedChildIdsJson).toBe(frameMsgB!.orderedChildIdsJson)
+      expect(frameMsgA!.timestamp).toBe(frameMsgB!.timestamp)
+      expect(frameMsgA!.operationId).toBe(frameMsgB!.operationId)
+      // A converged to the same effective order.
+      const orderedA = (
+        sqliteA!
+          .prepare("SELECT id FROM messages WHERE topic_id='auto-topic-1' ORDER BY sort_order ASC")
+          .all() as Array<{
+          id: string
+        }>
+      ).map((r) => r.id)
+      expect(orderedA).toEqual(['auto-m1', 'auto-m2', 'auto-m3', 'auto-m4'])
 
       // B pre-existing rows preserved; outbox pushed; cursor advanced past N.
       const bKeep = sqliteB!.prepare("SELECT id FROM topics WHERE id='b-keep-topic'").get() as
@@ -517,8 +597,37 @@ describe('auto local mutation -> debounce/drain -> publish -> B bootstrap -> N+1
         | { id: string }
         | undefined
       expect(bKeepMsg?.id).toBe('b-keep-msg')
+      expect(outboxCount('A')).toBe(0)
       expect(outboxCount('B')).toBe(0)
-      expect(readCursor('B')).toBeGreaterThanOrEqual(headAfter)
+      const cursorA = readCursor('A')
+      const cursorB = readCursor('B')
+      expect(cursorB).toBeGreaterThanOrEqual(headAfter)
+      expect(cursorA).toBeGreaterThanOrEqual(headAfter)
+      expect(cursorB).toBe(cursorA)
+      // Repeat sync adds no repair: frames/cursors stable, outboxes stay
+      // drained, and no extra baseline PUT was issued (repair rides op push).
+      const topicFrameJsonBefore = frameTopic!.orderedChildIdsJson
+      const topicFrameTsBefore = frameTopic!.timestamp
+      const topicFrameOpBefore = frameTopic!.operationId
+      bindProfile('B')
+      await syncService.sync()
+      bindProfile('A')
+      await syncService.sync()
+      expect(lastError('A')).toBeNull()
+      expect(lastError('B')).toBeNull()
+      expect(outboxCount('A')).toBe(0)
+      expect(outboxCount('B')).toBe(0)
+      expect(readCursor('A')).toBe(cursorA)
+      expect(readCursor('B')).toBe(cursorB)
+      const frameTopicAfter = dbB!
+        .select()
+        .from(schema.syncParentOrderFrame)
+        .all()
+        .find((r) => r.kind === 'topicMessage' && r.parentId === 'auto-topic-1')
+      expect(frameTopicAfter!.orderedChildIdsJson).toBe(topicFrameJsonBefore)
+      expect(frameTopicAfter!.timestamp).toBe(topicFrameTsBefore)
+      expect(frameTopicAfter!.operationId).toBe(topicFrameOpBefore)
+      expect(baselinePutCount).toBe(1)
       const aM1 = sqliteA!.prepare("SELECT id FROM messages WHERE id='auto-m1'").get() as { id: string } | undefined
       expect(aM1?.id).toBe('auto-m1')
       expect(readChannel('A')).toBe(channelId)
