@@ -1,16 +1,18 @@
 /**
- * Reset-final stable-wide topic-frame completion with ordinary success
+ * Reset-final stable-wide topic-frame completion with ordinary stable
  * sibling supplement.
  *
  * Frame ordered/live inventory covers every stable live non-tombstoned
  * sibling (`isStableMessageStatus`), not success-only: stable non-success
  * siblings with existing same-parent membership are retained unchanged and
- * contribute to the clock floor; a live stable non-success sibling missing
- * membership stays local-only `sibling-membership-missing` with zero writes
- * (never supplemented); only ordinary `success` missing siblings qualify for
- * supplement; intent/register success-missing stays local-only; transient and
- * tombstoned siblings stay excluded; different-parent rolls back; later
- * failure rolls back supplements with intent retained; real-relay convergence.
+ * contribute to the clock floor; every ordinary live stable non-transient
+ * sibling (`success`/`error`/`paused`/`sent`/legacy stable) missing topic
+ * membership qualifies for supplement when ordinary (no active resend intent,
+ * no stable-replace register); intent/register missing stays local-only with
+ * zero writes; transient and tombstoned siblings stay excluded;
+ * different-parent rolls back; later failure rolls back supplements with
+ * intent retained; real-relay convergence; baseline candidate no longer
+ * reports `unversioned-membership` for the supplemented topic.
  */
 import { validateSyncOperationStrict } from '@shared/sync'
 import Database from 'better-sqlite3'
@@ -39,6 +41,7 @@ import { chatDbService } from '../../chatDb'
 import { ChatDbAggregateService } from '../../chatDb/ChatDbAggregateService'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
+import { captureLocalSyncBaselineCandidate } from '../syncBaseline'
 import { getFrameHighWater } from '../syncFrameHighWater'
 import { syncService } from '../SyncService'
 import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
@@ -215,6 +218,12 @@ describe('reset-final sibling supplement', () => {
       .prepare(`SELECT id, sort_order FROM messages WHERE topic_id='t-s-1' ORDER BY sort_order, id`)
       .all() as Array<{ id: string; sort_order: number }>
     expect(msgOrder.map((r) => r.sort_order)).toEqual(msgOrder.map((_, i) => i))
+    const cand1 = captureLocalSyncBaselineCandidate(db as never) as {
+      completeness: { reasons: string[] }
+      manifest: { unversionedMembershipCount: number }
+    }
+    expect(cand1.manifest.unversionedMembershipCount).toBe(0)
+    expect(cand1.completeness.reasons).not.toContain('unversioned-membership')
   })
 
   it('missing sibling with active intent stays local-only with zero writes', () => {
@@ -281,11 +290,12 @@ describe('reset-final sibling supplement', () => {
     expect(sqlite.prepare(`SELECT * FROM sync_outbox`).all()).toHaveLength(0)
   })
 
-  it('live stable non-success sibling missing membership stays local-only with zero writes', () => {
+  it('missing error sibling is supplemented with monotonic clocks and baseline complete', () => {
     seedVersionedUser('t-s-4', 'u-s-4')
     seedVersionedAssistant('t-s-4', 'm-target-4', 'u-s-4', 'b-old-4')
     insertUnversionedMessage('t-s-4', 'm-err-4', 'u-s-4', 'error')
     db.delete(schema.syncOutbox).run()
+    const hwTopicBefore = getFrameHighWater(db as never, 'topicMessage', 't-s-4')
     const attemptId = resetTarget('t-s-4', 'm-target-4', 'u-s-4', ['b-old-4'])
     db.delete(schema.syncOutbox).run()
     expect(
@@ -299,17 +309,155 @@ describe('reset-final sibling supplement', () => {
         resendAttemptId: attemptId
       }).ok
     ).toBe(true)
-    // Stable-wide guard: live `error` sibling without membership is not
-    // supplementable — existing `sibling-membership-missing` local-only with
-    // zero writes, intent retained.
-    expect(stableReplaceRows()).toHaveLength(0)
-    expect(getIntentRow('m-target-4')).toBeDefined()
-    expect(syncService.getMembershipClock('message', 'm-err-4')).toBeNull()
-    expect(sqlite.prepare(`SELECT * FROM sync_outbox`).all()).toHaveLength(0)
+    // Stable-wide supplement: live `error` missing membership is ordinary
+    // stable and now supplemented (not local-only).
+    const supplements = siblingUpsertRows().filter((r) => r.entity_id === 'm-err-4')
+    expect(supplements).toHaveLength(1)
+    const sibOp = readOp(supplements[0])
+    expect(validateSyncOperationStrict(sibOp)).toBeNull()
+    expect((sibOp.payload as Record<string, unknown>).status).toBe('error')
+    const sibTs = sibOp.timestamp as number
+    expect(sibTs).toBeGreaterThan(hwTopicBefore)
+    const sibMem = syncService.getMembershipClock('message', 'm-err-4')
+    expect(sibMem?.parentId).toBe('t-s-4')
+    expect(sibMem?.timestamp).toBe(sibTs)
+    const rows = stableReplaceRows()
+    expect(rows).toHaveLength(1)
+    const op = readOp(rows[0])
+    expect(validateSyncOperationStrict(op)).toBeNull()
+    const payload = op.payload as Record<string, unknown>
+    const rc = payload.replacementClock as { timestamp: number; operationId: string }
+    expect(rc.timestamp).toBeGreaterThan(sibTs)
+    const ordered = (payload.topicFrame as Record<string, unknown>).orderedChildIds as string[]
+    expect(ordered).toContain('m-target-4')
+    expect(ordered).toContain('m-err-4')
+    expect(getIntentRow('m-target-4')).toBeUndefined()
     expect(
       sqlite.prepare(`SELECT * FROM sync_stable_replace_register WHERE message_id='m-target-4'`).get()
+    ).toBeDefined()
+    expect(syncService.getParentFrame('topicMessage', 't-s-4')?.timestamp).toBe(rc.timestamp)
+    // Baseline candidate no longer reports unversioned-membership for the
+    // supplemented topic (isolated harness keeps only the orthogonal
+    // watermark cause).
+    const cand = captureLocalSyncBaselineCandidate(db as never) as {
+      completeness: { reasons: string[] }
+      manifest: { unversionedMembershipCount: number }
+    }
+    expect(cand.manifest.unversionedMembershipCount).toBe(0)
+    expect(cand.completeness.reasons).not.toContain('unversioned-membership')
+  })
+
+  it('error+paused+sent+legacy mixed missing supplement with deterministic clocks/order', () => {
+    seedVersionedUser('t-s-4m', 'u-s-4m')
+    seedVersionedAssistant('t-s-4m', 'm-keep-4m', 'u-s-4m', 'b-keep-4m')
+    seedVersionedAssistant('t-s-4m', 'm-target-4m', 'u-s-4m', 'b-old-4m')
+    insertUnversionedMessage('t-s-4m', 'm-err-4m', 'u-s-4m', 'error')
+    insertUnversionedMessage('t-s-4m', 'm-paused-4m', 'u-s-4m', 'paused')
+    insertUnversionedMessage('t-s-4m', 'm-sent-4m', 'u-s-4m', 'sent')
+    insertUnversionedMessage('t-s-4m', 'm-legacy-4m', 'u-s-4m', 'archived')
+    // Distinct sort orders for deterministic supplement order: sortOrder ASC
+    // then id ASC.
+    sqlite.prepare(`UPDATE messages SET sort_order=10 WHERE id='m-err-4m'`).run()
+    sqlite.prepare(`UPDATE messages SET sort_order=11 WHERE id='m-paused-4m'`).run()
+    sqlite.prepare(`UPDATE messages SET sort_order=12 WHERE id='m-sent-4m'`).run()
+    sqlite.prepare(`UPDATE messages SET sort_order=13 WHERE id='m-legacy-4m'`).run()
+    const keepMemBefore = syncService.getMembershipClock('message', 'm-keep-4m')
+    expect(keepMemBefore).not.toBeNull()
+    db.delete(schema.syncOutbox).run()
+    const attemptId = resetTarget('t-s-4m', 'm-target-4m', 'u-s-4m', ['b-old-4m'])
+    db.delete(schema.syncOutbox).run()
+    expect(
+      agg.bulkAddBlocks(
+        [{ id: 'b-new-4m', messageId: 'm-target-4m', type: 'main_text', content: 'v2', status: 'success' } as never],
+        { resendAttemptId: attemptId }
+      ).ok
+    ).toBe(true)
+    expect(
+      agg.updateMessage('t-s-4m', 'm-target-4m', { status: 'success', content: 'final' } as never, {
+        resendAttemptId: attemptId
+      }).ok
+    ).toBe(true)
+    const wanted = ['m-err-4m', 'm-paused-4m', 'm-sent-4m', 'm-legacy-4m']
+    const sibRows = siblingUpsertRows().filter((r) => wanted.includes(r.entity_id as string))
+    expect(sibRows.map((r) => r.entity_id).sort()).toEqual([...wanted].sort())
+    const sibOps = sibRows.map((r) => readOp(r))
+    for (const sibOp of sibOps) expect(validateSyncOperationStrict(sibOp)).toBeNull()
+    const byId = new Map(sibOps.map((o) => [o.entityId as string, o]))
+    expect((byId.get('m-err-4m')!.payload as Record<string, unknown>).status).toBe('error')
+    expect((byId.get('m-paused-4m')!.payload as Record<string, unknown>).status).toBe('paused')
+    expect((byId.get('m-sent-4m')!.payload as Record<string, unknown>).status).toBe('sent')
+    expect((byId.get('m-legacy-4m')!.payload as Record<string, unknown>).status).toBe('archived')
+    // Deterministic supplement order follows sortOrder then id, with distinct
+    // monotonic clocks strictly increasing in that order.
+    const orderedSibIds = [...sibOps]
+      .sort((a, b) => (a.timestamp as number) - (b.timestamp as number))
+      .map((o) => o.entityId as string)
+    expect(orderedSibIds).toEqual(['m-err-4m', 'm-paused-4m', 'm-sent-4m', 'm-legacy-4m'])
+    const sibTimestamps = sibOps.map((o) => o.timestamp as number)
+    expect(new Set(sibTimestamps).size).toBe(sibTimestamps.length)
+    const sortedTs = [...sibTimestamps].sort((a, b) => a - b)
+    for (let i = 1; i < sortedTs.length; i++) expect(sortedTs[i]).toBeGreaterThan(sortedTs[i - 1])
+    for (const id of wanted) {
+      const mem = syncService.getMembershipClock('message', id)
+      expect(mem?.parentId).toBe('t-s-4m')
+      expect(mem?.timestamp).toBe(byId.get(id)!.timestamp)
+      expect(mem?.operationId).toBe(byId.get(id)!.id)
+    }
+    expect(syncService.getMembershipClock('message', 'm-keep-4m')).toEqual(keepMemBefore)
+    const rows = stableReplaceRows()
+    expect(rows).toHaveLength(1)
+    const op = readOp(rows[0])
+    expect(validateSyncOperationStrict(op)).toBeNull()
+    const payload = op.payload as Record<string, unknown>
+    const rc = payload.replacementClock as { timestamp: number; operationId: string }
+    for (const ts of sibTimestamps) expect(rc.timestamp).toBeGreaterThan(ts)
+    const ordered = (payload.topicFrame as Record<string, unknown>).orderedChildIds as string[]
+    for (const id of [...wanted, 'm-target-4m', 'm-keep-4m']) expect(ordered).toContain(id)
+    const cand = captureLocalSyncBaselineCandidate(db as never) as {
+      completeness: { reasons: string[] }
+      manifest: { unversionedMembershipCount: number }
+    }
+    expect(cand.manifest.unversionedMembershipCount).toBe(0)
+    expect(cand.completeness.reasons).not.toContain('unversioned-membership')
+  })
+
+  it('missing non-success sibling with intent/register stays local-only with zero writes', () => {
+    seedVersionedUser('t-s-4n', 'u-s-4n')
+    seedVersionedAssistant('t-s-4n', 'm-target-4n', 'u-s-4n', 'b-old-4n')
+    insertUnversionedMessage('t-s-4n', 'm-err-4n', 'u-s-4n', 'error')
+    insertUnversionedMessage('t-s-4n', 'm-paused-4n', 'u-s-4n', 'paused')
+    db.delete(schema.syncOutbox).run()
+    // Paused sibling carries its own active resend intent; error sibling
+    // carries a stable-replace register. Both force local-only before any
+    // supplement write.
+    expect(resetTarget('t-s-4n', 'm-paused-4n', 'u-s-4n', [])).toBeDefined()
+    expect(getIntentRow('m-paused-4n')).toBeDefined()
+    sqlite
+      .prepare(
+        `INSERT INTO sync_stable_replace_register (message_id, timestamp, operation_id, active_block_ids_json, payload_hash) VALUES (?,?,?,?,?)`
+      )
+      .run('m-err-4n', 100, '11111111-1111-4111-8111-111111111111', '[]', 'h')
+    const attemptId = resetTarget('t-s-4n', 'm-target-4n', 'u-s-4n', ['b-old-4n'])
+    db.delete(schema.syncOutbox).run()
+    expect(
+      agg.bulkAddBlocks(
+        [{ id: 'b-new-4n', messageId: 'm-target-4n', type: 'main_text', content: 'v2', status: 'success' } as never],
+        { resendAttemptId: attemptId }
+      ).ok
+    ).toBe(true)
+    expect(
+      agg.updateMessage('t-s-4n', 'm-target-4n', { status: 'success', content: 'final' } as never, {
+        resendAttemptId: attemptId
+      }).ok
+    ).toBe(true)
+    expect(stableReplaceRows()).toHaveLength(0)
+    expect(getIntentRow('m-target-4n')).toBeDefined()
+    expect(syncService.getMembershipClock('message', 'm-err-4n')).toBeNull()
+    expect(syncService.getMembershipClock('message', 'm-paused-4n')).toBeNull()
+    expect(sqlite.prepare(`SELECT * FROM sync_outbox`).all()).toHaveLength(0)
+    expect(
+      sqlite.prepare(`SELECT * FROM sync_stable_replace_register WHERE message_id='m-target-4n'`).get()
     ).toBeUndefined()
-    expect(syncService.getParentFrame('topicMessage', 't-s-4')).toBeNull()
   })
 
   it('tombstoned missing siblings stay excluded while the final issues', () => {

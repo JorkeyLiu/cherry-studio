@@ -1325,7 +1325,7 @@ export class SyncService {
       }
     }
 
-    // Reset-final stable-wide topic-frame completion with ordinary success
+    // Reset-final stable-wide topic-frame completion with ordinary stable
     // sibling supplement: reuse promotion supplement semantics in this stable
     // replacement issuer tx.
     // - Topic frame ordered/live inventory covers every stable live
@@ -1333,16 +1333,15 @@ export class SyncService {
     //   (`isStableMessageStatus`), not success-only: stable non-success
     //   siblings (`error`/`paused`/`sent`/legacy) with existing membership are
     //   retained unchanged in the frame and contribute to the clock floor.
-    // - Only other message siblings with status==='success' and no existing
-    //   membership qualify for supplement; existing memberships are preserved
-    //   exactly.
+    // - Every other ordinary live stable non-transient sibling
+    //   (`isStableMessageStatus`, including `success`/`error`/`paused`/`sent`/
+    //   legacy) with missing topic membership qualifies for supplement;
+    //   existing memberships are preserved exactly.
     // - Guard pass is read-only before any writes: tombstoned/transient
-    //   siblings are excluded; a live stable non-success sibling missing
-    //   membership is not ordinary → local-only `sibling-membership-missing`
-    //   with zero writes (never supplemented); a missing `success` sibling
-    //   carrying an active resend intent or a stable-replace register is not
-    //   ordinary → local-only before any writes; only remaining ordinary
-    //   `success` missing siblings qualify.
+    //   siblings are excluded; a missing sibling carrying an active resend
+    //   intent or a stable-replace register is not ordinary → local-only
+    //   before any writes (`sibling-resend-intent`/`sibling-replacement-
+    //   register`); only remaining ordinary stable missing siblings qualify.
     // - Sibling block subtrees are never validated (topic-message frame
     //   closure only).
     // - An existing stable sibling membership with a different parent throws
@@ -1372,14 +1371,12 @@ export class SyncService {
     // Guard pass (read-only, before any writes): classify siblings.
     // Tombstoned siblings are excluded outright. Existing stable memberships
     // with a different parent fail closed; existing transient memberships stay
-    // excluded. A live stable non-success sibling missing membership is not
-    // supplementable → local-only `sibling-membership-missing` (checked before
-    // intent/register so the stable-wide verdict is preserved). Otherwise a
-    // missing sibling carrying an active resend intent or a stable-replace
-    // register is not ordinary and forces local-only before any writes — this
-    // intentionally applies even when the sibling currently reads
-    // transient/pending (reset intermediate); remaining transient missing
-    // siblings stay excluded; only remaining ordinary `success` missing
+    // excluded. A missing sibling carrying an active resend intent or a
+    // stable-replace register is not ordinary and forces local-only before
+    // any writes — this intentionally applies even when the sibling currently
+    // reads transient/pending (reset intermediate); remaining transient
+    // missing siblings stay excluded; only remaining ordinary stable
+    // (`isStableMessageStatus`, including error/paused/sent/legacy) missing
     // siblings qualify for supplement.
     const qualifyingSiblings: Array<(typeof fullSiblingRows)[number]> = []
     for (const r of fullSiblingRows) {
@@ -1395,7 +1392,6 @@ export class SyncService {
         }
         continue
       }
-      if (stable && r.status !== 'success') return { issued: false, reason: 'sibling-membership-missing' }
       const intent = getResendAttemptInTx(tx, r.id)
       if (intent) return { issued: false, reason: 'sibling-resend-intent' }
       const sibReg = this.readStableReplaceRegister(tx as unknown as BetterSQLite3Database<typeof schema>, r.id)
@@ -1409,7 +1405,7 @@ export class SyncService {
     })
     // Topic frame covers every stable live non-tombstoned sibling
     // (success plus error/paused/sent/legacy); existing memberships preserved,
-    // qualifying ordinary success missing supplemented below so the frame is
+    // qualifying ordinary stable missing supplemented below so the frame is
     // complete by construction.
     const topicOrderedIds: string[] = [...fullSiblingRows]
       .filter((r) => {
