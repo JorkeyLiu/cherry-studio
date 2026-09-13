@@ -103,16 +103,18 @@ async function register(base: string, deviceId: string): Promise<{ code: string;
 async function pairDevices(base: string, aId: string, bId: string) {
   const a = await register(base, aId)
   const b = await register(base, bId)
+  // SYNC-CC-026: the acceptor holds the one-shot seed grant, so `b` requests
+  // and `a` accepts to keep the existing first-PUT-as-`a` fixtures holder-valid.
   let res = await fetch(`${base}/sync/pair/request`, {
     method: 'POST',
-    headers: authed(a.code, a.secret),
-    body: JSON.stringify({ targetCode: b.code })
+    headers: authed(b.code, b.secret),
+    body: JSON.stringify({ targetCode: a.code })
   })
   expect(res.status).toBe(200)
   const reqBody = (await res.json()) as { requestId: string }
   res = await fetch(`${base}/sync/pair/accept`, {
     method: 'POST',
-    headers: authed(b.code, b.secret),
+    headers: authed(a.code, a.secret),
     body: JSON.stringify({ requestId: reqBody.requestId })
   })
   expect(res.status).toBe(200)
@@ -687,7 +689,7 @@ describe('relay baseline resource', () => {
     const meta = legacy.prepare('SELECT value FROM relay_schema_meta WHERE key = ?').get('schema_version') as {
       value: string
     }
-    expect(meta.value).toBe('cc-2')
+    expect(meta.value).toBe('cc-3')
     const device = legacy.prepare('SELECT device_code FROM sync_devices WHERE device_code = ?').get('AAAAAAAA') as
       | { device_code: string }
       | undefined
@@ -709,7 +711,7 @@ describe('relay baseline resource', () => {
   })
 
   it('unknown schema markers fail closed with zero side effects (file-backed)', async () => {
-    for (const marker of ['cc-3', '', 'garbage-v9']) {
+    for (const marker of ['cc-4', '', 'garbage-v9']) {
       const dir = mkdtempSync(join(tmpdir(), 'relay-baseline-'))
       tmpDirs.push(dir)
       const dbPath = join(dir, 'relay.db')

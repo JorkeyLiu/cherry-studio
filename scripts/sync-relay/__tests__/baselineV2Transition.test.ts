@@ -91,16 +91,17 @@ async function register(base: string, deviceId: string): Promise<{ code: string;
 async function pairDevices(base: string, aId: string, bId: string) {
   const a = await register(base, aId)
   const b = await register(base, bId)
+  // SYNC-CC-026: acceptor `a` holds the seed grant for holder-first PUT fixtures.
   let res = await fetch(`${base}/sync/pair/request`, {
     method: 'POST',
-    headers: authed(a.code, a.secret),
-    body: JSON.stringify({ targetCode: b.code })
+    headers: authed(b.code, b.secret),
+    body: JSON.stringify({ targetCode: a.code })
   })
   expect(res.status).toBe(200)
   const reqBody = (await res.json()) as { requestId: string }
   res = await fetch(`${base}/sync/pair/accept`, {
     method: 'POST',
-    headers: authed(b.code, b.secret),
+    headers: authed(a.code, a.secret),
     body: JSON.stringify({ requestId: reqBody.requestId })
   })
   expect(res.status).toBe(200)

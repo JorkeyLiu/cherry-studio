@@ -425,6 +425,15 @@ export class SyncService {
   private serviceConnected = false
   private enqueueListeners = new Set<() => void>()
   private channelChangeListeners = new Set<() => void>()
+  /**
+   * One-shot seed baseline intent (SYNC-CC-026, in-memory only): set when an
+   * Accept success or a state observation reports pending, retained across
+   * deferred/needs-sync, consumed only on publish success or observed
+   * non-pending, restored from state after restart. Never set by ordinary
+   * remote/SSE/reconcile/manual paths.
+   */
+  private seedBaselineIntent = false
+  private seedBaselineRunning = false
   private shutdownRequested = false
   private activeFetchControllers = new Set<AbortController>()
   /**
@@ -6557,7 +6566,7 @@ export class SyncService {
     if (existingCode && existingSecret) {
       // Registered: re-attach with the same credential (no rotation) and
       // reconcile membership/channel observation.
-      let state: { channelId: string | null }
+      let state: { channelId: string | null; seedBaselinePending?: boolean }
       try {
         state = await syncClient.getPairState(cfg.endpoint, cfg.token, existingCode, existingSecret)
       } catch (e) {
@@ -6581,6 +6590,9 @@ export class SyncService {
       }
       this.markRelayContact(true)
       this.reconcileChannelFull(state.channelId)
+      if (state.seedBaselinePending === true) {
+        this.seedBaselineIntent = true
+      }
       return this.getServiceStatus()
     }
     // First Connect: register and persist the issued credential before any
@@ -6928,6 +6940,7 @@ export class SyncService {
       channelId: string | null
       outgoing: SyncPairState['outgoing']
       incoming: SyncPairState['incoming']
+      seedBaselinePending?: boolean
     }
     try {
       res = await syncClient.getPairState(endpoint, token, deviceCode, deviceSecret)
@@ -6937,6 +6950,12 @@ export class SyncService {
       throw e instanceof Error ? e : new Error(String(e))
     }
     this.reconcileChannelFull(res.channelId)
+    // Pairing-intent recovery (SYNC-CC-026): a pending observation restores
+    // the dedicated in-memory seed intent; non-pending never sets it here
+    // (consumption happens only in the seed flow on success/non-pending).
+    if (res.seedBaselinePending === true) {
+      this.seedBaselineIntent = true
+    }
     const state: SyncPairingState = res.paired
       ? 'paired'
       : res.outgoing
@@ -6944,7 +6963,23 @@ export class SyncService {
         : res.incoming.length > 0
           ? 'incoming'
           : 'unpaired'
-    return { deviceCode: res.deviceCode, state, outgoing: res.outgoing, incoming: res.incoming }
+    return {
+      deviceCode: res.deviceCode,
+      state,
+      outgoing: res.outgoing,
+      incoming: res.incoming,
+      seedBaselinePending: res.seedBaselinePending === true
+    }
+  }
+
+  /** Test-only accessor for the in-memory seed intent (never persisted). */
+  hasSeedBaselineIntentForTests(): boolean {
+    return this.seedBaselineIntent
+  }
+
+  /** Test-only setter for the in-memory seed intent. */
+  setSeedBaselineIntentForTests(v: boolean): void {
+    this.seedBaselineIntent = v
   }
 
   /**
@@ -7000,7 +7035,7 @@ export class SyncService {
    * with no merge. Returns the (internal, never user-visible) channel
    * identity for cursor scoping.
    */
-  async acceptPairing(requestId: string): Promise<{ channelId: string }> {
+  async acceptPairing(requestId: string): Promise<{ channelId: string; seedBaselinePending?: boolean }> {
     this.throwIfShutdown()
     const idErr = validatePairingRequestId(requestId)
     if (idErr) throw new Error(idErr)
@@ -7009,11 +7044,115 @@ export class SyncService {
       const res = await syncClient.acceptPairing(endpoint, token, { requestId }, deviceCode, deviceSecret)
       this.markRelayContact(true)
       this.reconcileChannelFull(res.channelId)
+      if (res.seedBaselinePending === true) {
+        this.seedBaselineIntent = true
+      }
       logger.info('[acceptPairing] request accepted')
       return res
     } catch (e) {
       this.markRelayContact(false, e)
       throw e instanceof Error ? e : new Error(String(e))
+    }
+  }
+
+  /**
+   * Dedicated one-shot seed flow (SYNC-CC-026): adopt -> sync drain ->
+   * barrier -> single PUT. No SQLite write tx is held across the network;
+   * the adoption tx commits before sync/publish. Loop-safe: at most one seed
+   * cycle at a time; lost-response/restart idempotent (existing clocks never
+   * rewritten; already-adopted only drains+publishes). Deferred/needs-sync
+   * retains the intent; only success or observed non-pending consumes it.
+   * Ordinary remote/SSE/reconcile/manual paths never set the seed intent and
+   * never call this method.
+   */
+  async runSeedBaselineIfPending(): Promise<
+    | { kind: 'published'; watermark: number; digest: string }
+    | { kind: 'deferred'; reason: string; detail: string }
+    | { kind: 'skipped'; reason: string; detail: string }
+  > {
+    this.throwIfShutdown()
+    if (this.seedBaselineRunning) {
+      return { kind: 'deferred', reason: 'seed-busy', detail: 'seed baseline already in progress' }
+    }
+    if (this.statusSyncing || this.publishBarrierHeld) {
+      return { kind: 'deferred', reason: 'seed-busy', detail: 'sync or publish already in progress' }
+    }
+    this.seedBaselineRunning = true
+    try {
+      const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+      // Fresh pending observation (network, no tx held). Restart recovery uses
+      // this same state read; no secret is persisted.
+      let pending = this.seedBaselineIntent
+      try {
+        const st = await syncClient.getPairState(endpoint, token, deviceCode, deviceSecret)
+        this.markRelayContact(true)
+        this.reconcileChannelFull(st.channelId)
+        pending = st.seedBaselinePending === true
+        if (pending) this.seedBaselineIntent = true
+        else {
+          this.seedBaselineIntent = false
+          return { kind: 'skipped', reason: 'not-pending', detail: 'seed grant not pending' }
+        }
+      } catch (e) {
+        this.markRelayContact(false, e)
+        return {
+          kind: 'deferred',
+          reason: 'seed-state-unavailable',
+          detail: (e instanceof Error ? e.message : String(e)).slice(0, 300)
+        }
+      }
+      if (!pending && !this.seedBaselineIntent) {
+        return { kind: 'skipped', reason: 'not-pending', detail: 'seed grant not pending' }
+      }
+      // Single adoption tx (no network held).
+      const db = this.getDb()
+      const { adoptSeedBaselineOnce } = await import('./syncSeedAdoption')
+      let adoption: { kind: string; reason?: string; detail?: string }
+      try {
+        adoption = adoptSeedBaselineOnce(db as never, this as never) as unknown as {
+          kind: string
+          reason?: string
+          detail?: string
+        }
+      } catch (e) {
+        return {
+          kind: 'deferred',
+          reason: 'seed-adoption-tx-failed',
+          detail: (e instanceof Error ? e.message : String(e)).slice(0, 300)
+        }
+      }
+      if (adoption.kind === 'deferred') {
+        return {
+          kind: 'deferred',
+          reason: adoption.reason ?? 'seed-precondition-not-met',
+          detail: (adoption.detail ?? 'seed adoption deferred').slice(0, 500)
+        }
+      }
+      // Drain outbox -> cursor=N via the existing op-log sync (no auto PUT).
+      try {
+        await this.sync()
+      } catch (e) {
+        return {
+          kind: 'deferred',
+          reason: 'seed-sync-drain-failed',
+          detail: (e instanceof Error ? e.message : String(e)).slice(0, 300)
+        }
+      }
+      this.throwIfShutdown()
+      // Single barrier PUT. Any failure retains the intent for recovery.
+      try {
+        const published = await this.publishBaseline()
+        this.seedBaselineIntent = false
+        return { kind: 'published', watermark: published.watermark, digest: published.digest }
+      } catch (e) {
+        return {
+          kind: 'deferred',
+          reason: 'seed-publish-failed',
+          detail: (e instanceof Error ? e.message : String(e)).slice(0, 500)
+        }
+      }
+    } finally {
+      this.seedBaselineRunning = false
     }
   }
 
@@ -7060,6 +7199,8 @@ export class SyncService {
     this.serviceConnected = false
     this.statusSyncing = false
     this.publishBarrierHeld = false
+    this.seedBaselineIntent = false
+    this.seedBaselineRunning = false
     try {
       configManager.set(STATE_DEVICE_AUTH as never, '' as never)
     } catch {}

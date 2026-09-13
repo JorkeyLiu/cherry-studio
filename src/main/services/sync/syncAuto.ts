@@ -35,6 +35,14 @@ export interface SyncAutoDeps {
    * recurses into `runSync`; at most one PUT per successful sync cycle.
    */
   tryPublishBaseline: () => Promise<BaselineAutoPublishResult>
+  /**
+   * Dedicated one-shot seed flow (SYNC-CC-026): runs only when a seed intent
+   * was restored via Accept/state pending. Defaults to the live
+   * `SyncService.runSeedBaselineIfPending()`. Ordinary remote/SSE/reconcile
+   * cycles without a seed intent never PUT via this path.
+   */
+  trySeedBaseline?: () => Promise<unknown>
+  hasSeedIntent?: () => boolean
   createSubscriber: () => SyncSubscriber
   /**
    * Attachment gate (SYNC-CC-004/005): automation runs only for registered,
@@ -96,6 +104,8 @@ export class SyncAutoService {
       getConfig: () => syncService.getConfig(),
       runSync: () => syncService.sync(),
       tryPublishBaseline: () => syncService.publishBaselineIfEligible(),
+      trySeedBaseline: () => syncService.runSeedBaselineIfPending(),
+      hasSeedIntent: () => syncService.hasSeedBaselineIntentForTests(),
       createSubscriber: () => new SyncSubscriber(),
       isAttached: () => syncService.isAutoSyncAllowed(),
       getCredentials: () => syncService.getAutoCredentials(),
@@ -417,46 +427,77 @@ export class SyncAutoService {
           await this.deps.runSync()
           if (isStale()) return
           consecutiveFailures = 0
+          // Dedicated seed recovery (SYNC-CC-026): when a seed intent was
+          // restored via Accept/state pending, the dedicated seed flow runs
+          // once (adopt -> drain -> barrier -> single PUT). Ordinary remote /
+          // SSE / reconnect / reconcile cycles without a seed intent never
+          // PUT here; the local auto-publish path below stays local-triggered
+          // only. Seed deferred retains the intent; success/non-pending
+          // consumes it inside the service.
+          let seedPublishedThisCycle = false
+          try {
+            if (this.deps.hasSeedIntent?.() === true && this.deps.trySeedBaseline) {
+              try {
+                const seedRes = (await this.deps.trySeedBaseline()) as { kind?: string } | undefined
+                if (isStale()) return
+                if (seedRes && seedRes.kind === 'published') seedPublishedThisCycle = true
+              } catch (e) {
+                if (isStale()) return
+                const msg = e instanceof Error ? e.message : String(e)
+                logger.warn(`[autoSync] seed baseline deferred: ${msg.slice(0, 300)}`)
+              }
+              if (isStale()) return
+            }
+          } catch {
+            // Seed observer failure never fails the op-log sync cycle.
+          }
           // Conservative auto-publish: only a successful ordinary sync cycle
           // that contains an unconsumed local trigger may attempt one baseline
           // publish. Remote/reconnect/reconcile/manual cycles have no intent
-          // and never PUT. At most one attempt per success; the attempt never
-          // recurses into runSync and never wakes another auto cycle by itself.
+          // and never PUT. At most one baseline PUT per drain cycle: if seed
+          // flow published this cycle, skip ordinary auto-publish and retain
+          // local intent for the next local-change-driven cycle so no subsequent
+          // change is lost. The attempt never recurses into runSync and never
+          // wakes another auto cycle by itself.
           if (this.localPublishIntent) {
-            const seqBefore = this.localPublishSeq
-            let result: BaselineAutoPublishResult | null = null
-            try {
-              result = await this.deps.tryPublishBaseline()
+            if (seedPublishedThisCycle) {
               if (isStale()) return
-            } catch (e) {
+            } else {
+              const seqBefore = this.localPublishSeq
+              let result: BaselineAutoPublishResult | null = null
+              try {
+                result = await this.deps.tryPublishBaseline()
+                if (isStale()) return
+              } catch (e) {
+                if (isStale()) return
+                if ((e as Error)?.name === 'SyncShutdownError') return
+                if ((e as Error)?.name === 'SyncStaleConfigError') {
+                  logger.info(`[autoSync] auto-publish invalidated by config change, stop`)
+                  return
+                }
+                if ((e as Error)?.name === 'SyncConfigPreflightError') {
+                  try {
+                    this.handleAutoConfigFailure('autoSync', e)
+                  } catch {}
+                  return
+                }
+                const msg = e instanceof Error ? e.message : String(e)
+                logger.warn(`[autoSync] auto-publish unexpected deferred: ${msg.slice(0, 300)}`)
+              }
+              // Intent accounting: `needs-sync` (outbox not drained, concurrent
+              // barrier block, busy) retains the intent so the next successful
+              // sync cycle retries after draining. `published`/`skipped`/
+              // `deferred` (incl. 409/transport, already truthfully recorded
+              // without failing the op-log sync) consume the round's intent —
+              // but only when no newer local trigger arrived during the attempt.
+              if (result !== null && result.kind === 'needs-sync') {
+                // Retain: a newer trigger already set pending via requestAutoSync
+                // (or its debounce fires next), so the next cycle converges first.
+              } else if (this.localPublishSeq === seqBefore) {
+                this.localPublishIntent = false
+              }
               if (isStale()) return
-              if ((e as Error)?.name === 'SyncShutdownError') return
-              if ((e as Error)?.name === 'SyncStaleConfigError') {
-                logger.info(`[autoSync] auto-publish invalidated by config change, stop`)
-                return
-              }
-              if ((e as Error)?.name === 'SyncConfigPreflightError') {
-                try {
-                  this.handleAutoConfigFailure('autoSync', e)
-                } catch {}
-                return
-              }
-              const msg = e instanceof Error ? e.message : String(e)
-              logger.warn(`[autoSync] auto-publish unexpected deferred: ${msg.slice(0, 300)}`)
             }
-            // Intent accounting: `needs-sync` (outbox not drained, concurrent
-            // barrier block, busy) retains the intent so the next successful
-            // sync cycle retries after draining. `published`/`skipped`/
-            // `deferred` (incl. 409/transport, already truthfully recorded
-            // without failing the op-log sync) consume the round's intent —
-            // but only when no newer local trigger arrived during the attempt.
-            if (result !== null && result.kind === 'needs-sync') {
-              // Retain: a newer trigger already set pending via requestAutoSync
-              // (or its debounce fires next), so the next cycle converges first.
-            } else if (this.localPublishSeq === seqBefore) {
-              this.localPublishIntent = false
-            }
-            if (isStale()) return
           }
         } catch (e) {
           if (isStale()) return

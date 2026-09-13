@@ -628,3 +628,45 @@ describe('finding-01: busy retain has no tight retry and next schedule publishes
     svc.stopSync()
   })
 })
+
+describe('seed flow + local intent at most one baseline PUT per drain cycle', () => {
+  it('seed pending + concurrent local intent: single seed PUT retained, next cycle publishes local intent', async () => {
+    vi.useFakeTimers()
+    const { SyncAutoService } = await import('../syncAuto')
+    const runSync = vi.fn(async () => ({ ok: true }))
+    let seedCalls = 0
+    const trySeedBaseline = vi.fn(async () => {
+      seedCalls += 1
+      return { kind: 'published', watermark: 10, digest: 'd' } as never
+    })
+    const tryPublish = vi.fn(async () => ({ kind: 'published', watermark: 10, digest: 'd', channelId: 'c' }) as never)
+    let seedPending = false
+    const hasSeedIntent = vi.fn(() => seedPending)
+    const svc = new SyncAutoService(
+      validDeps({ runSync, tryPublishBaseline: tryPublish, trySeedBaseline, hasSeedIntent }) as never
+    )
+    svc.start()
+    await vi.advanceTimersByTimeAsync(50)
+    runSync.mockClear()
+    trySeedBaseline.mockClear()
+    tryPublish.mockClear()
+    seedPending = true
+    svc.notifyLocalChange()
+    expect(svc.hasLocalPublishIntentForTests()).toBe(true)
+    await vi.advanceTimersByTimeAsync(900)
+    await vi.advanceTimersByTimeAsync(50)
+    expect(runSync).toHaveBeenCalledTimes(1)
+    expect(trySeedBaseline).toHaveBeenCalledTimes(1)
+    expect(tryPublish).not.toHaveBeenCalled()
+    expect(svc.hasLocalPublishIntentForTests()).toBe(true)
+    // Next cycle without seed intent consumes the retained local intent with exactly one publish.
+    seedPending = false
+    svc.notifyRemote()
+    await vi.advanceTimersByTimeAsync(300)
+    await vi.advanceTimersByTimeAsync(50)
+    expect(runSync).toHaveBeenCalledTimes(2)
+    expect(tryPublish).toHaveBeenCalledTimes(1)
+    expect(svc.hasLocalPublishIntentForTests()).toBe(false)
+    svc.stopSync()
+  })
+})

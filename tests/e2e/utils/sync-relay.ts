@@ -209,6 +209,14 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     envelopeJson: string
   }
   const channelBaselines = new Map<string, StoredBaseline>()
+  // One-shot seed grants (SYNC-CC-026 mirror): channelId -> {holder, consumed}.
+  const seedGrants = new Map<string, { holder: string; consumed: boolean }>()
+  const isSeedPending = (channelId: string | null, caller: string): boolean => {
+    if (!channelId) return false
+    const grant = seedGrants.get(channelId)
+    if (!grant || grant.holder !== caller || grant.consumed) return false
+    return !channelBaselines.has(channelId)
+  }
   // Closure-local, secret-safe per-device baseline GET 200 counter: device
   // code (normalized caller) -> successful GET count. Only the success-200
   // branch increments; 404/4xx never count. No request records retained.
@@ -474,7 +482,8 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
             id: r.id,
             requesterCode: r.requester,
             createdAt: r.createdAt
-          }))
+          })),
+          seedBaselinePending: isSeedPending(channel, caller)
         })
       )
       return
@@ -655,6 +664,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           memberships.set(caller, channelId)
           channelOps.set(channelId, [])
           channelByOpId.set(channelId, new Map())
+          if (!seedGrants.has(channelId)) seedGrants.set(channelId, { holder: caller, consumed: false })
         }
         row.status = 'accepted'
         // Stale-intent cleanup parity with production: both devices are paired
@@ -680,7 +690,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           }
         } catch {}
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, channelId }))
+        res.end(JSON.stringify({ ok: true, channelId, seedBaselinePending: isSeedPending(channelId, caller) }))
         return
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -763,6 +773,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           if (ch === channel) memberships.delete(code)
         }
         channels.set(channel, { dissolved: true })
+        seedGrants.delete(channel)
         dissolvedCodes = membersBefore
       }
       // Membership changed atomically above: the caller always left its
@@ -1090,6 +1101,14 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         return
       }
       if (!current) {
+        const grant = seedGrants.get(channelId)
+        if (grant) {
+          if (grant.holder !== caller || grant.consumed) {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'seed-grant-required' }))
+            return
+          }
+        }
         const payloadJson = JSON.stringify(envelope.payload)
         const envelopeJson = serializeBaselineEnvelope(envelope)
         channelBaselines.set(channelId, {
@@ -1100,6 +1119,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
           payloadJson,
           envelopeJson
         })
+        if (grant) grant.consumed = true
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(envelopeJson)
         return

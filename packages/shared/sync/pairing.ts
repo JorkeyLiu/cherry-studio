@@ -48,6 +48,12 @@ export interface SyncPairState {
   outgoing: SyncOutgoingPairRequest | null
   /** Pending requests addressed to this device. */
   incoming: SyncIncomingPairRequest[]
+  /**
+   * One-shot seed baseline pending (SYNC-CC-026): strictly boolean, holder
+   * only, unconsumed, and no baseline yet. Never a secret; never persisted.
+   * Optional on the wire for backward compatibility (absent means false).
+   */
+  seedBaselinePending?: boolean
 }
 
 export const SYNC_DEVICE_CODE_LENGTH = 8

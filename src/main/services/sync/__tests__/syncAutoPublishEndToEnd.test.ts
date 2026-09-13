@@ -352,6 +352,12 @@ describe('auto local mutation -> debounce/drain -> publish -> B bootstrap -> N+1
     expect(aggA!.deleteMessage('auto-topic-tomb', 'auto-mt-gone').ok).toBe(true)
     expect(sqliteA!.prepare("SELECT id FROM messages WHERE id='auto-mt-gone'").get()).toBeFalsy()
 
+    // Isolate the local auto-publish path from the one-shot seed path
+    // (SYNC-CC-026): the holder holds a seed grant after Accept, but this
+    // regression proves local-triggered publish only, so the seed intent is
+    // cleared here. Seed recovery is covered by syncSeedBaseline.test.ts.
+    bindProfile('A')
+    syncService.setSeedBaselineIntentForTests(false)
     // Delegating PUT counter: observation only, real fetch still runs.
     const realFetch = globalThis.fetch
     let baselinePutCount = 0

@@ -650,12 +650,13 @@ function readDeviceHeader(req: IncomingMessage, name: string): string {
  * explicit legacy schema is present without the versioned meta marker
  * (SYNC-CC-013). Fresh installs (no legacy, no marker) only record the
  * marker; a second startup against the same DB is a no-op for existing
- * rows, so pending requests and published baselines survive relay restarts.
- * The `cc-1` → `cc-2` migration is purely additive (creates
- * `sync_channel_baselines` when absent, then advances the marker) and never
- * touches devices, channels, memberships, requests, or operations.
+ * rows, so pending requests, published baselines, and seed grants survive
+ * relay restarts. The `cc-1`/`cc-2` → `cc-3` migration is purely additive
+ * (creates `sync_channel_baselines`/`sync_seed_grants` when absent, then
+ * advances the marker) and never touches devices, channels, memberships,
+ * requests, or operations.
  */
-export const RELAY_SCHEMA_VERSION = 'cc-2'
+export const RELAY_SCHEMA_VERSION = 'cc-3'
 const RELAY_SCHEMA_META_KEY = 'schema_version'
 
 /**
@@ -663,7 +664,7 @@ const RELAY_SCHEMA_META_KEY = 'schema_version'
  * these names are ever dropped by the one-time reset. Current tables
  * (`sync_devices`, `sync_channels`, `sync_memberships`,
  * `sync_pair_requests`, `sync_channel_operations`, `sync_channel_baselines`,
- * `relay_schema_meta`)
+ * `sync_seed_grants`, `relay_schema_meta`)
  * are never in this set.
  */
 const RELAY_LEGACY_TABLES = [
@@ -702,9 +703,9 @@ export function ensureRelaySchema(db: Database.Database): void {
   } catch {
     applied = null
   }
-  if (applied !== null && applied !== 'cc-1' && applied !== RELAY_SCHEMA_VERSION) {
+  if (applied !== null && applied !== 'cc-1' && applied !== 'cc-2' && applied !== RELAY_SCHEMA_VERSION) {
     throw new Error(
-      `unsupported relay schema version '${applied}' (expected '${RELAY_SCHEMA_VERSION}' or migratable 'cc-1'); refusing to overwrite`
+      `unsupported relay schema version '${applied}' (expected '${RELAY_SCHEMA_VERSION}' or migratable 'cc-1'/'cc-2'); refusing to overwrite`
     )
   }
   db.exec(`
@@ -760,6 +761,13 @@ export function ensureRelaySchema(db: Database.Database): void {
       envelope_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS sync_seed_grants (
+      channel_id TEXT PRIMARY KEY,
+      holder_device_code TEXT NOT NULL,
+      consumed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS relay_schema_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -768,11 +776,12 @@ export function ensureRelaySchema(db: Database.Database): void {
   if (applied === RELAY_SCHEMA_VERSION) return
   // One-time deterministic reset of explicit legacy tables only, gated on an
   // explicit legacy schema without the marker. Current tables above (notably
-  // `sync_pair_requests`, `sync_channel_operations`, and
-  // `sync_channel_baselines`) are never dropped; the version marker makes
-  // later restarts a no-op so pending rows and published baselines survive.
-  // A `cc-1` database keeps every row: the additive `cc-2` table above was
-  // already created idempotently, so only the marker advances here.
+  // `sync_pair_requests`, `sync_channel_operations`,
+  // `sync_channel_baselines`, and `sync_seed_grants`) are never dropped; the
+  // version marker makes later restarts a no-op so pending rows, published
+  // baselines, and seed grants survive. A `cc-1`/`cc-2` database keeps every
+  // row: the additive `cc-2`/`cc-3` tables above were already created
+  // idempotently, so only the marker advances here.
   if (applied === null) {
     const legacyTables = listPresentLegacyRelayTables(db)
     if (legacyTables.length > 0) {
@@ -949,6 +958,49 @@ function getBaselineRowOrThrow(db: Database.Database, channelId: string): Baseli
     )
     .get(channelId) as BaselineRow | undefined
   return row ?? null
+}
+
+interface SeedGrantRow {
+  channel_id: string
+  holder_device_code: string
+  consumed: number
+}
+
+function getSeedGrantOrThrow(db: Database.Database, channelId: string): SeedGrantRow | null {
+  try {
+    const row = db
+      .prepare('SELECT channel_id, holder_device_code, consumed FROM sync_seed_grants WHERE channel_id = ?')
+      .get(channelId) as SeedGrantRow | undefined
+    return row ?? null
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) return null
+    throw e
+  }
+}
+
+/**
+ * One-shot seed baseline pending (SYNC-CC-026): strictly boolean, holder-only,
+ * unconsumed, and no baseline row yet. Never exposes grant tokens; the holder
+ * identity is the authenticated caller only. Dissolve deletes the grant row so
+ * pending resolves false; restart persists via SQLite.
+ */
+function isSeedBaselinePendingForCaller(db: Database.Database, channelId: string | null, caller: string): boolean {
+  if (!channelId) return false
+  let grant: SeedGrantRow | null = null
+  let baseline: BaselineRow | null = null
+  try {
+    grant = getSeedGrantOrThrow(db, channelId)
+  } catch {
+    return false
+  }
+  if (!grant || grant.holder_device_code !== caller || (grant.consumed ?? 0) !== 0) return false
+  try {
+    baseline = getBaselineRowOrThrow(db, channelId)
+  } catch {
+    return false
+  }
+  return baseline === null
 }
 
 function serializeBaselineEnvelope(envelope: {
@@ -1566,6 +1618,21 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
             throw { status: 400, error: 'watermark-above-head' }
           }
           if (!current) {
+            // Empty state with one-shot seed grant (SYNC-CC-026): only the
+            // grant holder may establish the first baseline, and the write
+            // consumes the grant in the same transaction. Same-envelope
+            // lost-response replay after consume reaches the idempotent
+            // same-N branch below (baseline exists), so no nonce is needed.
+            // Non-holder, consumed, holder-mismatch, or missing grant (for a
+            // granted channel) fails closed 403 without disclosure. Channels
+            // without a grant row (pre-cc-3 legacy) keep the legacy allow path
+            // so existing data is never stranded by migration.
+            const grant = getSeedGrantOrThrow(db, channelId)
+            if (grant) {
+              if (grant.holder_device_code !== caller || (grant.consumed ?? 0) !== 0) {
+                throw { status: 403, error: 'seed-grant-required' }
+              }
+            }
             // Empty state: the first legal N (relay-confirmed, at most head)
             // is accepted; coverage holds under full retention. Either strict
             // version (v1 or v2) may establish current.
@@ -1584,6 +1651,11 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
               envelopeJson,
               nowIso
             )
+            if (grant) {
+              db.prepare(
+                'UPDATE sync_seed_grants SET consumed = 1, consumed_at = ? WHERE channel_id = ? AND holder_device_code = ? AND consumed = 0'
+              ).run(nowIso, channelId, caller)
+            }
             storedJson = envelopeJson
             return
           }
@@ -1800,6 +1872,12 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
         const channel = getMembershipChannelOrThrow(db, caller)
         const outgoingRow = getOutgoingPendingOrThrow(db, caller)
         const incomingRows = getIncomingPendingOrThrow(db, caller)
+        let seedBaselinePending = false
+        try {
+          seedBaselinePending = isSeedBaselinePendingForCaller(db, channel, caller)
+        } catch {
+          seedBaselinePending = false
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(
           JSON.stringify({
@@ -1813,7 +1891,8 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
               id: r.id,
               requesterCode: r.requester_code,
               createdAt: r.created_at
-            }))
+            })),
+            seedBaselinePending
           })
         )
         return
@@ -2126,6 +2205,18 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
                 nowIso
               )
               resultChannel = channelId
+              // One-shot seed grant (SYNC-CC-026): dual-unpaired new channel
+              // grants exactly once to the executing acceptor (caller). No
+              // grant is a transfer/owner/leader; join-existing grants none.
+              try {
+                db.prepare(
+                  'INSERT INTO sync_seed_grants (channel_id, holder_device_code, consumed, created_at, consumed_at) VALUES (?, ?, 0, ?, NULL) ON CONFLICT(channel_id) DO NOTHING'
+                ).run(channelId, caller, nowIso)
+              } catch {
+                // sync_seed_grants missing on a partially migrated DB is
+                // fail-closed below via the PUT/state pending path; accept
+                // itself stays atomic for membership.
+              }
             }
             const info = db
               .prepare("UPDATE sync_pair_requests SET status='accepted' WHERE id = ? AND status='pending'")
@@ -2192,8 +2283,14 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
             } catch {}
           }
         } catch {}
+        let seedBaselinePending = false
+        try {
+          seedBaselinePending = isSeedBaselinePendingForCaller(db, resultChannel, caller)
+        } catch {
+          seedBaselinePending = false
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, channelId: resultChannel }))
+        res.end(JSON.stringify({ ok: true, channelId: resultChannel, seedBaselinePending }))
         return
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -2329,6 +2426,11 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
             if ((remaining?.n ?? 0) < 2) {
               db.prepare('DELETE FROM sync_memberships WHERE channel_id = ?').run(channel)
               db.prepare('UPDATE sync_channels SET dissolved = 1 WHERE id = ?').run(channel)
+              // Seed grant voids on dissolve (SYNC-CC-026): the one-shot
+              // grant never transfers and never outlives its channel.
+              try {
+                db.prepare('DELETE FROM sync_seed_grants WHERE channel_id = ?').run(channel)
+              } catch {}
               dissolvedCodes = members
             }
           })

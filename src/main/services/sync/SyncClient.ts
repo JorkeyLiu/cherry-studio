@@ -47,6 +47,13 @@ export interface SyncPairStateResponse {
   channelId: string | null
   outgoing: SyncOutgoingPairRequest | null
   incoming: SyncIncomingPairRequest[]
+  /**
+   * One-shot seed baseline pending (SYNC-CC-026): strictly boolean, holder
+   * only, unconsumed, and no baseline yet. Never carries a grant token and is
+   * never persisted client-side as a secret. Optional for backward-compatible
+   * mocks (absent means false).
+   */
+  seedBaselinePending?: boolean
 }
 
 export type BaselineFetchResult = { found: false } | { found: true; envelope: SyncEnvelopeAny; rawText: string }
@@ -604,12 +611,17 @@ export class SyncClient {
         throw new Error('pair state response malformed: incoming')
       }
     }
+    const rawPending = (data as { seedBaselinePending?: unknown }).seedBaselinePending
+    if (rawPending !== undefined && typeof rawPending !== 'boolean') {
+      throw new Error('pair state response malformed: seedBaselinePending')
+    }
     return {
       deviceCode: normalizePairingCode(data.deviceCode as string),
       paired: data.paired as boolean,
       channelId: (data.channelId as string | null | undefined) ?? null,
       outgoing: (outgoing as SyncOutgoingPairRequest | null | undefined) ?? null,
-      incoming: incoming as SyncIncomingPairRequest[]
+      incoming: incoming as SyncIncomingPairRequest[],
+      seedBaselinePending: rawPending === true
     }
   }
 
@@ -678,7 +690,7 @@ export class SyncClient {
     args: { requestId: string },
     deviceCode: string,
     deviceSecret: string
-  ): Promise<{ channelId: string }> {
+  ): Promise<{ channelId: string; seedBaselinePending?: boolean }> {
     const idErr = validatePairingRequestId(args.requestId)
     if (idErr) throw new Error(idErr)
     const data = await this.requestJson(endpoint, token, '/sync/pair/accept', {
@@ -690,7 +702,11 @@ export class SyncClient {
     if (!data || data.ok !== true || typeof data.channelId !== 'string') {
       throw new Error('accept response malformed')
     }
-    return { channelId: data.channelId as string }
+    const rawPending = (data as { seedBaselinePending?: unknown }).seedBaselinePending
+    if (rawPending !== undefined && typeof rawPending !== 'boolean') {
+      throw new Error('accept response malformed: seedBaselinePending')
+    }
+    return { channelId: data.channelId as string, seedBaselinePending: rawPending === true }
   }
 
   async rejectPairing(
