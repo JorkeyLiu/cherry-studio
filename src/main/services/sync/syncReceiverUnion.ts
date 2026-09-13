@@ -61,6 +61,270 @@ export interface ReceiverUnionResult {
   pureParents: { topicIds: string[]; messageIds: string[] }
 }
 
+type TombstoneRef = { entityType: 'topic' | 'message' | 'message_block'; entityId: string }
+type RegisterRef = { messageId: string; activeBlockIds: string[] }
+
+function parseTombstoneKey(key: string): TombstoneRef {
+  if (key.startsWith('tombstone:message_block:')) {
+    const id = key.slice('tombstone:message_block:'.length)
+    if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
+    return { entityType: 'message_block', entityId: id }
+  }
+  if (key.startsWith('tombstone:message:')) {
+    const id = key.slice('tombstone:message:'.length)
+    if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
+    return { entityType: 'message', entityId: id }
+  }
+  if (key.startsWith('tombstone:topic:')) {
+    const id = key.slice('tombstone:topic:'.length)
+    if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
+    return { entityType: 'topic', entityId: id }
+  }
+  fail(`receiver union unknown tombstone key ${key}`)
+}
+
+function collectLocalTombstones(tx: Tx): TombstoneRef[] {
+  const rows = tx.select().from(schema.syncState).all() as Array<{ key: string }>
+  const out: TombstoneRef[] = []
+  for (const r of rows) {
+    if (typeof r.key !== 'string' || !r.key.startsWith('tombstone:')) continue
+    out.push(parseTombstoneKey(r.key))
+  }
+  return out
+}
+
+function parseActiveBlockIds(raw: unknown, ctx: string): string[] {
+  let arr: unknown
+  if (typeof raw === 'string') {
+    try {
+      arr = JSON.parse(raw)
+    } catch {
+      fail(`receiver union malformed register activeBlockIds for ${ctx}`)
+    }
+  } else {
+    arr = raw
+  }
+  if (!Array.isArray(arr)) fail(`receiver union malformed register activeBlockIds for ${ctx}`)
+  const ids = arr as unknown[]
+  const seen = new Set<string>()
+  for (const v of ids) {
+    if (typeof v !== 'string' || !v || v.includes(':')) {
+      fail(`receiver union malformed register activeBlockId for ${ctx}`)
+    }
+    if (seen.has(v)) fail(`receiver union duplicate register activeBlockId for ${ctx}`)
+    seen.add(v)
+  }
+  return [...seen]
+}
+
+function isValidOpId(v: unknown): v is string {
+  return typeof v === 'string' && v.length >= 1 && v.length <= 256 && !v.includes(':')
+}
+
+function collectLocalRegisters(tx: Tx): RegisterRef[] {
+  let rows: Array<{
+    messageId: string
+    timestamp: number
+    operationId: string
+    activeBlockIdsJson: string
+  }>
+  try {
+    rows = tx.select().from(schema.syncStableReplaceRegister).all() as never as typeof rows
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(m)) return []
+    throw e
+  }
+  return rows.map((r) => {
+    if (typeof r.messageId !== 'string' || !r.messageId || r.messageId.includes(':')) {
+      fail(`receiver union malformed register owner ${String(r.messageId)}`)
+    }
+    if (typeof r.timestamp !== 'number' || !Number.isSafeInteger(r.timestamp) || r.timestamp < 0) {
+      fail(`receiver union malformed register clock for ${r.messageId}`)
+    }
+    if (!isValidOpId(r.operationId)) fail(`receiver union malformed register op for ${r.messageId}`)
+    return { messageId: r.messageId, activeBlockIds: parseActiveBlockIds(r.activeBlockIdsJson, r.messageId) }
+  })
+}
+
+function collectIncomingRegisters(
+  incoming: ValidatedBaselineMergeInput
+): Array<RegisterRef & { timestamp: number; operationId: string }> {
+  const out: Array<RegisterRef & { timestamp: number; operationId: string }> = []
+  for (const r of incoming.replacementRegisters ?? []) {
+    if (typeof r.messageId !== 'string' || !r.messageId || r.messageId.includes(':')) {
+      fail(`receiver union malformed incoming register owner ${String(r.messageId)}`)
+    }
+    if (typeof r.timestamp !== 'number' || !Number.isSafeInteger(r.timestamp) || r.timestamp < 0) {
+      fail(`receiver union malformed incoming register clock for ${r.messageId}`)
+    }
+    if (!isValidOpId(r.operationId)) fail(`receiver union malformed incoming register op for ${r.messageId}`)
+    if (!Array.isArray(r.activeBlockIds))
+      fail(`receiver union malformed incoming register activeBlockIds for ${r.messageId}`)
+    out.push({
+      messageId: r.messageId,
+      activeBlockIds: parseActiveBlockIds(r.activeBlockIds, `incoming:${r.messageId}`),
+      timestamp: r.timestamp,
+      operationId: r.operationId
+    })
+  }
+  return out
+}
+
+function assertCandidateClosureDisjoint(
+  candidates: Array<{
+    entityType: 'topic' | 'message' | 'message_block'
+    entityId: string
+    payload: Record<string, unknown>
+  }>,
+  topicRowById: Map<string, { id: string }>,
+  messageRowById: Map<string, { id: string; topicId: string }>,
+  blockRowById: Map<string, { id: string; messageId: string }>,
+  incomingEntityByKey: Map<string, LocalSyncBaselineEntity>,
+  incomingTombstones: TombstoneRef[],
+  localTombstones: TombstoneRef[],
+  localRegisters: RegisterRef[],
+  incomingRegisters: RegisterRef[]
+): void {
+  const candidateKeys = new Set(candidates.map((c) => `${c.entityType}:${c.entityId}`))
+  const candidateTopicIds = new Set(candidates.filter((c) => c.entityType === 'topic').map((c) => c.entityId))
+  const candidateMessageIds = new Set(candidates.filter((c) => c.entityType === 'message').map((c) => c.entityId))
+  const candidateAllIds = new Set(candidates.map((c) => c.entityId))
+
+  const candMsgParent = new Map<string, string>()
+  const candBlockParent = new Map<string, string>()
+  for (const c of candidates) {
+    if (c.entityType === 'message') {
+      const tid: unknown = c.payload.topicId
+      if (typeof tid !== 'string' || !tid) fail(`receiver union parent mismatch for message ${c.entityId}`)
+      candMsgParent.set(c.entityId, tid)
+    } else if (c.entityType === 'message_block') {
+      const mid: unknown = c.payload.messageId
+      if (typeof mid !== 'string' || !mid) fail(`receiver union parent mismatch for block ${c.entityId}`)
+      candBlockParent.set(c.entityId, mid)
+    }
+  }
+  const localMsgParent = new Map<string, string>()
+  for (const [id, row] of messageRowById) localMsgParent.set(id, row.topicId)
+  const localBlockParent = new Map<string, string>()
+  for (const [id, row] of blockRowById) localBlockParent.set(id, row.messageId)
+  const incomingMsgParent = new Map<string, string>()
+  const incomingBlockParent = new Map<string, string>()
+  for (const e of incomingEntityByKey.values()) {
+    if (e.entityType === 'message') {
+      const tid: unknown = e.payload.topicId
+      if (typeof tid !== 'string' || !tid) fail(`receiver union malformed incoming message parent for ${e.entityId}`)
+      incomingMsgParent.set(e.entityId, tid)
+    } else if (e.entityType === 'message_block') {
+      const mid: unknown = e.payload.messageId
+      if (typeof mid !== 'string' || !mid) fail(`receiver union malformed incoming block parent for ${e.entityId}`)
+      incomingBlockParent.set(e.entityId, mid)
+    }
+  }
+  const resolveMessageTopic = (mid: string): string | undefined => {
+    const got = [candMsgParent.get(mid), localMsgParent.get(mid), incomingMsgParent.get(mid)].filter(
+      (v): v is string => v !== undefined
+    )
+    if (got.length === 0) return undefined
+    for (const v of got) if (v !== got[0]) fail(`receiver union parent mismatch for message ${mid}`)
+    return got[0]
+  }
+  const resolveBlockMessage = (bid: string): string | undefined => {
+    const got = [candBlockParent.get(bid), localBlockParent.get(bid), incomingBlockParent.get(bid)].filter(
+      (v): v is string => v !== undefined
+    )
+    if (got.length === 0) return undefined
+    for (const v of got) if (v !== got[0]) fail(`receiver union parent mismatch for block ${bid}`)
+    return got[0]
+  }
+  const resolveBlockTopic = (bid: string): string | undefined => {
+    const mid = resolveBlockMessage(bid)
+    if (mid === undefined) return undefined
+    return resolveMessageTopic(mid)
+  }
+
+  const allTombs: TombstoneRef[] = [
+    ...localTombstones,
+    ...incomingTombstones.map((t) => {
+      if (t.entityType !== 'topic' && t.entityType !== 'message' && t.entityType !== 'message_block') {
+        fail(`receiver union unknown incoming tombstone type ${String(t.entityType)}`)
+      }
+      if (typeof t.entityId !== 'string' || !t.entityId || t.entityId.includes(':')) {
+        fail(`receiver union malformed incoming tombstone id ${String(t.entityId)}`)
+      }
+      return { entityType: t.entityType, entityId: t.entityId }
+    })
+  ]
+  for (const t of allTombs) {
+    const key = `${t.entityType}:${t.entityId}`
+    if (candidateKeys.has(key)) fail(`receiver union tombstone direct overlap ${key}`)
+    if (t.entityType === 'topic') {
+      for (const [, tid] of candMsgParent)
+        if (tid === t.entityId) fail(`receiver union candidate under tombstoned topic ${t.entityId}`)
+      for (const [bid] of candBlockParent) {
+        const topic = resolveBlockTopic(bid)
+        if (topic === undefined)
+          fail(`receiver union cannot prove block ${bid} disjoint from tombstoned topic ${t.entityId}`)
+        if (topic === t.entityId) fail(`receiver union candidate block under tombstoned topic ${t.entityId}`)
+      }
+    } else if (t.entityType === 'message') {
+      for (const [, mid] of candBlockParent)
+        if (mid === t.entityId) fail(`receiver union candidate block under tombstoned message ${t.entityId}`)
+      const topic = resolveMessageTopic(t.entityId)
+      if (topic === undefined) {
+        if (candidateTopicIds.size > 0)
+          fail(`receiver union cannot prove tombstoned message ${t.entityId} disjoint from candidates`)
+      } else if (candidateTopicIds.has(topic)) {
+        fail(`receiver union tombstoned message ${t.entityId} under candidate topic ${topic}`)
+      }
+    } else {
+      const parentMid = resolveBlockMessage(t.entityId)
+      if (parentMid === undefined) {
+        if (candidateMessageIds.size > 0 || candidateTopicIds.size > 0) {
+          fail(`receiver union cannot prove tombstoned block ${t.entityId} disjoint from candidates`)
+        }
+      } else {
+        if (candidateMessageIds.has(parentMid))
+          fail(`receiver union tombstoned block ${t.entityId} under candidate message ${parentMid}`)
+        const topic = resolveMessageTopic(parentMid)
+        if (topic === undefined) {
+          if (candidateTopicIds.size > 0)
+            fail(`receiver union cannot prove tombstoned block ${t.entityId} disjoint from candidates`)
+        } else if (candidateTopicIds.has(topic)) {
+          fail(`receiver union tombstoned block ${t.entityId} under candidate topic ${topic}`)
+        }
+      }
+    }
+  }
+
+  const allRegs: RegisterRef[] = [...localRegisters, ...incomingRegisters]
+  for (const r of allRegs) {
+    if (candidateAllIds.has(r.messageId)) fail(`receiver union candidate within replacement domain ${r.messageId}`)
+    for (const [, mid] of candBlockParent)
+      if (mid === r.messageId) fail(`receiver union candidate block within replacement domain ${r.messageId}`)
+    for (const aid of r.activeBlockIds)
+      if (candidateAllIds.has(aid)) fail(`receiver union candidate matches replacement active ${aid} in ${r.messageId}`)
+    const topic = resolveMessageTopic(r.messageId)
+    if (topic === undefined) {
+      if (candidateTopicIds.size > 0)
+        fail(`receiver union cannot prove replacement ${r.messageId} disjoint from candidates`)
+    } else if (candidateTopicIds.has(topic)) {
+      fail(`receiver union replacement ${r.messageId} under candidate topic ${topic}`)
+    }
+    for (const aid of r.activeBlockIds) {
+      const parent = resolveBlockMessage(aid)
+      if (parent === undefined) {
+        if (candidateTopicIds.size > 0 || candidateMessageIds.size > 0) {
+          fail(`receiver union cannot prove replacement active ${aid} disjoint from candidates`)
+        }
+      } else if (parent !== r.messageId) {
+        fail(`receiver union replacement active ${aid} parent mismatch for ${r.messageId}`)
+      }
+    }
+  }
+  void topicRowById
+}
+
 export function adoptReceiverExclusiveInTx(
   tx: Tx,
   incoming: ValidatedBaselineMergeInput,
@@ -333,7 +597,11 @@ export function adoptReceiverExclusiveInTx(
 
   for (const row of topicRows) {
     const id = row.id
-    if (incomingTopicIds.has(id) || incomingTombstoneKeys.has(`topic:${id}`)) continue
+    if (incomingTopicIds.has(id)) continue
+    if (incomingTombstoneKeys.has(`topic:${id}`)) {
+      if (isFullyVersionedComplete('topic', id)) continue
+      fail(`receiver union tombstone direct overlap topic/${id}`)
+    }
     const payload = buildAdoptionTopicPayload(row)
     if (isFullyUnversioned('topic', id)) {
       candidates.push({ entityType: 'topic', entityId: id, row, payload })
@@ -345,7 +613,11 @@ export function adoptReceiverExclusiveInTx(
   }
   for (const row of messageRows) {
     const id = row.id
-    if (incomingMessageIds.has(id) || incomingTombstoneKeys.has(`message:${id}`)) continue
+    if (incomingMessageIds.has(id)) continue
+    if (incomingTombstoneKeys.has(`message:${id}`)) {
+      if (isFullyVersionedComplete('message', id)) continue
+      fail(`receiver union tombstone direct overlap message/${id}`)
+    }
     if (!isEligibleMessageRow(row)) {
       fail(`receiver union ineligible message ${id} status ${String(row.status)}`)
     }
@@ -363,7 +635,11 @@ export function adoptReceiverExclusiveInTx(
   }
   for (const row of blockRows) {
     const id = row.id
-    if (incomingBlockIds.has(id) || incomingTombstoneKeys.has(`message_block:${id}`)) continue
+    if (incomingBlockIds.has(id)) continue
+    if (incomingTombstoneKeys.has(`message_block:${id}`)) {
+      if (isFullyVersionedComplete('message_block', id)) continue
+      fail(`receiver union tombstone direct overlap block/${id}`)
+    }
     if (!isEligibleBlockRow(row)) {
       fail(`receiver union ineligible block ${id} type ${String(row.type)} status ${String(row.status)}`)
     }
@@ -388,24 +664,21 @@ export function adoptReceiverExclusiveInTx(
     }
   }
 
-  // Global gates when adoption will happen: any tombstone/register/outbox/frame/applied anywhere fails.
-  {
-    const tombRows = tx
-      .select()
-      .from(schema.syncState)
-      .all()
-      .filter((r) => typeof r.key === 'string' && r.key.startsWith('tombstone:'))
-    if (tombRows.length > 0) fail(`receiver union tombstone present ${tombRows.length}`)
-  }
-  {
-    try {
-      const regs = tx.select().from(schema.syncStableReplaceRegister).all()
-      if (regs.length > 0) fail(`receiver union replacement register present ${regs.length}`)
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(m)) throw e
-    }
-  }
+  // Narrowed tombstone/register gate: adoption candidates may proceed only when
+  // their entity/parent/descendant impact closure is provably disjoint from all
+  // local + incoming tombstones and stable replacement registers. Outbox/order
+  // frames/applied ops retain the existing any-presence fail-closed gates.
+  assertCandidateClosureDisjoint(
+    candidates,
+    topicRowById,
+    messageRowById,
+    blockRowById,
+    incomingEntityByKey,
+    incoming.tombstones,
+    collectLocalTombstones(tx),
+    collectLocalRegisters(tx),
+    collectIncomingRegisters(incoming)
+  )
   {
     const outRows = tx.select().from(schema.syncOutbox).all()
     if (outRows.length > 0) fail(`receiver union pending outbox present ${outRows.length}`)

@@ -757,7 +757,7 @@ describe('receiver union fail-closed matrix', () => {
     }
   }, 60000)
 
-  it('partial clock / existing outbox / tombstone / register each fail-closed', async () => {
+  it('partial clock / existing outbox / frame / applied each fail-closed', async () => {
     await setupPair()
     // Partial clock: exclusive message with entity clock but missing field/membership.
     {
@@ -815,7 +815,57 @@ describe('receiver union fail-closed matrix', () => {
       await expect(syncService.sync()).rejects.toThrow()
       expect(await snapshotB()).toEqual(before)
     }
-    // Tombstone.
+    // Existing order frame.
+    {
+      const fresh = openChatDb()
+      try {
+        sqliteB?.close()
+      } catch {}
+      sqliteB = fresh.sqlite
+      dbB = fresh.db
+      bindProfile('B', credB)
+      await syncService.getPairState()
+      insertSharedTopicOnly(sqliteB)
+      insertExclusiveMessage(sqliteB, 'f-m1', 'seed-t1', 'x', 2)
+      insertExclusiveBlock(sqliteB, 'f-b1', 'f-m1', 'x')
+      dbB
+        .insert(schema.syncParentOrderFrame)
+        .values({
+          kind: 'topicMessage',
+          parentId: 'seed-t1',
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIdsJson: JSON.stringify(['f-m1']),
+          timestamp: 1,
+          operationId: '00000000-0000-4000-a000-000000000014'
+        })
+        .run()
+      const before = await snapshotB()
+      await expect(syncService.sync()).rejects.toThrow()
+      expect(await snapshotB()).toEqual(before)
+    }
+    // Existing applied op.
+    {
+      const fresh = openChatDb()
+      try {
+        sqliteB?.close()
+      } catch {}
+      sqliteB = fresh.sqlite
+      dbB = fresh.db
+      bindProfile('B', credB)
+      await syncService.getPairState()
+      insertSharedTopicOnly(sqliteB)
+      insertExclusiveMessage(sqliteB, 'a-m1', 'seed-t1', 'x', 2)
+      insertExclusiveBlock(sqliteB, 'a-b1', 'a-m1', 'x')
+      dbB.insert(schema.syncApplied).values({ operationId: 'applied-keep', appliedAt: new Date().toISOString() }).run()
+      const before = await snapshotB()
+      await expect(syncService.sync()).rejects.toThrow()
+      expect(await snapshotB()).toEqual(before)
+    }
+  }, 60000)
+
+  it('unrelated local tombstone/register permit bootstrap adoption with pushback and convergence', async () => {
+    await setupPair()
+    // Unrelated local tombstone topic:other with exclusive under seed-t1.
     {
       const fresh = openChatDb()
       try {
@@ -832,11 +882,17 @@ describe('receiver union fail-closed matrix', () => {
         .insert(schema.syncState)
         .values({ key: 'tombstone:topic:other', value: '1:00000000-0000-4000-a000-000000000012' })
         .run()
-      const before = await snapshotB()
-      await expect(syncService.sync()).rejects.toThrow()
-      expect(await snapshotB()).toEqual(before)
+      await syncService.sync()
+      expect(readCursor(dbB)).toBeGreaterThan(0)
+      expect(outboxCount(dbB)).toBe(0)
+      expect(sqliteB.prepare(`SELECT id FROM messages WHERE id='tb-m1'`).get()).toBeTruthy()
+      bindProfile('A', credA)
+      await syncService.sync()
+      expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='tb-m1'`).get()).toBeTruthy()
+      expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='tb-b1'`).get()).toBeTruthy()
+      bindProfile('B', credB)
     }
-    // Register.
+    // Unrelated local register some-m with exclusive under seed-t1.
     {
       const fresh = openChatDb()
       try {
@@ -859,9 +915,300 @@ describe('receiver union fail-closed matrix', () => {
           payloadHash: 'x'
         })
         .run()
-      const before = await snapshotB()
-      await expect(syncService.sync()).rejects.toThrow()
-      expect(await snapshotB()).toEqual(before)
+      await syncService.sync()
+      expect(readCursor(dbB)).toBeGreaterThan(0)
+      expect(outboxCount(dbB)).toBe(0)
+      bindProfile('A', credA)
+      await syncService.sync()
+      expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='r-m1'`).get()).toBeTruthy()
+      expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='r-b1'`).get()).toBeTruthy()
+      bindProfile('B', credB)
+    }
+  }, 60000)
+
+  it('intersecting tombstone/register closures fail closed with zero writes', async () => {
+    await setupPair()
+    bindProfile('A', credA)
+    const { captureLocalSyncBaselineCandidate } = await import('../syncBaseline')
+    const { buildPublishEnvelope } = await import('../syncBaselinePublish')
+    const { mapWireEnvelopeToMergeInput } = await import('../syncBaselineWireApply')
+    const { mergeValidatedBaselineInTx } = await import('../syncBaselineApply')
+    const { adoptReceiverExclusiveInTx: adoptTx } = await import('../syncReceiverUnion')
+    const candidate = captureLocalSyncBaselineCandidate(dbA!)
+    const channelId = candidate.observedLocalChannelKey as string
+    const watermark = candidate.observedLocalCursor as number
+    const { envelope } = buildPublishEnvelope(candidate, channelId, watermark)
+    const snapOf = (cDb: BetterSQLite3Database<typeof schema>, cSqlite: Database.Database): unknown => ({
+      outbox: cDb.select().from(schema.syncOutbox).all(),
+      entity: cSqlite.prepare(`SELECT * FROM sync_entity_clock`).all(),
+      field: cSqlite.prepare(`SELECT * FROM sync_field_clock`).all(),
+      membership: cSqlite.prepare(`SELECT * FROM sync_membership_clock`).all(),
+      frame: cSqlite.prepare(`SELECT * FROM sync_parent_order_frame`).all(),
+      topics: cSqlite.prepare(`SELECT * FROM topics ORDER BY id`).all(),
+      messages: cSqlite.prepare(`SELECT * FROM messages ORDER BY id`).all(),
+      blocks: cSqlite.prepare(`SELECT * FROM message_blocks ORDER BY id`).all()
+    })
+    const runAdopt = (
+      cDb: BetterSQLite3Database<typeof schema>,
+      mutateInput?: (input: { tombstones: Array<{ entityType: string; entityId: string }> }) => void
+    ): void => {
+      cDb.transaction((tx) => {
+        const mapped = mapWireEnvelopeToMergeInput(envelope)
+        if (mutateInput) mutateInput(mapped.input as never)
+        adoptTx(tx as never, mapped.input, 'test-device-closure')
+        mergeValidatedBaselineInTx(tx as never, mapped.input)
+      })
+    }
+    // Direct self: local tombstone for the exclusive message itself.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m1', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b1', 'c-m1', 'x')
+        fresh.db
+          .insert(schema.syncState)
+          .values({ key: 'tombstone:message:c-m1', value: '1:00000000-0000-4000-a000-000000000021' })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Candidate child under tombstoned parent: exclusive under seed-t1 with local tombstone for seed-t1.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m2', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b2', 'c-m2', 'x')
+        fresh.db
+          .insert(schema.syncState)
+          .values({ key: 'tombstone:topic:seed-t1', value: '1:00000000-0000-4000-a000-000000000022' })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Tombstoned descendant under candidate parent: pure exclusive topic with tombstoned block beneath its message.
+    {
+      const fresh = openChatDb()
+      try {
+        fresh.sqlite
+          .prepare(
+            `INSERT INTO topics (id, assistant_id, name, created_at, updated_at, deleted_at, extra) VALUES (?,?,?,?,?,?,?)`
+          )
+          .run(
+            'ex-t9',
+            'a1',
+            'Ex',
+            '2026-01-01T00:00:00.000Z',
+            '2026-01-02T00:00:00.000Z',
+            null,
+            JSON.stringify({ pinned: false, prompt: null, isNameManuallyEdited: false })
+          )
+        insertExclusiveMessage(fresh.sqlite, 'ex-m9', 'ex-t9', 'x', 0)
+        insertExclusiveBlock(fresh.sqlite, 'ex-b9', 'ex-m9', 'x')
+        fresh.db
+          .insert(schema.syncState)
+          .values({ key: 'tombstone:message_block:ex-b9', value: '1:00000000-0000-4000-a000-000000000023' })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Incoming direct overlap: incoming tombstone for the exclusive message id.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m3', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b3', 'c-m3', 'x')
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() =>
+          runAdopt(fresh.db, (input) => {
+            input.tombstones.push({
+              entityType: 'message',
+              entityId: 'c-m3'
+            })
+          })
+        ).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Register owner overlap: local register for the exclusive message itself.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m4', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b4', 'c-m4', 'x')
+        fresh.db
+          .insert(schema.syncStableReplaceRegister)
+          .values({
+            messageId: 'c-m4',
+            timestamp: 1,
+            operationId: '00000000-0000-4000-a000-000000000024',
+            activeBlockIdsJson: '[]',
+            payloadHash: 'x'
+          })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Register block ownership: exclusive block owned by the registered message.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m5', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b5', 'c-m5', 'x')
+        fresh.db
+          .insert(schema.syncStableReplaceRegister)
+          .values({
+            messageId: 'c-m5',
+            timestamp: 1,
+            operationId: '00000000-0000-4000-a000-000000000025',
+            activeBlockIdsJson: JSON.stringify(['c-b5']),
+            payloadHash: 'x'
+          })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Register active overlap: active lists the exclusive block while owner differs.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m6', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b6', 'c-m6', 'x')
+        fresh.sqlite
+          .prepare(
+            `INSERT INTO messages (id, topic_id, role, content, status, ask_id, model, model_id, assistant_id, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          )
+          .run(
+            'other-m6',
+            'seed-t1',
+            'user',
+            'o',
+            'success',
+            null,
+            null,
+            null,
+            null,
+            '2026-01-01T00:00:00.000Z',
+            '2026-01-02T00:00:00.000Z',
+            9,
+            null
+          )
+        fresh.db
+          .insert(schema.syncStableReplaceRegister)
+          .values({
+            messageId: 'other-m6',
+            timestamp: 1,
+            operationId: '00000000-0000-4000-a000-000000000026',
+            activeBlockIdsJson: JSON.stringify(['c-b6']),
+            payloadHash: 'x'
+          })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Malformed register data fails closed (duplicate active passes DB JSON CHECK but fails closure validator).
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m7', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b7', 'c-m7', 'x')
+        fresh.db
+          .insert(schema.syncStableReplaceRegister)
+          .values({
+            messageId: 'other-m7',
+            timestamp: 1,
+            operationId: '00000000-0000-4000-a000-000000000027',
+            activeBlockIdsJson: JSON.stringify(['dup', 'dup']),
+            payloadHash: 'x'
+          })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() => runAdopt(fresh.db)).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Unrelated incoming tombstone/register permit adoption.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'c-m8', 'seed-t1', 'x', 2)
+        insertExclusiveBlock(fresh.sqlite, 'c-b8', 'c-m8', 'x')
+        fresh.db.transaction((tx) => {
+          const mapped = mapWireEnvelopeToMergeInput(envelope)
+          mapped.input.tombstones.push({
+            entityType: 'topic',
+            entityId: 'other-incoming',
+            timestamp: 5,
+            operationId: 'op-inc2',
+            entityClock: null
+          })
+          ;(mapped.input.replacementRegisters ??= []).push({
+            messageId: 'other-reg',
+            timestamp: 5,
+            operationId: '00000000-0000-4000-a000-000000000028',
+            activeBlockIds: []
+          })
+          const union = adoptTx(tx as never, mapped.input, 'test-device-closure')
+          expect(union.adopted).toBeGreaterThan(0)
+          mergeValidatedBaselineInTx(tx as never, mapped.input)
+        })
+        expect(fresh.db.select().from(schema.syncOutbox).all().length).toBeGreaterThan(0)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
     }
   }, 60000)
 
@@ -911,7 +1258,7 @@ describe('receiver union fail-closed matrix', () => {
     expect(clocksAfter2).toEqual(clocksAfter)
   }, 60000)
 
-  it('incoming baseline v2 replacementRegisters apply; local register fail-closed only with adoption candidate, LWW with zero candidate', async () => {
+  it('incoming baseline v2 replacementRegisters apply; intersecting local register fail-closed, LWW with zero candidate', async () => {
     // Real incoming path: A captures a complete v2 candidate carrying a
     // replacement register, projects to wire, and fresh receivers apply it
     // through the real bootstrap composition (map + receiver union + merge
@@ -1065,7 +1412,7 @@ describe('receiver union fail-closed matrix', () => {
       }
     }
 
-    // Case 2: local register + adoption candidate (exclusive) fails closed 0 writes.
+    // Case 2: intersecting local register + adoption candidate fails closed 0 writes.
     {
       const fresh = openChatDb()
       const cDb = fresh.db
@@ -1077,10 +1424,10 @@ describe('receiver union fail-closed matrix', () => {
         cDb
           .insert(schema.syncStableReplaceRegister)
           .values({
-            messageId: 'some-m',
+            messageId: 'v2-m1',
             timestamp: 1,
             operationId: REG_OP,
-            activeBlockIdsJson: '[]',
+            activeBlockIdsJson: JSON.stringify(['v2-b1']),
             payloadHash: 'x'
           })
           .run()
