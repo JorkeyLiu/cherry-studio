@@ -479,7 +479,7 @@ describe('sync parent order frame — missing/malformed/exhaustion rollback', ()
 })
 
 describe('sync parent order frame — unsupported structural paths invalidate', () => {
-  it('reorderMessages issues order_frame when membership complete; branch rides incremental sync while clone/reset still invalidate without frame ops; selectAnswer preserves', () => {
+  it('reorderMessages issues order_frame when membership complete; branch and clone ride incremental sync while reset still invalidates without frame ops; selectAnswer preserves', () => {
     const topicId = 't-unsupported'
     sqlite
       .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
@@ -566,7 +566,9 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     expect(branchFrame.orderedChildIds[0]).toBe('m-branch-target-1')
     expect(outboxCount()).toBeGreaterThan(outboxBeforeBranch) // branch mints entity + frame ops
 
-    // Test cloneMessagesToTopic
+    // Test cloneMessagesToTopic participates in incremental sync: ordinary
+    // success true-new clones refresh the target topic frame (no longer
+    // invalidate-only), mirroring branch/insert/paste.
     const cloneTarget = 't-clone-target'
     vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_030)
     agg.appendMessage(
@@ -576,6 +578,7 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     )
     const cloneFrameBefore = getFrame('topicMessage', cloneTarget)
     expect(cloneFrameBefore).not.toBeNull()
+    const cloneOutboxBefore = outboxCount()
     const cloneRes = agg.cloneMessagesToTopic(cloneTarget, [
       {
         message: { id: 'm-clone-2', topicId: cloneTarget, role: 'user', content: 'z', status: 'success' } as never,
@@ -583,7 +586,9 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
       }
     ])
     expect(cloneRes.ok).toBe(true)
-    expect(frameExists('topicMessage', cloneTarget)).toBe(false)
+    expect(frameExists('topicMessage', cloneTarget)).toBe(true)
+    expect(getFrame('topicMessage', cloneTarget)!.orderedChildIds).toEqual(['m-clone-1', 'm-clone-2'])
+    expect(outboxCount()).toBeGreaterThan(cloneOutboxBefore) // clone mints entity + frame ops
 
     // Test insertMessagesAfterAnchor
     const insertTopic = 't-insert-anchor'

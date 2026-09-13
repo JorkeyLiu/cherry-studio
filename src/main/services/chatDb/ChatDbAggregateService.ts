@@ -4566,112 +4566,352 @@ export class ChatDbAggregateService {
     assistantId?: string
   ): ChatDbResult<null> {
     return wrapResult(() => {
-      syncService.throwIfPublishBarrierHeld('cloneMessagesToTopic')
-      this.db.transaction((tx) => {
-        const repos = createRepositories(tx)
+      const ctx = this.syncCtx('cloneMessagesToTopic')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      try {
+        this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
 
-        // Ensure target topic exists
-        repos.topics.ensure(targetTopicId, assistantId)
-
-        // Phase 1 — convert every entry, enforce block ownership, and
-        // classify as new vs existing. Cross-topic ownership and duplicate
-        // new IDs are resolved here, before any write, so the first invalid
-        // entry aborts the whole transaction exactly as the per-entry loop
-        // did (error precedence is unchanged).
-        const newMessages: MessageData[] = []
-        const newMessageIds = new Set<string>()
-        const existingPlans: Array<{
-          message: MessageData
-          blocks: MessageBlockData[]
-          patch: Record<string, unknown>
-        }> = []
-        // Phase-4 side-effect order (audit F1): every entry's blocks in the
-        // ORIGINAL request order. Upserting blocks + syncing file references
-        // in `[...newEntryPlans, ...existingPlans]` order would move all NEW
-        // entries' block side effects before EXISTING entries', changing the
-        // last-writer for rare cross-entry block-ID collisions vs the legacy
-        // per-entry loop.
-        const phase4Plans: Array<{ message: MessageData; blocks: MessageBlockData[] }> = []
-
-        for (const entry of entries) {
-          const messageData = wireToMessage(entry.message)
-          messageData.topicId = targetTopicId
-          const blockDataList = entry.blocks.map(wireToBlock)
-
-          // Enforce block ownership
-          for (const block of blockDataList) {
-            block.messageId = messageData.id
+          // Ensure target topic exists (create-only). A missing target is
+          // represented only via the existing topic upsert semantics (same
+          // payload as ensureTopic/appendMessage closure, same tx, no new
+          // semantics): true creation emits the topic upsert parent-first;
+          // an existing target emits no topic op.
+          const topicExistedBefore = repos.topics.getById(targetTopicId).found
+          repos.topics.ensure(targetTopicId, assistantId)
+          if (ctx && !topicExistedBefore) {
+            const created = repos.topics.getById(targetTopicId)
+            if (!created.found) throw new Error(`cloneMessagesToTopic topic ${targetTopicId} missing after ensure`)
+            syncService.enqueueUpsertInTx(
+              stx,
+              'topic',
+              targetTopicId,
+              this.syncTopicPayload(created.data),
+              Math.max(0, ctx.ts - 2),
+              ctx.deviceId
+            )
+            syncNotify = true
           }
 
-          const patch = wireToMessagePatch(entry.message)
-          delete patch.id
-          delete patch.topicId
-          delete patch.sortOrder
-
-          // Check if message already exists
-          const existing = repos.messages.getById(messageData.id)
-
-          if (existing.found) {
-            // Reject cross-topic ownership: message must belong to target topic
-            if (existing.data.topicId !== targetTopicId) {
-              throw new ChatDbConflictError(
-                `Message ${messageData.id} belongs to topic ${existing.data.topicId}, ` +
-                  `cannot clone into topic ${targetTopicId}`
-              )
+          // Pre-state snapshots for sync diffing (taken before any mutation
+          // in this tx; same pattern as insert/paste).
+          const preMessageRows = new Map<string, MessageData>()
+          const preBlockRows = new Map<string, MessageBlockData>()
+          if (ctx) {
+            const seenMsg = new Set<string>()
+            for (const entry of entries) {
+              const mid = (entry.message as Record<string, unknown>).id as string
+              if (typeof mid === 'string' && mid.length > 0 && !seenMsg.has(mid)) {
+                seenMsg.add(mid)
+                const pre = repos.messages.getById(mid)
+                if (pre.found) preMessageRows.set(mid, { ...pre.data, overflow: { ...pre.data.overflow } })
+              }
+              for (const b of entry.blocks) {
+                const bid = (b as Record<string, unknown>).id as string
+                if (typeof bid === 'string' && bid.length > 0 && !preBlockRows.has(bid)) {
+                  const pre = repos.blocks.getById(bid)
+                  if (pre.found) preBlockRows.set(bid, { ...pre.data, overflow: { ...pre.data.overflow } })
+                }
+              }
             }
-            // Same topic: preserve position, update metadata only
-            existingPlans.push({ message: messageData, blocks: blockDataList, patch })
-          } else if (newMessageIds.has(messageData.id)) {
-            // Duplicate new ID within one request: the first occurrence is
-            // inserted; later occurrences follow the established update path.
-            existingPlans.push({ message: messageData, blocks: blockDataList, patch })
-          } else {
-            // New: append at end (batched)
-            newMessageIds.add(messageData.id)
-            newMessages.push(messageData)
           }
-          // Phase 4 runs in original entry order regardless of the
-          // new/existing split above (audit F1).
-          phase4Plans.push({ message: messageData, blocks: blockDataList })
-        }
 
-        // Phase 2 — batch-insert all new messages (single linear normalize).
-        if (newMessages.length > 0) {
-          repos.messages.appendMany(newMessages)
-        }
+          // Phase 1 — convert every entry, enforce block ownership, and
+          // classify as new vs existing. Cross-topic ownership and duplicate
+          // new IDs are resolved here, before any write, so the first invalid
+          // entry aborts the whole transaction exactly as the per-entry loop
+          // did (error precedence is unchanged).
+          const newMessages: MessageData[] = []
+          const newMessageIds = new Set<string>()
+          const existingPlans: Array<{
+            message: MessageData
+            blocks: MessageBlockData[]
+            patch: Record<string, unknown>
+          }> = []
+          // Phase-4 side-effect order (audit F1): every entry's blocks in the
+          // ORIGINAL request order. Upserting blocks + syncing file references
+          // in `[...newEntryPlans, ...existingPlans]` order would move all NEW
+          // entries' block side effects before EXISTING entries', changing the
+          // last-writer for rare cross-entry block-ID collisions vs the legacy
+          // per-entry loop.
+          const phase4Plans: Array<{ message: MessageData; blocks: MessageBlockData[] }> = []
 
-        // Phase 3 — metadata patches for existing rows and in-request
-        // duplicates (applied after the batch insert so duplicate entries
-        // patch the just-inserted row, matching the per-entry loop).
-        for (const plan of existingPlans) {
-          if (Object.keys(plan.patch).length > 0) {
-            repos.messages.update(targetTopicId, plan.message.id, plan.patch)
+          for (const entry of entries) {
+            const messageData = wireToMessage(entry.message)
+            messageData.topicId = targetTopicId
+            const blockDataList = entry.blocks.map(wireToBlock)
+
+            // Enforce block ownership
+            for (const block of blockDataList) {
+              block.messageId = messageData.id
+            }
+
+            const patch = wireToMessagePatch(entry.message)
+            delete patch.id
+            delete patch.topicId
+            delete patch.sortOrder
+
+            // Check if message already exists
+            const existing = repos.messages.getById(messageData.id)
+
+            if (existing.found) {
+              // Reject cross-topic ownership: message must belong to target topic
+              if (existing.data.topicId !== targetTopicId) {
+                throw new ChatDbConflictError(
+                  `Message ${messageData.id} belongs to topic ${existing.data.topicId}, ` +
+                    `cannot clone into topic ${targetTopicId}`
+                )
+              }
+              // Same topic: preserve position, update metadata only
+              existingPlans.push({ message: messageData, blocks: blockDataList, patch })
+            } else if (newMessageIds.has(messageData.id)) {
+              // Duplicate new ID within one request: the first occurrence is
+              // inserted; later occurrences follow the established update path.
+              existingPlans.push({ message: messageData, blocks: blockDataList, patch })
+            } else {
+              // New: append at end (batched)
+              newMessageIds.add(messageData.id)
+              newMessages.push(messageData)
+            }
+            // Phase 4 runs in original entry order regardless of the
+            // new/existing split above (audit F1).
+            phase4Plans.push({ message: messageData, blocks: blockDataList })
           }
-        }
 
-        // Phase 4 — upsert blocks + sync file references for ALL entries in
-        // ORIGINAL request order (audit F1: the new/existing classification
-        // must not reorder block side effects, so rare cross-entry block-ID
-        // collisions keep the legacy per-entry loop's last-writer).
-        for (const plan of phase4Plans) {
-          if (plan.blocks.length > 0) {
-            repos.blocks.upsertMany(plan.blocks)
-            this.syncFileReferences(repos, plan.blocks)
+          // Phase 2 — batch-insert all new messages (single linear normalize).
+          if (newMessages.length > 0) {
+            repos.messages.appendMany(newMessages)
           }
-        }
 
-        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
-        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', targetTopicId)
-        {
-          const mids = new Set<string>()
+          // Phase 3 — metadata patches for existing rows and in-request
+          // duplicates (applied after the batch insert so duplicate entries
+          // patch the just-inserted row, matching the per-entry loop).
+          for (const plan of existingPlans) {
+            if (Object.keys(plan.patch).length > 0) {
+              repos.messages.update(targetTopicId, plan.message.id, plan.patch)
+            }
+          }
+
+          // Phase 4 — upsert blocks + sync file references for ALL entries in
+          // ORIGINAL request order (audit F1: the new/existing classification
+          // must not reorder block side effects, so rare cross-entry block-ID
+          // collisions keep the legacy per-entry loop's last-writer).
           for (const plan of phase4Plans) {
-            for (const blk of plan.blocks) mids.add(blk.messageId)
+            if (plan.blocks.length > 0) {
+              repos.blocks.upsertMany(plan.blocks)
+              this.syncFileReferences(repos, plan.blocks)
+            }
           }
-          for (const mid of mids) {
-            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
+
+          // Transaction-bound sync intent (same atomic boundary, reused from
+          // insert/paste/branch true-create enqueue + membership + frame
+          // helpers — no new mechanism, no new wire). Ordinary clone contract:
+          // fresh-ID `success` messages (shouldCapture gate) plus `success` +
+          // supported blocks under a `success` parent enqueue full-state
+          // upserts with true-create-only membership; existing rows enqueue
+          // allowlisted diffs only with membership preserved (never
+          // backfilled); transient / non-success-terminal / unsupported rows
+          // emit nothing (durable unsupported outcome for the latter) so the
+          // frame helpers below invalidate truthfully instead of faking
+          // complete. Source rows are untouched by definition (fresh IDs).
+          if (ctx) {
+            let tsOffset = 0
+            const nextTs = (): number => ctx.ts + tsOffset++
+            const distinctMids: string[] = []
+            const seenMids = new Set<string>()
+            for (const entry of entries) {
+              const mid = (entry.message as Record<string, unknown>).id as string
+              if (typeof mid === 'string' && !seenMids.has(mid)) {
+                seenMids.add(mid)
+                distinctMids.push(mid)
+              }
+            }
+            let hasNewInclusion = false
+            let hasDemotion = false
+            for (const mid of distinctMids) {
+              const postRow = repos.messages.getById(mid)
+              if (!postRow.found) throw new Error(`cloneMessagesToTopic message ${mid} missing in transaction`)
+              const pre = preMessageRows.get(mid) ?? null
+              const isTrueCreate = !pre
+              const postStable = isStableMessageStatus(postRow.data.status)
+              const preStable = pre ? isStableMessageStatus(pre.status) : false
+              if (pre && preStable && !postStable) hasDemotion = true
+              // Ordinary clone inclusion: fresh-ID success creates (existing
+              // stable→stable patches never advance the topic frame by
+              // themselves; stable promotion of an existing row counts).
+              const postSuccess = postRow.data.status === 'success'
+              const preSuccess = pre ? pre.status === 'success' : false
+              if ((isTrueCreate && postSuccess) || (pre && !preSuccess && postSuccess)) hasNewInclusion = true
+              if (!postStable) continue
+              if (isTrueCreate) {
+                // Fresh-ID ordinary clone: success only. Non-success
+                // terminals stay local-only (no op, no membership) so the
+                // frame decision below stays truthful partial.
+                if (!postSuccess) continue
+                if (!this.shouldCaptureMessageCreate(postRow.data)) continue
+                const opTs = nextTs()
+                this.ensureTopicClosureInTx(stx, targetTopicId, opTs, ctx.deviceId)
+                const full = this.syncMessagePayloadFull(postRow.data)
+                delete full.sortOrder
+                const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
+                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncNotify = true
+              } else {
+                const diff = this.diffMessagePayload(pre, postRow.data)
+                if (!diff) continue
+                delete diff.sortOrder
+                if (Object.keys(diff).length <= 2) continue
+                const opTs = nextTs()
+                this.ensureTopicClosureInTx(stx, targetTopicId, opTs, ctx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message', mid, diff, opTs, ctx.deviceId)
+                syncNotify = true
+              }
+            }
+            const distinctBids: string[] = []
+            const seenBids = new Set<string>()
+            for (const plan of phase4Plans) {
+              for (const blk of plan.blocks) {
+                if (!seenBids.has(blk.id)) {
+                  seenBids.add(blk.id)
+                  distinctBids.push(blk.id)
+                }
+              }
+            }
+            for (const bid of distinctBids) {
+              const postBlk = repos.blocks.getById(bid)
+              if (!postBlk.found) throw new Error(`cloneMessagesToTopic block ${bid} missing in transaction`)
+              // Blocks under a non-success parent never ride the ordinary
+              // clone wire: skip without closure (closure would fail closed or
+              // fabricate a non-ordinary parent). The per-parent frame decision
+              // below invalidates that parent.
+              const parentMsg = repos.messages.getById(postBlk.data.messageId)
+              if (!parentMsg.found || parentMsg.data.status !== 'success') continue
+              // Ordinary clone blocks: success + supported only.
+              if (postBlk.data.status !== 'success') continue
+              if (this.isUnsupportedBlock(postBlk.data)) {
+                unsupportedBlockIds.push(bid)
+                continue
+              }
+              const pre = preBlockRows.get(bid) ?? null
+              if (!pre) {
+                const opTs = nextTs()
+                this.ensureBlockParentClosureInTx(stx, bid, opTs, ctx.deviceId)
+                const full = this.syncBlockPayloadFull(postBlk.data)
+                delete full.sortOrder
+                const opId = syncService.enqueueUpsertInTx(stx, 'message_block', bid, full, opTs, ctx.deviceId)
+                syncService.setMembershipClockInTx(stx, 'message_block', bid, postBlk.data.messageId, opTs, opId)
+                syncNotify = true
+              } else {
+                if (postBlk.data.messageId !== pre.messageId) continue
+                const diff = this.diffBlockPayload(pre, postBlk.data)
+                if (!diff) continue
+                delete diff.sortOrder
+                if (Object.keys(diff).length <= 2) continue
+                const opTs = nextTs()
+                this.ensureBlockParentClosureInTx(stx, bid, opTs, ctx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message_block', bid, diff, opTs, ctx.deviceId)
+                syncNotify = true
+              }
+            }
+            // Local parent order frames — exactly one topicMessage attempt when
+            // semantically required plus one per affected block parent where
+            // required. Pure stable→stable content patches advance nothing;
+            // inclusion changes use the existing try helpers (missing /
+            // excluded invalidates with 0 op, malformed rolls back).
+            if (hasDemotion) {
+              syncService.invalidateParentFrameInTx(stx, 'topicMessage', targetTopicId)
+              for (const mid of distinctMids) {
+                const pre = preMessageRows.get(mid)
+                const postRow = repos.messages.getById(mid)
+                const preStable = pre ? isStableMessageStatus(pre.status) : false
+                const postStable = postRow.found ? isStableMessageStatus(postRow.data.status) : false
+                if (pre && preStable && !postStable) {
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+                }
+              }
+            } else if (hasNewInclusion) {
+              if (
+                syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, targetTopicId, ctx.deviceId) === 'refreshed'
+              ) {
+                syncNotify = true
+              }
+            }
+            const affectedParents = new Set<string>()
+            for (const mid of distinctMids) affectedParents.add(mid)
+            for (const bid of distinctBids) {
+              const pre = preBlockRows.get(bid)
+              const postBlk = repos.blocks.getById(bid)
+              if (pre) affectedParents.add(pre.messageId)
+              if (postBlk.found) affectedParents.add(postBlk.data.messageId)
+            }
+            for (const mid of affectedParents) {
+              const postMsg = repos.messages.getById(mid)
+              if (!postMsg.found) continue
+              const postSuccess = postMsg.data.status === 'success'
+              const pre = preMessageRows.get(mid) ?? null
+              const preSuccess = pre ? pre.status === 'success' : false
+              const preStable = pre ? isStableMessageStatus(pre.status) : false
+              const postStable = isStableMessageStatus(postMsg.data.status)
+              if (pre && preStable && !postStable) continue // already invalidated above
+              if (!postStable) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+                continue
+              }
+              const isNewlyIncludedParent = (!pre && postSuccess) || (!!pre && !preSuccess && postSuccess)
+              let needsBlockFrame = isNewlyIncludedParent
+              if (!needsBlockFrame) {
+                for (const bid of distinctBids) {
+                  const bPre = preBlockRows.get(bid)
+                  const bPost = repos.blocks.getById(bid)
+                  if (!bPost.found) continue
+                  if (bPost.data.messageId !== mid && (!bPre || bPre.messageId !== mid)) continue
+                  if (!bPre) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  if (bPre.messageId !== bPost.data.messageId) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  const preIncluded = bPre.status === 'success' && !this.isUnsupportedBlock(bPre)
+                  const postIncluded = bPost.data.status === 'success' && !this.isUnsupportedBlock(bPost.data)
+                  if (preIncluded !== postIncluded) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  if (!postIncluded) {
+                    needsBlockFrame = true
+                    break
+                  }
+                }
+              }
+              if (!needsBlockFrame) continue
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, mid, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+          } else {
+            // Capture disabled: preserve existing truthful invalidation, no ops.
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', targetTopicId)
+            {
+              const mids = new Set<string>()
+              for (const plan of phase4Plans) {
+                for (const blk of plan.blocks) mids.add(blk.messageId)
+              }
+              for (const mid of mids) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+              }
+            }
           }
-        }
-      })
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('cloneMessagesToTopic', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('cloneMessagesToTopic', unsupportedBlockIds)
 
       return null
     }, `cloneMessagesToTopic(${targetTopicId}, ${entries.length} entries)`)
