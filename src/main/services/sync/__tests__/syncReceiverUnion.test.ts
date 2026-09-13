@@ -230,21 +230,50 @@ function insertExclusiveMessage(
 }
 
 function insertExclusiveBlock(sqlite: Database.Database, id: string, messageId: string, content: string): void {
+  insertExclusiveBlockWithStatus(sqlite, id, messageId, content, 'success')
+}
+
+function insertExclusiveMessageWithStatus(
+  sqlite: Database.Database,
+  id: string,
+  topicId: string,
+  content: string,
+  status: string,
+  sortOrder = 2
+): void {
+  sqlite
+    .prepare(
+      `INSERT INTO messages (id, topic_id, role, content, status, ask_id, model, model_id, assistant_id, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    )
+    .run(
+      id,
+      topicId,
+      'user',
+      content,
+      status,
+      null,
+      null,
+      null,
+      null,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-02T00:00:00.000Z',
+      sortOrder,
+      null
+    )
+}
+
+function insertExclusiveBlockWithStatus(
+  sqlite: Database.Database,
+  id: string,
+  messageId: string,
+  content: string,
+  status: string
+): void {
   sqlite
     .prepare(
       `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?)`
     )
-    .run(
-      id,
-      messageId,
-      'main_text',
-      content,
-      'success',
-      '2026-01-01T00:00:00.000Z',
-      '2026-01-02T00:00:00.000Z',
-      0,
-      null
-    )
+    .run(id, messageId, 'main_text', content, status, '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', 0, null)
 }
 
 beforeEach(() => {
@@ -645,7 +674,7 @@ describe('receiver union fail-closed matrix', () => {
     }
   }
 
-  it('orphan/unsupported/transient/non-success each fail-closed unchanged', async () => {
+  it('orphan/unsupported/transient each fail-closed unchanged (stable non-success now adopts)', async () => {
     await setupPair()
     const cases: Array<{ name: string; setup: () => void }> = [
       {
@@ -727,14 +756,25 @@ describe('receiver union fail-closed matrix', () => {
         }
       },
       {
-        name: 'non-success',
+        name: 'transient-block',
         setup: () => {
           insertSharedTopicOnly(sqliteB!)
-          insertExclusiveMessage(sqliteB!, 'e-m1', 'seed-t1', 'x', 2)
-          // Flip to error (non-success eligible? spec says only success adopted; error should fail).
-          sqliteB!.prepare(`UPDATE messages SET status='error' WHERE id='e-m1'`).run()
-          insertExclusiveBlock(sqliteB!, 'e-b1', 'e-m1', 'x')
-          sqliteB!.prepare(`UPDATE message_blocks SET status='error' WHERE id='e-b1'`).run()
+          insertExclusiveMessage(sqliteB!, 't-m2', 'seed-t1', 'x', 2)
+          sqliteB!
+            .prepare(
+              `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?)`
+            )
+            .run(
+              't-b2',
+              't-m2',
+              'main_text',
+              'x',
+              'pending',
+              '2026-01-01T00:00:00.000Z',
+              '2026-01-02T00:00:00.000Z',
+              0,
+              null
+            )
         }
       }
     ]
@@ -2317,5 +2357,248 @@ describe('receiver union claim matrix over real relay (SYNC-DATA-058)', () => {
     await syncService.sync()
     expect(outboxCount(dbA!)).toBe(0)
     expect(outboxCount(dbB!)).toBe(0)
+  }, 60000)
+})
+
+describe('receiver union stable non-success bootstrap (cursor-0 ordinary live stable history)', () => {
+  it('exclusive error/paused/sent/legacy message/block combos bootstrap, mint membership/frames, push back, converge with no storm; baseline projectable', async () => {
+    const n = await pairAndSeedPublish()
+    bindProfile('B', credB)
+    insertSharedTopicOnly(sqliteB!)
+    const combos: Array<{ msg: string; blk: string; status: string }> = [
+      { msg: 'ns-m-err', blk: 'ns-b-err', status: 'error' },
+      { msg: 'ns-m-paused', blk: 'ns-b-paused', status: 'paused' },
+      { msg: 'ns-m-sent', blk: 'ns-b-sent', status: 'sent' },
+      { msg: 'ns-m-legacy', blk: 'ns-b-legacy', status: 'archived' }
+    ]
+    let sort = 2
+    for (const c of combos) {
+      insertExclusiveMessageWithStatus(sqliteB!, c.msg, 'seed-t1', `body ${c.status}`, c.status, sort)
+      sort += 1
+      insertExclusiveBlockWithStatus(sqliteB!, c.blk, c.msg, `body ${c.status}`, c.status)
+    }
+    await syncService.sync()
+    expect(readCursor(dbB!)).toBeGreaterThanOrEqual(n)
+    if (outboxCount(dbB!) > 0) await syncService.sync()
+    expect(outboxCount(dbB!)).toBe(0)
+    // All exclusives retained with statuses preserved; suffix after incoming.
+    const orderRows = (
+      sqliteB!
+        .prepare(`SELECT id FROM messages WHERE topic_id='seed-t1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(orderRows).toContain('seed-m1')
+    expect(orderRows).toContain('seed-m2')
+    for (const c of combos) {
+      expect(orderRows).toContain(c.msg)
+      const mrow = sqliteB!.prepare(`SELECT status FROM messages WHERE id=?`).get(c.msg) as { status: string }
+      expect(mrow.status).toBe(c.status)
+      const brow = sqliteB!.prepare(`SELECT status FROM message_blocks WHERE id=?`).get(c.blk) as { status: string }
+      expect(brow.status).toBe(c.status)
+      const mem = sqliteB!.prepare(`SELECT timestamp FROM sync_membership_clock WHERE child_entity_id=?`).get(c.msg) as
+        | { timestamp: number }
+        | undefined
+      expect(mem).toBeTruthy()
+      const bmem = sqliteB!.prepare(`SELECT timestamp FROM sync_membership_clock WHERE child_entity_id=?`).get(c.blk) as
+        | { timestamp: number }
+        | undefined
+      expect(bmem).toBeTruthy()
+    }
+    // Minted frame covers incoming winner plus exclusives; frame above entities.
+    const frame = sqliteB!
+      .prepare(
+        `SELECT ordered_child_ids_json AS json, timestamp AS ts FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='seed-t1'`
+      )
+      .get() as { json: string; ts: number }
+    expect(frame).toBeTruthy()
+    const listed = JSON.parse(frame.json) as string[]
+    for (const id of orderRows) expect(listed).toContain(id)
+    for (const c of combos) {
+      const ent = sqliteB!.prepare(`SELECT timestamp FROM sync_entity_clock WHERE entity_id=?`).get(c.msg) as {
+        timestamp: number
+      }
+      expect(frame.ts).toBeGreaterThan(ent.timestamp)
+    }
+    // Baseline becomes projectable: no unversioned-membership.
+    const { captureLocalSyncBaselineCandidate } = await import('../syncBaseline')
+    const cand = captureLocalSyncBaselineCandidate(dbB!)
+    expect(cand.completeness.reasons).not.toContain('unversioned-membership')
+    // Seed converges on every exclusive with wire statuses preserved.
+    bindProfile('A', credA)
+    await syncService.sync()
+    for (const c of combos) {
+      expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id=?`).get(c.msg)).toBeTruthy()
+      expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id=?`).get(c.blk)).toBeTruthy()
+      const mrow = sqliteA!.prepare(`SELECT status FROM messages WHERE id=?`).get(c.msg) as { status: string }
+      expect(mrow.status).toBe(c.status)
+    }
+    const orderA = (
+      sqliteA!
+        .prepare(`SELECT id FROM messages WHERE topic_id='seed-t1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
+    const orderB2 = (
+      sqliteB!
+        .prepare(`SELECT id FROM messages WHERE topic_id='seed-t1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(orderB2).toEqual(orderA)
+    const framesBefore = (sqliteB!.prepare(`SELECT COUNT(*) as n FROM sync_parent_order_frame`).get() as { n: number })
+      .n
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
+    expect((sqliteB!.prepare(`SELECT COUNT(*) as n FROM sync_parent_order_frame`).get() as { n: number }).n).toBe(
+      framesBefore
+    )
+    expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
+  }, 60000)
+
+  it('shared-message parent exclusive non-success block converges', async () => {
+    const n = await pairAndSeedPublish()
+    void n
+    bindProfile('B', credB)
+    insertSharedTopicOnly(sqliteB!)
+    sqliteB!
+      .prepare(
+        `INSERT INTO messages (id, topic_id, role, content, status, ask_id, model, model_id, assistant_id, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        'seed-m1',
+        'seed-t1',
+        'user',
+        'hello',
+        'success',
+        null,
+        null,
+        null,
+        null,
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        0,
+        null
+      )
+    insertExclusiveBlockWithStatus(sqliteB!, 'ns-shared-b-err', 'seed-m1', 'exclusive error block', 'error')
+    await syncService.sync()
+    if (outboxCount(dbB!) > 0) await syncService.sync()
+    expect(outboxCount(dbB!)).toBe(0)
+    expect(sqliteB!.prepare(`SELECT id FROM message_blocks WHERE id='seed-b1'`).get()).toBeTruthy()
+    expect(sqliteB!.prepare(`SELECT id FROM message_blocks WHERE id='ns-shared-b-err'`).get()).toBeTruthy()
+    const borderB = (
+      sqliteB!
+        .prepare(`SELECT id FROM message_blocks WHERE message_id='seed-m1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(borderB).toContain('seed-b1')
+    expect(borderB).toContain('ns-shared-b-err')
+    const frameB = sqliteB!
+      .prepare(
+        `SELECT ordered_child_ids_json AS json FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id='seed-m1'`
+      )
+      .get() as { json: string }
+    expect(JSON.parse(frameB.json)).toEqual(borderB)
+    bindProfile('A', credA)
+    await syncService.sync()
+    expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='ns-shared-b-err'`).get()).toBeTruthy()
+    const borderA = (
+      sqliteA!
+        .prepare(`SELECT id FROM message_blocks WHERE message_id='seed-m1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{ id: string }>
+    ).map((r) => r.id)
+    expect(borderA).toEqual(borderB)
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
+    expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
+  }, 60000)
+
+  it('same-ID status divergence and partial non-success fail closed with zero writes', async () => {
+    await pairAndSeedPublish()
+    bindProfile('A', credA)
+    const { captureLocalSyncBaselineCandidate } = await import('../syncBaseline')
+    const { buildPublishEnvelope } = await import('../syncBaselinePublish')
+    const { mapWireEnvelopeToMergeInput } = await import('../syncBaselineWireApply')
+    const { mergeValidatedBaselineInTx } = await import('../syncBaselineApply')
+    const { adoptReceiverExclusiveInTx: adoptTx } = await import('../syncReceiverUnion')
+    const candidate = captureLocalSyncBaselineCandidate(dbA!)
+    const channelId = candidate.observedLocalChannelKey as string
+    const watermark = candidate.observedLocalCursor as number
+    const { envelope } = buildPublishEnvelope(candidate, channelId, watermark)
+    const snapOf = (cDb: BetterSQLite3Database<typeof schema>, cSqlite: Database.Database): unknown => ({
+      outbox: cDb.select().from(schema.syncOutbox).all(),
+      entity: cSqlite.prepare(`SELECT * FROM sync_entity_clock`).all(),
+      field: cSqlite.prepare(`SELECT * FROM sync_field_clock`).all(),
+      membership: cSqlite.prepare(`SELECT * FROM sync_membership_clock`).all(),
+      frame: cSqlite.prepare(`SELECT * FROM sync_parent_order_frame`).all(),
+      topics: cSqlite.prepare(`SELECT * FROM topics ORDER BY id`).all(),
+      messages: cSqlite.prepare(`SELECT * FROM messages ORDER BY id`).all(),
+      blocks: cSqlite.prepare(`SELECT * FROM message_blocks ORDER BY id`).all()
+    })
+    // Same-ID status divergence: local seed-m1 flipped to error while incoming
+    // carries success — strict-identical overlap fails the whole tx.
+    {
+      const fresh = openChatDb()
+      try {
+        insertLegacyHistory(fresh.sqlite)
+        fresh.sqlite.prepare(`UPDATE messages SET status='error' WHERE id='seed-m1'`).run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() =>
+          fresh.db.transaction((tx) => {
+            const mapped = mapWireEnvelopeToMergeInput(envelope)
+            adoptTx(tx as never, mapped.input, 'test-device-ns-diverge')
+            mergeValidatedBaselineInTx(tx as never, mapped.input)
+          })
+        ).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Partial non-success: exclusive error message with entity clock but
+    // missing field/membership stays fail-closed with zero writes.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessageWithStatus(fresh.sqlite, 'ns-p-m1', 'seed-t1', 'x', 'error', 2)
+        insertExclusiveBlockWithStatus(fresh.sqlite, 'ns-p-b1', 'ns-p-m1', 'x', 'error')
+        fresh.db
+          .insert(schema.syncEntityClock)
+          .values({
+            entityType: 'message',
+            entityId: 'ns-p-m1',
+            timestamp: 1,
+            operationId: '00000000-0000-4000-a000-000000000031'
+          })
+          .run()
+        const before = snapOf(fresh.db, fresh.sqlite)
+        expect(() =>
+          fresh.db.transaction((tx) => {
+            const mapped = mapWireEnvelopeToMergeInput(envelope)
+            adoptTx(tx as never, mapped.input, 'test-device-ns-partial')
+            mergeValidatedBaselineInTx(tx as never, mapped.input)
+          })
+        ).toThrow()
+        expect(snapOf(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
   }, 60000)
 })

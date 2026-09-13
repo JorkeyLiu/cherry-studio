@@ -4,8 +4,9 @@
  *
  * Only baseline bootstrap (cursor==0) same Main SQLite tx before applying
  * incoming envelope. Adopts local-exclusive complete subtree/entities that
- * are fully unversioned and ordinary success. Fail-closed 0 writes on any
- * ambiguity, partial version, tombstone/register, orphan, unsupported, etc.
+ * are fully unversioned and ordinary live stable non-transient. Fail-closed
+ * 0 writes on any ambiguity, partial version, tombstone/register, orphan,
+ * unsupported, etc.
  *
  * Clock strictly > local+incoming+wall, MAX_SAFE fail-closed.
  * Entity ops precede frames; shared parents use membership > incoming frame
@@ -44,12 +45,10 @@ function fail(msg: string): never {
 }
 
 function isEligibleMessageRow(row: { status: string | null }): boolean {
-  if (!isStableMessageStatus(row.status)) return false
-  return row.status === 'success'
+  return isStableMessageStatus(row.status)
 }
 function isEligibleBlockRow(row: { status: string | null; type: string | null; extra: string | null }): boolean {
   if (!isStableBlockStatus(row.status)) return false
-  if (row.status !== 'success') return false
   const overflow = decodeAdoptionOverflow(row.extra)
   if (isUnsupportedBlockForSync({ type: row.type, overflow })) return false
   return true
