@@ -230,8 +230,11 @@ export class SyncBusyError extends Error {
  * - `deferred`: PUT attempted but relay/transport refused (409 conflict or
  *   other publish failure). The successful op-log sync stays successful; the
  *   error is already truthfully recorded by the barrier path (lastError +
- *   scoped log). Consumes the local intent for this round with no immediate
- *   re-capture/retry; the next local-change-driven successful sync retries.
+ *   scoped log). Consumes the local intent for this round. A first-attempt
+ *   409 runs exactly one bounded stale-409 recovery (one `sync()` to head
+ *   plus one fresh second PUT); any other failure or the second attempt
+ *   never retries again, and the next local-change-driven successful sync
+ *   retries.
  */
 export type BaselineAutoPublishResult =
   | { kind: 'published'; watermark: number; digest: string; channelId: string }
@@ -6957,12 +6960,13 @@ export class SyncService {
   }
 
   /**
-   * Conservative auto-publish eligibility + single attempt for local-triggered
+   * Conservative auto-publish eligibility + bounded attempts for local-triggered
    * auto-sync only. Callers must invoke this at most once after an ordinary
    * `sync()` success when an unconsumed local publish intent exists. Never
    * called from `sync()` itself (manual `sync()` never auto-publishes) and
-   * never recurses into auto-sync: exactly one barrier PUT at most, no new
-   * timers, no new persisted state, full op-log retention untouched.
+   * never recurses into auto-sync: at most two barrier PUTs via one bounded
+   * stale-409 recovery, no new timers, no new persisted state, full op-log
+   * retention untouched.
    *
    * Classification uses only direct snapshot reads plus `instanceof` and the
    * numeric relay `cause.status` — never exception message strings. The strict
@@ -6975,11 +6979,51 @@ export class SyncService {
    *   intent so the next successful sync cycle retries after draining.
    * - `deferred` (409/other PUT failure): the op-log sync stays successful;
    *   the barrier path already recorded the failure truthfully (`lastError` +
-   *   scoped log). Caller consumes the intent with no immediate retry.
+   *   scoped log). Caller consumes the intent for this round. A first-attempt
+   *   409 runs the single bounded stale-409 recovery below; any other failure
+   *   or the second attempt never retries again.
    * - Shutdown/stale-config/config-preflight propagate as thrown errors so
    *   automation aborts without retry; they never become deferred.
+   *
+   * Stale-409 recovery (bounded, exactly one retry): if and only if the first
+   * single attempt below ends as `deferred`/`conflict` (the first
+   * `publishBaseline()` PUT reached the relay and lost with status 409, after
+   * that call fully released the publish/status locks in its `finally`), run
+   * one sequential ordinary `sync()` to the current head — which never PUTs —
+   * then re-run the single attempt once with a freshly re-read config
+   * generation, credentials, cursor, eligibility, and candidate through the
+   * existing full publish barrier. At most two PUTs per call, no recursion
+   * into `publishBaselineIfEligible`, no synthesized intent/wake/timer, no
+   * loop or backoff. The second attempt's result is returned as-is (second
+   * 409 stays `deferred`/`conflict`; busy/barrier/outbox/skipped stay
+   * truthful) with no third attempt; shutdown/stale/preflight still throw.
    */
   async publishBaselineIfEligible(): Promise<BaselineAutoPublishResult> {
+    const first = await this.attemptBaselinePublishOnce()
+    if (first.kind !== 'deferred' || first.reason !== 'conflict') return first
+    try {
+      await this.sync()
+    } catch (e) {
+      if (e instanceof SyncShutdownError) throw e
+      if (e instanceof SyncStaleConfigError) throw e
+      if (e instanceof SyncConfigPreflightError) throw e
+      if (e instanceof SyncBusyError) {
+        return { kind: 'needs-sync', reason: 'busy', detail: 'sync or publish already in progress' }
+      }
+      const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
+      logger.warn(`[publishBaselineIfEligible] stale-409 resync deferred: ${detail}`)
+      return { kind: 'deferred', reason: 'publish-failed', detail: detail || 'resync failed' }
+    }
+    return await this.attemptBaselinePublishOnce()
+  }
+
+  /**
+   * Single publish attempt for the conservative auto-publish path: full
+   * eligibility read plus at most one `publishBaseline()` barrier PUT. No
+   * retry, no sync, no timers; the stale-409 budget lives only in
+   * `publishBaselineIfEligible` above so eligibility logic is not duplicated.
+   */
+  private async attemptBaselinePublishOnce(): Promise<BaselineAutoPublishResult> {
     this.throwIfShutdown()
     const syncGen = this.configGeneration
     this.throwIfStaleConfig(syncGen)
@@ -7112,7 +7156,9 @@ export class SyncService {
       const status = (e as { cause?: { status?: unknown } })?.cause?.status
       const detail = e instanceof Error ? e.message.slice(0, 300) : String(e).slice(0, 300)
       if (status === 409) {
-        logger.info(`[publishBaselineIfEligible] baseline-conflict deferred (no immediate retry): ${detail}`)
+        logger.info(
+          `[publishBaselineIfEligible] baseline-conflict deferred (caller runs bounded stale-409 recovery): ${detail}`
+        )
         return { kind: 'deferred', reason: 'conflict', detail: detail || 'baseline-conflict' }
       }
       logger.warn(`[publishBaselineIfEligible] publish failed deferred (sync stays success): ${detail}`)

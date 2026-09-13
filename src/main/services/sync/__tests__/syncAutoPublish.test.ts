@@ -500,7 +500,7 @@ describe('publishBaselineIfEligible production eligibility', () => {
     }
   })
 
-  it('409 conflict defers without throwing and keeps op-log sync truthful (no retry)', async () => {
+  it('409 conflict runs one bounded stale-409 recovery: second 409 stops at exactly 2 PUTs', async () => {
     bindChannel(CHANNEL)
     setCursor(CURSOR_N)
     seedPublishableTopic()
@@ -510,11 +510,16 @@ describe('publishBaselineIfEligible production eligibility', () => {
     }
     ;(conflict as { cause?: unknown }).cause = { status: 409 }
     vi.spyOn(syncClient, 'publishBaseline').mockRejectedValue(conflict)
+    const syncSpy = vi.spyOn(syncService, 'sync')
     const res = await syncService.publishBaselineIfEligible()
     expect(res).toMatchObject({ kind: 'deferred', reason: 'conflict' })
     expect(readCursor()).toBe(CURSOR_N)
     expect(db.select().from(schema.syncOutbox).all()).toHaveLength(0)
     expect(readLastError()).toMatch(/409/)
+    // Bounded budget: first 409 -> one sequential sync() -> one fresh second
+    // PUT which also 409s; no third attempt and no tight retry.
+    expect(vi.mocked(syncClient.publishBaseline)).toHaveBeenCalledTimes(2)
+    expect(syncSpy).toHaveBeenCalledTimes(1)
   })
 
   it('400/transport failure defers without throwing and keeps cursor/outbox truthful', async () => {
@@ -527,13 +532,15 @@ describe('publishBaselineIfEligible production eligibility', () => {
     }
     ;(bad as { cause?: unknown }).cause = { status: 400 }
     vi.spyOn(syncClient, 'publishBaseline').mockRejectedValueOnce(bad)
+    const syncSpy = vi.spyOn(syncService, 'sync')
     const first = await syncService.publishBaselineIfEligible()
     expect(first).toMatchObject({ kind: 'deferred', reason: 'publish-failed' })
     expect(readCursor()).toBe(CURSOR_N)
     expect(db.select().from(schema.syncOutbox).all()).toHaveLength(0)
     expect(readLastError()).toMatch(/400/)
-    // No immediate re-capture/retry inside the method: exactly one PUT attempt.
+    // Non-409 never recovers: exactly one PUT attempt and no resync.
     expect(vi.mocked(syncClient.publishBaseline)).toHaveBeenCalledTimes(1)
+    expect(syncSpy).not.toHaveBeenCalled()
   })
 
   it('ordinary sync() success never PUTs by itself (manual path stays publish-free)', async () => {

@@ -642,4 +642,243 @@ describe('auto local mutation -> debounce/drain -> publish -> B bootstrap -> N+1
       globalThis.fetch = realFetch
     }
   }, 60000)
+
+  it('stale loser with no new local edit pulls to head and republishes covering candidate (2 PUTs)', async () => {
+    await startRelay()
+
+    // Same paired channel via production connect/request/accept/getPairState.
+    bindProfile('A')
+    await syncService.connect()
+    credA = snapshotCreds()
+    expect(credA.code.length).toBeGreaterThan(0)
+
+    configStore.delete('deviceId')
+    configStore.delete('sync:deviceCode')
+    configStore.delete('sync:deviceAuth')
+    bindProfile('B')
+    credB = { deviceId: '', code: '', secret: '' }
+    bindProfile('B')
+    await syncService.connect()
+    credB = snapshotCreds()
+    expect(credB.code.length).toBeGreaterThan(0)
+    expect(credB.code).not.toBe(credA.code)
+
+    bindProfile('B')
+    const req = await syncService.requestPairing(credA.code)
+    expect(typeof req.requestId).toBe('string')
+    bindProfile('A')
+    const accepted = await syncService.acceptPairing(req.requestId)
+    expect(typeof accepted.channelId).toBe('string')
+    bindProfile('B')
+    await syncService.getPairState()
+    const channelA = (() => {
+      bindProfile('A')
+      return readChannel('A')
+    })()
+    const channelB = (() => {
+      bindProfile('B')
+      return readChannel('B')
+    })()
+    expect(channelA).toBeTruthy()
+    expect(channelB).toBe(channelA)
+    const channelId = channelA as string
+
+    // A base dataset; B stays clean (no pre-existing local rows here).
+    bindProfile('A')
+    ensureFullTopic(aggA!, 'stale-topic-1', 'Stale One')
+    expect(
+      aggA!.appendMessage('stale-topic-1', msgJson('stale-m1', 'stale-topic-1', 'stale one') as never, [
+        blockJson('stale-b1', 'stale-m1', 'stale one') as never
+      ]).ok
+    ).toBe(true)
+    expect(
+      aggA!.appendMessage('stale-topic-1', msgJson('stale-m2', 'stale-topic-1', 'stale two') as never, [
+        blockJson('stale-b2', 'stale-m2', 'stale two') as never
+      ]).ok
+    ).toBe(true)
+    ensureFullTopic(aggA!, 'stale-topic-2', 'Stale Empty')
+
+    // Local-triggered publish only: clear the one-shot seed intent (seed
+    // recovery is covered by syncSeedBaseline.test.ts).
+    bindProfile('A')
+    syncService.setSeedBaselineIntentForTests(false)
+
+    const realFetch = globalThis.fetch
+    let baselinePutCount = 0
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      try {
+        const url = typeof input === 'string' ? input : String((input as { url?: unknown })?.url ?? '')
+        const method = String(
+          init?.method ?? (typeof input !== 'string' ? (input as { method?: unknown })?.method : undefined) ?? 'GET'
+        ).toUpperCase()
+        if (method === 'PUT' && url.includes('/sync/baseline')) baselinePutCount += 1
+      } catch {}
+      return realFetch(input as never, init)
+    }) as typeof fetch
+
+    try {
+      // Both profiles converge at H0 via explicit manual sync only (manual
+      // sync never PUTs). The receiver side mints covering order-frame
+      // repairs on pull, so alternate B/A until both outboxes drain and both
+      // cursors agree and stop moving.
+      for (let round = 0; round < 6; round++) {
+        bindProfile('B')
+        await syncService.sync()
+        expect(lastError('B')).toBeNull()
+        bindProfile('A')
+        await syncService.sync()
+        expect(lastError('A')).toBeNull()
+        if (outboxCount('A') === 0 && outboxCount('B') === 0 && readCursor('A') === readCursor('B')) {
+          const steadyA = readCursor('A')
+          const steadyB = readCursor('B')
+          bindProfile('B')
+          await syncService.sync()
+          bindProfile('A')
+          await syncService.sync()
+          expect(lastError('A')).toBeNull()
+          expect(lastError('B')).toBeNull()
+          if (
+            outboxCount('A') === 0 &&
+            outboxCount('B') === 0 &&
+            readCursor('A') === steadyA &&
+            readCursor('B') === steadyB
+          ) {
+            break
+          }
+        }
+      }
+      expect(outboxCount('A')).toBe(0)
+      expect(outboxCount('B')).toBe(0)
+      expect(readCursor('A')).toBe(readCursor('B'))
+      const h0 = readCursor('A')
+      expect(h0).toBeGreaterThan(0)
+      expect(baselinePutCount).toBe(0)
+
+      // A publishes the H0 baseline (single PUT, 200).
+      bindProfile('A')
+      const pubA = await syncService.publishBaselineIfEligible()
+      expect(pubA.kind).toBe('published')
+      if (pubA.kind === 'published') expect(pubA.watermark).toBe(h0)
+      expect(lastError('A')).toBeNull()
+      expect(baselinePutCount).toBe(1)
+
+      // Winner B advances the op head and the baseline without A involved:
+      // a topic-metadata edit (no new message/block parents, so the loser
+      // pulls it with no covering repairs pending), op-log push, then
+      // baseline publish at H1.
+      bindProfile('B')
+      expect(aggB!.updateTopicMetadata('stale-topic-1', undefined, false, 'prompt-b-bump', false).ok).toBe(true)
+      await syncService.sync()
+      expect(lastError('B')).toBeNull()
+      // B-only drain (A stays stale): the author side rarely mints repairs,
+      // but push again while anything remains so the publish barrier sees a
+      // drained outbox. A is never synced here.
+      for (let round = 0; round < 4 && outboxCount('B') > 0; round++) {
+        bindProfile('B')
+        await syncService.sync()
+        expect(lastError('B')).toBeNull()
+      }
+      expect(outboxCount('B')).toBe(0)
+      const h1 = readCursor('B')
+      expect(h1).toBeGreaterThan(h0)
+      const pubB = await syncService.publishBaselineIfEligible()
+      expect(pubB.kind).toBe('published')
+      if (pubB.kind === 'published') expect(pubB.watermark).toBe(h1)
+      expect(lastError('B')).toBeNull()
+      expect(baselinePutCount).toBe(2)
+      const atH1 = await relayGetBaseline(credB)
+      expect(atH1.status).toBe(200)
+      expect((atH1.json as { watermark: number }).watermark).toBe(h1)
+
+      // Winner advances the op head once more WITHOUT publishing, so the
+      // relay head runs ahead of its baseline: head H2 > baseline H1. The
+      // loser's fresh second PUT then lands strictly above the winner's
+      // baseline (replace path), which never requires payload identity with
+      // the winner — only that the candidate covers the current head.
+      bindProfile('B')
+      expect(aggB!.updateTopicMetadata('stale-topic-1', undefined, false, 'prompt-b-bump-2', false).ok).toBe(true)
+      await syncService.sync()
+      expect(lastError('B')).toBeNull()
+      for (let round = 0; round < 4 && outboxCount('B') > 0; round++) {
+        bindProfile('B')
+        await syncService.sync()
+        expect(lastError('B')).toBeNull()
+      }
+      expect(outboxCount('B')).toBe(0)
+      const h2 = readCursor('B')
+      expect(h2).toBeGreaterThan(h1)
+      const stillH1 = await relayGetBaseline(credB)
+      expect(stillH1.status).toBe(200)
+      expect((stillH1.json as { watermark: number }).watermark).toBe(h1)
+
+      // Stale loser A: no new local edit, outbox drained, cursor still H0.
+      // Hide the winner ops from the very first barrier pull only, modeling
+      // the TOCTOU race where they land after the loser's quiescence proof:
+      // first PUT then deterministically loses with 409, the bounded recovery
+      // sync pulls to head, and the fresh second PUT covers the current head.
+      bindProfile('A')
+      expect(readCursor('A')).toBe(h0)
+      expect(outboxCount('A')).toBe(0)
+      baselinePutCount = 0
+      let hiddenPulls = 0
+      const staleCursor = h0
+      globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+        try {
+          const url = typeof input === 'string' ? input : String((input as { url?: unknown })?.url ?? '')
+          const method = String(
+            init?.method ?? (typeof input !== 'string' ? (input as { method?: unknown })?.method : undefined) ?? 'GET'
+          ).toUpperCase()
+          if (method === 'PUT' && url.includes('/sync/baseline')) baselinePutCount += 1
+          if (method === 'GET' && url.includes('/sync/pull') && hiddenPulls === 0) {
+            try {
+              const parsed = new URL(url)
+              if (parsed.searchParams.get('cursor') === String(staleCursor)) {
+                hiddenPulls += 1
+                return new Response(JSON.stringify({ operations: [], cursor: staleCursor }), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' }
+                })
+              }
+            } catch {}
+          }
+        } catch {}
+        return realFetch(input as never, init)
+      }) as typeof fetch
+
+      bindProfile('A')
+      const recovered = await syncService.publishBaselineIfEligible()
+      expect(recovered.kind).toBe('published')
+      if (recovered.kind === 'published') {
+        expect(recovered.watermark).toBe(h2)
+        expect(recovered.channelId).toBe(channelId)
+      }
+      // Bounded budget: exactly the first losing PUT plus the fresh covering
+      // PUT; the recovery sync itself never PUTs.
+      expect(baselinePutCount).toBe(2)
+      expect(hiddenPulls).toBe(1)
+      expect(lastError('A')).toBeNull()
+      expect(readCursor('A')).toBe(h2)
+      expect(outboxCount('A')).toBe(0)
+      const fetched = await relayGetBaseline(credA)
+      expect(fetched.status).toBe(200)
+      const envelope = fetched.json as { watermark: number; channelId: string; digest: string }
+      expect(envelope.watermark).toBe(h2)
+      expect(envelope.channelId).toBe(channelId)
+      if (recovered.kind === 'published') expect(envelope.digest).toBe(recovered.digest)
+      // No tight retry: quiescence issues no further PUT.
+      await sleepMs(1500)
+      expect(baselinePutCount).toBe(2)
+
+      // Loser converged on the winner's head through the recovery sync.
+      const aTopic = sqliteA!.prepare("SELECT id FROM topics WHERE id='stale-topic-1'").get() as
+        | { id: string }
+        | undefined
+      expect(aTopic?.id).toBe('stale-topic-1')
+    } finally {
+      try {
+        syncService.resetShutdownForTests()
+      } catch {}
+      globalThis.fetch = realFetch
+    }
+  }, 60000)
 })
