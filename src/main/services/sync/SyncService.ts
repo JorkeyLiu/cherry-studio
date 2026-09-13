@@ -39,12 +39,14 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { chatDbService } from '../chatDb'
 import * as schema from '../chatDb/schema'
 import { captureLocalSyncBaselineCandidate } from './syncBaseline'
+import { mergeValidatedBaselineInTx, SyncBaselineApplyError } from './syncBaselineApply'
 import { assertBarrierSnapshotProof, buildPublishEnvelope, SyncBaselinePublishError } from './syncBaselinePublish'
-import { applyWireSyncEnvelopeInTx } from './syncBaselineWireApply'
+import { mapWireEnvelopeToMergeInput } from './syncBaselineWireApply'
 import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import { compareClock as compareFrameClock, evaluateEffectiveOrder } from './syncFrameEvaluation'
 import { advanceFrameHighWater, getFrameHighWater } from './syncFrameHighWater'
+import { adoptReceiverExclusiveInTx } from './syncReceiverUnion'
 import { clearResendAttemptsInTx, getResendAttemptInTx, parseRemovedBlockIds } from './syncResendAttempt'
 import {
   formatSyncTombstoneValue,
@@ -3383,6 +3385,118 @@ export class SyncService {
     throw new Error(`order_frame ${op.id}: unknown kind ${String(payload.kind)}`)
   }
 
+  /**
+   * All-or-nothing suffix-merge emission for incremental order_frame apply
+   * (SYNC-DATA-035 suffix propagation, SYNC-DATA-048 LWW preserved).
+   *
+   * Legal scope only: callers must have already evaluated the incoming frame
+   * with `evaluateEffectiveOrder` and confirmed NOT incomplete. Caller
+   * `liveChildren` is advisory only — this helper carries parentId proof by
+   * re-querying authoritative membership in the same apply tx
+   * (`getMembershipClockInTx`) and verifying every suffix child has the same
+   * parent (`mem.parentId === parentId`) with clock strictly greater than the
+   * incoming frameClock. It never relaxes same-ID value/parent divergence,
+   * equal-clock divergence, orphan/tombstone/register/partial-version
+   * fail-closed (those throw in the caller before reaching here).
+   *
+   * All-or-nothing: every fallible dependency that can fail (at least
+   * `getDeviceId`) is fetched/validated before any frame persist. Once a
+   * merge is decided (non-empty suffix surviving recheck), allocate / persist
+   * / enqueue / materialize / SQLite / validation failure throws so the whole
+   * `applyIncomingOperation` tx rolls back with no `sync_applied` row and the
+   * pull cursor never advances past the unapplied op. `MAX_SAFE` exhaustion
+   * therefore fails closed (throw), never warn-and-commit.
+   *
+   * Deterministic expected no-ops returning false (no throw): empty suffix;
+   * authoritative clock recheck no longer `> incoming`; suffix id absent from
+   * `incomingEffective` (effective already needs no merge); caller set-diff
+   * shows no new coverage (callers skip the helper in that case).
+   *
+   * Mechanism: persists the incoming effective order under a strictly higher
+   * merge clock (existing winning-clock machinery) and enqueues exactly one
+   * order_frame op reusing the existing wire/schema/relay (no new
+   * wire/schema/relay/lease/ack). Termination/idempotence: merge clock wins
+   * incoming/existing/memberships/high-water; callers emit only on non-empty
+   * suffix with set-diff, so retries emit nothing further.
+   */
+  private emitSuffixMergeFrameInApply(
+    db: BetterSQLite3Database<typeof schema>,
+    kind: 'topicMessage' | 'messageBlock',
+    parentId: string,
+    liveChildren: Map<string, { timestamp: number; operationId: string }>,
+    incomingEffective: string[],
+    suffix: string[],
+    incomingClock: { timestamp: number; operationId: string },
+    opIdForLog: string
+  ): boolean {
+    if (suffix.length === 0) return false
+    for (const sid of suffix) {
+      if (!incomingEffective.includes(sid)) return false
+    }
+    // All fallible dependencies before any persist: deviceId first so a
+    // device-identity failure can never leave a persisted frame without its
+    // matching outbox op (permanent one-sided order).
+    const deviceId = this.getDeviceId()
+    if (typeof deviceId !== 'string' || deviceId.length === 0) {
+      throw new Error(`order_frame ${opIdForLog}: suffix merge deviceId unavailable for ${parentId}`)
+    }
+    // Authoritative parentId proof: re-query membership in the same tx.
+    // liveChildren is advisory only and never trusted for parent/clock truth.
+    const tx = db as unknown as SyncTxExecutor
+    const childType = kind === 'topicMessage' ? 'message' : 'message_block'
+    for (const sid of suffix) {
+      const mem = this.getMembershipClockInTx(tx, childType, sid)
+      if (!mem) {
+        throw new Error(`order_frame ${opIdForLog}: suffix merge missing membership for ${childType}/${sid}`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(
+          `order_frame ${opIdForLog}: suffix merge parent mismatch for ${sid}: ${mem.parentId} vs ${parentId}`
+        )
+      }
+      if (compareFrameClock({ timestamp: mem.timestamp, operationId: mem.operationId }, incomingClock) <= 0) {
+        return false
+      }
+    }
+    // Allocate strictly-winning clock; any exhaustion/validation error throws
+    // and rolls back the whole apply tx (fail-closed, cursor not advanced).
+    const mergeClock = this.allocateWinningFrameClockInTx(tx, kind, parentId, [...liveChildren.keys()])
+    if (compareFrameClock(mergeClock, incomingClock) <= 0) {
+      throw new Error(`order_frame ${opIdForLog}: suffix merge clock does not win incoming for ${parentId}`)
+    }
+    this.persistParentFrameInTx(tx, {
+      kind,
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...incomingEffective],
+      timestamp: mergeClock.timestamp,
+      operationId: mergeClock.operationId
+    })
+    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    const op: SyncOperation = {
+      id: mergeClock.operationId,
+      entityType: entityType as SyncOperation['entityType'],
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: mergeClock.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind,
+        parentId,
+        orderedChildIds: [...incomingEffective],
+        frameClock: { timestamp: mergeClock.timestamp, operationId: mergeClock.operationId }
+      }
+    }
+    this.enqueueOrderFrameInTx(tx, op)
+    if (kind === 'topicMessage') this.materializeTopicMessageOrder(db, parentId, [...incomingEffective])
+    else this.materializeMessageBlockOrder(db, [...incomingEffective])
+    logger.info(
+      `[applyOrderFrame] suffix merge emitted for ${parentId}: suffix=${suffix.length} mergeTs=${mergeClock.timestamp} from=${opIdForLog.slice(0, 8)}`
+    )
+    return true
+  }
+
   private applyTopicMessageOrderFrame(
     op: SyncOperation,
     parentId: string,
@@ -3481,10 +3595,47 @@ export class SyncService {
         operationId: frameClock.operationId
       })
       this.materializeTopicMessageOrder(db, parentId, effective)
+      // Suffix propagation: persist covered incoming, then all-or-nothing merge
+      // (merge failure throws and rolls back the whole apply tx).
+      this.emitSuffixMergeFrameInApply(
+        db,
+        'topicMessage',
+        parentId,
+        liveChildren,
+        [...effective],
+        [...evaluated.suffix],
+        frameClock,
+        op.id
+      )
       return true
     }
     const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
     if (cmp < 0) {
+      // Loser path with provable suffix: incoming brings union coverage the
+      // stored frame lacks; emit one higher merge so the union propagates
+      // instead of being silently ignored. Guarded by set-diff for idempotence.
+      // Merge failure throws (whole apply tx rolls back, cursor not advanced).
+      if (evaluated.suffix.length > 0) {
+        const existingSet = new Set(existing.orderedChildIds)
+        const bringsNew = effective.some((id) => !existingSet.has(id))
+        const missesStored = existing.orderedChildIds.some((id) => !new Set(effective).has(id))
+        // Emit only when the incoming effective differs from stored (new
+        // coverage in either direction); identical sets mean the stored frame
+        // already carries the union and no propagation is needed.
+        if (bringsNew || missesStored) {
+          const merged = this.emitSuffixMergeFrameInApply(
+            db,
+            'topicMessage',
+            parentId,
+            liveChildren,
+            [...effective],
+            [...evaluated.suffix],
+            frameClock,
+            op.id
+          )
+          if (merged) return true
+        }
+      }
       logger.info(`[applyOrderFrame] older frame ${op.id} loses to ${existing.operationId} for ${parentId}`)
       return false
     }
@@ -3515,6 +3666,17 @@ export class SyncService {
             operationId: existing.operationId
           })
           this.materializeTopicMessageOrder(db, parentId, effective)
+          // Normalized suffix still needs propagation: all-or-nothing higher merge.
+          this.emitSuffixMergeFrameInApply(
+            db,
+            'topicMessage',
+            parentId,
+            liveChildren,
+            [...effective],
+            [...evaluated.suffix],
+            frameClock,
+            op.id
+          )
         }
         return false
       }
@@ -3529,6 +3691,16 @@ export class SyncService {
       operationId: frameClock.operationId
     })
     this.materializeTopicMessageOrder(db, parentId, effective)
+    this.emitSuffixMergeFrameInApply(
+      db,
+      'topicMessage',
+      parentId,
+      liveChildren,
+      [...effective],
+      [...evaluated.suffix],
+      frameClock,
+      op.id
+    )
     return true
   }
 
@@ -3651,10 +3823,39 @@ export class SyncService {
         operationId: frameClock.operationId
       })
       this.materializeMessageBlockOrder(db, effective)
+      this.emitSuffixMergeFrameInApply(
+        db,
+        'messageBlock',
+        parentId,
+        liveChildren,
+        [...effective],
+        [...evaluated.suffix],
+        frameClock,
+        op.id
+      )
       return true
     }
     const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
     if (cmp < 0) {
+      if (evaluated.suffix.length > 0) {
+        const existingSet = new Set(existing.orderedChildIds)
+        const effectiveSet = new Set(effective)
+        const bringsNew = effective.some((id) => !existingSet.has(id))
+        const missesStored = existing.orderedChildIds.some((id) => !effectiveSet.has(id))
+        if (bringsNew || missesStored) {
+          const merged = this.emitSuffixMergeFrameInApply(
+            db,
+            'messageBlock',
+            parentId,
+            liveChildren,
+            [...effective],
+            [...evaluated.suffix],
+            frameClock,
+            op.id
+          )
+          if (merged) return true
+        }
+      }
       logger.info(`[applyOrderFrame] older frame ${op.id} loses to ${existing.operationId} for ${parentId}`)
       return false
     }
@@ -3684,6 +3885,16 @@ export class SyncService {
             operationId: existing.operationId
           })
           this.materializeMessageBlockOrder(db, effective)
+          this.emitSuffixMergeFrameInApply(
+            db,
+            'messageBlock',
+            parentId,
+            liveChildren,
+            [...effective],
+            [...evaluated.suffix],
+            frameClock,
+            op.id
+          )
         }
         return false
       }
@@ -3698,6 +3909,16 @@ export class SyncService {
       operationId: frameClock.operationId
     })
     this.materializeMessageBlockOrder(db, effective)
+    this.emitSuffixMergeFrameInApply(
+      db,
+      'messageBlock',
+      parentId,
+      liveChildren,
+      [...effective],
+      [...evaluated.suffix],
+      frameClock,
+      op.id
+    )
     return true
   }
 
@@ -5723,13 +5944,52 @@ export class SyncService {
           `baseline bootstrap channel changed before commit: expected ${expectedChannelKey} but found ${persistedChannel}`
         )
       }
-      const applied = applyWireSyncEnvelopeInTx(inner, envelope, { expectedChannelId: expectedChannelKey })
-      if (applied.channelId !== persistedChannel) {
+      // Pre-apply receiver exclusive union (SYNC-DATA-058): fully-unversioned ordinary history, fail-closed 0 writes on ambiguity.
+      // Map envelope once, reuse validation (no duplicated validator).
+      const mapped = mapWireEnvelopeToMergeInput(envelope)
+      if (mapped.channelId !== expectedChannelKey) {
         throw new SyncCursorError(
-          `baseline bootstrap envelope channel mismatch: envelope ${applied.channelId} vs local ${persistedChannel}`
+          `baseline bootstrap envelope channel mismatch: envelope ${mapped.channelId} vs local ${persistedChannel}`
         )
       }
-      watermark = applied.watermark
+      if (mapped.channelId !== persistedChannel) {
+        throw new SyncCursorError(
+          `baseline bootstrap envelope channel mismatch: envelope ${mapped.channelId} vs local ${persistedChannel}`
+        )
+      }
+      let unionResult: {
+        adopted: number
+        sharedParents: { topicIds: string[]; messageIds: string[] }
+        pureParents: { topicIds: string[]; messageIds: string[] }
+      } | null = null
+      try {
+        const deviceId = this.getDeviceId()
+        unionResult = adoptReceiverExclusiveInTx(inner, mapped.input, deviceId)
+      } catch (e) {
+        // Fail-closed: any union validation failure rolls back entire bootstrap (0 writes)
+        if (e instanceof SyncBaselineApplyError) throw e
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      // Apply incoming baseline via shared merge core (no re-validation, single tx)
+      const mergeResult = mergeValidatedBaselineInTx(inner, mapped.input)
+      void mergeResult
+      // Post-apply frame generation for adopted exclusive parents: entity ops already precede frames.
+      // For pure local-exclusive parents and shared parents, generate a higher winning frame for push convergence.
+      if (unionResult && unionResult.adopted > 0) {
+        const deviceId = this.getDeviceId()
+        const allTopicParents = [...unionResult.pureParents.topicIds, ...unionResult.sharedParents.topicIds].sort()
+        const allMessageParents = [
+          ...unionResult.pureParents.messageIds,
+          ...unionResult.sharedParents.messageIds
+        ].sort()
+        for (const tid of allTopicParents) {
+          this.refreshParentFrameAndEnqueueInTx(inner, 'topicMessage', tid, deviceId)
+        }
+        for (const mid of allMessageParents) {
+          this.refreshParentFrameAndEnqueueInTx(inner, 'messageBlock', mid, deviceId)
+        }
+      }
+      watermark = mapped.watermark
       if (!Number.isSafeInteger(watermark) || watermark < 0) {
         throw new SyncCursorError(`malformed baseline watermark ${String(watermark)}`)
       }

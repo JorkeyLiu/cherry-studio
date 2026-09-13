@@ -22,11 +22,17 @@
  *
  * Idempotency: existing clocks are never rewritten; a pending grant with an
  * already-adopted local state only continues drain+publish (already-adopted).
+ *
+ * Shared contract: adoption payload allowlists and the persisted-clock
+ * max-scan table boundary live in `syncAdoptionShared` (single source with
+ * the receiver-union path); this holder path reuses candidate payloads built
+ * by capture and service enqueue sequencing, so no second allowlist exists.
  */
 
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import * as schema from '../chatDb/schema'
+import { scanAdoptionMaxObserved } from './syncAdoptionShared'
 import { captureLocalSyncBaselineCandidate } from './syncBaseline'
 
 export type SeedAdoptionResult =
@@ -171,63 +177,13 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
   }
   const run = (txArg?: unknown): SeedAdoptionResult => {
     const tx = (txArg ?? db) as unknown
-    const txDb = txArg as BetterSQLite3Database<typeof schema>
+    const txDb = (txArg ?? db) as BetterSQLite3Database<typeof schema>
     // Compute monotonic adoption clock inside the same adoption transaction
-    // snapshot: max of all relevant persisted clocks at least entity/field +
-    // membership + parent frames + frame high-water. Tombstone and replacement
-    // register clocks are excluded by the preflight above (0-write deferred if
-    // present, so adoption never observes them; logic explicitly documents this).
-    let maxObserved = -1
-    const updateMax = (ts: unknown): void => {
-      if (typeof ts === 'number' && Number.isSafeInteger(ts) && ts >= 0) {
-        if (ts > maxObserved) maxObserved = ts
-      }
-    }
-    try {
-      const rows = (txDb as unknown as BetterSQLite3Database<typeof schema>).select
-        ? txDb.select().from(schema.syncEntityClock).all()
-        : []
-      for (const r of rows as Array<{ timestamp: number }>) updateMax(r.timestamp)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(msg)) throw e
-    }
-    try {
-      const rows = (txDb as unknown as BetterSQLite3Database<typeof schema>).select
-        ? txDb.select().from(schema.syncFieldClock).all()
-        : []
-      for (const r of rows as Array<{ timestamp: number }>) updateMax(r.timestamp)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(msg)) throw e
-    }
-    try {
-      const rows = (txDb as unknown as BetterSQLite3Database<typeof schema>).select
-        ? txDb.select().from(schema.syncMembershipClock).all()
-        : []
-      for (const r of rows as Array<{ timestamp: number }>) updateMax(r.timestamp)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(msg)) throw e
-    }
-    try {
-      const rows = (txDb as unknown as BetterSQLite3Database<typeof schema>).select
-        ? txDb.select().from(schema.syncParentOrderFrame).all()
-        : []
-      for (const r of rows as Array<{ timestamp: number }>) updateMax(r.timestamp)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(msg)) throw e
-    }
-    try {
-      const rows = (txDb as unknown as BetterSQLite3Database<typeof schema>).select
-        ? txDb.select().from(schema.syncFrameHighWater).all()
-        : []
-      for (const r of rows as Array<{ maxTimestamp: number }>) updateMax(r.maxTimestamp)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(msg)) throw e
-    }
+    // snapshot via the shared single-source scan (entity/field + membership +
+    // parent frames + frame high-water). Tombstone and replacement register
+    // clocks are excluded by the preflight above (0-write deferred if present,
+    // so adoption never observes them; logic explicitly documents this).
+    const maxObserved = scanAdoptionMaxObserved(txDb)
     const adoptionTs = Math.max(baseWall, maxObserved + 1)
     if (!isSafeAdoptionTimestamp(adoptionTs) || adoptionTs >= Number.MAX_SAFE_INTEGER) {
       throw new Error('seed adoption timestamp exhausted')
