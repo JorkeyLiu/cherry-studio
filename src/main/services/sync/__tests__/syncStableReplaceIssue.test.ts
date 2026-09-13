@@ -432,9 +432,10 @@ describe('stable_replace issuer — success final emission (updateMessage)', () 
 })
 
 describe('stable_replace issuer — missing membership, rollback, restart, ordinary regression', () => {
-  it('message without real membership stays local-only with intent retained', () => {
-    // Pre-sync style row inserted directly (no membership clock): the issuer
-    // must not fabricate one for the pre-existing message.
+  it('pre-existing message without membership is adopted at the success final', () => {
+    // Pre-sync style row inserted directly (no membership clock): the
+    // reset-adoption path mints the target membership at the replacement
+    // clock in the same success-final transaction.
     agg.ensureTopic('t-m-1', 'a-1', 'T')
     expect(agg.ensureTopic('t-m-1', 'a-1', 'T').ok).toBe(true)
     sqlite
@@ -449,13 +450,30 @@ describe('stable_replace issuer — missing membership, rollback, restart, ordin
     const attemptId = ((res as { ok: true; value: unknown }).value as { attempts: Array<{ attemptId: string }> })
       .attempts[0].attemptId
     db.delete(schema.syncOutbox).run()
+    expect(syncService.getMembershipClock('message', 'm-m-1')).toBeNull()
     expect(
       agg.updateMessage('t-m-1', 'm-m-1', { status: 'success', content: 'final' } as never, {
         resendAttemptId: attemptId
       }).ok
     ).toBe(true)
-    expect(stableReplaceRows()).toHaveLength(0)
-    expect(getIntentRow('m-m-1')).toBeDefined()
+    const rows = stableReplaceRows()
+    expect(rows).toHaveLength(1)
+    const op = readOp(rows[0])
+    expect(validateSyncOperationStrict(op)).toBeNull()
+    const rc = (op.payload as Record<string, unknown>).replacementClock as {
+      timestamp: number
+      operationId: string
+    }
+    expect(op.id).toBe(rc.operationId)
+    const minted = syncService.getMembershipClock('message', 'm-m-1')
+    expect(minted).not.toBeNull()
+    expect(minted?.parentId).toBe('t-m-1')
+    expect(minted?.timestamp).toBe(rc.timestamp)
+    expect(minted?.operationId).toBe(rc.operationId)
+    expect(((op.payload as Record<string, unknown>).message as Record<string, unknown>).parentMembershipClock).toEqual(
+      rc
+    )
+    expect(getIntentRow('m-m-1')).toBeUndefined()
   })
 
   it('frame-clock exhaustion rolls back the final with intent retained and 0 op', () => {

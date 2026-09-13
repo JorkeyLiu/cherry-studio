@@ -1160,15 +1160,18 @@ export class SyncService {
    *   checkpoints never consume — local-only, intent retained, 0 op).
    * - Every current block for the message is stable-supported with status
    *   exactly `success` (transient/unsupported/non-success → local-only).
-   * - Message membership present with parent match (absent → local-only, no
-   *   fabrication for the pre-existing row); missing block memberships are
+   * - Message membership present with parent match, or — for the reset
+   *   adoption path — a missing target membership with a matching reset
+   *   intent (minted at the replacement clock in this same tx; no
+   *   fabrication outside the success-final); missing block memberships are
    *   minted at the replacement clock (resend-generation creation); any
    *   parent mismatch or malformed overflow/clock → throw (rollback).
-   * - All stable sibling messages in the topic carry complete real
+   * - All other stable sibling messages in the topic carry complete real
    *   memberships (else local-only); topic row present (else throw).
-   * - Single replacementClock allocated above every relevant clock
-   *   (register, both existing frames, all included memberships, wall clock);
-   *   MAX_SAFE exhaustion → throw.
+   * - Single replacementClock strictly above every existing relevant clock
+   *   (register, both existing frames, both high-waters, all included block
+   *   memberships, all sibling memberships except the adopted missing
+   *   target, wall clock); MAX_SAFE exhaustion → throw.
    * - Strict shared validation of the constructed op (no copied rules); any
    *   failure → throw.
    * - Winning register LWW: the allocated clock always wins a present
@@ -1177,7 +1180,8 @@ export class SyncService {
    *
    * Effect (same tx, symmetric with the receiver apply semantics):
    * - Local entity + field clocks for the bundled message/blocks advance to
-   *   the replacement clock; missing block memberships minted; retirement
+   *   the replacement clock; adopted target message membership plus missing
+   *   block memberships minted at the replacement clock; retirement
    *   tombstone barriers at the replacement clock for omitted same-message
    *   stable-supported children (current rows plus previous-register plus
    *   intent removed ids) with membership <= clock; winning register
@@ -1284,13 +1288,16 @@ export class SyncService {
     const byCanonical = [...blockRows].sort((a, b) => compareUtf8ByteLex(a.id, b.id))
 
     // Membership prerequisites. The message row predates the resend (reset
-    // updates, never recreates), so an absent message membership means a
-    // pre-sync unversioned row — local-only without fabrication. Resend
-    // generation blocks mint absent memberships at the replacement clock;
-    // any parent mismatch fails closed.
+    // updates, never recreates). When the success-final matches the active
+    // reset intent, a missing target message membership is adopted: the
+    // replacement clock is allocated above every existing relevant clock
+    // (excluding the missing target clock) and the target membership is
+    // minted at that clock in the same final transaction. Resend generation
+    // blocks mint absent memberships at the replacement clock; any parent
+    // mismatch fails closed.
     const msgMem = this.getMembershipClockInTx(tx, 'message', messageId)
-    if (!msgMem) return { issued: false, reason: 'message-membership-missing' }
-    if (msgMem.parentId !== topicId) {
+    const needsTargetAdoption = !msgMem
+    if (msgMem && msgMem.parentId !== topicId) {
       throw new Error(`stable replace issuer membership parent mismatch for message ${messageId}`)
     }
     const blockMems = new Map<string, { timestamp: number; operationId: string }>()
@@ -1325,6 +1332,7 @@ export class SyncService {
     }
     for (const r of siblingRows) {
       if (!isStableMessageStatus(r.status)) continue
+      if (needsTargetAdoption && r.id === messageId) continue
       const mem = this.getMembershipClockInTx(tx, 'message', r.id)
       if (!mem) return { issued: false, reason: 'sibling-membership-missing' }
       if (mem.parentId !== topicId) {
@@ -1332,8 +1340,12 @@ export class SyncService {
       }
     }
 
-    // Single replacement clock above every relevant clock (register, both
-    // existing frames, all included memberships, wall clock).
+    // Single replacement clock strictly above every existing relevant clock
+    // (register, both existing frames, both high-waters, all included block
+    // memberships, all sibling memberships except the adopted missing
+    // target, wall clock). The missing target clock is excluded by
+    // construction; the target membership is minted at the replacement
+    // clock afterwards so payload membership equals both frame clocks.
     const existingReg = this.readStableReplaceRegister(tx as unknown as BetterSQLite3Database<typeof schema>, messageId)
     const existingTopicFrame = this.getParentFrameInTx(tx, 'topicMessage', topicId)
     const existingMessageFrame = this.getParentFrameInTx(tx, 'messageBlock', messageId)
@@ -1342,10 +1354,13 @@ export class SyncService {
     if (existingReg) maxTs = Math.max(maxTs, existingReg.timestamp)
     if (existingTopicFrame) maxTs = Math.max(maxTs, existingTopicFrame.timestamp)
     if (existingMessageFrame) maxTs = Math.max(maxTs, existingMessageFrame.timestamp)
-    maxTs = Math.max(maxTs, msgMem.timestamp)
+    maxTs = Math.max(maxTs, getFrameHighWater(tx, 'topicMessage', topicId))
+    maxTs = Math.max(maxTs, getFrameHighWater(tx, 'messageBlock', messageId))
+    if (msgMem) maxTs = Math.max(maxTs, msgMem.timestamp)
     for (const mem of blockMems.values()) maxTs = Math.max(maxTs, mem.timestamp)
     for (const r of siblingRows) {
       if (!isStableMessageStatus(r.status)) continue
+      if (needsTargetAdoption && r.id === messageId) continue
       const mem = this.getMembershipClockInTx(tx, 'message', r.id)
       if (mem) maxTs = Math.max(maxTs, mem.timestamp)
     }
@@ -1403,7 +1418,9 @@ export class SyncService {
         'createdAt',
         'updatedAt'
       ]),
-      parentMembershipClock: { timestamp: msgMem.timestamp, operationId: msgMem.operationId }
+      parentMembershipClock: msgMem
+        ? { timestamp: msgMem.timestamp, operationId: msgMem.operationId }
+        : { ...clockWire }
     }
     const wireBlocks: Array<Record<string, unknown>> = byCanonical.map((b) => {
       const mem = blockMems.get(b.id)
@@ -1455,8 +1472,14 @@ export class SyncService {
     if (strictErr) throw new Error(`stable replace issuer invalid op: ${strictErr}`)
 
     // Local convergence, symmetric with the receiver apply path: entity +
-    // field clocks advance to the replacement clock; absent block memberships
-    // mint at the replacement clock (existing ones already proven matching).
+    // field clocks advance to the replacement clock; the adopted target
+    // message membership (when missing) plus absent block memberships mint
+    // at the replacement clock (existing ones already proven matching).
+    // The target mint happens after clock allocation so the payload
+    // membership equals both frame clocks.
+    if (needsTargetAdoption) {
+      this.setMembershipClockInTx(tx, 'message', messageId, topicId, rc.timestamp, rc.operationId)
+    }
     this.advanceEntityClock(
       tx as unknown as BetterSQLite3Database<typeof schema>,
       'message',
