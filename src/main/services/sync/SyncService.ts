@@ -1170,10 +1170,14 @@ export class SyncService {
    *
    * Gate (all inside the same tx):
    * - Exact active intent with matching attempt; topic binding match.
-   * - Post-state message status exactly `success` (error/paused stable
-   *   checkpoints never consume — local-only, intent retained, 0 op).
-   * - Every current block for the message is stable-supported with status
-   *   exactly `success` (transient/unsupported/non-success → local-only).
+   * - Post-state message status exactly `success`/`error`/`paused`
+   *   (`sent`/legacy/transient checkpoints never consume — local-only,
+   *   intent retained, 0 op; no terminal state is fabricated).
+   * - Every current block for the message is stable non-transient and
+   *   already wire-eligible in any mix (`success`/`error`/`paused`/`sent`/
+   *   legacy stable via the existing transient gate, exact wire validator
+   *   still enforced on the constructed op) plus supported by the existing
+   *   type/overflow gate (transient/unsupported → local-only).
    * - Message membership present with parent match, or — for the reset
    *   adoption path — a missing target membership with a matching reset
    *   intent (minted at the replacement clock in this same tx; no
@@ -1247,10 +1251,14 @@ export class SyncService {
     if (msgRow.topicId !== topicId) {
       throw new Error(`stable replace issuer message ${messageId} topic mismatch (${msgRow.topicId} vs ${topicId})`)
     }
-    // Only the true success final converges peers: error/paused stable
-    // checkpoints (and any non-success terminal) stay local-only with the
-    // intent retained so a later success final can still consume it.
-    if (msgRow.status !== 'success') return { issued: false, reason: 'message-not-success' }
+    // Only true final checkpoints converge peers: exactly
+    // `success`/`error`/`paused` consume. Transient (`streaming`/`pending`/
+    // `processing`/`searching`) plus `sent`/legacy/unknown stay local-only
+    // with the intent retained so a later final can still consume it. No
+    // terminal state is fabricated here — the post-state is the renderer's.
+    if (msgRow.status !== 'success' && msgRow.status !== 'error' && msgRow.status !== 'paused') {
+      return { issued: false, reason: 'message-not-final' }
+    }
 
     const topicRow = tx.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
     if (!topicRow) throw new Error(`stable replace issuer topic ${topicId} missing in transaction`)
@@ -1272,6 +1280,11 @@ export class SyncService {
     }>
     for (const b of blockRows) {
       if (b.messageId !== messageId) throw new Error(`stable replace issuer block ${b.id} binding mismatch`)
+      // Block rule: every active block may carry any stable non-transient
+      // status already wire-eligible (success/error/paused/sent/legacy via
+      // the existing transient gate), in any mix — the exact wire validator
+      // on the constructed op remains the authority. Transient or
+      // unsupported blocks keep local-only intent-retained zero-op.
       if (!isStableBlockStatus(b.status)) return { issued: false, reason: 'transient-block' }
       let overflow: Record<string, unknown> = {}
       if (b.extra) {
@@ -1288,7 +1301,6 @@ export class SyncService {
         }
       }
       if (isUnsupportedBlockForSync({ type: b.type, overflow })) return { issued: false, reason: 'unsupported-block' }
-      if (b.status !== 'success') return { issued: false, reason: 'block-not-success' }
     }
 
     // Business order for activeBlockIds: current user-visible order

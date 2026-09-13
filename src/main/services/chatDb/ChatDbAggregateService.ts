@@ -2002,12 +2002,12 @@ export class ChatDbAggregateService {
           repos.messages.update(topicId, messageId, patch)
           if (resendCovered) {
             // Normal stable_replace issuer (SYNC-DATA-055 consume): only a
-            // success-final write with a matching attempt and complete
-            // stable post-state emits exactly one op in this tx and clears
-            // the intent. Transient/error/paused/unsupported/incomplete
-            // post-state stays local-only with the intent retained (0 op);
-            // any validator/membership/frame/clock error throws and rolls
-            // back with the intent retained and no op.
+            // success/error/paused-final write with a matching attempt and
+            // complete stable-supported post-state emits exactly one op in
+            // this tx and clears the intent. Transient/sent/legacy/
+            // unsupported/incomplete post-state stays local-only with the
+            // intent retained (0 op); any validator/membership/frame/clock
+            // error throws and rolls back with the intent retained and no op.
             if (ctx && resendAttemptId !== undefined) {
               const issue = syncService.tryIssueStableReplaceInTx(stx, {
                 messageId,
@@ -2568,12 +2568,12 @@ export class ChatDbAggregateService {
             }
           }
           // Normal stable_replace issuer (SYNC-DATA-055 consume) for the
-          // atomic message+blocks finalization shape: same success gate as
-          // updateMessage — only a matching attempt with complete stable
-          // post-state emits exactly one op and clears the intent;
-          // transient/error/paused/unsupported/incomplete stays local-only
-          // with the intent retained; any validator/membership/frame/clock
-          // error throws and rolls back with no op.
+          // atomic message+blocks finalization shape: same success/error/
+          // paused gate as updateMessage — only a matching attempt with
+          // complete stable-supported post-state emits exactly one op and
+          // clears the intent; transient/sent/legacy/unsupported/incomplete
+          // stays local-only with the intent retained; any validator/
+          // membership/frame/clock error throws and rolls back with no op.
           if (syncCtx && messageCovered && resendAttemptId !== undefined) {
             const issue = syncService.tryIssueStableReplaceInTx(stx, {
               messageId,

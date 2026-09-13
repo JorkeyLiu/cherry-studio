@@ -145,7 +145,7 @@ function resetForResend(
   return { attemptId: value.attempts[0].attemptId, attempts: value.attempts }
 }
 
-describe('stable_replace issuer — gating (transient/error/paused/unsupported/legacy)', () => {
+describe('stable_replace issuer — gating (transient/sent/legacy/unsupported/stale)', () => {
   it('transient streaming write stays local-only with intent retained and 0 op', () => {
     seedUser('t-i-1', 'u-i-1')
     seedAssistant('t-i-1', 'm-i-1', 'u-i-1', 'b-i-old')
@@ -159,8 +159,8 @@ describe('stable_replace issuer — gating (transient/error/paused/unsupported/l
     expect(getIntentRow('m-i-1')).toBeDefined()
   })
 
-  it('error and paused finals never consume the attempt', () => {
-    for (const status of ['error', 'paused']) {
+  it('sent and legacy finals never consume the attempt', () => {
+    for (const status of ['sent', 'legacy-foo']) {
       seedUser(`t-i-2-${status}`, `u-i-2-${status}`)
       seedAssistant(`t-i-2-${status}`, `m-i-2-${status}`, `u-i-2-${status}`, `b-i-old-${status}`)
       const { attemptId } = resetForResend(`t-i-2-${status}`, `m-i-2-${status}`, `u-i-2-${status}`, `b-i-old-${status}`)
