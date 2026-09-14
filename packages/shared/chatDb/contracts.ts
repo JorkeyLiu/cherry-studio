@@ -32,6 +32,7 @@ import type {
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
+  FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
   InsertMessageGroupIntent,
@@ -2631,6 +2632,141 @@ const fetchContextClosureContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Whole-topic snapshot READ — one-shot export/knowledge snapshot (distinct completeness)
+// ---------------------------------------------------------------------------
+
+const FETCH_WHOLE_TOPIC_SNAPSHOT_VALUE_KEYS = new Set(['messages', 'blocks', 'snapshot'])
+const FETCH_WHOLE_TOPIC_SNAPSHOT_META_KEYS = new Set([
+  'completeness',
+  'topicId',
+  'firstMessageId',
+  'lastMessageId',
+  'returnedCount'
+])
+
+const fetchWholeTopicSnapshotContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchWholeTopicSnapshotContract.allowedKeys)
+    const req = value as FetchWholeTopicSnapshotRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:fetch-whole-topic-snapshot', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-whole-topic-snapshot] Expected object with messages, blocks, snapshot'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-whole-topic-snapshot] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_WHOLE_TOPIC_SNAPSHOT_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:fetch-whole-topic-snapshot] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      if (v.snapshot === null || typeof v.snapshot !== 'object' || Array.isArray(v.snapshot)) {
+        throw new ValidationError(
+          'result.value.snapshot',
+          '[chatdb:fetch-whole-topic-snapshot] Expected snapshot object'
+        )
+      }
+      const sProto = Object.getPrototypeOf(v.snapshot)
+      if (sProto !== Object.prototype && sProto !== null) {
+        throw new ValidationError(
+          'result.value.snapshot',
+          '[chatdb:fetch-whole-topic-snapshot] Success snapshot must be a plain object'
+        )
+      }
+      const s = v.snapshot as Record<string, unknown>
+      for (const key of Object.keys(s)) {
+        if (!FETCH_WHOLE_TOPIC_SNAPSHOT_META_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.snapshot.${key}`,
+            `[chatdb:fetch-whole-topic-snapshot] Unknown key in snapshot: "${key}"`
+          )
+        }
+      }
+      if (s.completeness !== 'whole-topic') {
+        throw new ValidationError(
+          'result.value.snapshot.completeness',
+          '[chatdb:fetch-whole-topic-snapshot] Expected completeness "whole-topic"'
+        )
+      }
+      validateNonEmptyString(s.topicId, 'result.value.snapshot.topicId')
+      if (s.firstMessageId !== null) {
+        validateNonEmptyString(s.firstMessageId, 'result.value.snapshot.firstMessageId')
+      }
+      if (s.lastMessageId !== null) {
+        validateNonEmptyString(s.lastMessageId, 'result.value.snapshot.lastMessageId')
+      }
+      if (
+        typeof s.returnedCount !== 'number' ||
+        !Number.isFinite(s.returnedCount) ||
+        !Number.isInteger(s.returnedCount) ||
+        s.returnedCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.snapshot.returnedCount',
+          '[chatdb:fetch-whole-topic-snapshot] Expected non-negative integer returnedCount'
+        )
+      }
+      const msgs = v.messages as unknown[]
+      if (s.returnedCount !== msgs.length) {
+        throw new ValidationError(
+          'result.value.snapshot.returnedCount',
+          '[chatdb:fetch-whole-topic-snapshot] returnedCount must equal messages length'
+        )
+      }
+      if (s.returnedCount === 0) {
+        if (s.firstMessageId !== null || s.lastMessageId !== null) {
+          throw new ValidationError(
+            'result.value.snapshot',
+            '[chatdb:fetch-whole-topic-snapshot] Empty snapshot must have null first/lastMessageId'
+          )
+        }
+      } else {
+        if (s.firstMessageId === null || s.lastMessageId === null) {
+          throw new ValidationError(
+            'result.value.snapshot',
+            '[chatdb:fetch-whole-topic-snapshot] Non-empty snapshot must have first/lastMessageId'
+          )
+        }
+        const firstId = (msgs[0] as Record<string, unknown>).id
+        const lastId = (msgs[msgs.length - 1] as Record<string, unknown>).id
+        if (s.firstMessageId !== firstId) {
+          throw new ValidationError(
+            'result.value.snapshot.firstMessageId',
+            '[chatdb:fetch-whole-topic-snapshot] firstMessageId must match first message id'
+          )
+        }
+        if (s.lastMessageId !== lastId) {
+          throw new ValidationError(
+            'result.value.snapshot.lastMessageId',
+            '[chatdb:fetch-whole-topic-snapshot] lastMessageId must match last message id'
+          )
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Insert message groups contract — stable intents, Main-authoritative
 // ---------------------------------------------------------------------------
 
@@ -2817,6 +2953,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-answer-group': fetchAnswerGroupContract,
   // S6.3 R-06: authoritative context closure READ (anchor through newest)
   'chatdb:fetch-context-closure': fetchContextClosureContract,
+  // One-shot whole-topic snapshot READ (topic exports / knowledge)
+  'chatdb:fetch-whole-topic-snapshot': fetchWholeTopicSnapshotContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract,
   'chatdb:insert-message-groups': insertMessageGroupsContract

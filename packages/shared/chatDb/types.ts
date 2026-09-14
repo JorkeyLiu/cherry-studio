@@ -417,6 +417,36 @@ export interface FetchContextClosureResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Whole-topic snapshot DTOs (one-shot topic exports / knowledge)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_FetchWholeTopicSnapshot — additive READ for explicit whole-topic snapshot. */
+export interface FetchWholeTopicSnapshotRequest {
+  topicId: string
+}
+
+/** Typed whole-topic snapshot metadata — distinct from window/answer-group/context-closure completeness. */
+export interface FetchWholeTopicSnapshotMeta {
+  /** Completeness is always 'whole-topic' — never masquerades as window/answer-group/context-closure. */
+  completeness: 'whole-topic'
+  /** Topic that was read. */
+  topicId: string
+  /** First returned message ID, or null when the topic has no messages. */
+  firstMessageId: string | null
+  /** Last returned message ID, or null when the topic has no messages. */
+  lastMessageId: string | null
+  /** Number of messages returned. */
+  returnedCount: number
+}
+
+/** @see IpcChannel.ChatDb_FetchWholeTopicSnapshot */
+export interface FetchWholeTopicSnapshotResponse {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  snapshot: FetchWholeTopicSnapshotMeta
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -1178,6 +1208,11 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:fetch-answer-group': { request: FetchAnswerGroupRequest; response: FetchAnswerGroupResponse }
   // S6.3 R-06: authoritative context closure READ (anchor through newest)
   'chatdb:fetch-context-closure': { request: FetchContextClosureRequest; response: FetchContextClosureResponse }
+  // One-shot whole-topic snapshot READ (topic exports / knowledge; short-lived, no Redux residency)
+  'chatdb:fetch-whole-topic-snapshot': {
+    request: FetchWholeTopicSnapshotRequest
+    response: FetchWholeTopicSnapshotResponse
+  }
 }
 
 // ---------------------------------------------------------------------------

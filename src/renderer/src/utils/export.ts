@@ -12,6 +12,13 @@ import { removeSpecialCharactersForFileName } from '@renderer/utils/file'
 import { captureScrollableAsBlob, captureScrollableAsDataURL } from '@renderer/utils/image'
 import { convertMathFormula, markdownToPlainText } from '@renderer/utils/markdown'
 import { getCitationContent, getMainTextContent, getThinkingContent } from '@renderer/utils/messageUtils/find'
+import {
+  getCitationSnapshotContent,
+  getMainTextSnapshotContent,
+  getThinkingSnapshotContent,
+  type SnapshotBlockMap
+} from '@renderer/utils/messageUtils/snapshotBlocks'
+import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import { appIdentity } from '@shared/config/identity'
 import { markdownToBlocks } from '@tryfabric/martian'
 import dayjs from 'dayjs'
@@ -120,14 +127,27 @@ const sanitizeReasoningContent = (content: string): string => {
 }
 
 /**
- * 获取话题的消息列表，使用TopicManager确保消息被正确加载
- * 这样可以避免从未打开过的话题导出为空的问题
- * @param topicId 话题ID
- * @returns 话题消息列表
+ * Load a short-lived whole-topic snapshot from Main for one-shot topic exports.
+ * Centralizes all topic-scoped export reads so no path relies on or mutates
+ * the loaded Redux projection. Caller-local only.
  */
-async function fetchTopicMessages(topicId: string): Promise<Message[]> {
-  const { TopicManager } = await import('@renderer/hooks/useTopic')
-  return await TopicManager.getTopicMessages(topicId)
+const loadTopicSnapshotForExport = async (topicId: string) => {
+  return await loadWholeTopicSnapshot(topicId)
+}
+
+const resolveMainTextContent = (message: Message, blocksById?: SnapshotBlockMap): string => {
+  if (blocksById) return getMainTextSnapshotContent(message, blocksById)
+  return getMainTextContent(message)
+}
+
+const resolveThinkingContent = (message: Message, blocksById?: SnapshotBlockMap): string => {
+  if (blocksById) return getThinkingSnapshotContent(message, blocksById)
+  return getThinkingContent(message)
+}
+
+const resolveCitationContent = (message: Message, blocksById?: SnapshotBlockMap): string => {
+  if (blocksById) return getCitationSnapshotContent(message, blocksById)
+  return getCitationContent(message)
 }
 
 /**
@@ -268,7 +288,8 @@ const createBaseMarkdown = (
   message: Message,
   includeReasoning: boolean = false,
   excludeCitations: boolean = false,
-  normalizeCitations: boolean = true
+  normalizeCitations: boolean = true,
+  blocksById?: SnapshotBlockMap
 ): { titleSection: string; reasoningSection: string; contentSection: string; citation: string } => {
   const { forceDollarMathInMarkdown } = store.getState().settings
   const roleText = getRoleText(message.role, message.model?.name, message.model?.provider)
@@ -276,7 +297,7 @@ const createBaseMarkdown = (
   let reasoningSection = ''
 
   if (includeReasoning) {
-    let reasoningContent = getThinkingContent(message)
+    let reasoningContent = resolveThinkingContent(message, blocksById)
     if (reasoningContent) {
       if (reasoningContent.startsWith('<think>\n')) {
         reasoningContent = reasoningContent.substring(8)
@@ -298,8 +319,8 @@ const createBaseMarkdown = (
     }
   }
 
-  const content = getMainTextContent(message)
-  let citation = excludeCitations ? '' : getCitationContent(message)
+  const content = resolveMainTextContent(message, blocksById)
+  let citation = excludeCitations ? '' : resolveCitationContent(message, blocksById)
 
   let processedContent = forceDollarMathInMarkdown ? convertMathFormula(content) : content
 
@@ -314,26 +335,36 @@ const createBaseMarkdown = (
   return { titleSection, reasoningSection, contentSection: processedContent, citation }
 }
 
-export const messageToMarkdown = (message: Message, excludeCitations?: boolean): string => {
+export const messageToMarkdown = (
+  message: Message,
+  excludeCitations?: boolean,
+  blocksById?: SnapshotBlockMap
+): string => {
   const { excludeCitationsInExport, standardizeCitationsInExport } = store.getState().settings
   const shouldExcludeCitations = excludeCitations ?? excludeCitationsInExport
   const { titleSection, contentSection, citation } = createBaseMarkdown(
     message,
     false,
     shouldExcludeCitations,
-    standardizeCitationsInExport
+    standardizeCitationsInExport,
+    blocksById
   )
   return [titleSection, '', contentSection, citation].join('\n')
 }
 
-export const messageToMarkdownWithReasoning = (message: Message, excludeCitations?: boolean): string => {
+export const messageToMarkdownWithReasoning = (
+  message: Message,
+  excludeCitations?: boolean,
+  blocksById?: SnapshotBlockMap
+): string => {
   const { excludeCitationsInExport, standardizeCitationsInExport } = store.getState().settings
   const shouldExcludeCitations = excludeCitations ?? excludeCitationsInExport
   const { titleSection, reasoningSection, contentSection, citation } = createBaseMarkdown(
     message,
     true,
     shouldExcludeCitations,
-    standardizeCitationsInExport
+    standardizeCitationsInExport,
+    blocksById
   )
   return [titleSection, '', reasoningSection, contentSection, citation].join('\n')
 }
@@ -341,31 +372,32 @@ export const messageToMarkdownWithReasoning = (message: Message, excludeCitation
 export const messagesToMarkdown = (
   messages: Message[],
   exportReasoning?: boolean,
-  excludeCitations?: boolean
+  excludeCitations?: boolean,
+  blocksById?: SnapshotBlockMap
 ): string => {
   return messages
     .map((message) =>
       exportReasoning
-        ? messageToMarkdownWithReasoning(message, excludeCitations)
-        : messageToMarkdown(message, excludeCitations)
+        ? messageToMarkdownWithReasoning(message, excludeCitations, blocksById)
+        : messageToMarkdown(message, excludeCitations, blocksById)
     )
     .join('\n---\n')
 }
 
-const formatMessageAsPlainText = (message: Message): string => {
+const formatMessageAsPlainText = (message: Message, blocksById?: SnapshotBlockMap): string => {
   const roleText = message.role === 'user' ? 'User:' : 'Assistant:'
-  const content = getMainTextContent(message)
+  const content = resolveMainTextContent(message, blocksById)
   const plainTextContent = markdownToPlainText(content).trim()
   return `${roleText}\n${plainTextContent}`
 }
 
-export const messageToPlainText = (message: Message): string => {
-  const content = getMainTextContent(message)
+export const messageToPlainText = (message: Message, blocksById?: SnapshotBlockMap): string => {
+  const content = resolveMainTextContent(message, blocksById)
   return markdownToPlainText(content).trim()
 }
 
-const messagesToPlainText = (messages: Message[]): string => {
-  return messages.map(formatMessageAsPlainText).join('\n\n')
+const messagesToPlainText = (messages: Message[], blocksById?: SnapshotBlockMap): string => {
+  return messages.map((message) => formatMessageAsPlainText(message, blocksById)).join('\n\n')
 }
 
 export const topicToMarkdown = async (
@@ -375,10 +407,11 @@ export const topicToMarkdown = async (
 ): Promise<string> => {
   const topicName = `# ${topic.name}`
 
-  const messages = await fetchTopicMessages(topic.id)
+  const snapshot = await loadTopicSnapshotForExport(topic.id)
+  const messages = snapshot.messages
 
   if (messages && messages.length > 0) {
-    return topicName + '\n\n' + messagesToMarkdown(messages, exportReasoning, excludeCitations)
+    return topicName + '\n\n' + messagesToMarkdown(messages, exportReasoning, excludeCitations, snapshot.blocksById)
   }
 
   return topicName
@@ -387,10 +420,11 @@ export const topicToMarkdown = async (
 export const topicToPlainText = async (topic: Topic): Promise<string> => {
   const topicName = markdownToPlainText(topic.name).trim()
 
-  const topicMessages = await fetchTopicMessages(topic.id)
+  const snapshot = await loadTopicSnapshotForExport(topic.id)
+  const topicMessages = snapshot.messages
 
   if (topicMessages && topicMessages.length > 0) {
-    return topicName + '\n\n' + messagesToPlainText(topicMessages)
+    return topicName + '\n\n' + messagesToPlainText(topicMessages, snapshot.blocksById)
   }
 
   return topicName
@@ -626,13 +660,18 @@ const executeNotionExport = async (title: string, allBlocks: any[]): Promise<boo
   }
 }
 
-export const exportMessageToNotion = async (title: string, content: string, message?: Message): Promise<boolean> => {
+export const exportMessageToNotion = async (
+  title: string,
+  content: string,
+  message?: Message,
+  blocksById?: SnapshotBlockMap
+): Promise<boolean> => {
   const { notionExportReasoning } = store.getState().settings
 
   const notionBlocks = await convertMarkdownToNotionBlocks(content)
 
   if (notionExportReasoning && message) {
-    const thinkingContent = getThinkingContent(message)
+    const thinkingContent = resolveThinkingContent(message, blocksById)
     if (thinkingContent) {
       const thinkingBlocks = await convertThinkingToNotionBlocks(thinkingContent)
       if (notionBlocks.length > 0) {
@@ -649,7 +688,8 @@ export const exportMessageToNotion = async (title: string, content: string, mess
 export const exportTopicToNotion = async (topic: Topic): Promise<boolean> => {
   const { notionExportReasoning, excludeCitationsInExport } = store.getState().settings
 
-  const topicMessages = await fetchTopicMessages(topic.id)
+  const snapshot = await loadTopicSnapshotForExport(topic.id)
+  const topicMessages = snapshot.messages
 
   // 创建话题标题块
   const titleBlocks = await convertMarkdownToNotionBlocks(`# ${topic.name}`)
@@ -659,11 +699,11 @@ export const exportTopicToNotion = async (topic: Topic): Promise<boolean> => {
 
   for (const message of topicMessages) {
     // 将单个消息转换为markdown
-    const messageMarkdown = messageToMarkdown(message, excludeCitationsInExport)
+    const messageMarkdown = messageToMarkdown(message, excludeCitationsInExport, snapshot.blocksById)
     const messageBlocks = await convertMarkdownToNotionBlocks(messageMarkdown)
 
     if (notionExportReasoning) {
-      const thinkingContent = getThinkingContent(message)
+      const thinkingContent = resolveThinkingContent(message, snapshot.blocksById)
       if (thinkingContent) {
         const thinkingBlocks = await convertThinkingToNotionBlocks(thinkingContent)
         if (messageBlocks.length > 0) {
@@ -871,7 +911,8 @@ function transformObsidianFileName(fileName: string): string {
 
 export const exportMarkdownToJoplin = async (
   title: string,
-  contentOrMessages: string | Message | Message[]
+  contentOrMessages: string | Message | Message[],
+  blocksById?: SnapshotBlockMap
 ): Promise<any | null> => {
   const { joplinUrl, joplinToken, joplinExportReasoning, excludeCitationsInExport } = store.getState().settings
 
@@ -891,12 +932,12 @@ export const exportMarkdownToJoplin = async (
   if (typeof contentOrMessages === 'string') {
     content = contentOrMessages
   } else if (Array.isArray(contentOrMessages)) {
-    content = messagesToMarkdown(contentOrMessages, joplinExportReasoning, excludeCitationsInExport)
+    content = messagesToMarkdown(contentOrMessages, joplinExportReasoning, excludeCitationsInExport, blocksById)
   } else {
-    // 单条Message
+    // 单条Message — live-store based unless a snapshot block source is passed
     content = joplinExportReasoning
-      ? messageToMarkdownWithReasoning(contentOrMessages, excludeCitationsInExport)
-      : messageToMarkdown(contentOrMessages, excludeCitationsInExport)
+      ? messageToMarkdownWithReasoning(contentOrMessages, excludeCitationsInExport, blocksById)
+      : messageToMarkdown(contentOrMessages, excludeCitationsInExport, blocksById)
   }
 
   try {

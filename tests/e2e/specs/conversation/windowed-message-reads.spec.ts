@@ -712,4 +712,174 @@ test.describe('windowed reads: latest and around', () => {
       `visible anchor container-relative offset moved excessively: pre ${visibleAnchor!.offset} (id ${visibleAnchor!.id} rectTop ${visibleAnchor!.rectTop}) post ${postVisible!.offset} (rectTop ${postVisible!.rectTop}) containerTop pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop} clientHeight ${postGeom.clientHeight}`
     ).toBe(true)
   })
+
+  test('R-04 whole-topic snapshot via real copy-as-Markdown — bounded window preserved', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'R-04 INTEGRATED: real topic-item context menu → copy-as-Markdown (whole-topic Main snapshot) → clipboard holds head+tail; independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
+    })
+
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `window-copy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    await seedWindowTopic(page, liveAssistantId, topicId)
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const topicName = `Window Test ${topicId}`
+    const heading = `# ${topicName}`
+    const seedContent = `window-test-content-${'x'.repeat(40)}`
+    const headContent = `${seedContent}-${pad(0, 5)}`
+    const tailContent = `${seedContent}-${pad(SYNTHETIC_TOTAL - 1, 5)}`
+    const headId = `${topicId}-msg-${pad(0, 5)}`
+    const tailId = `${topicId}-msg-${pad(SYNTHETIC_TOTAL - 1, 5)}`
+    const expectedFullIds: string[] = []
+    for (let i = 0; i < SYNTHETIC_TOTAL; i++) {
+      expectedFullIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+    const expectedTailIds: string[] = []
+    for (let i = SYNTHETIC_TOTAL - DISPLAY_LIMIT; i < SYNTHETIC_TOTAL; i++) {
+      expectedTailIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+
+    // Exact pre-action projection: loaded Redux IDs, topic block membership (IDs, not global count), DOM IDs/count.
+    const pre = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
+      const blockIdsInOrder: string[] = []
+      for (const id of ids) {
+        const m = s.messages?.entities?.[id]
+        if (m && Array.isArray(m.blocks)) blockIdsInOrder.push(...m.blocks)
+      }
+      const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+      )
+      return { ids, blockIdsInOrder, domIds, domCount: domIds.length }
+    }, topicId)
+
+    expect(pre.ids).toEqual(expectedTailIds)
+    expect(pre.domCount).toBe(DISPLAY_LIMIT)
+    expect([...pre.domIds].sort()).toEqual([...expectedTailIds].sort())
+    expect(pre.ids).not.toContain(headId)
+    expect(pre.ids).toContain(tailId)
+    expect(pre.blockIdsInOrder.length).toBe(DISPLAY_LIMIT)
+    console.log(`[E2E] R-04 pre window ids=${pre.ids.length} dom=${pre.domCount} blocks=${pre.blockIdsInOrder.length}`)
+
+    // Real user-visible action: topic-item context menu → Copy submenu → Copy as markdown.
+    // Locale-robust (app locale zh-CN per trace): parent `chat.topics.copy.title` (复制|Copy),
+    // child `chat.topics.copy.md` (复制为 Markdown|Copy as markdown); no direct formatter call.
+    const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
+    await topicItem.scrollIntoViewIfNeeded()
+    await topicItem.click({ button: 'right' })
+    const copyParent = page
+      .locator('.ant-dropdown-menu-submenu')
+      .filter({ hasText: /^(复制|Copy)$/ })
+      .first()
+    await copyParent.waitFor({ state: 'visible', timeout: 10000 })
+    await copyParent.hover()
+    const mdItem = page.getByRole('menuitem', { name: /^(复制为 Markdown|Copy as markdown)$/ }).first()
+    await mdItem.waitFor({ state: 'visible', timeout: 10000 })
+    await mdItem.click()
+
+    // User-visible copy success toast (antd message from `message.copy.success`: zh-CN 复制成功 / en-US Copied!).
+    await expect(page.locator('.ant-message')).toContainText(/(复制成功|Copied!)/, { timeout: 10000 })
+    console.log('[E2E] R-04 copy success toast visible')
+
+    // Repository clipboard pattern: window.api.clipboard.readText fallback navigator.clipboard; poll until
+    // heading + authority head (outside loaded window) + tail are all present in order (no truncation).
+    let clipboard: string | null = null
+    const MAX_POLL_ATTEMPTS = 30
+    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+      clipboard = await page.evaluate(async () => {
+        try {
+          if ((window as any).api?.clipboard?.readText) {
+            return await (window as any).api.clipboard.readText()
+          }
+          return await navigator.clipboard.readText()
+        } catch {
+          return null
+        }
+      })
+      if (
+        clipboard &&
+        clipboard.includes(heading) &&
+        clipboard.includes(headContent) &&
+        clipboard.includes(tailContent)
+      ) {
+        break
+      }
+      await page.waitForTimeout(200)
+    }
+    expect(clipboard, 'clipboard must be readable after real copy action').not.toBeNull()
+    const text = clipboard as string
+    expect(text.includes(heading), 'clipboard must contain the topic heading').toBe(true)
+    expect(text.includes(headContent), 'clipboard must contain authority head content outside the loaded window').toBe(
+      true
+    )
+    expect(text.includes(tailContent), 'clipboard must contain the tail content (no truncation)').toBe(true)
+    const headingIdx = text.indexOf(heading)
+    const headIdx = text.indexOf(headContent)
+    const tailIdx = text.indexOf(tailContent)
+    expect(headingIdx).toBeGreaterThanOrEqual(0)
+    expect(headIdx).toBeGreaterThan(headingIdx)
+    expect(tailIdx).toBeGreaterThan(headIdx)
+    console.log(`[E2E] R-04 clipboard len=${text.length} heading@${headingIdx} head@${headIdx} tail@${tailIdx}`)
+
+    // Independent real IPC oracle: whole-topic snapshot straight from Main authority.
+    const snap: any = await page.evaluate(
+      async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
+      topicId
+    )
+    expect(snap.ok).toBe(true)
+    const sval: any = snap.value
+    expect(sval).toBeTruthy()
+    expect(sval.snapshot).toBeTruthy()
+    expect(sval.snapshot.completeness).toBe('whole-topic')
+    expect(sval.snapshot.topicId).toBe(topicId)
+    expect(sval.snapshot.returnedCount).toBe(SYNTHETIC_TOTAL)
+    expect(sval.snapshot.firstMessageId).toBe(headId)
+    expect(sval.snapshot.lastMessageId).toBe(tailId)
+    expect(sval.snapshot.returnedCount).toBe(sval.messages.length)
+    expect(sval.messages[0].id).toBe(sval.snapshot.firstMessageId)
+    expect(sval.messages[sval.messages.length - 1].id).toBe(sval.snapshot.lastMessageId)
+    expect(sval.messages.map((m: any) => m.id)).toEqual(expectedFullIds)
+    expect(sval.messages.some((m: any) => m.id === headId)).toBe(true)
+    expect(new Set(sval.messages.map((m: any) => m.id)).size).toBe(sval.messages.length)
+    const toNum = (id: string) => Number(id.split('-').pop())
+    for (let i = 1; i < sval.messages.length; i++) {
+      expect(toNum(sval.messages[i].id)).toBeGreaterThan(toNum(sval.messages[i - 1].id))
+    }
+    console.log(`[E2E] R-04 snapshot ok count=${sval.snapshot.returnedCount} first=${sval.snapshot.firstMessageId}`)
+
+    // Snapshot must not publish: loaded Redux IDs, topic block entities, and DOM IDs/count unchanged exactly.
+    const post = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
+      const blockIdsInOrder: string[] = []
+      for (const id of ids) {
+        const m = s.messages?.entities?.[id]
+        if (m && Array.isArray(m.blocks)) blockIdsInOrder.push(...m.blocks)
+      }
+      const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+      )
+      return { ids, blockIdsInOrder, domIds, domCount: domIds.length }
+    }, topicId)
+    expect(post.ids).toEqual(pre.ids)
+    expect(post.blockIdsInOrder).toEqual(pre.blockIdsInOrder)
+    expect(post.domCount).toBe(pre.domCount)
+    expect([...post.domIds].sort()).toEqual([...pre.domIds].sort())
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+            topicId
+          ),
+        { timeout: 1500 }
+      )
+      .toBe(DISPLAY_LIMIT)
+    console.log('[E2E] R-04 post window unchanged (Redux blocks/DOM stable, no publish)')
+  })
 })

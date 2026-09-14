@@ -73,7 +73,9 @@ describe('chatDbContracts', () => {
     'chatdb:insert-messages-after-anchor',
     'chatdb:insert-message-groups',
     // S6.3 R-06: authoritative context closure READ
-    'chatdb:fetch-context-closure'
+    'chatdb:fetch-context-closure',
+    // One-shot whole-topic snapshot READ (topic exports / knowledge)
+    'chatdb:fetch-whole-topic-snapshot'
   ]
 
   it('has entries for all expected channels', () => {
@@ -2996,6 +2998,212 @@ describe('insert-messages-after-anchor contract (S6.2c-2)', () => {
   })
 })
 
+describe('fetch-whole-topic-snapshot contract (one-shot exports/knowledge)', () => {
+  it('fetch-whole-topic-snapshot: accepts minimal valid request', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1' })).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', {} as any)).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects empty topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: '' })).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-whole-topic-snapshot', { topicId: 't1', extra: 'nope' } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: accepts valid non-empty result with exact metadata', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [{ id: 'b1', messageId: 'm1' }],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm2',
+            returnedCount: 2
+          }
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: accepts valid empty result with null bounds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: null,
+            lastMessageId: null,
+            returnedCount: 0
+          }
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('fetch-whole-topic-snapshot: rejects wrong completeness', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1' }],
+          blocks: [],
+          snapshot: {
+            completeness: 'window' as any,
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm1',
+            returnedCount: 1
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects returnedCount mismatch', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm2',
+            returnedCount: 1
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects non-empty snapshot with null bounds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1' }],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: null,
+            lastMessageId: null,
+            returnedCount: 1
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects empty snapshot with non-null bounds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'm1',
+            returnedCount: 0
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects first/last mismatch', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'mX',
+            lastMessageId: 'm2',
+            returnedCount: 2
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [{ id: 'm1' }, { id: 'm2' }],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: 'm1',
+            lastMessageId: 'mY',
+            returnedCount: 2
+          }
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-whole-topic-snapshot: rejects unknown keys in value and snapshot', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: null,
+            lastMessageId: null,
+            returnedCount: 0
+          },
+          extra: 'nope'
+        } as any
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-whole-topic-snapshot', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          snapshot: {
+            completeness: 'whole-topic',
+            topicId: 't1',
+            firstMessageId: null,
+            lastMessageId: null,
+            returnedCount: 0,
+            generation: 1
+          } as any
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
 // ===========================================================================
 // Coverage consistency: every command must have both request and result validation
 // ===========================================================================
@@ -3062,7 +3270,9 @@ describe('coverage consistency', () => {
     // Stable insert-message-groups (paste/redo/delete-undo authority)
     'chatdb:insert-message-groups',
     // S6.3 R-06: authoritative context closure READ
-    'chatdb:fetch-context-closure'
+    'chatdb:fetch-context-closure',
+    // One-shot whole-topic snapshot READ
+    'chatdb:fetch-whole-topic-snapshot'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

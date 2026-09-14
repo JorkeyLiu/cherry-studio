@@ -44,6 +44,7 @@ import type {
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
+  FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
   InsertMessageGroupsRequest,
@@ -382,6 +383,11 @@ export function registerChatDbIpc(): () => void {
   // 1d. fetch-context-closure (S6.3 R-06 authoritative context closure READ)
   handleCommand(IpcChannel.ChatDb_FetchContextClosure, (agg, req: FetchContextClosureRequest) => {
     return agg.fetchContextClosure(req)
+  })
+
+  // 1e. fetch-whole-topic-snapshot (one-shot whole-topic snapshot for exports/knowledge)
+  handleCommand(IpcChannel.ChatDb_FetchWholeTopicSnapshot, (agg, req: FetchWholeTopicSnapshotRequest) => {
+    return agg.fetchWholeTopicSnapshot(req)
   })
 
   // 2. get-raw-topic

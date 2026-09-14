@@ -32,6 +32,8 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchWholeTopicSnapshotRequest,
+  FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   FileReferenceWire,
   HardDeleteTopicResponse,
@@ -103,6 +105,7 @@ export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[]
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
 export type FetchContextClosureResult = FetchContextClosureResponse
+export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
 export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1151,53 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchContextClosure(${request.topicId}, ${request.anchorGroupKey})`)
+  }
+
+  /**
+   * One-shot whole-topic snapshot READ for topic exports / knowledge.
+   *
+   * One authoritative SQLite transaction:
+   * - Validates topic exists; missing topic → NOT_FOUND (consistent with
+   *   other explicit reads; never an ambiguous empty success).
+   * - Returns the full ordered topic (authority sort_order ASC, id ASC via
+   *   listByTopic) with complete message/block relations. No viewport cap,
+   *   no hasMore, completeness is 'whole-topic'.
+   * - Empty topic (exists, no messages) → empty success with null bounds.
+   * - Pure read: never creates/mutates rows, never logs content.
+   */
+  fetchWholeTopicSnapshot(request: FetchWholeTopicSnapshotRequest): ChatDbResult<FetchWholeTopicSnapshotResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const allMessages = repos.messages.listByTopic(request.topicId)
+        const messageIds = allMessages.map((m) => m.id)
+        const blockDataMap = repos.blocks.listByMessages(messageIds)
+        const allBlocks: MessageBlockData[] = []
+        for (const id of messageIds) {
+          allBlocks.push(...(blockDataMap.get(id) ?? []))
+        }
+        const wireMessages = messagesToWire(allMessages)
+        const wireBlocks = blocksToWire(allBlocks)
+        const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+        const firstMessageId = allMessages.length > 0 ? allMessages[0].id : null
+        const lastMessageId = allMessages.length > 0 ? allMessages[allMessages.length - 1].id : null
+        return {
+          messages: messagesWithBlocks,
+          blocks: wireBlocks,
+          snapshot: {
+            completeness: 'whole-topic' as const,
+            topicId: request.topicId,
+            firstMessageId,
+            lastMessageId,
+            returnedCount: allMessages.length
+          }
+        }
+      })
+    }, `fetchWholeTopicSnapshot(${request.topicId})`)
   }
 
   /**

@@ -403,6 +403,9 @@ export enum IpcChannel {
   // S6.3 R-06 — authoritative context closure READ (anchor through newest)
   ChatDb_FetchContextClosure = 'chatdb:fetch-context-closure',
 
+  // One-shot whole-topic snapshot for topic exports / knowledge (short-lived, no Redux residency)
+  ChatDb_FetchWholeTopicSnapshot = 'chatdb:fetch-whole-topic-snapshot',
+
   // Phase 5 authoritative deletion propagation — Main → all renderers
   ChatDb_TopicDeleted = 'chatdb:topic-deleted',
 

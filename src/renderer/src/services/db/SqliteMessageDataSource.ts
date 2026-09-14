@@ -54,6 +54,8 @@ import type {
   FetchMessagesResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchWholeTopicSnapshotRequest,
+  FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   GetRawTopicRequest,
   GetRawTopicResponse,
@@ -128,6 +130,9 @@ export interface ChatDbApi {
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<ChatDbResult<FetchMessagesWindowResponse>>
   fetchAnswerGroup?(request: FetchAnswerGroupRequest): Promise<ChatDbResult<FetchAnswerGroupResponse>>
   fetchContextClosure?(request: FetchContextClosureRequest): Promise<ChatDbResult<FetchContextClosureResponse>>
+  fetchWholeTopicSnapshot?(
+    request: FetchWholeTopicSnapshotRequest
+  ): Promise<ChatDbResult<FetchWholeTopicSnapshotResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
@@ -1032,6 +1037,36 @@ export class SqliteMessageDataSource implements MessageDataSource {
       blocks: result.blocks as unknown as FetchContextClosureResponse['blocks'],
       closure: result.closure
     } as unknown as FetchContextClosureResponse
+  }
+
+  // ============ Whole-topic snapshot READ (one-shot exports/knowledge, read-only) ============
+
+  /**
+   * Fetch an explicit short-lived whole-topic snapshot for one-shot
+   * topic exports / knowledge jobs.
+   *
+   * One Main SQLite transaction returns the full ordered topic
+   * (sort_order ASC, id ASC) with reconstructed block relations and strict
+   * whole-topic metadata. Converts wires to domain Message[]/MessageBlock[]
+   * and dispatches nothing — the result is caller-local only, never
+   * published to Redux. Missing topic throws ChatDbResultError (NOT_FOUND);
+   * transport rejection propagates unchanged.
+   */
+  async fetchWholeTopicSnapshot(topicId: string): Promise<{
+    messages: Message[]
+    blocks: MessageBlock[]
+    snapshot: FetchWholeTopicSnapshotResponse['snapshot']
+  }> {
+    if (!this.api.fetchWholeTopicSnapshot) {
+      throw new Error('ChatDb API unavailable: whole-topic snapshot read not exposed')
+    }
+    const request: FetchWholeTopicSnapshotRequest = cloneForWire({ topicId })
+    const result = unwrap(await this.api.fetchWholeTopicSnapshot(request))
+    return {
+      messages: result.messages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[],
+      snapshot: result.snapshot
+    }
   }
 
   // ============ Search (Phase 5.2A, read-only) ============

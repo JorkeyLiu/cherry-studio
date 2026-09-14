@@ -7,6 +7,7 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
   MessageBlockEntry,
@@ -78,6 +79,14 @@ class DbService implements MessageDataSource {
   fetchContextClosure(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse> {
     if (!this.ordinarySource.fetchContextClosure) throw new Error('fetchContextClosure unavailable')
     return this.ordinarySource.fetchContextClosure(request)
+  }
+  fetchWholeTopicSnapshot(topicId: string): Promise<{
+    messages: Message[]
+    blocks: MessageBlock[]
+    snapshot: FetchWholeTopicSnapshotResponse['snapshot']
+  }> {
+    if (!this.ordinarySource.fetchWholeTopicSnapshot) throw new Error('fetchWholeTopicSnapshot unavailable')
+    return this.ordinarySource.fetchWholeTopicSnapshot(topicId)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)

@@ -1,10 +1,11 @@
-import { TopicManager } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
 import type { FileMetadata, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
 import { findAllBlocks } from './messageUtils/find'
+import { findAllSnapshotBlocks, type SnapshotBlockMap } from './messageUtils/snapshotBlocks'
+import { loadWholeTopicSnapshot } from './topicSnapshot'
 
 /**
  * 内容类型常量定义
@@ -69,9 +70,11 @@ export interface TopicPreprocessResult {
 
 /**
  * 分析消息内容，统计各类型内容数量
+ * Live single-message path uses the loaded Redux projection; pass an explicit
+ * snapshot block source to resolve from a short-lived whole-topic snapshot.
  */
-export function analyzeMessageContent(message: Message): MessageContentStats {
-  const blocks = findAllBlocks(message)
+export function analyzeMessageContent(message: Message, blocksById?: SnapshotBlockMap): MessageContentStats {
+  const blocks = blocksById ? findAllSnapshotBlocks(message, blocksById) : findAllBlocks(message)
 
   const stats: MessageContentStats = {
     text: 0,
@@ -135,8 +138,12 @@ export function analyzeMessageContent(message: Message): MessageContentStats {
  * 根据选择的内容类型，处理消息内容
  * 将选中的文本类型合并为字符串，提取文件列表
  */
-export function processMessageContent(message: Message, selectedTypes: ContentType[]): MessagePreprocessResult {
-  const blocks = findAllBlocks(message)
+export function processMessageContent(
+  message: Message,
+  selectedTypes: ContentType[],
+  blocksById?: SnapshotBlockMap
+): MessagePreprocessResult {
+  const blocks = blocksById ? findAllSnapshotBlocks(message, blocksById) : findAllBlocks(message)
   const textParts: string[] = []
   const files: FileMetadata[] = []
 
@@ -279,12 +286,15 @@ function processFileBlocks(block: MessageBlock): FileMetadata | null {
 
 /**
  * 分析话题内容，统计各类型内容数量
+ * Uses an explicit short-lived whole-topic snapshot from Main; never relies
+ * on or mutates the loaded Redux projection.
  * @param topic 话题对象
  * @returns 话题内容统计
  */
 export async function analyzeTopicContent(topic: Topic): Promise<TopicContentStats> {
-  // 获取话题的所有消息
-  const messages = await TopicManager.getTopicMessages(topic.id)
+  // 获取话题的完整快照（Main 权威顺序，调用方本地持有）
+  const snapshot = await loadWholeTopicSnapshot(topic.id)
+  const messages = snapshot.messages
 
   const stats: TopicContentStats = {
     text: 0,
@@ -301,7 +311,7 @@ export async function analyzeTopicContent(topic: Topic): Promise<TopicContentSta
 
   // 分析每个消息的内容
   for (const message of messages) {
-    const messageStats = analyzeMessageContent(message)
+    const messageStats = analyzeMessageContent(message, snapshot.blocksById)
 
     // 累加各类型统计
     stats.text += messageStats.text
@@ -321,13 +331,16 @@ export async function analyzeTopicContent(topic: Topic): Promise<TopicContentSta
 /**
  * 根据选择的内容类型，处理话题内容
  * 将选中的文本类型合并为字符串，提取文件列表
+ * Uses an explicit short-lived whole-topic snapshot from Main; never relies
+ * on or mutates the loaded Redux projection.
  * @param topic 话题对象
  * @param selectedTypes 选择的内容类型
  * @returns 话题预处理结果
  */
 export async function processTopicContent(topic: Topic, selectedTypes: ContentType[]): Promise<TopicPreprocessResult> {
-  // 获取话题的所有消息
-  const messages = await TopicManager.getTopicMessages(topic.id)
+  // 获取话题的完整快照（Main 权威顺序，调用方本地持有）
+  const snapshot = await loadWholeTopicSnapshot(topic.id)
+  const messages = snapshot.messages
 
   const textParts: string[] = []
   const files: FileMetadata[] = []
@@ -340,7 +353,7 @@ export async function processTopicContent(topic: Topic, selectedTypes: ContentTy
 
   // 处理每个消息
   for (const message of messages) {
-    const messageResult = processMessageContent(message, selectedTypes)
+    const messageResult = processMessageContent(message, selectedTypes, snapshot.blocksById)
 
     // 合并文本内容
     if (messageResult.text.trim()) {

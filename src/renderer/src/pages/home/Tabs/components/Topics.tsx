@@ -515,8 +515,9 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
             label: t('chat.topics.export.joplin'),
             key: 'joplin',
             onClick: async () => {
-              const topicMessages = await TopicManager.getTopicMessages(topic.id)
-              void exportMarkdownToJoplin(topic.name, topicMessages)
+              const { loadWholeTopicSnapshot } = await import('@renderer/utils/topicSnapshot')
+              const snapshot = await loadWholeTopicSnapshot(topic.id)
+              void exportMarkdownToJoplin(topic.name, snapshot.messages, snapshot.blocksById)
             }
           },
           exportMenuOptions.siyuan && {

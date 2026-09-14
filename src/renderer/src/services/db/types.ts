@@ -6,6 +6,7 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
   MessageBlockEntry,
@@ -265,6 +266,19 @@ export interface MessageDataSource {
    * Distinct completeness 'context-closure', no cap, no hasMore.
    */
   fetchContextClosure?(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse>
+
+  /**
+   * Explicit short-lived whole-topic snapshot for one-shot topic exports /
+   * knowledge jobs. Returns the full ordered topic with reconstructed block
+   * relations and strict whole-topic metadata. Converts wires to domain
+   * Message[]/MessageBlock[] and dispatches nothing (caller-local only).
+   * Missing topic → throws ChatDbResultError (NOT_FOUND).
+   */
+  fetchWholeTopicSnapshot?(topicId: string): Promise<{
+    messages: Message[]
+    blocks: MessageBlock[]
+    snapshot: FetchWholeTopicSnapshotResponse['snapshot']
+  }>
 
   // ============ File Operations (Optional) ============
 

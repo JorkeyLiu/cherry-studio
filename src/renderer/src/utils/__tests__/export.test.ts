@@ -49,7 +49,34 @@ vi.mock('@renderer/utils/messageUtils/find', () => ({
   })
 }))
 
-// Mock TopicManager for dynamic import
+vi.mock('@renderer/utils/messageUtils/snapshotBlocks', () => ({
+  createSnapshotBlockMap: vi.fn((blocks: MessageBlock[]) => {
+    const map = new Map<string, MessageBlock>()
+    for (const b of blocks) map.set(b.id, b)
+    return map
+  }),
+  getMainTextSnapshotContent: vi.fn((message: Message & { _fullBlocks?: MessageBlock[] }) => {
+    const mainTextBlock = message._fullBlocks?.find((b) => b.type === MessageBlockType.MAIN_TEXT)
+    return mainTextBlock?.content || ''
+  }),
+  getThinkingSnapshotContent: vi.fn((message: Message & { _fullBlocks?: MessageBlock[] }) => {
+    const thinkingBlock = message._fullBlocks?.find((b) => b.type === MessageBlockType.THINKING)
+    return (thinkingBlock as any)?.content || ''
+  }),
+  getCitationSnapshotContent: vi.fn((message: Message & { _fullBlocks?: MessageBlock[] }) => {
+    const citationBlocks = message._fullBlocks?.filter((b) => b.type === MessageBlockType.CITATION) || []
+    if (citationBlocks.length === 0) return ''
+    return citationBlocks
+      .map((_, index) => `[${index + 1}] [https://example${index + 1}.com](Example Citation ${index + 1})`)
+      .join('\n\n')
+  })
+}))
+
+vi.mock('@renderer/utils/topicSnapshot', () => ({
+  loadWholeTopicSnapshot: vi.fn()
+}))
+
+// Mock TopicManager for legacy compat (no production export path should use it)
 vi.mock('@renderer/hooks/useTopic', () => ({
   TopicManager: {
     getTopicMessages: vi.fn()
@@ -68,6 +95,7 @@ vi.mock('@renderer/utils/markdown', async (importOriginal) => {
 import type { Topic } from '@renderer/types'
 import { TopicType } from '@renderer/types'
 import { markdownToPlainText } from '@renderer/utils/markdown'
+import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 
 import { copyMessageAsPlainText } from '../copy'
 import {
@@ -77,6 +105,7 @@ import {
   messageToMarkdownWithReasoning,
   messageToPlainText,
   processCitations,
+  topicToMarkdown,
   topicToPlainText
 } from '../export'
 
@@ -170,6 +199,25 @@ function createMessage(
 
 // Store mocked messages generated in beforeEach blocks
 let mockedMessages: (Message & { _fullBlocks: MessageBlock[] })[] = []
+
+const mockTopicSnapshot = (messages: (Message & { _fullBlocks?: MessageBlock[] })[]) => {
+  const blocks = messages.flatMap((m) => (m as any)._fullBlocks ?? [])
+  const blocksById = new Map<string, MessageBlock>()
+  for (const b of blocks) blocksById.set(b.id, b)
+  const ids = messages.map((m) => m.id)
+  ;(loadWholeTopicSnapshot as any).mockResolvedValue({
+    messages,
+    blocks,
+    blocksById,
+    snapshot: {
+      completeness: 'whole-topic',
+      topicId: 'mock-topic',
+      firstMessageId: ids[0] ?? null,
+      lastMessageId: ids[ids.length - 1] ?? null,
+      returnedCount: messages.length
+    }
+  })
+}
 
 beforeEach(() => {
   // Reset mocks and modules before each test suite (describe block)
@@ -422,11 +470,9 @@ describe('export', () => {
       vi.clearAllMocks()
       vi.resetModules()
 
-      // Re-mock TopicManager for this test suite
-      vi.doMock('@renderer/hooks/useTopic', () => ({
-        TopicManager: {
-          getTopicMessages: vi.fn()
-        }
+      // Re-mock whole-topic snapshot loader for this test suite
+      vi.doMock('@renderer/utils/topicSnapshot', () => ({
+        loadWholeTopicSnapshot: vi.fn()
       }))
     })
 
@@ -446,9 +492,8 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return the expected messages
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([userMsg, assistantMsg])
+      // Mock whole-topic snapshot to return the expected messages
+      mockTopicSnapshot([userMsg, assistantMsg])
       // Specific mock for this test to check formatting
       ;(markdownToPlainText as any).mockImplementation((str: string) => str.replace(/[#*]/g, ''))
 
@@ -459,6 +504,7 @@ describe('export', () => {
       expect(markdownToPlainText).toHaveBeenCalledWith('# User Content Formatted')
       expect(markdownToPlainText).toHaveBeenCalledWith('*Assistant Content Formatted*')
       expect(markdownToPlainText).toHaveBeenCalledWith('Formatted Plain Topic')
+      expect(loadWholeTopicSnapshot).toHaveBeenCalledWith('t_plain_formatted')
     })
   })
 
@@ -523,11 +569,9 @@ describe('export', () => {
       vi.clearAllMocks() // Clear mocks before each test in this suite
       vi.resetModules() // Reset module cache
 
-      // Re-import and re-mock TopicManager to ensure clean state
-      vi.doMock('@renderer/hooks/useTopic', () => ({
-        TopicManager: {
-          getTopicMessages: vi.fn()
-        }
+      // Re-mock whole-topic snapshot loader to ensure clean state
+      vi.doMock('@renderer/utils/topicSnapshot', () => ({
+        loadWholeTopicSnapshot: vi.fn()
       }))
     })
 
@@ -547,13 +591,13 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return the expected messages
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([msg1, msg2])
+      // Mock whole-topic snapshot to return the expected messages
+      mockTopicSnapshot([msg1, msg2])
       ;(markdownToPlainText as any).mockImplementation((str: string) => str) // Pass-through
 
       const plainText = await topicToPlainText(testTopic)
       expect(plainText).toBe('Multi Plain Formatted\n\nUser:\nMsg1 Formatted\n\nAssistant:\nMsg2 Formatted')
+      expect(loadWholeTopicSnapshot).toHaveBeenCalledWith('t_multi_plain_formatted')
     })
   })
 
@@ -583,9 +627,8 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return the expected messages
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([msgWithEmpty])
+      // Mock whole-topic snapshot to return the expected messages
+      mockTopicSnapshot([msgWithEmpty])
       ;(markdownToPlainText as any).mockImplementation((str: string) => str)
 
       const result = await topicToPlainText(testTopic)
@@ -605,9 +648,8 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return the expected messages
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([msgWithSpecial])
+      // Mock whole-topic snapshot to return the expected messages
+      mockTopicSnapshot([msgWithSpecial])
       ;(markdownToPlainText as any).mockImplementation((str: string) => str)
 
       const result = await topicToPlainText(testTopic)
@@ -632,9 +674,8 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return the expected messages
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([msg1, msg2])
+      // Mock whole-topic snapshot to return the expected messages
+      mockTopicSnapshot([msg1, msg2])
       ;(markdownToPlainText as any).mockImplementation((str: string) => str.replace(/[#*_]/g, ''))
 
       const result = await topicToPlainText(testTopic)
@@ -654,9 +695,8 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return empty array
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([])
+      // Mock whole-topic snapshot to return empty array
+      mockTopicSnapshot([])
       ;(markdownToPlainText as any).mockImplementation((str: string) => str.replace(/[#*_]/g, ''))
 
       const result = await topicToPlainText(testTopic)
@@ -674,9 +714,8 @@ describe('export', () => {
         updatedAt: '',
         type: TopicType.Chat
       }
-      // Mock TopicManager.getTopicMessages to return empty array for null case
-      const { TopicManager } = await import('@renderer/hooks/useTopic')
-      ;(TopicManager.getTopicMessages as any).mockResolvedValue([])
+      // Mock whole-topic snapshot to return empty array for null case
+      mockTopicSnapshot([])
 
       const result = await topicToPlainText(testTopic)
       expect(result).toBe('Null Messages Topic')
@@ -1018,5 +1057,62 @@ describe('Citation formatting in Markdown export', () => {
 
     // Should include citation content (mocked by getCitationContent)
     expect(markdown).toContain('[1] [https://example1.com](Example Citation 1)')
+  })
+})
+
+describe('topic snapshot exports (whole-topic, no Redux residency)', () => {
+  it('topicToMarkdown loads the snapshot once and preserves full ordered input', async () => {
+    const msgs = Array.from({ length: 35 }, (_, i) =>
+      createMessage({ role: i % 2 === 0 ? 'user' : 'assistant', id: `snap-m-${i}` }, [
+        { type: MessageBlockType.MAIN_TEXT, content: `snapshot-content-${i}` }
+      ])
+    )
+    const testTopic: Topic = {
+      id: 't-snapshot-order',
+      name: 'Snapshot Order',
+      assistantId: 'asst-test',
+      messages: [] as any,
+      createdAt: '',
+      updatedAt: '',
+      type: TopicType.Chat
+    }
+    mockTopicSnapshot(msgs)
+    ;(markdownToPlainText as any).mockImplementation((str: string) => str)
+    const markdown = await topicToMarkdown(testTopic)
+    expect(loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
+    expect(loadWholeTopicSnapshot).toHaveBeenCalledWith('t-snapshot-order')
+    for (let i = 0; i < 35; i++) {
+      expect(markdown).toContain(`snapshot-content-${i}`)
+    }
+    expect(markdown.indexOf('snapshot-content-0') < markdown.indexOf('snapshot-content-34')).toBe(true)
+  })
+
+  it('topic export resolves local blocks without TopicManager/load-thunk dependence', async () => {
+    const { TopicManager } = await import('@renderer/hooks/useTopic')
+    const msg = createMessage({ role: 'user', id: 'snap-local-1' }, [
+      { type: MessageBlockType.MAIN_TEXT, content: 'local-block-content' }
+    ])
+    const testTopic: Topic = {
+      id: 't-snapshot-local',
+      name: 'Snapshot Local',
+      assistantId: 'asst-test',
+      messages: [] as any,
+      createdAt: '',
+      updatedAt: '',
+      type: TopicType.Chat
+    }
+    mockTopicSnapshot([msg])
+    const markdown = await topicToMarkdown(testTopic)
+    expect(markdown).toContain('local-block-content')
+    expect(TopicManager.getTopicMessages).not.toHaveBeenCalled()
+  })
+
+  it('messagesToMarkdown with explicit snapshot blocks resolves local content', async () => {
+    const msg = createMessage({ role: 'user', id: 'joplin-snap-1' }, [
+      { type: MessageBlockType.MAIN_TEXT, content: 'joplin-snapshot-content' }
+    ])
+    const blocksById = new Map(msg._fullBlocks.map((b) => [b.id, b] as [string, MessageBlock]))
+    const markdown = messagesToMarkdown([msg], false, undefined, blocksById as any)
+    expect(markdown).toContain('joplin-snapshot-content')
   })
 })
