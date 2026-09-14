@@ -1,17 +1,22 @@
 /**
- * S6.2a R-04 search-hit navigation — INTEGRATED E2E
+ * Unified stable-ID navigation — search hit outside latest window (INTEGRATED E2E)
  *
- * Verifies that a hit outside the latest bounded projection becomes available
- * through the real SearchResults user path, exercising production
- * fetchMessagesWindow around (10/19) + canonical unionWindowMessages merge
- * and atomic Redux staging, with no whole-topic fetch in this path.
+ * Verifies that a hit outside the latest bounded projection reaches the real
+ * Messages viewport through the unified direct navigation path: the search hit
+ * calls the stable-ID entry (SearchResults → locateToMessageTarget, no pseudo
+ * Message, no preview, no private window fetch/merge/publish), which drives
+ * the Messages unified navigate path — ensure via existing
+ * fetchMessagesWindow around (10/19), atomic message+blocks merge, then the
+ * existing runMessageNavigationTransaction (viewport/DOM/reveal/scroll).
+ * No whole-topic fetch in this path.
  *
- * Evidence tier: INTEGRATED — drives actual History/SearchResults UI controls.
+ * Evidence tier: INTEGRATED — drives actual History/SearchResults UI controls
+ * directly through to the real #messages DOM (no preview-locate two-step).
  * Deterministic setup uses direct Redux dispatch only for seeding
  * (assistants/addTopic, newMessages/setDisplayCount) plus ensured chatDb
- * persistence (ensureTopic/pasteMessagesToTopic); the search-hit publication
- * itself does not directly dispatch — it exercises the production
- * SearchResults.handleMessageClick path.
+ * persistence (ensureTopic/pasteMessagesToTopic); the complement publication
+ * itself does not directly dispatch — it exercises the production Messages
+ * ensure + transaction path.
  *
  * - Uses standard fixture (fresh build, disposable profile, mock provider)
  * - Seeds via approved ensureTopic + pasteMessagesToTopic
@@ -20,10 +25,12 @@
  * - Enters query into real history-search-input, presses Enter, waits for real
  *   SearchResults to fetch via window.api.chatDb.searchMessages
  * - Clicks real search-result-hit (data-testid=search-result-hit) — production
- *   SearchResults.handleMessageClick → dbService.fetchMessagesWindow → isValid
- *   → unionWindowMessages (canonical) → upsertManyBlocks + messagesReceived
- * - Observes real Redux (messageIdsByTopic contains hit + tail, no duplicates,
- *   deterministic sort), real navigation (search-message-view + locate button)
+ *   SearchResults.handleMessageClick → locateToMessageTarget → pendingNavigate +
+ *   navigate('/') + NAVIGATE_TO_MESSAGE → Messages unified ensure (around
+ *   10/19 → validate → union → upsertManyBlocks + messagesReceived) →
+ *   runMessageNavigationTransaction
+ * - Primary assertions are DOM + viewport reachability inside #messages
+ *   (Redux presence is supporting only, never the sole proof)
  * - Supplemental direct fetchMessagesWindow around probe only (not a substitute)
  */
 
@@ -177,7 +184,7 @@ test.describe('search-hit around window (R-04) — integrated UI', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-04 INTEGRATED UI: deterministic setup via direct Redux dispatch (addTopic/displayCount) + ensured chatDb persistence; real Navbar search button → history-search-input Enter → real SearchResults hit outside tail → real search-result-hit click → production fetchMessagesWindow(around 10/19) → isValidWindowResponse → canonical unionWindowMessages → atomic Redux staging (real UI publication path, not direct Redux dispatch). Supplemental direct fetch probe only.'
+        'R-04 INTEGRATED UI: deterministic setup via direct Redux dispatch (addTopic/displayCount) + ensured chatDb persistence; real Navbar search button → history-search-input Enter → real SearchResults hit outside tail → real search-result-hit click → locateToMessageTarget → Messages unified ensure fetchMessagesWindow(around 10/19) → isValidWindowResponse → canonical unionWindowMessages → atomic Redux staging (real UI publication path, not direct Redux dispatch). Supplemental direct fetch probe only.'
     })
     const page = mainWindow
     const liveAssistantId = await prepareDisplayCountAndAssistant(page)
@@ -226,13 +233,12 @@ test.describe('search-hit around window (R-04) — integrated UI', () => {
     await historyInput.fill(hitQuery)
     await historyInput.press('Enter')
 
-    // After entering the query, SearchResults is shown with default whole-word mode. Switch to substring (Contains) to ensure the numeric token matches the hyphenated block content via LIKE/trigram path and avoids whole-word FTS phrase edge cases.
-    // Exact semantic locator scoped to the match-mode Segmented control (not page-global text).
-    const containsOption = page
-      .getByRole('radiogroup')
-      .filter({ hasText: 'Whole word' })
-      .getByText('Contains', { exact: true })
-    await expect(containsOption, 'Contains option must be visible in search toolbar').toBeVisible({ timeout: 10000 })
+    // After entering the query, SearchResults is shown with default whole-word mode. Switch to substring to ensure the numeric token matches the hyphenated block content via LIKE/trigram path and avoids whole-word FTS phrase edge cases.
+    // Locale-independent semantic testid on the match-mode Segmented option label (see SearchResults.tsx).
+    const containsOption = page.getByTestId('history-search-match-substring')
+    await expect(containsOption, 'substring match option must be visible in search toolbar').toBeVisible({
+      timeout: 10000
+    })
     await containsOption.click()
 
     // Wait for real SearchResults to produce the hit via SQLite searchMessages (substring mode)
@@ -241,10 +247,13 @@ test.describe('search-hit around window (R-04) — integrated UI', () => {
       timeout: 30000
     })
 
-    // Click real result — triggers production SearchResults.handleMessageClick path
+    // Click real result — production SearchResults.handleMessageClick navigates
+    // directly to Chat via locateToMessageTarget (no pseudo-Message, no preview,
+    // no private window fetch/merge/publish; complement happens in Messages).
     await hitLocator.click()
 
-    // Observe production fetch→merge outcome: Redux must contain hit + resident tail, no duplicates, ordered
+    // Supporting Redux observation: hit + resident tail present, no duplicates, ordered.
+    // (Supporting only — DOM + viewport below are the primary proof.)
     await page.waitForFunction(
       ({ topicId, hitId, expectedTail }: { topicId: string; hitId: string; expectedTail: string[] }) => {
         const s = (window as any).store.getState()
@@ -275,16 +284,26 @@ test.describe('search-hit around window (R-04) — integrated UI', () => {
       expect(toNum(post.ids[i])).toBeGreaterThan(toNum(post.ids[i - 1]))
     }
 
-    // Navigation succeeds: SearchMessage preview view is shown for the hit (real onMessageClick outcome)
-    const messageView = page.getByTestId('search-message-view')
-    await expect(messageView, 'search-message-view must be visible after real hit click').toBeVisible({
+    // Primary proof: the target truly entered the #messages DOM via the direct path.
+    const targetInMessages = page.locator(`#messages [data-message-id="${hitId}"]`)
+    await expect(targetInMessages, `hit ${hitId} must render inside #messages after direct hit click`).toBeAttached({
+      timeout: 30000
+    })
+    await expect(targetInMessages, `hit ${hitId} must be visible inside #messages after direct hit click`).toBeVisible({
       timeout: 15000
     })
-    const locateBtn = page.getByTestId('search-message-locate')
-    const locatePrimary = page.getByTestId('search-message-locate-primary')
-    await expect(locateBtn.or(locatePrimary).first(), 'locate button must be visible in message preview').toBeVisible({
-      timeout: 10000
+
+    // Primary proof: the target is viewport-reachable (scrolled into view by the transaction).
+    await expect(targetInMessages, `hit ${hitId} must be viewport-reachable after direct hit click`).toBeInViewport({
+      timeout: 15000
     })
+    const rect = await targetInMessages.evaluate((el) => {
+      const r = (el as HTMLElement).getBoundingClientRect()
+      return { top: r.top, bottom: r.bottom, height: r.height, innerHeight: window.innerHeight }
+    })
+    expect(rect.height).toBeGreaterThan(0)
+    expect(rect.bottom).toBeGreaterThan(0)
+    expect(rect.top).toBeLessThan(rect.innerHeight)
 
     // Supplemental direct contract probe only (not a substitute for UI path) — verifies around window contract still valid
     const probe: any = await page.evaluate(

@@ -84,6 +84,13 @@ vi.mock('@renderer/store/newMessage', async () => {
   const actual = await vi.importActual<any>('@renderer/store/newMessage')
   return { ...actual, newMessagesActions: { ...actual.newMessagesActions, messagesReceived: messagesReceivedMock } }
 })
+vi.mock('@renderer/services/MessagesService', () => ({
+  locateToMessageTarget: vi.fn(async () => {}),
+  locateToMessage: vi.fn()
+}))
+vi.mock('@renderer/services/NavigationService', () => ({
+  default: { navigate: vi.fn(), setNavigate: vi.fn() }
+}))
 vi.mock('@renderer/databases', () => ({ default: {} }))
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
   default: () => ({ handleScroll: vi.fn(), containerRef: { current: null } })
@@ -120,6 +127,7 @@ vi.mock('antd', () => {
   List.Item = ({ children }: any) => <div>{children}</div>
   return {
     List,
+    Button: () => null,
     Pagination: ({ current, pageSize, total, onChange, hideOnSinglePage }: any) => {
       const pageCount = Math.ceil((total ?? 0) / (pageSize || 10))
       if (hideOnSinglePage && pageCount <= 1) return null

@@ -11,15 +11,16 @@ interface TopicSegmentDrawerProps {
 }
 
 const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
-  const { orderedSegmentsForTopic, messageIndexById } = useTopicSegments(topicId)
+  const { orderedSegmentsForTopic } = useTopicSegments(topicId)
 
-  const scrollToSegment = useCallback(
-    (segmentMessageIds: string[]) => {
-      const firstExistingId = segmentMessageIds.find((id) => messageIndexById.has(id)) || segmentMessageIds[0]
-      void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, firstExistingId)
-    },
-    [messageIndexById]
-  )
+  // Always navigate to the segment's authoritative first message ID.
+  // Window complement for targets outside the loaded projection happens in
+  // the Messages unified navigate path; no window-local fallback here.
+  const scrollToSegment = useCallback((segmentMessageIds: string[]) => {
+    const targetId = segmentMessageIds[0]
+    if (!targetId) return
+    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, targetId)
+  }, [])
 
   const popoverContent = useMemo(() => {
     if (orderedSegmentsForTopic.length === 0) return null

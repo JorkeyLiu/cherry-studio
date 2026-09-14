@@ -119,6 +119,13 @@ const mocks = vi.hoisted(() => {
     // useTopicMessages mock — returns empty messages by default
     topicMessages: [] as Message[],
 
+    // Unified navigation: controllable ensure + observable dispatches/toast.
+    ensureMock: vi.fn(async () => ({ status: 'resident' }) as any),
+    dispatchMock: vi.fn(),
+    upsertManyBlocksMock: vi.fn((blocks: unknown) => ({ type: 'messageBlocks/upsertMany', payload: blocks })),
+    messagesReceivedMock: vi.fn((payload: unknown) => ({ type: 'newMessages/messagesReceived', payload })),
+    toastErrorMock: vi.fn(),
+
     // Mock refs to track
     scrollContainerRef,
 
@@ -284,13 +291,25 @@ vi.mock('@renderer/services/phaseTimingDiagnostics', () => ({
 
 vi.mock('@renderer/store', () => ({
   default: { getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} } })) },
-  useAppDispatch: () => vi.fn()
+  useAppDispatch: () => (mocks as any).dispatchMock
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
   messageBlocksSelectors: { selectById: vi.fn() },
-  updateOneBlock: vi.fn()
+  updateOneBlock: vi.fn(),
+  upsertManyBlocks: (...args: any[]) => (mocks as any).upsertManyBlocksMock(...args)
 }))
+
+vi.mock('@renderer/store/newMessage', async (importOriginal) => {
+  const actual = (await importOriginal()) as any
+  return {
+    ...actual,
+    newMessagesActions: {
+      ...actual.newMessagesActions,
+      messagesReceived: (...args: any[]) => (mocks as any).messagesReceivedMock(...args)
+    }
+  }
+})
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   updateMessageAndBlocksThunk: vi.fn()
@@ -373,8 +392,27 @@ vi.mock('@renderer/pages/home/Messages/messageNavigation', async () => {
   }
 })
 
+// Unified navigation: the Messages navigate path ensures missing targets through
+// messageNavigationLoader before running the transaction. These epoch-guard tests
+// use empty topic messages, so without this mock every navigate would take the
+// real ensure path (async window read) instead of reaching the controllable
+// transaction mock below. Defaulting to `resident` keeps these tests focused on
+// pending/epoch/persistence semantics; ensure-then-transaction success is covered
+// by messageNavigationLoader.test.ts and the unified block below (controllable
+// via mocks.ensureMock per test).
+vi.mock('@renderer/pages/home/Messages/messageNavigationLoader', () => ({
+  ensureMessageLoaded: (...args: any[]) => (mocks as any).ensureMock(...args),
+  buildNavigationAroundRequest: vi.fn(),
+  NAVIGATION_LOADER_BEFORE: 10,
+  NAVIGATION_LOADER_AFTER: 19
+}))
+
 vi.mock('@renderer/pages/home/Messages/messageViewportProjection', () => ({
-  projectMessageViewportGroups: vi.fn((_messages: any[], groups: any[]) => groups)
+  // Return empty projection to keep rendering empty while navigate logic uses
+  // `messagesRef` (topicMessages). The real projection is covered elsewhere;
+  // returning `groups` directly would mismatch the projected-tuple shape and
+  // crash on non-empty windows.
+  projectMessageViewportGroups: vi.fn(() => [])
 }))
 
 // Child component mocks — render with data-testid for identity/structure assertions
@@ -479,6 +517,11 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // S3.2: Clear key-aware scroll store and reset key ref
     mocks.scrollKeyStore.clear()
     mocks.scrollKeyRef.current = ''
+    // Unified navigation defaults: resident (zero reads), empty projection.
+    mocks.ensureMock.mockReset()
+    mocks.ensureMock.mockImplementation(async () => ({ status: 'resident' }) as any)
+    mocks.topicMessages = [] as any
+    ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
   })
 
   // -----------------------------------------------------------------------
@@ -1188,10 +1231,12 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
+    // Unified navigate ensures missing targets before the transaction, so the
+    // bootstrap transaction starts after the ensure microtask chain drains.
+    await act(async () => {})
+
     // Bootstrap should have started a pending navigation (epoch 0)
     expect(pendingTransactionResolvers.length).toBe(1)
-
-    await act(async () => {})
 
     // S3.2: Reset mock after initial render
     mocks.savePosition.mockClear()
@@ -1236,10 +1281,12 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
+    // Unified navigate ensures missing targets before the transaction, so the
+    // bootstrap transaction starts after the ensure microtask chain drains.
+    await act(async () => {})
+
     // Bootstrap started a pending navigation (epoch 0)
     expect(pendingTransactionResolvers.length).toBe(1)
-
-    await act(async () => {})
 
     // No topic change — same epoch throughout
     await act(async () => {
@@ -1268,6 +1315,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       />
     )
 
+    // Unified navigate ensures missing targets before the transaction, so the
+    // bootstrap transaction starts after the ensure microtask chain drains.
+    await act(async () => {})
+
     // Bootstrap started at epoch 0 (resolver index 0)
     expect(pendingTransactionResolvers.length).toBe(1)
 
@@ -1290,7 +1341,8 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // B → A (epoch 2) — savePosition called once for old topic B;
     // bootstrap detects matching pending and starts new navigation
-    // (resolver index 1)
+    // (resolver index 1). Unified navigate ensures (async) before the
+    // transaction, so drain the ensure microtask chain before asserting.
     await act(async () => {
       rerender(
         <Messages
@@ -1301,6 +1353,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
         />
       )
     })
+    await act(async () => {})
 
     // Two resolvers: epoch-0 (stale) and epoch-2 (current)
     expect(pendingTransactionResolvers.length).toBe(2)
@@ -1500,5 +1553,259 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // Same epoch: savePosition SHOULD have been called
     expect(mocks.savePosition).toHaveBeenCalled()
+  })
+})
+
+describe('Unified navigation — ensure/commit/pending semantics (mounted)', () => {
+  const msgFor = (id: string, topicId = 'topic-a'): Message =>
+    ({
+      id,
+      role: 'user',
+      assistantId: 'assistant-1',
+      topicId,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      status: 'success',
+      blocks: []
+    }) as unknown as Message
+
+  const isolateNav = (topicId: string) => {
+    mocks.scrollContainerRef.current = null
+    mocks.scrollKeyStore.clear()
+    mocks.scrollKeyRef.current = ''
+    mocks.getSavedPosition.mockImplementation(() => null)
+    mocks.simulatePassiveKeyUpdate(`topic-${topicId}`)
+  }
+
+  it('missing→loaded dispatches blocks/messages and runs the transaction only after the React commit is observable', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+    const tail = [msgFor('m-tail-1'), msgFor('m-tail-2')]
+    const target = msgFor('msg-target')
+    const loadedMessages = [...tail, target] as Message[]
+    const loadedBlocks = [{ id: 'b-target', messageId: 'msg-target' }] as any
+    mocks.topicMessages = tail as any
+    mocks.ensureMock.mockImplementation(
+      async () => ({ status: 'loaded', messages: loadedMessages, blocks: loadedBlocks }) as any
+    )
+
+    mocks.setPendingNavigate(null)
+    isolateNav('topic-a')
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    pendingTransactionResolvers.length = 0
+    mocks.dispatchMock.mockClear()
+
+    const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
+    const handlerPromise: Promise<any> = handler('msg-target')
+    // Let ensure resolve + staged publication happen (dispatch), but the
+    // projection commit is not yet observable so the transaction must wait.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(mocks.dispatchMock).toHaveBeenCalled()
+    expect(pendingTransactionResolvers.length).toBe(0)
+
+    // Simulate the Redux projection / React commit becoming observable.
+    mocks.topicMessages = loadedMessages as any
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicA}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    // Bounded commit wait polls; allow it to observe the new projection.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 120))
+    })
+    expect(pendingTransactionResolvers.length).toBe(1)
+
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    await handlerPromise
+    expect(mocks.toastErrorMock).not.toHaveBeenCalled()
+  })
+
+  it('post-fetch stale cancels with zero publication', async () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+    mocks.topicMessages = [] as any
+    let ensureResolve: ((v: any) => void) | null = null
+    mocks.ensureMock.mockImplementation(
+      () =>
+        new Promise<any>((resolve) => {
+          ensureResolve = resolve
+        })
+    )
+    mocks.setPendingNavigate(null)
+    isolateNav('topic-a')
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    pendingTransactionResolvers.length = 0
+    mocks.dispatchMock.mockClear()
+
+    const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
+    const handlerPromise: Promise<any> = handler('msg-target')
+    await act(async () => {})
+
+    // Topic switches while the around read is in flight.
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicB}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+    await act(async () => {
+      ensureResolve?.({ status: 'loaded', messages: [msgFor('msg-target', 'topic-a')], blocks: [] })
+    })
+    await handlerPromise
+
+    expect(mocks.dispatchMock).not.toHaveBeenCalled()
+    expect(pendingTransactionResolvers.length).toBe(0)
+  })
+
+  it('transport error preserves pending with no publication and no toast', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+    mocks.topicMessages = [] as any
+    mocks.ensureMock.mockImplementation(async () => ({ status: 'error' }) as any)
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-target' })
+    mocks.clearPendingNavigate.mockClear()
+    isolateNav('topic-a')
+    render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    pendingTransactionResolvers.length = 0
+    mocks.dispatchMock.mockClear()
+    mocks.toastErrorMock.mockClear()
+
+    const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
+    const handlerPromise: Promise<any> = handler('msg-target')
+    await handlerPromise
+
+    // Retryable error maps to cancelled: pending preserved, nothing published.
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
+    expect(mocks.dispatchMock).not.toHaveBeenCalled()
+    expect(mocks.toastErrorMock).not.toHaveBeenCalled()
+    expect(pendingTransactionResolvers.length).toBe(0)
+  })
+
+  it('authoritative not-found clears pending with a single not-found toast', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+    mocks.topicMessages = [] as any
+    mocks.ensureMock.mockImplementation(async () => ({ status: 'not-found' }) as any)
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-missing' })
+    mocks.clearPendingNavigate.mockClear()
+    mocks.clearPendingNavigate.mockImplementation(() => true)
+    isolateNav('topic-a')
+    render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    pendingTransactionResolvers.length = 0
+    mocks.dispatchMock.mockClear()
+    mocks.toastErrorMock.mockClear()
+
+    const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
+    const handlerPromise: Promise<any> = handler('msg-missing')
+    await handlerPromise
+
+    expect(mocks.dispatchMock).not.toHaveBeenCalled()
+    expect(mocks.toastErrorMock).toHaveBeenCalledWith('history.error.message_not_found')
+    expect(mocks.clearPendingNavigate).toHaveBeenCalled()
+    expect(pendingTransactionResolvers.length).toBe(0)
+  })
+
+  it('live topic ref captures a switch during the ensure window (no stale closure)', async () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+    mocks.topicMessages = [] as any
+    let ensureResolve: ((v: any) => void) | null = null
+    mocks.ensureMock.mockImplementation(
+      () =>
+        new Promise<any>((resolve) => {
+          ensureResolve = resolve
+        })
+    )
+    mocks.setPendingNavigate(null)
+    isolateNav('topic-a')
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    mocks.simulatePassiveKeyUpdate(`topic-${topicA.id}`)
+    pendingTransactionResolvers.length = 0
+    mocks.dispatchMock.mockClear()
+
+    const handler = mocks.eventHandlers['NAVIGATE_TO_MESSAGE']
+    const handlerPromise: Promise<any> = handler('msg-target')
+    await act(async () => {})
+
+    // Live ref must observe the switch even though the navigate closure was
+    // created for topic-a: switch to B, then resolve the in-flight ensure.
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicB}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+    await act(async () => {
+      ensureResolve?.({ status: 'loaded', messages: [msgFor('msg-target', 'topic-a')], blocks: [] })
+    })
+    await handlerPromise
+
+    expect(mocks.dispatchMock).not.toHaveBeenCalled()
+    expect(pendingTransactionResolvers.length).toBe(0)
   })
 })

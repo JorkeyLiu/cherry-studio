@@ -27,7 +27,9 @@ const {
   upsertManyBlocksMock,
   messagesReceivedMock,
   toastErrorMock,
-  storeTopicsMap
+  storeTopicsMap,
+  locateTargetMock,
+  navigateMock
 } = vi.hoisted(() => ({
   searchMessagesMock: vi.fn<(request: SearchMessagesRequest) => Promise<SearchMessagesResponse>>(),
   fetchMessagesWindowMock: vi.fn(),
@@ -42,7 +44,9 @@ const {
     payload
   })),
   toastErrorMock: vi.fn(),
-  storeTopicsMap: new Map<string, { id: string; name: string }>()
+  storeTopicsMap: new Map<string, { id: string; name: string }>(),
+  locateTargetMock: vi.fn(async () => {}),
+  navigateMock: vi.fn()
 }))
 
 vi.mock('@renderer/services/db/SqliteMessageDataSource', () => {
@@ -127,6 +131,15 @@ vi.mock('i18next', async (importOriginal) => {
   const actual = (await importOriginal()) as any
   return { ...actual, t: (k: string) => k }
 })
+
+vi.mock('@renderer/services/MessagesService', () => ({
+  locateToMessageTarget: locateTargetMock,
+  locateToMessage: vi.fn()
+}))
+
+vi.mock('@renderer/services/NavigationService', () => ({
+  default: { navigate: navigateMock, setNavigate: vi.fn() }
+}))
 
 vi.mock('@renderer/store/assistants', async (importOriginal) => {
   const actual = (await importOriginal()) as any
@@ -222,32 +235,6 @@ const makeResponse = (
   totalCount: options.totalCount ?? items.length
 })
 
-const makeWindowResponse = (
-  request: { topicId: string; anchorMessageId: string; before: number; after: number },
-  messages: Array<Record<string, unknown>>,
-  blocks: Array<Record<string, unknown>> = []
-) => {
-  const returnedCount = messages.length
-  const firstMessageId = returnedCount > 0 ? (messages[0] as any).id : null
-  const lastMessageId = returnedCount > 0 ? (messages[returnedCount - 1] as any).id : null
-  return {
-    messages,
-    blocks,
-    window: {
-      kind: 'around' as const,
-      completeness: 'window' as const,
-      topicId: request.topicId,
-      anchorMessageId: request.anchorMessageId,
-      requested: { before: request.before, after: request.after },
-      firstMessageId,
-      lastMessageId,
-      returnedCount,
-      hasMoreBefore: false,
-      hasMoreAfter: false
-    }
-  }
-}
-
 beforeEach(() => {
   vi.clearAllMocks()
   resetAllDeletionGenerationsForTests()
@@ -259,18 +246,11 @@ beforeEach(() => {
   ;(window as any).toast = { error: toastErrorMock }
 })
 
-describe('SearchResults deletion during around-window fetch (focused)', () => {
-  it('discards stale around-window response after hard deletion: no blocks/messages publication, no navigation', async () => {
+describe('SearchResults direct navigation under deletion (unified navigation)', () => {
+  it('hard deletion before hit click fails closed: toast, no locate, no window fetch, no publication', async () => {
     const anchor = makeItem(1, 'topic-1')
     searchMessagesMock.mockResolvedValue(makeResponse([anchor]))
-
-    // Deferred window fetch so we can interleave deletion before resolution
-    let resolveWindow!: (v: any) => void
-    const windowPromise = new Promise<any>((res) => {
-      resolveWindow = res
-    })
-    fetchMessagesWindowMock.mockReturnValueOnce(windowPromise)
-
+    storeTopicsMap.set('topic-1', { id: 'topic-1', name: 'Topic topic-1', assistantId: 'assistant-1' } as any)
     storeGetStateMock.mockReturnValue({
       messages: { entities: {}, messageIdsByTopic: { 'topic-1': [] }, currentTopicId: 'topic-1' },
       messageBlocks: { entities: {} }
@@ -281,70 +261,45 @@ describe('SearchResults deletion during around-window fetch (focused)', () => {
     render(<SearchResults keywords="hello" onMessageClick={onMessageClick} onTopicClick={onTopicClick} />)
 
     await waitFor(() => expect(screen.getAllByTestId('result-item')).toHaveLength(1))
-    // Trigger around-window fetch
-    fireEvent.click(screen.getByText('hello'))
-    // Allow handleMessageClick to start and capture deletionGenAtStart
-    await new Promise((r) => setTimeout(r, 0))
-    expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1)
-
-    // Simulate hard deletion of the topic during in-flight fetch
+    // Simulate hard deletion of the topic after results render, before hit click
     bumpDeletionGeneration('topic-1')
 
-    // Resolve stale window response — should be discarded before validation/publication
-    const staleMessages = [
-      { id: 'message-1', topicId: 'topic-1', sortOrder: 1, blocks: ['block-1'] },
-      { id: 'message-2', topicId: 'topic-1', sortOrder: 2, blocks: ['block-2'] }
-    ]
-    const staleBlocks = [
-      { id: 'block-1', messageId: 'message-1', type: 'main_text', content: 'hello content 1' },
-      { id: 'block-2', messageId: 'message-2', type: 'main_text', content: 'other' }
-    ]
-    resolveWindow(
-      makeWindowResponse(
-        { topicId: 'topic-1', anchorMessageId: 'message-1', before: 10, after: 19 },
-        staleMessages as any,
-        staleBlocks as any
-      )
-    )
+    fireEvent.click(screen.getByText('hello'))
 
-    await new Promise((r) => setTimeout(r, 0))
-    await waitFor(() => expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1))
-
-    // Must not publish blocks/messages nor navigate for deleted topic
-    // Intentional resident-registry deletion lifecycle dispatches occur on hard deletion (invalidateForDeletion)
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('history.error.message_not_found'))
+    expect(locateTargetMock).not.toHaveBeenCalled()
+    expect(onMessageClick).not.toHaveBeenCalled()
+    // SearchResults never fetches/publishes windows; complement lives in Messages.
+    expect(fetchMessagesWindowMock).not.toHaveBeenCalled()
     expect(upsertManyBlocksMock).not.toHaveBeenCalled()
     expect(messagesReceivedMock).not.toHaveBeenCalled()
-    expect(onMessageClick).not.toHaveBeenCalled()
-    // Stale discard must still hold for messages/blocks even though resident invalidation dispatches occurred
-    const nonResidentCalls = storeDispatchMock.mock.calls.filter(
-      ([a]: any) => a?.type !== 'residentRegistry/invalidateForDeletion' && a?.type !== 'residentRegistry/resetAll'
-    )
-    expect(nonResidentCalls.length).toBe(0)
-    const residentInvalidations = storeDispatchMock.mock.calls.filter(
-      ([a]: any) => a?.type === 'residentRegistry/invalidateForDeletion'
-    )
-    expect(residentInvalidations.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('preserves normal non-deleted around-window response: stages blocks/messages and navigates', async () => {
+  it('missing topic in the store map fails closed without locate', async () => {
+    const anchor = makeItem(1, 'topic-missing')
+    searchMessagesMock.mockResolvedValue(makeResponse([anchor]))
+    // No storeTopicsMap entry for topic-missing.
+    storeGetStateMock.mockReturnValue({
+      messages: { entities: {}, messageIdsByTopic: {}, currentTopicId: 'topic-missing' },
+      messageBlocks: { entities: {} }
+    } as any)
+
+    const onMessageClick = vi.fn()
+    render(<SearchResults keywords="hello" onMessageClick={onMessageClick} onTopicClick={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getAllByTestId('result-item')).toHaveLength(1))
+    fireEvent.click(screen.getByText('hello'))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('history.error.message_not_found'))
+    expect(locateTargetMock).not.toHaveBeenCalled()
+    expect(onMessageClick).not.toHaveBeenCalled()
+    expect(fetchMessagesWindowMock).not.toHaveBeenCalled()
+  })
+
+  it('non-deleted hit navigates directly via the stable target; no preview or publication here', async () => {
     const anchor = makeItem(1, 'topic-1')
     searchMessagesMock.mockResolvedValue(makeResponse([anchor]))
-
-    const incomingMessages = [
-      { id: 'message-1', topicId: 'topic-1', sortOrder: 1, blocks: ['block-1'] },
-      { id: 'message-2', topicId: 'topic-1', sortOrder: 2, blocks: ['block-2'] }
-    ]
-    const incomingBlocks = [
-      { id: 'block-1', messageId: 'message-1', type: 'main_text', content: 'hello content 1' },
-      { id: 'block-2', messageId: 'message-2', type: 'main_text', content: 'other' }
-    ]
-    fetchMessagesWindowMock.mockResolvedValue(
-      makeWindowResponse(
-        { topicId: 'topic-1', anchorMessageId: 'message-1', before: 10, after: 19 },
-        incomingMessages as any,
-        incomingBlocks as any
-      )
-    )
+    storeTopicsMap.set('topic-1', { id: 'topic-1', name: 'Topic topic-1', assistantId: 'assistant-1' } as any)
     storeGetStateMock.mockReturnValue({
       messages: { entities: {}, messageIdsByTopic: { 'topic-1': [] }, currentTopicId: 'topic-1' },
       messageBlocks: { entities: {} }
@@ -356,13 +311,15 @@ describe('SearchResults deletion during around-window fetch (focused)', () => {
     await waitFor(() => expect(screen.getAllByTestId('result-item')).toHaveLength(1))
     fireEvent.click(screen.getByText('hello'))
 
-    await waitFor(() => expect(fetchMessagesWindowMock).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(onMessageClick).toHaveBeenCalledTimes(1))
-    expect(upsertManyBlocksMock).toHaveBeenCalledWith(incomingBlocks)
-    expect(messagesReceivedMock).toHaveBeenCalledWith({
+    await waitFor(() => expect(locateTargetMock).toHaveBeenCalledTimes(1))
+    expect(locateTargetMock).toHaveBeenCalledWith(navigateMock, {
       topicId: 'topic-1',
-      messages: expect.arrayContaining([expect.objectContaining({ id: 'message-1' })])
+      messageId: 'message-1',
+      assistantId: 'assistant-1'
     })
-    expect(onMessageClick.mock.calls[0][0].id).toBe('message-1')
+    expect(onMessageClick).not.toHaveBeenCalled()
+    expect(fetchMessagesWindowMock).not.toHaveBeenCalled()
+    expect(upsertManyBlocksMock).not.toHaveBeenCalled()
+    expect(messagesReceivedMock).not.toHaveBeenCalled()
   })
 })

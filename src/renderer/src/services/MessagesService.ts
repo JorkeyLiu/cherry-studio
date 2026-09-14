@@ -114,19 +114,36 @@ export function isGenerating() {
   })
 }
 
-export async function locateToMessage(navigate: NavigateFunction, message: Message) {
+export type StableNavigateTarget = { topicId: string; messageId: string; assistantId?: string }
+
+/**
+ * Stable-ID cross-topic navigation entry (unified navigation).
+ *
+ * Takes only stable IDs — never a full Message — so global search hits can
+ * navigate directly to the chat target without constructing a pseudo Message
+ * or entering a preview that requires authoritative blocks. Resolves the
+ * assistant/topic through the existing services, sets the pending identity,
+ * navigates to Chat, and emits the navigation event. Fail-closed: a missing
+ * topic resolves to a user-visible not-found toast with no navigation.
+ */
+export async function locateToMessageTarget(navigate: NavigateFunction, target: StableNavigateTarget): Promise<void> {
   await isGenerating()
 
   SearchPopup.hide()
-  const assistant = getAssistantById(message.assistantId)
-  const topic = await getTopicById(message.topicId)
+  const topic = await getTopicById(target.topicId)
+  if (!topic?.id) {
+    window.toast.error(i18n.t('history.error.message_not_found'))
+    return
+  }
+  const assistantId = target.assistantId ?? topic.assistantId
+  const assistant = assistantId ? getAssistantById(assistantId) : getAssistantById(topic.assistantId)
 
   // Store the pending navigation target before navigating so the Messages component
   // can pick it up on mount (cross-topic path: Messages remounts and the mount
   // effect reads pending). For same-topic navigation the component does NOT
   // remount, so we also emit the event below.
   // Pending is only cleared by the consumer (Messages) after successful handling.
-  pendingNavigate = { messageId: message.id, topicId: topic.id }
+  pendingNavigate = { messageId: target.messageId, topicId: topic.id }
 
   navigate('/', { state: { assistant, topic } })
 
@@ -135,9 +152,17 @@ export async function locateToMessage(navigate: NavigateFunction, message: Messa
   // If Messages is not yet mounted (cross topic), the event is lost but the
   // mount effect will pick up the pending id instead.
   setTimeout(() => {
-    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, message.id)
+    void EventEmitter.emit(EVENT_NAMES.NAVIGATE_TO_MESSAGE, target.messageId)
     void EventEmitter.emit(EVENT_NAMES.SHOW_TOPIC_SIDEBAR)
   }, 0)
+}
+
+export async function locateToMessage(navigate: NavigateFunction, message: Message) {
+  return locateToMessageTarget(navigate, {
+    topicId: message.topicId,
+    messageId: message.id,
+    assistantId: message.assistantId
+  })
 }
 
 /**

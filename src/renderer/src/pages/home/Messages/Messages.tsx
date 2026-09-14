@@ -30,6 +30,7 @@ import {
   runMessageNavigationTransaction,
   shouldPersistNavigationResult
 } from '@renderer/pages/home/Messages/messageNavigation'
+import { ensureMessageLoaded } from '@renderer/pages/home/Messages/messageNavigationLoader'
 import { projectMessageViewportGroups } from '@renderer/pages/home/Messages/messageViewportProjection'
 import {
   createMessageViewportState,
@@ -374,6 +375,16 @@ const Messages = ({
   const messageElements = useRef<Map<string, HTMLElement>>(new Map())
   const messagesRef = useRef<Message[]>(messages)
   const previousMessagesRef = useRef<Message[]>(messages)
+  // Live current-topic ref: assigned during render so async `isStale` guards
+  // always read the current topic, never a closure-fixed `topic.id`.
+  const topicIdRef = useRef(topic.id)
+  topicIdRef.current = topic.id
+  // Live translation ref so `navigate` stays stable across renders (production
+  // `t` is stable; test mocks return a new closure per render).
+  const tRef = useRef(t)
+  tRef.current = t
+  // Last-wins navigation epoch: each `navigate` call supersedes prior ones.
+  const navigateEpochRef = useRef(0)
   const viewportStateRef = useRef(viewportState)
   // S6.1: per-topic last window cache for coverage checks (fail-closed, generation-owned)
   const windowCacheRef = useRef<Map<string, FetchMessagesWindowResponse>>(new Map())
@@ -683,7 +694,7 @@ const Messages = ({
     cancelActiveLoads()
   }, [cancelActiveLoads, clearTimeoutTimer])
 
-  const navigate = useCallback(
+  const runTransaction = useCallback(
     (intent: MessageNavigationIntent) =>
       runMessageNavigationTransaction(intent, {
         begin: (token, targetId, source, alignment) => {
@@ -734,6 +745,127 @@ const Messages = ({
       viewportDispatch,
       waitForNavigationCommit
     ]
+  )
+
+  /**
+   * Bounded wait until the Redux projection / React commit observably contains
+   * the target (via `messagesRef`, which syncs in the `[messages]` effect after
+   * render). Bounded by timeout, never infinite; no DOM scroll, no transaction
+   * copy. Returns true when observable, false on stale/superseded/timeout.
+   */
+  const waitForProjectionCommit = useCallback(
+    async (targetId: string, isStale: () => boolean, timeoutMs = 2000): Promise<boolean> => {
+      const startedAt = Date.now()
+      for (;;) {
+        if (isStale()) return false
+        if (messagesRef.current.some((m) => m.id === targetId)) return true
+        if (Date.now() - startedAt >= timeoutMs) return false
+        await new Promise<void>((resolve) => setTimeout(resolve, 16))
+      }
+    },
+    []
+  )
+
+  /**
+   * Unified stable-ID navigation entry point (single assembly site).
+   *
+   * Resident targets run the existing transaction directly (zero reads).
+   * Missing message-ID targets are first ensured through the canonical
+   * around-window loader (target topic activated, Messages mounted): one
+   * `fetchMessagesWindow({kind:'around'})` read, strictly validated and
+   * atomically merged (message+blocks), published, then — only after the Redux
+   * projection/React commit observably contains the target — the same existing
+   * transaction resolves. Stale/superseded completions never publish nor
+   * navigate. `error` (transport/unknown/malformed) maps to `cancelled` so the
+   * pending identity is preserved; only authoritative `not-found`/`success`
+   * clears pending. No DB knowledge in the transaction itself.
+   */
+  const navigate = useCallback(
+    (intent: MessageNavigationIntent) => {
+      if (intent.kind !== 'message') return runTransaction(intent)
+      const targetId = intent.targetId
+      if (messagesRef.current.some((m) => m.id === targetId)) return runTransaction(intent)
+
+      return (async () => {
+        const navigateEpochAtStart = ++navigateEpochRef.current
+        const topicIdAtStart = topicIdRef.current
+        const transitionEpochAtStart = transitionEpochRef.current
+        const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
+        const residentGenAtStart = captureResidentGeneration(() => store.getState(), topicIdAtStart)
+
+        const isStale = (): boolean => {
+          // Live current-topic read: catches switches even when the closure
+          // topic.id is fixed (A→B→A included via transition epoch below).
+          // No viewport topicGeneration check here: the generation advances
+          // asynchronously via topic/reset after a switch, so a bootstrap
+          // navigate started with the pre-reset generation would falsely
+          // self-stale when the reset commits. Transition epoch + live topic
+          // already cover switches without this race.
+          if (topicIdRef.current !== topicIdAtStart) return true
+          if (navigateEpochRef.current !== navigateEpochAtStart) return true
+          if (transitionEpochRef.current !== transitionEpochAtStart) return true
+          if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) return true
+          if (
+            shouldDiscardPaginationForResident(
+              residentGenAtStart,
+              captureResidentGeneration(() => store.getState(), topicIdAtStart)
+            )
+          ) {
+            return true
+          }
+          return false
+        }
+
+        const ensured = await ensureMessageLoaded(topicIdAtStart, targetId, {
+          getExistingMessages: () => messagesRef.current,
+          readAroundWindow: async (request) => {
+            const { dbService } = await import('@renderer/services/db')
+            return (await runTopicWindowRead(topicIdAtStart, 'around', () =>
+              dbService.fetchMessagesWindow(request)
+            )) as unknown as FetchMessagesWindowResponse
+          },
+          isStaleBeforeFetch: isStale,
+          isStaleAfterFetch: isStale
+        })
+
+        if (ensured.status === 'cancelled') return 'cancelled' as const
+        if (ensured.status === 'resident') {
+          if (isStale()) return 'cancelled' as const
+          return runTransaction(intent)
+        }
+        if (ensured.status === 'not-found') {
+          if (isStale()) return 'cancelled' as const
+          // Authoritative missing: single user-visible toast per navigate call.
+          // No retry loop here, so no toast storm. Pending clears via the
+          // existing `result !== 'cancelled'` path in bootstrap/event handlers.
+          window.toast.error(tRef.current('history.error.message_not_found'))
+          return 'not-found' as const
+        }
+        if (ensured.status === 'error') {
+          // Retryable transport/unknown/malformed: log already emitted in the
+          // loader (privacy-safe, no IDs). Preserve pending by mapping to
+          // `cancelled`; no user toast (no suitable generic key — log only).
+          return 'cancelled' as const
+        }
+
+        if (isStale()) return 'cancelled' as const
+
+        // Atomic staged publication (blocks then merged messages, synchronously
+        // with no interleaving await). No manual `messagesRef` assignment: the
+        // transaction below runs only after the projection commit is observable.
+        if (ensured.blocks.length > 0) {
+          dispatch(upsertManyBlocks(ensured.blocks))
+        }
+        dispatch(newMessagesActions.messagesReceived({ topicId: topicIdAtStart, messages: ensured.messages }))
+
+        const committed = await waitForProjectionCommit(targetId, isStale)
+        if (!committed) return 'cancelled' as const
+        if (isStale()) return 'cancelled' as const
+
+        return runTransaction(intent)
+      })()
+    },
+    [dispatch, runTransaction, waitForProjectionCommit]
   )
 
   /**
