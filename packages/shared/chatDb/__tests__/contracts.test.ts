@@ -38,6 +38,7 @@ describe('chatDbContracts', () => {
     'chatdb:delete-segment',
     'chatdb:replace-segment-membership',
     'chatdb:reorder-messages',
+    'chatdb:reorder-answer-group',
     'chatdb:list-file-refs-by-file',
     'chatdb:count-file-refs-by-file',
     'chatdb:list-blocks-by-file',
@@ -360,6 +361,17 @@ describe('validateChatDbRequest — valid payloads', () => {
       validateChatDbRequest('chatdb:reorder-messages', {
         topicId: 'topic-1',
         messageIds: ['msg-3', 'msg-1', 'msg-2']
+      })
+    ).not.toThrow()
+  })
+
+  // Answer-group authority reorder (additive semantic command)
+  it('reorder-answer-group: { topicId, anchorMessageId, orderedMessageIds }', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-answer-group', {
+        topicId: 'topic-1',
+        anchorMessageId: 'a-1',
+        orderedMessageIds: ['a-2', 'a-1']
       })
     ).not.toThrow()
   })
@@ -811,6 +823,57 @@ describe('validateChatDbRequest — invalid payloads', () => {
       validateChatDbRequest('chatdb:reorder-messages', {
         topicId: 't1',
         messageIds: 'not-array'
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects missing anchorMessageId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-answer-group', {
+        topicId: 't1',
+        orderedMessageIds: ['a-1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects empty orderedMessageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-answer-group', {
+        topicId: 't1',
+        anchorMessageId: 'a-1',
+        orderedMessageIds: []
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects duplicate orderedMessageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-answer-group', {
+        topicId: 't1',
+        anchorMessageId: 'a-1',
+        orderedMessageIds: ['a-1', 'a-1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects legacy messageIds key (unknown key fail-closed)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-answer-group', {
+        topicId: 't1',
+        anchorMessageId: 'a-1',
+        orderedMessageIds: ['a-1'],
+        messageIds: ['a-1']
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:reorder-answer-group', {
+        topicId: 't1',
+        anchorMessageId: 'a-1',
+        orderedMessageIds: ['a-1'],
+        extra: 'nope'
       })
     ).toThrow(ValidationError)
   })
@@ -1891,6 +1954,64 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:reorder-messages', { ok: true, value: null })).not.toThrow()
   })
 
+  // Answer-group authority reorder (additive semantic command)
+  it('reorder-answer-group: accepts authoritative group order response', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reorder-answer-group', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', anchorMessageId: 'a-1', orderedMessageIds: ['a-2', 'a-1'] }
+      })
+    ).not.toThrow()
+  })
+
+  it('reorder-answer-group: rejects null success value', () => {
+    expect(() => validateChatDbResult('chatdb:reorder-answer-group', { ok: true, value: null })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('reorder-answer-group: rejects anchor missing from orderedMessageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reorder-answer-group', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', anchorMessageId: 'a-9', orderedMessageIds: ['a-1', 'a-2'] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects duplicate orderedMessageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reorder-answer-group', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', anchorMessageId: 'a-1', orderedMessageIds: ['a-1', 'a-1'] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects empty orderedMessageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reorder-answer-group', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', anchorMessageId: 'a-1', orderedMessageIds: [] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('reorder-answer-group: rejects unknown keys in result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:reorder-answer-group', {
+        ok: true,
+        value: {
+          topicId: 't1',
+          askId: 'ask-1',
+          anchorMessageId: 'a-1',
+          orderedMessageIds: ['a-1'],
+          messageIds: ['a-1']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
   // Phase 5.1A: file reference queries
   it('list-file-refs-by-file: empty array', () => {
     expect(() => validateChatDbResult('chatdb:list-file-refs-by-file', { ok: true, value: [] })).not.toThrow()
@@ -2903,6 +3024,7 @@ describe('coverage consistency', () => {
     'chatdb:delete-segment',
     'chatdb:replace-segment-membership',
     'chatdb:reorder-messages',
+    'chatdb:reorder-answer-group',
     'chatdb:list-file-refs-by-file',
     'chatdb:count-file-refs-by-file',
     'chatdb:list-blocks-by-file',

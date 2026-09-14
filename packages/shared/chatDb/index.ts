@@ -79,6 +79,8 @@ export type {
   PurgeExpiredTopicsRequest,
   PurgeExpiredTopicsResponse,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupRequest,
+  ReorderAnswerGroupResponse,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,

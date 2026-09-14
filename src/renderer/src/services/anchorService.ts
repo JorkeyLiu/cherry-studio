@@ -249,7 +249,7 @@ function isActiveAnchorResolvableInMessages(
  *     Redux (`loadTopicMessagesThunk`) — on BOTH the fetch path (after
  *     `messagesReceived`) and the cached path (a non-empty cached topic whose
  *     messages are already in Redux, e.g. a fresh branch pre-populated by
- *     `cloneMessagesToNewTopicThunk`).
+ *     `branchMessagesToTopicThunk`).
  *
  * Note: contains a side-effect (dispatch); it is the integration glue kept
  * separate from the pure decision helpers in `contextWindowService`.

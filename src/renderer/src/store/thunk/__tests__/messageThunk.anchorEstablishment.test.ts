@@ -28,6 +28,7 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     ensureTopicAnchorEstablished: vi.fn(),
     appendMessage: vi.fn(),
+    insertMessagesAfterAnchor: vi.fn(),
     addMessage: vi.fn((p: unknown) => ({ type: 'newMessages/addMessage', payload: p })),
     upsertManyBlocks: vi.fn(),
     updateTopicUpdatedAt: vi.fn((p: unknown) => ({ type: 'updateTopicUpdatedAt', payload: p })),
@@ -64,6 +65,7 @@ vi.mock('@renderer/services/anchorService', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     appendMessage: mocks.appendMessage,
+    insertMessagesAfterAnchor: mocks.insertMessagesAfterAnchor,
     fetchMessages: vi.fn(),
     fetchMessagesWindow: vi.fn(async (req: any) => ({
       messages: [],
@@ -228,6 +230,7 @@ const deepFreeze = <T>(value: T): T => {
 describe('messageThunk anchor hooks', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.insertMessagesAfterAnchor.mockResolvedValue(undefined)
     storeState = {
       assistants: { assistants: [{ id: 'asst-1', settings: { contextCount: 5 }, topics: [{ id: 'topic-1' }] }] },
       messages: {

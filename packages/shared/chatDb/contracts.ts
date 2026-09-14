@@ -42,6 +42,7 @@ import type {
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ResendUserMessagesRequest,
@@ -713,6 +714,105 @@ const reorderMessagesContract: ChatDbContract = {
     }
   },
   validateResult: voidResult('chatdb:reorder-messages')
+}
+
+// ---------------------------------------------------------------------------
+// Answer-group authority reorder contract (additive semantic command)
+// ---------------------------------------------------------------------------
+
+const REORDER_ANSWER_GROUP_VALUE_KEYS = new Set(['topicId', 'askId', 'anchorMessageId', 'orderedMessageIds'])
+
+const reorderAnswerGroupContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'anchorMessageId', 'orderedMessageIds'),
+  validate(value: unknown): void {
+    validateRequest(value, reorderAnswerGroupContract.allowedKeys)
+    const req = value as ReorderAnswerGroupRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
+    if (!Array.isArray(req.orderedMessageIds)) {
+      throw new ValidationError('request.orderedMessageIds', 'Expected an array of message IDs')
+    }
+    if (req.orderedMessageIds.length === 0) {
+      throw new ValidationError('request.orderedMessageIds', 'orderedMessageIds must not be empty')
+    }
+    const seen = new Set<string>()
+    for (let i = 0; i < req.orderedMessageIds.length; i++) {
+      const id = req.orderedMessageIds[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`request.orderedMessageIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(
+          `request.orderedMessageIds[${i}]`,
+          '[chatdb:reorder-answer-group] Duplicate messageId'
+        )
+      }
+      seen.add(id)
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:reorder-answer-group')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:reorder-answer-group] Expected ReorderAnswerGroupResponse object'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:reorder-answer-group] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!REORDER_ANSWER_GROUP_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:reorder-answer-group] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateNonEmptyString(v.askId, 'result.value.askId')
+      validateNonEmptyString(v.anchorMessageId, 'result.value.anchorMessageId')
+      if (!Array.isArray(v.orderedMessageIds)) {
+        throw new ValidationError(
+          'result.value.orderedMessageIds',
+          '[chatdb:reorder-answer-group] Expected array of orderedMessageIds'
+        )
+      }
+      if ((v.orderedMessageIds as unknown[]).length === 0) {
+        throw new ValidationError(
+          'result.value.orderedMessageIds',
+          '[chatdb:reorder-answer-group] orderedMessageIds must not be empty'
+        )
+      }
+      const seen = new Set<string>()
+      let anchorCount = 0
+      for (let i = 0; i < (v.orderedMessageIds as unknown[]).length; i++) {
+        const id = (v.orderedMessageIds as unknown[])[i]
+        if (typeof id !== 'string' || id.length === 0) {
+          throw new ValidationError(`result.value.orderedMessageIds[${i}]`, 'Expected a non-empty string')
+        }
+        if (seen.has(id)) {
+          throw new ValidationError(
+            `result.value.orderedMessageIds[${i}]`,
+            '[chatdb:reorder-answer-group] Duplicate messageId'
+          )
+        }
+        seen.add(id)
+        if (id === v.anchorMessageId) anchorCount += 1
+      }
+      if (anchorCount !== 1) {
+        throw new ValidationError(
+          'result.value.anchorMessageId',
+          '[chatdb:reorder-answer-group] anchorMessageId must appear in orderedMessageIds exactly once'
+        )
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2580,6 +2680,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:replace-segment-membership': replaceSegmentMembershipContract,
   // Phase 5.1A: message reorder
   'chatdb:reorder-messages': reorderMessagesContract,
+  // Answer-group authority reorder (additive semantic command)
+  'chatdb:reorder-answer-group': reorderAnswerGroupContract,
   // Phase 5.1A: file reference queries (read-only)
   'chatdb:list-file-refs-by-file': listFileRefsByFileContract,
   'chatdb:count-file-refs-by-file': countFileRefsByFileContract,

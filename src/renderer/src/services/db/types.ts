@@ -9,6 +9,7 @@ import type {
   FileCleanupResult,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
   SelectAnswerMessageResponse,
   SemanticResendResponse,
@@ -96,6 +97,21 @@ export interface MessageDataSource {
    * exactly once after success (the thunk must NOT dispatch it again).
    */
   selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse>
+
+  /**
+   * Answer-group authority reorder (additive semantic command).
+   *
+   * The renderer supplies ONLY the stable anchor + desired group order; Main
+   * resolves the full group and persists the authority slots permutation
+   * atomically. Returns the authoritative group order for a
+   * loaded-projection intersection commit. Dispatches `updateTopicUpdatedAt`
+   * exactly once after success (the thunk must NOT dispatch it again).
+   */
+  reorderAnswerGroup(
+    topicId: string,
+    anchorMessageId: string,
+    orderedMessageIds: string[]
+  ): Promise<ReorderAnswerGroupResponse>
 
   /**
    * Semantic plural deletion with Main-resolved dependents.

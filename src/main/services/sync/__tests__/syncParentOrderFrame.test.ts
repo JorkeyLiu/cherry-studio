@@ -740,6 +740,66 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
 
     vi.restoreAllMocks()
   })
+
+  it('reorderAnswerGroup refreshes the winning frame with exactly one order_frame op reusing that clock', () => {
+    const topicId = 't-reorder-group'
+    sqlite
+      .prepare(`INSERT INTO topics (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
+      .run(topicId, 'G', '2026-01-01', '2026-01-01')
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_100)
+    agg.appendMessage(topicId, { id: 'm-rg-u1', topicId, role: 'user', content: 'q', status: 'success' } as never, [])
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_101)
+    agg.appendMessage(
+      topicId,
+      { id: 'm-rg-a1', topicId, role: 'assistant', content: 'a1', status: 'success', askId: 'm-rg-u1' } as never,
+      []
+    )
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_102)
+    agg.appendMessage(
+      topicId,
+      { id: 'm-rg-a2', topicId, role: 'assistant', content: 'a2', status: 'success', askId: 'm-rg-u1' } as never,
+      []
+    )
+    vi.spyOn(Date, 'now').mockReturnValue(2_300_000_000_103)
+    agg.appendMessage(topicId, { id: 'm-rg-u2', topicId, role: 'user', content: 'q2', status: 'success' } as never, [])
+    const frameBefore = getFrame('topicMessage', topicId)!
+    expect(frameBefore.orderedChildIds).toEqual(['m-rg-u1', 'm-rg-a1', 'm-rg-a2', 'm-rg-u2'])
+    const outboxBefore = outboxCount()
+
+    // Answer-group slots permutation: only the two group slots swap.
+    const res = agg.reorderAnswerGroup(topicId, 'm-rg-a1', ['m-rg-a2', 'm-rg-a1'])
+    expect(res.ok).toBe(true)
+
+    const frameAfter = getFrame('topicMessage', topicId)!
+    expect(frameAfter.orderedChildIds).toEqual(['m-rg-u1', 'm-rg-a2', 'm-rg-a1', 'm-rg-u2'])
+    expect(frameAfter.timestamp).toBeGreaterThan(frameBefore.timestamp)
+    expect(outboxCount()).toBe(outboxBefore + 1)
+    const candidates = db
+      .select()
+      .from(schema.syncOutbox)
+      .all()
+      .filter((r) => r.op === 'order_frame' && r.entityId === topicId)
+    const op = candidates[candidates.length - 1]
+    expect(op).toBeDefined()
+    expect(op.timestamp).toBe(frameAfter.timestamp)
+    expect(op.id).toBe(frameAfter.operationId)
+    const payload = JSON.parse(op.payloadJson as string) as {
+      frameVersion: string
+      kind: string
+      parentId: string
+      orderedChildIds: string[]
+      frameClock: { timestamp: number; operationId: string }
+    }
+    expect(payload).toEqual({
+      frameVersion: 'parent-order-frame-v1',
+      kind: 'topicMessage',
+      parentId: topicId,
+      orderedChildIds: ['m-rg-u1', 'm-rg-a2', 'm-rg-a1', 'm-rg-u2'],
+      frameClock: { timestamp: frameAfter.timestamp, operationId: frameAfter.operationId }
+    })
+
+    vi.restoreAllMocks()
+  })
 })
 
 describe('sync parent order frame — selectAnswerMessage is local-only and frame-preserving', () => {

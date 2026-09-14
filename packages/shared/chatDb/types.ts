@@ -504,6 +504,38 @@ export interface ReorderMessagesRequest {
   messageIds: string[]
 }
 
+/**
+ * @see IpcChannel.ChatDb_ReorderAnswerGroup
+ *
+ * Additive semantic reorder: the renderer supplies ONLY the desired answer-group
+ * order plus a stable anchor from that group. Main resolves the complete answer
+ * group in the same SQLite transaction (topic exists; anchor belongs to topic,
+ * role assistant, non-empty askId; full group = same-topic assistant messages
+ * with equal askId in sort_order ASC, id ASC) and persists the group-slots
+ * permutation atomically. No content/blocks cross the wire.
+ */
+export interface ReorderAnswerGroupRequest {
+  topicId: string
+  /** Stable anchor belonging to the answer group (must be in orderedMessageIds). */
+  anchorMessageId: string
+  /** Desired complete ordered answer-group message IDs. */
+  orderedMessageIds: string[]
+}
+
+/**
+ * @see IpcChannel.ChatDb_ReorderAnswerGroup
+ *
+ * Main-authoritative answer-group reorder result. `orderedMessageIds` is the
+ * Main final complete answer-group order (no content/blocks).
+ */
+export interface ReorderAnswerGroupResponse {
+  topicId: string
+  askId: string
+  anchorMessageId: string
+  /** Complete ordered answer-group message IDs in final authority order. */
+  orderedMessageIds: string[]
+}
+
 // ---------------------------------------------------------------------------
 // File reference query DTOs (Phase 5.1A, read-only)
 // ---------------------------------------------------------------------------
@@ -1035,6 +1067,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   }
   // Phase 5.1A: message reorder
   'chatdb:reorder-messages': { request: ReorderMessagesRequest; response: null }
+  // Answer-group authority reorder (additive semantic command)
+  'chatdb:reorder-answer-group': { request: ReorderAnswerGroupRequest; response: ReorderAnswerGroupResponse }
   // Phase 5.1A: file reference queries (read-only)
   'chatdb:list-file-refs-by-file': { request: ListFileRefsByFileRequest; response: ListFileRefsByFileResponse }
   'chatdb:count-file-refs-by-file': { request: CountFileRefsByFileRequest; response: CountFileRefsByFileResponse }

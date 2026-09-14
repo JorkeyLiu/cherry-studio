@@ -14,7 +14,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     branchMessagesToTopic: vi.fn(),
-    cloneMessagesToTopic: vi.fn(),
     updateFileCount: vi.fn(),
     dispatch: vi.fn(),
     messagesReceived: vi.fn((p: unknown) => ({ type: 'messagesReceived', payload: p })),
@@ -30,7 +29,6 @@ vi.mock('@logger', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     branchMessagesToTopic: mocks.branchMessagesToTopic,
-    cloneMessagesToTopic: mocks.cloneMessagesToTopic,
     updateFileCount: mocks.updateFileCount
   }
 }))
@@ -113,10 +111,11 @@ describe('branchMessagesToTopicThunk — S6.2c-1', () => {
     expect(mocks.dispatch).not.toHaveBeenCalled()
   })
 
-  it('old cloneMessagesToTopic path remains but is not used by new thunk', async () => {
-    // Ensure old thunk still exists and uses slice/index semantics (compatibility)
+  it('dead index-based clone path is removed; anchor thunk is the branch entry', async () => {
+    // The renderer dead clone branch (index/slice `cloneMessagesToNewTopicThunk`)
+    // is removed; Main/IPC compat (`cloneMessagesToTopic`) is untouched.
     const mod = await import('../messageThunk')
-    expect(typeof mod.cloneMessagesToNewTopicThunk).toBe('function')
+    expect((mod as Record<string, unknown>).cloneMessagesToNewTopicThunk).toBeUndefined()
     expect(typeof mod.branchMessagesToTopicThunk).toBe('function')
   })
 })

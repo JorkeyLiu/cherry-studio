@@ -109,6 +109,21 @@ interface InsertMessageAtIndexPayload {
   index: number
 }
 
+/**
+ * Answer-group authority reorder projection commit (ids-only).
+ *
+ * Permutes ONLY the existing loaded slots for a topic that belong to the
+ * authority group: loaded IDs intersecting `groupMessageIds` are replaced in
+ * loaded order by `orderedMessageIds` filtered to the loaded set. Never adds
+ * or removes IDs/entities — window-outside members are never injected. The
+ * caller must fail closed (zero dispatch) on slot-count mismatch.
+ */
+interface ReorderLoadedMessageIdsForTopicPayload {
+  topicId: string
+  orderedMessageIds: string[]
+  groupMessageIds: string[]
+}
+
 // 4. Create the Slice with Refactored Reducers
 export const messagesSlice = createSlice({
   name: 'newMessages',
@@ -227,6 +242,38 @@ export const messagesSlice = createSlice({
           .map(({ messageId, updates: changes }) => ({ id: messageId, changes }))
           .filter((entry) => state.entities[entry.id] !== undefined)
       )
+    },
+    /**
+     * Answer-group authority reorder projection commit (ids-only).
+     *
+     * Permutes ONLY existing loaded slots: collects loaded positions whose ID
+     * is in `groupMessageIds`, then writes `orderedMessageIds` filtered to the
+     * loaded set into those positions in order. Fail-closed no-op unless the
+     * loaded intersection count exactly matches the filtered order count and
+     * every filtered ID is already loaded. Never adds/removes IDs or touches
+     * entities — `foldSelected`/`useful` objects are preserved by identity.
+     */
+    reorderLoadedMessageIdsForTopic(state, action: PayloadAction<ReorderLoadedMessageIdsForTopicPayload>) {
+      const { topicId, orderedMessageIds, groupMessageIds } = action.payload
+      const loadedIds = state.messageIdsByTopic[topicId]
+      if (!loadedIds || loadedIds.length === 0) return
+      const groupSet = new Set(groupMessageIds)
+      const loadedSet = new Set(loadedIds)
+      const filteredOrder = orderedMessageIds.filter((id) => loadedSet.has(id))
+      const slotIndexes: number[] = []
+      for (let i = 0; i < loadedIds.length; i++) {
+        if (groupSet.has(loadedIds[i])) slotIndexes.push(i)
+      }
+      if (slotIndexes.length !== filteredOrder.length) return
+      for (const id of filteredOrder) {
+        if (!groupSet.has(id)) return
+        if (state.entities[id] === undefined) return
+      }
+      const next = [...loadedIds]
+      for (let i = 0; i < slotIndexes.length; i++) {
+        next[slotIndexes[i]] = filteredOrder[i]
+      }
+      state.messageIdsByTopic[topicId] = next
     },
     removeMessage(state, action: PayloadAction<RemoveMessagePayload>) {
       const { topicId, messageId } = action.payload

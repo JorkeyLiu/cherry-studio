@@ -62,7 +62,7 @@ import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import { type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
 import { ChunkType } from '@renderer/types/chunk'
 import type { GroupAnchor } from '@renderer/types/editMode'
-import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import {
   AssistantMessageStatus,
   MessageBlockStatus,
@@ -1348,13 +1348,19 @@ export const appendAssistantResponseThunk =
         traceId: traceId
       })
 
-      // 3. Update Redux Store
+      // 3. Local projection placement only (window-relative). Authority
+      // position is resolved in Main from the stable anchor below, so this
+      // loaded index must never reach persistence.
       const currentTopicMessageIds = getState().messages.messageIdsByTopic[topicId] || []
       const existingMessageIndex = currentTopicMessageIds.findIndex((id) => id === existingAssistantMessageId)
       const insertAtIndex = existingMessageIndex !== -1 ? existingMessageIndex + 1 : currentTopicMessageIds.length
 
-      // 4. Update Database (Save the stub to the topic's message list)
-      await saveMessageAndBlocksToDB(topicId, newAssistantMessageStub, [], insertAtIndex)
+      // 4. Persist the stub via the stable-ID authority capability. Main
+      // resolves insertion after the anchor/contiguous assistant group tail
+      // in one transaction (cold-window safe: no loaded-relative DB index).
+      await dbService.insertMessagesAfterAnchor(topicId, existingAssistantMessageId, [
+        { message: newAssistantMessageStub as unknown as JsonObject, blocks: [] }
+      ])
 
       dispatch(
         newMessagesActions.insertMessageAtIndex({
@@ -1679,164 +1685,6 @@ export const branchMessagesToTopicThunk =
     } catch (error) {
       logger.error(`[branchMessagesToTopicThunk] Failed to branch messages:`, error as Error)
       return false
-    }
-  }
-
-/**
- * Clones messages from a source topic up to a specified index into a *pre-existing* new topic.
- * Generates new unique IDs for all cloned messages and blocks.
- * Updates the DB and Redux message/block state for the new topic.
- * Assumes the newTopic object already exists in Redux topic state and DB.
- * @param sourceTopicId The ID of the topic to branch from.
- * @param branchPointIndex The index *after* which messages should NOT be copied (slice endpoint).
- * @param newTopic The newly created Topic object (created and added to Redux/DB by the caller).
- */
-export const cloneMessagesToNewTopicThunk =
-  (
-    sourceTopicId: string,
-    branchPointIndex: number,
-    newTopic: Topic // Receive newTopic object
-  ) =>
-  async (dispatch: AppDispatch, getState: () => RootState): Promise<boolean> => {
-    if (!newTopic || !newTopic.id) {
-      logger.error(`[cloneMessagesToNewTopicThunk] Invalid newTopic provided.`)
-      return false
-    }
-    try {
-      const state = getState()
-      const sourceMessages = selectMessagesForTopic(state, sourceTopicId)
-
-      if (!sourceMessages || sourceMessages.length === 0) {
-        logger.error(`[cloneMessagesToNewTopicThunk] Source topic ${sourceTopicId} not found or is empty.`)
-        return false
-      }
-
-      // 1. Slice messages to clone
-      const messagesToClone = sourceMessages.slice(0, branchPointIndex)
-      if (messagesToClone.length === 0) {
-        logger.warn(`[cloneMessagesToNewTopicThunk] No messages to branch (index ${branchPointIndex}).`)
-        return true // Nothing to clone, operation considered successful but did nothing.
-      }
-
-      // 2. Prepare for cloning: Maps and Arrays
-      const clonedMessages: Message[] = []
-      const clonedBlocks: MessageBlock[] = []
-      const filesToUpdateCount: FileMetadata[] = []
-      const originalToNewMsgIdMap = new Map<string, string>() // Map original message ID -> new message ID
-
-      // 3. First pass: Create ID mappings for all messages
-      for (const oldMessage of messagesToClone) {
-        const newMsgId = uuid()
-        originalToNewMsgIdMap.set(oldMessage.id, newMsgId) // Store mapping for all cloned messages
-      }
-
-      // 4. Second pass: Clone Messages and Blocks with New IDs using complete mapping
-      for (const oldMessage of messagesToClone) {
-        const newMsgId = originalToNewMsgIdMap.get(oldMessage.id)!
-
-        let newAskId: string | undefined = undefined // Initialize newAskId
-        if (oldMessage.role === 'assistant' && oldMessage.askId) {
-          // If it's an assistant message with an askId, find the NEW ID of the user message it references
-          const mappedNewAskId = originalToNewMsgIdMap.get(oldMessage.askId)
-          if (mappedNewAskId) {
-            newAskId = mappedNewAskId // Use the new ID
-          } else {
-            // This happens if the user message corresponding to askId was *before* the branch point index
-            // and thus wasn't included in messagesToClone or the map.
-            // In this case, the link is broken in the new topic.
-            logger.warn(
-              `[cloneMessages] Could not find new ID mapping for original askId ${oldMessage.askId} (likely outside branch). Setting askId to undefined for new assistant message ${newMsgId}.`
-            )
-            // newAskId remains undefined
-          }
-        }
-
-        // --- Clone Blocks ---
-        const newBlockIds: string[] = []
-        if (oldMessage.blocks && oldMessage.blocks.length > 0) {
-          for (const oldBlockId of oldMessage.blocks) {
-            const oldBlock = state.messageBlocks.entities[oldBlockId]
-            if (oldBlock) {
-              const newBlockId = uuid()
-              const newBlock = {
-                ...oldBlock,
-                id: newBlockId,
-                messageId: newMsgId // Link block to the NEW message ID
-              }
-              clonedBlocks.push(newBlock)
-              newBlockIds.push(newBlockId)
-
-              if (newBlock.type === MessageBlockType.FILE || newBlock.type === MessageBlockType.IMAGE) {
-                const fileInfo = (newBlock as FileMessageBlock | ImageMessageBlock).file
-                if (fileInfo) {
-                  filesToUpdateCount.push(fileInfo)
-                }
-              }
-            } else {
-              logger.warn(
-                `[cloneMessagesToNewTopicThunk] Block ${oldBlockId} not found in state for message ${oldMessage.id}. Skipping block clone.`
-              )
-            }
-          }
-        }
-
-        // --- Create New Message Object ---
-        const newMessage: Message = {
-          ...oldMessage,
-          id: newMsgId,
-          topicId: newTopic.id, // Use the NEW topic ID provided
-          blocks: newBlockIds // Use the NEW block IDs
-        }
-        if (newMessage.role === 'assistant') {
-          newMessage.askId = newAskId // Use the mapped/updated askId
-        }
-        clonedMessages.push(newMessage)
-      }
-
-      // 5. Update Database (Atomic Transaction)
-      // Entry assembly is O(M+B): group cloned blocks by message ID once
-      // instead of filtering the whole block list per message (O(M·B)).
-      // Block order within each message is preserved (array push order).
-      const blocksByMessageId = new Map<string, MessageBlock[]>()
-      for (const block of clonedBlocks) {
-        const list = blocksByMessageId.get(block.messageId)
-        if (list) {
-          list.push(block)
-        } else {
-          blocksByMessageId.set(block.messageId, [block])
-        }
-      }
-      await dbService.cloneMessagesToTopic(
-        newTopic.id,
-        clonedMessages.map((message) => ({
-          message,
-          blocks: blocksByMessageId.get(message.id) ?? []
-        })),
-        newTopic.assistantId
-      )
-      {
-        // Update file counts
-        const uniqueFiles = [...new Map(filesToUpdateCount.map((f) => [f.id, f])).values()]
-        for (const file of uniqueFiles) {
-          await updateFileCount(file.id, 1, false)
-        }
-      }
-
-      // --- Update Redux State ---
-      dispatch(
-        newMessagesActions.messagesReceived({
-          topicId: newTopic.id,
-          messages: clonedMessages
-        })
-      )
-      if (clonedBlocks.length > 0) {
-        dispatch(upsertManyBlocks(clonedBlocks))
-      }
-
-      return true // Indicate success
-    } catch (error) {
-      logger.error(`[cloneMessagesToNewTopicThunk] Failed to clone messages:`, error as Error)
-      return false // Indicate failure
     }
   }
 

@@ -10,6 +10,7 @@ import type {
   FileCleanupResult,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
   ResetMessagesForResendResponse,
   SelectAnswerMessageResponse,
@@ -191,6 +192,13 @@ class DbService implements MessageDataSource {
   reorderMessages(topicId: string, messageIds: string[]) {
     return this.ordinarySource.reorderMessages(topicId, messageIds)
   }
+  reorderAnswerGroup(
+    topicId: string,
+    anchorMessageId: string,
+    orderedMessageIds: string[]
+  ): Promise<ReorderAnswerGroupResponse> {
+    return this.ordinarySource.reorderAnswerGroup(topicId, anchorMessageId, orderedMessageIds)
+  }
   listBlocksByFile(fileId: string) {
     return this.ordinarySource.listBlocksByFile(fileId)
   }
@@ -212,9 +220,6 @@ class DbService implements MessageDataSource {
     return this.ordinarySource.insertMessagesAfterAnchor(topicId, afterMessageId, entries)
   }
 
-  cloneMessagesToTopic(targetTopicId: string, entries: Array<{ message: any; blocks: any[] }>, assistantId?: string) {
-    return this.ordinarySource.cloneMessagesToTopic(targetTopicId, entries, assistantId)
-  }
   resetMessagesForResend(
     topicId: string,
     messages: Array<{ message: any; blocks: any[] }>,

@@ -1,84 +1,58 @@
 import { dbService } from '@renderer/services/db'
-import { updateTopicUpdatedAt } from '@renderer/store/assistants'
-import type { Message } from '@renderer/types/newMessage'
 
 import type { AppDispatch, RootState } from '../index'
-import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
+import { newMessagesActions } from '../newMessage'
 
-export const buildReorderedMessageGroup = (
-  messages: Message[],
-  reorderedGroupMessageIds: string[]
-): Message[] | undefined => {
-  if (reorderedGroupMessageIds.length < 2) {
-    return undefined
-  }
-
-  if (new Set(reorderedGroupMessageIds).size !== reorderedGroupMessageIds.length) {
-    return undefined
-  }
-
-  const messageById = new Map(messages.map((message) => [message.id, message]))
-  const groupMessages = reorderedGroupMessageIds.map((id) => messageById.get(id))
-
-  if (groupMessages.some((message) => !message || message.role !== 'assistant')) {
-    return undefined
-  }
-
-  const firstMessage = groupMessages[0]
-  const askId = firstMessage?.askId
-
-  if (!askId || groupMessages.some((message) => message?.askId !== askId)) {
-    return undefined
-  }
-
-  const originalGroupMessages = messages.filter((message) => message.role === 'assistant' && message.askId === askId)
-
-  if (originalGroupMessages.length !== reorderedGroupMessageIds.length) {
-    return undefined
-  }
-
-  const originalGroupIds = originalGroupMessages.map((message) => message.id)
-  const originalGroupIdSet = new Set(originalGroupIds)
-
-  if (
-    originalGroupIdSet.size !== reorderedGroupMessageIds.length ||
-    reorderedGroupMessageIds.some((id) => !originalGroupIdSet.has(id))
-  ) {
-    return undefined
-  }
-
-  if (originalGroupIds.every((id, index) => id === reorderedGroupMessageIds[index])) {
-    return undefined
-  }
-
-  const reorderedGroupMessages = reorderedGroupMessageIds.map((id) => messageById.get(id) as Message)
-  let replacementIndex = 0
-
-  return messages.map((message) => {
-    if (!originalGroupIdSet.has(message.id)) {
-      return message
-    }
-
-    const reorderedMessage = reorderedGroupMessages[replacementIndex]
-    replacementIndex += 1
-    return reorderedMessage
-  })
-}
-
+/**
+ * Answer-group authority reorder (renderer thin client).
+ *
+ * The renderer supplies ONLY the stable anchor + desired group order; Main
+ * resolves the complete answer group and persists the authority slots
+ * permutation atomically. Never reads loaded messages to construct a full
+ * topic list — `orderedGroupIds[0]` is the anchor (the dnd-kit caller passes
+ * the visible group order whose head is a stable group member).
+ *
+ * On success commits ONLY the loaded-projection intersection via the ids-only
+ * `reorderLoadedMessageIdsForTopic` action: loaded slots belonging to the
+ * authority group are replaced by the response order filtered to the loaded
+ * set. Window-outside members are never injected. Slot-count mismatch fails
+ * closed with zero dispatch. `updateTopicUpdatedAt` is dispatched exactly
+ * once by the data source — never here.
+ */
 export const reorderMessageGroupThunk =
-  (topicId: string, reorderedGroupMessageIds: string[]) => async (dispatch: AppDispatch, getState: () => RootState) => {
-    const messages = selectMessagesForTopic(getState(), topicId)
-    const reorderedMessages = buildReorderedMessageGroup(messages, reorderedGroupMessageIds)
-
-    if (!reorderedMessages) {
+  (topicId: string, orderedGroupIds: string[]) => async (dispatch: AppDispatch, getState: () => RootState) => {
+    if (!Array.isArray(orderedGroupIds) || orderedGroupIds.length === 0) {
       return
     }
+    const anchorMessageId = orderedGroupIds[0]
+    const response = await dbService.reorderAnswerGroup(topicId, anchorMessageId, orderedGroupIds)
 
-    await dbService.reorderMessages(
-      topicId,
-      reorderedMessages.map((message) => message.id)
+    const state = getState()
+    const loadedIds: string[] = state.messages.messageIdsByTopic[topicId] || []
+    if (loadedIds.length === 0) {
+      return
+    }
+    const loadedSet = new Set(loadedIds)
+    const groupSet = new Set(response.orderedMessageIds)
+    const filteredOrder = response.orderedMessageIds.filter((id) => loadedSet.has(id))
+    let slotCount = 0
+    for (const id of loadedIds) {
+      if (groupSet.has(id)) slotCount += 1
+    }
+    if (slotCount !== filteredOrder.length) {
+      return
+    }
+    for (const id of filteredOrder) {
+      if (!groupSet.has(id) || state.messages.entities[id] === undefined) {
+        return
+      }
+    }
+
+    dispatch(
+      newMessagesActions.reorderLoadedMessageIdsForTopic({
+        topicId,
+        orderedMessageIds: response.orderedMessageIds,
+        groupMessageIds: response.orderedMessageIds
+      })
     )
-
-    dispatch(newMessagesActions.messagesReceived({ topicId, messages: reorderedMessages }))
-    dispatch(updateTopicUpdatedAt({ topicId }))
   }

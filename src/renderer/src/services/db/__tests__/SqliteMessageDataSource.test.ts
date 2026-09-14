@@ -44,7 +44,6 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
-  JsonObject,
   ListBlocksByFileRequest,
   ListBlocksByFileResponse,
   ListFileRefsByFileRequest,
@@ -57,6 +56,8 @@ import type {
   PasteMessagesToTopicResponse,
   PurgeExpiredTopicsRequest,
   PurgeExpiredTopicsResponse,
+  ReorderAnswerGroupRequest,
+  ReorderAnswerGroupResponse,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
@@ -136,6 +137,8 @@ function makeApiSpy() {
     replaceSegmentMembership:
       vi.fn<(request: ReplaceSegmentMembershipRequest) => Promise<ChatDbResult<ReplaceSegmentMembershipResponse>>>(),
     reorderMessages: vi.fn<(request: ReorderMessagesRequest) => Promise<ChatDbResult<null>>>(),
+    reorderAnswerGroup:
+      vi.fn<(request: ReorderAnswerGroupRequest) => Promise<ChatDbResult<ReorderAnswerGroupResponse>>>(),
     listFileRefsByFile:
       vi.fn<(request: ListFileRefsByFileRequest) => Promise<ChatDbResult<ListFileRefsByFileResponse>>>(),
     countFileRefsByFile:
@@ -435,6 +438,24 @@ describe('SqliteMessageDataSource', () => {
       const req = api.reorderMessages.mock.calls[0][0]
       expect(req.topicId).toBe('topic-1')
       expect(req.messageIds).toEqual(['m3', 'm1', 'm2'])
+    })
+
+    it('reorderAnswerGroup calls api.reorderAnswerGroup with anchor+order and returns the authority order', async () => {
+      const response = { topicId: 'topic-1', askId: 'ask-1', anchorMessageId: 'a-1', orderedMessageIds: ['a-2', 'a-1'] }
+      api.reorderAnswerGroup.mockResolvedValue(successResult(response))
+      const result = await ds.reorderAnswerGroup('topic-1', 'a-1', ['a-2', 'a-1'])
+      expect(api.reorderAnswerGroup).toHaveBeenCalledOnce()
+      expect(api.reorderAnswerGroup).toHaveBeenCalledWith({
+        topicId: 'topic-1',
+        anchorMessageId: 'a-1',
+        orderedMessageIds: ['a-2', 'a-1']
+      })
+      expect(result).toEqual(response)
+    })
+
+    it('reorderAnswerGroup propagates structured failure as ChatDbResultError', async () => {
+      api.reorderAnswerGroup.mockResolvedValue(failureResult('CONFLICT', 'Incomplete answer group'))
+      await expect(ds.reorderAnswerGroup('topic-1', 'a-1', ['a-1'])).rejects.toBeInstanceOf(ChatDbResultError)
     })
 
     // ---- Phase 5.1A: file reference queries ----
@@ -857,43 +878,6 @@ describe('SqliteMessageDataSource', () => {
   })
 
   describe('Phase 5.1B: compound mutations', () => {
-    it('cloneMessagesToTopic calls api and dispatches', async () => {
-      api.cloneMessagesToTopic.mockResolvedValue(successResult(null))
-      await ds.cloneMessagesToTopic('t-1', [{ message: { id: 'm1' }, blocks: [{ id: 'b1', messageId: 'm1' }] }], 'a1')
-      expect(api.cloneMessagesToTopic).toHaveBeenCalledOnce()
-      expect(mockDispatch).toHaveBeenCalledOnce()
-    })
-
-    it('cloneMessagesToTopic sends duplicated independent clones for messages sharing one model object (LOCK-N6)', async () => {
-      api.cloneMessagesToTopic.mockResolvedValue(successResult(null))
-      // Real call shape: createAssistantMessage stores `model: assistant.model`
-      // — the SAME object reference on every assistant message — so one
-      // cloneForWire invocation over the entries array contains a shared
-      // non-cyclic graph. This must serialize as duplicated valid JSON, not
-      // throw `cyclic reference detected`.
-      const model = { id: 'gpt-4', provider: 'openai', name: 'GPT-4', group: 'gpt', capabilities: [{ type: 'text' }] }
-      const mkMessage = (id: string): JsonObject => ({ id, role: 'assistant', model })
-      await ds.cloneMessagesToTopic(
-        't-1',
-        [
-          { message: mkMessage('m-1'), blocks: [{ id: 'b-1', messageId: 'm-1', type: 'main_text', content: 'a' }] },
-          { message: mkMessage('m-2'), blocks: [{ id: 'b-2', messageId: 'm-2', type: 'main_text', content: 'b' }] }
-        ],
-        'a-1'
-      )
-      expect(api.cloneMessagesToTopic).toHaveBeenCalledOnce()
-      const req = api.cloneMessagesToTopic.mock.calls[0][0]
-      const modelA = req.entries[0].message.model as Record<string, unknown>
-      const modelB = req.entries[1].message.model as Record<string, unknown>
-      expect(modelA).toEqual(model)
-      expect(modelB).toEqual(model)
-      // Duplicated equal-but-independent clones — never the shared reference.
-      expect(modelA).not.toBe(modelB)
-      expect(modelA).not.toBe(model)
-      expect(modelB).not.toBe(model)
-      expect(mockDispatch).toHaveBeenCalledOnce()
-    })
-
     it('resetMessagesForResend calls api and dispatches', async () => {
       api.resetMessagesForResend.mockResolvedValue(
         successResult({ affectedFileIds: ['f1'], remainingReferenceCounts: { f1: 0 }, attempts: [] })
@@ -1220,6 +1204,24 @@ describe('SqliteMessageDataSource', () => {
       mockDispatch.mockClear()
       try {
         await ds.selectAnswerMessage('t-1', 'a-2')
+      } catch {
+        // expected
+      }
+      expect(mockDispatch).not.toHaveBeenCalled()
+    })
+
+    it('dispatches EXACTLY ONCE after reorderAnswerGroup (one timestamp per logical reorder)', async () => {
+      api.reorderAnswerGroup.mockResolvedValue(
+        successResult({ topicId: 't-1', askId: 'ask-1', anchorMessageId: 'a-1', orderedMessageIds: ['a-2', 'a-1'] })
+      )
+      await dispatchesAfter(() => ds.reorderAnswerGroup('t-1', 'a-1', ['a-2', 'a-1']))
+    })
+
+    it('does NOT dispatch when reorderAnswerGroup fails (no commit on DB failure)', async () => {
+      api.reorderAnswerGroup.mockResolvedValue(failureResult('CONFLICT', 'Incomplete answer group'))
+      mockDispatch.mockClear()
+      try {
+        await ds.reorderAnswerGroup('t-1', 'a-1', ['a-1'])
       } catch {
         // expected
       }

@@ -360,6 +360,7 @@ export enum IpcChannel {
   ChatDb_DeleteSegment = 'chatdb:delete-segment',
   ChatDb_ReplaceSegmentMembership = 'chatdb:replace-segment-membership',
   ChatDb_ReorderMessages = 'chatdb:reorder-messages',
+  ChatDb_ReorderAnswerGroup = 'chatdb:reorder-answer-group',
   ChatDb_ListFileRefsByFile = 'chatdb:list-file-refs-by-file',
   ChatDb_CountFileRefsByFile = 'chatdb:count-file-refs-by-file',
   ChatDb_ListBlocksByFile = 'chatdb:list-blocks-by-file',

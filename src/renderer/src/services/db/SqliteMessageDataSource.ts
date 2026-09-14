@@ -76,6 +76,8 @@ import type {
   PurgeExpiredTopicsRequest,
   PurgeExpiredTopicsResponse,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupRequest,
+  ReorderAnswerGroupResponse,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
@@ -154,6 +156,8 @@ export interface ChatDbApi {
   ): Promise<ChatDbResult<ReplaceSegmentMembershipResponse>>
   // Phase 5.1A: message reorder
   reorderMessages(request: ReorderMessagesRequest): Promise<ChatDbResult<null>>
+  // Answer-group authority reorder (additive semantic command)
+  reorderAnswerGroup(request: ReorderAnswerGroupRequest): Promise<ChatDbResult<ReorderAnswerGroupResponse>>
   // Phase 5.1A: file reference queries (read-only)
   listFileRefsByFile(request: ListFileRefsByFileRequest): Promise<ChatDbResult<ListFileRefsByFileResponse>>
   countFileRefsByFile(request: CountFileRefsByFileRequest): Promise<ChatDbResult<CountFileRefsByFileResponse>>
@@ -722,6 +726,26 @@ export class SqliteMessageDataSource implements MessageDataSource {
     unwrap(await this.api.reorderMessages(request))
   }
 
+  /**
+   * Answer-group authority reorder (additive semantic command).
+   *
+   * ONE named bridge call carrying ONLY the stable anchor + desired group
+   * order (Main resolves the full group and persists the slots permutation
+   * atomically). Returns the authoritative group order. Dispatches
+   * `updateTopicUpdatedAt` exactly once after success — the calling thunk
+   * must NOT dispatch it again.
+   */
+  async reorderAnswerGroup(
+    topicId: string,
+    anchorMessageId: string,
+    orderedMessageIds: string[]
+  ): Promise<ReorderAnswerGroupResponse> {
+    const request: ReorderAnswerGroupRequest = cloneForWire({ topicId, anchorMessageId, orderedMessageIds })
+    const response = unwrap(await this.api.reorderAnswerGroup(request))
+    dispatchTopicUpdatedAt(topicId)
+    return response
+  }
+
   // ============ File Reference Queries (Phase 5.1A, read-only) ============
 
   async listFileRefsByFile(fileId: string): Promise<ListFileRefsByFileResponse> {
@@ -872,12 +896,6 @@ export class SqliteMessageDataSource implements MessageDataSource {
   }
 
   // ============ Compound Mutations (Phase 5.1B) ============
-
-  async cloneMessagesToTopic(targetTopicId: string, entries: MessageBlockEntry[], assistantId?: string): Promise<void> {
-    const request: CloneMessagesToTopicRequest = cloneForWire({ targetTopicId, entries, assistantId })
-    unwrap(await this.api.cloneMessagesToTopic(request))
-    dispatchTopicUpdatedAt(targetTopicId)
-  }
 
   async resetMessagesForResend(
     topicId: string,

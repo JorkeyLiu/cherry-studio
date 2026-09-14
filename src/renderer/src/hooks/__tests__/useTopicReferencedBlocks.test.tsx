@@ -39,7 +39,6 @@ vi.mock('@renderer/store', async () => {
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({ consumeFileCleanupResult: vi.fn() }))
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   appendAssistantResponseThunk: vi.fn(),
-  cloneMessagesToNewTopicThunk: vi.fn(),
   deleteSingleMessageThunk: vi.fn(),
   initiateTranslationThunk: vi.fn(),
   regenerateAssistantResponseThunk: vi.fn(),

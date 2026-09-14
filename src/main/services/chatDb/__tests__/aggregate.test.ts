@@ -2122,6 +2122,168 @@ describe('ChatDbAggregateService', () => {
   })
 
   // =========================================================================
+  // Answer-group authority reorder (additive semantic command)
+  // =========================================================================
+
+  describe('reorderAnswerGroup', () => {
+    function seedAnswerTopic() {
+      const topicId = `t-${uid()}`
+      const askA = `ask-${uid()}`
+      const askB = `ask-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, { role: 'assistant', askId: askA })
+      const a2 = makeMessageJson(topicId, { role: 'assistant', askId: askA })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      const b1 = makeMessageJson(topicId, { role: 'assistant', askId: askB })
+      const b2 = makeMessageJson(topicId, { role: 'assistant', askId: askB })
+      for (const m of [u1, a1, a2, u2, b1, b2]) agg.appendMessage(topicId, m as any, [])
+      return { topicId, askA, askB, u1, a1, a2, u2, b1, b2 }
+    }
+
+    function authorityIds(topicId: string): string[] {
+      return okValue(agg.fetchMessages(topicId)).messages.map((m) => m.id as string)
+    }
+
+    it('permutes only the group slots; outside messages keep authority order', () => {
+      const { topicId, a1, a2, u1, u2, b1, b2 } = seedAnswerTopic()
+
+      const result = agg.reorderAnswerGroup(topicId, a1.id as string, [a2.id as string, a1.id as string])
+      expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.topicId).toBe(topicId)
+      expect(response.anchorMessageId).toBe(a1.id)
+      expect(response.orderedMessageIds).toEqual([a2.id, a1.id])
+
+      expect(authorityIds(topicId)).toEqual([u1.id, a2.id, a1.id, u2.id, b1.id, b2.id])
+      expect(() => validateChatDbResult('chatdb:reorder-answer-group', result)).not.toThrow()
+    })
+
+    it('permutes non-contiguous same-askId slots in place', () => {
+      const topicId = `t-${uid()}`
+      const ask = `ask-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, { role: 'assistant', askId: ask })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      const a2 = makeMessageJson(topicId, { role: 'assistant', askId: ask })
+      for (const m of [u1, a1, u2, a2]) agg.appendMessage(topicId, m as any, [])
+
+      const result = agg.reorderAnswerGroup(topicId, a1.id as string, [a2.id as string, a1.id as string])
+      expect(result.ok).toBe(true)
+      expect(authorityIds(topicId)).toEqual([u1.id, a2.id, u2.id, a1.id])
+    })
+
+    it('identical order is a no-op success with unchanged authority order', () => {
+      const { topicId, a1, a2, u1, u2, b1, b2 } = seedAnswerTopic()
+
+      const result = agg.reorderAnswerGroup(topicId, a2.id as string, [a1.id as string, a2.id as string])
+      expect(result.ok).toBe(true)
+      expect(okValue(result).orderedMessageIds).toEqual([a1.id, a2.id])
+      expect(authorityIds(topicId)).toEqual([u1.id, a1.id, a2.id, u2.id, b1.id, b2.id])
+    })
+
+    it('rejects incomplete group with rollback (authority order unchanged)', () => {
+      const { topicId, a1 } = seedAnswerTopic()
+      const before = authorityIds(topicId)
+
+      const result = agg.reorderAnswerGroup(topicId, a1.id as string, [a1.id as string])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toMatch(/CONFLICT|NOT_FOUND/)
+      expect(authorityIds(topicId)).toEqual(before)
+    })
+
+    it('rejects foreign IDs with rollback (authority order unchanged)', () => {
+      const { topicId, a1 } = seedAnswerTopic()
+      const otherTopic = `t-${uid()}`
+      const foreign = makeMessageJson(otherTopic, { role: 'assistant', askId: `ask-${uid()}` })
+      agg.appendMessage(otherTopic, foreign as any, [])
+      const before = authorityIds(topicId)
+
+      const result = agg.reorderAnswerGroup(topicId, a1.id as string, [a1.id as string, foreign.id as string])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toMatch(/CONFLICT|NOT_FOUND/)
+      expect(authorityIds(topicId)).toEqual(before)
+    })
+
+    it('rejects duplicate IDs with rollback (authority order unchanged)', () => {
+      const { topicId, a1 } = seedAnswerTopic()
+      const before = authorityIds(topicId)
+
+      const result = agg.reorderAnswerGroup(topicId, a1.id as string, [a1.id as string, a1.id as string])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toMatch(/CONFLICT|VALIDATION/)
+      expect(authorityIds(topicId)).toEqual(before)
+    })
+
+    it('rejects cross-topic anchor with rollback', () => {
+      const { topicId, a1, a2 } = seedAnswerTopic()
+      const otherTopic = `t-${uid()}`
+      const foreign = makeMessageJson(otherTopic, { role: 'assistant', askId: `ask-${uid()}` })
+      agg.appendMessage(otherTopic, foreign as any, [])
+      const before = authorityIds(topicId)
+
+      const result = agg.reorderAnswerGroup(topicId, foreign.id as string, [a1.id as string, a2.id as string])
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
+      expect(authorityIds(topicId)).toEqual(before)
+    })
+
+    it('rejects user-role and empty-askId anchors with rollback', () => {
+      const { topicId, u1 } = seedAnswerTopic()
+      const noAsk = makeMessageJson(topicId, { role: 'assistant', askId: '' })
+      agg.appendMessage(topicId, noAsk as any, [])
+      const before = authorityIds(topicId)
+
+      expect(agg.reorderAnswerGroup(topicId, u1.id as string, [u1.id as string]).ok).toBe(false)
+      expect(agg.reorderAnswerGroup(topicId, noAsk.id as string, [noAsk.id as string]).ok).toBe(false)
+      expect(authorityIds(topicId)).toEqual(before)
+    })
+
+    it('rejects missing topic and anchor-outside-order with rollback', () => {
+      const { topicId, a1, a2, b1 } = seedAnswerTopic()
+      const before = authorityIds(topicId)
+
+      expect(agg.reorderAnswerGroup(`missing-${uid()}`, a1.id as string, [a1.id as string, a2.id as string]).ok).toBe(
+        false
+      )
+      const missingAnchor = agg.reorderAnswerGroup(topicId, a1.id as string, [a2.id as string, b1.id as string])
+      expect(missingAnchor.ok).toBe(false)
+      if (!missingAnchor.ok) expect(missingAnchor.error.code).toBe('NOT_FOUND')
+      expect(authorityIds(topicId)).toEqual(before)
+    })
+
+    it('preserves content/overflow — order-only mutation', () => {
+      const topicId = `t-${uid()}`
+      const ask = `ask-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, {
+        role: 'assistant',
+        askId: ask,
+        content: 'First answer',
+        useful: true,
+        foldSelected: false
+      })
+      const a2 = makeMessageJson(topicId, {
+        role: 'assistant',
+        askId: ask,
+        content: 'Second answer',
+        useful: false,
+        foldSelected: true
+      })
+      for (const m of [u1, a1, a2]) agg.appendMessage(topicId, m as any, [])
+
+      const result = agg.reorderAnswerGroup(topicId, a1.id as string, [a2.id as string, a1.id as string])
+      expect(result.ok).toBe(true)
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      const byId = new Map(fetched.messages.map((m) => [m.id, m]))
+      expect(byId.get(a1.id as string)?.content).toBe('First answer')
+      expect(byId.get(a2.id as string)?.content).toBe('Second answer')
+      expect(byId.get(a1.id as string)?.useful).toBe(true)
+      expect(byId.get(a2.id as string)?.foldSelected).toBe(true)
+    })
+  })
+
+  // =========================================================================
   // Phase 5.1A: file reference queries (read-only)
   // =========================================================================
 

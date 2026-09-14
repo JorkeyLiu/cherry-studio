@@ -30,6 +30,7 @@ import type {
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ResendUserMessagesRequest,
@@ -685,6 +686,9 @@ const api = {
     // Phase 5.1A: message reorder
     reorderMessages: (request: ReorderMessagesRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_ReorderMessages, request),
+    // Answer-group authority reorder (additive semantic command)
+    reorderAnswerGroup: (request: ReorderAnswerGroupRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ReorderAnswerGroup, request),
     // Phase 5.1A: file reference queries (read-only)
     listFileRefsByFile: (request: ListFileRefsByFileRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_ListFileRefsByFile, request),

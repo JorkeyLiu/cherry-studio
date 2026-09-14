@@ -54,6 +54,7 @@ import type {
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
+  ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ResendUserMessagesRequest,
@@ -483,6 +484,11 @@ export function registerChatDbIpc(): () => void {
   // 19. reorder-messages (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ReorderMessages, (agg, req: ReorderMessagesRequest) => {
     return agg.reorderMessages(req.topicId, req.messageIds)
+  })
+
+  // 19b. reorder-answer-group (additive semantic command, keeps reorder-messages intact)
+  handleCommand(IpcChannel.ChatDb_ReorderAnswerGroup, (agg, req: ReorderAnswerGroupRequest) => {
+    return agg.reorderAnswerGroup(req.topicId, req.anchorMessageId, req.orderedMessageIds)
   })
 
   // 20. list-file-refs-by-file (Phase 5.1A, read-only)

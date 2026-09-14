@@ -39,6 +39,7 @@ import type {
   JsonValue,
   MessageBlockEntry,
   PurgeExpiredTopicsResponse,
+  ReorderAnswerGroupResponse,
   ResendAttemptMapping,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
@@ -3690,6 +3691,127 @@ export class ChatDbAggregateService {
       if (notify) syncService.notifyEnqueued()
       return result
     }, `reorderMessages(${topicId})`)
+  }
+
+  /**
+   * Additive semantic answer-group reorder (authority slots permutation).
+   *
+   * ONE root better-sqlite3 transaction resolves AND persists the reorder
+   * from the anchor + desired group order alone:
+   * 1. Topic must exist; anchor must belong to topic, role assistant,
+   *    non-empty askId — otherwise NOT_FOUND fail-closed.
+   * 2. Resolve the complete group: same-topic assistant messages with equal
+   *    askId in listByTopic order (sort_order ASC, id ASC).
+   * 3. Request orderedMessageIds must be a non-empty exact set/length match
+   *    of the complete group with no duplicates and must contain the anchor —
+   *    otherwise CONFLICT/NOT_FOUND fail-closed. Identical order is a no-op
+   *    success.
+   * 4. Permute only the authority slots occupied by the group: locate group
+   *    member positions in the complete topic order, place ordered IDs in
+   *    sequence, keep every other message in place; persist the complete
+   *    topic order via the existing `replaceOrder`.
+   * 5. Same-tx topicMessage order-frame refresh/invalidate + notify semantics
+   *    as `reorderMessages`. No schema change. Returns the final complete
+   *    answer-group order (no content/blocks).
+   */
+  reorderAnswerGroup(
+    topicId: string,
+    anchorMessageId: string,
+    orderedMessageIds: string[]
+  ): ChatDbResult<ReorderAnswerGroupResponse> {
+    return wrapResult(() => {
+      const ctx = this.syncCtx('reorderAnswerGroup')
+      let notify = false
+      let result: ReorderAnswerGroupResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+          const anchor = repos.messages.getInTopic(anchorMessageId, topicId)
+          if (!anchor.found) {
+            throw new ChatDbNotFoundError(`Message ${anchorMessageId} does not belong to topic ${topicId}`)
+          }
+          const askId = anchor.data.askId
+          if (anchor.data.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+            throw new ChatDbNotFoundError(`Message ${anchorMessageId} has no actionable answer group`)
+          }
+          const allMessages = repos.messages.listByTopic(topicId)
+          const groupIds = allMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
+          if (groupIds.length === 0 || !groupIds.includes(anchorMessageId)) {
+            throw new ChatDbNotFoundError(`Message ${anchorMessageId} has no actionable answer group`)
+          }
+          if (!Array.isArray(orderedMessageIds) || orderedMessageIds.length === 0) {
+            throw new ChatDbConflictError('orderedMessageIds must not be empty')
+          }
+          const seen = new Set<string>()
+          for (const id of orderedMessageIds) {
+            if (typeof id !== 'string' || id.length === 0) {
+              throw new ChatDbConflictError('orderedMessageIds must contain only non-empty strings')
+            }
+            if (seen.has(id)) {
+              throw new ChatDbConflictError(`Duplicate message ID in orderedMessageIds: ${id}`)
+            }
+            seen.add(id)
+          }
+          if (!seen.has(anchorMessageId)) {
+            throw new ChatDbNotFoundError(`Anchor ${anchorMessageId} must appear in orderedMessageIds`)
+          }
+          if (orderedMessageIds.length !== groupIds.length) {
+            throw new ChatDbConflictError(
+              `Incomplete answer group: expected ${groupIds.length}, got ${orderedMessageIds.length}`
+            )
+          }
+          const groupSet = new Set(groupIds)
+          for (const id of orderedMessageIds) {
+            if (!groupSet.has(id)) {
+              // Cross-topic/foreign-sourced IDs surface here: not a group member.
+              throw new ChatDbNotFoundError(`Message ${id} does not belong to the answer group`)
+            }
+            const owned = repos.messages.getInTopic(id, topicId)
+            if (!owned.found) {
+              throw new ChatDbNotFoundError(`Message ${id} does not belong to topic ${topicId}`)
+            }
+          }
+          const fullOrder = allMessages.map((m) => m.id)
+          const groupPositions: number[] = []
+          for (let i = 0; i < fullOrder.length; i++) {
+            if (groupSet.has(fullOrder[i])) groupPositions.push(i)
+          }
+          if (groupPositions.length !== groupIds.length) {
+            throw new ChatDbConflictError('Answer-group slot resolution mismatch')
+          }
+          const nextFullOrder = [...fullOrder]
+          for (let i = 0; i < groupPositions.length; i++) {
+            nextFullOrder[groupPositions[i]] = orderedMessageIds[i]
+          }
+          repos.messages.replaceOrder(topicId, nextFullOrder)
+          if (ctx) {
+            const outcome = syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(
+              tx as unknown as SyncTxExecutor,
+              topicId,
+              ctx.deviceId
+            )
+            if (outcome === 'refreshed') notify = true
+          } else {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
+          }
+          return {
+            topicId,
+            askId,
+            anchorMessageId,
+            orderedMessageIds: [...orderedMessageIds]
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('reorderAnswerGroup', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
+    }, `reorderAnswerGroup(${topicId})`)
   }
 
   // =========================================================================

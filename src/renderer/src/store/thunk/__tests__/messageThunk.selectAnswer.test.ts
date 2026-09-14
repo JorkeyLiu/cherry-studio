@@ -20,6 +20,7 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     dbSelectAnswerMessage: vi.fn(),
     dbAppendMessage: vi.fn(),
+    dbInsertMessagesAfterAnchor: vi.fn(),
     dispatch: vi.fn(),
     getState: vi.fn(),
     queueAdd: vi.fn(),
@@ -84,6 +85,7 @@ vi.mock('@renderer/services/db', () => ({
     updateBlocks: vi.fn(),
     updateSingleBlock: vi.fn(),
     appendMessage: mocks.dbAppendMessage,
+    insertMessagesAfterAnchor: mocks.dbInsertMessagesAfterAnchor,
     deleteMessage: vi.fn(),
     resetMessagesForResend: vi.fn(),
     fetchMessages: vi.fn().mockResolvedValue({ messages: [], blocks: [] }),
@@ -283,6 +285,7 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.dbAppendMessage.mockResolvedValue(undefined)
+    mocks.dbInsertMessagesAfterAnchor.mockResolvedValue(undefined)
     mocks.queueAdd.mockResolvedValue(undefined)
     mocks.waitForTopicQueue.mockResolvedValue(undefined)
     mocks.dbSelectAnswerMessage.mockImplementation(async (_t: string, selectedId: string) => ({
@@ -308,8 +311,9 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
         appendAssistantResponseThunk(appendTopicId, existingAssistantId, newModel, assistant)(dispatch, mocks.getState)
       ).resolves.toBeUndefined()
 
-      // Stub committed first, then generation queued unconditionally.
-      expect(mocks.dbAppendMessage).toHaveBeenCalledTimes(1)
+      // Stub committed first via the stable-anchor authority capability, then generation queued unconditionally.
+      expect(mocks.dbInsertMessagesAfterAnchor).toHaveBeenCalledTimes(1)
+      expect(mocks.dbAppendMessage).not.toHaveBeenCalled()
       expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
       // Selection was attempted but its failure did not propagate.
       expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledTimes(1)
@@ -349,11 +353,46 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
 
     // Flush so the thunk reaches queue.add while selection is still pending.
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(mocks.dbAppendMessage).toHaveBeenCalledTimes(1)
+    expect(mocks.dbInsertMessagesAfterAnchor).toHaveBeenCalledTimes(1)
+    expect(mocks.dbAppendMessage).not.toHaveBeenCalled()
     expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
 
     resolveSelection(undefined)
     await expect(pending).resolves.toBeUndefined()
     expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the stub via stable anchor with one entry and never uses the positional append path', async () => {
+    mocks.getState.mockReturnValue(makeAppendState())
+
+    const dispatch = makeThunkAwareDispatch()
+    await appendAssistantResponseThunk(
+      appendTopicId,
+      existingAssistantId,
+      newModel,
+      assistant
+    )(dispatch, mocks.getState)
+
+    // Authority persistence: stable anchor + single new-assistant entry with empty blocks.
+    expect(mocks.dbInsertMessagesAfterAnchor).toHaveBeenCalledTimes(1)
+    const [persistedTopicId, persistedAnchorId, persistedEntries] = mocks.dbInsertMessagesAfterAnchor.mock.calls[0] as [
+      string,
+      string,
+      Array<{ message: any; blocks: any[] }>
+    ]
+    expect(persistedTopicId).toBe(appendTopicId)
+    expect(persistedAnchorId).toBe(existingAssistantId)
+    expect(persistedEntries).toHaveLength(1)
+    expect(persistedEntries[0].message.askId).toBe(userQueryId)
+    expect(persistedEntries[0].message.role).toBe('assistant')
+    expect(persistedEntries[0].blocks).toEqual([])
+    // Positional loaded-relative DB path is not used for persistence.
+    expect(mocks.dbAppendMessage).not.toHaveBeenCalled()
+
+    // Local projection still lands immediately after the loaded existing assistant.
+    expect(mocks.insertMessageAtIndexAction).toHaveBeenCalledTimes(1)
+    expect(mocks.insertMessageAtIndexAction).toHaveBeenCalledWith(
+      expect.objectContaining({ topicId: appendTopicId, index: 2 })
+    )
   })
 })

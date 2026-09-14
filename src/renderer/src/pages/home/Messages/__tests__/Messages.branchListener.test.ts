@@ -18,9 +18,13 @@ describe('Messages NEW_BRANCH primary listener — S6.2c-1', () => {
     expect(handlerSlice).not.toMatch(/createTopicBranch\(topic\.id, branchEndpoint/)
   })
 
-  it('hook exposes createTopicBranchByAnchor primary, createTopicBranch legacy', () => {
+  it('hook exposes createTopicBranchByAnchor primary; index-based dead branch removed', () => {
     expect(hookSource).toMatch(/createTopicBranchByAnchor/)
     expect(hookSource).toMatch(/branchMessagesToTopicThunk/)
+    // Dead renderer branch (index/slice clone) removed; the anchor name contains
+    // the `createTopicBranch` prefix, so match the legacy call signature instead.
+    expect(hookSource).not.toMatch(/cloneMessagesToNewTopicThunk/)
+    expect(hookSource).not.toMatch(/branchPointIndex/)
   })
 
   it('thunk primary path does not compute branchPointIndex/slice from partial projection', () => {
@@ -33,9 +37,9 @@ describe('Messages NEW_BRANCH primary listener — S6.2c-1', () => {
     expect(anchorSegment).toMatch(/anchorMessageId/)
   })
 
-  it('old cloneMessagesToTopic remains but is not referenced in NEW_BRANCH primary handler', () => {
-    // Ensure old path still exists for compatibility
-    expect(thunkSource).toMatch(/export const cloneMessagesToNewTopicThunk/)
+  it('dead index-based clone thunk removed; NEW_BRANCH primary handler never used it', () => {
+    // Dead renderer branch removed (Main/IPC `cloneMessagesToTopic` compat untouched).
+    expect(thunkSource).not.toMatch(/export const cloneMessagesToNewTopicThunk/)
     // But NEW_BRANCH handler must not use it
     const newBranchHandler = source.slice(
       source.indexOf('EVENT_NAMES.NEW_BRANCH'),
