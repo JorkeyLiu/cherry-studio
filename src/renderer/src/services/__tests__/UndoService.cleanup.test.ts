@@ -21,12 +21,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     deleteMessagesFromDB: vi.fn(),
+    deleteMessagesWithDependents: vi.fn(),
+    replaceSegmentsForTopic: vi.fn((p: unknown) => ({ type: 'replaceSegmentsForTopic', p })),
     saveMessageAndBlocksToDB: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     updateFileCount: vi.fn(),
     upsertManyBlocks: vi.fn(),
     removeManyBlocks: vi.fn(),
-    newMessagesActions: { removeMessages: vi.fn(), insertMessageAtIndex: vi.fn() },
+    newMessagesActions: {
+      removeMessages: vi.fn(),
+      insertMessageAtIndex: vi.fn(),
+      updateManyMessages: vi.fn(),
+      updateMessage: vi.fn()
+    },
     selectMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
@@ -50,7 +57,8 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/services/db', () => ({
   dbService: {
-    updateFileCount: mocks.updateFileCount
+    updateFileCount: mocks.updateFileCount,
+    deleteMessagesWithDependents: mocks.deleteMessagesWithDependents
   }
 }))
 
@@ -83,6 +91,10 @@ vi.mock('@renderer/store/messageBlock', () => ({
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: mocks.newMessagesActions,
   selectMessagesForTopic: mocks.selectMessagesForTopic
+}))
+
+vi.mock('@renderer/store/topicSegment', () => ({
+  replaceSegmentsForTopic: mocks.replaceSegmentsForTopic
 }))
 
 // ── Store state ────────────────────────────────────────────────────────────
@@ -181,15 +193,62 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
   })
 
   describe('redoDelete', () => {
-    it('consumeFileCleanupResult called exactly once, no updateFileCount', async () => {
+    const semanticRedoResponse = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {} as Record<string, number>,
+      deletedMessageIds: ['msg-1'],
+      deletedBlockIds: ['blk-1'],
+      previousUserMessageIds: ['msg-1'],
+      remainingUserMessageIds: [] as string[],
+      segments: [],
+      restoreGroups: [
+        { entries: [{ message: { id: 'msg-1' }, blocks: [{ id: 'blk-1' }] }], positionIndex: 0, anchorMessageId: null }
+      ],
+      segmentSnapshots: []
+    }
+
+    it('re-issues the original root IDs via the semantic command (never expanded IDs as intent)', async () => {
       const msg1 = makeMessage('msg-1', ['blk-1'])
       storeState.messages.entities = { 'msg-1': msg1 }
+      mocks.deleteMessagesWithDependents.mockResolvedValue(semanticRedoResponse)
 
       const action: DeleteUndoAction = {
         id: 'redo-del-1',
         type: 'delete',
         timestamp: Date.now(),
         targetTopicId: 'topic-1',
+        rootMessageIds: ['u1'],
+        insertedMessageIds: ['u1', 'a1'],
+        pastedMessagesSnapshot: [],
+        pastedBlocksSnapshot: [],
+        fileReferenceDeltas: [],
+        groupAnchors: [],
+        segmentSnapshots: []
+      }
+
+      const { executeRedo } = await import('../UndoService')
+      const dispatch = vi.fn() as unknown as AppDispatch
+
+      storeState.undoStack = { undoStack: [], redoStack: [action] }
+
+      await executeRedo(dispatch, () => storeState)
+
+      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['u1'])
+      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(semanticRedoResponse)
+      expect(mocks.updateFileCount).not.toHaveBeenCalled()
+    })
+
+    it('falls back to expanded IDs for legacy actions and converges segments from the response', async () => {
+      const msg1 = makeMessage('msg-1', ['blk-1'])
+      storeState.messages.entities = { 'msg-1': msg1 }
+      mocks.deleteMessagesWithDependents.mockResolvedValue(semanticRedoResponse)
+
+      const action: DeleteUndoAction = {
+        id: 'redo-del-legacy',
+        type: 'delete',
+        timestamp: Date.now(),
+        targetTopicId: 'topic-1',
+        rootMessageIds: [],
         insertedMessageIds: ['msg-1'],
         pastedMessagesSnapshot: [],
         pastedBlocksSnapshot: [],
@@ -205,8 +264,15 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       await executeRedo(dispatch, () => storeState)
 
-      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
-      expect(mocks.updateFileCount).not.toHaveBeenCalled()
+      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'])
+      // Authority convergence: exact expanded removal + full segment replace, no loaded segment sync.
+      expect(mocks.newMessagesActions.removeMessages).toHaveBeenCalledWith({
+        topicId: 'topic-1',
+        messageIds: ['msg-1']
+      })
+      expect(mocks.removeManyBlocks).toHaveBeenCalledWith(['blk-1'])
+      expect(mocks.replaceSegmentsForTopic).toHaveBeenCalledTimes(1)
+      expect(mocks.syncSegmentsAfterMessageDeletion).not.toHaveBeenCalled()
     })
 
     it('consumeFileCleanupResult called with file cleanup for file-bearing messages', async () => {
@@ -215,13 +281,15 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
       storeState.messages.entities = { 'msg-1': msg1 }
       storeState.messageBlocks.entities = { 'blk-1': fileBlock }
 
-      mocks.deleteMessagesFromDB.mockResolvedValue(cleanupWithFiles)
+      const responseWithFiles = { ...semanticRedoResponse, ...cleanupWithFiles }
+      mocks.deleteMessagesWithDependents.mockResolvedValue(responseWithFiles)
 
       const action: DeleteUndoAction = {
         id: 'redo-del-2',
         type: 'delete',
         timestamp: Date.now(),
         targetTopicId: 'topic-1',
+        rootMessageIds: ['msg-1'],
         insertedMessageIds: ['msg-1'],
         pastedMessagesSnapshot: [],
         pastedBlocksSnapshot: [],
@@ -237,8 +305,36 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       await executeRedo(dispatch, () => storeState)
 
-      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(cleanupWithFiles)
+      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(responseWithFiles)
       expect(mocks.updateFileCount).not.toHaveBeenCalled()
+    })
+
+    it('DB failure yields no cleanup consume and returns null', async () => {
+      mocks.deleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+
+      const action: DeleteUndoAction = {
+        id: 'redo-del-fail',
+        type: 'delete',
+        timestamp: Date.now(),
+        targetTopicId: 'topic-1',
+        rootMessageIds: ['msg-1'],
+        insertedMessageIds: ['msg-1'],
+        pastedMessagesSnapshot: [],
+        pastedBlocksSnapshot: [],
+        fileReferenceDeltas: [],
+        groupAnchors: [],
+        segmentSnapshots: []
+      }
+
+      const { executeRedo } = await import('../UndoService')
+      const dispatch = vi.fn() as unknown as AppDispatch
+
+      storeState.undoStack = { undoStack: [], redoStack: [action] }
+
+      const result = await executeRedo(dispatch, () => storeState)
+
+      expect(result).toBeNull()
+      expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
     })
   })
 

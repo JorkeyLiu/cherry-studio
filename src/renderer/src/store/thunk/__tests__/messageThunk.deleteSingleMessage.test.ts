@@ -1,22 +1,27 @@
 /**
- * deleteSingleMessageThunk — Phase 5.3 blocker fixes.
+ * deleteMessagesWithDependentsThunk / deleteSingleMessageThunk — unified
+ * plural semantic delete.
  *
- * LOCK-001: single deletion commits DB first, consumes FileCleanupResult
- * exactly once, then mutates Redux. Failures leave Redux/files unchanged.
+ * The renderer supplies ONLY stable root IDs. Main expands user dependents +
+ * captures the authority undo snapshot in one transaction. Redux/segments/
+ * anchor converge from the response deltas only after DB success; DB failure
+ * leaves Redux/anchor untouched and yields no undo parts.
  */
 
 import type { Message } from '@renderer/types/newMessage'
-import { AssistantMessageStatus, UserMessageStatus } from '@renderer/types/newMessage'
+import { AssistantMessageStatus, MessageBlockType, UserMessageStatus } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // --- Mocks ----------------------------------------------------------------
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
-    deleteMessagesWithSegments: vi.fn(),
+    deleteMessagesWithDependents: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     removeMessages: vi.fn((p: unknown) => ({ type: 'removeMessages', p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
+    replaceSegmentsForTopic: vi.fn((p: unknown) => ({ type: 'replaceSegmentsForTopic', p })),
+    transferAnchorsWithAuthorityGroupKeys: vi.fn(),
     transferAnchorsAfterDeletion: vi.fn(),
     buildGroupList: vi.fn(() => []),
     selectMessagesForTopic: vi.fn(),
@@ -38,7 +43,8 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/services/db', () => ({
   dbService: {
-    deleteMessagesWithSegments: mocks.deleteMessagesWithSegments,
+    deleteMessagesWithDependents: mocks.deleteMessagesWithDependents,
+    deleteMessagesWithSegments: vi.fn(),
     resetMessagesForResend: vi.fn(),
     updateMessageAndBlocks: vi.fn(),
     updateMessage: vi.fn(),
@@ -56,7 +62,8 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
 
 vi.mock('@renderer/services/anchorService', () => ({
   buildGroupList: mocks.buildGroupList,
-  transferAnchorsAfterDeletion: mocks.transferAnchorsAfterDeletion
+  transferAnchorsAfterDeletion: mocks.transferAnchorsAfterDeletion,
+  transferAnchorsWithAuthorityGroupKeys: mocks.transferAnchorsWithAuthorityGroupKeys
 }))
 
 vi.mock('@renderer/store/assistants', () => ({
@@ -65,6 +72,10 @@ vi.mock('@renderer/store/assistants', () => ({
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
   loadTopicSegmentsThunk: vi.fn()
+}))
+
+vi.mock('@renderer/store/topicSegment', () => ({
+  replaceSegmentsForTopic: mocks.replaceSegmentsForTopic
 }))
 
 vi.mock('@renderer/utils/queue', () => ({
@@ -119,7 +130,26 @@ const createAssistantMessage = (overrides: Partial<Message> = {}): Message =>
     ...overrides
   }) as unknown as Message
 
-const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} as Record<string, number> }
+const semanticResponse = {
+  affectedFileIds: [],
+  remainingReferenceCounts: {},
+  deletedMessageIds: ['msg-1', 'asst-1'],
+  deletedBlockIds: ['block-1', 'block-2', 'block-3'],
+  previousUserMessageIds: ['msg-1'],
+  remainingUserMessageIds: [],
+  segments: [],
+  restoreGroups: [
+    {
+      entries: [
+        { message: { id: 'msg-1', blocks: ['block-1', 'block-2'] }, blocks: [{ id: 'block-1' }, { id: 'block-2' }] },
+        { message: { id: 'asst-1', blocks: ['block-3'] }, blocks: [{ id: 'block-3' }] }
+      ],
+      positionIndex: 0,
+      anchorMessageId: null
+    }
+  ],
+  segmentSnapshots: []
+}
 
 // --- Store mock setup ----------------------------------------------------
 
@@ -156,7 +186,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 
 // --- Tests ----------------------------------------------------------------
 
-describe('deleteSingleMessageThunk', () => {
+describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     storeState = {
@@ -167,8 +197,8 @@ describe('deleteSingleMessageThunk', () => {
     }
   })
 
-  describe('ordinary topic (LOCK-001): DB commit first, consume cleanup once, then Redux', () => {
-    it('commits to DB before Redux, consumes FileCleanupResult exactly once', { timeout: 60_000 }, async () => {
+  describe('semantic delete (DB-first, authority deltas)', () => {
+    it('calls the plural semantic command with one stable root and converges from response deltas', async () => {
       const userMsg = createMessage()
       const asstMsg = createAssistantMessage()
 
@@ -179,34 +209,37 @@ describe('deleteSingleMessageThunk', () => {
       storeState.messages.messageIdsByTopic = {
         'topic-1': ['msg-1', 'asst-1']
       }
-      mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
-      mocks.buildGroupList.mockReturnValue([])
-      mocks.deleteMessagesWithSegments.mockResolvedValue(emptyCleanup)
+      mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
 
       const { deleteSingleMessageThunk } = await import('../messageThunk')
       const dispatch = vi.fn()
 
       await deleteSingleMessageThunk('topic-1', 'msg-1')(dispatch, () => storeState as any)
 
-      // DB commit FIRST
-      expect(mocks.deleteMessagesWithSegments).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'asst-1'])
-      // consumeFileCleanupResult called exactly once
-      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
+      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'])
+      expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(semanticResponse)
+      expect(mocks.replaceSegmentsForTopic).toHaveBeenCalledTimes(1)
+      expect(mocks.transferAnchorsWithAuthorityGroupKeys).toHaveBeenCalledWith(
+        dispatch,
+        expect.any(Function),
+        'topic-1',
+        ['msg-1'],
+        []
+      )
     })
 
-    it('Redux mutations happen AFTER successful DB commit', { timeout: 60_000 }, async () => {
+    it('Redux mutations happen AFTER successful DB commit', async () => {
       const userMsg = createMessage()
       storeState.messages.entities = { 'msg-1': userMsg }
       storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
-      mocks.selectMessagesForTopic.mockReturnValue([userMsg])
-      mocks.buildGroupList.mockReturnValue([])
 
       const dbCalled = vi.fn()
       const cleanupCalled = vi.fn()
       const reduxCalled = vi.fn()
-      mocks.deleteMessagesWithSegments.mockImplementation(async () => {
+      mocks.deleteMessagesWithDependents.mockImplementation(async () => {
         dbCalled()
-        return emptyCleanup
+        return semanticResponse
       })
       mocks.consumeFileCleanupResult.mockImplementation(async () => {
         cleanupCalled()
@@ -219,31 +252,131 @@ describe('deleteSingleMessageThunk', () => {
 
       await deleteSingleMessageThunk('topic-1', 'msg-1')(dispatch, () => storeState as any)
 
-      // Verify ordering: db called before cleanup, cleanup called before any redux
       expect(dbCalled).toHaveBeenCalled()
       expect(cleanupCalled).toHaveBeenCalled()
       expect(reduxCalled).toHaveBeenCalled()
-      // DB is synchronous mock, cleanup is awaited, redux happens after
       expect(dbCalled.mock.invocationCallOrder[0]).toBeLessThan(cleanupCalled.mock.invocationCallOrder[0])
       expect(cleanupCalled.mock.invocationCallOrder[0]).toBeLessThan(reduxCalled.mock.invocationCallOrder[0])
     })
 
-    it('DB failure leaves Redux unchanged', { timeout: 60_000 }, async () => {
+    it('DB failure leaves Redux and anchors unchanged', async () => {
       const userMsg = createMessage()
       storeState.messages.entities = { 'msg-1': userMsg }
       storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
-      mocks.selectMessagesForTopic.mockReturnValue([userMsg])
-      mocks.buildGroupList.mockReturnValue([])
-      mocks.deleteMessagesWithSegments.mockRejectedValue(new Error('SQLITE_FAILURE'))
+      mocks.deleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
 
       const { deleteSingleMessageThunk } = await import('../messageThunk')
       const dispatch = vi.fn()
 
       await deleteSingleMessageThunk('topic-1', 'msg-1')(dispatch, () => storeState as any)
 
-      // Redux should NOT be mutated on failure
-      expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'removeMessages' }))
+      expect(dispatch).not.toHaveBeenCalled()
       expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
+      expect(mocks.transferAnchorsWithAuthorityGroupKeys).not.toHaveBeenCalled()
+      expect(mocks.replaceSegmentsForTopic).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    storeState = {
+      messages: {
+        entities: {},
+        messageIdsByTopic: {}
+      }
+    }
+  })
+
+  it('passes stable root IDs without reading the loaded cascade and returns undo parts', async () => {
+    mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
+
+    const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
+    const dispatch = vi.fn()
+    const getState = () => storeState as any
+
+    const result = await deleteMessagesWithDependentsThunk('topic-1', ['msg-1', 'other-root'])(dispatch, getState)
+
+    // Roots pass through untouched — no loaded expansion, no cascade derivation.
+    expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'other-root'])
+    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.buildGroupList).not.toHaveBeenCalled()
+    // Authority convergence.
+    expect(mocks.removeMessages).toHaveBeenCalledWith({
+      topicId: 'topic-1',
+      messageIds: ['msg-1', 'asst-1']
+    })
+    expect(mocks.replaceSegmentsForTopic).toHaveBeenCalledTimes(1)
+    expect(mocks.transferAnchorsWithAuthorityGroupKeys).toHaveBeenCalledWith(
+      dispatch,
+      expect.any(Function),
+      'topic-1',
+      ['msg-1'],
+      []
+    )
+    // Normalized undo snapshot for the caller.
+    expect(result.response).toBe(semanticResponse)
+    expect(result.undoParts.groupAnchors).toHaveLength(1)
+    expect(result.undoParts.groupAnchors[0].anchorMessageId).toBeNull()
+    expect(result.undoParts.groupAnchors[0].messages.map((m) => m.id)).toEqual(['msg-1', 'asst-1'])
+    expect(result.undoParts.segmentSnapshots).toEqual([])
+  })
+
+  it('DB failure propagates with no dispatch and no undo parts', async () => {
+    mocks.deleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+
+    const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
+    const dispatch = vi.fn()
+
+    await expect(
+      deleteMessagesWithDependentsThunk('topic-1', ['msg-1'])(dispatch, () => storeState as any)
+    ).rejects.toThrow('SQLITE_FAILURE')
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
+  })
+})
+
+describe('buildDeleteDependentsUndoParts (response adapter)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('derives file deltas from authority FILE blocks for undo restoration', async () => {
+    const { buildDeleteDependentsUndoParts } = await import('../messageThunk')
+    const response = {
+      ...semanticResponse,
+      restoreGroups: [
+        {
+          entries: [
+            {
+              message: { id: 'msg-1' },
+              blocks: [{ id: 'block-f', type: MessageBlockType.FILE, file: { id: 'file-1' } }]
+            }
+          ],
+          positionIndex: 2,
+          anchorMessageId: 'next-1'
+        }
+      ]
+    }
+    const parts = buildDeleteDependentsUndoParts(response as any)
+    expect(parts.groupAnchors).toHaveLength(1)
+    expect(parts.groupAnchors[0].positionIndex).toBe(2)
+    expect(parts.groupAnchors[0].anchorMessageId).toBe('next-1')
+    expect(parts.fileReferenceDeltas).toEqual([{ fileId: 'file-1', delta: -1 }])
+  })
+
+  it('adapts pre-delete segment snapshots to TopicSegment shapes', async () => {
+    const { buildDeleteDependentsUndoParts } = await import('../messageThunk')
+    const response = {
+      ...semanticResponse,
+      segmentSnapshots: [
+        { id: 's1', topicId: 'topic-1', name: 'seg', messageIds: ['msg-1'], createdAt: null, updatedAt: null }
+      ]
+    }
+    const parts = buildDeleteDependentsUndoParts(response as any)
+    expect(parts.segmentSnapshots).toHaveLength(1)
+    expect(parts.segmentSnapshots[0].id).toBe('s1')
+    expect(parts.segmentSnapshots[0].messageIds).toEqual(['msg-1'])
   })
 })

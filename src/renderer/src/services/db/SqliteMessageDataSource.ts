@@ -38,6 +38,8 @@ import type {
   DeleteBlocksResponse,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithDependentsRequest,
+  DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithSegmentsRequest,
   DeleteMessagesWithSegmentsResponse,
   DeleteSegmentRequest,
@@ -84,6 +86,7 @@ import type {
   SearchMessagesRequest,
   SearchMessagesResponse,
   SelectAnswerMessageRequest,
+  SelectAnswerMessageResponse,
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
   TopicExistsRequest,
@@ -127,8 +130,11 @@ export interface ChatDbApi {
   appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<null>>
   updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<null>>
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
-  // PERF-100: one atomic multi-model answer-tab selection
-  selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<null>>
+  // Cross-process authority answer selection (Main-resolved full group)
+  selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<SelectAnswerMessageResponse>>
+  deleteMessagesWithDependents(
+    request: DeleteMessagesWithDependentsRequest
+  ): Promise<ChatDbResult<DeleteMessagesWithDependentsResponse>>
   deleteMessage(request: DeleteMessageRequest): Promise<ChatDbResult<null>>
   deleteMessages(request: DeleteMessagesRequest): Promise<ChatDbResult<null>>
   updateBlocks(request: UpdateBlocksRequest): Promise<ChatDbResult<null>>
@@ -436,20 +442,21 @@ export class SqliteMessageDataSource implements MessageDataSource {
   }
 
   /**
-   * PERF-100: one atomic multi-model answer-tab selection.
+   * Cross-process authority answer selection.
    *
    * ONE named bridge call to the Main `selectAnswerMessage` command (ONE
-   * root SQLite transaction validating topic ownership of every supplied ID
-   * and persisting exactly one foldSelected=true). Unwraps ChatDbResult,
-   * throws ChatDbResultError on structured failure, propagates transport
-   * rejection unchanged. No retry, no fallback. Dispatches
-   * `updateTopicUpdatedAt` exactly once after success — the calling thunk
-   * must NOT dispatch it again for the same logical selection.
+   * root SQLite transaction resolving the full answer group from the
+   * selected ID and persisting exactly one foldSelected=true). Returns the
+   * authoritative group. Unwraps ChatDbResult, throws ChatDbResultError on
+   * structured failure, propagates transport rejection unchanged. No retry,
+   * no fallback. Dispatches `updateTopicUpdatedAt` exactly once after
+   * success — the calling thunk must NOT dispatch it again.
    */
-  async selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void> {
-    const request: SelectAnswerMessageRequest = cloneForWire({ topicId, selectedMessageId, messageIds })
-    unwrap(await this.api.selectAnswerMessage(request))
+  async selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse> {
+    const request: SelectAnswerMessageRequest = cloneForWire({ topicId, selectedMessageId })
+    const response = unwrap(await this.api.selectAnswerMessage(request))
     dispatchTopicUpdatedAt(topicId)
+    return response
   }
 
   async deleteMessage(topicId: string, messageId: string): Promise<void> {
@@ -881,6 +888,19 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async deleteMessagesWithSegments(topicId: string, messageIds: string[]): Promise<FileCleanupResult> {
     const request: DeleteMessagesWithSegmentsRequest = cloneForWire({ topicId, messageIds })
     const result = unwrap(await this.api.deleteMessagesWithSegments(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async deleteMessagesWithDependents(
+    topicId: string,
+    messageIds: string[]
+  ): Promise<DeleteMessagesWithDependentsResponse> {
+    if (!this.api.deleteMessagesWithDependents) {
+      throw new Error('ChatDb API unavailable: semantic delete not exposed')
+    }
+    const request: DeleteMessagesWithDependentsRequest = cloneForWire({ topicId, messageIds })
+    const result = unwrap(await this.api.deleteMessagesWithDependents(request))
     dispatchTopicUpdatedAt(topicId)
     return result
   }

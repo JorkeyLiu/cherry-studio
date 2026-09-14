@@ -90,6 +90,27 @@ export function transferAnchorOnDeletion(
 }
 
 /**
+ * Authority group-key anchor transfer (cross-process deletion path).
+ *
+ * Deterministic transfer driven DIRECTLY by Main-authoritative ordered user
+ * group keys — no loaded message entity lookup. `previousUserMessageIds`
+ * is the pre-delete authority order, `remainingUserMessageIds` the
+ * post-delete authority order. Semantics are exactly
+ * `transferAnchorOnDeletion` (CW-9): anchor still present stays; deleted
+ * anchor falls to the previous group, first-group deletion falls to the new
+ * first, empty topic clears. Pure except the dispatch glue.
+ */
+export function transferAnchorsWithAuthorityGroupKeys(
+  dispatch: (action: { type: string; payload?: unknown }) => void,
+  getState: () => RootState,
+  topicId: string,
+  previousUserMessageIds: string[],
+  remainingUserMessageIds: string[]
+): void {
+  transferAnchorsAfterDeletion(dispatch, getState, topicId, previousUserMessageIds, remainingUserMessageIds)
+}
+
+/**
  * 删除后对所有 assistant 的 active topic 锚点进行转移（集成胶水函数）。
  * 遍历 assistants.assistants，对每个有 contextWindowAnchor[topicId]: active 的，
  * 调 transferAnchorOnDeletion，diff 则 dispatch updateAssistantSettings。

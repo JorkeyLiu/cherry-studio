@@ -83,6 +83,12 @@ interface BaseUndoAction {
 
 export interface DeleteUndoAction extends BaseUndoAction {
   type: 'delete'
+  /**
+   * Original stable root IDs supplied to the semantic delete command.
+   * Redo re-issues these roots (Main re-expands user dependents); the
+   * expanded `insertedMessageIds` below must never masquerade as user intent.
+   */
+  rootMessageIds: string[]
   /** Per-group anchors for restoring deleted groups to their original positions */
   groupAnchors: GroupAnchor[]
   /** Snapshots of affected segments before deletion (for undo segment restoration) */

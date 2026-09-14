@@ -387,6 +387,7 @@ export enum IpcChannel {
   ChatDb_CloneMessagesToTopic = 'chatdb:clone-messages-to-topic',
   ChatDb_ResetMessagesForResend = 'chatdb:reset-messages-for-resend',
   ChatDb_DeleteMessagesWithSegments = 'chatdb:delete-messages-with-segments',
+  ChatDb_DeleteMessagesWithDependents = 'chatdb:delete-messages-with-dependents',
   ChatDb_PasteMessagesToTopic = 'chatdb:paste-messages-to-topic',
 
   // Phase 5.1B-2 — search

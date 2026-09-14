@@ -9,7 +9,8 @@ import {
   inheritAnchorForBranch,
   resolveGroupKey,
   transferAnchorOnDeletion,
-  transferAnchorsAfterDeletion
+  transferAnchorsAfterDeletion,
+  transferAnchorsWithAuthorityGroupKeys
 } from '../anchorService'
 import * as contextTurnService from '../contextTurnService'
 
@@ -264,6 +265,35 @@ describe('transferAnchorsAfterDeletion', () => {
     transferAnchorsAfterDeletion(dispatch, getState, topicId, ['u1', 'u2'], ['u1'])
 
     expect(updateAssistantSettings).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+})
+
+describe('transferAnchorsWithAuthorityGroupKeys', () => {
+  const g = (key: string): ContextWindowAnchor => ({ kind: 'active', groupKey: key })
+  const topicId = 'topic-1'
+  const makeGetState = (settings: { contextWindowAnchor?: Record<string, ContextWindowAnchor | undefined> }) => () =>
+    ({
+      assistants: {
+        assistants: [{ id: 'asst-1', settings }]
+      }
+    }) as any
+
+  it('transfers directly from authority group keys without entity lookup', () => {
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('u2') } })
+    const dispatch = vi.fn()
+    transferAnchorsWithAuthorityGroupKeys(dispatch, getState, topicId, ['u1', 'u2', 'u3'], ['u1', 'u3'])
+    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
+    expect(updateAssistantSettings).toHaveBeenCalledWith({
+      assistantId: 'asst-1',
+      settings: { contextWindowAnchor: { [topicId]: g('u1') } }
+    })
+  })
+
+  it('leaves a surviving anchor untouched', () => {
+    const getState = makeGetState({ contextWindowAnchor: { [topicId]: g('u1') } })
+    const dispatch = vi.fn()
+    transferAnchorsWithAuthorityGroupKeys(dispatch, getState, topicId, ['u1', 'u2'], ['u1'])
     expect(dispatch).not.toHaveBeenCalled()
   })
 })

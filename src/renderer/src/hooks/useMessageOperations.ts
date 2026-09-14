@@ -123,25 +123,23 @@ export function useMessageOperations(topic: Topic) {
   )
 
   /**
-   * PERF-100: switch the selected answer within one multi-model answer group.
+   * Cross-process authority answer selection.
    *
-   * ONE logical selection = ONE atomic Main SQLite command (validates topic
-   * ownership of every supplied ID, persists exactly one foldSelected=true)
-   * + ONE plural Redux commit + exactly one updateTopicUpdatedAt dispatch.
-   * On DB failure the error propagates and Redux is untouched.
+   * ONE logical selection = ONE atomic Main SQLite command carrying ONLY the
+   * selected ID (Main resolves the full group, including window-outside
+   * members) + ONE plural Redux commit intersected with the loaded
+   * projection + exactly one updateTopicUpdatedAt dispatch. On DB failure
+   * the error propagates and Redux is untouched.
    *
-   * @param messageId        The message to select (foldSelected=true).
-   * @param groupMessageIds  The FULL answer-group message IDs (caller-owned
-   *                         group coherence; Main enforces topic ownership +
-   *                         unique set + selected inclusion).
+   * @param messageId The message to select (foldSelected=true).
    */
   const selectAnswerMessage = useCallback(
-    async (messageId: string, groupMessageIds: string[]) => {
+    async (messageId: string) => {
       if (!topic?.id) {
         logger.error('[selectAnswerMessage] Topic prop is not valid.')
         return
       }
-      await dispatch(selectAnswerMessageThunk(topic.id, messageId, groupMessageIds))
+      await dispatch(selectAnswerMessageThunk(topic.id, messageId))
     },
     [dispatch, topic.id]
   )

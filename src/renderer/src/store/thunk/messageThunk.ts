@@ -19,11 +19,7 @@ import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import { INITIAL_MESSAGES_COUNT } from '@renderer/config/constant'
 import { getModel } from '@renderer/hooks/useModel'
 import { setLatestWindowCompleteness } from '@renderer/pages/home/Messages/messageWindow'
-import {
-  buildGroupList,
-  ensureTopicAnchorEstablished,
-  transferAnchorsAfterDeletion
-} from '@renderer/services/anchorService'
+import { ensureTopicAnchorEstablished, transferAnchorsWithAuthorityGroupKeys } from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
@@ -61,6 +57,7 @@ import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import { type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
 import { ChunkType } from '@renderer/types/chunk'
+import type { GroupAnchor } from '@renderer/types/editMode'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import {
   AssistantMessageStatus,
@@ -68,6 +65,7 @@ import {
   MessageBlockType,
   UserMessageStatus
 } from '@renderer/types/newMessage'
+import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
 import { addAbortController } from '@renderer/utils/abortController'
 import {
@@ -78,6 +76,7 @@ import {
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
+  DeleteMessagesWithDependentsResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
@@ -742,9 +741,116 @@ export const sendMessage =
 //   }
 
 /**
- * Thunk to delete a single message and its associated blocks.
- * If deleting a user message, cascades to all assistant messages with matching askId,
- * and transfers anchors for all affected assistants.
+ * Reusable semantic delete execution (single + multi-select unified).
+ *
+ * Cross-process authority: the renderer supplies ONLY stable root IDs.
+ * Main expands user dependents, deletes in ONE transaction, and returns the
+ * exact expanded deletion set plus block IDs, pre/post user group keys, the
+ * post-delete segment catalog, and the full authority undo snapshot
+ * (restore groups + affected segment snapshots).
+ *
+ * DB-first (LOCK-001): Redux/anchor changes happen ONLY after DB success; DB
+ * failure leaves Redux and anchors untouched (the error propagates, no undo
+ * parts are produced). One consume-cleanup, one loaded-intersection removal
+ * (reducers never inject window-outside entities), one full segment replace
+ * from the authority catalog (no loaded segment read), and one anchor
+ * transfer from the authoritative group keys (no loaded entity lookup).
+ *
+ * Returns the authority response plus normalized undo parts adapted to the
+ * existing `DeleteUndoAction` shapes (`GroupAnchor[]`, `TopicSegment[]`,
+ * file deltas derived from the authority block wires), so callers can push
+ * undo without reading loaded projection.
+ */
+export interface DeleteDependentsUndoParts {
+  groupAnchors: GroupAnchor[]
+  segmentSnapshots: TopicSegment[]
+  fileReferenceDeltas: Array<{ fileId: string; delta: number }>
+}
+
+export function buildDeleteDependentsUndoParts(
+  response: DeleteMessagesWithDependentsResponse
+): DeleteDependentsUndoParts {
+  const groupAnchors: GroupAnchor[] = response.restoreGroups.map((group) => ({
+    messages: group.entries.map((entry) => entry.message as unknown as Message),
+    blocks: group.entries.flatMap((entry) => entry.blocks as unknown as MessageBlock[]),
+    positionIndex: group.positionIndex,
+    anchorMessageId: group.anchorMessageId
+  }))
+  const now = new Date().toISOString()
+  const segmentSnapshots: TopicSegment[] = response.segmentSnapshots.map((wire) => ({
+    id: wire.id,
+    topicId: wire.topicId,
+    name: wire.name ?? '',
+    color: wire.color ?? undefined,
+    messageIds: [...wire.messageIds],
+    createdAt: wire.createdAt ?? now,
+    updatedAt: wire.updatedAt ?? now
+  }))
+  const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
+  for (const anchor of groupAnchors) {
+    for (const block of anchor.blocks) {
+      if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
+        const file = block.file
+        if (file) {
+          fileReferenceDeltas.push({ fileId: file.id, delta: -1 })
+        }
+      }
+    }
+  }
+  return { groupAnchors, segmentSnapshots, fileReferenceDeltas }
+}
+
+export const executeDeleteMessagesWithDependents = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  rootIds: string[]
+): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+  // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
+  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds)
+
+  // Cancel throttled block updates for the authoritative deleted blocks.
+  response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
+
+  // Consume file cleanup exactly once after commit.
+  await consumeFileCleanupResult(response)
+
+  // Redux mutations AFTER successful SQLite commit — reducers naturally
+  // affect only the loaded intersection, never injecting window-outside entities.
+  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
+  if (response.deletedBlockIds.length > 0) {
+    dispatch(removeManyBlocks(response.deletedBlockIds))
+  }
+  dispatch(
+    replaceSegmentsForTopic({
+      topicId,
+      segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
+    })
+  )
+
+  // Renderer-owned anchor transfer from authoritative group keys.
+  transferAnchorsWithAuthorityGroupKeys(
+    dispatch,
+    getState,
+    topicId,
+    response.previousUserMessageIds,
+    response.remainingUserMessageIds
+  )
+
+  return { response, undoParts: buildDeleteDependentsUndoParts(response) }
+}
+
+export const deleteMessagesWithDependentsThunk =
+  (topicId: string, rootIds: string[]) => async (dispatch: AppDispatch, getState: () => RootState) => {
+    return executeDeleteMessagesWithDependents(dispatch, getState, topicId, rootIds)
+  }
+
+/**
+ * Thin single-message wrapper over the unified plural helper.
+ *
+ * Keeps the existing non-undo API (plain delete path + trace cleanup in the
+ * hook). The existence guard is a single-entity check only — no loaded
+ * cascade derivation; Main owns the expansion.
  */
 export const deleteSingleMessageThunk =
   (topicId: string, messageId: string) => async (dispatch: AppDispatch, getState: () => RootState) => {
@@ -755,58 +861,8 @@ export const deleteSingleMessageThunk =
       return
     }
 
-    // Snapshot oldGroupList before deletion for anchor transfer
-    const messageIdsBefore = currentState.messages.messageIdsByTopic[topicId] || []
-    const entitiesBefore = currentState.messages.entities
-    const oldGroupList = buildGroupList(messageIdsBefore, (id) => entitiesBefore[id])
-
-    let idsToDelete: string[]
-
-    if (messageToDelete.role === 'user') {
-      // Cascade: collect all assistant messages that reference this user message
-      const allTopicMessages = selectMessagesForTopic(currentState, topicId)
-      const assistantIds = allTopicMessages.filter((m) => m.askId === messageId).map((m) => m.id)
-      idsToDelete = [messageId, ...assistantIds]
-    } else {
-      // Assistant: only delete the single message, no anchor transfer needed
-      idsToDelete = [messageId]
-    }
-
-    // Collect block IDs for all messages being deleted
-    const allBlockIds: string[] = []
-    for (const id of idsToDelete) {
-      const msg = currentState.messages.entities[id]
-      if (msg?.blocks) {
-        allBlockIds.push(...msg.blocks)
-      }
-    }
-
     try {
-      // DB commit first (LOCK-001), consume cleanup once, then Redux.
-      // deleteMessagesWithSegments is atomic and returns FileCleanupResult.
-      const cleanup = await dbService.deleteMessagesWithSegments(topicId, idsToDelete)
-
-      // Cancel throttled block updates (file cleanup handled post-commit)
-      allBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
-
-      // Consume file cleanup exactly once after commit
-      await consumeFileCleanupResult(cleanup)
-
-      // Redux mutations AFTER successful SQLite commit
-      dispatch(newMessagesActions.removeMessages({ topicId, messageIds: idsToDelete }))
-      if (allBlockIds.length > 0) {
-        dispatch(removeManyBlocks(allBlockIds))
-      }
-
-      // Transfer anchors if user message was deleted (cascade)
-      if (messageToDelete.role === 'user') {
-        const newState = getState()
-        const messageIdsAfter = newState.messages.messageIdsByTopic[topicId] || []
-        const entitiesAfter = newState.messages.entities
-        const newGroupList = buildGroupList(messageIdsAfter, (id) => entitiesAfter[id])
-
-        transferAnchorsAfterDeletion(dispatch, getState, topicId, oldGroupList, newGroupList)
-      }
+      await executeDeleteMessagesWithDependents(dispatch, getState, topicId, [messageId])
     } catch (error) {
       logger.error(`[deleteSingleMessage] Failed to delete message ${messageId}:`, error as Error)
     }
@@ -1246,29 +1302,23 @@ export const appendAssistantResponseThunk =
         })
       )
 
-      // 4b. PERF-100: the same selected-answer invariant — the newly appended
-      // response becomes the group's single selection. The stub was persisted
-      // (saveMessageAndBlocksToDB) and committed to Redux above, so the full
-      // answer group is resolvable here. ONE atomic select-answer-message
-      // command + ONE plural Redux commit replaces the two fire-and-forget
-      // updateMessageAndBlocks writes below, preserving fire-and-forget
-      // lifecycle semantics (the processing queue starts immediately).
-      // The aggregate enforces topic ownership + unique set + selected
-      // inclusion; group coherence comes from the shared askId.
-      const selectState = getState()
-      const answerGroupIds = (selectState.messages.messageIdsByTopic[topicId] || [])
-        .map((id) => selectState.messages.entities[id])
-        .filter((m): m is Message => !!m && m.role === 'assistant' && m.askId === askId)
-        .map((m) => m.id)
-      void dispatch(selectAnswerMessageThunk(topicId, newAssistantMessageStub.id, answerGroupIds))
-
-      // 5. Prepare and queue the processing task
+      // 4b. The newly appended response becomes the group's single selection.
+      // Cross-process authority: the second transaction carries ONLY the new
+      // selected ID; Main resolves the complete group (including
+      // window-outside members) and persists the single selection atomically.
+      // Ordering: the generation queue starts unconditionally right after the
+      // stub commit above, so a second-transaction failure can never block the
+      // AI streaming pipeline. Selection is then awaited in its own try/catch
+      // (never fire-and-forget without catch): failure is logged privacy-safe
+      // and the already-committed stub stands as DB truth — the append is NOT
+      // rolled back and no success of the selection is claimed.
+      // 5. Prepare and queue the processing task (unconditional after stub commit)
       const assistantConfigForThisCall = {
         ...assistant,
         model: newModel
       }
       const queue = getTopicQueue(topicId)
-      void queue.add(async () => {
+      const requestTask = queue.add(async () => {
         await fetchAndProcessAssistantResponseImpl(
           dispatch,
           getState,
@@ -1277,6 +1327,16 @@ export const appendAssistantResponseThunk =
           newAssistantMessageStub // Pass the newly created stub
         )
       })
+      void requestTask
+
+      try {
+        await dispatch(selectAnswerMessageThunk(topicId, newAssistantMessageStub.id))
+      } catch (error) {
+        logger.error(
+          `[appendAssistantResponseThunk] Failed to select appended answer; continuing with queued generation:`,
+          error as Error
+        )
+      }
     } catch (error) {
       logger.error(`[appendAssistantResponseThunk] Error appending assistant response:`, error as Error)
       // Optionally dispatch an error action or notification
@@ -1793,40 +1853,39 @@ export const updateMessageAndBlocksThunk =
   }
 
 /**
- * PERF-100: switch the selected answer within one multi-model answer group.
+ * Cross-process authority answer selection.
  *
  * DB-first, single-commit:
- * 1. ONE `selectAnswerMessage` ChatDb command → ONE Main root SQLite
- *    transaction validates topic ownership of every supplied message ID and
- *    persists exactly one foldSelected=true atomically (no partial write).
- *    The data source dispatches `updateTopicUpdatedAt` exactly once on
- *    success — this thunk must NOT dispatch it again.
- * 2. On success, ONE plural `updateManyMessages` Redux dispatch commits every
- *    foldSelected patch in a single store notification.
+ * 1. ONE `selectAnswerMessage` ChatDb command with the selected ID only →
+ *    ONE Main root SQLite transaction resolves the complete answer group
+ *    (topic/role/askId validated, cross-topic fail-closed) and persists
+ *    exactly one foldSelected=true atomically. The data source dispatches
+ *    `updateTopicUpdatedAt` exactly once on success — this thunk must NOT
+ *    dispatch it again.
+ * 2. On success, ONE plural `updateManyMessages` Redux dispatch commits the
+ *    authoritative group, intersected with the currently loaded projection
+ *    (never injects window-outside entities).
  * 3. On DB failure the error propagates and NO Redux commit happens.
- *
- * The caller supplies the FULL answer-group message IDs; group coherence is
- * the caller's responsibility (Main enforces topic ownership + unique set +
- * selected inclusion only).
  */
 export const selectAnswerMessageThunk =
-  (topicId: string, selectedMessageId: string, messageIds: string[]) =>
-  async (dispatch: AppDispatch): Promise<void> => {
-    // 1. Atomic SQLite persistence (DB-first, LOCK-001). The Main command
-    // rejects missing/cross-topic IDs atomically; on failure the error
-    // propagates and Redux is never touched.
-    await dbService.selectAnswerMessage(topicId, selectedMessageId, messageIds)
+  (topicId: string, selectedMessageId: string) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+    // 1. Atomic Main-authoritative persistence (DB-first, LOCK-001).
+    const response = await dbService.selectAnswerMessage(topicId, selectedMessageId)
 
-    // 2. ONE plural Redux commit for the whole logical selection.
-    dispatch(
-      newMessagesActions.updateManyMessages({
-        topicId,
-        updates: messageIds.map((messageId) => ({
-          messageId,
-          updates: { foldSelected: messageId === selectedMessageId }
-        }))
-      })
-    )
+    // 2. ONE plural Redux commit intersected with the loaded projection.
+    const state = getState()
+    const loadedIds = state.messages.messageIdsByTopic[topicId] || []
+    const loadedSet = new Set(loadedIds)
+    const visibleUpdates = response.messageIds
+      .filter((id) => loadedSet.has(id))
+      .map((messageId) => ({
+        messageId,
+        updates: { foldSelected: messageId === response.selectedMessageId }
+      }))
+    if (visibleUpdates.length > 0) {
+      dispatch(newMessagesActions.updateManyMessages({ topicId, updates: visibleUpdates }))
+    }
     // updateTopicUpdatedAt is dispatched exactly once by the data source.
   }
 

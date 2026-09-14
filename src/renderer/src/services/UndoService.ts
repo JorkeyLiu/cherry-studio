@@ -11,6 +11,7 @@ import {
   restoreTargetSegments,
   syncSegmentsAfterMessageDeletion
 } from '@renderer/store/thunk/topicSegmentThunk'
+import { replaceSegmentsForTopic } from '@renderer/store/topicSegment'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
 import type {
   CutPasteUndoAction,
@@ -339,53 +340,55 @@ async function undoCutPaste(
 // ==================== Redo Implementations ====================
 
 /**
- * Redo delete = re-delete the messages again
+ * Redo delete = re-delete the messages again.
+ *
+ * Semantically-correct roots: the original stable root IDs (Main re-expands
+ * user dependents and dedupes overlapping expansions to the same set).
+ * Legacy actions without roots fall back to the expanded set, which Main
+ * handles as unique roots. Converges from the authority response (exact
+ * expanded IDs/blocks + full segment catalog) — no loaded-projection reads.
  */
-async function redoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
-  const { targetTopicId, insertedMessageIds = [] } = action
+async function redoDelete(dispatch: AppDispatch, _getState: () => RootState, action: DeleteUndoAction): Promise<void> {
+  const { targetTopicId, insertedMessageIds = [], rootMessageIds } = action
+  const roots = rootMessageIds && rootMessageIds.length > 0 ? rootMessageIds : insertedMessageIds
 
-  if (insertedMessageIds.length === 0) {
+  if (roots.length === 0) {
     return
   }
 
-  // Collect block IDs BEFORE any changes
-  const stateBefore = getState()
-  const blockIdsToRemove: string[] = []
-  for (const msgId of insertedMessageIds) {
-    const message = stateBefore.messages.entities[msgId]
-    if (message?.blocks) {
-      blockIdsToRemove.push(...message.blocks)
-    }
-  }
-
-  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
-  let cleanup
+  // DB-first via the unified semantic command (LOCK-001)
+  let response: Awaited<ReturnType<typeof dbService.deleteMessagesWithDependents>>
   try {
-    cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
+    response = await dbService.deleteMessagesWithDependents(targetTopicId, roots)
   } catch (error) {
     logger.error('[redoDelete] Failed to delete from DB', error as Error)
     throw error
   }
 
   // Consume file cleanup exactly once after commit
-  await consumeFileCleanupResult(cleanup)
+  await consumeFileCleanupResult(response)
 
-  // Remove messages from Redux only after DB delete succeeds
-  dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
+  // Remove messages from Redux only after DB delete succeeds (authority-expanded set)
+  dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: response.deletedMessageIds }))
 
-  // Remove blocks from Redux
-  if (blockIdsToRemove.length > 0) {
-    dispatch(removeManyBlocks(blockIdsToRemove))
+  // Remove blocks from Redux (authority-owned set, no loaded lookup)
+  if (response.deletedBlockIds.length > 0) {
+    dispatch(removeManyBlocks(response.deletedBlockIds))
   }
 
-  // Sync segments after message deletion
-  await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
+  // Converge segments from the authority post-delete catalog (no loaded sync read)
+  dispatch(
+    replaceSegmentsForTopic({
+      topicId: targetTopicId,
+      segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
+    })
+  )
 
   // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
   // consumeFileCleanupResult above already handled physical file cleanup
   // via FileManager.deleteFile which decrements Dexie files.count.
 
-  logger.info(`[redoDelete] Re-deleted ${insertedMessageIds.length} messages`)
+  logger.info(`[redoDelete] Re-deleted ${response.deletedMessageIds.length} messages`)
 }
 
 /**

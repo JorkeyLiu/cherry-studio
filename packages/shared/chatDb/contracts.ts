@@ -23,6 +23,7 @@ import type {
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithDependentsRequest,
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
@@ -331,51 +332,89 @@ const updateMessageContract: ChatDbContract = {
 }
 
 /**
- * PERF-100: one logical multi-model answer-tab selection.
+ * Cross-process authority answer selection.
  *
- * Request invariants enforced at the shared boundary:
+ * Request is selected-ID only (Main resolves the full group):
  * - `topicId` and `selectedMessageId` are non-empty strings.
- * - `messageIds` is a non-empty array of non-empty strings.
- * - `messageIds` contains NO duplicates (unique set).
- * - `selectedMessageId` appears in `messageIds` EXACTLY once.
- * - No extra fields.
+ * - No extra fields (unknown keys fail closed).
  *
- * Result is a void command (null success value).
+ * Result is the Main-resolved full group:
+ * `{topicId, askId, selectedMessageId, messageIds}` with messageIds
+ * non-empty, unique, containing selected exactly once.
  */
+const SELECT_ANSWER_VALUE_KEYS = new Set(['topicId', 'askId', 'selectedMessageId', 'messageIds'])
+
 const selectAnswerMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'selectedMessageId', 'messageIds'),
+  allowedKeys: keySet('topicId', 'selectedMessageId'),
   validate(value: unknown): void {
     validateRequest(value, selectAnswerMessageContract.allowedKeys)
     const req = value as SelectAnswerMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
     validateNonEmptyString(req.selectedMessageId, 'request.selectedMessageId')
-    if (!Array.isArray(req.messageIds)) {
-      throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
-    }
-    if (req.messageIds.length === 0) {
-      throw new ValidationError('request.messageIds', 'Answer-group message IDs must not be empty')
-    }
-    const seen = new Set<string>()
-    let selectedCount = 0
-    for (let i = 0; i < req.messageIds.length; i++) {
-      const id = req.messageIds[i]
-      if (typeof id !== 'string' || id.length === 0) {
-        throw new ValidationError(`request.messageIds[${i}]`, 'Expected a non-empty string')
-      }
-      if (seen.has(id)) {
-        throw new ValidationError(`request.messageIds[${i}]`, `Duplicate answer-group message ID at index ${i}`)
-      }
-      seen.add(id)
-      if (id === req.selectedMessageId) selectedCount += 1
-    }
-    if (selectedCount !== 1) {
-      throw new ValidationError(
-        'request.selectedMessageId',
-        `Selected message must appear in messageIds exactly once (found ${selectedCount})`
-      )
-    }
   },
-  validateResult: voidResult('chatdb:select-answer-message')
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:select-answer-message')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:select-answer-message] Expected SelectAnswerMessageResponse object'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:select-answer-message] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!SELECT_ANSWER_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:select-answer-message] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateNonEmptyString(v.askId, 'result.value.askId')
+      validateNonEmptyString(v.selectedMessageId, 'result.value.selectedMessageId')
+      if (!Array.isArray(v.messageIds)) {
+        throw new ValidationError(
+          'result.value.messageIds',
+          '[chatdb:select-answer-message] Expected array of messageIds'
+        )
+      }
+      if ((v.messageIds as unknown[]).length === 0) {
+        throw new ValidationError(
+          'result.value.messageIds',
+          '[chatdb:select-answer-message] messageIds must not be empty'
+        )
+      }
+      const seen = new Set<string>()
+      let selectedCount = 0
+      for (let i = 0; i < (v.messageIds as unknown[]).length; i++) {
+        const id = (v.messageIds as unknown[])[i]
+        if (typeof id !== 'string' || id.length === 0) {
+          throw new ValidationError(`result.value.messageIds[${i}]`, 'Expected a non-empty string')
+        }
+        if (seen.has(id)) {
+          throw new ValidationError(
+            `result.value.messageIds[${i}]`,
+            '[chatdb:select-answer-message] Duplicate messageId'
+          )
+        }
+        seen.add(id)
+        if (id === v.selectedMessageId) selectedCount += 1
+      }
+      if (selectedCount !== 1) {
+        throw new ValidationError(
+          'result.value.selectedMessageId',
+          '[chatdb:select-answer-message] selectedMessageId must appear in messageIds exactly once'
+        )
+      }
+    }
+  }
 }
 
 const updateMessageAndBlocksContract: ChatDbContract = {
@@ -1290,6 +1329,369 @@ const deleteMessagesWithSegmentsContract: ChatDbContract = {
   validateResult: fileCleanupResultValidator('chatdb:delete-messages-with-segments')
 }
 
+const DELETE_WITH_DEPENDENTS_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'deletedMessageIds',
+  'deletedBlockIds',
+  'previousUserMessageIds',
+  'remainingUserMessageIds',
+  'segments',
+  'restoreGroups',
+  'segmentSnapshots'
+])
+const DELETE_WITH_DEPENDENTS_SEGMENT_KEYS = new Set([
+  'id',
+  'topicId',
+  'name',
+  'messageIds',
+  'color',
+  'createdAt',
+  'updatedAt'
+])
+const DELETE_WITH_DEPENDENTS_RESTORE_GROUP_KEYS = new Set(['entries', 'positionIndex', 'anchorMessageId'])
+const DELETE_WITH_DEPENDENTS_RESTORE_ENTRY_KEYS = new Set(['message', 'blocks'])
+
+const DELETE_WITH_DEPENDENTS_CHANNEL = 'chatdb:delete-messages-with-dependents'
+
+/**
+ * Strict SegmentWire validator shared by the post-delete catalog and the
+ * pre-delete affected snapshots (same shape, same unknown-key fail-closed).
+ */
+function validateDependentsSegmentWire(seg: unknown, path: string): string {
+  if (seg === null || typeof seg !== 'object' || Array.isArray(seg)) {
+    throw new ValidationError(path, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected segment object`)
+  }
+  const rec = seg as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (!DELETE_WITH_DEPENDENTS_SEGMENT_KEYS.has(key)) {
+      throw new ValidationError(
+        `${path}.${key}`,
+        `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Unknown key in segment: "${key}"`
+      )
+    }
+  }
+  validateNonEmptyString(rec.id, `${path}.id`)
+  validateNonEmptyString(rec.topicId, `${path}.topicId`)
+  if (rec.name !== null && rec.name !== undefined && typeof rec.name !== 'string') {
+    throw new ValidationError(`${path}.name`, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for name`)
+  }
+  if (!Array.isArray(rec.messageIds)) {
+    throw new ValidationError(`${path}.messageIds`, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected messageIds array`)
+  }
+  {
+    const seenMsg = new Set<string>()
+    const mids = rec.messageIds as unknown[]
+    for (let j = 0; j < mids.length; j++) {
+      const mid = mids[j]
+      if (typeof mid !== 'string' || mid.length === 0) {
+        throw new ValidationError(`${path}.messageIds[${j}]`, 'Expected a non-empty string')
+      }
+      if (seenMsg.has(mid)) {
+        throw new ValidationError(
+          `${path}.messageIds[${j}]`,
+          `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Duplicate segment messageId`
+        )
+      }
+      seenMsg.add(mid)
+    }
+  }
+  if (rec.color !== undefined && rec.color !== null && typeof rec.color !== 'string') {
+    throw new ValidationError(`${path}.color`, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for color`)
+  }
+  if (rec.createdAt !== null && rec.createdAt !== undefined && typeof rec.createdAt !== 'string') {
+    throw new ValidationError(
+      `${path}.createdAt`,
+      `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for createdAt`
+    )
+  }
+  if (rec.updatedAt !== null && rec.updatedAt !== undefined && typeof rec.updatedAt !== 'string') {
+    throw new ValidationError(
+      `${path}.updatedAt`,
+      `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for updatedAt`
+    )
+  }
+  return rec.id as string
+}
+
+const deleteMessagesWithDependentsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'messageIds'),
+  validate(value: unknown): void {
+    validateRequest(value, deleteMessagesWithDependentsContract.allowedKeys)
+    const req = value as DeleteMessagesWithDependentsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (!Array.isArray(req.messageIds) || req.messageIds.length === 0) {
+      throw new ValidationError('request.messageIds', 'Expected a non-empty array of stable root message IDs')
+    }
+    const seen = new Set<string>()
+    for (let i = 0; i < req.messageIds.length; i++) {
+      const id = req.messageIds[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`request.messageIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(
+          `request.messageIds[${i}]`,
+          `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Duplicate root message ID at index ${i}`
+        )
+      }
+      seen.add(id)
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, DELETE_WITH_DEPENDENTS_CHANNEL)
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:delete-messages-with-dependents] Expected DeleteMessagesWithDependentsResponse object'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:delete-messages-with-dependents] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!DELETE_WITH_DEPENDENTS_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:delete-messages-with-dependents] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+      validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+      const counts = v.remainingReferenceCounts as Record<string, unknown>
+      for (const key of Object.keys(counts)) {
+        if (key.length === 0) {
+          throw new ValidationError(
+            'result.value.remainingReferenceCounts',
+            '[chatdb:delete-messages-with-dependents] remainingReferenceCounts key must be a non-empty string'
+          )
+        }
+        validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+      }
+      // deletedMessageIds: non-empty unique IDs (semantic delete always deletes at least one root).
+      if (!Array.isArray(v.deletedMessageIds) || (v.deletedMessageIds as unknown[]).length === 0) {
+        throw new ValidationError(
+          'result.value.deletedMessageIds',
+          '[chatdb:delete-messages-with-dependents] deletedMessageIds must be a non-empty array'
+        )
+      }
+      const deletedSet = new Set<string>()
+      {
+        const arr = v.deletedMessageIds as unknown[]
+        for (let i = 0; i < arr.length; i++) {
+          const id = arr[i]
+          if (typeof id !== 'string' || id.length === 0) {
+            throw new ValidationError(`result.value.deletedMessageIds[${i}]`, 'Expected a non-empty string')
+          }
+          if (deletedSet.has(id)) {
+            throw new ValidationError(
+              `result.value.deletedMessageIds[${i}]`,
+              '[chatdb:delete-messages-with-dependents] Duplicate deletedMessageId'
+            )
+          }
+          deletedSet.add(id)
+        }
+      }
+      // deletedBlockIds: array (may be empty), unique non-empty strings.
+      if (!Array.isArray(v.deletedBlockIds)) {
+        throw new ValidationError(
+          'result.value.deletedBlockIds',
+          '[chatdb:delete-messages-with-dependents] Expected deletedBlockIds array'
+        )
+      }
+      {
+        const seen = new Set<string>()
+        const arr = v.deletedBlockIds as unknown[]
+        for (let i = 0; i < arr.length; i++) {
+          const id = arr[i]
+          if (typeof id !== 'string' || id.length === 0) {
+            throw new ValidationError(`result.value.deletedBlockIds[${i}]`, 'Expected a non-empty string')
+          }
+          if (seen.has(id)) {
+            throw new ValidationError(
+              `result.value.deletedBlockIds[${i}]`,
+              '[chatdb:delete-messages-with-dependents] Duplicate deletedBlockId'
+            )
+          }
+          seen.add(id)
+        }
+      }
+      // previous/remaining user IDs: arrays (remaining may be empty), unique shape only.
+      for (const key of ['previousUserMessageIds', 'remainingUserMessageIds'] as const) {
+        if (!Array.isArray(v[key])) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:delete-messages-with-dependents] Expected ${key} array`
+          )
+        }
+        const seen = new Set<string>()
+        const arr = v[key] as unknown[]
+        for (let i = 0; i < arr.length; i++) {
+          const id = arr[i]
+          if (typeof id !== 'string' || id.length === 0) {
+            throw new ValidationError(`result.value.${key}[${i}]`, 'Expected a non-empty string')
+          }
+          if (seen.has(id)) {
+            throw new ValidationError(
+              `result.value.${key}[${i}]`,
+              `[chatdb:delete-messages-with-dependents] Duplicate ${key} entry`
+            )
+          }
+          seen.add(id)
+        }
+      }
+      // segments: complete post-delete catalog array (may be empty), strict SegmentWire shapes.
+      if (!Array.isArray(v.segments)) {
+        throw new ValidationError(
+          'result.value.segments',
+          '[chatdb:delete-messages-with-dependents] Expected segments array'
+        )
+      }
+      {
+        const seenSeg = new Set<string>()
+        const segs = v.segments as unknown[]
+        for (let i = 0; i < segs.length; i++) {
+          const sid = validateDependentsSegmentWire(segs[i], `result.value.segments[${i}]`)
+          if (seenSeg.has(sid)) {
+            throw new ValidationError(
+              `result.value.segments[${i}].id`,
+              '[chatdb:delete-messages-with-dependents] Duplicate segment id'
+            )
+          }
+          seenSeg.add(sid)
+        }
+      }
+      // segmentSnapshots: pre-delete full snapshots of affected segments (may be empty).
+      if (!Array.isArray(v.segmentSnapshots)) {
+        throw new ValidationError(
+          'result.value.segmentSnapshots',
+          '[chatdb:delete-messages-with-dependents] Expected segmentSnapshots array'
+        )
+      }
+      {
+        const seenSnap = new Set<string>()
+        const snaps = v.segmentSnapshots as unknown[]
+        for (let i = 0; i < snaps.length; i++) {
+          const sid = validateDependentsSegmentWire(snaps[i], `result.value.segmentSnapshots[${i}]`)
+          if (seenSnap.has(sid)) {
+            throw new ValidationError(
+              `result.value.segmentSnapshots[${i}].id`,
+              '[chatdb:delete-messages-with-dependents] Duplicate segment snapshot id'
+            )
+          }
+          seenSnap.add(sid)
+        }
+      }
+      // restoreGroups: non-empty ordered contiguous restore groups covering exactly the deleted set.
+      if (!Array.isArray(v.restoreGroups) || (v.restoreGroups as unknown[]).length === 0) {
+        throw new ValidationError(
+          'result.value.restoreGroups',
+          '[chatdb:delete-messages-with-dependents] restoreGroups must be a non-empty array'
+        )
+      }
+      {
+        const covered = new Set<string>()
+        const groups = v.restoreGroups as unknown[]
+        for (let i = 0; i < groups.length; i++) {
+          const gpath = `result.value.restoreGroups[${i}]`
+          const group = groups[i] as Record<string, unknown>
+          if (group === null || typeof group !== 'object' || Array.isArray(group)) {
+            throw new ValidationError(gpath, '[chatdb:delete-messages-with-dependents] Expected restore group object')
+          }
+          for (const key of Object.keys(group)) {
+            if (!DELETE_WITH_DEPENDENTS_RESTORE_GROUP_KEYS.has(key)) {
+              throw new ValidationError(
+                `${gpath}.${key}`,
+                `[chatdb:delete-messages-with-dependents] Unknown key in restore group: "${key}"`
+              )
+            }
+          }
+          if (!Array.isArray(group.entries) || (group.entries as unknown[]).length === 0) {
+            throw new ValidationError(
+              `${gpath}.entries`,
+              '[chatdb:delete-messages-with-dependents] Restore group entries must be a non-empty array'
+            )
+          }
+          validateNonNegativeInteger(group.positionIndex, `${gpath}.positionIndex`)
+          if (group.anchorMessageId !== null) {
+            if (typeof group.anchorMessageId !== 'string' || group.anchorMessageId.length === 0) {
+              throw new ValidationError(
+                `${gpath}.anchorMessageId`,
+                '[chatdb:delete-messages-with-dependents] Expected a non-empty string or null for anchorMessageId'
+              )
+            }
+            if (deletedSet.has(group.anchorMessageId)) {
+              throw new ValidationError(
+                `${gpath}.anchorMessageId`,
+                '[chatdb:delete-messages-with-dependents] Anchor must be a surviving message'
+              )
+            }
+          }
+          const entries = group.entries as unknown[]
+          for (let j = 0; j < entries.length; j++) {
+            const epath = `${gpath}.entries[${j}]`
+            const entry = entries[j] as Record<string, unknown>
+            if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+              throw new ValidationError(epath, '[chatdb:delete-messages-with-dependents] Expected restore entry object')
+            }
+            for (const key of Object.keys(entry)) {
+              if (!DELETE_WITH_DEPENDENTS_RESTORE_ENTRY_KEYS.has(key)) {
+                throw new ValidationError(
+                  `${epath}.${key}`,
+                  `[chatdb:delete-messages-with-dependents] Unknown key in restore entry: "${key}"`
+                )
+              }
+            }
+            validateJsonObject(entry.message, `${epath}.message`)
+            if (!Array.isArray(entry.blocks)) {
+              throw new ValidationError(
+                `${epath}.blocks`,
+                '[chatdb:delete-messages-with-dependents] Expected blocks array in restore entry'
+              )
+            }
+            validateJsonObjectArray(entry.blocks, `${epath}.blocks`)
+            const mid = (entry.message as Record<string, unknown>).id
+            if (typeof mid !== 'string' || mid.length === 0) {
+              throw new ValidationError(
+                `${epath}.message.id`,
+                '[chatdb:delete-messages-with-dependents] Restore entry message must carry a non-empty id'
+              )
+            }
+            if (!deletedSet.has(mid)) {
+              throw new ValidationError(
+                `${epath}.message.id`,
+                '[chatdb:delete-messages-with-dependents] Restore entry message is not in deletedMessageIds'
+              )
+            }
+            if (covered.has(mid)) {
+              throw new ValidationError(
+                `${epath}.message.id`,
+                '[chatdb:delete-messages-with-dependents] Duplicate restore entry message id'
+              )
+            }
+            covered.add(mid)
+          }
+        }
+        if (covered.size !== deletedSet.size) {
+          throw new ValidationError(
+            'result.value.restoreGroups',
+            '[chatdb:delete-messages-with-dependents] Restore groups must cover exactly the deletedMessageIds set'
+          )
+        }
+      }
+    }
+  }
+}
+
 const pasteMessagesToTopicContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'entries', 'insertIndex'),
   validate(value: unknown): void {
@@ -2035,6 +2437,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,
   'chatdb:delete-messages-with-segments': deleteMessagesWithSegmentsContract,
+  'chatdb:delete-messages-with-dependents': deleteMessagesWithDependentsContract,
   'chatdb:paste-messages-to-topic': pasteMessagesToTopicContract,
   // Phase 5.1B-2: search
   'chatdb:search-messages': searchMessagesContract,

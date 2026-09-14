@@ -23,6 +23,7 @@ import {
   messageToWire,
   projectFileReferences,
   reconstructMessageBlockRelations,
+  segmentToWire,
   topicToWire,
   topicToWireFull,
   wireToBlock,
@@ -694,6 +695,43 @@ describe('wireAdapters', () => {
   // =========================================================================
   // wireToTopicMetadataPatch (LOCK-TRASH-4: marker key is not renderer mutable)
   // =========================================================================
+
+  describe('segmentToWire no-color omission (STORAGE_ERROR root fix)', () => {
+    const baseSeg = {
+      id: 'seg-1',
+      topicId: 't-1',
+      name: 'Seg',
+      createdAt: null as string | null,
+      updatedAt: null as string | null,
+      overflow: {} as Record<string, unknown>
+    }
+
+    it('omits the color own property when overflow has no color', () => {
+      const wire = segmentToWire(baseSeg, ['m1'])
+      expect('color' in wire).toBe(false)
+      expect(wire).toEqual({
+        id: 'seg-1',
+        topicId: 't-1',
+        name: 'Seg',
+        messageIds: ['m1'],
+        createdAt: null,
+        updatedAt: null
+      })
+    })
+
+    it('omits color for null/non-string overflow values', () => {
+      for (const v of [null, 42, {}, []] as unknown[]) {
+        const wire = segmentToWire({ ...baseSeg, overflow: { color: v } }, ['m1'])
+        expect('color' in wire).toBe(false)
+      }
+    })
+
+    it('keeps a legal string color', () => {
+      const wire = segmentToWire({ ...baseSeg, overflow: { color: '#ff0000' } }, ['m1'])
+      expect(wire.color).toBe('#ff0000')
+      expect('color' in wire).toBe(true)
+    })
+  })
 
   describe('wireToTopicMetadataPatch', () => {
     it('maps name to columns and pinned/prompt/isNameManuallyEdited to overflow', () => {

@@ -51,6 +51,7 @@ describe('chatDbContracts', () => {
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',
     'chatdb:delete-messages-with-segments',
+    'chatdb:delete-messages-with-dependents',
     'chatdb:paste-messages-to-topic',
     // Phase 5.1B-2: search
     'chatdb:search-messages',
@@ -205,22 +206,26 @@ describe('validateChatDbRequest — valid payloads', () => {
     ).not.toThrow()
   })
 
-  it('select-answer-message: minimal valid group with selected included once', () => {
+  it('select-answer-message: minimal valid selected-only request', () => {
     expect(() =>
       validateChatDbRequest('chatdb:select-answer-message', {
         topicId: 'topic-1',
-        selectedMessageId: 'a-2',
-        messageIds: ['a-1', 'a-2', 'a-3']
+        selectedMessageId: 'a-2'
       })
     ).not.toThrow()
   })
 
-  it('select-answer-message: single-message group is valid', () => {
+  it('delete-messages-with-dependents: { topicId, messageIds } plural roots', () => {
     expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', {
         topicId: 'topic-1',
-        selectedMessageId: 'a-1',
-        messageIds: ['a-1']
+        messageIds: ['msg-1']
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', {
+        topicId: 'topic-1',
+        messageIds: ['u1', 'u2']
       })
     ).not.toThrow()
   })
@@ -603,83 +608,32 @@ describe('validateChatDbRequest — invalid payloads', () => {
     ).toThrow(ValidationError)
   })
 
-  // PERF-100: select-answer-message invalid payloads
+  // Cross-process authority select-answer-message: selected-ID-only requests
   it('select-answer-message: rejects missing topicId', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
-        selectedMessageId: 'a-1',
-        messageIds: ['a-1']
-      })
-    ).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:select-answer-message', { selectedMessageId: 'a-1' })).toThrow(
+      ValidationError
+    )
   })
 
   it('select-answer-message: rejects missing selectedMessageId', () => {
+    expect(() => validateChatDbRequest('chatdb:select-answer-message', { topicId: 't1' })).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects empty-string IDs', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', { topicId: '', selectedMessageId: 'a-1' })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:select-answer-message', { topicId: 't1', selectedMessageId: '' })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects legacy messageIds key (unknown key fail-closed)', () => {
     expect(() =>
       validateChatDbRequest('chatdb:select-answer-message', {
         topicId: 't1',
+        selectedMessageId: 'a-1',
         messageIds: ['a-1']
-      })
-    ).toThrow(ValidationError)
-  })
-
-  it('select-answer-message: rejects non-array messageIds', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
-        topicId: 't1',
-        selectedMessageId: 'a-1',
-        messageIds: 'a-1'
-      })
-    ).toThrow(ValidationError)
-  })
-
-  it('select-answer-message: rejects empty messageIds', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
-        topicId: 't1',
-        selectedMessageId: 'a-1',
-        messageIds: []
-      })
-    ).toThrow(ValidationError)
-  })
-
-  it('select-answer-message: rejects empty-string or non-string messageIds', () => {
-    for (const messageIds of [[''], [42], [null], [undefined]]) {
-      expect(() =>
-        validateChatDbRequest('chatdb:select-answer-message', {
-          topicId: 't1',
-          selectedMessageId: 'a-1',
-          messageIds
-        })
-      ).toThrow(ValidationError)
-    }
-  })
-
-  it('select-answer-message: rejects duplicate messageIds', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
-        topicId: 't1',
-        selectedMessageId: 'a-1',
-        messageIds: ['a-1', 'a-2', 'a-1']
-      })
-    ).toThrow(ValidationError)
-  })
-
-  it('select-answer-message: rejects selected missing from messageIds (zero occurrences)', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
-        topicId: 't1',
-        selectedMessageId: 'a-9',
-        messageIds: ['a-1', 'a-2']
-      })
-    ).toThrow(ValidationError)
-  })
-
-  it('select-answer-message: rejects selected appearing more than once', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:select-answer-message', {
-        topicId: 't1',
-        selectedMessageId: 'a-2',
-        messageIds: ['a-1', 'a-2', 'a-2']
       })
     ).toThrow(ValidationError)
   })
@@ -689,8 +643,50 @@ describe('validateChatDbRequest — invalid payloads', () => {
       validateChatDbRequest('chatdb:select-answer-message', {
         topicId: 't1',
         selectedMessageId: 'a-1',
-        messageIds: ['a-1'],
         foldSelected: true
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-messages-with-dependents', { messageIds: ['m1'] })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('delete-messages-with-dependents: rejects missing messageIds', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-messages-with-dependents', { topicId: 't1' })).toThrow(
+      ValidationError
+    )
+  })
+
+  it('delete-messages-with-dependents: rejects empty messageIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', { topicId: 't1', messageIds: [] })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects duplicate root IDs', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', { topicId: 't1', messageIds: ['m1', 'm1'] })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects empty-string IDs', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', { topicId: '', messageIds: ['m1'] })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', { topicId: 't1', messageIds: [''] })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects legacy singular key and unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-messages-with-dependents', {
+        topicId: 't1',
+        messageIds: ['m1'],
+        messageId: 'm1'
       })
     ).toThrow(ValidationError)
   })
@@ -1015,12 +1011,18 @@ describe('JSON round-trip', () => {
   it('select-answer-message survives round-trip', () => {
     const original = {
       topicId: 'topic-1',
-      selectedMessageId: 'a-2',
-      messageIds: ['a-1', 'a-2', 'a-3']
+      selectedMessageId: 'a-2'
     }
 
     const roundTripped = JSON.parse(JSON.stringify(original))
     expect(() => validateChatDbRequest('chatdb:select-answer-message', roundTripped)).not.toThrow()
+    expect(roundTripped).toEqual(original)
+  })
+
+  it('delete-messages-with-dependents survives round-trip', () => {
+    const original = { topicId: 'topic-1', messageIds: ['m-1', 'm-2'] }
+    const roundTripped = JSON.parse(JSON.stringify(original))
+    expect(() => validateChatDbRequest('chatdb:delete-messages-with-dependents', roundTripped)).not.toThrow()
     expect(roundTripped).toEqual(original)
   })
 
@@ -1063,9 +1065,14 @@ describe('contract allowedKeys', () => {
     )
   })
 
-  it('select-answer-message has exactly topicId, selectedMessageId, messageIds', () => {
+  it('select-answer-message has exactly topicId, selectedMessageId', () => {
     const keys = getContract('chatdb:select-answer-message').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'selectedMessageId', 'messageIds']))
+    expect(keys).toEqual(new Set(['topicId', 'selectedMessageId']))
+  })
+
+  it('delete-messages-with-dependents has exactly topicId, messageIds', () => {
+    const keys = getContract('chatdb:delete-messages-with-dependents').allowedKeys
+    expect(keys).toEqual(new Set(['topicId', 'messageIds']))
   })
 
   it('ensure-topic has topicId, assistantId, and name keys', () => {
@@ -1445,14 +1452,331 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:update-message', { ok: true, value: null })).not.toThrow()
   })
 
-  it('select-answer-message: null value (void command)', () => {
-    expect(() => validateChatDbResult('chatdb:select-answer-message', { ok: true, value: null })).not.toThrow()
+  it('select-answer-message: accepts authoritative group response', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-answer-message', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', selectedMessageId: 'a-2', messageIds: ['a-1', 'a-2'] }
+      })
+    ).not.toThrow()
   })
 
-  it('select-answer-message: rejects non-null success value', () => {
-    expect(() => validateChatDbResult('chatdb:select-answer-message', { ok: true, value: 'unexpected' })).toThrow(
+  it('select-answer-message: rejects null success value', () => {
+    expect(() => validateChatDbResult('chatdb:select-answer-message', { ok: true, value: null })).toThrow(
       ValidationError
     )
+  })
+
+  it('select-answer-message: rejects selected missing from messageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-answer-message', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', selectedMessageId: 'a-9', messageIds: ['a-1', 'a-2'] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects duplicate messageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-answer-message', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', selectedMessageId: 'a-1', messageIds: ['a-1', 'a-1'] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects empty messageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-answer-message', {
+        ok: true,
+        value: { topicId: 't1', askId: 'ask-1', selectedMessageId: 'a-1', messageIds: [] }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-answer-message: rejects unknown keys in result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-answer-message', {
+        ok: true,
+        value: {
+          topicId: 't1',
+          askId: 'ask-1',
+          selectedMessageId: 'a-1',
+          messageIds: ['a-1'],
+          foldSelected: true
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: accepts full semantic response', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedMessageIds: ['u1', 'a1'],
+          deletedBlockIds: ['b1'],
+          previousUserMessageIds: ['u1', 'u2'],
+          remainingUserMessageIds: ['u2'],
+          segments: [],
+          restoreGroups: [
+            {
+              entries: [
+                { message: { id: 'u1' }, blocks: [{ id: 'b1', messageId: 'u1' }] },
+                { message: { id: 'a1' }, blocks: [] }
+              ],
+              positionIndex: 0,
+              anchorMessageId: 'u2'
+            }
+          ],
+          segmentSnapshots: []
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-messages-with-dependents: accepts multi-group noncontiguous restore with tail null anchor', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedMessageIds: ['u1', 'u3'],
+          deletedBlockIds: [],
+          previousUserMessageIds: ['u1', 'u2', 'u3'],
+          remainingUserMessageIds: ['u2'],
+          segments: [],
+          restoreGroups: [
+            {
+              entries: [{ message: { id: 'u1' }, blocks: [] }],
+              positionIndex: 0,
+              anchorMessageId: 'u2'
+            },
+            {
+              entries: [{ message: { id: 'u3' }, blocks: [] }],
+              positionIndex: 4,
+              anchorMessageId: null
+            }
+          ],
+          segmentSnapshots: [
+            { id: 's1', topicId: 't1', name: null, messageIds: ['u1', 'u2'], createdAt: null, updatedAt: null }
+          ]
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-messages-with-dependents: rejects empty deletedMessageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedMessageIds: [],
+          deletedBlockIds: [],
+          previousUserMessageIds: ['u1'],
+          remainingUserMessageIds: [],
+          segments: [],
+          restoreGroups: [],
+          segmentSnapshots: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects duplicate deletedMessageIds', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedMessageIds: ['m1', 'm1'],
+          deletedBlockIds: [],
+          previousUserMessageIds: ['m1'],
+          remainingUserMessageIds: [],
+          segments: [],
+          restoreGroups: [
+            { entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }
+          ],
+          segmentSnapshots: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects unknown keys in result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedMessageIds: ['m1'],
+          deletedBlockIds: [],
+          previousUserMessageIds: ['m1'],
+          remainingUserMessageIds: [],
+          segments: [],
+          restoreGroups: [
+            { entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }
+          ],
+          segmentSnapshots: [],
+          extra: 1
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects unknown keys in restore groups and entries', () => {
+    const base = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      deletedMessageIds: ['m1'],
+      deletedBlockIds: [],
+      previousUserMessageIds: ['m1'],
+      remainingUserMessageIds: [],
+      segments: [],
+      segmentSnapshots: []
+    }
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          ...base,
+          restoreGroups: [
+            { entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null, extra: 1 }
+          ]
+        }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          ...base,
+          restoreGroups: [
+            {
+              entries: [{ message: { id: 'm1' }, blocks: [], extra: 1 }],
+              positionIndex: 0,
+              anchorMessageId: null
+            }
+          ]
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects restore groups that do not cover the deleted set', () => {
+    const base = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      deletedMessageIds: ['m1', 'm2'],
+      deletedBlockIds: [],
+      previousUserMessageIds: ['m1'],
+      remainingUserMessageIds: [],
+      segments: [],
+      segmentSnapshots: []
+    }
+    // Missing m2 coverage.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          ...base,
+          restoreGroups: [{ entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }]
+        }
+      })
+    ).toThrow(ValidationError)
+    // Entry outside the deleted set.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          ...base,
+          restoreGroups: [
+            {
+              entries: [
+                { message: { id: 'm1' }, blocks: [] },
+                { message: { id: 'mX' }, blocks: [] }
+              ],
+              positionIndex: 0,
+              anchorMessageId: null
+            }
+          ]
+        }
+      })
+    ).toThrow(ValidationError)
+    // Anchor must be a surviving message.
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          ...base,
+          restoreGroups: [
+            {
+              entries: [
+                { message: { id: 'm1' }, blocks: [] },
+                { message: { id: 'm2' }, blocks: [] }
+              ],
+              positionIndex: 0,
+              anchorMessageId: 'm2'
+            }
+          ]
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects duplicate segment ids', () => {
+    const seg = { id: 's1', topicId: 't1', name: null, messageIds: [], createdAt: null, updatedAt: null }
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedMessageIds: ['m1'],
+          deletedBlockIds: [],
+          previousUserMessageIds: ['m1'],
+          remainingUserMessageIds: [],
+          segments: [seg, seg],
+          restoreGroups: [
+            { entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }
+          ],
+          segmentSnapshots: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-messages-with-dependents: rejects duplicate segment snapshot ids and unknown segment keys', () => {
+    const seg = { id: 's1', topicId: 't1', name: null, messageIds: ['m1'], createdAt: null, updatedAt: null }
+    const base = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      deletedMessageIds: ['m1'],
+      deletedBlockIds: [],
+      previousUserMessageIds: ['m1'],
+      remainingUserMessageIds: [],
+      segments: [],
+      restoreGroups: [{ entries: [{ message: { id: 'm1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }]
+    }
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: { ...base, segmentSnapshots: [seg, seg] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:delete-messages-with-dependents', {
+        ok: true,
+        value: { ...base, segmentSnapshots: [{ ...seg, extra: 1 }] }
+      })
+    ).toThrow(ValidationError)
   })
 
   it('update-message-and-blocks: valid FileCleanupResult', () => {
@@ -2596,6 +2920,7 @@ describe('coverage consistency', () => {
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',
     'chatdb:delete-messages-with-segments',
+    'chatdb:delete-messages-with-dependents',
     'chatdb:paste-messages-to-topic',
     // Phase 5.1B-2: search
     'chatdb:search-messages',

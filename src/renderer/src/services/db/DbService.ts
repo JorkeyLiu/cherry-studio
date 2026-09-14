@@ -1,6 +1,7 @@
 import db from '@renderer/databases'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
@@ -9,6 +10,7 @@ import type {
   FileCleanupResult,
   MessageBlockEntry,
   ResetMessagesForResendResponse,
+  SelectAnswerMessageResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 
@@ -97,8 +99,12 @@ class DbService implements MessageDataSource {
   ): Promise<FileCleanupResult> {
     return this.ordinarySource.updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete, resendAttemptId)
   }
-  selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void> {
-    return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId, messageIds)
+  selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse> {
+    return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId)
+  }
+  deleteMessagesWithDependents(topicId: string, messageIds: string[]): Promise<DeleteMessagesWithDependentsResponse> {
+    if (!this.ordinarySource.deleteMessagesWithDependents) throw new Error('deleteMessagesWithDependents unavailable')
+    return this.ordinarySource.deleteMessagesWithDependents(topicId, messageIds)
   }
   deleteMessage(topicId: string, messageId: string) {
     return this.ordinarySource.deleteMessage(topicId, messageId)

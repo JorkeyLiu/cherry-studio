@@ -1026,7 +1026,10 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
           okButtonProps={{ danger: true }}
           onConfirm={async () => await handleDeleteMessage()}
           onOpenChange={(open) => open && setShowDeleteTooltip(false)}>
-          <ActionButton className="message-action-button" $softHoverBg={softHoverBg}>
+          <ActionButton
+            className="message-action-button"
+            data-testid="message-delete-button"
+            $softHoverBg={softHoverBg}>
             {deleteTooltip}
           </ActionButton>
         </Popconfirm>
@@ -1036,6 +1039,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     return (
       <ActionButton
         className="message-action-button"
+        data-testid="message-delete-button"
         onClick={async () => await handleDeleteMessage()}
         $softHoverBg={softHoverBg}>
         {deleteTooltip}

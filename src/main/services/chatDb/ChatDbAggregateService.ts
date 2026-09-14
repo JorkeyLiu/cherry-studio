@@ -23,6 +23,8 @@ import { randomUUID } from 'node:crypto'
 import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
+  DeleteMessagesWithDependentsResponse,
+  DeleteMessagesWithDependentsRestoreGroup,
   EmptyTrashTopicsResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
@@ -39,6 +41,7 @@ import type {
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
   SegmentWire,
+  SelectAnswerMessageResponse,
   StreamWriteDiagnostics,
   TopicWire
 } from '@shared/chatDb'
@@ -2595,22 +2598,16 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * PERF-100: one logical multi-model answer-tab selection.
+   * Cross-process authority answer selection.
    *
-   * ONE root better-sqlite3 transaction performs the WHOLE selection:
-   * 1. Defense-in-depth uniqueness re-check (contract already rejects).
-   * 2. Load and validate EVERY supplied message belongs to the topic —
-   *    a missing or cross-topic ID throws a typed error and aborts the
-   *    transaction (no partial write).
-   * 3. Persist `foldSelected` for every supplied message: `true` for the
-   *    selected message, `false` for every other supplied ID — exactly one
-   *    selected message among the supplied group, atomically.
-   *
-   * Group coherence (which IDs form one answer group) is the caller's
-   * responsibility: the renderer supplies the full answer-group set. This
-   * aggregate intentionally does NOT invent askId/role coherence validation
-   * (legacy data cannot reliably prove it) — topic ownership + unique set +
-   * selected inclusion are the enforceable invariants.
+   * ONE root better-sqlite3 transaction resolves AND persists the WHOLE
+   * selection from the selected ID alone:
+   * 1. Topic must exist; selected must belong to topic, role assistant,
+   *    non-empty askId — otherwise NOT_FOUND fail-closed.
+   * 2. Resolve the complete group: same-topic assistant messages with equal
+   *    askId in listByTopic order (sort_order ASC, id ASC).
+   * 3. Persist `foldSelected=true` for selected, `false` for every other
+   *    group member atomically; return the authoritative response.
    *
    * No timestamps/content/order changes: `foldSelected` is an existing
    * persisted UI overflow field and the only field touched. It is
@@ -2619,43 +2616,37 @@ export class ChatDbAggregateService {
    * high-water are preserved with zero sync ops, and no missing frame is
    * synthesized.
    */
-  selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): ChatDbResult<null> {
+  selectAnswerMessage(topicId: string, selectedMessageId: string): ChatDbResult<SelectAnswerMessageResponse> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('selectAnswerMessage')
-      // Defense-in-depth (the shared contract already rejects duplicates and
-      // missing selected). Fail early on programmer error before any write.
-      const uniqueIds = new Set(messageIds)
-      if (uniqueIds.size !== messageIds.length) {
-        throw new ChatDbConflictError('Duplicate message IDs in the answer-group selection')
-      }
-      if (!messageIds.includes(selectedMessageId)) {
-        throw new ChatDbConflictError(`Selected message ${selectedMessageId} is not in the supplied answer group`)
-      }
-
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
-
-        // Phase 1 — validate ownership of every supplied message BEFORE any
-        // write. A missing or cross-topic ID aborts the whole transaction.
-        for (const id of messageIds) {
-          const existing = repos.messages.getInTopic(id, topicId)
-          if (!existing.found) {
-            throw new ChatDbNotFoundError(`Message ${id} does not belong to topic ${topicId}`)
-          }
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
         }
-
-        // Phase 2 — persist exactly one selected message atomically:
-        // foldSelected=true for the selected, false for every other supplied
-        // ID. The overflow delta merge preserves all other message fields.
-        for (const id of messageIds) {
+        const selected = repos.messages.getInTopic(selectedMessageId, topicId)
+        if (!selected.found) {
+          throw new ChatDbNotFoundError(`Message ${selectedMessageId} does not belong to topic ${topicId}`)
+        }
+        const askId = selected.data.askId
+        if (selected.data.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+          throw new ChatDbNotFoundError(`Message ${selectedMessageId} has no actionable answer group`)
+        }
+        const allMessages = repos.messages.listByTopic(topicId)
+        const groupIds = allMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
+        if (!groupIds.includes(selectedMessageId) || groupIds.length === 0) {
+          throw new ChatDbNotFoundError(`Message ${selectedMessageId} has no actionable answer group`)
+        }
+        for (const id of groupIds) {
           repos.messages.update(topicId, id, { overflow: { foldSelected: id === selectedMessageId } })
         }
-
-        // Local-only overflow selection: `foldSelected` is wire-excluded and
-        // changes neither order, membership, nor synced fields, so the
-        // existing topicMessage frame/high-water is preserved with zero sync
-        // ops and no missing-frame synthesis.
-        return null
+        return {
+          topicId,
+          askId,
+          selectedMessageId,
+          messageIds: groupIds
+        }
       })
     }, `selectAnswerMessage(${topicId})`)
   }
@@ -3556,16 +3547,21 @@ export class ChatDbAggregateService {
         // Read back the result
         const segment = repos.segments.getById(segmentId)
         if (!segment.found) {
-          // Segment was deleted (empty membership) — return empty wire
-          return {
+          // Segment was deleted (empty membership) — return empty wire.
+          // Same JSON-safety rule as segmentToWire: omit `color` unless it
+          // is a legal string (never `color: undefined`).
+          const emptyBase = {
             id: segmentId,
             topicId,
             name: name ?? null,
-            messageIds: [],
-            color: color ?? undefined,
-            createdAt: null,
-            updatedAt: null
+            messageIds: [] as string[],
+            createdAt: null as string | null,
+            updatedAt: null as string | null
           }
+          if (typeof color === 'string') {
+            return { ...emptyBase, color }
+          }
+          return emptyBase
         }
 
         const finalMessageIds = repos.segments.getMessageIds(segmentId)
@@ -5109,6 +5105,66 @@ export class ChatDbAggregateService {
    *
    * Atomicity: one root SQLite transaction.
    */
+  /**
+   * Shared transaction-internal message deletion core.
+   *
+   * Runs INSIDE the caller's root `db.transaction` — never opens its own
+   * transaction (no nesting). Performs the exact `deleteMessagesWithSegments`
+   * cleanup/frame/sync sequence for the supplied owned IDs: file-ref harvest,
+   * segment membership cleanup (empty segments auto-deleted by the
+   * repository), message delete + resend-intent clear, sync delete intents,
+   * and parent-frame invalidation/refresh. Returns affected file IDs; the
+   * caller builds its own response in the same tx.
+   */
+  private deleteOwnedMessagesCoreInTx(
+    _tx: unknown,
+    repos: ReturnType<typeof createRepositories>,
+    stx: SyncTxExecutor,
+    ctx: { deviceId: string; ts: number } | null,
+    topicId: string,
+    ownedIds: string[],
+    notify: { value: boolean }
+  ): string[] {
+    const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
+    const refs = repos.fileRefs.listByMessages(ownedIds)
+    const affectedFileIds = collectAffectedFileIds(refs)
+    for (const seg of repos.segments.listByTopic(topicId)) {
+      const segMsgIds = repos.segments.getMessageIds(seg.id)
+      const toRemove = ownedIds.filter((id) => segMsgIds.includes(id))
+      if (toRemove.length > 0) {
+        repos.segments.removeMessages(seg.id, toRemove)
+      }
+    }
+    if (ownedIds.length > 0) {
+      repos.messages.deleteMany(ownedIds)
+      clearResendAttemptsInTx(stx, ownedIds)
+    }
+    if (ctx) {
+      for (const id of knownIds) {
+        syncService.enqueueDeleteInTx(stx, 'message', id, ctx.ts, ctx.deviceId)
+        notify.value = true
+      }
+    }
+    if (ownedIds.length > 0) {
+      for (const did of ownedIds) {
+        syncService.invalidateParentFrameInTx(stx, 'messageBlock', did)
+      }
+      if (ctx) {
+        const topicRow = repos.topics.getById(topicId)
+        if (topicRow.found) {
+          if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+            notify.value = true
+          }
+        } else {
+          syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+        }
+      } else {
+        syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+      }
+    }
+    return affectedFileIds
+  }
+
   deleteMessagesWithSegments(topicId: string, messageIds: string[]): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
       const ctx = this.syncCtx('deleteMessagesWithSegments')
@@ -5118,6 +5174,7 @@ export class ChatDbAggregateService {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+          const notifyRef = { value: false }
 
           // Phase 1: Filter to owned messages BEFORE collecting refs
           const ownedIds: string[] = []
@@ -5125,55 +5182,9 @@ export class ChatDbAggregateService {
             const existing = repos.messages.getInTopic(id, topicId)
             if (existing.found) ownedIds.push(id)
           }
-          const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
 
-          // Phase 2: Collect affected file IDs from owned messages only
-          const refs = repos.fileRefs.listByMessages(ownedIds)
-          const affectedFileIds = collectAffectedFileIds(refs)
-
-          // Phase 3: Remove segment memberships for owned messages (local-only)
-          for (const seg of repos.segments.listByTopic(topicId)) {
-            const segMsgIds = repos.segments.getMessageIds(seg.id)
-            const toRemove = ownedIds.filter((id) => segMsgIds.includes(id))
-            if (toRemove.length > 0) {
-              repos.segments.removeMessages(seg.id, toRemove)
-            }
-          }
-
-          // Phase 4: Delete owned messages (FK cascade: blocks → file_references)
-          if (ownedIds.length > 0) {
-            repos.messages.deleteMany(ownedIds)
-            // Resend intent (SYNC-DATA-055): deleted messages carry no
-            // unfinished attempt — clear in the same transaction.
-            clearResendAttemptsInTx(stx, ownedIds)
-          }
-          if (ctx) {
-            for (const id of knownIds) {
-              syncService.enqueueDeleteInTx(stx, 'message', id, ctx.ts, ctx.deviceId)
-              notify = true
-            }
-          }
-
-          // Phase 5: Frames — deleted messageBlock parents removed as today;
-          // surviving topic uses the existing try-helper fail-safe.
-          if (ownedIds.length > 0) {
-            for (const did of ownedIds) {
-              syncService.invalidateParentFrameInTx(stx, 'messageBlock', did)
-            }
-            if (ctx) {
-              const topicRow = repos.topics.getById(topicId)
-              if (topicRow.found) {
-                if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
-                  notify = true
-                }
-              } else {
-                syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
-              }
-            } else {
-              syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
-            }
-          }
-
+          const affectedFileIds = this.deleteOwnedMessagesCoreInTx(tx, repos, stx, ctx, topicId, ownedIds, notifyRef)
+          notify = notifyRef.value
           return buildFileCleanupResult(repos, affectedFileIds)
         })
       } catch (e) {
@@ -5183,6 +5194,186 @@ export class ChatDbAggregateService {
       if (notify) syncService.notifyEnqueued()
       return result
     }, `deleteMessagesWithSegments(${topicId}, ${messageIds.length} msgs)`)
+  }
+
+  /**
+   * Semantic plural deletion with Main-resolved dependents.
+   *
+   * ONE root SQLite transaction over stable root IDs:
+   * - Request carries non-empty unique stable root IDs (contract-enforced,
+   *   re-checked defense-in-depth as CONFLICT). Every root must exist and
+   *   belong to the topic — one missing/cross-topic root fails the WHOLE
+   *   command closed (NOT_FOUND, full rollback, no partial write).
+   * - Expansion per root: role user => that user + every same-topic
+   *   `role=assistant && askId===root`; any other role => only itself.
+   *   Overlapping expansions dedupe; the expanded set is ordered by the
+   *   pre-delete authority order (`sort_order ASC, id ASC`).
+   * - BEFORE deleting, capture the complete authority undo snapshot from
+   *   authority rows/blocks/segments (never renderer entries): full
+   *   message+block wires per deleted message, contiguous restore groups
+   *   with surviving anchors, and pre-delete full snapshots of intersecting
+   *   segments.
+   * - The actual deletion shares the exact bulk cleanup/frame/sync core
+   *   (`deleteOwnedMessagesCoreInTx` — no nesting, no copied logic); then
+   *   read post-delete user IDs + full segment catalog in the same tx.
+   * - Commit-time notify matches the bulk path. Bulk compat
+   *   (`deleteMessagesWithSegments`) behavior is unchanged.
+   */
+  deleteMessagesWithDependents(
+    topicId: string,
+    messageIds: string[]
+  ): ChatDbResult<DeleteMessagesWithDependentsResponse> {
+    return wrapResult(() => {
+      const ctx = this.syncCtx('deleteMessagesWithDependents')
+      let notify = false
+      let result: DeleteMessagesWithDependentsResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          if (!Array.isArray(messageIds) || messageIds.length === 0) {
+            throw new ChatDbValidationError('messageIds must be a non-empty array of stable root message IDs')
+          }
+          const rootSet = new Set<string>(messageIds)
+          if (rootSet.size !== messageIds.length) {
+            throw new ChatDbConflictError('Duplicate root message IDs in the semantic delete request')
+          }
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+          // Fail-closed ownership: EVERY root must belong to the topic.
+          const rootRows = new Map<string, MessageData>()
+          for (const rootId of messageIds) {
+            const existing = repos.messages.getInTopic(rootId, topicId)
+            if (!existing.found) {
+              throw new ChatDbNotFoundError(`Message ${rootId} does not belong to topic ${topicId}`)
+            }
+            rootRows.set(rootId, existing.data)
+          }
+          const ordered = repos.messages.listByTopic(topicId)
+          const previousUserMessageIds = ordered.filter((m) => m.role === 'user').map((m) => m.id)
+          // Expand user dependents; dedupe overlapping expansions.
+          const ownedSet = new Set<string>()
+          for (const rootId of messageIds) {
+            const row = rootRows.get(rootId)!
+            ownedSet.add(rootId)
+            if (row.role === 'user') {
+              for (const m of ordered) {
+                if (m.role === 'assistant' && m.askId === rootId) ownedSet.add(m.id)
+              }
+            }
+          }
+          const ownedIds = ordered.filter((m) => ownedSet.has(m.id)).map((m) => m.id)
+
+          // Authority undo snapshot BEFORE any write: wires, groups, segments.
+          const blockMap = repos.blocks.listByMessages(ownedIds)
+          const ownedRows = ordered.filter((m) => ownedSet.has(m.id))
+          const ownedMsgWires = reconstructMessageBlockRelations(
+            messagesToWire(ownedRows),
+            blocksToWire(ownedRows.flatMap((r) => blockMap.get(r.id) ?? []))
+          )
+          const wireByMessageId = new Map<string, JsonObject>()
+          for (const w of ownedMsgWires) wireByMessageId.set(w.id as string, w)
+          const blocksByMessageId = new Map<string, JsonObject[]>()
+          for (const r of ownedRows) {
+            blocksByMessageId.set(r.id, blocksToWire(blockMap.get(r.id) ?? []))
+          }
+          const deletedBlockIds: string[] = []
+          for (const oid of ownedIds) {
+            for (const b of blockMap.get(oid) ?? []) deletedBlockIds.push(b.id)
+          }
+          // Pre-delete segment snapshots: full SegmentWire for segments
+          // intersecting the expanded deletion set (affected only).
+          // Unified via segmentToWire: the adapter itself omits `color`
+          // unless it is a legal string, so no per-caller delete workaround.
+          const toSafeSegmentWire = (
+            seg: {
+              id: string
+              topicId: string
+              name: string | null
+              createdAt: string | null
+              updatedAt: string | null
+              overflow: Record<string, unknown>
+            },
+            mids: string[]
+          ): SegmentWire => segmentToWire(seg, mids)
+          const segmentSnapshots: SegmentWire[] = []
+          for (const seg of repos.segments.listByTopic(topicId)) {
+            const mids = repos.segments.getMessageIds(seg.id)
+            if (mids.some((id) => ownedSet.has(id))) {
+              segmentSnapshots.push(toSafeSegmentWire(seg, mids))
+            }
+          }
+          // Contiguous restore groups in pre-delete authority order: maximal
+          // runs of deleted messages; each anchor is the first surviving
+          // message after its run (null at the topic tail); positionIndex is
+          // the pre-delete authority index fallback.
+          const restoreGroups: DeleteMessagesWithDependentsRestoreGroup[] = []
+          {
+            const indexById = new Map<string, number>()
+            ordered.forEach((m, idx) => indexById.set(m.id, idx))
+            let run: MessageData[] = []
+            let runStart = -1
+            const flushRun = (afterIdx: number): void => {
+              if (run.length === 0) return
+              let anchorMessageId: string | null = null
+              for (let k = afterIdx; k < ordered.length; k++) {
+                if (!ownedSet.has(ordered[k].id)) {
+                  anchorMessageId = ordered[k].id
+                  break
+                }
+              }
+              restoreGroups.push({
+                entries: run.map((r) => ({
+                  message: wireByMessageId.get(r.id)!,
+                  blocks: blocksByMessageId.get(r.id) ?? []
+                })),
+                positionIndex: runStart,
+                anchorMessageId
+              })
+              run = []
+              runStart = -1
+            }
+            for (let idx = 0; idx < ordered.length; idx++) {
+              const m = ordered[idx]
+              if (ownedSet.has(m.id)) {
+                if (run.length === 0) runStart = idx
+                run.push(m)
+              } else {
+                flushRun(idx)
+              }
+            }
+            flushRun(ordered.length)
+          }
+
+          const notifyRef = { value: false }
+          const affectedFileIds = this.deleteOwnedMessagesCoreInTx(tx, repos, stx, ctx, topicId, ownedIds, notifyRef)
+          notify = notifyRef.value
+          const remainingOrdered = repos.messages.listByTopic(topicId)
+          const remainingUserMessageIds = remainingOrdered.filter((m) => m.role === 'user').map((m) => m.id)
+          const segments = repos.segments
+            .listByTopic(topicId)
+            .map((seg) => toSafeSegmentWire(seg, repos.segments.getMessageIds(seg.id)))
+          const cleanup = buildFileCleanupResult(repos, affectedFileIds)
+          return {
+            ...cleanup,
+            deletedMessageIds: ownedIds,
+            deletedBlockIds,
+            previousUserMessageIds,
+            remainingUserMessageIds,
+            segments,
+            restoreGroups,
+            segmentSnapshots
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('deleteMessagesWithDependents', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
+    }, `deleteMessagesWithDependents(${topicId}, ${messageIds.length} roots)`)
   }
 
   /**

@@ -1,10 +1,14 @@
 /**
- * ClipboardService.deleteSingleMessage — Phase 5.3 live caller tests.
+ * ClipboardService.deleteSingleMessage / deleteSelectedMessages — unified
+ * semantic delete tests.
  *
- * LOCK-001: deletion commits DB first via deleteMessagesFromDB
- * (which uses deleteMessagesWithSegments returning FileCleanupResult),
- * consumes cleanup exactly once post-commit, then mutates Redux/files.
- * DB failure leaves Redux/files unchanged.
+ * Both paths call the unified `executeDeleteMessagesWithDependents` helper
+ * with stable root IDs only (single ID / selected group IDs — never a
+ * loaded-projection expansion), converge projection inside the helper, and
+ * push a `DeleteUndoAction` built from the authority snapshot
+ * (`rootMessageIds` + expanded `insertedMessageIds` + authority
+ * groupAnchors/segmentSnapshots/file deltas).
+ * DB failure leaves Redux untouched and pushes no undo.
  */
 
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -15,13 +19,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
+    executeDeleteMessagesWithDependents: vi.fn(),
     deleteMessagesFromDB: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     selectMessagesForTopic: vi.fn(),
-    buildGroupList: vi.fn(() => []),
-    transferAnchorsAfterDeletion: vi.fn(),
-    syncSegmentsAfterMessageDeletion: vi.fn().mockResolvedValue(undefined),
-    collectSegmentSnapshots: vi.fn(() => []),
     removeMessages: vi.fn((p: unknown) => ({ type: 'removeMessages', p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
     pushUndoAction: vi.fn((p: unknown) => ({ type: 'pushUndoAction', p })),
@@ -43,6 +44,7 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
   saveMessageAndBlocksToDB: vi.fn()
 }))
 
@@ -75,22 +77,15 @@ vi.mock('@renderer/store/undoStack', () => ({
   pushUndoAction: mocks.pushUndoAction
 }))
 
-vi.mock('@renderer/services/anchorService', () => ({
-  buildGroupList: mocks.buildGroupList,
-  transferAnchorsAfterDeletion: mocks.transferAnchorsAfterDeletion
-}))
-
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
-  collectSegmentSnapshots: mocks.collectSegmentSnapshots,
+  collectSegmentSnapshots: vi.fn(() => []),
   collectWholeSelectedSegmentsForClipboard: vi.fn(() => []),
-  syncSegmentsAfterMessageDeletion: mocks.syncSegmentsAfterMessageDeletion
+  syncSegmentsAfterMessageDeletion: vi.fn().mockResolvedValue(undefined)
 }))
 
 vi.mock('@renderer/store/topicSegment', () => ({
   addSegment: vi.fn()
 }))
-
-const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} as Record<string, number> }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -108,24 +103,43 @@ const createUserMessage = (overrides: Partial<Message> = {}): Message =>
     ...overrides
   }) as unknown as Message
 
-const createFileBlock = (overrides: Partial<MessageBlock> = {}): MessageBlock =>
-  ({
-    id: 'block-1',
-    messageId: 'msg-1',
-    type: MessageBlockType.FILE,
-    content: '',
-    file: { id: 'file-1', name: 'test.pdf' },
-    ...overrides
-  }) as unknown as MessageBlock
-
 const createTextBlock = (overrides: Partial<MessageBlock> = {}): MessageBlock =>
   ({
-    id: 'block-2',
+    id: 'block-1',
     messageId: 'msg-1',
     type: MessageBlockType.MAIN_TEXT,
     content: 'hello',
     ...overrides
   }) as unknown as MessageBlock
+
+const semanticResult = (overrides: Record<string, unknown> = {}) => ({
+  response: {
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    deletedMessageIds: ['msg-1'],
+    deletedBlockIds: ['block-1'],
+    previousUserMessageIds: ['msg-1'],
+    remainingUserMessageIds: [] as string[],
+    segments: [],
+    restoreGroups: [
+      { entries: [{ message: { id: 'msg-1' }, blocks: [{ id: 'block-1' }] }], positionIndex: 0, anchorMessageId: null }
+    ],
+    segmentSnapshots: [],
+    ...overrides
+  },
+  undoParts: {
+    groupAnchors: [
+      {
+        messages: [{ id: 'msg-1' }],
+        blocks: [{ id: 'block-1' }],
+        positionIndex: 0,
+        anchorMessageId: null
+      }
+    ],
+    segmentSnapshots: [],
+    fileReferenceDeltas: []
+  }
+})
 
 // ── Store mock ─────────────────────────────────────────────────────────────
 
@@ -151,7 +165,7 @@ vi.mock('@renderer/store', () => ({
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe('ClipboardService.deleteSingleMessage', () => {
+describe('ClipboardService.deleteSingleMessage (semantic)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     storeState = {
@@ -160,91 +174,131 @@ describe('ClipboardService.deleteSingleMessage', () => {
     }
   })
 
-  it('DB commits first, consumes cleanup once, then Redux (LOCK-001)', async () => {
+  it('calls the unified helper with the single stable root and pushes authority undo', async () => {
     const userMsg = createUserMessage()
     const block = createTextBlock()
     storeState.messages.entities = { 'msg-1': userMsg }
     storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
     storeState.messageBlocks.entities = { 'block-1': block }
-
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg])
-    mocks.deleteMessagesFromDB.mockResolvedValue(emptyCleanup)
-
-    const ordering = { db: 0, cleanup: 0, redux: 0, counter: 0 }
-    mocks.deleteMessagesFromDB.mockImplementation(async () => {
-      ordering.db = ++ordering.counter
-      return emptyCleanup
-    })
-    mocks.consumeFileCleanupResult.mockImplementation(async () => {
-      ordering.cleanup = ++ordering.counter
-    })
-    mocks.removeMessages.mockImplementation((p: unknown) => {
-      ordering.redux = ++ordering.counter
-      return { type: 'removeMessages', p }
-    })
+    mocks.executeDeleteMessagesWithDependents.mockResolvedValue(semanticResult())
 
     const { deleteSingleMessage } = await import('../ClipboardService')
-    const dispatch = vi.fn((action: unknown) => {
-      if ((action as any)?.type === 'removeMessages') ordering.redux = ++ordering.counter
-      return action
-    }) as any
+    const dispatch = vi.fn() as any
 
     await deleteSingleMessage(dispatch, () => storeState as any, 'topic-1', userMsg)
 
-    // DB before cleanup, cleanup before Redux
-    expect(ordering.db).toBeLessThan(ordering.cleanup)
-    expect(ordering.cleanup).toBeLessThan(ordering.redux)
-    // consumeFileCleanupResult called exactly once
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
+    // Stable root only — no loaded cascade derivation.
+    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+      dispatch,
+      expect.any(Function),
+      'topic-1',
+      ['msg-1']
+    )
+    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    // Undo carries original roots + expanded IDs + authority snapshots.
+    expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0] as any
+    expect(undoAction.type).toBe('delete')
+    expect(undoAction.targetTopicId).toBe('topic-1')
+    expect(undoAction.rootMessageIds).toEqual(['msg-1'])
+    expect(undoAction.insertedMessageIds).toEqual(['msg-1'])
+    expect(undoAction.groupAnchors).toHaveLength(1)
   })
 
-  it('DB failure leaves Redux/files unchanged', async () => {
+  it('DB failure pushes no undo and leaves Redux untouched', async () => {
     const userMsg = createUserMessage()
-    const fileBlock = createFileBlock()
     storeState.messages.entities = { 'msg-1': userMsg }
     storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
-    storeState.messageBlocks.entities = { 'block-1': fileBlock }
-
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg])
-    mocks.deleteMessagesFromDB.mockRejectedValue(new Error('SQLITE_FAILURE'))
+    mocks.executeDeleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
 
     const { deleteSingleMessage } = await import('../ClipboardService')
-    const dispatch = vi.fn()
+    const dispatch = vi.fn() as any
 
     await deleteSingleMessage(dispatch, () => storeState as any, 'topic-1', userMsg)
 
-    // Redux not mutated
+    expect(mocks.pushUndoAction).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'removeMessages' }))
-    // Cleanup not consumed
-    expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
   })
 
-  it('does NOT call dbService.updateFileCount after consumeFileCleanupResult (LOCK-P5.3-1)', async () => {
-    // When a message with file/image blocks is deleted, consumeFileCleanupResult
-    // already handles physical file cleanup via FileManager.deleteFile. A second
-    // dbService.updateFileCount would double-decrement the Dexie files.count.
-    const userMsg = createUserMessage({ blocks: ['block-file'] })
-    const fileBlock = createFileBlock({ id: 'block-file', messageId: 'msg-1' })
-    storeState.messages.entities = { 'msg-1': userMsg }
-    storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
-    storeState.messageBlocks.entities = { 'block-file': fileBlock }
+  it('missing entity is a no-op without touching the helper', async () => {
+    const { deleteSingleMessage } = await import('../ClipboardService')
+    const dispatch = vi.fn() as any
 
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg])
-    const cleanupWithFile = {
-      affectedFileIds: ['file-1'],
-      remainingReferenceCounts: { 'file-1': 0 } as Record<string, number>
+    await deleteSingleMessage(dispatch, () => storeState as any, 'topic-1', createUserMessage())
+
+    expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
+    expect(mocks.pushUndoAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('ClipboardService.deleteSelectedMessages (semantic multi)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    storeState = {
+      messages: { entities: {}, messageIdsByTopic: {} },
+      messageBlocks: { entities: {} }
     }
-    mocks.deleteMessagesFromDB.mockResolvedValue(cleanupWithFile)
+  })
+
+  it('passes selected group IDs as stable roots (never loaded-expanded IDs)', async () => {
+    mocks.executeDeleteMessagesWithDependents.mockResolvedValue(
+      semanticResult({ deletedMessageIds: ['u1', 'a1', 'u2'] })
+    )
+
+    const { deleteSelectedMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn() as any
+
+    const count = await deleteSelectedMessages(dispatch, () => storeState as any, 'topic-1', ['u1', 'u2'])
+
+    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+      dispatch,
+      expect.any(Function),
+      'topic-1',
+      ['u1', 'u2']
+    )
+    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(count).toBe(3)
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0] as any
+    expect(undoAction.rootMessageIds).toEqual(['u1', 'u2'])
+    expect(undoAction.insertedMessageIds).toEqual(['u1', 'a1', 'u2'])
+  })
+
+  it('empty selection is a no-op without touching the helper', async () => {
+    const { deleteSelectedMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn() as any
+
+    const count = await deleteSelectedMessages(dispatch, () => storeState as any, 'topic-1', [])
+
+    expect(count).toBe(0)
+    expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
+    expect(mocks.pushUndoAction).not.toHaveBeenCalled()
+  })
+
+  it('DB failure returns 0 with no undo', async () => {
+    mocks.executeDeleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+
+    const { deleteSelectedMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn() as any
+
+    const count = await deleteSelectedMessages(dispatch, () => storeState as any, 'topic-1', ['u1'])
+
+    expect(count).toBe(0)
+    expect(mocks.pushUndoAction).not.toHaveBeenCalled()
+  })
+
+  it('menu/hook path ends at the semantic command (deleteMessageWithUndo)', async () => {
+    // The menu path (useMessageOperations.deleteMessageWithUndo) delegates to
+    // ClipboardService.deleteSingleMessage, which must end at the unified
+    // semantic helper — assert the delegation chain, not the dialog.
+    mocks.executeDeleteMessagesWithDependents.mockResolvedValue(semanticResult())
+    const userMsg = createUserMessage()
+    storeState.messages.entities = { 'msg-1': userMsg }
 
     const { deleteSingleMessage } = await import('../ClipboardService')
-    const dispatch = vi.fn()
-
+    const dispatch = vi.fn() as any
     await deleteSingleMessage(dispatch, () => storeState as any, 'topic-1', userMsg)
 
-    // consumeFileCleanupResult called with the cleanup result
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(cleanupWithFile)
-    // CRITICAL: dbService.updateFileCount must NOT be called — the file cleanup
-    // is already handled by consumeFileCleanupResult → FileManager.deleteFile.
-    expect(mocks.updateFileCount).not.toHaveBeenCalled()
+    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledTimes(1)
+    expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
   })
 })

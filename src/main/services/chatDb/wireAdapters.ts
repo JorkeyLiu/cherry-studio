@@ -404,6 +404,13 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
 /**
  * Convert a TopicSegmentData + ordered messageIds to a SegmentWire.
  * Color is bridged from/to overflow.
+ *
+ * JSON-safety: the optional `color` own property is emitted ONLY when
+ * overflow carries a legal string. When absent/null/non-string it is fully
+ * omitted (never `color: undefined`), otherwise the shared
+ * `validateJsonValue` walker rejects the whole result envelope as
+ * non-JSON-safe and the IPC layer falls back to STORAGE_ERROR.
+ * Shared `SegmentWire.color?: string` contract unchanged — absence is valid.
  */
 export function segmentToWire(
   segment: {
@@ -416,15 +423,19 @@ export function segmentToWire(
   },
   messageIds: string[]
 ): SegmentWire {
-  return {
+  const base = {
     id: segment.id,
     topicId: segment.topicId,
     name: segment.name,
     messageIds,
-    color: (segment.overflow.color as string | null) ?? undefined,
     createdAt: segment.createdAt,
     updatedAt: segment.updatedAt
   }
+  const color = segment.overflow.color
+  if (typeof color === 'string') {
+    return { ...base, color }
+  }
+  return base
 }
 
 // ---------------------------------------------------------------------------

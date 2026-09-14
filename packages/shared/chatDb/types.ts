@@ -180,24 +180,33 @@ export interface UpdateMessageAndBlocksRequest extends ResendAttemptIdCarrier {
 /**
  * @see IpcChannel.ChatDb_SelectAnswerMessage
  *
- * PERF-100: one logical multi-model answer-tab selection.
+ * Cross-process authority: the renderer supplies ONLY the selected message
+ * ID. Main resolves the complete answer group in the same SQLite
+ * transaction (topic exists; selected belongs to topic, role assistant,
+ * non-empty askId; full group = same-topic assistant messages with equal
+ * askId in sort_order ASC, id ASC) and persists `foldSelected` for the full
+ * group atomically: `true` for the selected, `false` for every other member.
+ * No partial write; missing/invalid/cross-topic fails closed.
  *
- * The renderer supplies the FULL answer-group message IDs for the logical
- * selection. Main validates (topic ownership of every supplied ID, no
- * duplicates, selected included) and persists `foldSelected` for every
- * supplied message in ONE atomic transaction: `true` for the selected
- * message, `false` for every other supplied ID. No partial write; a missing
- * or cross-topic ID rejects the whole operation.
- *
- * Group coherence (which IDs form one answer group) is the CALLER's
- * responsibility — the aggregate intentionally does not invent askId/role
- * coherence validation that could break legacy data.
+ * `foldSelected` stays local-only: no sync frame/outbox change.
  */
 export interface SelectAnswerMessageRequest {
   topicId: string
-  /** The message to select (`foldSelected=true`). Must be in `messageIds`. */
+  /** The message to select (`foldSelected=true`). Main resolves its group. */
   selectedMessageId: string
-  /** Full answer-group message IDs; non-empty, unique, includes the selected. */
+}
+
+/**
+ * @see IpcChannel.ChatDb_SelectAnswerMessage
+ *
+ * Main-authoritative answer-group selection result. `messageIds` is the
+ * complete answer group resolved by Main (sort_order ASC, id ASC).
+ */
+export interface SelectAnswerMessageResponse {
+  topicId: string
+  askId: string
+  selectedMessageId: string
+  /** Complete ordered answer-group message IDs (sort_order ASC, id ASC). */
   messageIds: string[]
 }
 
@@ -774,6 +783,66 @@ export interface DeleteMessagesWithSegmentsRequest {
 /** @see IpcChannel.ChatDb_DeleteMessagesWithSegments */
 export type DeleteMessagesWithSegmentsResponse = FileCleanupResult
 
+/** @see IpcChannel.ChatDb_DeleteMessagesWithDependents */
+export interface DeleteMessagesWithDependentsRequest {
+  topicId: string
+  /** Stable root message IDs; non-empty, unique. Main expands user dependents. */
+  messageIds: string[]
+}
+
+/**
+ * One authority-generated restore entry: full message + owned blocks as JSON.
+ */
+export interface DeleteMessagesWithDependentsRestoreEntry {
+  /** Full message entity as JSON. */
+  message: JsonObject
+  /** Full block entities owned by the message as JSON. */
+  blocks: JsonObject[]
+}
+
+/**
+ * One authority-generated ordered contiguous restore group.
+ *
+ * Groups partition the expanded deletion set into maximal contiguous runs in
+ * pre-delete authority order (`sort_order ASC, id ASC`), so multiple
+ * non-contiguous selections restore without reordering. `positionIndex` is
+ * the pre-delete authority index of the group's first entry (fallback when
+ * the anchor is gone); `anchorMessageId` is the first surviving message
+ * after the run (null when the run reaches the topic tail).
+ */
+export interface DeleteMessagesWithDependentsRestoreGroup {
+  entries: DeleteMessagesWithDependentsRestoreEntry[]
+  positionIndex: number
+  anchorMessageId: string | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_DeleteMessagesWithDependents
+ *
+ * Semantic plural deletion resolved by Main authority. Extends the
+ * file-cleanup facts with the exact expanded deletion set plus the pre/post
+ * user group keys, the post-delete segment catalog, authority-generated
+ * restore groups, and pre-delete affected segment snapshots, so the renderer
+ * can converge loaded projection, anchor, segments, and undo without reading
+ * a window-derived cascade.
+ */
+export interface DeleteMessagesWithDependentsResponse extends FileCleanupResult {
+  /** Actual expanded message IDs deleted (authority order: sort_order ASC, id ASC). */
+  deletedMessageIds: string[]
+  /** Block IDs owned by the deleted messages (ordered by message then block order). */
+  deletedBlockIds: string[]
+  /** Stable user message IDs before deletion (authority order). */
+  previousUserMessageIds: string[]
+  /** Stable user message IDs after deletion (authority order). */
+  remainingUserMessageIds: string[]
+  /** Complete topic segment catalog after deletion. */
+  segments: SegmentWire[]
+  /** Authority-generated ordered contiguous restore groups for undo. */
+  restoreGroups: DeleteMessagesWithDependentsRestoreGroup[]
+  /** Pre-delete full snapshots of segments intersecting the deleted set. */
+  segmentSnapshots: SegmentWire[]
+}
+
 /** @see IpcChannel.ChatDb_PasteMessagesToTopic */
 export interface PasteMessagesToTopicRequest {
   topicId: string
@@ -859,8 +928,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:append-message': { request: AppendMessageRequest; response: null }
   'chatdb:update-message': { request: UpdateMessageRequest; response: null }
   'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
-  // PERF-100: one atomic multi-model answer selection (foldSelected group switch)
-  'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: null }
+  // Cross-process authority answer selection (Main-resolved full group)
+  'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: SelectAnswerMessageResponse }
   'chatdb:delete-message': { request: DeleteMessageRequest; response: null }
   'chatdb:delete-messages': { request: DeleteMessagesRequest; response: null }
   'chatdb:update-blocks': { request: UpdateBlocksRequest; response: null }
@@ -917,6 +986,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:delete-messages-with-segments': {
     request: DeleteMessagesWithSegmentsRequest
     response: DeleteMessagesWithSegmentsResponse
+  }
+  'chatdb:delete-messages-with-dependents': {
+    request: DeleteMessagesWithDependentsRequest
+    response: DeleteMessagesWithDependentsResponse
   }
   'chatdb:paste-messages-to-topic': {
     request: PasteMessagesToTopicRequest

@@ -10,7 +10,6 @@ const mocks = vi.hoisted(() => ({
   resolveRegenerate: vi.fn(),
   resolveResend: vi.fn(),
   resolveAnswerGroup: vi.fn(),
-  fetchAuthoritativeAnswerGroup: vi.fn(),
   resolveEditTarget: vi.fn(),
   resolveAssistantSnapshot: vi.fn()
 }))
@@ -28,7 +27,6 @@ vi.mock('@renderer/services/messageActionController', () => ({
     resolveRegenerateForAssistant: mocks.resolveRegenerate,
     resolveResendForUser: mocks.resolveResend,
     resolveAnswerGroup: mocks.resolveAnswerGroup,
-    fetchAuthoritativeAnswerGroup: mocks.fetchAuthoritativeAnswerGroup,
     resolveEditTarget: mocks.resolveEditTarget,
     resolveAssistantSnapshot: mocks.resolveAssistantSnapshot
   }
@@ -67,19 +65,15 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     })
   })
 
-  it('null resolver => no dispatch for regenerate/resend/select', async () => {
+  it('null resolver => no dispatch for regenerate/resend', async () => {
     mocks.resolveRegenerate.mockReturnValue(null)
     mocks.resolveResend.mockReturnValue(null)
-    mocks.fetchAuthoritativeAnswerGroup.mockResolvedValue(null)
     const { result } = renderHook(() => useMessageActionController())
     await act(async () => {
       await result.current.regenerateAssistant({ topicId: 't1', messageId: 'm1' })
     })
     await act(async () => {
       await result.current.resendUser({ topicId: 't1', messageId: 'm1' })
-    })
-    await act(async () => {
-      await result.current.selectAnswer({ topicId: 't1', messageId: 'm1' })
     })
     expect(mocks.dispatch).not.toHaveBeenCalled()
   })
@@ -131,7 +125,6 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
       assistants: { assistants: [{ id: 'a1', model: { id: 'm' } }] },
       messageBlocks: { entities: {} }
     })
-    // editSave will dispatch and fail
     mocks.dispatch.mockRejectedValueOnce(new Error('cleanup fail'))
     const { result } = renderHook(() => useMessageActionController())
     let error: any
@@ -204,36 +197,15 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     expect(ok).toBe(true)
   })
 
-  it('selectAnswer uses authoritative Main READ group and dispatches exactly once (S6.2b R-05)', async () => {
-    mocks.fetchAuthoritativeAnswerGroup.mockResolvedValue({
-      targetMessage: { id: 'a-2', topicId: 't1', askId: 'ask-1', role: 'assistant' } as any,
-      groupIds: ['a-1', 'a-2', 'a-3']
-    })
+  it('selectAnswer dispatches the selected ID only (Main resolves the group)', async () => {
     const { result } = renderHook(() => useMessageActionController())
     await act(async () => {
       await result.current.selectAnswer({ topicId: 't1', messageId: 'a-2' })
     })
-    expect(mocks.fetchAuthoritativeAnswerGroup).toHaveBeenCalledWith({ topicId: 't1', messageId: 'a-2' })
     expect(mocks.dispatch).toHaveBeenCalledTimes(1)
-    // Verify fetch was awaited before dispatch (dispatch called once after fetch)
-    expect(mocks.fetchAuthoritativeAnswerGroup).toHaveBeenCalledBefore(mocks.dispatch as any)
   })
 
-  it('selectAnswer does not dispatch when authoritative READ fails (no mutation, no fallback)', async () => {
-    mocks.fetchAuthoritativeAnswerGroup.mockResolvedValue(null)
-    const { result } = renderHook(() => useMessageActionController())
-    await act(async () => {
-      await result.current.selectAnswer({ topicId: 't1', messageId: 'missing' })
-    })
-    expect(mocks.fetchAuthoritativeAnswerGroup).toHaveBeenCalledWith({ topicId: 't1', messageId: 'missing' })
-    expect(mocks.dispatch).not.toHaveBeenCalled()
-  })
-
-  it('selectAnswer propagates dispatch error after successful authoritative READ', async () => {
-    mocks.fetchAuthoritativeAnswerGroup.mockResolvedValue({
-      targetMessage: { id: 'a-2', topicId: 't1', askId: 'ask-1', role: 'assistant' } as any,
-      groupIds: ['a-1', 'a-2']
-    })
+  it('selectAnswer propagates dispatch error', async () => {
     mocks.dispatch.mockRejectedValueOnce(new Error('select fail'))
     const { result } = renderHook(() => useMessageActionController())
     let error: any
@@ -246,48 +218,5 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     })
     expect(error).toBeDefined()
     expect((error as Error).message).toContain('select fail')
-  })
-
-  it('overlapping selects A then B with B resolving first dispatches B only (stale A discarded, S6.2b R-05)', async () => {
-    let resolveA!: (v: any) => void
-    let resolveB!: (v: any) => void
-    const promiseA = new Promise<any>((res) => {
-      resolveA = res
-    })
-    const promiseB = new Promise<any>((res) => {
-      resolveB = res
-    })
-    mocks.fetchAuthoritativeAnswerGroup.mockImplementation(({ messageId }: any) => {
-      if (messageId === 'a-1') return promiseA
-      if (messageId === 'a-2') return promiseB
-      return Promise.resolve(null)
-    })
-    const { result } = renderHook(() => useMessageActionController())
-    const pA = result.current.selectAnswer({ topicId: 't1', messageId: 'a-1' })
-    const pB = result.current.selectAnswer({ topicId: 't1', messageId: 'a-2' })
-    // B resolves before A (out-of-order completion)
-    await act(async () => {
-      resolveB({
-        targetMessage: { id: 'a-2', topicId: 't1', askId: 'ask-1', role: 'assistant' } as any,
-        groupIds: ['a-1', 'a-2', 'a-3']
-      })
-      // let microtasks flush for B's continuation
-      await Promise.resolve()
-    })
-    await act(async () => {
-      resolveA({
-        targetMessage: { id: 'a-1', topicId: 't1', askId: 'ask-1', role: 'assistant' } as any,
-        groupIds: ['a-1', 'a-2', 'a-3']
-      })
-      await Promise.all([pA, pB])
-    })
-    expect(mocks.fetchAuthoritativeAnswerGroup).toHaveBeenCalledTimes(2)
-    expect(mocks.fetchAuthoritativeAnswerGroup).toHaveBeenCalledWith({ topicId: 't1', messageId: 'a-1' })
-    expect(mocks.fetchAuthoritativeAnswerGroup).toHaveBeenCalledWith({ topicId: 't1', messageId: 'a-2' })
-    // Only the latest intent (B) should dispatch; stale A must be discarded
-    expect(mocks.dispatch).toHaveBeenCalledTimes(1)
-    // Verify dispatched args correspond to B (messageId a-2), proving no stale dispatch of A
-    const dispatched = (mocks.dispatch as any).mock.calls[0][0]
-    expect(dispatched.args[1]).toBe('a-2')
   })
 })

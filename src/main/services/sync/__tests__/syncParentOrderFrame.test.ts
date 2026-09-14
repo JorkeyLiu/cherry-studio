@@ -683,7 +683,7 @@ describe('sync parent order frame — unsupported structural paths invalidate', 
     const selFrameBefore = getFrame('topicMessage', selTopic)
     expect(selFrameBefore).not.toBeNull()
     const selOutboxBefore = outboxCount()
-    const selRes = agg.selectAnswerMessage(selTopic, 'm-sel-2', ['m-sel-2', 'm-sel-3'])
+    const selRes = agg.selectAnswerMessage(selTopic, 'm-sel-2')
     expect(selRes.ok).toBe(true)
     expect(getFrame('topicMessage', selTopic)).toEqual(selFrameBefore)
     expect(outboxCount()).toBe(selOutboxBefore)
@@ -828,7 +828,7 @@ describe('sync parent order frame — selectAnswerMessage is local-only and fram
     const digestBefore = candidateBefore.manifest.digest
     const reasonsBefore = [...candidateBefore.completeness.reasons].sort()
 
-    const res = agg.selectAnswerMessage(topicId, `${topicId}-m2`, [`${topicId}-m2`, `${topicId}-m3`])
+    const res = agg.selectAnswerMessage(topicId, `${topicId}-m2`)
     expect(res.ok).toBe(true)
 
     // Frame byte/semantic identical: orderedChildIds + frameClock unchanged.
@@ -873,7 +873,7 @@ describe('sync parent order frame — selectAnswerMessage is local-only and fram
     }
     const reasonsBefore = [...candidateBefore.completeness.reasons].sort()
 
-    const res = agg.selectAnswerMessage(topicId, `${topicId}-m3`, [`${topicId}-m2`, `${topicId}-m3`])
+    const res = agg.selectAnswerMessage(topicId, `${topicId}-m3`)
     expect(res.ok).toBe(true)
 
     // No synthesis: frame still missing, high-water and outbox untouched.
@@ -901,7 +901,7 @@ describe('sync parent order frame — selectAnswerMessage is local-only and fram
     const orderFrameOpsBefore = topicOrderFrameOps(topicId)
     configStore.set('sync:enabled', false)
     try {
-      const res = agg.selectAnswerMessage(topicId, `${topicId}-m3`, [`${topicId}-m2`, `${topicId}-m3`])
+      const res = agg.selectAnswerMessage(topicId, `${topicId}-m3`)
       expect(res.ok).toBe(true)
       expect(foldSelectedOf(`${topicId}-m3`)).toBe(true)
       expect(foldSelectedOf(`${topicId}-m2`)).toBe(false)

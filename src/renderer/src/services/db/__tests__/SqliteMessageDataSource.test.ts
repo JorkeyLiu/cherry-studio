@@ -29,6 +29,8 @@ import type {
   DeleteBlocksResponse,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithDependentsRequest,
+  DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithSegmentsRequest,
   DeleteMessagesWithSegmentsResponse,
   DeleteSegmentRequest,
@@ -65,6 +67,7 @@ import type {
   SearchMessagesRequest,
   SearchMessagesResponse,
   SelectAnswerMessageRequest,
+  SelectAnswerMessageResponse,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
@@ -118,7 +121,8 @@ function makeApiSpy() {
     updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<null>>>(),
     updateMessageAndBlocks:
       vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
-    selectAnswerMessage: vi.fn<(request: SelectAnswerMessageRequest) => Promise<ChatDbResult<null>>>(),
+    selectAnswerMessage:
+      vi.fn<(request: SelectAnswerMessageRequest) => Promise<ChatDbResult<SelectAnswerMessageResponse>>>(),
     deleteMessage: vi.fn<(request: DeleteMessageRequest) => Promise<ChatDbResult<null>>>(),
     deleteMessages: vi.fn<(request: DeleteMessagesRequest) => Promise<ChatDbResult<null>>>(),
     updateBlocks: vi.fn<(request: UpdateBlocksRequest) => Promise<ChatDbResult<null>>>(),
@@ -157,6 +161,10 @@ function makeApiSpy() {
     deleteMessagesWithSegments:
       vi.fn<
         (request: DeleteMessagesWithSegmentsRequest) => Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
+      >(),
+    deleteMessagesWithDependents:
+      vi.fn<
+        (request: DeleteMessagesWithDependentsRequest) => Promise<ChatDbResult<DeleteMessagesWithDependentsResponse>>
       >(),
     pasteMessagesToTopic:
       vi.fn<(request: PasteMessagesToTopicRequest) => Promise<ChatDbResult<PasteMessagesToTopicResponse>>>(),
@@ -255,22 +263,36 @@ describe('SqliteMessageDataSource', () => {
       expect(req.messageUpdates.content).toBe('updated')
     })
 
-    it('selectAnswerMessage calls api.selectAnswerMessage with the closed request (PERF-100)', async () => {
-      api.selectAnswerMessage.mockResolvedValue(successResult(null))
-      await ds.selectAnswerMessage('topic-1', 'a-2', ['a-1', 'a-2', 'a-3'])
+    it('selectAnswerMessage calls api.selectAnswerMessage with the selected-only request', async () => {
+      const response = { topicId: 'topic-1', askId: 'ask-1', selectedMessageId: 'a-2', messageIds: ['a-1', 'a-2'] }
+      api.selectAnswerMessage.mockResolvedValue(successResult(response))
+      const result = await ds.selectAnswerMessage('topic-1', 'a-2')
       expect(api.selectAnswerMessage).toHaveBeenCalledOnce()
-      expect(api.selectAnswerMessage).toHaveBeenCalledWith({
-        topicId: 'topic-1',
-        selectedMessageId: 'a-2',
-        messageIds: ['a-1', 'a-2', 'a-3']
-      })
+      expect(api.selectAnswerMessage).toHaveBeenCalledWith({ topicId: 'topic-1', selectedMessageId: 'a-2' })
+      expect(result).toEqual(response)
     })
 
     it('selectAnswerMessage propagates structured failure as ChatDbResultError', async () => {
       api.selectAnswerMessage.mockResolvedValue(failureResult('NOT_FOUND', 'Message does not belong to topic'))
-      await expect(ds.selectAnswerMessage('topic-1', 'a-2', ['a-1', 'a-2', 'a-3'])).rejects.toBeInstanceOf(
-        ChatDbResultError
-      )
+      await expect(ds.selectAnswerMessage('topic-1', 'a-2')).rejects.toBeInstanceOf(ChatDbResultError)
+    })
+
+    it('deleteMessagesWithDependents calls api with plural stable roots and returns the semantic response', async () => {
+      const response = {
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        deletedMessageIds: ['u1'],
+        deletedBlockIds: [],
+        previousUserMessageIds: ['u1'],
+        remainingUserMessageIds: [],
+        segments: [],
+        restoreGroups: [{ entries: [{ message: { id: 'u1' }, blocks: [] }], positionIndex: 0, anchorMessageId: null }],
+        segmentSnapshots: []
+      }
+      ;(api as any).deleteMessagesWithDependents = vi.fn().mockResolvedValue(successResult(response))
+      const result = await ds.deleteMessagesWithDependents('t-1', ['u1'])
+      expect((api as any).deleteMessagesWithDependents).toHaveBeenCalledWith({ topicId: 't-1', messageIds: ['u1'] })
+      expect(result).toEqual(response)
     })
 
     it('deleteMessage calls api.deleteMessage', async () => {
@@ -1186,16 +1208,18 @@ describe('SqliteMessageDataSource', () => {
       await dispatchesAfter(() => ds.updateMessageAndBlocks('t-1', { id: 'm-1' } as any, []))
     })
 
-    it('dispatches EXACTLY ONCE after selectAnswerMessage (PERF-100 one timestamp per logical selection)', async () => {
-      api.selectAnswerMessage.mockResolvedValue(successResult(null))
-      await dispatchesAfter(() => ds.selectAnswerMessage('t-1', 'a-2', ['a-1', 'a-2', 'a-3']))
+    it('dispatches EXACTLY ONCE after selectAnswerMessage (one timestamp per logical selection)', async () => {
+      api.selectAnswerMessage.mockResolvedValue(
+        successResult({ topicId: 't-1', askId: 'ask-1', selectedMessageId: 'a-2', messageIds: ['a-2'] })
+      )
+      await dispatchesAfter(() => ds.selectAnswerMessage('t-1', 'a-2'))
     })
 
     it('does NOT dispatch when selectAnswerMessage fails (no commit on DB failure)', async () => {
       api.selectAnswerMessage.mockResolvedValue(failureResult('NOT_FOUND', 'Message does not belong to topic'))
       mockDispatch.mockClear()
       try {
-        await ds.selectAnswerMessage('t-1', 'a-2', ['a-1', 'a-2', 'a-3'])
+        await ds.selectAnswerMessage('t-1', 'a-2')
       } catch {
         // expected
       }

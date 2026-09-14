@@ -107,9 +107,9 @@ describe('ChatDb IPC Registration', () => {
   // Handler count
   // =========================================================================
 
-  it('registers exactly 40 handlers', () => {
+  it('registers exactly 43 handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
   })
 
   // =========================================================================
@@ -157,6 +157,7 @@ describe('ChatDb IPC Registration', () => {
       IpcChannel.ChatDb_CloneMessagesToTopic,
       IpcChannel.ChatDb_ResetMessagesForResend,
       IpcChannel.ChatDb_DeleteMessagesWithSegments,
+      IpcChannel.ChatDb_DeleteMessagesWithDependents,
       IpcChannel.ChatDb_PasteMessagesToTopic,
       // Phase 5.1B-2: search
       IpcChannel.ChatDb_SearchMessages,
@@ -187,11 +188,11 @@ describe('ChatDb IPC Registration', () => {
 
   it('disposer removes all handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     disposer()
     expect(handlers.size).toBe(0)
-    expect(mockRemoveHandler).toHaveBeenCalledTimes(42)
+    expect(mockRemoveHandler).toHaveBeenCalledTimes(43)
   })
 
   // =========================================================================
@@ -423,11 +424,11 @@ describe('ChatDb IPC Registration', () => {
     expect(result.error.code).toBe('VALIDATION_ERROR')
   })
 
-  it('select-answer-message rejects an invalid group at the IPC boundary (PERF-100)', async () => {
+  it('select-answer-message rejects legacy group payload at the IPC boundary', async () => {
     disposer = registerChatDbIpc()
 
     const handler = handlers.get(IpcChannel.ChatDb_SelectAnswerMessage)!
-    // Selected appears twice in the group → contract rejects before dispatch.
+    // Legacy messageIds key is now an unknown key → contract rejects before dispatch.
     const result = await handler(
       {},
       {
@@ -441,22 +442,40 @@ describe('ChatDb IPC Registration', () => {
     expect(result.error.code).toBe('VALIDATION_ERROR')
   })
 
-  it('select-answer-message accepts a valid group at the IPC boundary', async () => {
+  it('select-answer-message accepts a valid selected-only request at the IPC boundary', async () => {
     disposer = registerChatDbIpc()
 
     const handler = handlers.get(IpcChannel.ChatDb_SelectAnswerMessage)!
-    const result = await handler(
-      {},
-      {
-        topicId: 't-1',
-        selectedMessageId: 'a-2',
-        messageIds: ['a-1', 'a-2', 'a-3']
-      }
-    )
+    const result = await handler({}, { topicId: 't-1', selectedMessageId: 'a-2' })
 
     // Validation passes; DB is not initialised → UNAVAILABLE (not VALIDATION_ERROR).
     expect(result).toHaveProperty('ok')
     expect(result).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+  })
+
+  it('delete-messages-with-dependents validates plural roots at the IPC boundary', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_DeleteMessagesWithDependents)!
+    const missingIds = await handler({}, { topicId: 't-1' } as any)
+    expect(missingIds.ok).toBe(false)
+    expect(missingIds.error.code).toBe('VALIDATION_ERROR')
+
+    const emptyIds = await handler({}, { topicId: 't-1', messageIds: [] } as any)
+    expect(emptyIds.ok).toBe(false)
+    expect(emptyIds.error.code).toBe('VALIDATION_ERROR')
+
+    const duplicateIds = await handler({}, { topicId: 't-1', messageIds: ['m-1', 'm-1'] } as any)
+    expect(duplicateIds.ok).toBe(false)
+    expect(duplicateIds.error.code).toBe('VALIDATION_ERROR')
+
+    const legacySingular = await handler({}, { topicId: 't-1', messageId: 'm-1' } as any)
+    expect(legacySingular.ok).toBe(false)
+    expect(legacySingular.error.code).toBe('VALIDATION_ERROR')
+
+    const valid = await handler({}, { topicId: 't-1', messageIds: ['m-1'] })
+    expect(valid).toHaveProperty('ok')
+    expect(valid).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
   })
 
   it('fetch-answer-group rejects an invalid request at the IPC boundary (S6.2b R-05)', async () => {
@@ -611,6 +630,96 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
+  // Segment no-color IPC regression (STORAGE_ERROR root fix)
+  //
+  // A legal no-color segment must cross the full IPC path
+  // (handler → aggregate → segmentToWire → validateChatDbResult) as a
+  // JSON-safe success with NO `color` own property — never
+  // `color: undefined` (which the shared JSON walker rejects, surfacing as
+  // STORAGE_ERROR). Aggregate-direct assertions alone cannot prove this.
+  // =========================================================================
+
+  it('no-color upsert/list SegmentWire is JSON-safe success without a color own property', async () => {
+    const betterSqlite3Mod = await import('better-sqlite3')
+    const Database: any = (betterSqlite3Mod as any).default ?? betterSqlite3Mod
+    const { drizzle } = await import('drizzle-orm/better-sqlite3')
+    const { runMigrations } = await import('../migration')
+    const schema = await import('../schema')
+    const { validateChatDbResult } = await import('@shared/chatDb')
+
+    const tmpDir = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'chatdb-ipc-seg-nocolor-'))
+    const dbPath = realPath.join(tmpDir, 'test.db')
+    const sqlite = new Database(dbPath)
+    sqlite.pragma('journal_mode = WAL')
+    sqlite.pragma('foreign_keys = ON')
+    const db = drizzle(sqlite, { schema })
+    runMigrations(db, sqlite)
+
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue(db as any)
+    mockGetSqlite.mockReturnValue(sqlite)
+    disposer = registerChatDbIpc()
+
+    try {
+      const topicId = 't-seg-nocolor'
+      const segId = 'seg-nocolor-1'
+      await handlers.get(IpcChannel.ChatDb_EnsureTopic)!({}, { topicId })
+
+      const upsertHandler = handlers.get(IpcChannel.ChatDb_UpsertSegment)!
+      const upsertResult = await upsertHandler({}, { segmentId: segId, topicId, name: 'no-color', messageIds: [] })
+      expect(upsertResult.ok).toBe(true)
+      if (upsertResult.ok) {
+        // No-color wire must fully omit the optional own property.
+        expect('color' in (upsertResult.value as Record<string, unknown>)).toBe(false)
+        expect(() => validateChatDbResult('chatdb:upsert-segment', upsertResult)).not.toThrow()
+        // JSON-safe: stringify round-trip preserves the shape (undefined would drop/throw).
+        expect(JSON.parse(JSON.stringify(upsertResult.value))).toEqual(upsertResult.value)
+      }
+
+      const listHandler = handlers.get(IpcChannel.ChatDb_ListSegments)!
+      const listResult = await listHandler({}, { topicId })
+      expect(listResult.ok).toBe(true)
+      if (listResult.ok) {
+        // Empty membership deletes the segment per repo semantics → empty catalog is valid.
+        expect(Array.isArray(listResult.value)).toBe(true)
+      }
+
+      // Re-upsert with a member so list returns a no-color wire to validate.
+      const msgId = 'm-seg-nocolor-1'
+      await handlers.get(IpcChannel.ChatDb_AppendMessage)!(
+        {},
+        {
+          topicId,
+          message: { id: msgId, topicId, role: 'user', content: 'hi', status: 'success' },
+          blocks: []
+        }
+      )
+      const upsert2 = await upsertHandler({}, { segmentId: segId, topicId, name: 'no-color', messageIds: [msgId] })
+      expect(upsert2.ok).toBe(true)
+      if (upsert2.ok) {
+        expect('color' in (upsert2.value as Record<string, unknown>)).toBe(false)
+        expect(() => validateChatDbResult('chatdb:upsert-segment', upsert2)).not.toThrow()
+      }
+      const list2 = await listHandler({}, { topicId })
+      expect(list2.ok).toBe(true)
+      if (list2.ok) {
+        expect(list2.value).toHaveLength(1)
+        expect('color' in (list2.value[0] as Record<string, unknown>)).toBe(false)
+        expect(() => validateChatDbResult('chatdb:list-segments', list2)).not.toThrow()
+        expect(JSON.parse(JSON.stringify(list2.value))).toEqual(list2.value)
+      }
+    } finally {
+      try {
+        sqlite.close()
+      } catch {}
+      realFs.rmSync(tmpDir, { recursive: true, force: true })
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+
+  // =========================================================================
   // Result envelope structure
   // =========================================================================
 
@@ -688,7 +797,7 @@ describe('ChatDb IPC Registration', () => {
   it('uses ipcMain.handle for registration', () => {
     disposer = registerChatDbIpc()
 
-    expect(mockHandle).toHaveBeenCalledTimes(42)
+    expect(mockHandle).toHaveBeenCalledTimes(43)
     for (const call of mockHandle.mock.calls) {
       expect(typeof call[0]).toBe('string')
       expect(typeof call[1]).toBe('function')
@@ -767,16 +876,16 @@ describe('ChatDb IPC Registration', () => {
   // All 40 commands preserve 40-registration invariant
   // =========================================================================
 
-  it('preserves exactly 40 registrations after multiple calls', () => {
+  it('preserves exactly 43 registrations after multiple calls', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // Call disposer, re-register
     disposer()
     expect(handlers.size).toBe(0)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
   })
 
   // =========================================================================
@@ -785,15 +894,15 @@ describe('ChatDb IPC Registration', () => {
 
   it('re-registration disposes prior handlers before installing new ones', () => {
     const disposer1 = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // Register again without calling disposer1 — should auto-dispose
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // disposer1 is now stale — calling it should be a no-op
     disposer1()
-    expect(handlers.size).toBe(42) // still 40
+    expect(handlers.size).toBe(43) // still 43
 
     // The current disposer works
     disposer()
@@ -805,32 +914,32 @@ describe('ChatDb IPC Registration', () => {
 
     // Re-register — disposer1 becomes stale
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // Stale disposer1 is a no-op
     disposer1()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // Active disposer still works
     disposer()
     expect(handlers.size).toBe(0)
   })
 
-  it('three sequential registrations produce exactly 40 handlers each time', () => {
+  it('three sequential registrations produce exactly 43 handlers each time', () => {
     const d1 = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     const d2 = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // Stale discarders are no-ops
     d1()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
     d2()
-    expect(handlers.size).toBe(42)
+    expect(handlers.size).toBe(43)
 
     // Active disposer works
     disposer()

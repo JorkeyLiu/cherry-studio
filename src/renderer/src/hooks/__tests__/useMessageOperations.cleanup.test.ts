@@ -147,19 +147,17 @@ describe('useMessageOperations atomic cleanup callers', () => {
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(cleanup)
   })
 
-  it('selectAnswerMessage dispatches ONE atomic selection thunk with the full group (PERF-100 navigation path)', async () => {
+  it('selectAnswerMessage dispatches ONE atomic selection thunk with the selected ID only', async () => {
     mocks.selectAnswerMessageThunk.mockReturnValue({ type: 'select-answer-message' })
     mocks.dispatch.mockResolvedValue({ type: 'select-answer-message' })
 
     const { useMessageOperations } = await import('../useMessageOperations')
     const { result } = renderHook(() => useMessageOperations({ id: 'topic-1' } as any))
 
-    await result.current.selectAnswerMessage('a-2', ['a-1', 'a-2', 'a-3'])
+    await result.current.selectAnswerMessage('a-2')
 
-    // The caller-facing wrapper forwards the target + the FULL answer group
-    // to the DB-first thunk — never two per-message editMessage writes.
     expect(mocks.selectAnswerMessageThunk).toHaveBeenCalledTimes(1)
-    expect(mocks.selectAnswerMessageThunk).toHaveBeenCalledWith('topic-1', 'a-2', ['a-1', 'a-2', 'a-3'])
+    expect(mocks.selectAnswerMessageThunk).toHaveBeenCalledWith('topic-1', 'a-2')
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'select-answer-message' })
   })
 

@@ -621,7 +621,7 @@ describe('ChatDbAggregateService', () => {
   // =========================================================================
 
   describe('selectAnswerMessage', () => {
-    it('persists exactly one foldSelected=true among the supplied group atomically', () => {
+    it('resolves the complete window-outside group from the selected ID and returns it', () => {
       const topicId = `t-${uid()}`
       const askId = `ask-${uid()}`
       const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
@@ -631,25 +631,25 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, m2 as any, [])
       agg.appendMessage(topicId, m3 as any, [])
 
-      const result = agg.selectAnswerMessage(topicId, m2.id as string, [
-        m1.id as string,
-        m2.id as string,
-        m3.id as string
-      ])
+      const result = agg.selectAnswerMessage(topicId, m2.id as string)
       expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.topicId).toBe(topicId)
+      expect(response.askId).toBe(askId)
+      expect(response.selectedMessageId).toBe(m2.id)
+      expect(response.messageIds).toEqual([m1.id, m2.id, m3.id])
 
       const fetched = okValue(agg.fetchMessages(topicId))
       const byId = new Map(fetched.messages.map((m) => [m.id, m]))
       expect(byId.get(m1.id as string)?.foldSelected).toBe(false)
       expect(byId.get(m2.id as string)?.foldSelected).toBe(true)
       expect(byId.get(m3.id as string)?.foldSelected).toBe(false)
-      // Exactly one true across the whole topic.
       const selected = fetched.messages.filter((m) => m.foldSelected === true)
       expect(selected).toHaveLength(1)
       expect(selected[0].id).toBe(m2.id)
     })
 
-    it('rejects a missing message in the group with NO partial write (rollback)', () => {
+    it('rejects missing selected with NO partial write', () => {
       const topicId = `t-${uid()}`
       const askId = `ask-${uid()}`
       const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
@@ -657,22 +657,17 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, m1 as any, [])
       agg.appendMessage(topicId, m2 as any, [])
 
-      const result = agg.selectAnswerMessage(topicId, m2.id as string, [
-        m1.id as string,
-        m2.id as string,
-        'missing-msg'
-      ])
+      const result = agg.selectAnswerMessage(topicId, 'missing-msg')
       expect(result.ok).toBe(false)
       if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
 
-      // No partial write: m1 must still be selected and m2 unselected.
       const fetched = okValue(agg.fetchMessages(topicId))
       const byId = new Map(fetched.messages.map((m) => [m.id, m]))
       expect(byId.get(m1.id as string)?.foldSelected).toBe(true)
       expect(byId.get(m2.id as string)?.foldSelected).toBe(false)
     })
 
-    it('rejects a cross-topic message with NO partial write (ownership validation)', () => {
+    it('rejects cross-topic selected with NO partial write', () => {
       const topicIdA = `t-${uid()}`
       const topicIdB = `t-${uid()}`
       const askId = `ask-${uid()}`
@@ -683,11 +678,7 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicIdA, a2 as any, [])
       agg.appendMessage(topicIdB, foreign as any, [])
 
-      const result = agg.selectAnswerMessage(topicIdA, a2.id as string, [
-        a1.id as string,
-        a2.id as string,
-        foreign.id as string
-      ])
+      const result = agg.selectAnswerMessage(topicIdA, foreign.id as string)
       expect(result.ok).toBe(false)
       if (!result.ok) expect(result.error.code).toBe('NOT_FOUND')
 
@@ -697,34 +688,14 @@ describe('ChatDbAggregateService', () => {
       expect(byId.get(a2.id as string)?.foldSelected).toBe(false)
     })
 
-    it('rejects duplicate IDs in the group (defense in depth)', () => {
+    it('rejects user role and missing askId (fail-closed)', () => {
       const topicId = `t-${uid()}`
-      const askId = `ask-${uid()}`
-      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
-      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
-      agg.appendMessage(topicId, m1 as any, [])
-      agg.appendMessage(topicId, m2 as any, [])
-
-      const result = agg.selectAnswerMessage(topicId, m2.id as string, [
-        m1.id as string,
-        m2.id as string,
-        m2.id as string
-      ])
-      expect(result.ok).toBe(false)
-      if (!result.ok) expect(result.error.code).toBe('CONFLICT_ERROR')
-    })
-
-    it('rejects selected not in the supplied group', () => {
-      const topicId = `t-${uid()}`
-      const askId = `ask-${uid()}`
-      const m1 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: true })
-      const m2 = makeMessageJson(topicId, { role: 'assistant', askId, foldSelected: false })
-      agg.appendMessage(topicId, m1 as any, [])
-      agg.appendMessage(topicId, m2 as any, [])
-
-      const result = agg.selectAnswerMessage(topicId, 'not-in-group', [m1.id as string, m2.id as string])
-      expect(result.ok).toBe(false)
-      if (!result.ok) expect(result.error.code).toBe('CONFLICT_ERROR')
+      const user = makeMessageJson(topicId, { role: 'user' })
+      const noAsk = makeMessageJson(topicId, { role: 'assistant', askId: '' })
+      agg.appendMessage(topicId, user as any, [])
+      agg.appendMessage(topicId, noAsk as any, [])
+      expect(agg.selectAnswerMessage(topicId, user.id as string).ok).toBe(false)
+      expect(agg.selectAnswerMessage(topicId, noAsk.id as string).ok).toBe(false)
     })
 
     it('preserves message content/order/other overflow — selection-only update', () => {
@@ -749,7 +720,7 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, m1 as any, [])
       agg.appendMessage(topicId, m2 as any, [])
 
-      const result = agg.selectAnswerMessage(topicId, m2.id as string, [m1.id as string, m2.id as string])
+      const result = agg.selectAnswerMessage(topicId, m2.id as string)
       expect(result.ok).toBe(true)
 
       const fetched = okValue(agg.fetchMessages(topicId))
@@ -758,14 +729,12 @@ describe('ChatDbAggregateService', () => {
       const m2After = byId.get(m2.id as string)!
       expect(m1After.foldSelected).toBe(false)
       expect(m2After.foldSelected).toBe(true)
-      // Content, model, and other overflow fields are untouched.
       expect(m1After.content).toBe('First answer')
       expect(m2After.content).toBe('Second answer')
       expect(m1After.modelId).toBe('model-x')
       expect(m2After.modelId).toBe('model-y')
       expect(m1After.useful).toBe(true)
       expect(m2After.useful).toBe(false)
-      // Order is preserved (m1 then m2).
       expect(fetched.messages.map((m) => m.id)).toEqual([m1.id, m2.id])
     })
 
@@ -779,8 +748,6 @@ describe('ChatDbAggregateService', () => {
       agg.appendMessage(topicId, m2 as any, [])
       agg.appendMessage(topicId, m3 as any, [])
 
-      // Abort the whole transaction when the SECOND row is updated — proving
-      // the first row's foldSelected write is rolled back too.
       sqlite.exec(`
         CREATE TEMP TRIGGER abort_select_answer_rollback_test
         AFTER UPDATE OF extra ON messages
@@ -790,22 +757,221 @@ describe('ChatDbAggregateService', () => {
         END
       `)
       try {
-        const result = agg.selectAnswerMessage(topicId, m3.id as string, [
-          m1.id as string,
-          m2.id as string,
-          m3.id as string
-        ])
+        const result = agg.selectAnswerMessage(topicId, m3.id as string)
         expect(result.ok).toBe(false)
       } finally {
         sqlite.exec('DROP TRIGGER IF EXISTS TEMP.abort_select_answer_rollback_test')
       }
 
-      // NO partial write: m1 keeps foldSelected=true, m2/m3 keep false.
       const fetched = okValue(agg.fetchMessages(topicId))
       const byId = new Map(fetched.messages.map((m) => [m.id, m]))
       expect(byId.get(m1.id as string)?.foldSelected).toBe(true)
       expect(byId.get(m2.id as string)?.foldSelected).toBe(false)
       expect(byId.get(m3.id as string)?.foldSelected).toBe(false)
+    })
+
+    it('response validates against the shared select-answer-message result contract', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId })
+      agg.appendMessage(topicId, m1 as any, [])
+      const result = agg.selectAnswerMessage(topicId, m1.id as string)
+      expect(() => validateChatDbResult('chatdb:select-answer-message', result)).not.toThrow()
+    })
+  })
+
+  describe('deleteMessagesWithDependents', () => {
+    it('deletes user + all same-askId assistants with authority order and segment/catalog facts', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, { role: 'assistant', askId: u1.id })
+      const a2 = makeMessageJson(topicId, { role: 'assistant', askId: u1.id })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      const b1 = makeBlockJson(a1.id as string)
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(topicId, a1 as any, [b1 as any])
+      agg.appendMessage(topicId, a2 as any, [])
+      agg.appendMessage(topicId, u2 as any, [])
+      const segId = `seg-${uid()}`
+      agg.upsertSegment(segId, topicId, 'seg', [u1.id as string, a1.id as string, u2.id as string], undefined)
+
+      const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
+      expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.deletedMessageIds).toEqual([u1.id, a1.id, a2.id])
+      expect(response.deletedBlockIds).toEqual([b1.id])
+      expect(response.previousUserMessageIds).toEqual([u1.id, u2.id])
+      expect(response.remainingUserMessageIds).toEqual([u2.id])
+      expect(response.segments).toHaveLength(1)
+      expect(response.segments[0].id).toBe(segId)
+      expect(response.segments[0].messageIds).toEqual([u2.id])
+      // Authority undo snapshot: single contiguous group anchored at the survivor,
+      // complete message+block wires, and the pre-delete affected segment snapshot.
+      expect(response.restoreGroups).toHaveLength(1)
+      expect(response.restoreGroups[0].positionIndex).toBe(0)
+      expect(response.restoreGroups[0].anchorMessageId).toBe(u2.id)
+      expect(response.restoreGroups[0].entries.map((e) => (e.message as Record<string, unknown>).id)).toEqual([
+        u1.id,
+        a1.id,
+        a2.id
+      ])
+      expect(
+        response.restoreGroups[0].entries.flatMap((e) => e.blocks.map((b) => (b as Record<string, unknown>).id))
+      ).toEqual([b1.id])
+      expect(response.segmentSnapshots).toHaveLength(1)
+      expect(response.segmentSnapshots[0].id).toBe(segId)
+      expect(response.segmentSnapshots[0].messageIds).toEqual([u1.id, a1.id, u2.id])
+      expect(() =>
+        validateChatDbResult('chatdb:delete-messages-with-dependents', { ok: true, value: response })
+      ).not.toThrow()
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      expect(fetched.messages.map((m) => m.id)).toEqual([u2.id])
+    })
+
+    it('assistant single root removes only the target and leaves user groups unchanged', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, { role: 'assistant', askId: u1.id })
+      const a2 = makeMessageJson(topicId, { role: 'assistant', askId: u1.id })
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(topicId, a1 as any, [])
+      agg.appendMessage(topicId, a2 as any, [])
+
+      const result = agg.deleteMessagesWithDependents(topicId, [a1.id as string])
+      expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.deletedMessageIds).toEqual([a1.id])
+      expect(response.previousUserMessageIds).toEqual([u1.id])
+      expect(response.remainingUserMessageIds).toEqual([u1.id])
+      expect(response.restoreGroups).toHaveLength(1)
+      expect(response.restoreGroups[0].anchorMessageId).toBe(a2.id)
+    })
+
+    it('multiple roots expand and dedupe overlapping user+assistant roots', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, { role: 'assistant', askId: u1.id })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      const a2 = makeMessageJson(topicId, { role: 'assistant', askId: u2.id })
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(topicId, a1 as any, [])
+      agg.appendMessage(topicId, u2 as any, [])
+      agg.appendMessage(topicId, a2 as any, [])
+
+      // Overlapping: u1 root already covers a1; passing both must dedupe to the same set.
+      const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string, a1.id as string])
+      expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.deletedMessageIds).toEqual([u1.id, a1.id])
+      expect(response.remainingUserMessageIds).toEqual([u2.id])
+      expect(() =>
+        validateChatDbResult('chatdb:delete-messages-with-dependents', { ok: true, value: response })
+      ).not.toThrow()
+    })
+
+    it('noncontiguous roots produce ordered restore groups with surviving anchors', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      const u3 = makeMessageJson(topicId, { role: 'user' })
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(topicId, u2 as any, [])
+      agg.appendMessage(topicId, u3 as any, [])
+
+      const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string, u3.id as string])
+      expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.deletedMessageIds).toEqual([u1.id, u3.id])
+      expect(response.remainingUserMessageIds).toEqual([u2.id])
+      expect(response.restoreGroups).toHaveLength(2)
+      // First run anchors at the surviving middle user; tail run anchors null.
+      expect(response.restoreGroups[0].positionIndex).toBe(0)
+      expect(response.restoreGroups[0].anchorMessageId).toBe(u2.id)
+      expect(response.restoreGroups[0].entries.map((e) => (e.message as Record<string, unknown>).id)).toEqual([u1.id])
+      expect(response.restoreGroups[1].positionIndex).toBe(2)
+      expect(response.restoreGroups[1].anchorMessageId).toBeNull()
+      expect(response.restoreGroups[1].entries.map((e) => (e.message as Record<string, unknown>).id)).toEqual([u3.id])
+      expect(() =>
+        validateChatDbResult('chatdb:delete-messages-with-dependents', { ok: true, value: response })
+      ).not.toThrow()
+
+      const fetched = okValue(agg.fetchMessages(topicId))
+      expect(fetched.messages.map((m) => m.id)).toEqual([u2.id])
+    })
+
+    it('unaffected segments are excluded from snapshots; intersecting ones are complete', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(topicId, u2 as any, [])
+      const hitId = `seg-${uid()}`
+      const missId = `seg-${uid()}`
+      agg.upsertSegment(hitId, topicId, 'hit', [u1.id as string, u2.id as string], undefined)
+      agg.upsertSegment(missId, topicId, 'miss', [u2.id as string], undefined)
+
+      const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
+      expect(result.ok).toBe(true)
+      const response = okValue(result)
+      expect(response.segmentSnapshots.map((s) => s.id)).toEqual([hitId])
+      expect(response.segmentSnapshots[0].messageIds).toEqual([u1.id, u2.id])
+      expect(response.segments.map((s) => s.id).sort()).toEqual([hitId, missId].sort())
+    })
+
+    it('deletes an empty segment when its last member is removed', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      agg.appendMessage(topicId, u1 as any, [])
+      const segId = `seg-${uid()}`
+      agg.upsertSegment(segId, topicId, 'solo', [u1.id as string], undefined)
+      const result = agg.deleteMessagesWithDependents(topicId, [u1.id as string])
+      expect(result.ok).toBe(true)
+      expect(okValue(result).segments).toEqual([])
+      expect(okValue(result).remainingUserMessageIds).toEqual([])
+      // The emptied segment still snapshots pre-delete for undo.
+      expect(okValue(result).segmentSnapshots.map((s) => s.id)).toEqual([segId])
+    })
+
+    it('one missing root fails the whole command closed with full rollback', () => {
+      const topicId = `t-${uid()}`
+      const other = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const foreign = makeMessageJson(other, { role: 'user' })
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(other, foreign as any, [])
+      expect(agg.deleteMessagesWithDependents(topicId, ['missing']).ok).toBe(false)
+      expect(agg.deleteMessagesWithDependents(topicId, [u1.id as string, 'missing']).ok).toBe(false)
+      expect(agg.deleteMessagesWithDependents(topicId, [foreign.id as string]).ok).toBe(false)
+      expect(agg.deleteMessagesWithDependents('missing-topic', [u1.id as string]).ok).toBe(false)
+      expect(agg.deleteMessagesWithDependents(topicId, []).ok).toBe(false)
+      expect(agg.deleteMessagesWithDependents(topicId, [u1.id as string, u1.id as string]).ok).toBe(false)
+      expect(okValue(agg.fetchMessages(topicId)).messages).toHaveLength(1)
+    })
+
+    it('expanded deletion matches the bulk compat path on the same expanded set', () => {
+      const mkTopic = (): { topicId: string; u1: string; a1: string; u2: string } => {
+        const topicId = `t-${uid()}`
+        const u1 = makeMessageJson(topicId, { role: 'user' })
+        const a1 = makeMessageJson(topicId, { role: 'assistant', askId: u1.id })
+        const u2 = makeMessageJson(topicId, { role: 'user' })
+        agg.appendMessage(topicId, u1 as any, [])
+        agg.appendMessage(topicId, a1 as any, [])
+        agg.appendMessage(topicId, u2 as any, [])
+        return { topicId, u1: u1.id as string, a1: a1.id as string, u2: u2.id as string }
+      }
+      const semantic = mkTopic()
+      const bulk = mkTopic()
+      const semResult = agg.deleteMessagesWithDependents(semantic.topicId, [semantic.u1])
+      expect(semResult.ok).toBe(true)
+      const bulkResult = agg.deleteMessagesWithSegments(bulk.topicId, [bulk.u1, bulk.a1])
+      expect(bulkResult.ok).toBe(true)
+      const semRemaining = okValue(agg.fetchMessages(semantic.topicId)).messages.map((m) => m.id)
+      const bulkRemaining = okValue(agg.fetchMessages(bulk.topicId)).messages.map((m) => m.id)
+      // Same shape: only the second user survives in both paths.
+      expect(semRemaining).toHaveLength(1)
+      expect(bulkRemaining).toHaveLength(1)
+      expect(okValue(semResult).deletedMessageIds).toHaveLength(2)
     })
   })
 

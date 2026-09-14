@@ -1,5 +1,6 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
@@ -7,6 +8,7 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   MessageBlockEntry,
+  SelectAnswerMessageResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 
@@ -82,19 +84,27 @@ export interface MessageDataSource {
   ): Promise<FileCleanupResult>
 
   /**
-   * PERF-100: switch the selected answer within one multi-model answer group.
+   * Cross-process authority answer selection.
    *
-   * ONE Main SQLite transaction validates that every supplied `messageIds`
-   * belongs to the topic (missing/cross-topic rejects the whole operation,
-   * no partial write), then persists `foldSelected=true` for
-   * `selectedMessageId` and `foldSelected=false` for every other supplied
-   * ID — exactly one selected message among the group, atomically.
-   *
-   * The caller supplies the FULL answer-group IDs; group coherence is the
-   * caller's responsibility. Dispatches `updateTopicUpdatedAt` exactly once
-   * after a successful selection (the thunk must NOT dispatch it again).
+   * The renderer supplies ONLY the selected message ID; Main resolves the
+   * complete answer group in the same SQLite transaction and persists
+   * `foldSelected` atomically. Returns the authoritative group for a
+   * loaded-projection intersection commit. Dispatches `updateTopicUpdatedAt`
+   * exactly once after success (the thunk must NOT dispatch it again).
    */
-  selectAnswerMessage(topicId: string, selectedMessageId: string, messageIds: string[]): Promise<void>
+  selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse>
+
+  /**
+   * Semantic plural deletion with Main-resolved dependents.
+   *
+   * The renderer supplies ONLY stable root IDs; Main expands user dependents
+   * (user + same-askId assistants, or single non-user), deletes in one
+   * transaction, and returns the exact expanded deletion set plus block IDs,
+   * pre/post user group keys, the post-delete segment catalog, and the full
+   * authority undo snapshot (restore groups + affected segment snapshots).
+   * Dispatches `updateTopicUpdatedAt` exactly once after success.
+   */
+  deleteMessagesWithDependents(topicId: string, messageIds: string[]): Promise<DeleteMessagesWithDependentsResponse>
 
   /**
    * Delete a single message and its blocks

@@ -2,8 +2,11 @@
  * S6.2 R-05 / S6.2c-1 / S6.2c-2 — INTEGRATED E2E (real UI)
  *
  * Covers:
- * - R-05 answer-group: real MessageGroup model selector click → fetchAnswerGroup (complete) → selectAnswerMessage
- *   with partial projection (exactly one member missing before click).
+ * - R-05 answer-group: real MessageGroup model selector click → selectAnswerMessage (selected-ID-only,
+ *   Main-resolved complete group) with partial projection (exactly one member missing before click).
+ *   The click carries no renderer group derivation; the window-outside member is asserted via the
+ *   authoritative select response + post-exit SQLite (foldSelected false for the missing member,
+ *   true for the clicked tail).
  * - Branch by anchor: real MessageMenubar NEW_BRANCH click → branchMessagesToTopic (Main prefix)
  * - Insert after anchor: real MessageMenubar insert click → insertMessagesAfterAnchor (group-tail)
  *
@@ -11,6 +14,14 @@
  * When the oldest visible group straddles the boundary, messageIds length may exceed DISPLAY_LIMIT (e.g. 21-22); bootstrap invariant is >= DISPLAY_LIMIT.
  * Standard fixture, fresh build, disposable profile, mock provider.
  * No direct Redux publication for action path; direct fetch/branch/insert IPC used only as supplemental authority probe.
+ *
+ * Evidence boundary: this E2E NEVER counts IPC calls. contextBridge is
+ * immutable from page.evaluate, so any monkeypatch of window.api.chatDb
+ * cannot intercept the production datasource path and its call counts are
+ * invalid evidence. Exactly-once / root-payload is proven by the repo unit
+ * tests (datasource + thunk selectAnswer); E2E proves only observable state
+ * (loaded projection counts, visible foldSelected, read-only Main probes,
+ * post-exit SQLite).
  */
 import * as fs from 'fs'
 import { expect, test } from '../../fixtures/electron.fixture'
@@ -373,7 +384,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-05 INTEGRATED UI: deterministic seed via addTopic/displayCount/pasteMessagesToTopic with straddle group (29,30,31, missing 29 before click); real MessageGroup avatar selector click (data-testid=answer-group-selector) → fetchAnswerGroup + selectAnswerMessage; Redux + post-exit SQLite authority probe for complete group mutation.'
+        'R-05 INTEGRATED UI: deterministic seed via addTopic/displayCount/pasteMessagesToTopic with straddle group (29,30,31, missing 29 before click); real MessageGroup avatar selector click (data-testid=answer-group-selector) → selectAnswerMessage (selected-ID-only, Main-resolved complete group including the window-outside member); loaded counts equal + missing absent + visible foldSelected + read-only fetchAnswerGroup/getRawTopic + post-exit SQLite. No IPC call counting (contextBridge immutable; exactly-once by unit tests).'
     })
     const page = mainWindow
     const liveAssistantId = await prepareDisplayCountAndAssistant(page)
@@ -521,6 +532,23 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     // Find the group container and click the selector for tailId (second visible) to switch selection
     // MessageGroupModelList renders avatars for the grouped messages; locate by data-message-id
     // The group containing our visibleIds is the one near the top of column-reverse? Search globally.
+    //
+    // E2E does NO IPC call counting here: contextBridge is immutable from
+    // page.evaluate, so a monkeypatch of window.api.chatDb cannot observe
+    // the production datasource path. Exactly-once is proven by unit tests
+    // (datasource/thunk). This test issues NO direct select mutation after
+    // the click — only the real UI click plus read-only probes below.
+    const preClickProjection = await page.evaluate(
+      ({ topicId, missingId }: { topicId: string; missingId: string }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+        const entities: Record<string, any> = s.messages?.entities ?? {}
+        return { count: ids.length, hasMissing: ids.includes(missingId), missingEntity: !!entities[missingId] }
+      },
+      { topicId, missingId }
+    )
+    expect(preClickProjection.hasMissing).toBe(false)
+    expect(preClickProjection.missingEntity).toBe(false)
     const selector = page.locator(`[data-testid="answer-group-selector"][data-message-id="${tailId}"]`)
     await expect(
       selector,
@@ -548,8 +576,35 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       { timeout: 30000 }
     )
 
-    // Supplemental authority check: missing member's foldSelected should have been persisted false via selectAnswerMessage (complete group)
-    // Use direct fetch while app still open (supplemental) then post-exit SQLite will be definitive.
+    // Redux projection must NOT grow and must NOT inject the missing entity:
+    // the loaded intersection commits, the window-outside member stays absent.
+    const postClickProjection = await page.evaluate(
+      ({ topicId, missingId }: { topicId: string; missingId: string }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+        const entities: Record<string, any> = s.messages?.entities ?? {}
+        return { count: ids.length, hasMissing: ids.includes(missingId), missingEntity: !!entities[missingId] }
+      },
+      { topicId, missingId }
+    )
+    expect(postClickProjection.count).toBe(preClickProjection.count)
+    expect(postClickProjection.hasMissing).toBe(false)
+    expect(postClickProjection.missingEntity).toBe(false)
+
+    // READ-ONLY authority probes while the app is still open (no mutation):
+    // fetchAnswerGroup proves Main still owns all 3 members; getRawTopic
+    // proves only the clicked tail is selected. Definitive proof is SQLite.
+    const postGroupReadonly: any = await page.evaluate(
+      async ({ topicId, anchorId }: { topicId: string; anchorId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.fetchAnswerGroup({ topicId, anchorMessageId: anchorId })
+      },
+      { topicId, anchorId }
+    )
+    expect(postGroupReadonly.ok).toBe(true)
+    expect(postGroupReadonly.value.messageIds).toHaveLength(3)
+    expect(postGroupReadonly.value.messageIds).toContain(missingId)
+
     const postGroupDirect: any = await page.evaluate(
       async ({ topicId, anchorId }: { topicId: string; anchorId: string }) => {
         const api: any = (window as any).api.chatDb
@@ -562,7 +617,9 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(postGroupDirect.ok).toBe(true)
     const rawMessages: any[] = postGroupDirect.value?.messages ?? []
     const byId = new Map(rawMessages.map((m: any) => [m.id, m]))
-    // Verify complete group persisted selection (including missing)
+
+    // Verify complete group persisted selection (including missing) — the
+    // single selected member is the clicked tail, caused by the real UI click.
     for (const id of [missingId, visibleIds[0], tailId]) {
       expect(byId.has(id), `raw topic must contain ${id}`).toBe(true)
       const m = byId.get(id)

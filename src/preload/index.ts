@@ -11,6 +11,7 @@ import type {
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithDependentsRequest,
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
@@ -721,6 +722,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_ResetMessagesForResend, request),
     deleteMessagesWithSegments: (request: DeleteMessagesWithSegmentsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessagesWithSegments, request),
+    deleteMessagesWithDependents: (request: DeleteMessagesWithDependentsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessagesWithDependents, request),
     pasteMessagesToTopic: (request: PasteMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_PasteMessagesToTopic, request),
     // Phase 5.1B-2: search

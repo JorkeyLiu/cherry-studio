@@ -5,7 +5,7 @@ import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
-import { deleteMessagesFromDB } from '@renderer/store/thunk/messageThunk'
+import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
 import {
   collectSegmentSnapshots,
   collectWholeSelectedSegmentsForClipboard,
@@ -27,8 +27,6 @@ import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import type { MessageBlockEntry } from '@shared/chatDb'
 import { v4 as uuidv4 } from 'uuid'
-
-import { buildGroupList, transferAnchorsAfterDeletion } from './anchorService'
 
 const logger = loggerService.withContext('ClipboardService')
 
@@ -624,7 +622,13 @@ export async function pasteMessages(
 
 /**
  * Delete selected message groups in edit mode.
- * Returns the number of groups deleted.
+ * Returns the number of messages deleted (authority-expanded count).
+ *
+ * Unified semantic path: stable selected group IDs are passed as root IDs
+ * ONLY — Main expands user dependents, deletes atomically, and returns the
+ * full authority undo snapshot. No loaded-projection cascade derivation, no
+ * window-relative anchors, no loaded block/segment snapshots as undo source.
+ * DB failure leaves Redux/anchors untouched and pushes no undo.
  */
 export async function deleteSelectedMessages(
   dispatch: AppDispatch,
@@ -632,120 +636,60 @@ export async function deleteSelectedMessages(
   topicId: string,
   selectedGroupIds: string[]
 ): Promise<number> {
-  const state = getState()
-  const messages = selectMessagesForTopic(state, topicId)
-
-  if (messages.length === 0 || selectedGroupIds.length === 0) {
+  // Stable root IDs only (dedupe defense-in-depth; Main rejects duplicates).
+  const rootIds = [...new Set(selectedGroupIds.filter((id) => typeof id === 'string' && id.length > 0))]
+  if (rootIds.length === 0) {
     return 0
   }
 
-  // Snapshot oldGroupList before deletion for anchor transfer
-  const messageIdsBefore = state.messages.messageIdsByTopic[topicId] || []
-  const entitiesBefore = state.messages.entities
-  const oldGroupList = buildGroupList(messageIdsBefore, (id) => entitiesBefore[id])
-
-  // Collect all messages and blocks to delete
-  const allMessagesToDelete: Message[] = []
-  const allBlocksToDelete: MessageBlock[] = []
-  const allMessageIds: string[] = []
-  const allBlockIds: string[] = []
-  const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
-
-  for (const askId of selectedGroupIds) {
-    const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
-
-    for (const msg of groupMessages) {
-      allMessagesToDelete.push(structuredClone(msg))
-      allMessageIds.push(msg.id)
-
-      for (const blockId of msg.blocks || []) {
-        const block = state.messageBlocks.entities[blockId]
-        if (block) {
-          allBlocksToDelete.push(structuredClone(block))
-          allBlockIds.push(blockId)
-
-          // Track file reference deltas
-          if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
-            const file = block.file
-            if (file) {
-              fileReferenceDeltas.push({ fileId: file.id, delta: -1 })
-            }
-          }
-        }
-      }
-    }
-  }
-
-  if (allMessageIds.length === 0) {
-    return 0
-  }
-
-  // Build per-group anchors for undo positioning
-  const groupAnchors = buildGroupAnchors(messages, allBlocksToDelete, selectedGroupIds)
-
-  // Collect segment snapshots BEFORE deletion (needed for undo)
-  const segmentSnapshots = collectSegmentSnapshots(getState, topicId, allMessageIds)
-
-  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
-  let cleanup
+  // Unified semantic delete: DB-first, then one converged projection update
+  // (cleanup consume, loaded-intersection removal, full segment replace,
+  // authority-key anchor transfer) inside the helper.
+  let result: Awaited<ReturnType<typeof executeDeleteMessagesWithDependents>>
   try {
-    cleanup = await deleteMessagesFromDB(topicId, allMessageIds)
+    result = await executeDeleteMessagesWithDependents(dispatch, getState, topicId, rootIds)
   } catch (error) {
     logger.error('[deleteSelectedMessages] Failed to delete from DB', error as Error)
     return 0
   }
 
-  // Consume file cleanup exactly once after commit, before Redux/file changes
-  await consumeFileCleanupResult(cleanup)
-
-  // Remove from Redux only after DB delete succeeds
-  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
-  if (allBlockIds.length > 0) {
-    dispatch(removeManyBlocks(allBlockIds))
-  }
-
-  // Transfer anchors after deletion
-  const newState = getState()
-  const messageIdsAfter = newState.messages.messageIdsByTopic[topicId] || []
-  const entitiesAfter = newState.messages.entities
-  const newGroupList = buildGroupList(messageIdsAfter, (id) => entitiesAfter[id])
-  transferAnchorsAfterDeletion(dispatch, getState, topicId, oldGroupList, newGroupList)
-
-  // Sync segments after message deletion
-  await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
-
   // LOCK-P5.3-1: No separate updateFileCount here. consumeFileCleanupResult
-  // above already handled physical file cleanup via FileManager.deleteFile
-  // which decrements Dexie files.count. A second dbService.updateFileCount
-  // would double-decrement the same references.
+  // inside the helper already handled physical file cleanup via
+  // FileManager.deleteFile which decrements Dexie files.count. A second
+  // dbService.updateFileCount would double-decrement the same references.
 
-  // Create undo action
+  // Undo from the authority snapshot (never loaded projection).
   const undoAction: DeleteUndoAction = {
     id: uuidv4(),
     type: 'delete',
     timestamp: Date.now(),
     targetTopicId: topicId,
-    insertedMessageIds: allMessageIds,
+    rootMessageIds: rootIds,
+    insertedMessageIds: result.response.deletedMessageIds,
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
-    fileReferenceDeltas,
-    groupAnchors,
-    segmentSnapshots
+    fileReferenceDeltas: result.undoParts.fileReferenceDeltas,
+    groupAnchors: result.undoParts.groupAnchors,
+    segmentSnapshots: result.undoParts.segmentSnapshots
   }
 
   dispatch(pushUndoAction(undoAction))
 
   logger.info(
-    `[deleteSelectedMessages] Deleted ${allMessageIds.length} messages from ${selectedGroupIds.length} groups`
+    `[deleteSelectedMessages] Deleted ${result.response.deletedMessageIds.length} messages from ${rootIds.length} groups`
   )
-  return allMessageIds.length
+  return result.response.deletedMessageIds.length
 }
 
 /**
  * Delete a single message with undo support.
- * If deleting a user message, cascades to all assistant messages with matching askId,
- * and transfers anchors for all affected assistants.
- * If deleting an assistant message, only deletes that single message.
+ *
+ * Unified semantic path: the message ID is passed as the single stable root
+ * — Main resolves dependents (user + same-askId assistants, or single
+ * non-user) and returns the authority undo snapshot. The menu confirm dialog
+ * and trace cleanup stay at the Menu/hook layer; this function ends at the
+ * semantic command. DB failure leaves Redux/anchors untouched and pushes no
+ * undo.
  */
 export async function deleteSingleMessage(
   dispatch: AppDispatch,
@@ -757,113 +701,40 @@ export async function deleteSingleMessage(
   const msg = state.messages.entities[message.id]
   if (!msg) return
 
-  // Snapshot oldGroupList before deletion for anchor transfer
-  const messageIdsBefore = state.messages.messageIdsByTopic[topicId] || []
-  const entitiesBefore = state.messages.entities
-  const oldGroupList = buildGroupList(messageIdsBefore, (id) => entitiesBefore[id])
-
-  // Determine cascade: user messages delete their assistant children
-  let allMessageIds: string[]
-  let allMessages: Message[]
-  if (msg.role === 'user') {
-    const topicMessages = selectMessagesForTopic(state, topicId)
-    const groupMessages = topicMessages.filter((m) => m.askId === message.id)
-    allMessageIds = [message.id, ...groupMessages.map((m) => m.id)]
-    allMessages = [msg, ...groupMessages]
-  } else {
-    allMessageIds = [message.id]
-    allMessages = [msg]
-  }
-
-  // Collect blocks for all messages
-  const allBlockIds: string[] = []
-  const allBlocks: MessageBlock[] = []
-  for (const m of allMessages) {
-    for (const blockId of m.blocks || []) {
-      const block = state.messageBlocks.entities[blockId]
-      if (block) {
-        allBlockIds.push(blockId)
-        allBlocks.push(block)
-      }
-    }
-  }
-
-  // Collect file reference deltas (for undo restoration)
-  const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
-  for (const block of allBlocks) {
-    if (block.type === MessageBlockType.FILE || block.type === MessageBlockType.IMAGE) {
-      const file = block.file
-      if (file) {
-        fileReferenceDeltas.push({ fileId: file.id, delta: -1 })
-      }
-    }
-  }
-
-  // Calculate position info (for undo restoration to original position)
-  const topicMessages = selectMessagesForTopic(state, topicId)
-  const positionIndex = topicMessages.findIndex((m) => m.id === message.id)
-  const nextMessage = positionIndex >= 0 ? topicMessages[positionIndex + 1] : undefined
-
-  // Collect segment snapshots BEFORE deletion (needed for undo)
-  const segmentSnapshots = collectSegmentSnapshots(getState, topicId, allMessageIds)
-
-  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
-  let cleanup
+  // Unified semantic delete: DB-first, then one converged projection update
+  // inside the helper (cleanup consume, loaded-intersection removal, full
+  // segment replace, authority-key anchor transfer).
+  let result: Awaited<ReturnType<typeof executeDeleteMessagesWithDependents>>
   try {
-    cleanup = await deleteMessagesFromDB(topicId, allMessageIds)
+    result = await executeDeleteMessagesWithDependents(dispatch, getState, topicId, [message.id])
   } catch (error) {
     logger.error('[deleteSingleMessage] Failed to delete from DB', error as Error)
     return
   }
 
-  // Consume file cleanup exactly once after commit, before Redux/file changes
-  await consumeFileCleanupResult(cleanup)
-
-  // Redux: remove from state only after DB delete succeeds
-  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: allMessageIds }))
-  if (allBlockIds.length > 0) {
-    dispatch(removeManyBlocks(allBlockIds))
-  }
-
-  // Transfer anchors after deletion (only if user message was deleted)
-  if (msg.role === 'user') {
-    const newState = getState()
-    const messageIdsAfter = newState.messages.messageIdsByTopic[topicId] || []
-    const entitiesAfter = newState.messages.entities
-    const newGroupList = buildGroupList(messageIdsAfter, (id) => entitiesAfter[id])
-    transferAnchorsAfterDeletion(dispatch, getState, topicId, oldGroupList, newGroupList)
-  }
-
-  // Sync segments after message deletion
-  await syncSegmentsAfterMessageDeletion(dispatch, getState, topicId, allMessageIds)
-
   // LOCK-P5.3-1: No separate updateFileCount here. consumeFileCleanupResult
-  // above already handled physical file cleanup via FileManager.deleteFile
-  // which decrements Dexie files.count. A second dbService.updateFileCount
-  // would double-decrement the same references.
+  // inside the helper already handled physical file cleanup via
+  // FileManager.deleteFile which decrements Dexie files.count. A second
+  // dbService.updateFileCount would double-decrement the same references.
 
-  // Build undo data
-  const groupAnchor: GroupAnchor = {
-    messages: allMessages.map((m) => structuredClone(m)),
-    blocks: allBlocks.map((b) => structuredClone(b)),
-    positionIndex: positionIndex >= 0 ? positionIndex : 0,
-    anchorMessageId: nextMessage?.id ?? null
-  }
-
+  // Undo from the authority snapshot (never loaded projection).
   const undoAction: DeleteUndoAction = {
     id: uuidv4(),
     type: 'delete',
     timestamp: Date.now(),
     targetTopicId: topicId,
-    insertedMessageIds: allMessageIds,
+    rootMessageIds: [message.id],
+    insertedMessageIds: result.response.deletedMessageIds,
     pastedMessagesSnapshot: [],
     pastedBlocksSnapshot: [],
-    fileReferenceDeltas,
-    groupAnchors: [groupAnchor],
-    segmentSnapshots
+    fileReferenceDeltas: result.undoParts.fileReferenceDeltas,
+    groupAnchors: result.undoParts.groupAnchors,
+    segmentSnapshots: result.undoParts.segmentSnapshots
   }
 
   dispatch(pushUndoAction(undoAction))
 
-  logger.info(`[deleteSingleMessage] Deleted ${allMessageIds.length} messages from topic ${topicId}`)
+  logger.info(
+    `[deleteSingleMessage] Deleted ${result.response.deletedMessageIds.length} messages from topic ${topicId}`
+  )
 }

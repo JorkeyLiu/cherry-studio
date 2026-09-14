@@ -35,6 +35,7 @@ import type {
   DeleteBlocksRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
+  DeleteMessagesWithDependentsRequest,
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
@@ -413,11 +414,11 @@ export function registerChatDbIpc(): () => void {
     })
   })
 
-  // 7b. select-answer-message (PERF-100): one atomic multi-model answer
-  // selection — validates topic ownership of every supplied ID and persists
+  // 7b. select-answer-message: cross-process authority selection — Main
+  // resolves the complete answer group from the selected ID and persists
   // exactly one foldSelected=true in one Main transaction.
   handleCommand(IpcChannel.ChatDb_SelectAnswerMessage, (agg, req: SelectAnswerMessageRequest) => {
-    return agg.selectAnswerMessage(req.topicId, req.selectedMessageId, req.messageIds)
+    return agg.selectAnswerMessage(req.topicId, req.selectedMessageId)
   })
 
   // 8. delete-message
@@ -545,6 +546,11 @@ export function registerChatDbIpc(): () => void {
   // 31. delete-messages-with-segments (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_DeleteMessagesWithSegments, (agg, req: DeleteMessagesWithSegmentsRequest) => {
     return agg.deleteMessagesWithSegments(req.topicId, req.messageIds)
+  })
+
+  // 31b. delete-messages-with-dependents: semantic plural delete with Main-resolved cascade + authority undo snapshot
+  handleCommand(IpcChannel.ChatDb_DeleteMessagesWithDependents, (agg, req: DeleteMessagesWithDependentsRequest) => {
+    return agg.deleteMessagesWithDependents(req.topicId, req.messageIds)
   })
 
   // 32. paste-messages-to-topic (Phase 5.1B)
