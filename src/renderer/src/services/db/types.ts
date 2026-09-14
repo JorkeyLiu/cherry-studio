@@ -6,6 +6,8 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchTopicActivityResponse,
+  FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
@@ -279,6 +281,28 @@ export interface MessageDataSource {
     blocks: MessageBlock[]
     snapshot: FetchWholeTopicSnapshotResponse['snapshot']
   }>
+
+  /**
+   * Bounded naming-context READ for automatic/manual naming.
+   * Returns authority naming metadata, exact count, first message (or null),
+   * latest at most 5 messages in authority ASC order, and blocks for those
+   * returned messages only. Missing topic → throws ChatDbResultError (NOT_FOUND).
+   */
+  fetchTopicNamingContext?(topicId: string): Promise<{
+    topic: FetchTopicNamingContextResponse['topic']
+    messageCount: number
+    firstMessage: Message | null
+    latestMessages: Message[]
+    blocks: MessageBlock[]
+    naming: FetchTopicNamingContextResponse['naming']
+  }>
+
+  /**
+   * Bounded topic activity READ for rate-limit checks.
+   * Returns exact count plus latest message id/timestamp; no messages/blocks.
+   * Missing topic → throws ChatDbResultError (NOT_FOUND).
+   */
+  fetchTopicActivity?(topicId: string): Promise<FetchTopicActivityResponse>
 
   // ============ File Operations (Optional) ============
 

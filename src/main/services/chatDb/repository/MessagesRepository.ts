@@ -217,6 +217,44 @@ export class MessagesRepository {
   }
 
   /**
+   * Bounded authority read: first message in deterministic order.
+   *
+   * Uses the existing topic_id/sort_order authority ordering
+   * (sort_order ASC, id ASC) with a single-row limit. Never materializes
+   * the whole topic.
+   */
+  getFirstByTopic(topicId: string): MessageData | null {
+    const row = this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.topicId, topicId))
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .limit(1)
+      .get()
+    if (!row) return null
+    return fromDrizzleResult<MessageData>(row, 'messages', (row as any).id)
+  }
+
+  /**
+   * Bounded authority read: latest N messages in deterministic ASC order.
+   *
+   * Reads the tail with a bounded DESC limit over the same
+   * topic_id/sort_order authority ordering, then reverses to ASC so callers
+   * observe authority order without a whole-topic scan into memory.
+   */
+  getLatestByTopic(topicId: string, limit: number): MessageData[] {
+    if (!Number.isInteger(limit) || limit <= 0) return []
+    const rows = this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.topicId, topicId))
+      .orderBy(desc(messages.sortOrder), desc(messages.id))
+      .limit(limit)
+      .all()
+    return rows.reverse().map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
    * Append many messages at the end of their topics in ONE batch.
    *
    * Semantics are the batch analog of {@link append}: for each affected

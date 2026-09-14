@@ -20,12 +20,25 @@
  *   threshold (`Math.min(0, clientHeight - scrollHeight)`), production
  *   InfiniteScroll → around → mergeWindowIntoTopic → Redux/DOM growth. No
  *   synthetic dispatch, no spacer, no instrumentation.
+ * - R-04 whole-topic snapshot via real copy-as-Markdown — INTEGRATED snapshot
+ *   action with independent fetchWholeTopicSnapshot oracle; loaded window
+ *   unchanged (snapshot never publishes).
+ * - R-05 ChatFlowHistory whole-topic graph — INTEGRATED UI evidence: enable
+ *   messageNavigation via existing settings action, cold-activate the same
+ *   50/20 seed, open Chat History through the hover-gated navigation button
+ *   (accessible role/name, locale-robust), assert the ReactFlow drawer holds
+ *   deterministic head/window-outside + tail content with node count 50 > 20
+ *   against the fetchWholeTopicSnapshot oracle, loaded Redux/DOM unchanged,
+ *   then real-send a marker with the drawer open and assert the coalesced
+ *   MESSAGE_COMPLETE/updatedAt refetch grows the graph (marker + reply +
+ *   retained head, no empty state).
  *
  * Governing constraints:
  * - Uses standard fixture (fresh production build, disposable profile, mock provider).
  * - Seeds via approved pattern only; no direct SQLite file writes.
- * - Calls the existing `chatdb:fetch-messages-window` contract only; 1..100 are
- *   validation bounds, not new defaults; no R-04/R-05/R-06, no new fields/SQL/cursors.
+ * - Calls the existing `chatdb:fetch-messages-window` contract and the
+ *   already-used `chatdb:fetch-whole-topic-snapshot` oracle only; 1..100 are
+ *   validation bounds, not new defaults; no R-06, no new fields/SQL/cursors.
  * - No wrapper/monkey-patching of `window.api.chatDb.fetchMessagesWindow`,
  *   `window.electron.ipcRenderer`, or legacy `fetchMessages`; no call-count asserts
  *   from ineffective wrappers; no synthetic Redux publication. UI scroll uses the
@@ -34,7 +47,7 @@
  * - No production source/docs edits, no fixture-global edits, no new selectors.
  */
 
-import { expect, test } from '../../fixtures/electron.fixture'
+import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
 
 const DISPLAY_LIMIT = 20 // caller-provided limit within 1..100
 const SYNTHETIC_TOTAL = 50 // > DISPLAY_LIMIT to prove bounded window
@@ -186,6 +199,187 @@ async function activateTopicAndWaitForBootstrap(page: any, topicId: string): Pro
     DISPLAY_LIMIT,
     { timeout: 30000 }
   )
+}
+
+/**
+ * Real UI send pattern copied from ordinary-chat.spec.ts (spec-local only —
+ * never a fixture-global helper). Exercises the production InputbarCore →
+ * sendMessage thunk path via React-compatible input events + Enter.
+ */
+async function uiSendMessage(page: any, text: string): Promise<void> {
+  const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+  await textarea.waitFor({ state: 'visible', timeout: 15000 })
+  await textarea.click()
+
+  await page.evaluate(
+    ({ selector, text }: { selector: string; text: string }) => {
+      const el = document.querySelector(selector) as HTMLTextAreaElement
+      if (!el) throw new Error('Textarea not found')
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+      if (!nativeSetter) throw new Error('No native textarea setter')
+      nativeSetter.call(el, text)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    { selector: '.inputbar textarea, textarea[placeholder]', text }
+  )
+
+  await expect(textarea).toHaveValue(text, { timeout: 5000 })
+  await textarea.press('Enter')
+}
+
+/**
+ * R-05 drawer-open send (spec-local only — never a fixture-global helper).
+ * The ReactFlow drawer pane overlays `.inputbar textarea`, so Playwright
+ * pointer actionability (click / locator.press) cannot pass while the drawer
+ * stays open. This helper keeps the drawer open and still exercises the
+ * production input event + Enter send path: DOM focus (no click), native
+ * HTMLTextAreaElement value setter + bubbling `input` event for React state,
+ * value assertion, then global Enter while the textarea is focused. No Redux
+ * thunk/service dispatch, no production formatter calls.
+ */
+async function uiSendMessageWithDrawerOpen(page: any, text: string): Promise<void> {
+  const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+  await textarea.waitFor({ state: 'attached', timeout: 15000 })
+  await expect(textarea).toBeEnabled({ timeout: 10000 })
+  await textarea.evaluate((el: HTMLTextAreaElement) => el.focus())
+
+  await page.evaluate(
+    ({ selector, text }: { selector: string; text: string }) => {
+      const el = document.querySelector(selector) as HTMLTextAreaElement
+      if (!el) throw new Error('Textarea not found')
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+      if (!nativeSetter) throw new Error('No native textarea setter')
+      nativeSetter.call(el, text)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    { selector: '.inputbar textarea, textarea[placeholder]', text }
+  )
+
+  await expect(textarea).toHaveValue(text, { timeout: 5000 })
+  await page.keyboard.press('Enter')
+}
+
+/**
+ * Assistant-completion wait copied from ordinary-chat.spec.ts (spec-local
+ * only). Resolves when a new assistant message reaches terminal status with
+ * terminal blocks and the topic queue drained.
+ */
+async function waitForAssistantResponseComplete(
+  page: any,
+  topicId: string,
+  previousAssistantCount: number,
+  timeout = 60000
+): Promise<number> {
+  await page.waitForFunction(
+    ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
+      const s = (window as any).store?.getState()
+      if (!s) return false
+      const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+      let count = 0
+      for (const id of msgIds) {
+        const msg = s.messages.entities?.[id]
+        if (msg?.role === 'assistant') count++
+      }
+      return count > prevCount
+    },
+    { topicId, prevCount: previousAssistantCount },
+    { timeout }
+  )
+
+  await page.waitForFunction(
+    ({ topicId }: { topicId: string }) => {
+      const s = (window as any).store?.getState()
+      if (!s) return false
+      if (s.messages?.loadingByTopic?.[topicId]) return false
+      const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+      let latestAssistantId: string | null = null
+      for (let i = msgIds.length - 1; i >= 0; i--) {
+        const msg = s.messages.entities?.[msgIds[i]]
+        if (msg?.role === 'assistant') {
+          latestAssistantId = msgIds[i]
+          break
+        }
+      }
+      if (!latestAssistantId) return false
+      const assistantMsg = s.messages.entities[latestAssistantId]
+      if (!['success', 'error'].includes(assistantMsg.status)) return false
+      const blocks = assistantMsg.blocks || []
+      if (blocks.length === 0) return false
+      for (const blockId of blocks) {
+        const block = s.messageBlocks?.entities?.[blockId]
+        if (!block) return false
+        if (block.status !== 'success' && block.status !== 'error') return false
+      }
+      return true
+    },
+    { topicId },
+    { timeout }
+  )
+
+  return page.evaluate((topicId: string) => {
+    const s = (window as any).store.getState()
+    const msgIds = s.messages.messageIdsByTopic[topicId] || []
+    let count = 0
+    for (const id of msgIds) {
+      const msg = s.messages.entities[id]
+      if (msg?.role === 'assistant') count++
+    }
+    return count
+  }, topicId)
+}
+
+const HISTORY_ACCESSIBLE_NAME = '^(Chat History|聊天历史)$'
+
+/**
+ * Opens the Chat History drawer through the real hover-gated navigation bar
+ * (ChatNavigation.tsx, spec-local only). The bar is pointer-events:none until
+ * the cursor enters the trigger band (RIGHT_GAP=16, width=60, vertical
+ * 35%..65% of viewport, right offset +275 when right topics are shown). The
+ * trigger point is derived from that production geometry plus the live
+ * store/viewport — never arbitrary coordinates — and delivered as a real
+ * mouse move through the production window-mousemove path. Up to four
+ * derived vertical candidates are probed (elementFromPoint actionability) to
+ * tolerate an excluded-area landing (e.g. code-toolbar under the cursor).
+ */
+async function openChatHistoryDrawer(page: any): Promise<void> {
+  const candidates = await page.evaluate(() => {
+    const s = (window as any).store.getState()
+    const showRightTopics = s.settings?.showTopics !== false
+    const rightOffset = 16 + (showRightTopics ? 275 : 0)
+    const x = Math.round(window.innerWidth - rightOffset - 60 / 2)
+    const ys = [0.5, 0.42, 0.58, 0.38].map((f) => Math.round(window.innerHeight * f))
+    return { x, ys }
+  })
+
+  let exposed = false
+  for (const y of candidates.ys) {
+    await page.mouse.move(candidates.x, y)
+    // Bounded settle for the 50ms production mousemove throttle + React flush.
+    await page.waitForTimeout(300)
+    const probe = await page.evaluate((pattern: string) => {
+      const re = new RegExp(pattern)
+      const btn =
+        Array.from(document.querySelectorAll('button')).find((b) =>
+          re.test((b.getAttribute('aria-label') || '').trim())
+        ) ?? null
+      if (!btn) return { found: false, hit: false }
+      const r = btn.getBoundingClientRect()
+      if (r.width === 0 && r.height === 0) return { found: true, hit: false }
+      const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+      return { found: true, hit: !!el && (el === btn || btn.contains(el)) }
+    }, HISTORY_ACCESSIBLE_NAME)
+    if (probe.hit) {
+      exposed = true
+      break
+    }
+  }
+  expect(exposed, 'hover trigger band never exposed the history navigation button').toBe(true)
+
+  const historyBtn = page.getByRole('button', { name: new RegExp(HISTORY_ACCESSIBLE_NAME) })
+  await historyBtn.hover({ timeout: 10000 })
+  await historyBtn.click({ timeout: 10000 })
 }
 
 test.describe('windowed reads: latest and around', () => {
@@ -881,5 +1075,184 @@ test.describe('windowed reads: latest and around', () => {
       )
       .toBe(DISPLAY_LIMIT)
     console.log('[E2E] R-04 post window unchanged (Redux blocks/DOM stable, no publish)')
+  })
+
+  test('R-05 ChatFlowHistory whole-topic graph — bounded window preserved + live marker refetch', async ({
+    mainWindow
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'R-05 INTEGRATED UI: settings/setMessageNavigation enable → cold activate 50-msg topic (20 loaded) → hover-gated Chat History drawer shows whole-topic ReactFlow graph (head + tail, 50 nodes) against fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged → real-send marker with drawer open → coalesced MESSAGE_COMPLETE/updatedAt refetch grows graph to 52 (marker + reply + retained head, no empty state). Deterministic mocked provider; no direct formatter/component calls.'
+    })
+
+    const page = mainWindow
+
+    // 1) Enable messageNavigation through the existing Redux settings action/path.
+    await page.evaluate(() => {
+      ;(window as any).store.dispatch({ type: 'settings/setMessageNavigation', payload: true })
+    })
+    const navEnabled = await page.evaluate(() => (window as any).store.getState().settings?.messageNavigation)
+    expect(navEnabled).toBe(true)
+    console.log('[E2E] R-05 messageNavigation enabled via settings/setMessageNavigation')
+
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `window-r05-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    await seedWindowTopic(page, liveAssistantId, topicId)
+
+    // 2) Cold activate and capture the loaded tail; head ID/content absent from the loaded projection.
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const seedContent = `window-test-content-${'x'.repeat(40)}`
+    const headId = `${topicId}-msg-${pad(0, 5)}`
+    const tailId = `${topicId}-msg-${pad(SYNTHETIC_TOTAL - 1, 5)}`
+    const headContent = `${seedContent}-${pad(0, 5)}`
+    const tailContent = `${seedContent}-${pad(SYNTHETIC_TOTAL - 1, 5)}`
+    const expectedTailIds: string[] = []
+    for (let i = SYNTHETIC_TOTAL - DISPLAY_LIMIT; i < SYNTHETIC_TOTAL; i++) {
+      expectedTailIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+    const expectedFullIds: string[] = []
+    for (let i = 0; i < SYNTHETIC_TOTAL; i++) {
+      expectedFullIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
+
+    const pre = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
+      const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+      )
+      return { ids, domIds, domCount: domIds.length }
+    }, topicId)
+    expect(pre.ids).toEqual(expectedTailIds)
+    expect(pre.domCount).toBe(DISPLAY_LIMIT)
+    expect([...pre.domIds].sort()).toEqual([...expectedTailIds].sort())
+    expect(pre.ids).not.toContain(headId)
+    expect(pre.ids).toContain(tailId)
+    await expect(page.locator('#messages')).not.toContainText(headContent, { timeout: 10000 })
+    await expect(page.locator('#messages')).toContainText(tailContent, { timeout: 10000 })
+    console.log(`[E2E] R-05 pre window ids=${pre.ids.length} dom=${pre.domCount} head absent`)
+
+    // 3) Open Chat History via the hover-gated navigation button (accessible role/name, locale-robust).
+    await openChatHistoryDrawer(page)
+    const drawer = page.locator('.ant-drawer.ant-drawer-open')
+    await expect(drawer).toBeVisible({ timeout: 15000 })
+    await expect(drawer.locator('.ant-drawer-title')).toHaveText(/^(Chat History|聊天历史)$/, { timeout: 10000 })
+    await expect(drawer.locator('.react-flow')).toBeVisible({ timeout: 20000 })
+    console.log('[E2E] R-05 drawer + ReactFlow visible')
+
+    // 4) Graph holds deterministic head/window-outside + tail content; node
+    // count exact 50 (25 user + 25 assistant incl. equal-stamp orphans) > 20;
+    // independent whole-topic snapshot oracle for count/order.
+    await expect(drawer).toContainText(headContent, { timeout: 20000 })
+    await expect(drawer).toContainText(tailContent, { timeout: 10000 })
+    await expect
+      .poll(async () => await drawer.locator('.react-flow__node').count(), { timeout: 20000 })
+      .toBe(SYNTHETIC_TOTAL)
+    const nodeCount = await drawer.locator('.react-flow__node').count()
+    expect(nodeCount).toBeGreaterThan(pre.ids.length)
+    console.log(`[E2E] R-05 graph nodes=${nodeCount} loaded=${pre.ids.length}`)
+
+    const snap: any = await page.evaluate(
+      async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
+      topicId
+    )
+    expect(snap.ok).toBe(true)
+    const sval: any = snap.value
+    expect(sval.snapshot.completeness).toBe('whole-topic')
+    expect(sval.snapshot.topicId).toBe(topicId)
+    expect(sval.snapshot.returnedCount).toBe(SYNTHETIC_TOTAL)
+    expect(sval.snapshot.firstMessageId).toBe(headId)
+    expect(sval.snapshot.lastMessageId).toBe(tailId)
+    expect(sval.messages.map((m: any) => m.id)).toEqual(expectedFullIds)
+    expect(new Set(sval.messages.map((m: any) => m.id)).size).toBe(sval.messages.length)
+    console.log(`[E2E] R-05 snapshot oracle count=${sval.snapshot.returnedCount}`)
+
+    // 5) Loaded Redux IDs and normal message DOM remain unchanged/bounded after opening the drawer.
+    const post = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
+      const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+      )
+      return { ids, domIds, domCount: domIds.length }
+    }, topicId)
+    expect(post.ids).toEqual(pre.ids)
+    expect(post.domCount).toBe(DISPLAY_LIMIT)
+    expect([...post.domIds].sort()).toEqual([...pre.domIds].sort())
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+            topicId
+          ),
+        { timeout: 1500 }
+      )
+      .toBe(DISPLAY_LIMIT)
+    console.log('[E2E] R-05 post-drawer window unchanged (Redux/DOM stable, no publish)')
+
+    // 6) While the drawer remains open, real-send a marker through the input
+    // UI and wait for assistant completion (terminal Redux state).
+    const prevAssistantCount = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+      let n = 0
+      for (const id of ids) {
+        if (s.messages?.entities?.[id]?.role === 'assistant') n++
+      }
+      return n
+    }, topicId)
+    const marker = `R05 history marker ${Date.now()}`
+    const seq = getRequestSequence()
+    await uiSendMessageWithDrawerOpen(page, marker)
+    await waitForAssistantResponseComplete(page, topicId, prevAssistantCount)
+    const productReq = findProductRequestAfter(seq)
+    expect(productReq).not.toBeNull()
+    expect(JSON.stringify((productReq as any).parsed?.messages ?? '')).toContain(marker)
+    const expectedReply = `[Mock mock-model] You said: "${marker.slice(0, 100)}"`
+    console.log(`[E2E] R-05 marker sent+completed seq=${(productReq as any)?.sequence}`)
+
+    // After terminal MESSAGE_COMPLETE/coalesced refetch: drawer contains the
+    // new user marker (and deterministic assistant reply) while the old head
+    // remains; graph is fresh (52 nodes), never stale/empty.
+    await expect(drawer).toContainText(marker, { timeout: 20000 })
+    await expect(drawer).toContainText(expectedReply, { timeout: 20000 })
+    await expect(drawer).toContainText(headContent, { timeout: 10000 })
+    await expect(drawer.locator('.react-flow')).toBeVisible({ timeout: 10000 })
+    await expect(drawer.getByText(/^(No Messages Found|没有找到消息)$/)).toHaveCount(0)
+    await expect
+      .poll(async () => await drawer.locator('.react-flow__node').count(), { timeout: 20000 })
+      .toBe(SYNTHETIC_TOTAL + 2)
+    console.log('[E2E] R-05 drawer refetched: marker + reply + head present, nodes=52')
+
+    const snap2: any = await page.evaluate(
+      async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
+      topicId
+    )
+    expect(snap2.ok).toBe(true)
+    const sval2: any = snap2.value
+    expect(sval2.snapshot.completeness).toBe('whole-topic')
+    expect(sval2.snapshot.returnedCount).toBe(SYNTHETIC_TOTAL + 2)
+    expect(sval2.snapshot.firstMessageId).toBe(headId)
+    expect(sval2.snapshot.lastMessageId).not.toBe(tailId)
+    expect(new Set(sval2.messages.map((m: any) => m.id)).size).toBe(sval2.messages.length)
+    const toNum = (id: string) => Number(id.split('-').pop())
+    const seededNums = sval2.messages
+      .map((m: any) => m.id)
+      .filter((id: string) => id.startsWith(`${topicId}-msg-`))
+      .map(toNum)
+    for (let i = 1; i < seededNums.length; i++) {
+      expect(seededNums[i]).toBeGreaterThan(seededNums[i - 1])
+    }
+    console.log(`[E2E] R-05 post-send snapshot oracle count=${sval2.snapshot.returnedCount}`)
+
+    // 7) Close via visible drawer's own close button; drawer hidden, no global cleanup.
+    const drawerCloseButton = drawer.locator('.ant-drawer-close')
+    await expect(drawerCloseButton).toBeVisible({ timeout: 10000 })
+    await drawerCloseButton.click()
+    await expect(page.locator('.ant-drawer.ant-drawer-open')).toHaveCount(0, { timeout: 10000 })
+    console.log('[E2E] R-05 drawer closed via close button')
   })
 })

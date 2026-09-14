@@ -3,9 +3,9 @@ import SearchPopup from '@renderer/components/Popups/SearchPopup'
 import { getTopicById } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
+import { dbService } from '@renderer/services/db'
 import store from '@renderer/store'
 import { messageBlocksSelectors, removeManyBlocks } from '@renderer/store/messageBlock'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import type { Assistant, FileMetadata, Model, Topic, Usage } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -311,23 +311,44 @@ export async function getMessageTitle(message: Message, length = 30): Promise<st
   return title
 }
 
-export function checkRateLimit(assistant: Assistant): boolean {
+export async function checkRateLimit(assistant: Assistant, topicId: string): Promise<boolean> {
   const provider = getAssistantProvider(assistant)
 
   if (!provider?.rateLimit) {
     return false
   }
 
-  const topicId = assistant.topics[0].id
-  const messages = selectMessagesForTopic(store.getState(), topicId)
+  if (!topicId) {
+    return false
+  }
 
-  if (!messages || messages.length <= 1) {
+  // Bounded activity authority: exact count + latest timestamp only.
+  // Never loads whole-topic messages for rate-limit checks. Metadata
+  // failure (missing topic / transport) allows send — it must not block.
+  let messageCount: number
+  let latestMessageCreatedAt: string | null
+  try {
+    const activity = await dbService.fetchTopicActivity(topicId)
+    messageCount = activity.messageCount
+    latestMessageCreatedAt = activity.latestMessageCreatedAt
+  } catch (error) {
+    logger.warn('checkRateLimit: topic activity read failed, allowing send', error as Error)
+    return false
+  }
+
+  if (messageCount <= 1) {
+    return false
+  }
+
+  if (!latestMessageCreatedAt) {
     return false
   }
 
   const now = Date.now()
-  const lastMessage = messages[messages.length - 1]
-  const lastMessageTime = new Date(lastMessage.createdAt).getTime()
+  const lastMessageTime = new Date(latestMessageCreatedAt).getTime()
+  if (!Number.isFinite(lastMessageTime)) {
+    return false
+  }
   const timeDiff = now - lastMessageTime
   const rateLimitMs = provider.rateLimit * 1000
 

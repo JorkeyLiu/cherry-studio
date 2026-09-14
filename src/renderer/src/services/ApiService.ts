@@ -24,6 +24,11 @@ import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailabi
 import { getErrorMessage, isAbortError } from '@renderer/utils/error'
 import { purifyMarkdownImages } from '@renderer/utils/markdown'
 import { findFileBlocks, findImageBlocks, getMainTextContent } from '@renderer/utils/messageUtils/find'
+import {
+  findFileSnapshotBlocks,
+  getMainTextSnapshotContent,
+  type SnapshotBlockMap
+} from '@renderer/utils/messageUtils/snapshotBlocks'
 import { assertProviderMatchesModel, createNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
 import { NOT_SUPPORT_API_KEY_PROVIDER_TYPES, NOT_SUPPORT_API_KEY_PROVIDERS } from '@renderer/utils/provider'
@@ -498,9 +503,18 @@ export async function fetchImageGeneration({
 }
 
 export async function fetchMessagesSummary({
-  messages
+  messages,
+  blocksById
 }: {
   messages: Message[]
+  /**
+   * Explicit snapshot block source for bounded authority messages.
+   * When supplied, main-text/file names resolve from this map via the
+   * snapshot helpers instead of the loaded Redux projection. Absent =
+   * legacy live-store resolution (preserved for existing Message[] and
+   * single-message title call sites).
+   */
+  blocksById?: SnapshotBlockMap
 }): Promise<{ text: string | null; error?: string }> {
   let prompt = getStoreSetting('topicNamingPrompt') || i18n.t('prompts.title')
   const model = getQuickModel()
@@ -537,14 +551,15 @@ export async function fetchMessagesSummary({
 
   // LLM对多条消息的总结有问题，用单条结构化的消息表示会话内容会更好
   const structredMessages = contextMessages.map((message) => {
+    const mainText = blocksById ? getMainTextSnapshotContent(message, blocksById) : getMainTextContent(message)
     const structredMessage = {
       role: message.role,
-      mainText: purifyMarkdownImages(getMainTextContent(message))
+      mainText: purifyMarkdownImages(mainText)
     }
 
     // 让LLM知道消息中包含的文件，但只提供文件名
     // 对助手消息而言，没有提供工具调用结果等更多信息，仅提供文本上下文。
-    const fileBlocks = findFileBlocks(message)
+    const fileBlocks = blocksById ? findFileSnapshotBlocks(message, blocksById) : findFileBlocks(message)
     let fileList: Array<string> = []
     if (fileBlocks.length && fileBlocks.length > 0) {
       fileList = fileBlocks.map((fileBlock) => fileBlock.file.origin_name)

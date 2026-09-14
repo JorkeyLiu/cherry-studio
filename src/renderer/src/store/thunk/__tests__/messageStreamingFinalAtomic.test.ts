@@ -479,6 +479,92 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
   })
 })
 
+describe('Naming lifecycle: post-persist only', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
+    mocks.getAssistantSettings.mockReturnValue({})
+    mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
+    mocks.autoRenameTopic.mockResolvedValue(undefined)
+  })
+
+  it('success: naming starts after final DB persist and loaded Redux final dispatch', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-text'] })
+    seedBlocks(store, [textBlock({ status: MessageBlockStatus.STREAMING, content: 'streaming...' })])
+
+    const order: string[] = []
+    let reduxAtNaming: { block?: string; message?: string } = {}
+    mocks.autoRenameTopic.mockImplementationOnce(async () => {
+      order.push('naming')
+      reduxAtNaming = {
+        block: store.getState().messageBlocks.entities['b-text']?.status as unknown as string,
+        message: store.getState().messages.entities[ASSISTANT_MSG_ID]?.status as unknown as string
+      }
+    })
+    const saveFinal = async (mid: string, tid: string, mu: any, blocks: any[]) => {
+      order.push('persist')
+      const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
+      return saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT)
+    }
+
+    const { manager, callbacks } = await createHarness(store, saveFinal)
+    manager.activeBlockInfo = { id: 'b-text', type: MessageBlockType.MAIN_TEXT }
+    const emitSpy = vi.spyOn(EventEmitter, 'emit')
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(order).toEqual(['persist', 'naming'])
+    expect(mocks.autoRenameTopic).toHaveBeenCalledTimes(1)
+    expect(mocks.autoRenameTopic).toHaveBeenCalledWith(assistantStub, TOPIC_ID)
+    // Loaded Redux final update already dispatched before naming started.
+    expect(reduxAtNaming.block).toBe(MessageBlockStatus.SUCCESS)
+    expect(reduxAtNaming.message).toBe(AssistantMessageStatus.SUCCESS)
+    expect(emitSpy).toHaveBeenCalledWith(EVENT_NAMES.MESSAGE_COMPLETE, {
+      id: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      status: AssistantMessageStatus.SUCCESS
+    })
+    emitSpy.mockRestore()
+  })
+
+  it('success persist rejection never starts naming and never emits', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-text'] })
+    seedBlocks(store, [textBlock({ status: MessageBlockStatus.STREAMING, content: 'streaming...' })])
+    const saveFinal = vi.fn().mockRejectedValueOnce(new Error('db down'))
+
+    const { manager, callbacks } = await createHarness(store, saveFinal)
+    manager.activeBlockInfo = { id: 'b-text', type: MessageBlockType.MAIN_TEXT }
+    const emitSpy = vi.spyOn(EventEmitter, 'emit')
+    await expect(callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)).rejects.toThrow('db down')
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(saveFinal).toHaveBeenCalledTimes(1)
+    expect(mocks.autoRenameTopic).not.toHaveBeenCalled()
+    expect(emitSpy).not.toHaveBeenCalled()
+    emitSpy.mockRestore()
+  })
+
+  it('non-success final never starts naming', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-text'] })
+    seedBlocks(store, [textBlock({ status: MessageBlockStatus.STREAMING })])
+
+    const { manager, callbacks } = await createHarness(store)
+    manager.activeBlockInfo = { id: 'b-text', type: MessageBlockType.MAIN_TEXT }
+    await callbacks.onComplete(AssistantMessageStatus.ERROR, successResponse)
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
+    expect(mocks.autoRenameTopic).not.toHaveBeenCalled()
+  })
+})
+
 describe('Detached execution: request-local state completes without Redux injection', () => {
   beforeEach(() => {
     vi.clearAllMocks()

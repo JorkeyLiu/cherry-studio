@@ -52,6 +52,7 @@ import TopicSegmentDrawer from '../Messages/TopicSegmentDrawer'
 import { InputbarCore } from './components/InputbarCore'
 import { useContextWindowAnchor } from './hooks/useContextWindowAnchor'
 import { usePromptTokenEstimate } from './hooks/usePromptTokenEstimate'
+import { useSendInFlightGuard } from './hooks/useSendInFlightGuard'
 import InputbarTools from './InputbarTools'
 import KnowledgeBaseInput from './KnowledgeBaseInput'
 import MentionModelsInput from './MentionModelsInput'
@@ -191,6 +192,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const contextCount = previewContextInfo.contextCount
 
   const dispatch = useAppDispatch()
+  const { runSend } = useSendInFlightGuard()
   const isVisionAssistant = useMemo(() => isVisionModel(model), [model])
   const isGenerateImageAssistant = useMemo(() => isGenerateImageModel(model), [model])
   const { setTimeoutTimer } = useTimer()
@@ -256,48 +258,58 @@ const InputbarInner: FC<InputbarInnerProps> = ({
         })
       })
 
-  const sendMessage = useCallback(async () => {
-    if (checkRateLimit(assistant)) {
-      return
-    }
-
-    logger.info('Starting to send message')
-
-    const parent = spanManagerService.startTrace(
-      { topicId: topic.id, name: 'sendMessage', inputs: text },
-      mentionedModels.length > 0 ? mentionedModels : assistant.model ? [assistant.model] : []
-    )
-    void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: topic.id, traceId: parent?.spanContext().traceId })
-
-    try {
-      const uploadedFiles = await FileManager.uploadFiles(files)
-
-      const baseUserMessage: MessageInputBaseParams = { assistant, topic, content: text }
-      if (uploadedFiles) {
-        baseUserMessage.files = uploadedFiles
-      }
-      if (mentionedModels.length) {
-        baseUserMessage.mentions = mentionedModels
+  const sendMessage = useCallback(() => {
+    // In-flight guard: a repeated activation while the first send is still
+    // awaiting/preparing (rate-limit read, upload, usage estimate) returns
+    // false without creating a second user message/request. `runSend`
+    // acquires before the rate-limit await and releases in a `finally` on
+    // every path (rate-limit block, validation early return, error, and
+    // after dispatch initiation); the dispatch below is fire-and-forget so
+    // the guard never spans the assistant streaming lifecycle.
+    return runSend(async () => {
+      if (await checkRateLimit(assistant, topic.id)) {
+        return
       }
 
-      baseUserMessage.usage = await estimateUserPromptUsage(baseUserMessage)
+      logger.info('Starting to send message')
 
-      const { message, blocks } = getUserMessage(baseUserMessage)
-      message.traceId = parent?.spanContext().traceId
+      const parent = spanManagerService.startTrace(
+        { topicId: topic.id, name: 'sendMessage', inputs: text },
+        mentionedModels.length > 0 ? mentionedModels : assistant.model ? [assistant.model] : []
+      )
+      void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: topic.id, traceId: parent?.spanContext().traceId })
 
-      void dispatch(_sendMessage(message, blocks, assistant, topic.id))
+      try {
+        const uploadedFiles = await FileManager.uploadFiles(files)
 
-      setText('')
-      setFiles([])
-      setTimeoutTimer('sendMessage_1', () => setText(''), 500)
-      setTimeoutTimer('sendMessage_2', () => resizeTextArea(), 0)
-      // Restore focus to textarea after sending to maintain IME state (fcitx5 issue)
-      focusTextarea()
-    } catch (error) {
-      logger.warn('Failed to send message:', error as Error)
-      parent?.recordException(error as Error)
-    }
+        const baseUserMessage: MessageInputBaseParams = { assistant, topic, content: text }
+        if (uploadedFiles) {
+          baseUserMessage.files = uploadedFiles
+        }
+        if (mentionedModels.length) {
+          baseUserMessage.mentions = mentionedModels
+        }
+
+        baseUserMessage.usage = await estimateUserPromptUsage(baseUserMessage)
+
+        const { message, blocks } = getUserMessage(baseUserMessage)
+        message.traceId = parent?.spanContext().traceId
+
+        void dispatch(_sendMessage(message, blocks, assistant, topic.id))
+
+        setText('')
+        setFiles([])
+        setTimeoutTimer('sendMessage_1', () => setText(''), 500)
+        setTimeoutTimer('sendMessage_2', () => resizeTextArea(), 0)
+        // Restore focus to textarea after sending to maintain IME state (fcitx5 issue)
+        focusTextarea()
+      } catch (error) {
+        logger.warn('Failed to send message:', error as Error)
+        parent?.recordException(error as Error)
+      }
+    })
   }, [
+    runSend,
     assistant,
     topic,
     text,

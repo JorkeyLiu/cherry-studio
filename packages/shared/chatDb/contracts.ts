@@ -32,6 +32,8 @@ import type {
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
+  FetchTopicActivityRequest,
+  FetchTopicNamingContextRequest,
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
@@ -2767,6 +2769,319 @@ const fetchWholeTopicSnapshotContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded naming/activity authority reads — never whole-topic
+// ---------------------------------------------------------------------------
+
+const FETCH_TOPIC_NAMING_CONTEXT_VALUE_KEYS = new Set([
+  'topic',
+  'messageCount',
+  'firstMessage',
+  'latestMessages',
+  'blocks',
+  'naming'
+])
+const FETCH_TOPIC_NAMING_CONTEXT_TOPIC_KEYS = new Set(['id', 'name', 'isNameManuallyEdited'])
+const FETCH_TOPIC_NAMING_CONTEXT_META_KEYS = new Set([
+  'completeness',
+  'topicId',
+  'firstMessageId',
+  'lastMessageId',
+  'returnedLatestCount'
+])
+
+const fetchTopicNamingContextContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchTopicNamingContextContract.allowedKeys)
+    const req = value as FetchTopicNamingContextRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:fetch-topic-naming-context', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-topic-naming-context] Expected object with topic, messageCount, firstMessage, latestMessages, blocks, naming'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-topic-naming-context] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_TOPIC_NAMING_CONTEXT_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:fetch-topic-naming-context] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      // Authority topic naming metadata (id + name + manual-edit flag only).
+      if (v.topic === null || typeof v.topic !== 'object' || Array.isArray(v.topic)) {
+        throw new ValidationError('result.value.topic', '[chatdb:fetch-topic-naming-context] Expected topic object')
+      }
+      const tProto = Object.getPrototypeOf(v.topic)
+      if (tProto !== Object.prototype && tProto !== null) {
+        throw new ValidationError(
+          'result.value.topic',
+          '[chatdb:fetch-topic-naming-context] Success topic must be a plain object'
+        )
+      }
+      const t = v.topic as Record<string, unknown>
+      for (const key of Object.keys(t)) {
+        if (!FETCH_TOPIC_NAMING_CONTEXT_TOPIC_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.topic.${key}`,
+            `[chatdb:fetch-topic-naming-context] Unknown key in topic: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(t.id, 'result.value.topic.id')
+      if (t.name !== null && typeof t.name !== 'string') {
+        throw new ValidationError(
+          'result.value.topic.name',
+          '[chatdb:fetch-topic-naming-context] Expected string|null for name'
+        )
+      }
+      if (t.isNameManuallyEdited !== null && typeof t.isNameManuallyEdited !== 'boolean') {
+        throw new ValidationError(
+          'result.value.topic.isNameManuallyEdited',
+          '[chatdb:fetch-topic-naming-context] Expected boolean|null for isNameManuallyEdited'
+        )
+      }
+      if (
+        typeof v.messageCount !== 'number' ||
+        !Number.isFinite(v.messageCount) ||
+        !Number.isInteger(v.messageCount) ||
+        v.messageCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.messageCount',
+          '[chatdb:fetch-topic-naming-context] Expected non-negative integer messageCount'
+        )
+      }
+      if (v.firstMessage !== null) {
+        validateJsonObject(v.firstMessage, 'result.value.firstMessage')
+      }
+      const latest = validateJsonObjectArray(v.latestMessages, 'result.value.latestMessages')
+      if (latest.length > 5) {
+        throw new ValidationError(
+          'result.value.latestMessages',
+          '[chatdb:fetch-topic-naming-context] latestMessages must contain at most 5 messages'
+        )
+      }
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      if (v.naming === null || typeof v.naming !== 'object' || Array.isArray(v.naming)) {
+        throw new ValidationError('result.value.naming', '[chatdb:fetch-topic-naming-context] Expected naming object')
+      }
+      const nProto = Object.getPrototypeOf(v.naming)
+      if (nProto !== Object.prototype && nProto !== null) {
+        throw new ValidationError(
+          'result.value.naming',
+          '[chatdb:fetch-topic-naming-context] Success naming must be a plain object'
+        )
+      }
+      const n = v.naming as Record<string, unknown>
+      for (const key of Object.keys(n)) {
+        if (!FETCH_TOPIC_NAMING_CONTEXT_META_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.naming.${key}`,
+            `[chatdb:fetch-topic-naming-context] Unknown key in naming: "${key}"`
+          )
+        }
+      }
+      if (n.completeness !== 'naming-context') {
+        throw new ValidationError(
+          'result.value.naming.completeness',
+          '[chatdb:fetch-topic-naming-context] Expected completeness "naming-context"'
+        )
+      }
+      validateNonEmptyString(n.topicId, 'result.value.naming.topicId')
+      if (n.firstMessageId !== null) {
+        validateNonEmptyString(n.firstMessageId, 'result.value.naming.firstMessageId')
+      }
+      if (n.lastMessageId !== null) {
+        validateNonEmptyString(n.lastMessageId, 'result.value.naming.lastMessageId')
+      }
+      if (
+        typeof n.returnedLatestCount !== 'number' ||
+        !Number.isFinite(n.returnedLatestCount) ||
+        !Number.isInteger(n.returnedLatestCount) ||
+        n.returnedLatestCount < 0 ||
+        n.returnedLatestCount > 5
+      ) {
+        throw new ValidationError(
+          'result.value.naming.returnedLatestCount',
+          '[chatdb:fetch-topic-naming-context] Expected integer returnedLatestCount in [0, 5]'
+        )
+      }
+      const msgs = v.latestMessages as unknown[]
+      if (n.returnedLatestCount !== msgs.length) {
+        throw new ValidationError(
+          'result.value.naming.returnedLatestCount',
+          '[chatdb:fetch-topic-naming-context] returnedLatestCount must equal latestMessages length'
+        )
+      }
+      const messageCount = v.messageCount
+      if (n.returnedLatestCount > messageCount) {
+        throw new ValidationError(
+          'result.value.naming.returnedLatestCount',
+          '[chatdb:fetch-topic-naming-context] returnedLatestCount must not exceed messageCount'
+        )
+      }
+      if (messageCount === 0) {
+        if (v.firstMessage !== null || msgs.length !== 0) {
+          throw new ValidationError(
+            'result.value',
+            '[chatdb:fetch-topic-naming-context] Empty topic must have null firstMessage and empty latestMessages'
+          )
+        }
+        if (n.firstMessageId !== null || n.lastMessageId !== null) {
+          throw new ValidationError(
+            'result.value.naming',
+            '[chatdb:fetch-topic-naming-context] Empty topic must have null first/lastMessageId'
+          )
+        }
+      } else {
+        if (v.firstMessage === null || msgs.length === 0) {
+          throw new ValidationError(
+            'result.value',
+            '[chatdb:fetch-topic-naming-context] Non-empty topic must have firstMessage and latestMessages'
+          )
+        }
+        if (n.firstMessageId === null || n.lastMessageId === null) {
+          throw new ValidationError(
+            'result.value.naming',
+            '[chatdb:fetch-topic-naming-context] Non-empty naming must have first/lastMessageId'
+          )
+        }
+        const firstId = (v.firstMessage as Record<string, unknown>).id
+        const lastId = (msgs[msgs.length - 1] as Record<string, unknown>).id
+        if (n.firstMessageId !== firstId) {
+          throw new ValidationError(
+            'result.value.naming.firstMessageId',
+            '[chatdb:fetch-topic-naming-context] firstMessageId must match firstMessage id'
+          )
+        }
+        if (n.lastMessageId !== lastId) {
+          throw new ValidationError(
+            'result.value.naming.lastMessageId',
+            '[chatdb:fetch-topic-naming-context] lastMessageId must match last latest message id'
+          )
+        }
+      }
+    }
+  }
+}
+
+const FETCH_TOPIC_ACTIVITY_VALUE_KEYS = new Set([
+  'messageCount',
+  'latestMessageId',
+  'latestMessageCreatedAt',
+  'activity'
+])
+const FETCH_TOPIC_ACTIVITY_META_KEYS = new Set(['completeness', 'topicId'])
+
+const fetchTopicActivityContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchTopicActivityContract.allowedKeys)
+    const req = value as FetchTopicActivityRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:fetch-topic-activity')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:fetch-topic-activity] Expected object with messageCount, latestMessageId, latestMessageCreatedAt, activity'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:fetch-topic-activity] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_TOPIC_ACTIVITY_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:fetch-topic-activity] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      if (
+        typeof v.messageCount !== 'number' ||
+        !Number.isFinite(v.messageCount) ||
+        !Number.isInteger(v.messageCount) ||
+        v.messageCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.messageCount',
+          '[chatdb:fetch-topic-activity] Expected non-negative integer messageCount'
+        )
+      }
+      if (v.latestMessageId !== null) {
+        validateNonEmptyString(v.latestMessageId, 'result.value.latestMessageId')
+      }
+      if (v.latestMessageCreatedAt !== null) {
+        validateNonEmptyString(v.latestMessageCreatedAt, 'result.value.latestMessageCreatedAt')
+      }
+      if (v.activity === null || typeof v.activity !== 'object' || Array.isArray(v.activity)) {
+        throw new ValidationError('result.value.activity', '[chatdb:fetch-topic-activity] Expected activity object')
+      }
+      const aProto = Object.getPrototypeOf(v.activity)
+      if (aProto !== Object.prototype && aProto !== null) {
+        throw new ValidationError(
+          'result.value.activity',
+          '[chatdb:fetch-topic-activity] Success activity must be a plain object'
+        )
+      }
+      const a = v.activity as Record<string, unknown>
+      for (const key of Object.keys(a)) {
+        if (!FETCH_TOPIC_ACTIVITY_META_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.activity.${key}`,
+            `[chatdb:fetch-topic-activity] Unknown key in activity: "${key}"`
+          )
+        }
+      }
+      if (a.completeness !== 'topic-activity') {
+        throw new ValidationError(
+          'result.value.activity.completeness',
+          '[chatdb:fetch-topic-activity] Expected completeness "topic-activity"'
+        )
+      }
+      validateNonEmptyString(a.topicId, 'result.value.activity.topicId')
+      const messageCount = v.messageCount
+      if (messageCount === 0) {
+        if (v.latestMessageId !== null || v.latestMessageCreatedAt !== null) {
+          throw new ValidationError(
+            'result.value',
+            '[chatdb:fetch-topic-activity] Empty topic must have null latestMessageId/createdAt'
+          )
+        }
+      } else if (v.latestMessageId === null) {
+        throw new ValidationError(
+          'result.value.latestMessageId',
+          '[chatdb:fetch-topic-activity] Non-empty topic must have latestMessageId'
+        )
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Insert message groups contract — stable intents, Main-authoritative
 // ---------------------------------------------------------------------------
 
@@ -2955,6 +3270,9 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-context-closure': fetchContextClosureContract,
   // One-shot whole-topic snapshot READ (topic exports / knowledge)
   'chatdb:fetch-whole-topic-snapshot': fetchWholeTopicSnapshotContract,
+  // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
+  'chatdb:fetch-topic-naming-context': fetchTopicNamingContextContract,
+  'chatdb:fetch-topic-activity': fetchTopicActivityContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract,
   'chatdb:insert-message-groups': insertMessageGroupsContract

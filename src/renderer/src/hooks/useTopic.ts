@@ -10,7 +10,8 @@ import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import { setNewlyRenamedTopics, setRenamingTopics } from '@renderer/store/runtime'
 import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Topic } from '@renderer/types'
-import { findMainTextBlocks } from '@renderer/utils/messageUtils/find'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
+import { createSnapshotBlockMap, getMainTextSnapshotContent } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { truncateText } from '@renderer/utils/naming'
 import { find, isEmpty } from 'lodash'
 import { type Dispatch, type SetStateAction, useEffect, useState } from 'react'
@@ -120,34 +121,59 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
   try {
     topicRenamingLocks.add(topicId)
 
-    const topic = await getTopicById(topicId)
+    // Bounded naming authority: exact count + first + latest ≤5 + their blocks.
+    // Never loads the whole topic into Redux for naming.
+    let namingContext: {
+      topic: { id: string; name: string | null; isNameManuallyEdited: boolean | null }
+      messageCount: number
+      firstMessage: Message | null
+      latestMessages: Message[]
+      blocks: MessageBlock[]
+    }
+    try {
+      namingContext = await dbService.fetchTopicNamingContext(topicId)
+    } catch {
+      return
+    }
+    const { topic: authorityTopic, messageCount, firstMessage, latestMessages, blocks } = namingContext
+
+    if (messageCount === 0 || !firstMessage || isEmpty(latestMessages)) {
+      return
+    }
+
+    if (authorityTopic.isNameManuallyEdited) {
+      return
+    }
+
+    // Base Topic for persistence comes from the loaded Redux projection (no
+    // message load); authority naming metadata drives all rename gates.
+    const reduxTopic = store
+      .getState()
+      .assistants.assistants.flatMap((a) => a.topics)
+      .find((t) => t.id === topicId)
+    const baseTopic = (reduxTopic ?? { id: topicId, name: authorityTopic.name }) as Topic
+    // Default-eligible: effective current name is the default name, OR the
+    // authority (Main) name is null/empty (legacy/lazy Main row). Authority
+    // name stays primary with Redux fallback; never ensureTopic/create a row.
+    const currentName = authorityTopic.name ?? reduxTopic?.name ?? ''
+    const defaultTopicName = i18n.t('chat.default.topic.name')
+    const isDefaultEligible =
+      currentName === defaultTopicName || authorityTopic.name == null || authorityTopic.name === ''
     const enableTopicNaming = getStoreSetting('enableTopicNaming')
 
-    if (isEmpty(topic.messages)) {
-      return
-    }
-
-    if (topic.isNameManuallyEdited) {
-      return
-    }
-
     const applyTopicName = async (name: string) => {
-      const data = { ...topic, name } as Topic
+      const data = { ...baseTopic, name } as Topic
       // Phase 5.2B: persist metadata to SQLite before Redux mutation (LOCK-528).
       await persistTopicMetadata(data)
-      if (topic.id === _activeTopic.id) {
+      if (topicId === _activeTopic?.id) {
         _setActiveTopic(data)
       }
       store.dispatch(updateTopic({ assistantId: assistant.id, topic: data }))
     }
 
+    const snapshotBlocksById = createSnapshotBlockMap(blocks)
     const getFirstMessageName = () => {
-      const message = topic.messages[0]
-      const blocks = findMainTextBlocks(message)
-      const text = blocks
-        .map((block) => block.content)
-        .join('\n\n')
-        .trim()
+      const text = getMainTextSnapshotContent(firstMessage, snapshotBlocksById).trim()
 
       return truncateText(text)
     }
@@ -165,10 +191,13 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
       return
     }
 
-    if (topic && topic.name === i18n.t('chat.default.topic.name') && topic.messages.length >= 2) {
+    if (isDefaultEligible && messageCount >= 2) {
       startTopicRenaming(topicId)
       try {
-        const { text: summaryText, error } = await fetchMessagesSummary({ messages: topic.messages })
+        const { text: summaryText, error } = await fetchMessagesSummary({
+          messages: latestMessages,
+          blocksById: snapshotBlocksById
+        })
         if (summaryText) {
           await applyTopicName(summaryText)
         } else {

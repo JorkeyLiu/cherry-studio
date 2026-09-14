@@ -9,17 +9,17 @@ import useAvatar from '@renderer/hooks/useAvatar'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import type { Model } from '@renderer/types'
+import type { Message } from '@renderer/types/newMessage'
 import { isEmoji } from '@renderer/utils'
-import { getMainTextContent } from '@renderer/utils/messageUtils/find'
+import { getMainTextSnapshotContent, type SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
+import { loadWholeTopicSnapshot, type WholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import type { Edge, Node, NodeTypes } from '@xyflow/react'
 import { Controls, Handle, MiniMap, ReactFlow, ReactFlowProvider } from '@xyflow/react'
 import { Position, useEdgesState, useNodesState } from '@xyflow/react'
 import { Avatar, Spin, Tooltip } from 'antd'
-import { isEqual } from 'lodash'
 import type { FC } from 'react'
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 import styled from 'styled-components'
@@ -155,7 +155,7 @@ const CustomNode: FC<{ data: any }> = ({ data }) => {
 }
 
 // 创建自定义节点类型
-const nodeTypes: NodeTypes = { custom: CustomNode }
+export const nodeTypes: NodeTypes = { custom: CustomNode }
 
 interface ChatFlowHistoryProps {
   conversationId?: string
@@ -182,272 +182,398 @@ const defaultEdgeOptions = {
   zIndex: 5
 }
 
+export interface ChatFlowGraphDeps {
+  userName?: string
+  userAvatar?: string | null
+  t: (key: string) => string
+}
+
+/**
+ * Pure caller-local graph builder for the history drawer.
+ *
+ * Builds nodes/edges from an explicit whole-topic snapshot (complete ordered
+ * messages + snapshot block map) — never from live Redux blocks or a windowed
+ * projection — so old/window-outside messages still produce graph content.
+ * Layout, chronological ordering, askId/model/orphan semantics and click
+ * navigation payloads match the previous selector-backed builder exactly;
+ * only the text source changed (`getMainTextSnapshotContent`).
+ */
+export const buildChatFlowGraph = (
+  messages: Message[],
+  blocksById: SnapshotBlockMap,
+  deps: ChatFlowGraphDeps
+): { nodes: FlowNode[]; edges: FlowEdge[] } => {
+  const { userName, userAvatar, t } = deps
+  if (!messages.length) return { nodes: [], edges: [] }
+
+  const userMessages = messages.filter((msg) => msg.role === 'user')
+  const assistantMessages = messages.filter((msg) => msg.role === 'assistant')
+
+  // 创建节点和边
+  const flowNodes: FlowNode[] = []
+  const flowEdges: FlowEdge[] = []
+
+  // 布局参数
+  const verticalGap = 200
+  const horizontalGap = 350
+  const baseX = 150
+
+  // 如果没有任何消息可以显示，返回空结果
+  if (userMessages.length === 0 && assistantMessages.length === 0) {
+    return { nodes: [], edges: [] }
+  }
+
+  // 为所有用户消息创建节点
+  userMessages.forEach((message, index) => {
+    const nodeId = `user-${message.id}`
+    const yPosition = index * verticalGap * 2
+
+    // 获取用户名
+    const userNameValue = userName || t('chat.history.user_node')
+
+    // 获取用户头像
+    const msgUserAvatar = userAvatar || null
+
+    flowNodes.push({
+      id: nodeId,
+      type: 'custom',
+      data: {
+        userName: userNameValue,
+        content: getMainTextSnapshotContent(message, blocksById),
+        type: 'user',
+        messageId: message.id,
+        userAvatar: msgUserAvatar
+      },
+      position: { x: baseX, y: yPosition },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top
+    })
+
+    // 找到用户消息之后的助手回复
+    const userMsgTime = new Date(message.createdAt).getTime()
+    const relatedAssistantMsgs = assistantMessages.filter((aMsg) => {
+      const aMsgTime = new Date(aMsg.createdAt).getTime()
+      return (
+        aMsgTime > userMsgTime &&
+        (index === userMessages.length - 1 || aMsgTime < new Date(userMessages[index + 1].createdAt).getTime())
+      )
+    })
+
+    // 为相关的助手消息创建节点
+    relatedAssistantMsgs.forEach((aMsg, aIndex) => {
+      const assistantNodeId = `assistant-${aMsg.id}`
+      const isMultipleResponses = relatedAssistantMsgs.length > 1
+      const assistantX = baseX + (isMultipleResponses ? horizontalGap * aIndex : 0)
+      const assistantY = yPosition + verticalGap
+
+      // 根据位置确定连接点位置
+      let sourcePos = Position.Bottom // 默认向下输出
+      let targetPos = Position.Top // 默认从上方输入
+
+      // 横向排列多个助手消息时调整连接点
+      // 注意：现在所有助手节点都直接连接到用户节点，而不是相互连接
+      if (isMultipleResponses) {
+        // 所有助手节点都使用顶部作为输入点(从用户节点)
+        targetPos = Position.Top
+
+        // 所有助手节点都使用底部作为输出点(到下一个用户节点)
+        sourcePos = Position.Bottom
+      }
+
+      const aMsgAny = aMsg as any
+
+      // 获取模型名称
+      const modelName = (aMsgAny.model && aMsgAny.model.name) || t('chat.history.assistant_node')
+
+      // 获取模型ID
+      const modelId = (aMsgAny.model && aMsgAny.model.id) || ''
+
+      // 完整的模型信息
+      const modelInfo = aMsgAny.model as Model | undefined
+
+      flowNodes.push({
+        id: assistantNodeId,
+        type: 'custom',
+        data: {
+          model: modelName,
+          content: getMainTextSnapshotContent(aMsg, blocksById),
+          type: 'assistant',
+          messageId: aMsg.id,
+          modelId: modelId,
+          modelInfo
+        },
+        position: { x: assistantX, y: assistantY },
+        sourcePosition: sourcePos,
+        targetPosition: targetPos
+      })
+
+      // 连接消息 - 将每个助手节点直接连接到用户节点
+      if (aIndex === 0) {
+        // 连接用户消息到第一个助手回复
+        flowEdges.push({
+          id: `edge-${nodeId}-to-${assistantNodeId}`,
+          source: nodeId,
+          target: assistantNodeId
+        })
+      } else {
+        // 直接连接用户消息到所有其他助手回复
+        flowEdges.push({
+          id: `edge-${nodeId}-to-${assistantNodeId}`,
+          source: nodeId,
+          target: assistantNodeId
+        })
+      }
+    })
+
+    // 连接相邻的用户消息
+    if (index > 0) {
+      const prevUserNodeId = `user-${userMessages[index - 1].id}`
+      const prevUserTime = new Date(userMessages[index - 1].createdAt).getTime()
+
+      // 查找前一个用户消息的所有助手回复
+      const prevAssistantMsgs = assistantMessages.filter((aMsg) => {
+        const aMsgTime = new Date(aMsg.createdAt).getTime()
+        return aMsgTime > prevUserTime && aMsgTime < userMsgTime
+      })
+
+      if (prevAssistantMsgs.length > 0) {
+        // 所有前一个用户的助手消息都连接到当前用户消息
+        prevAssistantMsgs.forEach((aMsg) => {
+          const assistantId = `assistant-${aMsg.id}`
+          flowEdges.push({
+            id: `edge-${assistantId}-to-${nodeId}`,
+            source: assistantId,
+            target: nodeId
+          })
+        })
+      } else {
+        // 如果没有助手消息，直接连接两个用户消息
+        flowEdges.push({
+          id: `edge-${prevUserNodeId}-to-${nodeId}`,
+          source: prevUserNodeId,
+          target: nodeId
+        })
+      }
+    }
+  })
+
+  // 处理孤立的助手消息（没有对应的用户消息）
+  const orphanAssistantMsgs = assistantMessages.filter(
+    (aMsg) => !flowNodes.some((node) => node.id === `assistant-${aMsg.id}`)
+  )
+
+  if (orphanAssistantMsgs.length > 0) {
+    // 在图表顶部添加这些孤立消息
+    const startY = flowNodes.length > 0 ? Math.min(...flowNodes.map((node) => node.position.y)) - verticalGap * 2 : 0
+
+    orphanAssistantMsgs.forEach((aMsg, index) => {
+      const assistantNodeId = `orphan-assistant-${aMsg.id}`
+
+      // 获取模型数据
+      // FIXME: No any plz
+      const aMsgAny = aMsg as any
+
+      // 获取模型名称
+      const modelName = (aMsgAny.model && aMsgAny.model.name) || t('chat.history.assistant_node')
+
+      // 获取模型ID
+      const modelId = (aMsgAny.model && aMsgAny.model.id) || ''
+
+      // 完整的模型信息
+      const modelInfo = aMsgAny.model as Model | undefined
+
+      flowNodes.push({
+        id: assistantNodeId,
+        type: 'custom',
+        data: {
+          model: modelName,
+          content: getMainTextSnapshotContent(aMsg, blocksById),
+          type: 'assistant',
+          messageId: aMsg.id,
+          modelId: modelId,
+          modelInfo
+        },
+        position: { x: baseX, y: startY - index * verticalGap },
+        sourcePosition: Position.Bottom,
+        targetPosition: Position.Top
+      })
+
+      // 连接相邻的孤立消息
+      if (index > 0) {
+        const prevNodeId = `orphan-assistant-${orphanAssistantMsgs[index - 1].id}`
+        flowEdges.push({
+          id: `edge-${prevNodeId}-to-${assistantNodeId}`,
+          source: prevNodeId,
+          target: assistantNodeId
+        })
+      }
+    })
+  }
+
+  return { nodes: flowNodes, edges: flowEdges }
+}
+
+/** Coalescing window for authority-metadata + terminal-streaming refetches. */
+export const CHAT_FLOW_SNAPSHOT_REFRESH_DEBOUNCE_MS = 250
+
 const ChatFlowHistory: FC<ChatFlowHistoryProps> = ({ conversationId }) => {
   const { t } = useTranslation()
   // FIXME: no any plz
   const [nodes, setNodes, onNodesChange] = useNodesState<any>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<any>([])
   const [loading, setLoading] = useState(true)
+  const [snapshot, setSnapshot] = useState<WholeTopicSnapshot | null>(null)
   const { userName } = useSettings()
   const { settedTheme } = useTheme()
 
   const topicId = conversationId
 
-  // 只在消息实际内容变化时更新，而不是属性变化（如foldSelected）
-  const messages = useSelector(
-    (state: RootState) => selectMessagesForTopic(state, topicId || ''),
-    (prev, next) => {
-      // 只比较消息的关键属性，忽略展示相关的属性（如foldSelected）
-      if (prev.length !== next.length) return false
-
-      // 比较每条消息的内容和关键属性，忽略UI状态相关属性
-      return prev.every((prevMsg, index) => {
-        const nextMsg = next[index]
-        const prevMsgContent = getMainTextContent(prevMsg)
-        const nextMsgContent = getMainTextContent(nextMsg)
-        return (
-          prevMsg.id === nextMsg.id &&
-          prevMsgContent === nextMsgContent &&
-          prevMsg.role === nextMsg.role &&
-          prevMsg.createdAt === nextMsg.createdAt &&
-          prevMsg.askId === nextMsg.askId &&
-          isEqual(prevMsg.model, nextMsg.model)
-        )
-      })
-    }
-  )
-
   // 获取用户头像
   const userAvatar = useAvatar()
 
-  // 消息过滤
-  const { userMessages, assistantMessages } = useMemo(() => {
-    const userMsgs = messages.filter((msg) => msg.role === 'user')
-    const assistantMsgs = messages.filter((msg) => msg.role === 'assistant')
-    return { userMessages: userMsgs, assistantMessages: assistantMsgs }
-  }, [messages])
+  // Authority mutation metadata signal: subscribe to ONLY the current topic's
+  // updatedAt (never messages/blocks). A change schedules a debounced
+  // whole-topic snapshot refetch; the snapshot itself stays caller-local.
+  const topicUpdatedAt = useSelector((state: RootState) =>
+    topicId
+      ? state.assistants.assistants.flatMap((a) => a.topics ?? []).find((topic) => topic.id === topicId)?.updatedAt
+      : undefined
+  )
 
-  const buildConversationFlowData = useCallback(() => {
-    if (!topicId || !messages.length) return { nodes: [], edges: [] }
-
-    // 创建节点和边
-    const flowNodes: FlowNode[] = []
-    const flowEdges: FlowEdge[] = []
-
-    // 布局参数
-    const verticalGap = 200
-    const horizontalGap = 350
-    const baseX = 150
-
-    // 如果没有任何消息可以显示，返回空结果
-    if (userMessages.length === 0 && assistantMessages.length === 0) {
-      return { nodes: [], edges: [] }
-    }
-
-    // 为所有用户消息创建节点
-    userMessages.forEach((message, index) => {
-      const nodeId = `user-${message.id}`
-      const yPosition = index * verticalGap * 2
-
-      // 获取用户名
-      const userNameValue = userName || t('chat.history.user_node')
-
-      // 获取用户头像
-      const msgUserAvatar = userAvatar || null
-
-      flowNodes.push({
-        id: nodeId,
-        type: 'custom',
-        data: {
-          userName: userNameValue,
-          content: getMainTextContent(message),
-          type: 'user',
-          messageId: message.id,
-          userAvatar: msgUserAvatar
-        },
-        position: { x: baseX, y: yPosition },
-        sourcePosition: Position.Bottom,
-        targetPosition: Position.Top
-      })
-
-      // 找到用户消息之后的助手回复
-      const userMsgTime = new Date(message.createdAt).getTime()
-      const relatedAssistantMsgs = assistantMessages.filter((aMsg) => {
-        const aMsgTime = new Date(aMsg.createdAt).getTime()
-        return (
-          aMsgTime > userMsgTime &&
-          (index === userMessages.length - 1 || aMsgTime < new Date(userMessages[index + 1].createdAt).getTime())
-        )
-      })
-
-      // 为相关的助手消息创建节点
-      relatedAssistantMsgs.forEach((aMsg, aIndex) => {
-        const assistantNodeId = `assistant-${aMsg.id}`
-        const isMultipleResponses = relatedAssistantMsgs.length > 1
-        const assistantX = baseX + (isMultipleResponses ? horizontalGap * aIndex : 0)
-        const assistantY = yPosition + verticalGap
-
-        // 根据位置确定连接点位置
-        let sourcePos = Position.Bottom // 默认向下输出
-        let targetPos = Position.Top // 默认从上方输入
-
-        // 横向排列多个助手消息时调整连接点
-        // 注意：现在所有助手节点都直接连接到用户节点，而不是相互连接
-        if (isMultipleResponses) {
-          // 所有助手节点都使用顶部作为输入点(从用户节点)
-          targetPos = Position.Top
-
-          // 所有助手节点都使用底部作为输出点(到下一个用户节点)
-          sourcePos = Position.Bottom
-        }
-
-        const aMsgAny = aMsg as any
-
-        // 获取模型名称
-        const modelName = (aMsgAny.model && aMsgAny.model.name) || t('chat.history.assistant_node')
-
-        // 获取模型ID
-        const modelId = (aMsgAny.model && aMsgAny.model.id) || ''
-
-        // 完整的模型信息
-        const modelInfo = aMsgAny.model as Model | undefined
-
-        flowNodes.push({
-          id: assistantNodeId,
-          type: 'custom',
-          data: {
-            model: modelName,
-            content: getMainTextContent(aMsg),
-            type: 'assistant',
-            messageId: aMsg.id,
-            modelId: modelId,
-            modelInfo
-          },
-          position: { x: assistantX, y: assistantY },
-          sourcePosition: sourcePos,
-          targetPosition: targetPos
-        })
-
-        // 连接消息 - 将每个助手节点直接连接到用户节点
-        if (aIndex === 0) {
-          // 连接用户消息到第一个助手回复
-          flowEdges.push({
-            id: `edge-${nodeId}-to-${assistantNodeId}`,
-            source: nodeId,
-            target: assistantNodeId
-          })
-        } else {
-          // 直接连接用户消息到所有其他助手回复
-          flowEdges.push({
-            id: `edge-${nodeId}-to-${assistantNodeId}`,
-            source: nodeId,
-            target: assistantNodeId
-          })
-        }
-      })
-
-      // 连接相邻的用户消息
-      if (index > 0) {
-        const prevUserNodeId = `user-${userMessages[index - 1].id}`
-        const prevUserTime = new Date(userMessages[index - 1].createdAt).getTime()
-
-        // 查找前一个用户消息的所有助手回复
-        const prevAssistantMsgs = assistantMessages.filter((aMsg) => {
-          const aMsgTime = new Date(aMsg.createdAt).getTime()
-          return aMsgTime > prevUserTime && aMsgTime < userMsgTime
-        })
-
-        if (prevAssistantMsgs.length > 0) {
-          // 所有前一个用户的助手消息都连接到当前用户消息
-          prevAssistantMsgs.forEach((aMsg) => {
-            const assistantId = `assistant-${aMsg.id}`
-            flowEdges.push({
-              id: `edge-${assistantId}-to-${nodeId}`,
-              source: assistantId,
-              target: nodeId
-            })
-          })
-        } else {
-          // 如果没有助手消息，直接连接两个用户消息
-          flowEdges.push({
-            id: `edge-${prevUserNodeId}-to-${nodeId}`,
-            source: prevUserNodeId,
-            target: nodeId
-          })
-        }
-      }
-    })
-
-    // 处理孤立的助手消息（没有对应的用户消息）
-    const orphanAssistantMsgs = assistantMessages.filter(
-      (aMsg) => !flowNodes.some((node) => node.id === `assistant-${aMsg.id}`)
-    )
-
-    if (orphanAssistantMsgs.length > 0) {
-      // 在图表顶部添加这些孤立消息
-      const startY = flowNodes.length > 0 ? Math.min(...flowNodes.map((node) => node.position.y)) - verticalGap * 2 : 0
-
-      orphanAssistantMsgs.forEach((aMsg, index) => {
-        const assistantNodeId = `orphan-assistant-${aMsg.id}`
-
-        // 获取模型数据
-        // FIXME: No any plz
-        const aMsgAny = aMsg as any
-
-        // 获取模型名称
-        const modelName = (aMsgAny.model && aMsgAny.model.name) || t('chat.history.assistant_node')
-
-        // 获取模型ID
-        const modelId = (aMsgAny.model && aMsgAny.model.id) || ''
-
-        // 完整的模型信息
-        const modelInfo = aMsgAny.model as Model | undefined
-
-        flowNodes.push({
-          id: assistantNodeId,
-          type: 'custom',
-          data: {
-            model: modelName,
-            content: getMainTextContent(aMsg),
-            type: 'assistant',
-            messageId: aMsg.id,
-            modelId: modelId,
-            modelInfo
-          },
-          position: { x: baseX, y: startY - index * verticalGap },
-          sourcePosition: Position.Bottom,
-          targetPosition: Position.Top
-        })
-
-        // 连接相邻的孤立消息
-        if (index > 0) {
-          const prevNodeId = `orphan-assistant-${orphanAssistantMsgs[index - 1].id}`
-          flowEdges.push({
-            id: `edge-${prevNodeId}-to-${assistantNodeId}`,
-            source: prevNodeId,
-            target: assistantNodeId
-          })
-        }
-      })
-    }
-
-    return { nodes: flowNodes, edges: flowEdges }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topicId, messages, userMessages, assistantMessages, t])
+  const generationRef = useRef(0)
+  const activeTopicRef = useRef<string | undefined>(topicId)
+  const mountedRef = useRef(true)
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const lastUpdatedAtRef = useRef<string | undefined>(undefined)
+  // Tracks whether the current target topic already has a successful snapshot.
+  // Background refetch failures must retain the last good snapshot/graph;
+  // only the initial/topic-change load (no success yet) may leave null.
+  const hasSnapshotRef = useRef(false)
 
   useEffect(() => {
-    setLoading(true)
-    const timer = setTimeout(() => {
-      const { nodes: flowNodes, edges: flowEdges } = buildConversationFlowData()
-      setNodes([...flowNodes])
-      setEdges([...flowEdges])
-      setLoading(false)
-    }, 500)
-
+    mountedRef.current = true
     return () => {
-      clearTimeout(timer)
+      mountedRef.current = false
+      generationRef.current += 1
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current)
+        debounceTimerRef.current = undefined
+      }
     }
-  }, [buildConversationFlowData, setNodes, setEdges])
+  }, [])
+
+  const fetchSnapshot = useCallback(async (targetTopicId: string, gen: number) => {
+    try {
+      const snap = await loadWholeTopicSnapshot(targetTopicId)
+      if (!mountedRef.current || gen !== generationRef.current || targetTopicId !== activeTopicRef.current) return
+      hasSnapshotRef.current = true
+      setSnapshot(snap)
+    } catch {
+      // Deleted/missing topic (NOT_FOUND) or transient read failure: the
+      // initial/topic-change load may leave null with the existing empty
+      // state, while a background refetch after a successful snapshot retains
+      // the last good snapshot/graph and only clears loading (via finally).
+      // Stale responses for a previous topic are ignored, never applied.
+      if (!mountedRef.current || gen !== generationRef.current || targetTopicId !== activeTopicRef.current) return
+      if (!hasSnapshotRef.current) {
+        setSnapshot(null)
+      }
+    } finally {
+      if (mountedRef.current && gen === generationRef.current && targetTopicId === activeTopicRef.current) {
+        setLoading(false)
+      }
+    }
+  }, [])
+
+  const scheduleDebouncedRefetch = useCallback(() => {
+    const target = activeTopicRef.current
+    if (!target) return
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current)
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = undefined
+      if (!mountedRef.current || activeTopicRef.current !== target) return
+      const gen = generationRef.current + 1
+      generationRef.current = gen
+      void fetchSnapshot(target, gen)
+    }, CHAT_FLOW_SNAPSHOT_REFRESH_DEBOUNCE_MS)
+  }, [fetchSnapshot])
+
+  // 1) mount / topic change: immediate whole-topic snapshot load.
+  useEffect(() => {
+    activeTopicRef.current = topicId
+    lastUpdatedAtRef.current = undefined
+    hasSnapshotRef.current = false
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = undefined
+    }
+    if (!topicId) {
+      generationRef.current += 1
+      setSnapshot(null)
+      setNodes([])
+      setEdges([])
+      setLoading(false)
+      return
+    }
+    const gen = generationRef.current + 1
+    generationRef.current = gen
+    // Drop the previous topic's graph immediately so a stale snapshot never
+    // renders under the new topic while the fresh read is in flight.
+    setSnapshot(null)
+    setNodes([])
+    setEdges([])
+    setLoading(true)
+    void fetchSnapshot(topicId, gen)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topicId, fetchSnapshot])
+
+  // 2) authority mutation metadata: refetch when the current topic's updatedAt
+  // changes. Baseline is established on mount/topic change (whose immediate
+  // load already covers current state); no interval polling.
+  useEffect(() => {
+    if (!topicId) return
+    if (lastUpdatedAtRef.current === undefined) {
+      lastUpdatedAtRef.current = topicUpdatedAt
+      return
+    }
+    if (topicUpdatedAt === lastUpdatedAtRef.current) return
+    lastUpdatedAtRef.current = topicUpdatedAt
+    scheduleDebouncedRefetch()
+  }, [topicId, topicUpdatedAt, scheduleDebouncedRefetch])
+
+  // 3) terminal streaming: final block writes may not update topic metadata,
+  // so MESSAGE_COMPLETE (filtered by topicId) also schedules a coalesced
+  // refetch sharing the same debounce timer as the updatedAt trigger.
+  useEffect(() => {
+    if (!topicId) return
+    const handler = (payload: { topicId?: string } | undefined) => {
+      if (!payload || payload.topicId !== topicId) return
+      scheduleDebouncedRefetch()
+    }
+    const unsubscribe = EventEmitter.on(EVENT_NAMES.MESSAGE_COMPLETE, handler)
+    return () => {
+      unsubscribe()
+    }
+  }, [topicId, scheduleDebouncedRefetch])
+
+  // Render the caller-local snapshot; settings-only changes rebuild without a
+  // reread. Snapshot stays local — nothing is published to Redux.
+  useEffect(() => {
+    if (!snapshot) {
+      setNodes([])
+      setEdges([])
+      return
+    }
+    const { nodes: flowNodes, edges: flowEdges } = buildChatFlowGraph(snapshot.messages, snapshot.blocksById, {
+      userName: userName ?? undefined,
+      userAvatar: userAvatar ?? null,
+      t
+    })
+    setNodes([...flowNodes])
+    setEdges([...flowEdges])
+  }, [snapshot, userName, userAvatar, t, setNodes, setEdges])
 
   return (
     <FlowContainer>

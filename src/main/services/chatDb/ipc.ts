@@ -44,6 +44,8 @@ import type {
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
+  FetchTopicActivityRequest,
+  FetchTopicNamingContextRequest,
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
@@ -388,6 +390,16 @@ export function registerChatDbIpc(): () => void {
   // 1e. fetch-whole-topic-snapshot (one-shot whole-topic snapshot for exports/knowledge)
   handleCommand(IpcChannel.ChatDb_FetchWholeTopicSnapshot, (agg, req: FetchWholeTopicSnapshotRequest) => {
     return agg.fetchWholeTopicSnapshot(req)
+  })
+
+  // 1f. fetch-topic-naming-context (bounded naming authority; never whole-topic)
+  handleCommand(IpcChannel.ChatDb_FetchTopicNamingContext, (agg, req: FetchTopicNamingContextRequest) => {
+    return agg.fetchTopicNamingContext(req)
+  })
+
+  // 1g. fetch-topic-activity (bounded rate-limit authority; no messages/blocks)
+  handleCommand(IpcChannel.ChatDb_FetchTopicActivity, (agg, req: FetchTopicActivityRequest) => {
+    return agg.fetchTopicActivity(req)
   })
 
   // 2. get-raw-topic

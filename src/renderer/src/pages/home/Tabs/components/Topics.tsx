@@ -12,9 +12,10 @@ import { useAssistant, useAssistants } from '@renderer/hooks/useAssistant'
 import { useInPlaceEdit } from '@renderer/hooks/useInPlaceEdit'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
 import { modelGenerating } from '@renderer/hooks/useRuntime'
-import { finishTopicRenaming, startTopicRenaming, TopicManager } from '@renderer/hooks/useTopic'
+import { finishTopicRenaming, startTopicRenaming } from '@renderer/hooks/useTopic'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { dbService } from '@renderer/services/db'
 import {
   emptyOrdinaryTrash,
   ensureOrdinaryTopicOwnership,
@@ -26,6 +27,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant, Topic } from '@renderer/types'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, removeSpecialCharactersForFileName } from '@renderer/utils'
 import { copyTopicAsMarkdown, copyTopicAsPlainText } from '@renderer/utils/copy'
 import {
@@ -37,6 +39,7 @@ import {
   exportTopicToNotion,
   topicToMarkdown
 } from '@renderer/utils/export'
+import { createSnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { reorderTopicsForPin, sortTopicsPinnedFirst } from '@renderer/utils/sort'
 import type { MenuProps } from 'antd'
 import { Dropdown, Tooltip } from 'antd'
@@ -318,11 +321,26 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         icon: <Sparkles size={14} />,
         disabled: isRenaming(topic.id),
         async onClick() {
-          const messages = await TopicManager.getTopicMessages(topic.id)
-          if (messages.length >= 2) {
+          // Bounded naming authority: exact count + latest ≤5 + their blocks.
+          // Never materializes the whole topic for manual auto-rename.
+          let namingContext: {
+            messageCount: number
+            latestMessages: Message[]
+            blocks: MessageBlock[]
+          }
+          try {
+            namingContext = await dbService.fetchTopicNamingContext(topic.id)
+          } catch (err) {
+            logger.error('Failed to load naming context for auto-rename', err as Error)
+            return
+          }
+          if (namingContext.messageCount >= 2) {
             startTopicRenaming(topic.id)
             try {
-              const { text: summaryText, error } = await fetchMessagesSummary({ messages })
+              const { text: summaryText, error } = await fetchMessagesSummary({
+                messages: namingContext.latestMessages,
+                blocksById: createSnapshotBlockMap(namingContext.blocks)
+              })
               if (summaryText) {
                 const updatedTopic = { ...topic, name: summaryText, isNameManuallyEdited: false }
                 try {

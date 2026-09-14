@@ -75,7 +75,10 @@ describe('chatDbContracts', () => {
     // S6.3 R-06: authoritative context closure READ
     'chatdb:fetch-context-closure',
     // One-shot whole-topic snapshot READ (topic exports / knowledge)
-    'chatdb:fetch-whole-topic-snapshot'
+    'chatdb:fetch-whole-topic-snapshot',
+    // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
+    'chatdb:fetch-topic-naming-context',
+    'chatdb:fetch-topic-activity'
   ]
 
   it('has entries for all expected channels', () => {
@@ -3272,7 +3275,10 @@ describe('coverage consistency', () => {
     // S6.3 R-06: authoritative context closure READ
     'chatdb:fetch-context-closure',
     // One-shot whole-topic snapshot READ
-    'chatdb:fetch-whole-topic-snapshot'
+    'chatdb:fetch-whole-topic-snapshot',
+    // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
+    'chatdb:fetch-topic-naming-context',
+    'chatdb:fetch-topic-activity'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

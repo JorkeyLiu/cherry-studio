@@ -447,6 +447,74 @@ export interface FetchWholeTopicSnapshotResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded naming/activity DTOs (automatic/manual naming + rate-limit authority)
+// ---------------------------------------------------------------------------
+
+/** @see IpcChannel.ChatDb_FetchTopicNamingContext — additive bounded READ for topic naming. */
+export interface FetchTopicNamingContextRequest {
+  topicId: string
+}
+
+/** Authority topic naming metadata carried by the naming-context read. */
+export interface FetchTopicNamingContextTopic {
+  id: string
+  name: string | null
+  isNameManuallyEdited: boolean | null
+}
+
+/** Typed naming-context metadata — distinct from window/answer-group/context-closure/whole-topic completeness. */
+export interface FetchTopicNamingContextMeta {
+  /** Completeness is always 'naming-context' — never masquerades as 'whole-topic'. */
+  completeness: 'naming-context'
+  /** Topic that was read. */
+  topicId: string
+  /** Authority first message ID, or null when the topic has no messages. */
+  firstMessageId: string | null
+  /** Authority last message ID, or null when the topic has no messages. */
+  lastMessageId: string | null
+  /** Number of latest messages returned (latestMessages length, at most 5). */
+  returnedLatestCount: number
+}
+
+/** @see IpcChannel.ChatDb_FetchTopicNamingContext */
+export interface FetchTopicNamingContextResponse {
+  topic: FetchTopicNamingContextTopic
+  /** Exact authority message count (independent of windowing). */
+  messageCount: number
+  /** Authority first message wire, or null when the topic has no messages. */
+  firstMessage: JsonObject | null
+  /** Authority latest at most 5 messages in ASC order. */
+  latestMessages: JsonObject[]
+  /** Blocks owned by the returned messages (first + latest, deduplicated). */
+  blocks: JsonObject[]
+  naming: FetchTopicNamingContextMeta
+}
+
+/** @see IpcChannel.ChatDb_FetchTopicActivity — additive bounded READ for rate-limit checks. */
+export interface FetchTopicActivityRequest {
+  topicId: string
+}
+
+/** Typed activity metadata — distinct from every message-carrying completeness. */
+export interface FetchTopicActivityMeta {
+  /** Completeness is always 'topic-activity'. */
+  completeness: 'topic-activity'
+  /** Topic that was read. */
+  topicId: string
+}
+
+/** @see IpcChannel.ChatDb_FetchTopicActivity */
+export interface FetchTopicActivityResponse {
+  /** Exact authority message count (independent of windowing). */
+  messageCount: number
+  /** Authority latest message ID, or null when the topic has no messages. */
+  latestMessageId: string | null
+  /** Authority latest message createdAt, or null when empty/unset. */
+  latestMessageCreatedAt: string | null
+  activity: FetchTopicActivityMeta
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -1213,6 +1281,12 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     request: FetchWholeTopicSnapshotRequest
     response: FetchWholeTopicSnapshotResponse
   }
+  // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
+  'chatdb:fetch-topic-naming-context': {
+    request: FetchTopicNamingContextRequest
+    response: FetchTopicNamingContextResponse
+  }
+  'chatdb:fetch-topic-activity': { request: FetchTopicActivityRequest; response: FetchTopicActivityResponse }
 }
 
 // ---------------------------------------------------------------------------

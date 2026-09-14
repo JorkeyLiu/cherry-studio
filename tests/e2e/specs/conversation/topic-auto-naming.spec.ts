@@ -542,4 +542,288 @@ test.describe('Topic Auto-Naming (repaired message-read path)', () => {
       await assertTopicNamePersistedInSqlite(electronApp, topicId, reduxName)
     })
   })
+
+  test('cold-window manual Auto Rename uses bounded naming context and preserves tail projection', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(300000)
+    const page = mainWindow
+    await waitForAppReady(page)
+
+    const COLD_DISPLAY = 10
+    const COLD_TOTAL = 25
+    const padCold = (n: number) => String(n).padStart(5, '0')
+    const markerFor = (i: number) => `NCOLD-${padCold(i)}`
+    const coldTopicId = `naming-cold-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const coldTopicName = `Cold Naming ${coldTopicId}`
+
+    await test.step('A: Provider seed verification', async () => {
+      const seedOk = await page.evaluate(() => {
+        const s = (window as any).store?.getState()
+        return (
+          s?.llm?.providers?.some((p: any) => p.id === 'mock-openai') &&
+          s.llm.defaultModel?.id === 'mock-model' &&
+          s.llm.quickModel?.id === 'mock-model'
+        )
+      })
+      expect(seedOk).toBe(true)
+    })
+
+    let liveAssistantId: string
+    let defaultTopicId: string
+    await test.step('B: Bound displayCount and capture default topic', async () => {
+      await page.evaluate((limit: number) => {
+        ;(window as any).store.dispatch({ type: 'newMessages/setDisplayCount', payload: limit })
+      }, COLD_DISPLAY)
+      const displayOk = await page.evaluate(() => (window as any).store.getState().messages.displayCount)
+      expect(displayOk).toBe(COLD_DISPLAY)
+      const ctx = await getActiveContext(page)
+      expect(ctx.topicId).not.toBe('')
+      defaultTopicId = ctx.topicId
+      liveAssistantId = await page.evaluate(
+        () =>
+          (window as any).store.getState().assistants?.assistants?.[0]?.id ??
+          (window as any).store.getState().assistants?.defaultAssistant?.id ??
+          null
+      )
+      expect(liveAssistantId).toBeTruthy()
+      console.log(`[E2E][topic-naming] Cold seed display=${COLD_DISPLAY} total=${COLD_TOTAL}`)
+    })
+
+    await test.step('C: Pre-seed cold topic with authority exceeding the display window', async () => {
+      const addOk = await page.evaluate(
+        ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+          try {
+            ;(window as any).store.dispatch({
+              type: 'assistants/addTopic',
+              payload: {
+                assistantId,
+                topic: {
+                  id: topicId,
+                  assistantId,
+                  name,
+                  createdAt: '2026-01-01T00:00:00.000Z',
+                  updatedAt: '2026-01-01T00:00:00.000Z'
+                }
+              }
+            })
+            return { ok: true as const }
+          } catch (e) {
+            return { ok: false as const, err: e instanceof Error ? e.message : String(e) }
+          }
+        },
+        { topicId: coldTopicId, assistantId: liveAssistantId, name: coldTopicName }
+      )
+      expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
+
+      const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+      for (let i = 0; i < COLD_TOTAL; i++) {
+        const msgId = `${coldTopicId}-msg-${padCold(i)}`
+        const blockId = `${coldTopicId}-block-${padCold(i)}`
+        entries.push({
+          message: {
+            id: msgId,
+            topicId: coldTopicId,
+            role: i % 2 === 0 ? 'user' : 'assistant',
+            assistantId: liveAssistantId,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            status: 'success',
+            blocks: [blockId],
+            sortOrder: i
+          },
+          blocks: [
+            {
+              id: blockId,
+              messageId: msgId,
+              type: 'main_text',
+              content: `${markerFor(i)} cold naming deterministic content ${padCold(i)}`,
+              status: 'success',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z'
+            }
+          ]
+        })
+      }
+      const persist = await page.evaluate(
+        async ({
+          topicId,
+          assistantId,
+          name,
+          entries
+        }: {
+          topicId: string
+          assistantId: string
+          name: string
+          entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }>
+        }) => {
+          try {
+            const chatDb = (window as any).api?.chatDb
+            if (
+              !chatDb ||
+              typeof chatDb.ensureTopic !== 'function' ||
+              typeof chatDb.pasteMessagesToTopic !== 'function'
+            ) {
+              return { ok: false as const, err: 'chatDb missing' }
+            }
+            const ensured = await chatDb.ensureTopic({ topicId, assistantId, name })
+            if (!ensured || ensured.ok !== true)
+              return { ok: false as const, err: `ensureTopic ${JSON.stringify(ensured)}` }
+            const pasted = await chatDb.pasteMessagesToTopic({ topicId, entries })
+            if (!pasted || pasted.ok !== true) return { ok: false as const, err: `paste ${JSON.stringify(pasted)}` }
+            return { ok: true as const }
+          } catch (e) {
+            return { ok: false as const, err: e instanceof Error ? e.message : String(e) }
+          }
+        },
+        { topicId: coldTopicId, assistantId: liveAssistantId, name: coldTopicName, entries }
+      )
+      expect(persist.ok, `persist failed: ${(persist as any).err}`).toBe(true)
+      expect(coldTopicId).not.toBe(defaultTopicId)
+      const stillDefaultActive = await page.evaluate(
+        (expectedDefault: string) => (window as any).store.getState().messages?.currentTopicId ?? null,
+        defaultTopicId
+      )
+      expect(stillDefaultActive).not.toBe(coldTopicId)
+      console.log(`[E2E][topic-naming] Cold topic seeded ${coldTopicId}, not initially active`)
+    })
+
+    let preIds: string[]
+    let preDomIds: string[]
+    await test.step('D: First cold activation proves bounded tail window', async () => {
+      const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${coldTopicId}"]`)
+      await topicItem.waitFor({ state: 'attached', timeout: 15000 })
+      await topicItem.scrollIntoViewIfNeeded()
+      await topicItem.waitFor({ state: 'visible', timeout: 15000 })
+      await topicItem.click()
+      await page.waitForFunction(
+        ({ topicId, expected }: { topicId: string; expected: number }) => {
+          const s = (window as any).store.getState()
+          const ids = s.messages?.messageIdsByTopic?.[topicId]
+          const loading = s.messages?.loadingByTopic?.[topicId]
+          return Array.isArray(ids) && ids.length === expected && loading !== true
+        },
+        { topicId: coldTopicId, expected: COLD_DISPLAY },
+        { timeout: 30000 }
+      )
+      await page.waitForFunction(
+        (expected: number) => document.querySelectorAll('#messages [data-message-id]').length === expected,
+        COLD_DISPLAY,
+        { timeout: 30000 }
+      )
+      const projection = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
+        const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+          (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+        )
+        return { ids, domIds, domCount: domIds.length }
+      }, coldTopicId)
+      const expectedTail: string[] = []
+      for (let i = COLD_TOTAL - COLD_DISPLAY; i < COLD_TOTAL; i++) expectedTail.push(`${coldTopicId}-msg-${padCold(i)}`)
+      expect(projection.ids).toEqual(expectedTail)
+      expect(projection.domCount).toBe(COLD_DISPLAY)
+      expect([...projection.domIds].sort()).toEqual([...expectedTail].sort())
+      preIds = projection.ids
+      preDomIds = projection.domIds
+      console.log(`[E2E][topic-naming] Cold activation bounded window ids=${preIds.length} dom=${projection.domCount}`)
+    })
+
+    await test.step('E: Bounded naming-context oracle from Main authority', async () => {
+      const naming: any = await page.evaluate(
+        async (topicId: string) => await (window as any).api.chatDb.fetchTopicNamingContext({ topicId }),
+        coldTopicId
+      )
+      expect(naming.ok).toBe(true)
+      const v: any = naming.value
+      expect(v.messageCount).toBe(COLD_TOTAL)
+      const headId = `${coldTopicId}-msg-${padCold(0)}`
+      const expectedLatest5: string[] = []
+      for (let i = COLD_TOTAL - 5; i < COLD_TOTAL; i++) expectedLatest5.push(`${coldTopicId}-msg-${padCold(i)}`)
+      expect(v.firstMessage?.id).toBe(headId)
+      expect(v.latestMessages.map((m: any) => m.id)).toEqual(expectedLatest5)
+      expect(v.naming).toEqual({
+        completeness: 'naming-context',
+        topicId: coldTopicId,
+        firstMessageId: headId,
+        lastMessageId: expectedLatest5[expectedLatest5.length - 1],
+        returnedLatestCount: 5
+      })
+      expect(v.naming.returnedLatestCount).toBeLessThanOrEqual(5)
+      expect(v.topic?.id).toBe(coldTopicId)
+      const allowedIds = new Set([headId, ...expectedLatest5])
+      expect(v.blocks.length).toBeGreaterThan(0)
+      for (const b of v.blocks as any[]) {
+        expect(allowedIds.has(b.messageId)).toBe(true)
+      }
+      expect(new Set((v.blocks as any[]).map((b) => b.messageId)).size).toBeLessThanOrEqual(6)
+      console.log(`[E2E][topic-naming] Naming oracle count=${v.messageCount} latest5=${expectedLatest5.length}`)
+    })
+
+    const preName = await getTopicNameFromRedux(page, coldTopicId)
+    let seqBeforeManual: number
+    await test.step('F: Manual Auto Rename via topic context menu', async () => {
+      seqBeforeManual = getRequestSequence()
+      const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${coldTopicId}"]`)
+      await topicItem.scrollIntoViewIfNeeded()
+      await topicItem.click({ button: 'right' })
+      const autoRenameItem = page
+        .locator('.ant-dropdown-menu:visible .ant-dropdown-menu-item')
+        .filter({ has: page.locator('svg.lucide-sparkles') })
+      await autoRenameItem.waitFor({ state: 'visible', timeout: 10000 })
+      await autoRenameItem.click()
+      console.log(`[E2E][topic-naming] Cold manual Auto Rename clicked (seq >= ${seqBeforeManual})`)
+    })
+
+    await test.step('G: Summary uses latest5 in authority order, excludes older marker, stays non-stream', async () => {
+      await expect.poll(() => findSummaryRequest(seqBeforeManual), { timeout: 60000 }).not.toBeNull()
+      const manualReq = findSummaryRequest(seqBeforeManual)
+      expect(manualReq).not.toBeNull()
+      expect(manualReq!.parsed).toEqual(expect.objectContaining({ model: 'mock-model' }))
+      expect(manualReq!.parsed?.stream).not.toBe(true)
+      const body = manualReq!.body as string
+      const latestMarkers: string[] = []
+      for (let i = COLD_TOTAL - 5; i < COLD_TOTAL; i++) latestMarkers.push(markerFor(i))
+      const middleMarker = markerFor(7)
+      let prevIdx = -1
+      for (const marker of latestMarkers) {
+        const idx = body.indexOf(marker)
+        expect(idx, `summary body must contain latest marker ${marker}`).toBeGreaterThan(prevIdx)
+        prevIdx = idx
+      }
+      expect(body.includes(middleMarker), `summary body must exclude older marker ${middleMarker}`).toBe(false)
+      console.log(`[E2E][topic-naming] Cold summary seq=${manualReq!.sequence} latest5 ordered, middle excluded`)
+    })
+
+    await test.step('H: Topic name updates and tail projection stays bounded unchanged', async () => {
+      await waitForGeneratedTopicName(page, coldTopicId)
+      const reduxName = await getTopicNameFromRedux(page, coldTopicId)
+      expect(reduxName).not.toBe(preName)
+      expect(reduxName).toContain(MOCK_TITLE_MARKER)
+      const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${coldTopicId}"]`)
+      await expect(topicItem).toContainText(MOCK_TITLE_MARKER, { timeout: 10000 })
+      const post = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
+        const domIds: string[] = Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+          (el) => (el as HTMLElement).getAttribute('data-message-id') || ''
+        )
+        return { ids, domIds, domCount: domIds.length }
+      }, coldTopicId)
+      expect(post.ids).toEqual(preIds)
+      expect(post.domCount).toBe(COLD_DISPLAY)
+      expect([...post.domIds].sort()).toEqual([...preDomIds].sort())
+      await expect
+        .poll(
+          async () =>
+            await page.evaluate(
+              (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+              coldTopicId
+            ),
+          { timeout: 1500 }
+        )
+        .toBe(COLD_DISPLAY)
+      console.log('[E2E][topic-naming] Cold post-rename window unchanged (no whole-topic projection load)')
+    })
+  })
 })

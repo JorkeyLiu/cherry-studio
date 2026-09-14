@@ -406,6 +406,10 @@ export enum IpcChannel {
   // One-shot whole-topic snapshot for topic exports / knowledge (short-lived, no Redux residency)
   ChatDb_FetchWholeTopicSnapshot = 'chatdb:fetch-whole-topic-snapshot',
 
+  // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
+  ChatDb_FetchTopicNamingContext = 'chatdb:fetch-topic-naming-context',
+  ChatDb_FetchTopicActivity = 'chatdb:fetch-topic-activity',
+
   // Phase 5 authoritative deletion propagation — Main → all renderers
   ChatDb_TopicDeleted = 'chatdb:topic-deleted',
 

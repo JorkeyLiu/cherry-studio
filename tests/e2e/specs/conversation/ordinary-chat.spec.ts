@@ -29,6 +29,7 @@ import {
   queryChatDbViaElectron,
   test
 } from '../../fixtures/electron.fixture'
+import { waitForAppReady } from '../../utils/wait-helpers'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1152,6 +1153,293 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
         // if the test runner hasn't reached fixture teardown yet, but log it.
         console.warn('[Phase 5.4] WARNING: Disposable dirs still exist — cleanup may not have run')
       }
+    })
+  })
+
+  test('rate-limit uses explicit current topic activity, not topics[0]', async ({ mainWindow }) => {
+    test.setTimeout(300000)
+    const page = mainWindow
+    await waitForAppReady(page)
+
+    const RATE_LIMIT_SECONDS = 60
+    const DISPLAY = 20
+    const padRate = (n: number) => String(n).padStart(5, '0')
+    const currentTopicId = `ratelimit-current-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const oldTopicId = `ratelimit-old-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const recentCreatedAt = new Date().toISOString()
+    const OLD_STAMP = '2026-01-01T00:00:00.000Z'
+
+    await test.step('A: Provider seed and deterministic rateLimit', async () => {
+      const seedOk = await page.evaluate(() => {
+        const s = (window as any).store?.getState()
+        return s?.llm?.providers?.some((p: any) => p.id === 'mock-openai') && s.llm.defaultModel?.id === 'mock-model'
+      })
+      expect(seedOk).toBe(true)
+      await page.evaluate((seconds: number) => {
+        ;(window as any).store.dispatch({
+          type: 'llm/updateProvider',
+          payload: { id: 'mock-openai', rateLimit: seconds }
+        })
+      }, RATE_LIMIT_SECONDS)
+      const rateOk = await page.evaluate(
+        (seconds: number) =>
+          (window as any).store.getState().llm.providers.find((p: any) => p.id === 'mock-openai')?.rateLimit ===
+          seconds,
+        RATE_LIMIT_SECONDS
+      )
+      expect(rateOk).toBe(true)
+      await page.evaluate((limit: number) => {
+        ;(window as any).store.dispatch({ type: 'newMessages/setDisplayCount', payload: limit })
+      }, DISPLAY)
+      const displayOk = await page.evaluate(() => (window as any).store.getState().messages.displayCount)
+      expect(displayOk).toBe(DISPLAY)
+      console.log(`[E2E] Rate-limit seed rateLimit=${RATE_LIMIT_SECONDS}s display=${DISPLAY}`)
+    })
+
+    let liveAssistantId: string
+    await test.step('B: Seed allowing topics[0] and blocking current topic', async () => {
+      liveAssistantId = await page.evaluate(
+        () =>
+          (window as any).store.getState().assistants?.assistants?.[0]?.id ??
+          (window as any).store.getState().assistants?.defaultAssistant?.id ??
+          null
+      )
+      expect(liveAssistantId).toBeTruthy()
+
+      const seedOne = async (
+        topicId: string,
+        name: string,
+        stamps: string[],
+        prefix: string,
+        roles: Array<'user' | 'assistant'>
+      ) => {
+        const addOk = await page.evaluate(
+          ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+            try {
+              ;(window as any).store.dispatch({
+                type: 'assistants/addTopic',
+                payload: {
+                  assistantId,
+                  topic: {
+                    id: topicId,
+                    assistantId,
+                    name,
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z'
+                  }
+                }
+              })
+              return { ok: true as const }
+            } catch (e) {
+              return { ok: false as const, err: e instanceof Error ? e.message : String(e) }
+            }
+          },
+          { topicId, assistantId: liveAssistantId, name }
+        )
+        expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
+        const entries = stamps.map((stamp, i) => {
+          const msgId = `${topicId}-msg-${padRate(i)}`
+          const blockId = `${topicId}-block-${padRate(i)}`
+          return {
+            message: {
+              id: msgId,
+              topicId,
+              role: roles[i],
+              assistantId: liveAssistantId,
+              createdAt: stamp,
+              updatedAt: stamp,
+              status: 'success',
+              blocks: [blockId],
+              sortOrder: i
+            },
+            blocks: [
+              {
+                id: blockId,
+                messageId: msgId,
+                type: 'main_text',
+                content: `${prefix}-${padRate(i)} deterministic content`,
+                status: 'success',
+                createdAt: stamp,
+                updatedAt: stamp
+              }
+            ]
+          }
+        })
+        const persist = await page.evaluate(
+          async ({
+            topicId,
+            assistantId,
+            name,
+            entries
+          }: {
+            topicId: string
+            assistantId: string
+            name: string
+            entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }>
+          }) => {
+            try {
+              const chatDb = (window as any).api?.chatDb
+              if (
+                !chatDb ||
+                typeof chatDb.ensureTopic !== 'function' ||
+                typeof chatDb.pasteMessagesToTopic !== 'function'
+              ) {
+                return { ok: false as const, err: 'chatDb missing' }
+              }
+              const ensured = await chatDb.ensureTopic({ topicId, assistantId, name })
+              if (!ensured || ensured.ok !== true)
+                return { ok: false as const, err: `ensureTopic ${JSON.stringify(ensured)}` }
+              const pasted = await chatDb.pasteMessagesToTopic({ topicId, entries })
+              if (!pasted || pasted.ok !== true) return { ok: false as const, err: `paste ${JSON.stringify(pasted)}` }
+              return { ok: true as const }
+            } catch (e) {
+              return { ok: false as const, err: e instanceof Error ? e.message : String(e) }
+            }
+          },
+          { topicId, assistantId: liveAssistantId, name, entries }
+        )
+        expect(persist.ok, `persist failed: ${(persist as any).err}`).toBe(true)
+      }
+
+      // Seed current FIRST so the later old-topic addTopic unshifts old to
+      // index 0 and current settles at index 1 (explicitly not index 0).
+      await seedOne(
+        currentTopicId,
+        `Rate Current ${currentTopicId}`,
+        [OLD_STAMP, OLD_STAMP, recentCreatedAt],
+        'ratelimit-current',
+        ['user', 'assistant', 'user']
+      )
+      await seedOne(oldTopicId, `Rate Old ${oldTopicId}`, [OLD_STAMP, OLD_STAMP], 'ratelimit-old', [
+        'user',
+        'assistant'
+      ])
+
+      const order = await page.evaluate(() => {
+        const topics = (window as any).store.getState().assistants?.assistants?.[0]?.topics ?? []
+        return {
+          ids: topics.map((t: any) => t.id),
+          currentTopicId: (window as any).store.getState().messages?.currentTopicId ?? null
+        }
+      })
+      expect(order.ids[0]).toBe(oldTopicId)
+      expect(order.ids[1]).toBe(currentTopicId)
+      expect(order.ids[1]).not.toBe(order.ids[0])
+      console.log('[E2E] Rate-limit topics ordered: topics[0]=old-allowing, topics[1]=current-blocking')
+    })
+
+    await test.step('C: Activate current topic and prove bounded projection', async () => {
+      const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${currentTopicId}"]`)
+      await topicItem.waitFor({ state: 'attached', timeout: 15000 })
+      await topicItem.scrollIntoViewIfNeeded()
+      await topicItem.waitFor({ state: 'visible', timeout: 15000 })
+      await topicItem.click()
+      await page.waitForFunction(
+        ({ topicId, expected }: { topicId: string; expected: number }) => {
+          const s = (window as any).store.getState()
+          const ids = s.messages?.messageIdsByTopic?.[topicId]
+          const loading = s.messages?.loadingByTopic?.[topicId]
+          return Array.isArray(ids) && ids.length === expected && loading !== true
+        },
+        { topicId: currentTopicId, expected: 3 },
+        { timeout: 30000 }
+      )
+      const activeNow = await page.evaluate(() => (window as any).store.getState().messages?.currentTopicId ?? null)
+      expect(activeNow).toBe(currentTopicId)
+      console.log('[E2E] Rate-limit current topic active with 3-message projection')
+    })
+
+    await test.step('D: fetchTopicActivity oracles differ by explicit topic', async () => {
+      const oldActivity: any = await page.evaluate(
+        async (topicId: string) => await (window as any).api.chatDb.fetchTopicActivity({ topicId }),
+        oldTopicId
+      )
+      const currentActivity: any = await page.evaluate(
+        async (topicId: string) => await (window as any).api.chatDb.fetchTopicActivity({ topicId }),
+        currentTopicId
+      )
+      expect(oldActivity.ok).toBe(true)
+      expect(currentActivity.ok).toBe(true)
+      expect(oldActivity.value.activity).toEqual({ completeness: 'topic-activity', topicId: oldTopicId })
+      expect(currentActivity.value.activity).toEqual({ completeness: 'topic-activity', topicId: currentTopicId })
+      expect(oldActivity.value.messageCount).toBe(2)
+      expect(currentActivity.value.messageCount).toBe(3)
+      expect(currentActivity.value.latestMessageId).toBe(`${currentTopicId}-msg-${padRate(2)}`)
+      expect(oldActivity.value.latestMessageId).toBe(`${oldTopicId}-msg-${padRate(1)}`)
+      expect(oldActivity.value.latestMessageCreatedAt).toBe(OLD_STAMP)
+      const ageMs = Date.now() - new Date(currentActivity.value.latestMessageCreatedAt).getTime()
+      expect(Number.isFinite(ageMs)).toBe(true)
+      expect(ageMs).toBeLessThan(120000)
+      expect(ageMs).toBeLessThan(RATE_LIMIT_SECONDS * 1000)
+      console.log('[E2E] Rate-limit activity oracle: old-allowing vs current-recent differ as seeded')
+    })
+
+    let blockedCount = 0
+    await test.step('E: Real send on current topic is blocked', async () => {
+      clearRequestLog()
+      const seq = getRequestSequence()
+      blockedCount = await page.evaluate(
+        (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+        currentTopicId
+      )
+      expect(blockedCount).toBe(3)
+      await uiSendMessage(page, 'Rate-limit current-topic blocked probe')
+      // Negative-evidence window: allow any stray product request to appear before asserting absence.
+      await page.waitForTimeout(3000)
+      expect(findProductRequestAfter(seq)).toBeNull()
+      const afterCount = await page.evaluate(
+        (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+        currentTopicId
+      )
+      expect(afterCount).toBe(blockedCount)
+      const toast = page.locator('.ant-message').first()
+      try {
+        await expect(toast).toContainText(/(Too many requests|Please wait|seconds|发送过于频繁|请等待|秒)/, {
+          timeout: 5000
+        })
+        console.log('[E2E] Rate-limit blocked toast visible (localized)')
+      } catch {
+        console.log('[E2E] Rate-limit toast not stable, skipping toast assert (block proven by request/count)')
+      }
+      console.log('[E2E] Rate-limit blocked: no product request, message count unchanged')
+    })
+
+    await test.step('F: Disable rateLimit, real send on current topic succeeds', async () => {
+      await page.evaluate(() => {
+        ;(window as any).store.dispatch({ type: 'llm/updateProvider', payload: { id: 'mock-openai', rateLimit: 0 } })
+      })
+      const disabledOk = await page.evaluate(
+        () => !(window as any).store.getState().llm.providers.find((p: any) => p.id === 'mock-openai')?.rateLimit
+      )
+      expect(disabledOk).toBe(true)
+      clearRequestLog()
+      const seq = getRequestSequence()
+      const prevAssistantCount = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages.messageIdsByTopic[topicId] || []
+        let count = 0
+        for (const id of ids) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        return count
+      }, currentTopicId)
+      await uiSendMessage(page, 'Rate-limit current-topic allowed probe')
+      await waitForAssistantResponseComplete(page, currentTopicId, prevAssistantCount)
+      const productReq = findProductRequestAfter(seq)
+      expect(productReq).not.toBeNull()
+      expect(productReq!.parsed).toEqual(expect.objectContaining({ model: 'mock-model', stream: true }))
+      const messages = (productReq!.parsed as any).messages as Array<{ role: string; content: string }>
+      expect(
+        messages.some((m) => m.role === 'user' && m.content?.includes('Rate-limit current-topic allowed probe'))
+      ).toBe(true)
+      const afterCount = await page.evaluate(
+        (topicId: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[topicId]?.length ?? 0,
+        currentTopicId
+      )
+      expect(afterCount).toBeGreaterThan(blockedCount)
+      console.log(
+        `[E2E] Rate-limit allowed: streaming request seq=${productReq!.sequence} count ${blockedCount} -> ${afterCount}`
+      )
     })
   })
 })

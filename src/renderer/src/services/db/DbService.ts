@@ -7,6 +7,8 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchTopicActivityResponse,
+  FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
@@ -87,6 +89,21 @@ class DbService implements MessageDataSource {
   }> {
     if (!this.ordinarySource.fetchWholeTopicSnapshot) throw new Error('fetchWholeTopicSnapshot unavailable')
     return this.ordinarySource.fetchWholeTopicSnapshot(topicId)
+  }
+  fetchTopicNamingContext(topicId: string): Promise<{
+    topic: FetchTopicNamingContextResponse['topic']
+    messageCount: number
+    firstMessage: Message | null
+    latestMessages: Message[]
+    blocks: MessageBlock[]
+    naming: FetchTopicNamingContextResponse['naming']
+  }> {
+    if (!this.ordinarySource.fetchTopicNamingContext) throw new Error('fetchTopicNamingContext unavailable')
+    return this.ordinarySource.fetchTopicNamingContext(topicId)
+  }
+  fetchTopicActivity(topicId: string): Promise<FetchTopicActivityResponse> {
+    if (!this.ordinarySource.fetchTopicActivity) throw new Error('fetchTopicActivity unavailable')
+    return this.ordinarySource.fetchTopicActivity(topicId)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)

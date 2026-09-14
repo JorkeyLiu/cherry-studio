@@ -32,6 +32,10 @@ import type {
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchTopicActivityRequest,
+  FetchTopicActivityResponse,
+  FetchTopicNamingContextRequest,
+  FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotRequest,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
@@ -106,6 +110,8 @@ export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
 export type FetchContextClosureResult = FetchContextClosureResponse
 export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
+export type FetchTopicNamingContextResult = FetchTopicNamingContextResponse
+export type FetchTopicActivityResult = FetchTopicActivityResponse
 export type GetRawTopicResult = { id: string; messages: JsonObject[] } | null
 
 // ---------------------------------------------------------------------------
@@ -1198,6 +1204,148 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchWholeTopicSnapshot(${request.topicId})`)
+  }
+
+  /**
+   * Bounded topic naming-context READ for automatic/manual naming.
+   *
+   * One authoritative SQLite transaction using only bounded queries over the
+   * existing topic_id/sort_order authority ordering — count, first row, and
+   * latest at most 5 rows — plus blocks for at most 6 deduplicated returned
+   * message IDs. Never calls listByTopic/fetchWholeTopicSnapshot.
+   * - Missing topic → NOT_FOUND (never an ambiguous empty success).
+   * - Existing empty topic → count 0, null first/latest bounds, empty arrays.
+   * - First message overlapping the latest window shares one block fetch.
+   * - Pure read: never creates/mutates rows, never logs content.
+   */
+  fetchTopicNamingContext(request: FetchTopicNamingContextRequest): ChatDbResult<FetchTopicNamingContextResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const messageCount = repos.messages.countByTopic(request.topicId)
+        if (messageCount === 0) {
+          const rawFlag = (topic.data.overflow as Record<string, unknown> | undefined)?.isNameManuallyEdited
+          return {
+            topic: {
+              id: topic.data.id,
+              name: topic.data.name ?? null,
+              isNameManuallyEdited: typeof rawFlag === 'boolean' ? rawFlag : null
+            },
+            messageCount: 0,
+            firstMessage: null,
+            latestMessages: [],
+            blocks: [],
+            naming: {
+              completeness: 'naming-context' as const,
+              topicId: request.topicId,
+              firstMessageId: null,
+              lastMessageId: null,
+              returnedLatestCount: 0
+            }
+          }
+        }
+        const first = repos.messages.getFirstByTopic(request.topicId)
+        const latest = repos.messages.getLatestByTopic(request.topicId, 5)
+        if (!first || latest.length === 0) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} has no readable messages`)
+        }
+        const returnedIds: string[] = []
+        const seenIds = new Set<string>()
+        const pushId = (id: string): void => {
+          if (!seenIds.has(id)) {
+            seenIds.add(id)
+            returnedIds.push(id)
+          }
+        }
+        pushId(first.id)
+        for (const m of latest) pushId(m.id)
+        const blockDataMap = repos.blocks.listByMessages(returnedIds)
+        const orderedBlocks: MessageBlockData[] = []
+        for (const id of returnedIds) {
+          orderedBlocks.push(...(blockDataMap.get(id) ?? []))
+        }
+        const wireFirstList = reconstructMessageBlockRelations(
+          messagesToWire([first]),
+          blocksToWire(blockDataMap.get(first.id) ?? [])
+        )
+        const wireLatest = reconstructMessageBlockRelations(
+          messagesToWire(latest),
+          blocksToWire(latest.flatMap((m) => blockDataMap.get(m.id) ?? []))
+        )
+        const wireBlocks = blocksToWire(orderedBlocks)
+        const rawFlag = (topic.data.overflow as Record<string, unknown> | undefined)?.isNameManuallyEdited
+        return {
+          topic: {
+            id: topic.data.id,
+            name: topic.data.name ?? null,
+            isNameManuallyEdited: typeof rawFlag === 'boolean' ? rawFlag : null
+          },
+          messageCount,
+          firstMessage: wireFirstList[0] ?? null,
+          latestMessages: wireLatest,
+          blocks: wireBlocks,
+          naming: {
+            completeness: 'naming-context' as const,
+            topicId: request.topicId,
+            firstMessageId: first.id,
+            lastMessageId: latest[latest.length - 1].id,
+            returnedLatestCount: latest.length
+          }
+        }
+      })
+    }, `fetchTopicNamingContext(${request.topicId})`)
+  }
+
+  /**
+   * Bounded topic activity READ for provider rate-limit checks.
+   *
+   * One authoritative SQLite transaction using only bounded queries over the
+   * existing topic_id/sort_order authority ordering — count plus the latest
+   * single row. No messages or blocks cross the wire.
+   * - Missing topic → NOT_FOUND (callers treat metadata failure as allow-send).
+   * - Existing empty topic → count 0 with null latest id/timestamp.
+   * - Pure read: never creates/mutates rows, never logs content.
+   */
+  fetchTopicActivity(request: FetchTopicActivityRequest): ChatDbResult<FetchTopicActivityResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const messageCount = repos.messages.countByTopic(request.topicId)
+        if (messageCount === 0) {
+          return {
+            messageCount: 0,
+            latestMessageId: null,
+            latestMessageCreatedAt: null,
+            activity: {
+              completeness: 'topic-activity' as const,
+              topicId: request.topicId
+            }
+          }
+        }
+        const latest = repos.messages.getLatestByTopic(request.topicId, 1)
+        const latestRow = latest[0]
+        if (!latestRow) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} has no readable messages`)
+        }
+        return {
+          messageCount,
+          latestMessageId: latestRow.id,
+          latestMessageCreatedAt: latestRow.createdAt ?? null,
+          activity: {
+            completeness: 'topic-activity' as const,
+            topicId: request.topicId
+          }
+        }
+      })
+    }, `fetchTopicActivity(${request.topicId})`)
   }
 
   /**

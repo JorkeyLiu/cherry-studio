@@ -456,11 +456,8 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           })
         }
 
-        // 更新topic的name
-        void Promise.resolve(autoRenameTopic(assistant, topicId)).catch((error: unknown) =>
-          logger.error('autoRenameTopic failed', error as Error)
-        )
-
+        // 更新topic的name推迟到最终原子持久化成功之后（见下文 DB-first 提交后），
+        // 避免在消息尚未落盘时触发基于 Main 命名上下文的重命名。
         // 处理usage估算
         // For OpenRouter, always use the accurate usage data from API, don't estimate
         const isOpenRouter = assistant.model?.provider === 'openrouter'
@@ -512,6 +509,13 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
             })
           )
         }
+
+        // 成功终态命名：仅在最终原子持久化成功且已加载 Redux 终态提交之后
+        // 触发（仍在 MESSAGE_COMPLETE 之前）。失败/非 success/持久化失败分支
+        // 永不触发；fire-and-forget，保留 catch 日志，不 await，不重复调用。
+        void Promise.resolve(autoRenameTopic(assistant, topicId)).catch((error: unknown) =>
+          logger.error('autoRenameTopic failed', error as Error)
+        )
 
         void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
         logger.debug('onComplete finished')

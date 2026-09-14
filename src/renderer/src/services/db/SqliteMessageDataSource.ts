@@ -54,6 +54,10 @@ import type {
   FetchMessagesResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
+  FetchTopicActivityRequest,
+  FetchTopicActivityResponse,
+  FetchTopicNamingContextRequest,
+  FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotRequest,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
@@ -133,6 +137,10 @@ export interface ChatDbApi {
   fetchWholeTopicSnapshot?(
     request: FetchWholeTopicSnapshotRequest
   ): Promise<ChatDbResult<FetchWholeTopicSnapshotResponse>>
+  fetchTopicNamingContext?(
+    request: FetchTopicNamingContextRequest
+  ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
+  fetchTopicActivity?(request: FetchTopicActivityRequest): Promise<ChatDbResult<FetchTopicActivityResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
@@ -1040,7 +1048,6 @@ export class SqliteMessageDataSource implements MessageDataSource {
   }
 
   // ============ Whole-topic snapshot READ (one-shot exports/knowledge, read-only) ============
-
   /**
    * Fetch an explicit short-lived whole-topic snapshot for one-shot
    * topic exports / knowledge jobs.
@@ -1067,6 +1074,57 @@ export class SqliteMessageDataSource implements MessageDataSource {
       blocks: result.blocks as unknown as MessageBlock[],
       snapshot: result.snapshot
     }
+  }
+
+  // ============ Bounded naming/activity reads (naming + rate-limit, read-only) ============
+
+  /**
+   * Fetch the bounded naming context for a topic.
+   *
+   * One Main SQLite transaction returns authority naming metadata, the exact
+   * message count, the first message (or null), the latest at most 5 messages
+   * in authority ASC order, and blocks for those returned messages only.
+   * Converts wires to domain Message[]/MessageBlock[] and dispatches nothing.
+   * Missing topic throws ChatDbResultError (NOT_FOUND); transport rejection
+   * propagates unchanged.
+   */
+  async fetchTopicNamingContext(topicId: string): Promise<{
+    topic: FetchTopicNamingContextResponse['topic']
+    messageCount: number
+    firstMessage: Message | null
+    latestMessages: Message[]
+    blocks: MessageBlock[]
+    naming: FetchTopicNamingContextResponse['naming']
+  }> {
+    if (!this.api.fetchTopicNamingContext) {
+      throw new Error('ChatDb API unavailable: naming-context read not exposed')
+    }
+    const request: FetchTopicNamingContextRequest = cloneForWire({ topicId })
+    const result = unwrap(await this.api.fetchTopicNamingContext(request))
+    return {
+      topic: result.topic,
+      messageCount: result.messageCount,
+      firstMessage: (result.firstMessage as unknown as Message | null) ?? null,
+      latestMessages: result.latestMessages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[],
+      naming: result.naming
+    }
+  }
+
+  /**
+   * Fetch the bounded topic activity for rate-limit checks.
+   *
+   * One Main SQLite transaction returns the exact message count plus the
+   * latest message id/timestamp. No messages or blocks cross the wire.
+   * Dispatches nothing. Missing topic throws ChatDbResultError (NOT_FOUND);
+   * transport rejection propagates unchanged.
+   */
+  async fetchTopicActivity(topicId: string): Promise<FetchTopicActivityResponse> {
+    if (!this.api.fetchTopicActivity) {
+      throw new Error('ChatDb API unavailable: topic-activity read not exposed')
+    }
+    const request: FetchTopicActivityRequest = cloneForWire({ topicId })
+    return unwrap(await this.api.fetchTopicActivity(request))
   }
 
   // ============ Search (Phase 5.2A, read-only) ============
