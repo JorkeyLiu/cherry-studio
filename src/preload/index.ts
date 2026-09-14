@@ -22,6 +22,7 @@ import type {
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
@@ -721,6 +722,8 @@ const api = {
     // S6.2c-2: insert after stable anchor (additive, keeps old append intact)
     insertMessagesAfterAnchor: (request: InsertMessagesAfterAnchorRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_InsertMessagesAfterAnchor, request),
+    insertMessageGroups: (request: InsertMessageGroupsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_InsertMessageGroups, request),
     // Phase 5.1B: compound mutations
     cloneMessagesToTopic: (request: CloneMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_CloneMessagesToTopic, request),

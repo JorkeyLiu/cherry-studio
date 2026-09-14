@@ -8,6 +8,7 @@ import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
+  InsertMessageGroup,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
@@ -218,6 +219,10 @@ class DbService implements MessageDataSource {
   insertMessagesAfterAnchor(topicId: string, afterMessageId: string, entries: MessageBlockEntry[]) {
     if (!this.ordinarySource.insertMessagesAfterAnchor) throw new Error('insertMessagesAfterAnchor unavailable')
     return this.ordinarySource.insertMessagesAfterAnchor(topicId, afterMessageId, entries)
+  }
+  insertMessageGroups(topicId: string, groups: InsertMessageGroup[]) {
+    if (!this.ordinarySource.insertMessageGroups) throw new Error('insertMessageGroups unavailable')
+    return this.ordinarySource.insertMessageGroups(topicId, groups)
   }
 
   resetMessagesForResend(

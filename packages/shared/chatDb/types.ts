@@ -976,6 +976,46 @@ export interface PasteMessagesToTopicRequest {
 export type PasteMessagesToTopicResponse = FileCleanupResult
 
 // ---------------------------------------------------------------------------
+// Insert message groups DTOs (stable insertion intents, Main-authoritative)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable insertion intent for one message group.
+ *
+ * - `after-group-tail`: insert after the complete logical group containing
+ *   `messageId` (user anchor advances through all assistants whose askId
+ *   equals the user ID; assistant anchor advances through all assistants
+ *   with its askId, including non-contiguous members).
+ * - `before-message`: insert immediately before the surviving `messageId`.
+ * - `topic-tail`: append at the topic tail.
+ */
+export type InsertMessageGroupIntent =
+  | { kind: 'after-group-tail'; messageId: string }
+  | { kind: 'before-message'; messageId: string }
+  | { kind: 'topic-tail' }
+
+/**
+ * One ordered group for `insert-message-groups`: entries plus exactly one
+ * stable insertion intent.
+ */
+export interface InsertMessageGroup {
+  /** Ordered entries to insert. Inserted at the resolved intent in array order. */
+  entries: MessageBlockEntry[]
+  /** Exactly one stable insertion intent (discriminated union). */
+  intent: InsertMessageGroupIntent
+}
+
+/** @see IpcChannel.ChatDb_InsertMessageGroups */
+export interface InsertMessageGroupsRequest {
+  topicId: string
+  /** Ordered groups to insert atomically in array order. */
+  groups: InsertMessageGroup[]
+}
+
+/** @see IpcChannel.ChatDb_InsertMessageGroups */
+export type InsertMessageGroupsResponse = FileCleanupResult
+
+// ---------------------------------------------------------------------------
 // Search command DTOs (Phase 5.1B-2)
 // ---------------------------------------------------------------------------
 
@@ -1124,6 +1164,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:paste-messages-to-topic': {
     request: PasteMessagesToTopicRequest
     response: PasteMessagesToTopicResponse
+  }
+  'chatdb:insert-message-groups': {
+    request: InsertMessageGroupsRequest
+    response: InsertMessageGroupsResponse
   }
   // Phase 5.1B-2: search
   'chatdb:search-messages': {

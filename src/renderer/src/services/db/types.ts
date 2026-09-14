@@ -7,6 +7,7 @@ import type {
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
   FileCleanupResult,
+  InsertMessageGroup,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
@@ -221,6 +222,15 @@ export interface MessageDataSource {
     afterMessageId: string,
     entries: MessageBlockEntry[]
   ): Promise<FileCleanupResult>
+
+  /**
+   * Insert message groups with stable intents atomically in Main.
+   * The renderer supplies only stable intents (after-group-tail /
+   * before-message / topic-tail); Main validates anchors against complete
+   * authority order and inserts all groups atomically. Dispatches
+   * updateTopicUpdatedAt exactly once after success.
+   */
+  insertMessageGroups?(topicId: string, groups: InsertMessageGroup[]): Promise<FileCleanupResult>
 
   // ============ Batch Operations ============
   /**

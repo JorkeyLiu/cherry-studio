@@ -1034,4 +1034,502 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(ordered[dbTailIdx + 1]).toBe(afterTail1)
     expect(ordered[dbTailIdx + 2]).toBe(afterTail2)
   })
+
+  test('insert-message-groups after-group-tail outside window inserts after complete tail without projection injection', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'INSERT-GROUPS INTEGRATED: Main pre-seed 50 + cold window 20 so early answer group (user 00004 + assistants 00005/00006/00007) is outside loaded projection; real preload/IPC/Main insertMessageGroups with after-group-tail anchor on the outside user; authority order inserts after complete tail 00007; loaded Redux ID set/count unchanged; post-exit SQLite order + blocks persist. Evidence split: production UI cannot target an outside-loaded anchor (no DOM node), so direct real IPC is the pure IPC authority subclaim; exactly-once is proven by unit tests, never by E2E call counting.'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `s62-img-outside-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const groupStart = 5
+    const { groupAskUserId: outsideUserId, tailId: outsideTailId } = await seedTopicWithStraddleGroup(
+      page,
+      liveAssistantId,
+      topicId,
+      groupStart
+    )
+    const successorId = `${topicId}-msg-${pad(8, 5)}`
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const preLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(preLoaded.count).toBeGreaterThanOrEqual(DISPLAY_LIMIT)
+    expect(preLoaded.ids).not.toContain(outsideUserId)
+    expect(preLoaded.ids).not.toContain(outsideTailId)
+
+    const preRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(preRaw.ok).toBe(true)
+    const preIds: string[] = (preRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(preIds.length).toBe(TOTAL)
+    const preTailIdx = preIds.indexOf(outsideTailId)
+    expect(preTailIdx).toBeGreaterThan(-1)
+    expect(preIds[preTailIdx + 1]).toBe(successorId)
+
+    const newUserId = `${topicId}-ins-u1`
+    const newAsstId = `${topicId}-ins-a1`
+    const newUserBlockId = `${topicId}-ins-block-u1`
+    const newAsstBlockId = `${topicId}-ins-block-a1`
+    const insertRes: any = await page.evaluate(
+      async ({
+        topicId,
+        newUserId,
+        newAsstId,
+        newUserBlockId,
+        newAsstBlockId,
+        outsideUserId,
+        liveAssistantId
+      }: any) => {
+        const api: any = (window as any).api.chatDb
+        const entries = [
+          {
+            message: {
+              id: newUserId,
+              topicId,
+              role: 'user',
+              assistantId: liveAssistantId,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              status: 'success',
+              blocks: [newUserBlockId]
+            },
+            blocks: [
+              {
+                id: newUserBlockId,
+                messageId: newUserId,
+                type: 'main_text',
+                content: 's62-img-outside-user',
+                status: 'success',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              }
+            ]
+          },
+          {
+            message: {
+              id: newAsstId,
+              topicId,
+              role: 'assistant',
+              assistantId: liveAssistantId,
+              askId: newUserId,
+              model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' },
+              modelId: 'mock-model',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              status: 'success',
+              blocks: [newAsstBlockId]
+            },
+            blocks: [
+              {
+                id: newAsstBlockId,
+                messageId: newAsstId,
+                type: 'main_text',
+                content: 's62-img-outside-asst',
+                status: 'success',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              }
+            ]
+          }
+        ]
+        return await api.insertMessageGroups({
+          topicId,
+          groups: [{ entries, intent: { kind: 'after-group-tail', messageId: outsideUserId } }]
+        })
+      },
+      { topicId, newUserId, newAsstId, newUserBlockId, newAsstBlockId, outsideUserId, liveAssistantId }
+    )
+    expect(insertRes.ok, `insertMessageGroups failed: ${JSON.stringify(insertRes)}`).toBe(true)
+
+    const postRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postRaw.ok).toBe(true)
+    const postIds: string[] = (postRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(postIds.length).toBe(TOTAL + 2)
+    const postTailIdx = postIds.indexOf(outsideTailId)
+    expect(postTailIdx).toBe(preTailIdx)
+    expect(postIds[postTailIdx + 1]).toBe(newUserId)
+    expect(postIds[postTailIdx + 2]).toBe(newAsstId)
+    expect(postIds[postTailIdx + 3]).toBe(successorId)
+
+    const postLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(postLoaded.count).toBe(preLoaded.count)
+    expect(postLoaded.ids).toEqual(preLoaded.ids)
+    expect(postLoaded.ids).not.toContain(newUserId)
+    expect(postLoaded.ids).not.toContain(newAsstId)
+
+    await electronApp.close()
+    const dbPath = getChatDbPath()
+    expect(dbPath).not.toBeNull()
+    await expect.poll(() => fs.existsSync(dbPath!), { timeout: 30000, intervals: [250, 500] }).toBe(true)
+    const esc = (v: string) => v.replace(/'/g, "''")
+    const sqlOrder = `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' ORDER BY sort_order ASC, id ASC`
+    await pollDbUntil(dbPath!, sqlOrder, (rows) => rows.length === TOTAL + 2, 30000)
+    const probe = queryChatDbViaElectron(dbPath!, sqlOrder)
+    expect(probe.ok, `SQLite order probe failed: ${JSON.stringify(probe)}`).toBe(true)
+    const ordered: string[] = ((probe as any).rows ?? []).map((r: any) => r.id)
+    expect(ordered).toEqual(postIds)
+    const sqlBlocks = `SELECT id, message_id FROM message_blocks WHERE message_id IN ('${esc(newUserId)}','${esc(newAsstId)}')`
+    const blockProbe = queryChatDbViaElectron(dbPath!, sqlBlocks)
+    expect(blockProbe.ok, `SQLite block probe failed: ${JSON.stringify(blockProbe)}`).toBe(true)
+    const blockRows: any[] = (blockProbe as any).rows ?? []
+    expect(blockRows.map((r: any) => r.id).sort()).toEqual([newUserBlockId, newAsstBlockId].sort())
+  })
+
+  test('insert-message-groups multi-group delete undo restores before-message + topic-tail with bounded projection', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'UNDO-RESTORE INTEGRATED: Main pre-seed 30 + cold window 20; production edit-mode Meta+Backspace deletes two non-contiguous groups (outside head user 00000 + loaded tail user 00028) via semantic delete; real Meta+z undo runs the production UndoService one-shot insertMessageGroups restore (before-message head + topic-tail tail); complete SQLite order returns exactly to pre-delete, blocks stay attached, loaded projection regains every pre-delete loaded deleted ID while outside-loaded deleted IDs stay absent from Redux (legitimate pagination prepend of pre-existing authority IDs allowed in order); post-exit SQLite persists. No IPC call counting (unit tests prove single-shot wiring); no segment atomicity claimed.'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `s62-img-undo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const totalUndo = 30
+    const headUser = `${topicId}-msg-${pad(0, 5)}`
+    const headAsst = `${topicId}-msg-${pad(1, 5)}`
+    const headAnchor = `${topicId}-msg-${pad(2, 5)}`
+    const headUserBlock = `${topicId}-block-${pad(0, 5)}`
+    const headAsstBlock = `${topicId}-block-${pad(1, 5)}`
+    const tailUser = `${topicId}-msg-${pad(28, 5)}`
+    const tailAsst = `${topicId}-msg-${pad(29, 5)}`
+    const tailUserBlock = `${topicId}-block-${pad(28, 5)}`
+    const tailAsstBlock = `${topicId}-block-${pad(29, 5)}`
+    const deletedIds = [headUser, headAsst, tailUser, tailAsst]
+    const name = `S62 Undo ${topicId}`
+
+    await page.evaluate(
+      ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+        const store = (window as any).store
+        store.dispatch({
+          type: 'assistants/addTopic',
+          payload: {
+            assistantId,
+            topic: {
+              id: topicId,
+              assistantId,
+              name,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z'
+            }
+          }
+        })
+      },
+      { topicId, assistantId: liveAssistantId, name }
+    )
+    const entries: any[] = []
+    for (let i = 0; i < totalUndo; i++) {
+      const msgId = `${topicId}-msg-${pad(i, 5)}`
+      const blockId = `${topicId}-block-${pad(i, 5)}`
+      const role = i % 2 === 0 ? 'user' : 'assistant'
+      const msg: any = {
+        id: msgId,
+        topicId,
+        role,
+        assistantId: liveAssistantId,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'success',
+        blocks: [blockId]
+      }
+      if (role === 'assistant') {
+        msg.model = { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' }
+        msg.modelId = 'mock-model'
+        msg.askId = `${topicId}-msg-${pad(i - 1, 5)}`
+      }
+      entries.push({
+        message: msg,
+        blocks: [
+          {
+            id: blockId,
+            messageId: msgId,
+            type: 'main_text',
+            content: `s62-undo-${pad(i, 5)}`,
+            status: 'success',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z'
+          }
+        ]
+      })
+    }
+    const persist = await page.evaluate(
+      async ({ topicId, assistantId, name, entries }: any) => {
+        try {
+          const api: any = (window as any).api.chatDb
+          const ensured = await api.ensureTopic({ topicId, assistantId, name })
+          if (!ensured || ensured.ok !== true) return { ok: false, err: JSON.stringify(ensured) }
+          const pasted = await api.pasteMessagesToTopic({ topicId, entries })
+          if (!pasted || pasted.ok !== true) return { ok: false, err: JSON.stringify(pasted) }
+          return { ok: true }
+        } catch (e) {
+          return { ok: false, err: e instanceof Error ? e.message : String(e) }
+        }
+      },
+      { topicId, assistantId: liveAssistantId, name, entries }
+    )
+    expect(persist.ok, `persist failed: ${JSON.stringify(persist)}`).toBe(true)
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const preRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(preRaw.ok).toBe(true)
+    const preOrder: string[] = (preRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(preOrder.length).toBe(totalUndo)
+    expect(preOrder, '[E2E] pre-delete authority must contain head group').toEqual(
+      expect.arrayContaining([headUser, headAsst])
+    )
+    expect(preOrder, '[E2E] pre-delete authority must contain tail group').toEqual(
+      expect.arrayContaining([tailUser, tailAsst])
+    )
+
+    const preLoaded: string[] = await page.evaluate(
+      ({ topicId }: { topicId: string }) => [
+        ...((window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? [])
+      ],
+      { topicId }
+    )
+    // Loaded tail group + outside head group: the corrected contract boundary.
+    expect(preLoaded, '[E2E] tail group must be loaded before delete').toEqual(
+      expect.arrayContaining([tailUser, tailAsst])
+    )
+    expect(preLoaded, '[E2E] head group must be outside pre-delete loaded projection').not.toEqual(
+      expect.arrayContaining([headUser])
+    )
+    expect(preLoaded, '[E2E] head assistant must be outside pre-delete loaded projection').not.toContain(headAsst)
+    const preLoadedSet = new Set(preLoaded)
+    const expectedReloaded = deletedIds.filter((id) => preLoadedSet.has(id))
+    const expectedAbsent = deletedIds.filter((id) => !preLoadedSet.has(id))
+    expect(expectedReloaded, '[E2E] expected loaded intersection must cover the tail group').toEqual(
+      expect.arrayContaining([tailUser, tailAsst])
+    )
+    expect(expectedAbsent, '[E2E] expected outside intersection must cover the head group').toEqual(
+      expect.arrayContaining([headUser, headAsst])
+    )
+
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, null, {
+      timeout: 15000
+    })
+    await page.evaluate(
+      ({ mids }: { mids: string[] }) => {
+        const store = (window as any).store
+        store.dispatch({ type: 'editMode/setSelectedGroupIds', payload: mids })
+      },
+      { mids: [headUser, tailUser] }
+    )
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+Backspace')
+
+    // Head IDs were never loaded, so Redux readiness is the loaded tail going
+    // away; authority probe below proves the outside head group was deleted.
+    await page.waitForFunction(
+      ({ topicId, gone }: { topicId: string; gone: string[] }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return gone.every((id) => !ids.includes(id))
+      },
+      { topicId, gone: [tailUser, tailAsst] },
+      { timeout: 30000 }
+    )
+    const deletedRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(deletedRaw.ok).toBe(true)
+    const deletedOrder: string[] = (deletedRaw.value?.messages ?? []).map((m: any) => m.id)
+    for (const id of deletedIds) {
+      expect(deletedOrder, `[E2E] ${id} must be authority-deleted`).not.toContain(id)
+    }
+    expect(deletedOrder.length, '[E2E] authority must drop exactly the expanded groups').toBe(
+      totalUndo - deletedIds.length
+    )
+    const undoShape: any = await page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const stack: any[] = s.undoStack?.undoStack ?? []
+      const top = stack[stack.length - 1]
+      return top
+        ? {
+            type: top.type,
+            anchors: (top.groupAnchors ?? []).map((a: any) => a.anchorMessageId ?? null),
+            groups: (top.groupAnchors ?? []).map((a: any) => ({
+              anchor: (a.anchorMessageId ?? null) as string | null,
+              ids: ((a.messages ?? []) as any[]).map((m: any) => m.id),
+              loaded: (a.loadedMessageIds ?? null) as string[] | null
+            }))
+          }
+        : null
+    })
+    expect(undoShape, '[E2E] semantic delete must push a delete undo').not.toBeNull()
+    expect(undoShape.type).toBe('delete')
+    expect(undoShape.anchors.length).toBe(2)
+    expect(undoShape.anchors, '[E2E] head before-message anchor must survive').toContain(headAnchor)
+    expect(undoShape.anchors, '[E2E] tail topic-tail anchor must be null').toContain(null)
+    const headGroup = (undoShape.groups as any[]).find((g) => g.anchor === headAnchor)
+    const tailGroup = (undoShape.groups as any[]).find((g) => g.anchor === null)
+    expect(headGroup, '[E2E] head restore group must exist').toBeTruthy()
+    expect(tailGroup, '[E2E] tail restore group must exist').toBeTruthy()
+    expect(headGroup.ids, '[E2E] head group must carry the outside messages').toEqual([headUser, headAsst])
+    expect(tailGroup.ids, '[E2E] tail group must carry the loaded messages').toEqual([tailUser, tailAsst])
+    expect(headGroup.loaded, '[E2E] outside head group must capture an empty loaded intersection').toEqual([])
+    expect(new Set(tailGroup.loaded), '[E2E] loaded tail group must capture its loaded intersection').toEqual(
+      new Set([tailUser, tailAsst])
+    )
+
+    await page.keyboard.press('Meta+z')
+    await page.waitForFunction(
+      ({ topicId, back }: { topicId: string; back: string[] }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return back.every((id) => ids.includes(id))
+      },
+      { topicId, back: expectedReloaded },
+      { timeout: 30000 }
+    )
+
+    const postRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postRaw.ok).toBe(true)
+    const postOrder: string[] = (postRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(postOrder, '[E2E] SQLite order must return exactly to pre-delete').toEqual(preOrder)
+    const postById = new Map((postRaw.value?.messages ?? []).map((m: any) => [m.id as string, m]))
+    for (const id of deletedIds) {
+      const msg: any = postById.get(id)
+      expect(msg, `[E2E] ${id} must be authority-restored`).toBeTruthy()
+      expect(Array.isArray(msg?.blocks) && msg.blocks.length > 0, `[E2E] ${id} must keep authority blocks`).toBe(true)
+    }
+
+    const restoredBlocks: any = await page.evaluate(
+      ({ mids }: { mids: string[] }) => {
+        const s = (window as any).store.getState()
+        return mids.map((id) => ({
+          id,
+          blocks: (s.messages?.entities?.[id] as any)?.blocks ?? null,
+          blockExists: ((s.messages?.entities?.[id] as any)?.blocks ?? []).every(
+            (bid: string) => !!s.messageBlocks?.entities?.[bid]
+          )
+        }))
+      },
+      { mids: expectedReloaded }
+    )
+    for (const row of restoredBlocks) {
+      expect(Array.isArray(row.blocks) && row.blocks.length > 0, `[E2E] ${row.id} must keep blocks`).toBe(true)
+      expect(row.blockExists, `[E2E] ${row.id} blocks must exist`).toBe(true)
+    }
+
+    const projection: any = await page.evaluate(
+      ({ topicId, outsideBlocks }: { topicId: string; outsideBlocks: string[] }) => {
+        const s = (window as any).store.getState()
+        return {
+          loaded: [...((s.messages?.messageIdsByTopic?.[topicId] ?? []) as string[])],
+          entities: s.messages?.entities ?? {},
+          blockEntities: s.messageBlocks?.entities ?? {},
+          outsideBlocks
+        }
+      },
+      { topicId, outsideBlocks: [headUserBlock, headAsstBlock] }
+    )
+    const postLoaded: string[] = projection.loaded
+    // No loss: the whole pre-delete window survives delete+undo.
+    for (const id of preLoaded) {
+      expect(postLoaded, `[E2E] pre-delete loaded ${id} must survive`).toContain(id)
+    }
+    // Bounded restore: loaded intersection returns, outside stays out.
+    for (const id of expectedReloaded) {
+      expect(postLoaded, `[E2E] loaded deleted ${id} must be present again`).toContain(id)
+    }
+    for (const id of expectedAbsent) {
+      expect(postLoaded, `[E2E] outside deleted ${id} must stay absent from Redux`).not.toContain(id)
+      expect(projection.entities[id], `[E2E] outside deleted ${id} must stay absent from entities`).toBeUndefined()
+    }
+    for (const bid of [headUserBlock, headAsstBlock, tailUserBlock, tailAsstBlock]) {
+      const shouldExist = bid === tailUserBlock || bid === tailAsstBlock
+      if (shouldExist) {
+        expect(projection.blockEntities[bid], `[E2E] loaded block ${bid} must exist`).toBeTruthy()
+      } else {
+        expect(projection.blockEntities[bid], `[E2E] outside block ${bid} must stay absent`).toBeUndefined()
+      }
+    }
+    // Legitimate pagination/window expansion only: extras are pre-existing
+    // authority IDs (never outside-restored or unknown) in authority order.
+    const preSet = new Set(preLoaded)
+    const extras = postLoaded.filter((id) => !preSet.has(id))
+    const orderIndex = new Map(preOrder.map((id, idx) => [id, idx] as [string, number]))
+    for (const id of extras) {
+      expect(orderIndex.has(id), `[E2E] extra loaded ${id} must be a pre-existing authority ID`).toBe(true)
+      expect(expectedAbsent, `[E2E] extra loaded ${id} must not be an outside-restored ID`).not.toContain(id)
+    }
+    const postIndexes = postLoaded.map((id) => orderIndex.get(id) ?? -1)
+    for (const idx of postIndexes) {
+      expect(idx, '[E2E] post-loaded ID must be a known authority ID').toBeGreaterThanOrEqual(0)
+    }
+    expect(
+      [...postIndexes].sort((a, b) => a - b),
+      '[E2E] post-loaded IDs must follow authority order'
+    ).toEqual(postIndexes)
+
+    await electronApp.close()
+    const dbPath = getChatDbPath()
+    expect(dbPath).not.toBeNull()
+    await expect.poll(() => fs.existsSync(dbPath!), { timeout: 30000, intervals: [250, 500] }).toBe(true)
+    const esc = (v: string) => v.replace(/'/g, "''")
+    const sqlUndo = `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' ORDER BY sort_order ASC, id ASC`
+    await pollDbUntil(dbPath!, sqlUndo, (rows) => rows.length === totalUndo, 30000)
+    const probe = queryChatDbViaElectron(dbPath!, sqlUndo)
+    expect(probe.ok, `SQLite undo order probe failed: ${JSON.stringify(probe)}`).toBe(true)
+    const ordered: string[] = ((probe as any).rows ?? []).map((r: any) => r.id)
+    expect(ordered).toEqual(preOrder)
+    const inList = [headUser, headAsst, tailUser, tailAsst].map((v) => `'${esc(v)}'`).join(',')
+    const blockProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT id, message_id FROM message_blocks WHERE message_id IN (${inList})`
+    )
+    expect(blockProbe.ok, `SQLite undo block probe failed: ${JSON.stringify(blockProbe)}`).toBe(true)
+    expect(((blockProbe as any).rows ?? []).length).toBe(4)
+  })
 })

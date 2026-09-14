@@ -1,21 +1,21 @@
 /**
- * ClipboardService.pasteMessages — PERF-100 batch paste tests.
+ * ClipboardService.pasteMessages — stable insert-message-groups tests.
  *
- * The insertion phase of paste must use ONE `pasteMessagesToTopic` data-source
- * call (one Main transaction, one batch primitive) and ONE ordered
- * `messagesReceived` projection commit, with clipboard/undo/file/segment
- * semantics preserved:
- *   - exactly one data-source batch call on copy paste (no per-message
- *     appendMessage / insertMessageAtIndex loop)
- *   - one `messagesReceived` projection commit carrying the EXACT post-batch
- *     ordered list (pre-batch projection with regenerated message IDs spliced
- *     at the same clamped insertion index)
+ * The insertion phase of paste must use ONE `insertMessageGroups` data-source
+ * call with a stable intent (never a loaded numeric index) and a bounded
+ * local projection commit, with clipboard/undo/file/segment semantics
+ * preserved:
+ *   - exactly one stable batch call on copy paste (no numeric paste call,
+ *     no per-message append loop)
+ *   - after-group-tail intent for a selected target group; topic-tail for an
+ *     explicit no-target paste; a supplied target absent from the loaded
+ *     projection still travels to Main unchanged (no loaded-tail fallback)
+ *   - bounded projection: an outside-loaded anchor injects no messages and
+ *     never replaces the loaded list with an assumed whole topic
  *   - one `upsertManyBlocks` commit with every pasted block
  *   - DB-first: a failed batch never touches Redux
- *   - active-topic precondition fires BEFORE the DB batch: a non-active-topic
- *     paste makes zero DB calls and zero Redux commits
+ *   - active-topic precondition fires BEFORE the DB batch
  *   - copy/cut semantics, file deltas, and undo payload shapes preserved
- *   - a regression case at a TRUE middle index
  */
 
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -29,6 +29,7 @@ interface UndoActionLike {
   type: string
   targetTopicId: string
   targetInsertPositionIndex: number
+  targetInsertIntent?: { kind: string; messageId?: string }
   insertedMessageIds: string[]
   sourceTopicId?: string
   sourceGroupAnchors?: Array<{
@@ -41,6 +42,7 @@ interface UndoActionLike {
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
+    insertMessageGroups: vi.fn(),
     pasteMessagesToTopic: vi.fn(),
     upsertSegment: vi.fn(),
     updateFileCount: vi.fn(),
@@ -76,6 +78,7 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/services/db', () => ({
   dbService: {
+    insertMessageGroups: mocks.insertMessageGroups,
     pasteMessagesToTopic: mocks.pasteMessagesToTopic,
     upsertSegment: mocks.upsertSegment,
     updateFileCount: mocks.updateFileCount
@@ -200,6 +203,19 @@ const createTextBlock = (messageId: string, overrides: Partial<MessageBlock> = {
     ...overrides
   }) as unknown as MessageBlock
 
+const createAssistantMessage = (id: string, askId: string): Message =>
+  ({
+    id,
+    role: 'assistant',
+    assistantId: 'assistant-1',
+    topicId: 'topic-1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    status: UserMessageStatus.SUCCESS,
+    blocks: [],
+    askId
+  }) as unknown as Message
+
 /** Pre-batch target topic: 4 user messages m0..m3 (each its own group). */
 function buildTargetTopic(): Message[] {
   return ['m0', 'm1', 'm2', 'm3'].map((id) => createUserMessage({ id }))
@@ -237,15 +253,15 @@ function mockTargetMessages(state: StoreState): void {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
+describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     storeState = baseStoreState()
     mockTargetMessages(storeState)
-    mocks.pasteMessagesToTopic.mockResolvedValue(emptyCleanup)
+    mocks.insertMessageGroups.mockResolvedValue(emptyCleanup)
   })
 
-  it('copy paste uses ONE data-source batch call and ONE ordered projection commit at a middle index', async () => {
+  it('copy paste uses ONE stable batch call and ONE ordered projection commit at a middle index', async () => {
     const copied = createUserMessage({ id: 'c0' })
     const copiedBlock = createTextBlock(copied.id, { id: 'cb0', content: 'copied' })
     const pastedMessage = { ...copied }
@@ -262,17 +278,20 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
     const count = await pasteMessages(dispatch, () => storeState as any, 'topic-1', 'm1')
 
     expect(count).toBe(1)
-    // ONE data-source call, no per-message appendMessage loop.
-    expect(mocks.pasteMessagesToTopic).toHaveBeenCalledExactlyOnceWith(
-      'topic-1',
-      [
-        {
-          message: expect.objectContaining({ id: expect.any(String), topicId: 'topic-1' }),
-          blocks: [expect.objectContaining({ messageId: expect.any(String), content: 'copied' })]
-        }
-      ],
-      2
-    )
+    // ONE stable data-source call with after-group-tail intent; no numeric paste call.
+    expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledWith('topic-1', [
+      {
+        entries: [
+          {
+            message: expect.objectContaining({ id: expect.any(String), topicId: 'topic-1' }),
+            blocks: [expect.objectContaining({ messageId: expect.any(String), content: 'copied' })]
+          }
+        ],
+        intent: { kind: 'after-group-tail', messageId: 'm1' }
+      }
+    ])
+    expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     // ONE projection commit; the regenerated ID lands exactly between m1 and m2.
     expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
     const receivedPayload = mocks.messagesReceived.mock.calls[0][0]
@@ -289,12 +308,12 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
     expect(receivedIds[4]).toBe('m3')
     // ONE block commit carrying the pasted block.
     expect(mocks.upsertManyBlocks).toHaveBeenCalledTimes(1)
-    // Undo payload keeps the exact insertion position.
+    // Undo payload carries the stable intent (authority) for redo.
     expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
     const undoAction = mocks.pushUndoAction.mock.calls[0][0]
     expect(undoAction.type).toBe('paste')
     expect(undoAction.targetTopicId).toBe('topic-1')
-    expect(undoAction.targetInsertPositionIndex).toBe(2)
+    expect(undoAction.targetInsertIntent).toEqual({ kind: 'after-group-tail', messageId: 'm1' })
     expect(undoAction.insertedMessageIds).toHaveLength(1)
   })
 
@@ -325,6 +344,61 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
     expect(pasted?.blocks![0]).not.toBe(pasted?.blocks![1])
   })
 
+  it('outside-loaded target still sends the stable ID to Main but injects no messages', async () => {
+    const copied = createUserMessage({ id: 'c0' })
+    storeState.clipboard = {
+      mode: 'copy',
+      items: [makeClipboardItem(copied, [], 1)],
+      sourceTopicId: null,
+      segmentSnapshots: []
+    }
+
+    const { pasteMessages } = await import('../ClipboardService')
+    await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'outside-id')
+
+    // Stable ID travels unchanged even though it is absent from loaded.
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', [
+      {
+        entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+        intent: { kind: 'after-group-tail', messageId: 'outside-id' }
+      }
+    ])
+    expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
+    // Bounded projection: no outside-window injection, loaded list untouched.
+    expect(mocks.messagesReceived).not.toHaveBeenCalled()
+    // Undo still records the stable intent for redo.
+    expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
+    expect(mocks.pushUndoAction.mock.calls[0][0].targetInsertIntent).toEqual({
+      kind: 'after-group-tail',
+      messageId: 'outside-id'
+    })
+  })
+
+  it('explicit no-target paste uses topic-tail and appends to loaded', async () => {
+    const copied = createUserMessage({ id: 'c0' })
+    storeState.clipboard = {
+      mode: 'copy',
+      items: [makeClipboardItem(copied, [], 1)],
+      sourceTopicId: null,
+      segmentSnapshots: []
+    }
+
+    const { pasteMessages } = await import('../ClipboardService')
+    await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', '')
+
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', [
+      {
+        entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+        intent: { kind: 'topic-tail' }
+      }
+    ])
+    expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
+    expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
+    const receivedIds = mocks.messagesReceived.mock.calls[0][0].messages.map((m) => m.id)
+    expect(receivedIds.slice(0, 4)).toEqual(['m0', 'm1', 'm2', 'm3'])
+    expect(receivedIds).toHaveLength(5)
+  })
+
   it('DB-first: a failed batch never dispatches a projection commit or undo', async () => {
     const copied = createUserMessage({ id: 'c0' })
     storeState.clipboard = {
@@ -333,7 +407,7 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
       sourceTopicId: null,
       segmentSnapshots: []
     }
-    mocks.pasteMessagesToTopic.mockRejectedValue(new Error('SQLITE_CONSTRAINT'))
+    mocks.insertMessageGroups.mockRejectedValue(new Error('SQLITE_CONSTRAINT'))
 
     const { pasteMessages } = await import('../ClipboardService')
     await expect(pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')).rejects.toThrow(
@@ -362,8 +436,9 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
     const { pasteMessages } = await import('../ClipboardService')
     await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
 
-    // Insertion is the SAME single batch call (cut is not a different path).
-    expect(mocks.pasteMessagesToTopic).toHaveBeenCalledTimes(1)
+    // Insertion is the SAME single stable batch call (cut is not a different path).
+    expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
     // Source deletion happens once with the cut ids; cleanup consumed once.
     expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-2', ['cut-0'])
@@ -417,6 +492,7 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
       'cannot project paste into non-active topic'
     )
     // Precondition fires BEFORE persistence: zero DB calls.
+    expect(mocks.insertMessageGroups).not.toHaveBeenCalled()
     expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     expect(mocks.updateFileCount).not.toHaveBeenCalled()
     expect(mocks.upsertSegment).not.toHaveBeenCalled()
@@ -429,5 +505,44 @@ describe('ClipboardService.pasteMessages (PERF-100 batch)', () => {
     expect(mocks.removeMessages).not.toHaveBeenCalled()
     expect(mocks.addSegment).not.toHaveBeenCalled()
     expect(mocks.clearClipboard).not.toHaveBeenCalled()
+  })
+
+  it('non-contiguous same-answer group projects after the last loaded assistant (Main parity)', async () => {
+    // Fully loaded projection: [user, a1, mid, a2] where a1/a2 share askId=user.
+    const user = createUserMessage({ id: 'u0' })
+    const a1 = createAssistantMessage('a1', user.id)
+    const mid = createUserMessage({ id: 'mid' })
+    const a2 = createAssistantMessage('a2', user.id)
+    const loaded = [user, a1, mid, a2]
+    storeState.messages.entities = Object.fromEntries(loaded.map((m) => [m.id, m]))
+    storeState.messages.messageIdsByTopic = { 'topic-1': loaded.map((m) => m.id) }
+
+    const copied = createUserMessage({ id: 'c0' })
+    storeState.clipboard = {
+      mode: 'copy',
+      items: [makeClipboardItem(copied, [], 1)],
+      sourceTopicId: null,
+      segmentSnapshots: []
+    }
+
+    const { pasteMessages } = await import('../ClipboardService')
+    const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', user.id)
+
+    expect(count).toBe(1)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', [
+      {
+        entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+        intent: { kind: 'after-group-tail', messageId: user.id }
+      }
+    ])
+    expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
+    const receivedIds = mocks.messagesReceived.mock.calls[0][0].messages.map((m) => m.id)
+    // Local order matches Main intent: pasted row lands after a2, not after a1.
+    expect(receivedIds.slice(0, 4)).toEqual([user.id, 'a1', mid.id, 'a2'])
+    expect(receivedIds).toHaveLength(5)
+    expect(receivedIds[4]).not.toBe(user.id)
+    expect(receivedIds[4]).not.toBe('a1')
+    expect(receivedIds[4]).not.toBe(mid.id)
+    expect(receivedIds[4]).not.toBe('a2')
   })
 })

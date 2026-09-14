@@ -34,6 +34,8 @@ import type {
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  InsertMessageGroupIntent,
+  InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
@@ -2629,6 +2631,106 @@ const fetchContextClosureContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Insert message groups contract — stable intents, Main-authoritative
+// ---------------------------------------------------------------------------
+
+const INSERT_MESSAGE_GROUPS_CHANNEL = 'chatdb:insert-message-groups'
+const INSERT_MESSAGE_GROUP_KEYS = new Set(['entries', 'intent'])
+const INSERT_MESSAGE_GROUP_INTENT_KEYS = new Set(['kind', 'messageId'])
+
+function validateInsertMessageGroupIntent(value: unknown, path: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Expected intent object`)
+  }
+  const rec = value as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (!INSERT_MESSAGE_GROUP_INTENT_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Unknown key in intent: "${key}"`)
+    }
+  }
+  const kind = rec.kind
+  if (kind !== 'after-group-tail' && kind !== 'before-message' && kind !== 'topic-tail') {
+    throw new ValidationError(
+      `${path}.kind`,
+      `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Expected kind "after-group-tail", "before-message" or "topic-tail"`
+    )
+  }
+  if (kind === 'topic-tail') {
+    if ('messageId' in rec) {
+      throw new ValidationError(
+        `${path}.messageId`,
+        `[${INSERT_MESSAGE_GROUPS_CHANNEL}] topic-tail must not carry messageId`
+      )
+    }
+    return
+  }
+  if (!('messageId' in rec)) {
+    throw new ValidationError(
+      `${path}.messageId`,
+      `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Missing required field "messageId"`
+    )
+  }
+  validateNonEmptyString(rec.messageId, `${path}.messageId`)
+}
+
+const insertMessageGroupsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'groups'),
+  validate(value: unknown): void {
+    validateRequest(value, insertMessageGroupsContract.allowedKeys)
+    const req = value as InsertMessageGroupsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (!Array.isArray(req.groups) || req.groups.length === 0) {
+      throw new ValidationError('request.groups', `[${INSERT_MESSAGE_GROUPS_CHANNEL}] groups must be a non-empty array`)
+    }
+    const seenMessageIds = new Set<string>()
+    for (let gi = 0; gi < req.groups.length; gi++) {
+      const gpath = `request.groups[${gi}]`
+      const group = (req.groups as unknown[])[gi] as Record<string, unknown>
+      if (group === null || typeof group !== 'object' || Array.isArray(group)) {
+        throw new ValidationError(gpath, `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Expected group object`)
+      }
+      for (const key of Object.keys(group)) {
+        if (!INSERT_MESSAGE_GROUP_KEYS.has(key)) {
+          throw new ValidationError(
+            `${gpath}.${key}`,
+            `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Unknown key in group: "${key}"`
+          )
+        }
+      }
+      if (!('entries' in group) || !('intent' in group)) {
+        throw new ValidationError(
+          gpath,
+          `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Group must carry entries and exactly one intent`
+        )
+      }
+      validateEntries(group.entries, `${gpath}.entries`)
+      if (!Array.isArray(group.entries) || (group.entries as unknown[]).length === 0) {
+        throw new ValidationError(`${gpath}.entries`, `[${INSERT_MESSAGE_GROUPS_CHANNEL}] entries must not be empty`)
+      }
+      validateInsertMessageGroupIntent(group.intent as InsertMessageGroupIntent, `${gpath}.intent`)
+      const entries = group.entries as Array<{ message: Record<string, unknown> }>
+      for (let ei = 0; ei < entries.length; ei++) {
+        const mid = entries[ei]?.message?.id
+        if (typeof mid !== 'string' || mid.length === 0) {
+          throw new ValidationError(
+            `${gpath}.entries[${ei}].message.id`,
+            `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Entry message must carry a non-empty id`
+          )
+        }
+        if (seenMessageIds.has(mid)) {
+          throw new ValidationError(
+            `${gpath}.entries[${ei}].message.id`,
+            `[${INSERT_MESSAGE_GROUPS_CHANNEL}] Duplicate new message ID "${mid}" across groups`
+          )
+        }
+        seenMessageIds.add(mid)
+      }
+    }
+  },
+  validateResult: fileCleanupResultValidator('chatdb:insert-message-groups')
+}
+
+// ---------------------------------------------------------------------------
 // S6.2c-2: Insert after stable anchor contract — Main-authoritative
 // ---------------------------------------------------------------------------
 
@@ -2716,7 +2818,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   // S6.3 R-06: authoritative context closure READ (anchor through newest)
   'chatdb:fetch-context-closure': fetchContextClosureContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
-  'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract
+  'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract,
+  'chatdb:insert-message-groups': insertMessageGroupsContract
 })
 
 /**

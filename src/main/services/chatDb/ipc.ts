@@ -46,6 +46,7 @@ import type {
   FetchMessagesWindowRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
   ListFileRefsByFileRequest,
@@ -579,6 +580,11 @@ export function registerChatDbIpc(): () => void {
   // 32b. insert-messages-after-anchor (S6.2c-2): stable anchor, atomic insert
   handleCommand(IpcChannel.ChatDb_InsertMessagesAfterAnchor, (agg, req: InsertMessagesAfterAnchorRequest) => {
     return agg.insertMessagesAfterAnchor(req.topicId, req.afterMessageId, req.entries)
+  })
+
+  // 32c. insert-message-groups: stable intents, atomic multi-group insert
+  handleCommand(IpcChannel.ChatDb_InsertMessageGroups, (agg, req: InsertMessageGroupsRequest) => {
+    return agg.insertMessageGroups(req.topicId, req.groups as any)
   })
 
   // 33. search-messages (Phase 5.1B-2)

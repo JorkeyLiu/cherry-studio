@@ -59,6 +59,9 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  InsertMessageGroup,
+  InsertMessageGroupsRequest,
+  InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorRequest,
   InsertMessagesAfterAnchorResponse,
   JsonObject,
@@ -129,6 +132,7 @@ export interface ChatDbApi {
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
   ): Promise<ChatDbResult<InsertMessagesAfterAnchorResponse>>
+  insertMessageGroups?(request: InsertMessageGroupsRequest): Promise<ChatDbResult<InsertMessageGroupsResponse>>
   getRawTopic(request: GetRawTopicRequest): Promise<ChatDbResult<GetRawTopicResponse>>
   topicExists(request: TopicExistsRequest): Promise<ChatDbResult<boolean>>
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
@@ -959,6 +963,16 @@ export class SqliteMessageDataSource implements MessageDataSource {
   ): Promise<FileCleanupResult> {
     const request: PasteMessagesToTopicRequest = cloneForWire({ topicId, entries, insertIndex })
     const result = unwrap(await this.api.pasteMessagesToTopic(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async insertMessageGroups(topicId: string, groups: InsertMessageGroup[]): Promise<FileCleanupResult> {
+    if (!this.api.insertMessageGroups) {
+      throw new Error('ChatDb API unavailable: insertMessageGroups not exposed')
+    }
+    const request: InsertMessageGroupsRequest = cloneForWire({ topicId, groups })
+    const result = unwrap(await this.api.insertMessageGroups(request))
     dispatchTopicUpdatedAt(topicId)
     return result
   }

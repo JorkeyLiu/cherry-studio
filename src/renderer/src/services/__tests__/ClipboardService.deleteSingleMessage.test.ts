@@ -131,9 +131,10 @@ const semanticResult = (overrides: Record<string, unknown> = {}) => ({
     groupAnchors: [
       {
         messages: [{ id: 'msg-1' }],
-        blocks: [{ id: 'block-1' }],
+        blocks: [{ id: 'block-1', messageId: 'msg-1' }],
         positionIndex: 0,
-        anchorMessageId: null
+        anchorMessageId: null,
+        loadedMessageIds: ['msg-1']
       }
     ],
     segmentSnapshots: [],
@@ -203,6 +204,8 @@ describe('ClipboardService.deleteSingleMessage (semantic)', () => {
     expect(undoAction.rootMessageIds).toEqual(['msg-1'])
     expect(undoAction.insertedMessageIds).toEqual(['msg-1'])
     expect(undoAction.groupAnchors).toHaveLength(1)
+    // Bounded projection: the thunk-supplied loaded intersection travels into the undo action.
+    expect(undoAction.groupAnchors[0].loadedMessageIds).toEqual(['msg-1'])
   })
 
   it('DB failure pushes no undo and leaves Redux untouched', async () => {
@@ -261,6 +264,7 @@ describe('ClipboardService.deleteSelectedMessages (semantic multi)', () => {
     const undoAction = mocks.pushUndoAction.mock.calls[0][0] as any
     expect(undoAction.rootMessageIds).toEqual(['u1', 'u2'])
     expect(undoAction.insertedMessageIds).toEqual(['u1', 'a1', 'u2'])
+    expect(undoAction.groupAnchors[0].loadedMessageIds).toEqual(['msg-1'])
   })
 
   it('empty selection is a no-op without touching the helper', async () => {

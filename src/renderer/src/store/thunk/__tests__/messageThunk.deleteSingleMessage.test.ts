@@ -291,6 +291,7 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
 
   it('passes stable root IDs without reading the loaded cascade and returns undo parts', async () => {
     mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
+    storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1', 'asst-1'] }
 
     const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
@@ -320,7 +321,23 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
     expect(result.undoParts.groupAnchors).toHaveLength(1)
     expect(result.undoParts.groupAnchors[0].anchorMessageId).toBeNull()
     expect(result.undoParts.groupAnchors[0].messages.map((m) => m.id)).toEqual(['msg-1', 'asst-1'])
+    // Loaded intersection captured before persistence bounds the Redux projection.
+    expect(result.undoParts.groupAnchors[0].loadedMessageIds).toEqual(['msg-1', 'asst-1'])
     expect(result.undoParts.segmentSnapshots).toEqual([])
+  })
+
+  it('captures the pre-delete loaded set so partly-loaded groups record only the loaded intersection', async () => {
+    mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
+    // asst-1 was outside the loaded projection before delete.
+    storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
+
+    const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
+    const dispatch = vi.fn()
+    const result = await deleteMessagesWithDependentsThunk('topic-1', ['msg-1'])(dispatch, () => storeState as any)
+
+    // Full authority messages/blocks are kept for Main restore.
+    expect(result.undoParts.groupAnchors[0].messages.map((m) => m.id)).toEqual(['msg-1', 'asst-1'])
+    expect(result.undoParts.groupAnchors[0].loadedMessageIds).toEqual(['msg-1'])
   })
 
   it('DB failure propagates with no dispatch and no undo parts', async () => {
@@ -359,11 +376,43 @@ describe('buildDeleteDependentsUndoParts (response adapter)', () => {
         }
       ]
     }
-    const parts = buildDeleteDependentsUndoParts(response as any)
+    const parts = buildDeleteDependentsUndoParts(response as any, ['msg-1'])
     expect(parts.groupAnchors).toHaveLength(1)
     expect(parts.groupAnchors[0].positionIndex).toBe(2)
     expect(parts.groupAnchors[0].anchorMessageId).toBe('next-1')
+    expect(parts.groupAnchors[0].loadedMessageIds).toEqual(['msg-1'])
     expect(parts.fileReferenceDeltas).toEqual([{ fileId: 'file-1', delta: -1 }])
+  })
+
+  it('intersects authority restore groups with the pre-delete loaded set (ordered)', async () => {
+    const { buildDeleteDependentsUndoParts } = await import('../messageThunk')
+    const response = {
+      ...semanticResponse,
+      restoreGroups: [
+        {
+          entries: [
+            { message: { id: 'm1' }, blocks: [{ id: 'b1', messageId: 'm1' }] },
+            { message: { id: 'm2' }, blocks: [{ id: 'b2', messageId: 'm2' }] },
+            { message: { id: 'm3' }, blocks: [{ id: 'b3', messageId: 'm3' }] }
+          ],
+          positionIndex: 0,
+          anchorMessageId: null
+        }
+      ]
+    }
+    const parts = buildDeleteDependentsUndoParts(response as any, ['m1', 'm3'])
+    // Full authority payload kept for Main.
+    expect(parts.groupAnchors[0].messages.map((m) => (m as unknown as { id: string }).id)).toEqual(['m1', 'm2', 'm3'])
+    expect(parts.groupAnchors[0].blocks).toHaveLength(3)
+    // Redux projection subset only.
+    expect(parts.groupAnchors[0].loadedMessageIds).toEqual(['m1', 'm3'])
+  })
+
+  it('missing pre-delete set fails closed with an empty intersection', async () => {
+    const { buildDeleteDependentsUndoParts } = await import('../messageThunk')
+    const parts = buildDeleteDependentsUndoParts(semanticResponse as any)
+    expect(parts.groupAnchors[0].messages.map((m) => (m as unknown as { id: string }).id)).toEqual(['msg-1', 'asst-1'])
+    expect(parts.groupAnchors[0].loadedMessageIds).toEqual([])
   })
 
   it('adapts pre-delete segment snapshots to TopicSegment shapes', async () => {

@@ -1,3 +1,5 @@
+import type { InsertMessageGroupIntent } from '@shared/chatDb'
+
 import type { Message, MessageBlock } from './newMessage'
 import type { TopicSegment } from './topicSegment'
 
@@ -62,6 +64,13 @@ export interface GroupAnchor {
   positionIndex: number
   /** First non-deleted message after this group (null if at end) */
   anchorMessageId: string | null
+  /**
+   * Ordered intersection of this authority restore group with the pre-delete
+   * loaded projection. Renderer-only: drives the Redux projection subset on
+   * undo. The full `messages`/`blocks` above remain the Main authority
+   * restore payload. Empty means inject nothing even for topic-tail.
+   */
+  loadedMessageIds: string[]
 }
 
 // 撤销操作类型
@@ -101,6 +110,8 @@ export interface PasteUndoAction extends BaseUndoAction {
   targetAnchorMessageId: string | null
   /** Fallback position index for redo */
   targetInsertPositionIndex: number
+  /** Stable insertion intent from the original paste (authority for redo DB). */
+  targetInsertIntent?: InsertMessageGroupIntent
   /** Snapshots of segments created in target topic (for undo delete / redo restore) */
   targetSegmentSnapshots: TopicSegment[]
 }
@@ -111,6 +122,8 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   targetAnchorMessageId: string | null
   /** Fallback position index in target topic for redo */
   targetInsertPositionIndex: number
+  /** Stable insertion intent from the original paste (authority for redo DB). */
+  targetInsertIntent?: InsertMessageGroupIntent
   /** Source topic ID */
   sourceTopicId: string
   /** Per-group anchors for restoring source groups to their original positions */

@@ -347,9 +347,10 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       const sourceAnchor = {
         messages: [srcMsg],
-        blocks: [makeFileBlock('src-blk-1', 'file-1')],
+        blocks: [{ ...makeFileBlock('src-blk-1', 'file-1'), messageId: 'src-msg-1' }],
         positionIndex: 0,
-        anchorMessageId: null
+        anchorMessageId: null,
+        loadedMessageIds: ['src-msg-1']
       }
 
       const action: CutPasteUndoAction = {

@@ -25,16 +25,18 @@ import type {
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
-import type { MessageBlockEntry } from '@shared/chatDb'
+import type { InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 import { v4 as uuidv4 } from 'uuid'
 
 const logger = loggerService.withContext('ClipboardService')
 
 /**
- * Calculate the insertion index after a target message, accounting for multi-model groups.
- * If the target message is part of an assistant group, insert after the last message in the group.
+ * Local-projection-only insertion index after a target message.
+ * Never an authority index: used solely to splice the already-committed
+ * pasted messages into the currently loaded list when the anchor is loaded.
+ * Main resolves the authoritative position from the stable intent.
  */
-function calculateInsertIndex(messages: Message[], targetMessageId: string): number {
+function calculateLocalInsertIndex(messages: Message[], targetMessageId: string): number {
   const targetIndex = messages.findIndex((m) => m.id === targetMessageId || m.askId === targetMessageId)
   if (targetIndex === -1) return messages.length
 
@@ -45,12 +47,13 @@ function calculateInsertIndex(messages: Message[], targetMessageId: string): num
   const groupKey = targetMessage.role === 'user' ? targetMessage.id : targetMessage.askId
 
   if (groupKey) {
-    // Skip past all messages in the same group
+    // Match Main after-group-tail authority: scan the entire loaded
+    // projection after the anchor and track the last loaded assistant with
+    // the same group key (including non-contiguous members). Never stop at
+    // intervening rows.
     for (let i = targetIndex + 1; i < messages.length; i++) {
       if (messages[i].role === 'assistant' && messages[i].askId === groupKey) {
         insertIndex = i + 1
-      } else {
-        break
       }
     }
   }
@@ -124,7 +127,9 @@ function buildGroupAnchors(messages: Message[], blocks: MessageBlock[], selected
       messages: structuredClone(groupMessages),
       blocks: structuredClone(groupBlocks),
       positionIndex,
-      anchorMessageId
+      anchorMessageId,
+      // Built from the loaded projection, so the whole group is loaded.
+      loadedMessageIds: groupMessages.map((m) => m.id)
     })
   }
 
@@ -285,16 +290,19 @@ export function cutMessages(
 }
 
 /**
- * Paste clipboard content into the target topic at the position after targetMessageId.
+ * Paste clipboard content into the target topic with a stable insertion intent.
  * Returns the number of message groups pasted.
  *
- * PERF-100 batch semantics: instead of M awaited per-message append IPCs
- * (each with its own transaction + sibling shift + full-topic normalization)
- * and M `insertMessageAtIndex` Redux commits, the insertion phase performs
- * exactly ONE `pasteMessagesToTopic` batch IPC (one Main transaction, one
- * `insertManyAt` sibling shift-by-count, at most one normalization) and ONE
- * ordered `messagesReceived` projection commit. Clipboard/undo/file/segment
- * semantics are unchanged.
+ * Authority: the renderer derives exactly one stable intent from target
+ * semantics (selected target group → after-group-tail with that stable ID;
+ * explicit no-target → topic-tail) and sends it to Main in ONE
+ * `insertMessageGroups` call. No loaded-projection search ever produces a DB
+ * index. A supplied target ID absent from the loaded projection is still
+ * sent to Main unchanged (no loaded-tail fallback for persistence).
+ * Local projection stays bounded: messages are spliced into the loaded list
+ * only when the anchor/group is loaded (at its loaded group tail) or for a
+ * topic-tail append; an outside-loaded anchor injects nothing and never
+ * replaces the loaded list with an assumed whole topic.
  */
 export async function pasteMessages(
   dispatch: AppDispatch,
@@ -314,17 +322,17 @@ export async function pasteMessages(
   const items = [...rawItems].sort((a, b) => a.positionIndex - b.positionIndex)
 
   // Pre-batch ordered target message projection (captured BEFORE any DB or
-  // Redux mutation; used both for the insert index and to derive the exact
-  // post-batch ordered list for the single projection commit).
+  // Redux mutation; used ONLY for the bounded local projection commit, never
+  // as an authority index).
   const targetMessages = selectMessagesForTopic(state, targetTopicId)
 
-  // Calculate insertion position
-  let insertIndex = targetMessages.length
-  if (targetMessageId) {
-    insertIndex = calculateInsertIndex(targetMessages, targetMessageId)
-  }
-  // Clamp to the same range the Main batch primitive clamps to ([0, count]).
-  const clampedInsertIndex = Math.max(0, Math.min(insertIndex, targetMessages.length))
+  // Stable insertion intent for Main (authority). Never derived from loaded
+  // positions: the supplied stable target ID travels unchanged even when it
+  // is absent from the loaded projection.
+  const stableIntent: InsertMessageGroupIntent =
+    typeof targetMessageId === 'string' && targetMessageId.length > 0
+      ? { kind: 'after-group-tail', messageId: targetMessageId }
+      : { kind: 'topic-tail' }
 
   // Track file reference deltas for undo
   const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
@@ -443,12 +451,12 @@ export async function pasteMessages(
   //
   // Bounded projection contract (same as the existing `messageGroupReorder`
   // `messagesReceived` usage): the list is a consistent pre-batch snapshot
-  // spliced with the regenerated IDs at the clamped index, so any message a
-  // NON-paste path appends to this same topic during the single batch IPC
-  // round-trip is not carried into the replacement list. The paste runs under
-  // the edit-mode `isProcessing` lock and targets only the active topic, so
-  // the exposure window is one IPC round-trip — the identical bounded
-  // contract the reorder projection already established.
+  // spliced with the regenerated IDs only at a locally visible point, so any
+  // message a NON-paste path appends to this same topic during the single
+  // batch IPC round-trip is not carried into the replacement list. The paste
+  // runs under the edit-mode `isProcessing` lock and targets only the active
+  // topic, so the exposure window is one IPC round-trip — the identical
+  // bounded contract the reorder projection already established.
   const activeTopicId = getState().messages.currentTopicId
   if (activeTopicId !== targetTopicId) {
     logger.error(
@@ -459,22 +467,41 @@ export async function pasteMessages(
     )
   }
 
-  // DB-first (LOCK-001): ONE atomic batch insertion BEFORE any Redux commit.
+  // DB-first (LOCK-001): ONE atomic stable insertion BEFORE any Redux commit.
   // If the batch fails, Redux is never touched and nothing is projected.
   try {
-    await dbService.pasteMessagesToTopic(targetTopicId, entries as unknown as MessageBlockEntry[], clampedInsertIndex)
+    await dbService.insertMessageGroups(targetTopicId, [
+      { entries: entries as unknown as MessageBlockEntry[], intent: stableIntent }
+    ])
   } catch (error) {
     logger.error('[pasteMessages] Failed to persist paste batch to DB', error as Error)
     throw new Error(`[pasteMessages] DB batch write failed for ${entries.length} entries`)
   }
 
-  // ONE ordered projection commit: splice the regenerated message IDs into
-  // the pre-batch ordered list at the SAME clamped insertion index the Main
-  // batch used (all batch entries land at that index in array order, so the
-  // spliced list is the exact post-batch order).
-  const postBatchMessages = [...targetMessages]
-  postBatchMessages.splice(clampedInsertIndex, 0, ...allInsertedMessages)
-  dispatch(newMessagesActions.messagesReceived({ topicId: targetTopicId, messages: postBatchMessages }))
+  // Bounded local projection: splice only when the insertion point is locally
+  // visible. Anchored intents insert at the loaded group tail when the anchor
+  // is loaded; an outside-loaded anchor injects nothing. Topic-tail appends
+  // to the loaded end while preserving existing loaded order (never a
+  // whole-topic assumption).
+  let localInsertIndex: number | null = null
+  if (stableIntent.kind === 'topic-tail') {
+    localInsertIndex = targetMessages.length
+  } else {
+    const anchorLoaded =
+      targetMessages.some((m) => m.id === stableIntent.messageId) ||
+      targetMessages.some((m) => m.askId === stableIntent.messageId)
+    if (anchorLoaded) {
+      localInsertIndex = Math.max(
+        0,
+        Math.min(calculateLocalInsertIndex(targetMessages, stableIntent.messageId), targetMessages.length)
+      )
+    }
+  }
+  if (localInsertIndex !== null) {
+    const postBatchMessages = [...targetMessages]
+    postBatchMessages.splice(localInsertIndex, 0, ...allInsertedMessages)
+    dispatch(newMessagesActions.messagesReceived({ topicId: targetTopicId, messages: postBatchMessages }))
+  }
 
   // ONE block commit for all pasted blocks (after the message projection).
   if (allInsertedBlocks.length > 0) {
@@ -575,11 +602,14 @@ export async function pasteMessages(
   }
 
   // Create undo action
-  // Calculate anchor: first non-pasted message after the paste region
+  // Calculate anchor: first non-pasted message after the locally visible paste
+  // region when projected; otherwise after the loaded end. The stable redo
+  // authority is `stableIntent` (never the numeric index).
   const finalTargetMessages = selectMessagesForTopic(getState(), targetTopicId)
-  const afterInsertIndex = clampedInsertIndex
+  const afterInsertIndex = localInsertIndex ?? finalTargetMessages.length
   const insertedIdSet = new Set(insertedMessageIds)
   const anchorMessageId = findAnchorAfterPosition(finalTargetMessages, afterInsertIndex, insertedIdSet)
+  const legacyPositionIndex = localInsertIndex ?? targetMessages.length
 
   if (mode === 'cut' && sourceTopicId) {
     const undoAction: CutPasteUndoAction = {
@@ -588,8 +618,9 @@ export async function pasteMessages(
       timestamp: Date.now(),
       targetTopicId: targetTopicId,
       insertedMessageIds,
-      targetInsertPositionIndex: clampedInsertIndex,
+      targetInsertPositionIndex: legacyPositionIndex,
       targetAnchorMessageId: anchorMessageId,
+      targetInsertIntent: stableIntent,
       sourceTopicId,
       sourceGroupAnchors,
       sourceSegmentSnapshots,
@@ -606,8 +637,9 @@ export async function pasteMessages(
       timestamp: Date.now(),
       targetTopicId: targetTopicId,
       insertedMessageIds,
-      targetInsertPositionIndex: clampedInsertIndex,
+      targetInsertPositionIndex: legacyPositionIndex,
       targetAnchorMessageId: anchorMessageId,
+      targetInsertIntent: stableIntent,
       targetSegmentSnapshots,
       pastedMessagesSnapshot: allInsertedMessages,
       pastedBlocksSnapshot: allInsertedBlocks,
@@ -616,7 +648,7 @@ export async function pasteMessages(
     dispatch(pushUndoAction(undoAction))
   }
 
-  logger.info(`[pasteMessages] Pasted ${items.length} groups at index ${clampedInsertIndex}`)
+  logger.info(`[pasteMessages] Pasted ${items.length} groups with stable intent ${stableIntent.kind}`)
   return items.length
 }
 

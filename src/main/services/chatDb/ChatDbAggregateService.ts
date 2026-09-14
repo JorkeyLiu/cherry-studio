@@ -1515,6 +1515,390 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Resolve after-group-tail index with full answer-group authority semantics.
+   *
+   * Deterministic, Main-only, no renderer state:
+   * - User anchor: groupKey is the user ID; tail is the last same-topic
+   *   assistant whose askId equals the user ID (including non-contiguous
+   *   members, consistent with answer-group authority). No match → anchor.
+   * - Assistant anchor with non-empty askId: tail is the last same-topic
+   *   assistant with equal askId (including non-contiguous members).
+   * - Otherwise (assistant without askId, other roles): singleton tail.
+   * Returns tail index + 1 against the supplied authority order.
+   */
+  private resolveAfterGroupTailFullIndex(orderedMessages: MessageData[], anchor: MessageData): number {
+    const anchorIdx = orderedMessages.findIndex((m) => m.id === anchor.id)
+    if (anchorIdx === -1) {
+      throw new ChatDbNotFoundError(`Anchor message ${anchor.id} does not belong to its topic`)
+    }
+    let groupKey: string | null = null
+    if (anchor.role === 'user') {
+      groupKey = anchor.id
+    } else if (anchor.role === 'assistant') {
+      const askId = (anchor as unknown as { askId: string | null }).askId
+      if (typeof askId === 'string' && askId.length > 0) {
+        groupKey = askId
+      }
+    }
+    if (groupKey === null) return anchorIdx + 1
+    let tailIdx = anchorIdx
+    for (let i = 0; i < orderedMessages.length; i++) {
+      const cur = orderedMessages[i]
+      if (cur.role === 'assistant' && (cur as unknown as { askId: string | null }).askId === groupKey) {
+        if (i > tailIdx) tailIdx = i
+      }
+    }
+    return tailIdx + 1
+  }
+
+  /**
+   * Insert message groups with stable intents in one atomic Main transaction.
+   *
+   * Authority: validates topic exists and every stable anchor belongs to the
+   * topic against the transaction-start complete order. Plans all group base
+   * indexes against that start order (after-group-tail via full answer-group
+   * tail, before-message immediately before the surviving ID, topic-tail at
+   * end), then inserts groups sequentially in request order with drift-free
+   * offsets so multi-group restores preserve their pre-delete relation.
+   * New message/block IDs must be truly new: any same-topic or cross-topic
+   * collision fails the whole transaction (no silent patch). Blocks upsert +
+   * file-ref sync + sync/frame capture reuse the established paste patterns.
+   * Returns FileCleanupResult (empty for pure inserts).
+   */
+  insertMessageGroups(
+    topicId: string,
+    groups: Array<{ entries: Array<{ message: JsonObject; blocks: JsonObject[] }>; intent: JsonObject }>
+  ): ChatDbResult<FileCleanupResult> {
+    return wrapResult(() => {
+      const ctx = this.syncCtx('insertMessageGroups')
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: FileCleanupResult
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+
+          const orderedStart = repos.messages.listByTopic(topicId)
+          const indexById = new Map<string, number>()
+          for (let i = 0; i < orderedStart.length; i++) indexById.set(orderedStart[i].id, i)
+          const anchorById = new Map<string, MessageData>()
+          for (const m of orderedStart) anchorById.set(m.id, m)
+
+          if (!Array.isArray(groups) || groups.length === 0) {
+            throw new ChatDbValidationError('groups must be a non-empty array')
+          }
+
+          type PlannedGroup = {
+            messages: MessageData[]
+            blocksPerMessage: MessageBlockData[][]
+            flatBlocks: MessageBlockData[]
+            baseIndex: number
+          }
+          const planned: PlannedGroup[] = []
+          const seenNewIds = new Set<string>()
+          const seenBlockIds = new Set<string>()
+
+          for (let gi = 0; gi < groups.length; gi++) {
+            const group = groups[gi] as unknown as {
+              entries: Array<{ message: JsonObject; blocks: JsonObject[] }>
+              intent: Record<string, unknown>
+            }
+            const entries = group?.entries
+            const intent = group?.intent as unknown as Record<string, unknown>
+            if (!Array.isArray(entries) || entries.length === 0) {
+              throw new ChatDbValidationError(`groups[${gi}].entries must be a non-empty array`)
+            }
+            const kind = intent?.kind
+            if (kind !== 'after-group-tail' && kind !== 'before-message' && kind !== 'topic-tail') {
+              throw new ChatDbValidationError(`groups[${gi}].intent.kind must be a stable intent kind`)
+            }
+
+            let baseIndex: number
+            if (kind === 'topic-tail') {
+              baseIndex = orderedStart.length
+            } else {
+              const messageId = intent?.messageId
+              if (typeof messageId !== 'string' || messageId.length === 0) {
+                throw new ChatDbValidationError(`groups[${gi}].intent.messageId must be a non-empty string`)
+              }
+              const anchor = anchorById.get(messageId)
+              if (!anchor) {
+                throw new ChatDbNotFoundError(`Anchor message ${messageId} does not belong to topic ${topicId}`)
+              }
+              if (kind === 'before-message') {
+                baseIndex = indexById.get(messageId) as number
+              } else {
+                baseIndex = this.resolveAfterGroupTailFullIndex(orderedStart, anchor)
+              }
+            }
+
+            const messages: MessageData[] = []
+            const blocksPerMessage: MessageBlockData[][] = []
+            const flatBlocks: MessageBlockData[] = []
+            for (const entry of entries) {
+              const messageData = wireToMessage(entry.message)
+              messageData.topicId = topicId
+              const blockDataList = entry.blocks.map(wireToBlock)
+              for (const block of blockDataList) {
+                block.messageId = messageData.id
+              }
+              const mid = messageData.id
+              if (typeof mid !== 'string' || mid.length === 0) {
+                throw new ChatDbValidationError(`groups[${gi}] entry message must carry a non-empty id`)
+              }
+              if (seenNewIds.has(mid)) {
+                throw new ChatDbConflictError(`Duplicate new message ID "${mid}" across groups`)
+              }
+              seenNewIds.add(mid)
+              const existing = repos.messages.getById(mid)
+              if (existing.found) {
+                throw new ChatDbConflictError(
+                  `Message ${mid} already exists in topic ${existing.data.topicId}, cannot insert`
+                )
+              }
+              for (const block of blockDataList) {
+                if (seenBlockIds.has(block.id)) {
+                  throw new ChatDbConflictError(`Duplicate new block ID "${block.id}" across groups`)
+                }
+                seenBlockIds.add(block.id)
+                const existingBlock = repos.blocks.getById(block.id)
+                if (existingBlock.found) {
+                  throw new ChatDbConflictError(`Block ${block.id} already exists, cannot insert`)
+                }
+              }
+              messages.push(messageData)
+              blocksPerMessage.push(blockDataList)
+              flatBlocks.push(...blockDataList)
+            }
+            planned.push({ messages, blocksPerMessage, flatBlocks, baseIndex })
+          }
+
+          const preMessageRows = new Map<string, MessageData>()
+          const preBlockRows = new Map<string, MessageBlockData>()
+          if (ctx) {
+            for (const mid of seenNewIds) {
+              const pre = repos.messages.getById(mid)
+              if (pre.found) preMessageRows.set(mid, { ...pre.data, overflow: { ...pre.data.overflow } })
+            }
+            for (const bid of seenBlockIds) {
+              const pre = repos.blocks.getById(bid)
+              if (pre.found) preBlockRows.set(bid, { ...pre.data, overflow: { ...pre.data.overflow } })
+            }
+          }
+
+          const flatEntriesInOrder: Array<{ message: JsonObject; blocks: JsonObject[] }> = []
+          for (const g of groups) {
+            const gg = g as unknown as { entries: Array<{ message: JsonObject; blocks: JsonObject[] }> }
+            for (const e of gg.entries) flatEntriesInOrder.push(e)
+          }
+
+          for (let gi = 0; gi < planned.length; gi++) {
+            const plan = planned[gi]
+            let adjusted = plan.baseIndex
+            for (let j = 0; j < gi; j++) {
+              if (planned[j].baseIndex <= plan.baseIndex) {
+                adjusted += planned[j].messages.length
+              }
+            }
+            if (plan.messages.length > 0) {
+              repos.messages.insertManyAt(plan.messages, adjusted)
+            }
+          }
+
+          for (const plan of planned) {
+            if (plan.flatBlocks.length === 0) continue
+            repos.blocks.upsertMany(plan.flatBlocks)
+            this.syncFileReferences(repos, plan.flatBlocks)
+          }
+
+          if (ctx) {
+            let tsOffset = 0
+            const nextTs = (): number => ctx.ts + tsOffset++
+            const distinctMids: string[] = []
+            const seenMids = new Set<string>()
+            for (const entry of flatEntriesInOrder) {
+              const mid = (entry.message as Record<string, unknown>).id as string
+              if (typeof mid === 'string' && !seenMids.has(mid)) {
+                seenMids.add(mid)
+                distinctMids.push(mid)
+              }
+            }
+            let hasNewInclusion = false
+            let hasDemotion = false
+            for (const mid of distinctMids) {
+              const postRow = repos.messages.getById(mid)
+              if (!postRow.found) throw new Error(`insertMessageGroups message ${mid} missing in transaction`)
+              const pre = preMessageRows.get(mid) ?? null
+              const isTrueCreate = !pre
+              const postStable = isStableMessageStatus(postRow.data.status)
+              const preStable = pre ? isStableMessageStatus(pre.status) : false
+              if (pre && preStable && !postStable) hasDemotion = true
+              if ((isTrueCreate && postStable) || (pre && !preStable && postStable)) hasNewInclusion = true
+              if (!postStable) continue
+              if (isTrueCreate) {
+                if (!this.shouldCaptureMessageCreate(postRow.data)) continue
+                const opTs = nextTs()
+                this.ensureTopicClosureInTx(stx, topicId, opTs, ctx.deviceId)
+                const full = this.syncMessagePayloadFull(postRow.data)
+                delete full.sortOrder
+                const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
+                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncNotify = true
+              } else {
+                const diff = this.diffMessagePayload(pre, postRow.data)
+                if (!diff) continue
+                delete diff.sortOrder
+                if (Object.keys(diff).length <= 2) continue
+                const opTs = nextTs()
+                this.ensureTopicClosureInTx(stx, topicId, opTs, ctx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message', mid, diff, opTs, ctx.deviceId)
+                syncNotify = true
+              }
+            }
+            const distinctBids: string[] = []
+            const seenBids = new Set<string>()
+            for (const plan of planned) {
+              for (const blk of plan.flatBlocks) {
+                if (!seenBids.has(blk.id)) {
+                  seenBids.add(blk.id)
+                  distinctBids.push(blk.id)
+                }
+              }
+            }
+            for (const bid of distinctBids) {
+              const postBlk = repos.blocks.getById(bid)
+              if (!postBlk.found) throw new Error(`insertMessageGroups block ${bid} missing in transaction`)
+              const parentMsg = repos.messages.getById(postBlk.data.messageId)
+              if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) continue
+              if (!isStableBlockStatus(postBlk.data.status)) continue
+              if (this.isUnsupportedBlock(postBlk.data)) {
+                unsupportedBlockIds.push(bid)
+                continue
+              }
+              const pre = preBlockRows.get(bid) ?? null
+              if (!pre) {
+                const opTs = nextTs()
+                this.ensureBlockParentClosureInTx(stx, bid, opTs, ctx.deviceId)
+                const full = this.syncBlockPayloadFull(postBlk.data)
+                delete full.sortOrder
+                const opId = syncService.enqueueUpsertInTx(stx, 'message_block', bid, full, opTs, ctx.deviceId)
+                syncService.setMembershipClockInTx(stx, 'message_block', bid, postBlk.data.messageId, opTs, opId)
+                syncNotify = true
+              } else {
+                if (postBlk.data.messageId !== pre.messageId) continue
+                const diff = this.diffBlockPayload(pre, postBlk.data)
+                if (!diff) continue
+                delete diff.sortOrder
+                if (Object.keys(diff).length <= 2) continue
+                const opTs = nextTs()
+                this.ensureBlockParentClosureInTx(stx, bid, opTs, ctx.deviceId)
+                syncService.enqueueUpsertInTx(stx, 'message_block', bid, diff, opTs, ctx.deviceId)
+                syncNotify = true
+              }
+            }
+            if (hasDemotion) {
+              syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+              for (const mid of distinctMids) {
+                const pre = preMessageRows.get(mid)
+                const postRow = repos.messages.getById(mid)
+                const preStable = pre ? isStableMessageStatus(pre.status) : false
+                const postStable = postRow.found ? isStableMessageStatus(postRow.data.status) : false
+                if (pre && preStable && !postStable) {
+                  syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+                }
+              }
+            } else if (hasNewInclusion) {
+              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+            const affectedParents = new Set<string>()
+            for (const mid of distinctMids) affectedParents.add(mid)
+            for (const bid of distinctBids) {
+              const pre = preBlockRows.get(bid)
+              const postBlk = repos.blocks.getById(bid)
+              if (pre) affectedParents.add(pre.messageId)
+              if (postBlk.found) affectedParents.add(postBlk.data.messageId)
+            }
+            for (const mid of affectedParents) {
+              const postMsg = repos.messages.getById(mid)
+              if (!postMsg.found) continue
+              const postStable = isStableMessageStatus(postMsg.data.status)
+              const pre = preMessageRows.get(mid) ?? null
+              const preStable = pre ? isStableMessageStatus(pre.status) : false
+              if (pre && preStable && !postStable) continue
+              if (!postStable) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+                continue
+              }
+              const isNewlyIncludedParent = (!pre && postStable) || (!!pre && !preStable && postStable)
+              let needsBlockFrame = isNewlyIncludedParent
+              if (!needsBlockFrame) {
+                for (const bid of distinctBids) {
+                  const bPre = preBlockRows.get(bid)
+                  const bPost = repos.blocks.getById(bid)
+                  if (!bPost.found) continue
+                  if (bPost.data.messageId !== mid && (!bPre || bPre.messageId !== mid)) continue
+                  if (!bPre) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  if (bPre.messageId !== mid && bPost.data.messageId !== mid) continue
+                  const preIncluded = isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre)
+                  const postIncluded = isStableBlockStatus(bPost.data.status) && !this.isUnsupportedBlock(bPost.data)
+                  if (bPre.messageId !== bPost.data.messageId) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  if (preIncluded !== postIncluded) {
+                    needsBlockFrame = true
+                    break
+                  }
+                  if (!postIncluded) {
+                    needsBlockFrame = true
+                    break
+                  }
+                }
+              }
+              if (!needsBlockFrame) continue
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, mid, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+          } else {
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+            {
+              const affectedMids = new Set<string>()
+              for (const plan of planned) {
+                for (const blk of plan.flatBlocks) {
+                  affectedMids.add(blk.messageId)
+                }
+              }
+              for (const mid of affectedMids) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+              }
+            }
+          }
+
+          return buildFileCleanupResult(repos, [])
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('insertMessageGroups', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('insertMessageGroups', unsupportedBlockIds)
+      return result
+    }, `insertMessageGroups(${topicId}, ${groups.length} groups)`)
+  }
+
+  /**
    * Get raw topic with ordered messages and relational block IDs.
    * Returns null if topic does not exist.
    */

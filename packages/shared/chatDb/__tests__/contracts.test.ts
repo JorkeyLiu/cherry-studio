@@ -71,6 +71,7 @@ describe('chatDbContracts', () => {
     'chatdb:branch-messages-to-topic',
     // S6.2c-2: Main-authoritative insert after stable anchor
     'chatdb:insert-messages-after-anchor',
+    'chatdb:insert-message-groups',
     // S6.3 R-06: authoritative context closure READ
     'chatdb:fetch-context-closure'
   ]
@@ -3058,6 +3059,8 @@ describe('coverage consistency', () => {
     'chatdb:branch-messages-to-topic',
     // S6.2c-2: insert after stable anchor
     'chatdb:insert-messages-after-anchor',
+    // Stable insert-message-groups (paste/redo/delete-undo authority)
+    'chatdb:insert-message-groups',
     // S6.3 R-06: authoritative context closure READ
     'chatdb:fetch-context-closure'
   ] as const

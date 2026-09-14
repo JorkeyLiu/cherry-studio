@@ -867,14 +867,24 @@ export interface DeleteDependentsUndoParts {
 }
 
 export function buildDeleteDependentsUndoParts(
-  response: DeleteMessagesWithDependentsResponse
+  response: DeleteMessagesWithDependentsResponse,
+  preDeleteLoadedMessageIds?: Iterable<string>
 ): DeleteDependentsUndoParts {
-  const groupAnchors: GroupAnchor[] = response.restoreGroups.map((group) => ({
-    messages: group.entries.map((entry) => entry.message as unknown as Message),
-    blocks: group.entries.flatMap((entry) => entry.blocks as unknown as MessageBlock[]),
-    positionIndex: group.positionIndex,
-    anchorMessageId: group.anchorMessageId
-  }))
+  // Fail-closed: a missing pre-delete set yields an empty intersection, so
+  // Redux injects nothing. Full messages/blocks are always kept for Main.
+  const loadedSet = new Set(preDeleteLoadedMessageIds ?? [])
+  const groupAnchors: GroupAnchor[] = response.restoreGroups.map((group) => {
+    const messages = group.entries.map((entry) => entry.message as unknown as Message)
+    const blocks = group.entries.flatMap((entry) => entry.blocks as unknown as MessageBlock[])
+    const loadedMessageIds = messages.map((m) => m.id).filter((id) => loadedSet.has(id))
+    return {
+      messages,
+      blocks,
+      positionIndex: group.positionIndex,
+      anchorMessageId: group.anchorMessageId,
+      loadedMessageIds
+    }
+  })
   const now = new Date().toISOString()
   const segmentSnapshots: TopicSegment[] = response.segmentSnapshots.map((wire) => ({
     id: wire.id,
@@ -905,6 +915,10 @@ export const executeDeleteMessagesWithDependents = async (
   topicId: string,
   rootIds: string[]
 ): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+  // Capture the pre-delete loaded projection BEFORE any persistence. The
+  // intersection below bounds the Redux undo projection; Main always keeps
+  // the full authority restore groups.
+  const preDeleteLoadedIds = new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
   // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
   const response = await dbService.deleteMessagesWithDependents(topicId, rootIds)
 
@@ -936,7 +950,7 @@ export const executeDeleteMessagesWithDependents = async (
     response.remainingUserMessageIds
   )
 
-  return { response, undoParts: buildDeleteDependentsUndoParts(response) }
+  return { response, undoParts: buildDeleteDependentsUndoParts(response, preDeleteLoadedIds) }
 }
 
 export const deleteMessagesWithDependentsThunk =

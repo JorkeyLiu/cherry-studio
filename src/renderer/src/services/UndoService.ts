@@ -4,7 +4,7 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
-import { deleteMessagesFromDB, saveMessageAndBlocksToDB } from '@renderer/store/thunk/messageThunk'
+import { deleteMessagesFromDB } from '@renderer/store/thunk/messageThunk'
 import {
   deleteSegmentsBySnapshots,
   restoreSegmentsAfterUndo,
@@ -20,26 +20,77 @@ import type {
   PasteUndoAction,
   UndoAction
 } from '@renderer/types/editMode'
-import type { MessageBlock } from '@renderer/types/newMessage'
+import type { Message } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import type { InsertMessageGroup, InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 
 const logger = loggerService.withContext('UndoService')
 
 /**
- * Resolve anchor message ID to a current insertion index.
- * If anchor exists, insert before it. Otherwise append at end.
+ * Local-projection-only anchor resolution.
+ * Returns the loaded index before the anchor, the loaded end for a tail, or
+ * null when the anchor is outside the loaded projection (caller must not
+ * inject). Never used as persistence authority.
  */
-function resolveAnchorIndex(
-  getState: () => RootState,
-  topicId: string,
-  anchorMessageId: string | null | undefined,
-  fallbackIndex: number
-): number {
-  if (!anchorMessageId) return fallbackIndex
-  const messages = selectMessagesForTopic(getState(), topicId)
-  const anchorIdx = messages.findIndex((m) => m.id === anchorMessageId)
-  if (anchorIdx >= 0) return anchorIdx
-  return messages.length // 锚点不存在，追加到末尾
+function resolveLocalBeforeIndex(loadedMessages: Message[], anchorMessageId: string | null | undefined): number | null {
+  if (!anchorMessageId) return loadedMessages.length
+  const idx = loadedMessages.findIndex((m) => m.id === anchorMessageId)
+  return idx >= 0 ? idx : null
+}
+
+/**
+ * Local-projection-only after-group-tail index.
+ * Returns the loaded group tail when any member is loaded, otherwise null.
+ */
+function resolveLocalAfterGroupTailIndex(loadedMessages: Message[], targetMessageId: string): number | null {
+  const targetIndex = loadedMessages.findIndex((m) => m.id === targetMessageId || m.askId === targetMessageId)
+  if (targetIndex === -1) return null
+  const targetMessage = loadedMessages[targetIndex]
+  let insertIndex = targetIndex + 1
+  const groupKey = targetMessage.role === 'user' ? targetMessage.id : targetMessage.askId
+  if (groupKey) {
+    // Match Main after-group-tail authority: scan the entire loaded
+    // projection after the anchor and track the last loaded assistant with
+    // the same group key (including non-contiguous members). Never stop at
+    // intervening rows.
+    for (let i = targetIndex + 1; i < loadedMessages.length; i++) {
+      if (loadedMessages[i].role === 'assistant' && loadedMessages[i].askId === groupKey) {
+        insertIndex = i + 1
+      }
+    }
+  }
+  return insertIndex
+}
+
+/**
+ * Resolve the stable redo intent for paste/cut-paste.
+ * New actions carry the original stable intent; legacy in-memory actions fall
+ * back to the stable after-region anchor (before-message) or topic-tail.
+ * Never a numeric index.
+ */
+function resolveRedoIntent(action: PasteUndoAction | CutPasteUndoAction): InsertMessageGroupIntent {
+  if (action.targetInsertIntent) return action.targetInsertIntent
+  if (action.targetAnchorMessageId) return { kind: 'before-message', messageId: action.targetAnchorMessageId }
+  return { kind: 'topic-tail' }
+}
+
+/**
+ * Build stable restore groups from authority snapshots.
+ * anchorMessageId != null → before-message; null → topic-tail. No renderer
+ * authority index is consulted.
+ */
+function buildRestoreGroups(groupAnchors: GroupAnchor[]): InsertMessageGroup[] {
+  return groupAnchors.map((anchor) => {
+    const entries: MessageBlockEntry[] = anchor.messages.map((message) => ({
+      message: message as unknown as MessageBlockEntry['message'],
+      blocks: anchor.blocks.filter((b) => b.messageId === message.id) as unknown as MessageBlockEntry['blocks']
+    }))
+    const intent: InsertMessageGroupIntent =
+      anchor.anchorMessageId != null
+        ? { kind: 'before-message', messageId: anchor.anchorMessageId }
+        : { kind: 'topic-tail' }
+    return { entries, intent }
+  })
 }
 
 /**
@@ -56,55 +107,60 @@ async function updateFileReferenceCounts(
 }
 
 /**
- * Restore groups using per-group anchors.
- * Inserts in reverse position order so earlier positions aren't shifted.
+ * Restore groups with one atomic stable command.
+ * Sends all Main-produced full restore groups in request order with
+ * before-message/topic-tail intents (no numeric index). Local projection is
+ * bounded by each group's pre-delete loaded intersection: only messages whose
+ * IDs are in `loadedMessageIds` enter Redux (with only their blocks); an empty
+ * intersection injects nothing even for topic-tail. Outside-loaded anchors
+ * inject nothing.
  */
-async function restoreGroupsByAnchors(
+async function restoreGroupsByStableAnchors(
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
-  groupAnchors: GroupAnchor[],
-  allBlocks: MessageBlock[]
+  groupAnchors: GroupAnchor[]
 ): Promise<void> {
-  // Sort by position descending so we insert from the end first
-  const sorted = [...groupAnchors].sort((a, b) => b.positionIndex - a.positionIndex)
+  if (groupAnchors.length === 0) return
+  const groups = buildRestoreGroups(groupAnchors)
 
-  // Phase 1: DB operations (before any Redux dispatches)
-  // Resolve insertion indices based on current Redux state (unchanged at this point)
-  const resolvedGroups: Array<{ anchor: GroupAnchor; insertIdx: number }> = []
-  for (const anchor of sorted) {
-    let insertIdx: number
-    if (anchor.anchorMessageId) {
-      const messages = selectMessagesForTopic(getState(), topicId)
-      const anchorIdx = messages.findIndex((m) => m.id === anchor.anchorMessageId)
-      insertIdx = anchorIdx >= 0 ? anchorIdx : messages.length
-    } else {
-      insertIdx = Math.min(anchor.positionIndex, selectMessagesForTopic(getState(), topicId).length)
-    }
-    resolvedGroups.push({ anchor, insertIdx })
-
-    // Persist to DB
-    for (let i = 0; i < anchor.messages.length; i++) {
-      const message = anchor.messages[i]
-      const blocksForMessage = allBlocks.filter((b) => b.messageId === message.id)
-      await saveMessageAndBlocksToDB(topicId, message, blocksForMessage, insertIdx + i)
-    }
+  // DB-first: one atomic multi-group restore with FULL entries. Missing/
+  // cross-topic anchors fail the whole transaction with no partial writes and
+  // no Redux changes.
+  try {
+    await dbService.insertMessageGroups(topicId, groups)
+  } catch (error) {
+    logger.error('[restoreGroupsByStableAnchors] Failed to restore groups to DB', error as Error)
+    throw error
   }
 
-  // Phase 2: Redux dispatches (after all DB operations succeed)
-  for (const { anchor, insertIdx } of resolvedGroups) {
-    // Restore blocks
-    if (anchor.blocks.length > 0) {
-      dispatch(upsertManyBlocks(anchor.blocks))
+  // Bounded local projection: evolve a loaded copy so later groups account
+  // for earlier visible inserts without assuming whole-topic order.
+  const evolving = [...selectMessagesForTopic(getState(), topicId)]
+  for (const anchor of groupAnchors) {
+    // Fail-closed for legacy actions lacking the field: empty set injects nothing.
+    const allowed = new Set(anchor.loadedMessageIds ?? [])
+    const visibleMessages = anchor.messages.filter((m) => allowed.has(m.id))
+    if (visibleMessages.length === 0) continue
+    let localIdx: number | null
+    if (anchor.anchorMessageId != null) {
+      localIdx = resolveLocalBeforeIndex(evolving, anchor.anchorMessageId)
+    } else {
+      localIdx = evolving.length
     }
-
-    // Insert messages
-    for (let i = 0; i < anchor.messages.length; i++) {
+    if (localIdx === null) continue
+    const visibleBlocks = anchor.blocks.filter((b) => allowed.has(b.messageId))
+    if (visibleBlocks.length > 0) {
+      dispatch(upsertManyBlocks(visibleBlocks))
+    }
+    for (let i = 0; i < visibleMessages.length; i++) {
+      const message = visibleMessages[i]
+      evolving.splice(localIdx + i, 0, message)
       dispatch(
         newMessagesActions.insertMessageAtIndex({
           topicId,
-          message: anchor.messages[i],
-          index: insertIdx + i
+          message,
+          index: localIdx + i
         })
       )
     }
@@ -216,9 +272,8 @@ async function undoDelete(dispatch: AppDispatch, getState: () => RootState, acti
     await updateFileReferenceCounts(fileReferenceDeltas, false)
   }
 
-  // Restore groups using per-group anchors
-  const allBlocks = groupAnchors.flatMap((a) => a.blocks)
-  await restoreGroupsByAnchors(dispatch, getState, targetTopicId, groupAnchors, allBlocks)
+  // Restore groups with one atomic stable command (no numeric index)
+  await restoreGroupsByStableAnchors(dispatch, getState, targetTopicId, groupAnchors)
 
   // Restore segment membership
   await restoreSegmentsAfterUndo(dispatch, getState, segmentSnapshots)
@@ -326,9 +381,8 @@ async function undoCutPaste(
     await updateFileReferenceCounts(sourceFileDeltas, true)
   }
 
-  // Restore groups using per-group anchors
-  const allSourceBlocks = sourceGroupAnchors.flatMap((a) => a.blocks)
-  await restoreGroupsByAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors, allSourceBlocks)
+  // Restore source groups with one atomic stable command (no numeric index)
+  await restoreGroupsByStableAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors)
 
   // Restore source segment membership
   await restoreSegmentsAfterUndo(dispatch, getState, sourceSegmentSnapshots)
@@ -392,15 +446,16 @@ async function redoDelete(dispatch: AppDispatch, _getState: () => RootState, act
 }
 
 /**
- * Redo paste = re-insert the pasted messages using after snapshots (new IDs)
+ * Redo paste = re-insert the pasted messages with the stored stable intent.
+ * No loaded numeric index is used for persistence; the stored original intent
+ * (or a stable before-message/topic-tail fallback for legacy actions) drives
+ * the single atomic Main command. Local projection stays bounded.
  */
 async function redoPaste(dispatch: AppDispatch, getState: () => RootState, action: PasteUndoAction): Promise<void> {
   const {
     targetTopicId,
     pastedMessagesSnapshot = [],
     pastedBlocksSnapshot = [],
-    targetInsertPositionIndex: insertPositionIndex,
-    targetAnchorMessageId: anchorMessageId,
     fileReferenceDeltas = [],
     targetSegmentSnapshots = []
   } = action
@@ -410,37 +465,45 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     return
   }
 
-  // Resolve insertion position from anchor (before any changes)
-  const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+  const intent = resolveRedoIntent(action)
+  const entries: MessageBlockEntry[] = pastedMessagesSnapshot.map((message) => ({
+    message: message as unknown as MessageBlockEntry['message'],
+    blocks: pastedBlocksSnapshot.filter((b) => b.messageId === message.id) as unknown as MessageBlockEntry['blocks']
+  }))
 
-  // DB-first: Persist to DB before dispatching to Redux
+  // DB-first: one atomic stable re-insert before any Redux commit.
   try {
-    for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
-      const message = pastedMessagesSnapshot[i]
-      const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
-      await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
-    }
+    await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }])
   } catch (error) {
     logger.error('[redoPaste] Failed to save to DB', error as Error)
     throw error
   }
 
-  // Restore blocks to Redux only after DB write succeeds
-  if (pastedBlocksSnapshot.length > 0) {
-    dispatch(upsertManyBlocks(pastedBlocksSnapshot))
+  // Bounded local projection only when the stable target is locally visible.
+  const loaded = selectMessagesForTopic(getState(), targetTopicId)
+  let localIdx: number | null = null
+  if (intent.kind === 'topic-tail') {
+    localIdx = loaded.length
+  } else if (intent.kind === 'before-message') {
+    localIdx = resolveLocalBeforeIndex(loaded, intent.messageId)
+  } else {
+    localIdx = resolveLocalAfterGroupTailIndex(loaded, intent.messageId)
   }
-
-  // Insert pasted messages back (with their NEW IDs)
-  let index = resolvedIndex
-  for (const message of pastedMessagesSnapshot) {
-    dispatch(
-      newMessagesActions.insertMessageAtIndex({
-        topicId: targetTopicId,
-        message,
-        index
-      })
-    )
-    index++
+  if (localIdx !== null) {
+    if (pastedBlocksSnapshot.length > 0) {
+      dispatch(upsertManyBlocks(pastedBlocksSnapshot))
+    }
+    let index = localIdx
+    for (const message of pastedMessagesSnapshot) {
+      dispatch(
+        newMessagesActions.insertMessageAtIndex({
+          topicId: targetTopicId,
+          message,
+          index
+        })
+      )
+      index++
+    }
   }
 
   // Re-increment file reference counts
@@ -454,7 +517,7 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   }
 
   logger.info(
-    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages at resolved index ${resolvedIndex}, ${targetSegmentSnapshots.length} target segments`
+    `[redoPaste] Re-inserted ${pastedMessagesSnapshot.length} pasted messages with stable intent ${intent.kind}, ${targetSegmentSnapshots.length} target segments`
   )
 }
 
@@ -472,8 +535,6 @@ async function redoCutPaste(
     pastedBlocksSnapshot = [],
     sourceTopicId,
     sourceGroupAnchors,
-    targetInsertPositionIndex: insertPositionIndex,
-    targetAnchorMessageId: anchorMessageId,
     fileReferenceDeltas = [],
     targetSegmentSnapshots = []
   } = action
@@ -515,38 +576,46 @@ async function redoCutPaste(
     // via FileManager.deleteFile which decrements Dexie files.count.
   }
 
-  // Step 2: Re-insert pasted messages to target topic (DB-first)
+  // Step 2: Re-insert pasted messages to target topic with the stored stable
+  // intent (DB-first, one atomic command, no numeric index).
   if (pastedMessagesSnapshot.length > 0) {
-    // Resolve insertion position from anchor (before any changes)
-    const resolvedIndex = resolveAnchorIndex(getState, targetTopicId, anchorMessageId, insertPositionIndex)
+    const intent = resolveRedoIntent(action)
+    const entries: MessageBlockEntry[] = pastedMessagesSnapshot.map((message) => ({
+      message: message as unknown as MessageBlockEntry['message'],
+      blocks: pastedBlocksSnapshot.filter((b) => b.messageId === message.id) as unknown as MessageBlockEntry['blocks']
+    }))
 
-    // DB-first: Persist to DB before dispatching to Redux
     try {
-      for (let i = 0; i < pastedMessagesSnapshot.length; i++) {
-        const message = pastedMessagesSnapshot[i]
-        const blocksForMessage = pastedBlocksSnapshot.filter((b) => b.messageId === message.id)
-        await saveMessageAndBlocksToDB(targetTopicId, message, blocksForMessage, resolvedIndex + i)
-      }
+      await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }])
     } catch (error) {
       logger.error('[redoCutPaste] Failed to save pasted messages to DB', error as Error)
       throw error
     }
 
-    // Redux dispatches only after DB write succeeds
-    if (pastedBlocksSnapshot.length > 0) {
-      dispatch(upsertManyBlocks(pastedBlocksSnapshot))
+    const loaded = selectMessagesForTopic(getState(), targetTopicId)
+    let localIdx: number | null = null
+    if (intent.kind === 'topic-tail') {
+      localIdx = loaded.length
+    } else if (intent.kind === 'before-message') {
+      localIdx = resolveLocalBeforeIndex(loaded, intent.messageId)
+    } else {
+      localIdx = resolveLocalAfterGroupTailIndex(loaded, intent.messageId)
     }
-
-    let index = resolvedIndex
-    for (const message of pastedMessagesSnapshot) {
-      dispatch(
-        newMessagesActions.insertMessageAtIndex({
-          topicId: targetTopicId,
-          message,
-          index
-        })
-      )
-      index++
+    if (localIdx !== null) {
+      if (pastedBlocksSnapshot.length > 0) {
+        dispatch(upsertManyBlocks(pastedBlocksSnapshot))
+      }
+      let index = localIdx
+      for (const message of pastedMessagesSnapshot) {
+        dispatch(
+          newMessagesActions.insertMessageAtIndex({
+            topicId: targetTopicId,
+            message,
+            index
+          })
+        )
+        index++
+      }
     }
 
     // Re-increment file reference counts for pasted blocks

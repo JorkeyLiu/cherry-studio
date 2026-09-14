@@ -392,6 +392,7 @@ export enum IpcChannel {
   ChatDb_DeleteMessagesWithSegments = 'chatdb:delete-messages-with-segments',
   ChatDb_DeleteMessagesWithDependents = 'chatdb:delete-messages-with-dependents',
   ChatDb_PasteMessagesToTopic = 'chatdb:paste-messages-to-topic',
+  ChatDb_InsertMessageGroups = 'chatdb:insert-message-groups',
 
   // Phase 5.1B-2 — search
   ChatDb_SearchMessages = 'chatdb:search-messages',
