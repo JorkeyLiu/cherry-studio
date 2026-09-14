@@ -9,16 +9,20 @@ import type { BlockManager } from '../BlockManager'
 
 const logger = loggerService.withContext('TextCallbacks')
 
+import type { AssistantExecutionState } from '../executionState'
+
 interface TextCallbacksDependencies {
   blockManager: BlockManager
   getState: any
   assistantMsgId: string
+  executionState?: AssistantExecutionState
   getCitationBlockId: () => string | null
   getCitationBlockIdFromTool: () => string | null
 }
 
 export const createTextCallbacks = (deps: TextCallbacksDependencies) => {
   const { blockManager, getState, assistantMsgId, getCitationBlockId, getCitationBlockIdFromTool } = deps
+  const executionState = deps.executionState ?? blockManager.executionState
 
   // 内部维护的状态
   let mainTextBlockId: string | null = null
@@ -47,9 +51,15 @@ export const createTextCallbacks = (deps: TextCallbacksDependencies) => {
 
     onTextChunk: async (text: string, providerMetadata?: ProviderMetadata) => {
       const citationBlockId = getCitationBlockId() || getCitationBlockIdFromTool()
-      const citationBlockSource = citationBlockId
-        ? (getState().messageBlocks.entities[citationBlockId] as CitationMessageBlock).response?.source
-        : WEB_SEARCH_SOURCE.WEBSEARCH
+      // Local-first: detached executions hold the citation block only locally.
+      const localCitation = citationBlockId ? executionState.getBlock(citationBlockId) : undefined
+      const reduxCitation = citationBlockId
+        ? (getState().messageBlocks.entities[citationBlockId] as CitationMessageBlock | undefined)
+        : undefined
+      const citationBlockSource =
+        (localCitation as CitationMessageBlock | undefined)?.response?.source ??
+        reduxCitation?.response?.source ??
+        WEB_SEARCH_SOURCE.WEBSEARCH
       if (text) {
         const blockChanges: Partial<MessageBlock> = {
           content: text,

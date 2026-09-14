@@ -21,6 +21,7 @@ import { resolveGroupKey } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { buildContextTurns, isMessageInContextTurn } from '@renderer/services/contextTurnService'
 import { resolveMessageAnchorDecision } from '@renderer/services/contextWindowService'
+import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
@@ -53,6 +54,8 @@ import {
   getMainTextContent,
   isAssistantInterruptedThinkingOnlyMessage
 } from '@renderer/utils/messageUtils/find'
+import { isNoModelError } from '@renderer/utils/noModelError'
+import { ERR_NOT_FOUND } from '@shared/chatDb'
 import type { MenuProps } from 'antd'
 import { Dropdown, Popconfirm, Tooltip } from 'antd'
 import dayjs from 'dayjs'
@@ -102,6 +105,30 @@ interface Props {
 }
 
 const logger = loggerService.withContext('MessageMenubar')
+
+// ChatDb NOT_FOUND family for user-resend classification. ERR_NOT_FOUND is
+// the project constant (value 'NOT_FOUND'); both spellings are accepted so a
+// literal 'ERR_NOT_FOUND' code never falls through to the generic bucket.
+const RESEND_NOT_FOUND_CODES = new Set([ERR_NOT_FOUND, 'NOT_FOUND', 'ERR_NOT_FOUND'])
+
+function isMissingModelResendError(error: unknown): boolean {
+  if (isNoModelError(error)) return true
+  // Legacy production throw text from resendMessageThunk
+  // ('Assistant model is not configured for resend'). Kept as a narrow
+  // fallback so already-thrown errors still classify without fragile
+  // locale-text matching.
+  return error instanceof Error && error.message.includes('not configured for resend')
+}
+
+function isMissingUserResendError(error: unknown): boolean {
+  return error instanceof ChatDbResultError && RESEND_NOT_FOUND_CODES.has(error.code)
+}
+
+function resolveResendErrorToastKey(error: unknown): string {
+  if (isMissingModelResendError(error)) return 'message.error.enter.model'
+  if (isMissingUserResendError(error)) return 'error.missing_user_message'
+  return 'common.error'
+}
 
 type MessageOperationsHandlers = ReturnType<typeof useMessageOperations>
 
@@ -261,8 +288,24 @@ const MessageMenubar: FC<Props> = (props) => {
   }, [dispatch, topic.id, message.id, assistant.id, t])
 
   const handleResendUserMessage = useCallback(async () => {
-    await resendUser({ topicId: topic.id, messageId: message.id })
-  }, [message.id, resendUser, topic.id])
+    // Event-time resend failures must never escape as unhandled rejections
+    // from either the direct click or the Popconfirm confirm branch.
+    // Privacy-safe: only stable IDs plus error name/code are logged, never
+    // message content. Single toast per failure, classified by error kind:
+    // missing model -> `message.error.enter.model` (ApiService parity),
+    // ChatDb NOT_FOUND -> `error.missing_user_message`, all other
+    // ChatDb/transport/local errors -> `common.error`.
+    try {
+      await resendUser({ topicId: topic.id, messageId: message.id })
+    } catch (error) {
+      const toastKey = resolveResendErrorToastKey(error)
+      logger.error(
+        `[handleResendUserMessage] Failed to resend ${topic.id}/${message.id} [${toastKey}]:`,
+        error as Error
+      )
+      window.toast.error(t(toastKey))
+    }
+  }, [message.id, resendUser, t, topic.id])
 
   const { startEditing } = useMessageEditing()
 

@@ -21,8 +21,10 @@ import { getModel } from '@renderer/hooks/useModel'
 import { setLatestWindowCompleteness } from '@renderer/pages/home/Messages/messageWindow'
 import { ensureTopicAnchorEstablished, transferAnchorsWithAuthorityGroupKeys } from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
+import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
+import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import {
   createStreamWriteDiagnosticsContext,
   isStreamAttrRendererMeasureEnabled,
@@ -31,8 +33,10 @@ import {
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
 import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
+import { buildBlockOverlay } from '@renderer/services/requestBlockOverlay'
 import {
   recordResidentReadDiscard,
   recordResidentReadHit,
@@ -68,11 +72,8 @@ import {
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
 import { addAbortController } from '@renderer/utils/abortController'
-import {
-  createAssistantMessage,
-  createTranslationBlock,
-  resetAssistantMessage
-} from '@renderer/utils/messageUtils/create'
+import { createAssistantMessage, createTranslationBlock } from '@renderer/utils/messageUtils/create'
+import { NO_MODEL_ERROR_NAME } from '@renderer/utils/noModelError'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
@@ -81,6 +82,8 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   JsonObject,
+  SemanticModelSnapshot,
+  SemanticResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
@@ -219,6 +222,12 @@ export interface ThrottledBlockWriteContext {
   resendAttemptId?: string
   /** Execution barrier tracking the produced DB-write promise. */
   barrier?: WriteBarrier
+  /**
+   * Runtime Redux-mirror gate. Evaluated when the throttled write runs (not at
+   * call time) so a mid-generation topic eviction stops mirroring without
+   * stopping the DB patch. Absent = mirror (legacy/test compat).
+   */
+  shouldMirrorToRedux?: () => boolean
 }
 
 /**
@@ -237,7 +246,17 @@ const getBlockThrottler = (id: string) => {
       }
 
       const rafId = requestAnimationFrame(() => {
-        store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
+        let shouldMirror = true
+        if (ctx?.shouldMirrorToRedux) {
+          try {
+            shouldMirror = ctx.shouldMirrorToRedux()
+          } catch {
+            shouldMirror = false
+          }
+        }
+        if (shouldMirror) {
+          store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
+        }
         blockUpdateRafs.delete(id)
       })
 
@@ -345,19 +364,21 @@ export const saveUpdatesToDB = async (
 }
 
 // 新增: 辅助函数，用于获取并保存单个更新后的 Block 到数据库
+// Local-first: an explicit local block (execution fact) is preferred; the Redux
+// lookup is only a fallback for legacy callers. DB writes never depend on Redux.
 export const saveUpdatedBlockToDB = async (
   blockId: string | null,
   messageId: string,
   topicId: string,
   getState: () => RootState,
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  localBlock?: MessageBlock
 ) => {
   if (!blockId) {
     logger.warn('[DB Save Single Block] Received null/undefined blockId. Skipping save.')
     return
   }
-  const state = getState()
-  const blockToSave = state.messageBlocks.entities[blockId]
+  const blockToSave = localBlock ?? getState().messageBlocks.entities[blockId]
   if (blockToSave) {
     await saveUpdatesToDB(messageId, topicId, {}, [blockToSave], resendAttemptId)
   } else {
@@ -490,6 +511,31 @@ export const mergeRequestAssistantSnapshot = (
   }
 }
 
+/**
+ * Strict renderer-side `SemanticModelSnapshot` construction. The `Model`
+ * type declares the four fields, but runtime (unconfigured/legacy) models
+ * may miss them — an id-only object must never be forged into a snapshot.
+ * Returns a full copy (extra JSON keys preserved) or null when the model
+ * lacks any required non-empty field. Single seam for resend/regenerate.
+ */
+export function toSemanticModelSnapshot(model: unknown): SemanticModelSnapshot | null {
+  if (model === null || typeof model !== 'object' || Array.isArray(model)) return null
+  const rec = model as Record<string, unknown>
+  if (
+    typeof rec.id !== 'string' ||
+    rec.id.length === 0 ||
+    typeof rec.provider !== 'string' ||
+    rec.provider.length === 0 ||
+    typeof rec.name !== 'string' ||
+    rec.name.length === 0 ||
+    typeof rec.group !== 'string' ||
+    rec.group.length === 0
+  ) {
+    return null
+  }
+  return { ...rec } as unknown as SemanticModelSnapshot
+}
+
 // 发送和处理助手响应的实现函数，话题提示词在此拼接
 const fetchAndProcessAssistantResponseImpl = async (
   dispatch: AppDispatch,
@@ -502,7 +548,15 @@ const fetchAndProcessAssistantResponseImpl = async (
    * reset response into this execution closure. Every DB write below carries
    * exactly this id; ordinary executions pass undefined (carrier omitted).
    */
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  /**
+   * Authority user snapshot for semantic resend/regenerate. When the loaded
+   * projection contains the user, the original slice is preserved; otherwise
+   * the authority user message acts as the last user with a request-local
+   * block overlay (never injected into Redux). Ordinary send/append paths
+   * pass undefined with unchanged behavior.
+   */
+  authorityUser?: { message: Message; blocks: MessageBlock[] }
 ) => {
   // Re-read the assistant from the store: the caller may have captured a
   // snapshot that predates the first-establishment anchor dispatch in
@@ -520,6 +574,11 @@ const fetchAndProcessAssistantResponseImpl = async (
   const assistant = mergeRequestAssistantSnapshot(origAssistant, freshAssistant, topicId)
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
+  // Request-local execution state: the execution fact for this generation.
+  // `assistantMessage` is the authority snapshot (semantic reset) or the
+  // ordinary stub; initial blocks resolve from matching Redux entities when
+  // present (detached semantic resets are usually empty, never injected).
+  const executionState = createAssistantExecutionState(assistantMessage, getState)
   // F2: one write barrier per execution; all persistence this execution
   // produces is tracked here for finalization quiescence.
   const writeBarrier = new WriteBarrier()
@@ -534,8 +593,18 @@ const fetchAndProcessAssistantResponseImpl = async (
     blockId: string | null,
     messageId: string,
     execTopicId: string,
-    execGetState: () => RootState
-  ): Promise<void> => saveUpdatedBlockToDB(blockId, messageId, execTopicId, execGetState, resendAttemptId)
+    execGetState: () => RootState,
+    _attemptId?: string,
+    localBlock?: MessageBlock
+  ): Promise<void> =>
+    saveUpdatedBlockToDB(
+      blockId,
+      messageId,
+      execTopicId,
+      execGetState,
+      resendAttemptId,
+      localBlock ?? (blockId ? executionState.getBlock(blockId) : undefined)
+    )
   // F1/Fix B: execution-scoped final atomic persist binding the immutable
   // closure attempt. onComplete's success-final checkpoint carries exactly
   // this id; ordinary executions pass undefined (carrier omitted).
@@ -549,7 +618,14 @@ const fetchAndProcessAssistantResponseImpl = async (
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
-    // 创建 BlockManager 实例
+    // 创建 BlockManager 实例 (request-local execution state; Redux only a mirror)
+    const isExecLoaded = () => {
+      try {
+        return !!getState().messages.entities[assistantMsgId]
+      } catch {
+        return false
+      }
+    }
     const blockManager = new BlockManager({
       dispatch,
       getState,
@@ -559,10 +635,18 @@ const fetchAndProcessAssistantResponseImpl = async (
       topicId,
       resendAttemptId,
       barrier: writeBarrier,
-      throttledBlockUpdate: (id: string, blockUpdate: any, attemptId?: string, barrier?: WriteBarrier) =>
+      executionState,
+      throttledBlockUpdate: (
+        id: string,
+        blockUpdate: any,
+        attemptId?: string,
+        barrier?: WriteBarrier,
+        shouldMirror?: () => boolean
+      ) =>
         throttledBlockUpdate(id, blockUpdate, {
           resendAttemptId: attemptId ?? resendAttemptId,
-          barrier: barrier ?? writeBarrier
+          barrier: barrier ?? writeBarrier,
+          shouldMirrorToRedux: shouldMirror ?? isExecLoaded
         }),
       flushThrottledBlockUpdate,
       cancelThrottledBlockUpdate
@@ -598,6 +682,19 @@ const fetchAndProcessAssistantResponseImpl = async (
       }
     }
 
+    // Semantic authority user: preserve the loaded slice when the user is
+    // present; otherwise append the authority user as the last user. Blocks
+    // resolve via a request-local overlay — never injected into Redux.
+    let authoritySnapshot: AuthorityUserSnapshot | undefined
+    if (authorityUser) {
+      const overlay = buildBlockOverlay(authorityUser.blocks)
+      authoritySnapshot = { message: authorityUser.message, blocks: overlay }
+      const hasAuthorityUser = messagesForContext.some((m) => m?.id === authorityUser.message.id)
+      if (!hasAuthorityUser) {
+        messagesForContext = [...messagesForContext, authorityUser.message]
+      }
+    }
+
     callbacks = createCallbacks({
       blockManager,
       dispatch,
@@ -606,7 +703,8 @@ const fetchAndProcessAssistantResponseImpl = async (
       assistantMsgId,
       saveUpdatesToDB: saveUpdatesToDBForExec,
       saveFinalUpdatesAtomically: saveFinalUpdatesAtomicallyForExec,
-      assistant
+      assistant,
+      executionState
     })
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
 
@@ -622,6 +720,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         blockManager,
         assistantMsgId,
         callbacks,
+        authorityUser: authoritySnapshot,
         options: {
           signal: abortController.signal,
           headers: defaultAppHeaders()
@@ -870,21 +969,19 @@ export const deleteSingleMessageThunk =
 
 /**
  * Thunk to resend a user message by regenerating its associated assistant responses.
- * Finds all assistant messages responding to the given user message, resets them,
- * and queues them for regeneration without deleting other messages.
+ * Semantic Main-authoritative path: supplies only stable IDs + assistant/model
+ * snapshots; Main resolves the full answer group in one transaction.
  */
 export const resendMessageThunk =
   (topicId: Topic['id'], userMessageToResend: Message, assistant: Assistant) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
     try {
       const state = getState()
-      // Use selector to get all messages for the topic
-      const allMessagesForTopic = selectMessagesForTopic(state, topicId)
-
-      // Filter to find the assistant messages to reset
-      const assistantMessagesToReset = allMessagesForTopic.filter(
-        (m) => m.askId === userMessageToResend.id && m.role === 'assistant'
-      )
+      const localUser = state.messages.entities[userMessageToResend.id]
+      if (!localUser || localUser.topicId !== topicId) {
+        logger.error(`[resendMessageThunk] Local user message ${userMessageToResend.id} not found in topic ${topicId}.`)
+        throw new Error(`Local user message ${userMessageToResend.id} not found`)
+      }
 
       // Clear cached search results for the user message being resent
       // This ensures that the regenerated responses will not use stale search results
@@ -895,91 +992,30 @@ export const resendMessageThunk =
         logger.warn(`Failed to clear keyv cache for message ${userMessageToResend.id}:`, error as Error)
       }
 
-      const resetDataList: Message[] = []
-
-      if (assistantMessagesToReset.length === 0 && !userMessageToResend?.mentions?.length) {
-        // 没有相关的助手消息且没有提及模型时，使用助手模型创建一条消息
-
-        const assistantMessage = createAssistantMessage(assistant.id, topicId, {
-          askId: userMessageToResend.id,
-          model: assistant.model
-        })
-        assistantMessage.traceId = userMessageToResend.traceId
-        resetDataList.push(assistantMessage)
+      if (!assistant.model || typeof assistant.model.id !== 'string') {
+        logger.error(`[resendMessageThunk] Assistant ${assistant.id} has no usable model for resend.`)
+        const noModelError = new Error('Assistant model is not configured for resend')
+        noModelError.name = NO_MODEL_ERROR_NAME
+        throw noModelError
       }
-
-      // 处理存在相关的助手消息的情况
-      const allBlockIdsToDelete: string[] = []
-      // F1: thunk-scoped immutable capture of the reset attempt mapping; each
-      // queued execution closure below reads exactly its own message's entry.
-      const attemptByMessage = new Map<string, string>()
-      // 先处理已有的重传
-      for (const originalMsg of assistantMessagesToReset) {
-        const modelToSet =
-          assistantMessagesToReset.length === 1 && !userMessageToResend?.mentions?.length
-            ? assistant.model
-            : originalMsg.model
-        const blockIdsToDelete = [...(originalMsg.blocks || [])]
-        const resetMsg = resetAssistantMessage(originalMsg, {
-          status: AssistantMessageStatus.PENDING,
-          updatedAt: new Date().toISOString(),
-          model: modelToSet
-        })
-
-        resetDataList.push(resetMsg)
-        allBlockIdsToDelete.push(...blockIdsToDelete)
-      }
-
-      // 再处理新的重传（用户消息提及，但是现有助手消息中不存在提及的模型）
-      const originModelSet = new Set(assistantMessagesToReset.map((m) => m.model).filter((m) => m !== undefined))
-      const mentionedModelSet = new Set(userMessageToResend.mentions ?? [])
-      const newModelSet = new Set([...mentionedModelSet].filter((m) => !originModelSet.has(m)))
-      for (const model of newModelSet) {
-        const assistantMessage = createAssistantMessage(assistant.id, topicId, {
-          askId: userMessageToResend.id,
-          model: model,
-          modelId: model.id
-        })
-        resetDataList.push(assistantMessage)
-      }
-
-      try {
-        const resetResult = await dbService.resetMessagesForResend(
-          topicId,
-          resetDataList.map((message) => ({ message, blocks: [] })),
-          allBlockIdsToDelete
+      const currentModel = toSemanticModelSnapshot(assistant.model)
+      if (!currentModel) {
+        logger.error(
+          `[resendMessageThunk] Assistant ${assistant.id} model lacks full snapshot (id/provider/name/group).`
         )
-        // F1: fill the thunk-scoped map from the Main-authoritative mapping.
-        // Each queued execution closure receives exactly its own message's id
-        // below — never a live lookup — so a later superseding reset cannot
-        // reroute this execution's residual writes. Legacy responses without
-        // a mapping yield undefined (carrier omitted, local-only).
-        const rawAttempts = (resetResult as { attempts?: unknown })?.attempts
-        if (Array.isArray(rawAttempts)) {
-          for (const entry of rawAttempts as Array<{ messageId?: unknown; attemptId?: unknown }>) {
-            if (typeof entry?.messageId === 'string' && typeof entry?.attemptId === 'string') {
-              attemptByMessage.set(entry.messageId, entry.attemptId)
-            }
-          }
-        }
-        const cleanup = resetResult
-        const currentMessages = selectMessagesForTopic(getState(), topicId)
-        for (const message of resetDataList) {
-          if (currentMessages.some((existing) => existing.id === message.id)) {
-            dispatch(newMessagesActions.updateMessage({ topicId, messageId: message.id, updates: message }))
-          }
-        }
-        for (const message of resetDataList) {
-          if (!currentMessages.some((existing) => existing.id === message.id)) {
-            dispatch(newMessagesActions.addMessage({ topicId, message }))
-          }
-        }
-        // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
-        allBlockIdsToDelete.forEach((id) => cancelThrottledBlockUpdate(id))
-        if (allBlockIdsToDelete.length > 0) {
-          dispatch(removeManyBlocks(allBlockIdsToDelete))
-        }
-        await consumeFileCleanupResult(cleanup)
+        const noModelError = new Error('Assistant model is not configured for resend')
+        noModelError.name = NO_MODEL_ERROR_NAME
+        throw noModelError
+      }
+
+      let response: SemanticResendResponse
+      try {
+        response = await dbService.resendUserMessages({
+          topicId,
+          userMessageId: userMessageToResend.id,
+          assistantId: assistant.id,
+          currentModel
+        })
       } catch (dbError) {
         logger.error('[resendMessageThunk] Error updating database:', dbError as Error)
         // LOCK-005: Rethrow DB persistence failure so callers (MessageEditor)
@@ -987,22 +1023,53 @@ export const resendMessageThunk =
         throw dbError
       }
 
+      const attemptByMessage = new Map<string, string>()
+      for (const entry of response.attempts ?? []) {
+        if (typeof entry?.messageId === 'string' && typeof entry?.attemptId === 'string') {
+          attemptByMessage.set(entry.messageId, entry.attemptId)
+        }
+      }
+      const createdIds = new Set(response.createdMessageIds ?? [])
+      const loadedIds = new Set(getState().messages.messageIdsByTopic[topicId] ?? [])
+      const userLoaded = loadedIds.has(response.askId)
+      const executionEntries = (response.executionMessages ?? []).map((e) => ({
+        message: e.message as unknown as Message,
+        attemptId: attemptByMessage.get((e.message as unknown as { id: string }).id)
+      }))
+      for (const { message } of executionEntries) {
+        if (loadedIds.has(message.id)) {
+          dispatch(newMessagesActions.updateMessage({ topicId, messageId: message.id, updates: message }))
+        } else if (createdIds.has(message.id) && userLoaded) {
+          dispatch(newMessagesActions.addMessage({ topicId, message }))
+        }
+      }
+      const loadedBlockIds = new Set(Object.keys(getState().messageBlocks.entities ?? {}))
+      const blocksToRemove = (response.removedBlockIds ?? []).filter((id) => loadedBlockIds.has(id))
+      blocksToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
+      if (blocksToRemove.length > 0) {
+        dispatch(removeManyBlocks(blocksToRemove))
+      }
+      await consumeFileCleanupResult(response)
+
+      const authorityUser = {
+        message: response.userMessage as unknown as Message,
+        blocks: (response.userBlocks ?? []) as unknown as MessageBlock[]
+      }
       const queue = getTopicQueue(topicId)
-      for (const resetMsg of resetDataList) {
+      for (const { message, attemptId } of executionEntries) {
         const assistantConfigForThisRegen = {
           ...assistant,
-          ...(resetMsg.model ? { model: resetMsg.model } : {})
+          ...(message.model ? { model: message.model } : {})
         }
-        // F1: the execution closure owns this message's attempt immutably.
-        const attemptForExec = attemptByMessage.get(resetMsg.id)
         void queue.add(async () => {
           await fetchAndProcessAssistantResponseImpl(
             dispatch,
             getState,
             topicId,
             assistantConfigForThisRegen,
-            resetMsg,
-            attemptForExec
+            message,
+            attemptId,
+            authorityUser
           )
         })
       }
@@ -1031,98 +1098,88 @@ export const resendUserMessageWithEditThunk =
   }
 
 /**
- * Thunk to regenerate a specific assistant response.
+ * Thunk to regenerate a specific assistant response via the semantic command.
+ * Supplies only the stable assistant ID; Main validates selected/askId/user
+ * and resets only the selected message in one transaction.
  */
 export const regenerateAssistantResponseThunk =
   (topicId: Topic['id'], assistantMessageToRegenerate: Message, assistant: Assistant) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
     try {
       const state = getState()
-
-      // 1. Use selector to get all messages for the topic
-      const allMessagesForTopic = selectMessagesForTopic(state, topicId)
-
-      const askId = assistantMessageToRegenerate.askId
-
-      if (!askId) {
+      const localSelected = state.messages.entities[assistantMessageToRegenerate.id]
+      if (!localSelected || localSelected.topicId !== topicId) {
+        logger.error(
+          `[regenerateAssistantResponseThunk] Assistant message ${assistantMessageToRegenerate.id} not found in topic ${topicId}.`
+        )
+        return
+      }
+      if (!assistantMessageToRegenerate.askId && !localSelected.askId) {
         logger.error(
           `[appendAssistantResponseThunk] Existing assistant message ${assistantMessageToRegenerate.id} does not have an askId.`
         )
-        return // Stop if askId is missing
-      }
-
-      if (!state.messages.entities[askId]) {
-        logger.error(
-          `[appendAssistantResponseThunk] Original user query (askId: ${askId}) not found in entities. Cannot create assistant response without corresponding user message.`
-        )
-
-        // Show error popup instead of creating error message block
-        window.toast.error(t('error.missing_user_message'))
-
         return
       }
-
-      // 2. Find the original user query (Restored Logic)
-      const originalUserQuery = allMessagesForTopic.find((m) => m.id === assistantMessageToRegenerate.askId)
-      if (!originalUserQuery) {
-        logger.error(
-          `[regenerateAssistantResponseThunk] Original user query (askId: ${assistantMessageToRegenerate.askId}) not found for assistant message ${assistantMessageToRegenerate.id}. Cannot regenerate.`
-        )
+      // Self-model compat: a truthy selected `modelId` preserves the old
+      // retain-model path without requiring a configured assistant model.
+      // Never forge a model id — omit `currentModel` when the assistant
+      // model lacks the full id/provider/name/group snapshot.
+      const hasSelfModelId =
+        (typeof localSelected.modelId === 'string' && localSelected.modelId.length > 0) ||
+        (typeof assistantMessageToRegenerate.modelId === 'string' && assistantMessageToRegenerate.modelId.length > 0)
+      const snapshot = toSemanticModelSnapshot(assistant.model)
+      const hasUsableAssistantModel = snapshot !== null
+      if (!hasSelfModelId && !hasUsableAssistantModel) {
+        logger.error(`[regenerateAssistantResponseThunk] Assistant ${assistant.id} has no usable model.`)
         return
       }
+      const currentModel = snapshot ?? undefined
 
-      // 3. Verify the assistant message itself exists in entities
-      const messageToResetEntity = state.messages.entities[assistantMessageToRegenerate.id]
-      if (!messageToResetEntity) {
-        // No need to check topicId again as selector implicitly handles it
-        logger.error(
-          `[regenerateAssistantResponseThunk] Assistant message ${assistantMessageToRegenerate.id} not found in entities despite being in the topic list. State might be inconsistent.`
-        )
-        return
-      }
-
-      // 4. Get Block IDs to delete
-      const blockIdsToDelete = [...(messageToResetEntity.blocks || [])]
-
-      // 5. Persist the reset and block deletion before mutating Redux.
-      const resetAssistantMsg = resetAssistantMessage(
-        messageToResetEntity,
-        // Grouped message (mentioned model message) should not reset model and modelId, always use the original model
-        assistantMessageToRegenerate.modelId
-          ? {
-              status: AssistantMessageStatus.PENDING,
-              updatedAt: new Date().toISOString()
-            }
-          : {
-              status: AssistantMessageStatus.PENDING,
-              updatedAt: new Date().toISOString(),
-              model: assistant.model
-            }
-      )
-
-      const resetResult = await dbService.resetMessagesForResend(
-        topicId,
-        [{ message: resetAssistantMsg, blocks: [] }],
-        blockIdsToDelete
-      )
-      // F1: capture this message's attempt into the execution closure below.
-      const rawAttempts = (resetResult as { attempts?: unknown })?.attempts
-      const matchedAttempt = Array.isArray(rawAttempts)
-        ? (rawAttempts as Array<{ messageId?: unknown; attemptId?: unknown }>).find(
-            (e) => e?.messageId === resetAssistantMsg.id && typeof e?.attemptId === 'string'
+      let response: SemanticResendResponse
+      try {
+        response = await dbService.regenerateAssistantMessage({
+          topicId,
+          assistantMessageId: assistantMessageToRegenerate.id,
+          assistantId: assistant.id,
+          ...(currentModel !== undefined && { currentModel })
+        })
+      } catch (dbError) {
+        if (dbError instanceof ChatDbResultError && dbError.code === 'NOT_FOUND') {
+          logger.error(
+            `[regenerateAssistantResponseThunk] Authority user query not found for assistant message ${assistantMessageToRegenerate.id}.`,
+            dbError
           )
-        : undefined
+          window.toast.error(t('error.missing_user_message'))
+          return
+        }
+        logger.error(
+          `[regenerateAssistantResponseThunk] Error regenerating response for assistant message ${assistantMessageToRegenerate.id}:`,
+          dbError as Error
+        )
+        return
+      }
+      const matchedAttempt = (response.attempts ?? []).find(
+        (e) => e?.messageId === assistantMessageToRegenerate.id && typeof e?.attemptId === 'string'
+      )
       const attemptForExec =
         matchedAttempt && typeof matchedAttempt.attemptId === 'string' ? matchedAttempt.attemptId : undefined
-      const cleanup = resetResult
-      await consumeFileCleanupResult(cleanup)
-      // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
-      blockIdsToDelete.forEach((id) => cancelThrottledBlockUpdate(id))
+      const execEntry = (response.executionMessages ?? [])[0]
+      if (!execEntry) {
+        logger.error(
+          `[regenerateAssistantResponseThunk] Empty execution messages for ${assistantMessageToRegenerate.id}.`
+        )
+        return
+      }
+      const resetAssistantMsg = execEntry.message as unknown as Message
+      await consumeFileCleanupResult(response)
+      const loadedBlockIds = new Set(Object.keys(getState().messageBlocks.entities ?? {}))
+      const blocksToRemove = (response.removedBlockIds ?? []).filter((id) => loadedBlockIds.has(id))
+      blocksToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
       dispatch(
         newMessagesActions.updateMessage({ topicId, messageId: resetAssistantMsg.id, updates: resetAssistantMsg })
       )
-      if (blockIdsToDelete.length > 0) {
-        dispatch(removeManyBlocks(blockIdsToDelete))
+      if (blocksToRemove.length > 0) {
+        dispatch(removeManyBlocks(blocksToRemove))
       }
 
       // 8. Add fetch/process call to the queue
@@ -1131,6 +1188,10 @@ export const regenerateAssistantResponseThunk =
         ...assistant,
         ...(resetAssistantMsg.model ? { model: resetAssistantMsg.model } : {})
       }
+      const authorityUser = {
+        message: response.userMessage as unknown as Message,
+        blocks: (response.userBlocks ?? []) as unknown as MessageBlock[]
+      }
       void queue.add(async () => {
         await fetchAndProcessAssistantResponseImpl(
           dispatch,
@@ -1138,7 +1199,8 @@ export const regenerateAssistantResponseThunk =
           topicId,
           assistantConfigForRegen,
           resetAssistantMsg,
-          attemptForExec
+          attemptForExec,
+          authorityUser
         )
       })
     } catch (error) {
@@ -2548,7 +2610,16 @@ export const setupChannelStream = (
 
   // Ordinary IM channel execution: no resend attempt, but still wired with a
   // barrier + flush so completion paths share the same quiescence semantics.
+  // Request-local execution state, same as ordinary chat (Redux only a mirror).
   const channelBarrier = new WriteBarrier()
+  const channelExecutionState = createAssistantExecutionState(assistantMessage, getState)
+  const channelIsLoaded = () => {
+    try {
+      return !!getState().messages.entities[assistantMessage.id]
+    } catch {
+      return false
+    }
+  }
   const blockManager = new BlockManager({
     dispatch,
     getState,
@@ -2557,8 +2628,18 @@ export const setupChannelStream = (
     assistantMsgId: assistantMessage.id,
     topicId,
     barrier: channelBarrier,
-    throttledBlockUpdate: (id: string, blockUpdate: any, _attemptId?: string, barrier?: WriteBarrier) =>
-      throttledBlockUpdate(id, blockUpdate, { barrier: barrier ?? channelBarrier }),
+    executionState: channelExecutionState,
+    throttledBlockUpdate: (
+      id: string,
+      blockUpdate: any,
+      _attemptId?: string,
+      barrier?: WriteBarrier,
+      shouldMirror?: () => boolean
+    ) =>
+      throttledBlockUpdate(id, blockUpdate, {
+        barrier: barrier ?? channelBarrier,
+        shouldMirrorToRedux: shouldMirror ?? channelIsLoaded
+      }),
     flushThrottledBlockUpdate,
     cancelThrottledBlockUpdate
   })
@@ -2569,6 +2650,7 @@ export const setupChannelStream = (
     getState,
     topicId,
     assistantMsgId: assistantMessage.id,
+    executionState: channelExecutionState,
     saveUpdatesToDB,
     // Ordinary IM channel execution: no resend attempt (carrier omitted), but
     // the same single-transaction final checkpoint as ordinary chat.

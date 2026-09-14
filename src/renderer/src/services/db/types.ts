@@ -8,7 +8,10 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   MessageBlockEntry,
+  RegenerateAssistantMessageRequest,
+  ResendUserMessagesRequest,
   SelectAnswerMessageResponse,
+  SemanticResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 
@@ -105,6 +108,23 @@ export interface MessageDataSource {
    * Dispatches `updateTopicUpdatedAt` exactly once after success.
    */
   deleteMessagesWithDependents(topicId: string, messageIds: string[]): Promise<DeleteMessagesWithDependentsResponse>
+
+  /**
+   * Semantic resend by stable user ID (Main-resolved full group).
+   *
+   * Renderer supplies only stable IDs + assistant/model snapshots; Main
+   * resolves the full answer group in one transaction and returns the
+   * authority user snapshot, post-write execution entries, removed block IDs,
+   * created IDs, cleanup facts, and 1:1 attempt mapping. Dispatches
+   * `updateTopicUpdatedAt` exactly once after success.
+   */
+  resendUserMessages?(request: ResendUserMessagesRequest): Promise<SemanticResendResponse>
+
+  /**
+   * Semantic regenerate by stable assistant ID (Main-resolved single reset).
+   * Same response shape as resend; exactly one execution entry.
+   */
+  regenerateAssistantMessage?(request: RegenerateAssistantMessageRequest): Promise<SemanticResendResponse>
 
   /**
    * Delete a single message and its blocks

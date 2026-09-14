@@ -53,8 +53,10 @@ import type {
   ListTrashTopicsRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
+  RegenerateAssistantMessageRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
@@ -541,6 +543,16 @@ export function registerChatDbIpc(): () => void {
   // 30. reset-messages-for-resend (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_ResetMessagesForResend, (agg, req: ResetMessagesForResendRequest) => {
     return agg.resetMessagesForResend(req.topicId, req.messages, req.blockIdsToDelete)
+  })
+
+  // 30b. resend-user-messages: semantic resend by stable user ID (authority group resolve)
+  handleCommand(IpcChannel.ChatDb_ResendUserMessages, (agg, req: ResendUserMessagesRequest) => {
+    return agg.resendUserMessages(req.topicId, req.userMessageId, req.assistantId, req.currentModel)
+  })
+
+  // 30c. regenerate-assistant-message: semantic regenerate by stable assistant ID
+  handleCommand(IpcChannel.ChatDb_RegenerateAssistantMessage, (agg, req: RegenerateAssistantMessageRequest) => {
+    return agg.regenerateAssistantMessage(req.topicId, req.assistantMessageId, req.assistantId, req.currentModel)
   })
 
   // 31. delete-messages-with-segments (Phase 5.1B)

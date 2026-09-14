@@ -1,6 +1,7 @@
 import type { Assistant } from '@renderer/types'
 
 import type { BlockManager } from '../BlockManager'
+import type { AssistantExecutionState } from '../executionState'
 import { createBaseCallbacks } from './baseCallbacks'
 import { createCitationCallbacks } from './citationCallbacks'
 import { createImageCallbacks } from './imageCallbacks'
@@ -15,6 +16,7 @@ interface CallbacksDependencies {
   getState: any
   topicId: string
   assistantMsgId: string
+  executionState?: AssistantExecutionState
   saveUpdatesToDB: any
   /**
    * Single-transaction final checkpoint for onComplete (Fix B): persists the
@@ -43,6 +45,10 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     saveFinalUpdatesAtomically,
     assistant
   } = deps
+  // Request-local execution state threads through every generation. When the
+  // caller omits it (legacy/test harnesses), fall back to the BlockManager's
+  // own state so no path returns to Redux-only.
+  const executionState = deps.executionState ?? blockManager.executionState
 
   // 首先创建 thinkingCallbacks ，以便传递 getCurrentThinkingInfo 给 baseCallbacks
   const thinkingCallbacks = createThinkingCallbacks({
@@ -60,13 +66,16 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     saveUpdatesToDB,
     saveFinalUpdatesAtomically,
     assistant,
+    executionState,
     getCurrentThinkingInfo: thinkingCallbacks.getCurrentThinkingInfo
   })
 
   const toolCallbacks = createToolCallbacks({
     blockManager,
     assistantMsgId,
-    dispatch
+    dispatch,
+    getState,
+    executionState
   })
 
   const imageCallbacks = createImageCallbacks({
@@ -77,7 +86,8 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
   const citationCallbacks = createCitationCallbacks({
     blockManager,
     assistantMsgId,
-    getState
+    getState,
+    executionState
   })
 
   const videoCallbacks = createVideoCallbacks({ blockManager, assistantMsgId })
@@ -87,6 +97,7 @@ export const createCallbacks = (deps: CallbacksDependencies) => {
     blockManager,
     getState,
     assistantMsgId,
+    executionState,
     getCitationBlockId: citationCallbacks.getCitationBlockId,
     getCitationBlockIdFromTool: toolCallbacks.getCitationBlockId
   })

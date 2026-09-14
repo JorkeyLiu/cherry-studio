@@ -6,12 +6,15 @@
 import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import { loggerService } from '@logger'
 import { isVisionModel } from '@renderer/config/models'
+import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
+import { resolveOverlayBlock } from '@renderer/services/requestBlockOverlay'
 import store from '@renderer/store'
 import type { Message, Model } from '@renderer/types'
 import type {
   FileMessageBlock,
   ImageMessageBlock,
   MainTextMessageBlock,
+  MessageBlock,
   ThinkingMessageBlock
 } from '@renderer/types/newMessage'
 import {
@@ -38,6 +41,44 @@ import { convertFileBlockToFilePart, convertFileBlockToTextPart } from './filePr
 
 const logger = loggerService.withContext('messageConverter')
 
+function overlayBlocksForMessage(message: Message, overlay?: BlockOverlay): MessageBlock[] | null {
+  if (!overlay || !message.blocks || message.blocks.length === 0) return null
+  const resolved: MessageBlock[] = []
+  for (const id of message.blocks) {
+    const b = resolveOverlayBlock(overlay, id)
+    if (b) resolved.push(b)
+  }
+  return resolved.length > 0 && resolved.length === message.blocks.length
+    ? resolved
+    : resolved.length > 0
+      ? resolved
+      : null
+}
+
+function findBlocksWithOverlay<T>(
+  message: Message,
+  overlay: BlockOverlay | undefined,
+  type: string,
+  fallback: (m: Message) => T[]
+): T[] {
+  const over = overlayBlocksForMessage(message, overlay)
+  if (over) {
+    return (over as unknown as Array<{ type: string }>).filter((b) => b.type === type) as unknown as T[]
+  }
+  return fallback(message)
+}
+
+function mainTextContentWithOverlay(message: Message, overlay?: BlockOverlay): string {
+  const over = overlayBlocksForMessage(message, overlay)
+  if (over) {
+    return (over as unknown as Array<{ type: string; content?: string }>)
+      .filter((b) => b.type === 'main_text')
+      .map((b) => b.content ?? '')
+      .join('\n\n')
+  }
+  return getMainTextContent(message)
+}
+
 /**
  * 转换消息为 AI SDK 参数格式
  * 基于 OpenAI 格式的通用转换，支持文本、图片和文件
@@ -45,9 +86,10 @@ const logger = loggerService.withContext('messageConverter')
 export async function convertMessageToSdkParam(
   message: Message,
   isVisionModel = false,
-  model?: Model
+  model?: Model,
+  overlay?: BlockOverlay
 ): Promise<ModelMessage | ModelMessage[]> {
-  let content = getMainTextContent(message)
+  let content = mainTextContentWithOverlay(message, overlay)
 
   // Inject context timestamp if enabled
   if (store.getState().settings.injectContextTimestamp && message.createdAt && message.role === 'user') {
@@ -55,10 +97,10 @@ export async function convertMessageToSdkParam(
     content = `<message_time>${timestamp}</message_time>\n${content}`
   }
 
-  const fileBlocks = findFileBlocks(message)
-  const imageBlocks = findImageBlocks(message)
-  const reasoningBlocks = findThinkingBlocks(message)
-  const mainTextBlocks = findMainTextBlocks(message)
+  const fileBlocks = findBlocksWithOverlay(message, overlay, 'file', findFileBlocks)
+  const imageBlocks = findBlocksWithOverlay(message, overlay, 'image', findImageBlocks)
+  const reasoningBlocks = findBlocksWithOverlay(message, overlay, 'thinking', findThinkingBlocks)
+  const mainTextBlocks = findBlocksWithOverlay(message, overlay, 'main_text', findMainTextBlocks)
   if (message.role === 'user' || message.role === 'system') {
     return convertMessageToUserModelMessage(content, fileBlocks, imageBlocks, isVisionModel, model)
   } else {
@@ -324,12 +366,16 @@ async function convertMessageToAssistantModelMessage(
  *
  * The function automatically detects vision model capabilities and adjusts conversion accordingly.
  */
-export async function convertMessagesToSdkMessages(messages: Message[], model: Model): Promise<ModelMessage[]> {
+export async function convertMessagesToSdkMessages(
+  messages: Message[],
+  model: Model,
+  overlay?: BlockOverlay
+): Promise<ModelMessage[]> {
   const sdkMessages: ModelMessage[] = []
   const isVision = isVisionModel(model)
 
   for (const message of messages) {
-    const sdkMessage = await convertMessageToSdkParam(message, isVision, model)
+    const sdkMessage = await convertMessageToSdkParam(message, isVision, model, overlay)
     sdkMessages.push(...(Array.isArray(sdkMessage) ? sdkMessage : [sdkMessage]))
   }
   // Special handling for vison models
@@ -364,7 +410,7 @@ export async function convertMessagesToSdkMessages(messages: Message[], model: M
     }
 
     // Check if there are images from the previous assistant message
-    const imageBlocks = prevAssistant ? findImageBlocks(prevAssistant) : []
+    const imageBlocks = prevAssistant ? findBlocksWithOverlay(prevAssistant, overlay, 'image', findImageBlocks) : []
     const imageParts = await convertImageBlockToImagePart(imageBlocks)
 
     // If no images to merge, return messages as-is

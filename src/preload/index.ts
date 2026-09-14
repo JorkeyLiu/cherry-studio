@@ -29,8 +29,10 @@ import type {
   ListTrashTopicsRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
+  RegenerateAssistantMessageRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
@@ -720,6 +722,10 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_CloneMessagesToTopic, request),
     resetMessagesForResend: (request: ResetMessagesForResendRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_ResetMessagesForResend, request),
+    resendUserMessages: (request: ResendUserMessagesRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ResendUserMessages, request),
+    regenerateAssistantMessage: (request: RegenerateAssistantMessageRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_RegenerateAssistantMessage, request),
     deleteMessagesWithSegments: (request: DeleteMessagesWithSegmentsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessagesWithSegments, request),
     deleteMessagesWithDependents: (request: DeleteMessagesWithDependentsRequest) =>

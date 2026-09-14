@@ -10,6 +10,7 @@ import { createCitationBlock, createToolBlock } from '@renderer/utils/messageUti
 import { isPlainObject } from 'lodash'
 
 import type { BlockManager } from '../BlockManager'
+import type { AssistantExecutionState } from '../executionState'
 
 const logger = loggerService.withContext('ToolCallbacks')
 
@@ -19,10 +20,14 @@ interface ToolCallbacksDependencies {
   blockManager: BlockManager
   assistantMsgId: string
   dispatch: AppDispatch
+  getState?: any
+  executionState?: AssistantExecutionState
 }
 
 export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
   const { blockManager, assistantMsgId } = deps
+  const executionState = deps.executionState ?? blockManager.executionState
+  const getState = deps.getState as undefined | (() => { messageBlocks?: { entities?: Record<string, unknown> } })
 
   // 内部维护的状态
   const toolCallIdToBlockIdMap = new Map<string, string>()
@@ -115,8 +120,17 @@ export const createToolCallbacks = (deps: ToolCallbacksDependencies) => {
             ? MessageBlockStatus.SUCCESS
             : MessageBlockStatus.ERROR
 
-        const state = store.getState()
-        const existingBlock = state.messageBlocks.entities[existingBlockId] as ToolMessageBlock | undefined
+        // Local-first: detached executions hold the tool block only locally.
+        const localBlock = executionState.getBlock(existingBlockId) as ToolMessageBlock | undefined
+        const reduxBlock = (() => {
+          try {
+            const entities = getState?.()?.messageBlocks?.entities ?? store.getState().messageBlocks.entities
+            return entities?.[existingBlockId] as ToolMessageBlock | undefined
+          } catch {
+            return undefined
+          }
+        })()
+        const existingBlock = localBlock ?? reduxBlock
 
         const existingResponse = existingBlock?.metadata?.rawMcpToolResponse
         // Merge order: toolResponse.arguments (base) -> existingResponse?.arguments

@@ -9,8 +9,11 @@ import type {
   FetchMessagesWindowResponse,
   FileCleanupResult,
   MessageBlockEntry,
+  RegenerateAssistantMessageRequest,
+  ResendUserMessagesRequest,
   ResetMessagesForResendResponse,
   SelectAnswerMessageResponse,
+  SemanticResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
 
@@ -218,6 +221,14 @@ class DbService implements MessageDataSource {
     blockIdsToDelete: string[]
   ): Promise<ResetMessagesForResendResponse> {
     return this.ordinarySource.resetMessagesForResend(topicId, messages, blockIdsToDelete)
+  }
+  resendUserMessages(request: ResendUserMessagesRequest): Promise<SemanticResendResponse> {
+    if (!this.ordinarySource.resendUserMessages) throw new Error('resendUserMessages unavailable')
+    return this.ordinarySource.resendUserMessages(request)
+  }
+  regenerateAssistantMessage(request: RegenerateAssistantMessageRequest): Promise<SemanticResendResponse> {
+    if (!this.ordinarySource.regenerateAssistantMessage) throw new Error('regenerateAssistantMessage unavailable')
+    return this.ordinarySource.regenerateAssistantMessage(request)
   }
   deleteMessagesWithSegments(topicId: string, messageIds: string[]) {
     return this.ordinarySource.deleteMessagesWithSegments(topicId, messageIds)

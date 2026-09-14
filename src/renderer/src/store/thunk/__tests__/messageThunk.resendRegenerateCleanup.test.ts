@@ -13,7 +13,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
-    resetMessagesForResend: vi.fn(),
+    resendUserMessages: vi.fn(),
+    regenerateAssistantMessage: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
     selectMessagesForTopic: vi.fn(),
@@ -35,7 +36,8 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/services/db', () => ({
   dbService: {
-    resetMessagesForResend: mocks.resetMessagesForResend
+    resendUserMessages: mocks.resendUserMessages,
+    regenerateAssistantMessage: mocks.regenerateAssistantMessage
   }
 }))
 
@@ -82,7 +84,7 @@ const createMessage = (overrides: Partial<Message> = {}): Message =>
     status: AssistantMessageStatus.SUCCESS,
     blocks: ['block-1', 'block-2'],
     askId: 'user-msg-1',
-    model: { id: 'model-1' } as any,
+    model: { id: 'model-1', provider: 'test-provider', name: 'test-model', group: 'test-group' } as any,
     modelId: 'model-1',
     ...overrides
   }) as unknown as Message
@@ -106,6 +108,8 @@ interface StoreState {
     entities: Record<string, Message>
     messageIdsByTopic: Record<string, string[]>
   }
+  messageBlocks: { entities: Record<string, unknown> }
+  assistants: { assistants: Array<{ id: string }> }
 }
 
 let storeState: StoreState
@@ -143,7 +147,9 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
       messages: {
         entities: {},
         messageIdsByTopic: {}
-      }
+      },
+      messageBlocks: { entities: {} },
+      assistants: { assistants: [] }
     }
   })
 
@@ -159,18 +165,29 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
       'topic-1': ['user-msg-1', 'msg-1']
     }
     mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
-    mocks.resetMessagesForResend.mockResolvedValue(emptyCleanup)
+    mocks.resendUserMessages.mockResolvedValue({
+      ...emptyCleanup,
+      topicId: 'topic-1',
+      askId: 'user-msg-1',
+      userMessage: userMsg,
+      userBlocks: [],
+      executionMessages: [{ message: asstMsg, blocks: [] }],
+      removedBlockIds: [],
+      createdMessageIds: [],
+      attempts: [{ messageId: 'msg-1', attemptId: 'att-1' }]
+    })
 
     const { resendMessageThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
 
-    await resendMessageThunk('topic-1', userMsg, { id: 'assistant-1', model: { id: 'm1' } } as any)(
-      dispatch,
-      () => storeState as any
-    )
+    await resendMessageThunk('topic-1', userMsg, {
+      id: 'assistant-1',
+      model: { id: 'm1', provider: 'p', name: 'n', group: 'g' }
+    } as any)(dispatch, () => storeState as any)
 
     // consumeFileCleanupResult called exactly once
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
+    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledTimes(1)
+    expect(mocks.consumeFileCleanupResult.mock.calls[0][0]).toMatchObject(emptyCleanup)
   })
 
   it('Redux removeManyBlocks is dispatched for old blocks', { timeout: 60_000 }, async () => {
@@ -184,16 +201,30 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'msg-1']
     }
+    storeState.messageBlocks.entities = {
+      'old-block-1': { id: 'old-block-1' },
+      'old-block-2': { id: 'old-block-2' }
+    }
     mocks.selectMessagesForTopic.mockReturnValue([asstMsg])
-    mocks.resetMessagesForResend.mockResolvedValue(emptyCleanup)
+    mocks.resendUserMessages.mockResolvedValue({
+      ...emptyCleanup,
+      topicId: 'topic-1',
+      askId: 'user-msg-1',
+      userMessage: userMsg,
+      userBlocks: [],
+      executionMessages: [{ message: asstMsg, blocks: [] }],
+      removedBlockIds: ['old-block-1', 'old-block-2'],
+      createdMessageIds: [],
+      attempts: [{ messageId: 'msg-1', attemptId: 'att-1' }]
+    })
 
     const { resendMessageThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
 
-    await resendMessageThunk('topic-1', userMsg, { id: 'assistant-1', model: { id: 'm1' } } as any)(
-      dispatch,
-      () => storeState as any
-    )
+    await resendMessageThunk('topic-1', userMsg, {
+      id: 'assistant-1',
+      model: { id: 'm1', provider: 'p', name: 'n', group: 'g' }
+    } as any)(dispatch, () => storeState as any)
 
     // removeManyBlocks should be called for old blocks
     expect(mocks.removeManyBlocks).toHaveBeenCalledWith(['old-block-1', 'old-block-2'])
@@ -207,7 +238,9 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
       messages: {
         entities: {},
         messageIdsByTopic: {}
-      }
+      },
+      messageBlocks: { entities: {} },
+      assistants: { assistants: [] }
     }
   })
 
@@ -223,18 +256,29 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
       'topic-1': ['user-msg-1', 'asst-1']
     }
     mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
-    mocks.resetMessagesForResend.mockResolvedValue(emptyCleanup)
+    mocks.regenerateAssistantMessage.mockResolvedValue({
+      ...emptyCleanup,
+      topicId: 'topic-1',
+      askId: 'user-msg-1',
+      userMessage: userMsg,
+      userBlocks: [],
+      executionMessages: [{ message: asstMsg, blocks: [] }],
+      removedBlockIds: [],
+      createdMessageIds: [],
+      attempts: [{ messageId: 'asst-1', attemptId: 'att-1' }]
+    })
 
     const { regenerateAssistantResponseThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
 
-    await regenerateAssistantResponseThunk('topic-1', asstMsg, { id: 'assistant-1', model: { id: 'm1' } } as any)(
-      dispatch,
-      () => storeState as any
-    )
+    await regenerateAssistantResponseThunk('topic-1', asstMsg, {
+      id: 'assistant-1',
+      model: { id: 'm1', provider: 'p', name: 'n', group: 'g' }
+    } as any)(dispatch, () => storeState as any)
 
     // consumeFileCleanupResult called exactly once
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
+    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledTimes(1)
+    expect(mocks.consumeFileCleanupResult.mock.calls[0][0]).toMatchObject(emptyCleanup)
   })
 })
 
@@ -247,7 +291,9 @@ describe('resendUserMessageWithEditThunk — failure propagation (LOCK-005)', ()
       messages: {
         entities: {},
         messageIdsByTopic: {}
-      }
+      },
+      messageBlocks: { entities: {} },
+      assistants: { assistants: [] }
     }
   })
 
@@ -263,7 +309,7 @@ describe('resendUserMessageWithEditThunk — failure propagation (LOCK-005)', ()
       'topic-1': ['user-msg-1', 'msg-1']
     }
     mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
-    mocks.resetMessagesForResend.mockRejectedValue(new Error('DB write failed'))
+    mocks.resendUserMessages.mockRejectedValue(new Error('DB write failed'))
 
     const { resendUserMessageWithEditThunk } = await import('../messageThunk')
     // LOCK-005: dispatch mock must execute thunks to propagate rejection
@@ -276,7 +322,10 @@ describe('resendUserMessageWithEditThunk — failure propagation (LOCK-005)', ()
 
     // LOCK-005: Error must propagate — caller catches and keeps editor open
     await expect(
-      resendUserMessageWithEditThunk('topic-1', userMsg, { id: 'assistant-1', model: { id: 'm1' } } as any)(dispatch)
+      resendUserMessageWithEditThunk('topic-1', userMsg, {
+        id: 'assistant-1',
+        model: { id: 'm1', provider: 'p', name: 'n', group: 'g' }
+      } as any)(dispatch)
     ).rejects.toThrow('DB write failed')
   })
 })

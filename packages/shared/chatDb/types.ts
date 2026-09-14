@@ -763,6 +763,94 @@ export interface ResetMessagesForResendRequest {
 }
 
 /**
+ * Strict model snapshot for semantic resend/regenerate commands.
+ *
+ * Carries the renderer `Model` wire shape as JSON-only data without importing
+ * renderer types (shared stays dependency-free). All four fields are required
+ * and non-empty on the wire: `id` is persisted as `modelId`, the full object
+ * is round-tripped through the message `model` overflow slot. Extra JSON keys
+ * (capabilities, pricing, etc.) are allowed and preserved verbatim.
+ * No `undefined` own properties on the wire.
+ */
+export interface SemanticModelSnapshot extends JsonObject {
+  /** Stable model id (also persisted as `modelId`). */
+  id: string
+  /** Provider id (renderer `Model.provider`). */
+  provider: string
+  /** Model display name (renderer `Model.name`). */
+  name: string
+  /** Model group (renderer `Model.group`). */
+  group: string
+}
+
+/**
+ * @see IpcChannel.ChatDb_ResendUserMessages
+ *
+ * Semantic resend: renderer supplies only stable IDs + assistant/model
+ * snapshots. Main resolves the full assistant answer group (`askId==userId`)
+ * in the same SQLite transaction from authority `listByTopic` order.
+ */
+export interface ResendUserMessagesRequest {
+  topicId: string
+  /** Stable user message being resent. */
+  userMessageId: string
+  /** Owning assistant for newly created group members. */
+  assistantId: string
+  /** Current assistant model snapshot (used for create + single-no-mention reset). */
+  currentModel: SemanticModelSnapshot
+}
+
+/**
+ * @see IpcChannel.ChatDb_RegenerateAssistantMessage
+ *
+ * Semantic regenerate: renderer supplies only the selected assistant stable
+ * ID. Main validates selected/askId/authority user and resets only selected.
+ * `currentModel` is optional: absent is legal and Main ignores it when the
+ * selected message carries a truthy `modelId` (self-model path). Main
+ * requires/uses it only when selected lacks `modelId`; that missing-model
+ * case without `currentModel` fails closed (typed conflict).
+ */
+export interface RegenerateAssistantMessageRequest {
+  topicId: string
+  /** Stable assistant message to regenerate. */
+  assistantMessageId: string
+  /** Owning assistant (used only when selected has no truthy `modelId`). */
+  assistantId: string
+  /** Current assistant model snapshot (fallback when selected lacks `modelId`). Absent = self-model path. */
+  currentModel?: SemanticModelSnapshot
+}
+
+/**
+ * @see IpcChannel.ChatDb_ResendUserMessages
+ * @see IpcChannel.ChatDb_RegenerateAssistantMessage
+ *
+ * Shared semantic resend/regenerate response. `executionMessages` is the
+ * post-write wire (`MessageBlockEntry[]` in authority execution order, each
+ * entry `blocks` normally `[]`); `attempts` maps exactly one entry per
+ * execution message. `createdMessageIds` marks Main-created members so the
+ * renderer can conditionally inject only when the authority user is currently
+ * loaded. All wire values are JSON-safe with no `undefined` own properties.
+ */
+export interface SemanticResendResponse extends FileCleanupResult {
+  /** Echo of the request topic. */
+  topicId: string
+  /** Authority user id (`askId` shared by all execution messages). */
+  askId: string
+  /** Authority user message wire (pre-reset, with `blocks` id array). */
+  userMessage: JsonObject
+  /** Authority user blocks wire (pre-reset, full block entities). */
+  userBlocks: JsonObject[]
+  /** Post-write execution entries in authority execution order. */
+  executionMessages: MessageBlockEntry[]
+  /** All removed original block IDs from reset existing messages. */
+  removedBlockIds: string[]
+  /** Subset of execution message IDs created by Main in this transaction. */
+  createdMessageIds: string[]
+  /** Per-message attempt mapping, exactly one entry per execution message. */
+  attempts: ResendAttemptMapping[]
+}
+
+/**
  * @see IpcChannel.ChatDb_ResetMessagesForResend
  *
  * Existing file-cleanup facts plus the Main-authoritative per-message attempt
@@ -982,6 +1070,14 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:reset-messages-for-resend': {
     request: ResetMessagesForResendRequest
     response: ResetMessagesForResendResponse
+  }
+  'chatdb:resend-user-messages': {
+    request: ResendUserMessagesRequest
+    response: SemanticResendResponse
+  }
+  'chatdb:regenerate-assistant-message': {
+    request: RegenerateAssistantMessageRequest
+    response: SemanticResendResponse
   }
   'chatdb:delete-messages-with-segments': {
     request: DeleteMessagesWithSegmentsRequest

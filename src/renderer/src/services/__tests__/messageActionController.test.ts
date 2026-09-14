@@ -32,6 +32,7 @@ vi.mock('@renderer/store/thunk/messageThunk', () => ({
 }))
 
 import {
+  findAssistantById,
   resolveAnswerGroup,
   resolveAssistantSnapshot,
   resolveAssistantSnapshotForMessage,
@@ -317,5 +318,169 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     })
     const group = resolveAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
     expect(group!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
+  })
+
+  it('unified lookup: empty array falls back to defaultAssistant id (user resend still resolves)', () => {
+    const fallback = makeAssistant('default', makeModel('fallback-model'))
+    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'default' })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'u-1': userMsg }, messageIdsByTopic: { 'topic-1': ['u-1'] } },
+      assistants: { assistants: [], defaultAssistant: fallback },
+      messageBlocks: { entities: {} }
+    })
+    expect(findAssistantById(mocks.storeGetState() as never, 'default')).toBe(fallback)
+    const resolved = resolveAssistantSnapshot({ topicId: 'topic-1', assistantId: 'default' })
+    expect(resolved).not.toBeNull()
+    expect(resolved!.fresh).toBe(fallback)
+    const resend = resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })
+    expect(resend).not.toBeNull()
+    expect(resend!.assistant.fresh).toBe(fallback)
+  })
+
+  it('unified lookup: array match wins over defaultAssistant; unknown id stays null (fail-closed)', () => {
+    const inList = makeAssistant('asst-1', makeModel('list-model'))
+    const fallback = makeAssistant('asst-1', makeModel('fallback-model'))
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: {}, messageIdsByTopic: {} },
+      assistants: { assistants: [inList], defaultAssistant: fallback },
+      messageBlocks: { entities: {} }
+    })
+    expect(findAssistantById(mocks.storeGetState() as never, 'asst-1')).toBe(inList)
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: {}, messageIdsByTopic: {} },
+      assistants: { assistants: [], defaultAssistant: fallback },
+      messageBlocks: { entities: {} }
+    })
+    expect(resolveAssistantSnapshot({ topicId: 'topic-1', assistantId: 'unknown' })).toBeNull()
+    expect(findAssistantById(mocks.storeGetState() as never, 'unknown')).toBeUndefined()
+  })
+
+  it('resolveEffectiveModel priority: explicit > own > defaultModel > global', async () => {
+    const { resolveEffectiveModel } = await import('../messageActionController')
+    const global = makeModel('global')
+    const state = { llm: { defaultModel: global } } as never
+    const full = { id: 'a', model: makeModel('own'), defaultModel: makeModel('dflt') } as never
+    expect(resolveEffectiveModel(state, full, makeModel('explicit'))?.id).toBe('explicit')
+    expect(resolveEffectiveModel(state, full)?.id).toBe('own')
+    expect(resolveEffectiveModel(state, { id: 'a', defaultModel: makeModel('dflt') } as never)?.id).toBe('dflt')
+    expect(resolveEffectiveModel(state, { id: 'a' } as never)?.id).toBe('global')
+    expect(resolveEffectiveModel({ llm: {} } as never, { id: 'a' } as never)).toBeUndefined()
+  })
+
+  it('user resend with model-less assistant falls back to global llm.defaultModel', () => {
+    const global = makeModel('mock-model')
+    const bare = makeAssistant('asst-1', undefined)
+    delete bare.model
+    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'asst-1' })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'u-1': userMsg }, messageIdsByTopic: { 'topic-1': ['u-1'] } },
+      assistants: { assistants: [bare] },
+      llm: { defaultModel: global },
+      messageBlocks: { entities: {} }
+    })
+    const resolved = resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })
+    expect(resolved).not.toBeNull()
+    expect(resolved!.assistant.snapshot.model?.id).toBe('mock-model')
+  })
+
+  it('assistant own model wins over assistant.defaultModel and global', () => {
+    const bare = { ...makeAssistant('asst-1', makeModel('own')), defaultModel: makeModel('dflt') }
+    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'asst-1' })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'u-1': userMsg }, messageIdsByTopic: { 'topic-1': ['u-1'] } },
+      assistants: { assistants: [bare] },
+      llm: { defaultModel: makeModel('global') },
+      messageBlocks: { entities: {} }
+    })
+    expect(resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })!.assistant.snapshot.model?.id).toBe('own')
+  })
+
+  it('assistant.defaultModel wins over global when own model is absent', () => {
+    const bare = { ...makeAssistant('asst-1', undefined), defaultModel: makeModel('dflt') }
+    delete bare.model
+    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'asst-1' })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'u-1': userMsg }, messageIdsByTopic: { 'topic-1': ['u-1'] } },
+      assistants: { assistants: [bare] },
+      llm: { defaultModel: makeModel('global') },
+      messageBlocks: { entities: {} }
+    })
+    expect(resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })!.assistant.snapshot.model?.id).toBe('dflt')
+  })
+
+  it('explicit model wins over every fallback slot', () => {
+    const bare = { ...makeAssistant('asst-1', makeModel('own')), defaultModel: makeModel('dflt') }
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: {}, messageIdsByTopic: {} },
+      assistants: { assistants: [bare] },
+      llm: { defaultModel: makeModel('global') },
+      messageBlocks: { entities: {} }
+    })
+    const resolved = resolveAssistantSnapshot({
+      topicId: 'topic-1',
+      assistantId: 'asst-1',
+      explicitModel: makeModel('explicit')
+    })
+    expect(resolved!.snapshot.model?.id).toBe('explicit')
+    expect(resolved!.explicitModel?.id).toBe('explicit')
+  })
+
+  it('all model slots empty: snapshot stays model-less so the thunk fails closed', () => {
+    const bare = makeAssistant('asst-1', undefined)
+    delete bare.model
+    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'asst-1' })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'u-1': userMsg }, messageIdsByTopic: { 'topic-1': ['u-1'] } },
+      assistants: { assistants: [bare] },
+      llm: {},
+      messageBlocks: { entities: {} }
+    })
+    const resolved = resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })
+    // Resolution itself stays non-null (target + assistant are valid); the
+    // missing model fails closed downstream in resendMessageThunk's guard.
+    expect(resolved).not.toBeNull()
+    expect(resolved!.assistant.snapshot.model).toBeUndefined()
+  })
+
+  it('regenerate without per-message override also receives the global fallback', () => {
+    const global = makeModel('mock-model')
+    const bare = makeAssistant('asst-1', undefined)
+    delete bare.model
+    const msg = makeMessage({
+      id: 'a-1',
+      topicId: 'topic-1',
+      role: 'assistant',
+      assistantId: 'asst-1',
+      askId: 'u-1'
+    })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'a-1': msg }, messageIdsByTopic: { 'topic-1': ['a-1'] } },
+      assistants: { assistants: [bare] },
+      llm: { defaultModel: global },
+      messageBlocks: { entities: {} }
+    })
+    const resolved = resolveRegenerateForAssistant({ topicId: 'topic-1', messageId: 'a-1' })
+    expect(resolved).not.toBeNull()
+    expect(resolved!.assistant.snapshot.model?.id).toBe('mock-model')
+  })
+
+  it('unified lookup: regenerate path resolves via defaultAssistant without regression', () => {
+    const fallback = makeAssistant('default', makeModel('fallback-model'))
+    const msg = makeMessage({
+      id: 'a-1',
+      topicId: 'topic-1',
+      role: 'assistant',
+      assistantId: 'default',
+      askId: 'u-1'
+    })
+    mocks.storeGetState.mockReturnValue({
+      messages: { entities: { 'a-1': msg }, messageIdsByTopic: { 'topic-1': ['a-1'] } },
+      assistants: { assistants: [], defaultAssistant: fallback },
+      messageBlocks: { entities: {} }
+    })
+    const resolved = resolveRegenerateForAssistant({ topicId: 'topic-1', messageId: 'a-1' })
+    expect(resolved).not.toBeNull()
+    expect(resolved!.assistant.fresh).toBe(fallback)
+    expect(resolved!.message).toBe(msg)
   })
 })

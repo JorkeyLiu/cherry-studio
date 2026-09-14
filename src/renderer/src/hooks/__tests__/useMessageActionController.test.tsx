@@ -219,4 +219,51 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     expect(error).toBeDefined()
     expect((error as Error).message).toContain('select fail')
   })
+
+  it('resendUser dispatches the semantic thunk when the controller resolves (defaultAssistant fallback path)', async () => {
+    const userMsg = { id: 'u-1', topicId: 't1', role: 'user' } as any
+    const snapshot = { id: 'default', model: { id: 'm' } } as any
+    mocks.resolveResend.mockReturnValue({ message: userMsg, assistant: { snapshot } })
+    const { result } = renderHook(() => useMessageActionController())
+    await act(async () => {
+      await result.current.resendUser({ topicId: 't1', messageId: 'u-1' })
+    })
+    expect(mocks.resolveResend).toHaveBeenCalledWith({ topicId: 't1', messageId: 'u-1' })
+    expect(mocks.dispatch).toHaveBeenCalledTimes(1)
+    expect(mocks.restartTrace).toHaveBeenCalledWith(userMsg)
+  })
+
+  it('action errors propagate for resendUser (UI boundary must catch)', async () => {
+    const userMsg = { id: 'u-1', topicId: 't1', role: 'user' } as any
+    const snapshot = { id: 'default', model: undefined } as any
+    mocks.resolveResend.mockReturnValue({ message: userMsg, assistant: { snapshot } })
+    mocks.dispatch.mockRejectedValueOnce(new Error('Assistant model is not configured for resend'))
+    const { result } = renderHook(() => useMessageActionController())
+    let error: any
+    await act(async () => {
+      try {
+        await result.current.resendUser({ topicId: 't1', messageId: 'u-1' })
+      } catch (e) {
+        error = e
+      }
+    })
+    // The hook preserves the rejection contract (same as regenerate): the
+    // MessageMenubar event boundary catches it into logger + toast so no
+    // unhandled rejection escapes the click/confirm path.
+    expect(error).toBeDefined()
+    expect((error as Error).message).toContain('not configured for resend')
+  })
+
+  it('regenerateAssistant dispatches the semantic thunk when the controller resolves (no regression)', async () => {
+    const assistantMsg = { id: 'a-1', topicId: 't1', role: 'assistant' } as any
+    const snapshot = { id: 'default', model: { id: 'm' } } as any
+    mocks.resolveRegenerate.mockReturnValue({ message: assistantMsg, assistant: { snapshot } })
+    const { result } = renderHook(() => useMessageActionController())
+    await act(async () => {
+      await result.current.regenerateAssistant({ topicId: 't1', messageId: 'a-1' })
+    })
+    expect(mocks.resolveRegenerate).toHaveBeenCalledWith({ topicId: 't1', messageId: 'a-1' })
+    expect(mocks.dispatch).toHaveBeenCalledTimes(1)
+    expect(mocks.restartTrace).toHaveBeenCalledWith(assistantMsg)
+  })
 })

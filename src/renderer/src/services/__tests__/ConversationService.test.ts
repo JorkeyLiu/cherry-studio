@@ -73,7 +73,7 @@ describe('ConversationService.prepareMessagesForModel — no-model branch', () =
 
     const result = await ConversationService.prepareMessagesForModel([userMessage], assistantWithModel)
 
-    expect(convertMessagesToSdkMessages).toHaveBeenCalledWith([userMessage], selectedModel)
+    expect(convertMessagesToSdkMessages).toHaveBeenCalledWith([userMessage], selectedModel, undefined)
     expect(result.uiMessages).toEqual([userMessage])
   })
 })

@@ -13,11 +13,11 @@ import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant } from '@renderer/types'
 import { ERROR_I18N_KEY_REQUEST_TIMEOUT, ERROR_I18N_KEY_STREAM_PAUSED } from '@renderer/types/error'
 import type {
+  Message,
   MessageBlock,
   PlaceholderMessageBlock,
   Response,
-  ThinkingMessageBlock,
-  ToolMessageBlock
+  ThinkingMessageBlock
 } from '@renderer/types/newMessage'
 import { AssistantMessageStatus, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { uuid } from '@renderer/utils'
@@ -29,6 +29,7 @@ import type { AISDKError } from 'ai'
 import { NoOutputGeneratedError } from 'ai'
 
 import type { BlockManager } from '../BlockManager'
+import type { AssistantExecutionState } from '../executionState'
 
 const logger = loggerService.withContext('BaseCallbacks')
 interface BaseCallbacksDependencies {
@@ -37,6 +38,7 @@ interface BaseCallbacksDependencies {
   getState: any
   topicId: string
   assistantMsgId: string
+  executionState?: AssistantExecutionState
   saveUpdatesToDB: any
   /**
    * Single-transaction final checkpoint for onComplete (Fix B). Fail-loud:
@@ -65,11 +67,20 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
     assistant,
     getCurrentThinkingInfo
   } = deps
+  const executionState: AssistantExecutionState = deps.executionState ?? blockManager.executionState
 
   const startTime = Date.now()
   const notificationService = NotificationService.getInstance()
 
-  // 通用的 block 查找函数
+  const isLoaded = (): boolean => {
+    try {
+      return !!getState().messages.entities[assistantMsgId]
+    } catch {
+      return false
+    }
+  }
+
+  // 通用的 block 查找函数 (local-aware, Redux preferred when loaded)
   const findBlockIdForCompletion = (message?: any) => {
     // 优先使用 BlockManager 中的 activeBlockInfo
     const activeBlockInfo = blockManager.activeBlockInfo
@@ -78,17 +89,46 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       return activeBlockInfo.id
     }
 
-    // 如果没有活跃的block，从message中查找最新的block作为备选
-    const targetMessage = message || getState().messages.entities[assistantMsgId]
-    if (targetMessage) {
-      const allBlocks = findAllBlocks(targetMessage)
+    // Explicit caller snapshot keeps legacy semantics (Redux read-through).
+    if (message) {
+      const allBlocks = findAllBlocks(message)
       if (allBlocks.length > 0) {
-        return allBlocks[allBlocks.length - 1].id // 返回最新的block
+        return allBlocks[allBlocks.length - 1].id
       }
+    }
+
+    // Loaded path: latest Redux message (user edits/realtime projection).
+    try {
+      const reduxMsg = getState().messages.entities[assistantMsgId]
+      if (reduxMsg) {
+        const allBlocks = findAllBlocks(reduxMsg)
+        if (allBlocks.length > 0) {
+          return allBlocks[allBlocks.length - 1].id
+        }
+      }
+    } catch {
+      // fall through to local
+    }
+
+    // Detached path: local execution fact.
+    const localIds = executionState.getBlockIds()
+    if (localIds.length > 0) {
+      return localIds[localIds.length - 1]
     }
 
     // 最后的备选方案：从 blockManager 获取占位符块ID
     return blockManager.initialPlaceholderBlockId
+  }
+
+  const getLocalMainTextContent = (): string => {
+    const parts: string[] = []
+    for (const block of executionState.getOrderedBlocks()) {
+      const typed = block as { type?: string; content?: unknown }
+      if (typed.type === MessageBlockType.MAIN_TEXT && typeof typed.content === 'string') {
+        parts.push(typed.content)
+      }
+    }
+    return parts.join('\n\n')
   }
 
   return {
@@ -138,30 +178,88 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           status: isErrorTypeAbort ? MessageBlockStatus.PAUSED : MessageBlockStatus.ERROR
         }
         // 如果是 thinking block，保留实际思考时间
-        if (blockManager.lastBlockType === MessageBlockType.THINKING) {
+        const targetType =
+          blockManager.lastBlockType ??
+          (executionState.getBlock(possibleBlockId) as ThinkingMessageBlock | undefined)?.type ??
+          MessageBlockType.UNKNOWN
+        if (targetType === MessageBlockType.THINKING) {
           const thinkingInfo = getCurrentThinkingInfo?.()
           if (thinkingInfo?.blockId === possibleBlockId && thinkingInfo?.millsec && thinkingInfo.millsec > 0) {
             changes.thinking_millsec = thinkingInfo.millsec
           }
         }
-        blockManager.smartBlockUpdate(possibleBlockId, changes, blockManager.lastBlockType!, true)
+        blockManager.smartBlockUpdate(possibleBlockId, changes, targetType, true)
       }
 
       // Fix: 更新所有仍处于 STREAMING 状态的 blocks 为 PAUSED/ERROR
-      // 这修复了停止回复时思考计时器继续运行的问题
-      const currentMessage = getState().messages.entities[assistantMsgId]
+      // Local-first: loaded path keeps Redux iteration; detached path uses the
+      // local execution fact so error/paused finals persist without Redux.
+      const loadedForError = isLoaded()
       const updatedBlockIds: string[] = []
-      if (currentMessage) {
-        const allBlockRefs = findAllBlocks(currentMessage)
-        const blockState = getState().messageBlocks
-        // 获取当前思考信息（如果有），用于保留实际思考时间
-        const thinkingInfo = getCurrentThinkingInfo?.()
-        for (const blockRef of allBlockRefs) {
-          const block = blockState.entities[blockRef.id]
-          if (!block) continue
+      const thinkingInfo = getCurrentThinkingInfo?.()
+      if (loadedForError) {
+        const currentMessage = getState().messages.entities[assistantMsgId]
+        if (currentMessage) {
+          const allBlockRefs = findAllBlocks(currentMessage)
+          const blockState = getState().messageBlocks
+          for (const blockRef of allBlockRefs) {
+            const block = blockState.entities[blockRef.id]
+            if (!block) continue
 
-          // 更新非 possibleBlockId 的 STREAMING blocks（possibleBlockId 已在上面处理）
-          // 跳过 TOOL 类型 blocks，它们在下面的 tool block 分支中统一处理
+            // 更新非 possibleBlockId 的 STREAMING blocks（possibleBlockId 已在上面处理）
+            // 跳过 TOOL 类型 blocks，它们在下面的 tool block 分支中统一处理
+            if (
+              block.id !== possibleBlockId &&
+              block.status === MessageBlockStatus.STREAMING &&
+              block.type !== MessageBlockType.TOOL
+            ) {
+              const changes: Partial<ThinkingMessageBlock> = {
+                status: isErrorTypeAbort ? MessageBlockStatus.PAUSED : MessageBlockStatus.ERROR
+              }
+              if (
+                block.type === MessageBlockType.THINKING &&
+                thinkingInfo?.blockId === block.id &&
+                thinkingInfo?.millsec &&
+                thinkingInfo.millsec > 0
+              ) {
+                changes.thinking_millsec = thinkingInfo.millsec
+              }
+              executionState.applyBlockPatch(block.id, changes)
+              dispatch(updateOneBlock({ id: block.id, changes }))
+              updatedBlockIds.push(block.id)
+            }
+
+            // Fix: 更新所有仍处于非完成状态的 tool blocks 的 rawMcpToolResponse.status
+            if (block.type === MessageBlockType.TOOL) {
+              const toolBlock = block
+              const toolResponse = toolBlock.metadata?.rawMcpToolResponse
+              const toolStatus = toolResponse?.status
+              if (
+                toolResponse &&
+                toolStatus &&
+                toolStatus !== 'done' &&
+                toolStatus !== 'error' &&
+                toolStatus !== 'cancelled'
+              ) {
+                const toolChanges = {
+                  status: isErrorTypeAbort ? MessageBlockStatus.PAUSED : MessageBlockStatus.ERROR,
+                  metadata: {
+                    ...toolBlock.metadata,
+                    rawMcpToolResponse: {
+                      ...toolResponse,
+                      status: isErrorTypeAbort ? 'cancelled' : 'error'
+                    }
+                  }
+                }
+                executionState.applyBlockPatch(block.id, toolChanges)
+                dispatch(updateOneBlock({ id: block.id, changes: toolChanges }))
+                updatedBlockIds.push(block.id)
+              }
+            }
+          }
+        }
+      } else {
+        for (const block of executionState.getOrderedBlocks()) {
           if (
             block.id !== possibleBlockId &&
             block.status === MessageBlockStatus.STREAMING &&
@@ -178,15 +276,11 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
             ) {
               changes.thinking_millsec = thinkingInfo.millsec
             }
-            dispatch(updateOneBlock({ id: block.id, changes }))
+            executionState.applyBlockPatch(block.id, changes)
             updatedBlockIds.push(block.id)
           }
-
-          // Fix: 更新所有仍处于非完成状态的 tool blocks 的 rawMcpToolResponse.status
-          // 当用户点击停止时，tool blocks 的 UI 状态依赖 rawMcpToolResponse.status，
-          // 而不是 MessageBlockStatus，所以需要单独更新
           if (block.type === MessageBlockType.TOOL) {
-            const toolBlock = block as ToolMessageBlock
+            const toolBlock = block
             const toolResponse = toolBlock.metadata?.rawMcpToolResponse
             const toolStatus = toolResponse?.status
             if (
@@ -196,21 +290,17 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
               toolStatus !== 'error' &&
               toolStatus !== 'cancelled'
             ) {
-              dispatch(
-                updateOneBlock({
-                  id: block.id,
-                  changes: {
-                    status: isErrorTypeAbort ? MessageBlockStatus.PAUSED : MessageBlockStatus.ERROR,
-                    metadata: {
-                      ...toolBlock.metadata,
-                      rawMcpToolResponse: {
-                        ...toolResponse,
-                        status: isErrorTypeAbort ? 'cancelled' : 'error'
-                      }
-                    }
+              const toolChanges = {
+                status: isErrorTypeAbort ? MessageBlockStatus.PAUSED : MessageBlockStatus.ERROR,
+                metadata: {
+                  ...toolBlock.metadata,
+                  rawMcpToolResponse: {
+                    ...toolResponse,
+                    status: isErrorTypeAbort ? 'cancelled' : 'error'
                   }
-                })
-              )
+                }
+              }
+              executionState.applyBlockPatch(block.id, toolChanges)
               updatedBlockIds.push(block.id)
             }
           }
@@ -222,17 +312,27 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       const messageErrorUpdate = {
         status: isErrorTypeAbort ? AssistantMessageStatus.SUCCESS : AssistantMessageStatus.ERROR
       }
-      dispatch(
-        newMessagesActions.updateMessage({
-          topicId,
-          messageId: assistantMsgId,
-          updates: messageErrorUpdate
-        })
-      )
+      executionState.applyMessagePatch(messageErrorUpdate as Partial<Message>)
+      if (isLoaded()) {
+        dispatch(
+          newMessagesActions.updateMessage({
+            topicId,
+            messageId: assistantMsgId,
+            updates: messageErrorUpdate
+          })
+        )
+      }
 
-      // 从更新后的 state 中获取需要持久化的 blocks
-      const blocksToSave = updatedBlockIds
-        .map((id) => getState().messageBlocks.entities[id])
+      // Local-first persistence: detached finals use the execution snapshot.
+      const reduxEntities = (() => {
+        try {
+          return getState().messageBlocks.entities
+        } catch {
+          return {}
+        }
+      })()
+      const blocksToSave = [...new Set(updatedBlockIds)]
+        .map((id) => executionState.getBlock(id) ?? reduxEntities[id])
         .filter(Boolean) as MessageBlock[]
       await saveUpdatesToDB(assistantMsgId, topicId, messageErrorUpdate, blocksToSave)
 
@@ -273,22 +373,23 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         }
       }
 
-      // Fix B: single-transaction success-final checkpoint. Re-read the
-      // LATEST Redux AFTER quiesce (never a pre-quiesce snapshot):
-      // the assistant message's current block list (this round's dynamic ids,
-      // in order) plus every associated block entity become ONE
-      // updateMessageAndBlocks call, so Main verifies closure and mints
-      // promotion membership atomically — no cross-tx window where block
-      // success is committed while a transient parent closure rolls back.
-      // Unsupported tool/file blocks ride along as ordinary chat data in the
-      // same tx; Main sync filtering semantics are unchanged. Fail-loud: a
-      // persistence failure is logged and rethrown, so the success Redux
-      // commit and MESSAGE_COMPLETE below never run forked from DB.
+      // Request-local source selection: when Redux still holds the message,
+      // keep the latest Redux/read-through semantics (user edits/realtime
+      // projection); otherwise use the execution-state snapshot. Referenced
+      // blocks always come from the same source; missing refs fail closed.
       const latestState = getState()
-      const latestAssistantMsg = latestState.messages.entities[assistantMsgId]
+      const reduxMsg = (() => {
+        try {
+          return latestState.messages.entities[assistantMsgId]
+        } catch {
+          return undefined
+        }
+      })()
+      const loaded = !!reduxMsg
+      const latestAssistantMsg = loaded ? reduxMsg : executionState.snapshot().message
       if (!latestAssistantMsg) {
         const missingError = new Error(
-          `[onComplete] Assistant message ${assistantMsgId} missing from Redux after quiesce; skipping final persist`
+          `[onComplete] Assistant message ${assistantMsgId} missing from execution state after quiesce; skipping final persist`
         )
         logger.error(missingError.message, missingError)
         throw missingError
@@ -316,7 +417,9 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // reference.
         const latestBlockEntities = latestState.messageBlocks.entities
         const referencedIds = [...(latestAssistantMsg.blocks ?? [])]
-        if (!possibleBlockId || !referencedIds.includes(possibleBlockId) || !latestBlockEntities[possibleBlockId]) {
+        const resolveFinalBlock = (blockId: string): MessageBlock | undefined =>
+          loaded ? (latestBlockEntities[blockId] as MessageBlock | undefined) : executionState.getBlock(blockId)
+        if (!possibleBlockId || !referencedIds.includes(possibleBlockId) || !resolveFinalBlock(possibleBlockId)) {
           const missingTargetError = new Error(
             `[onComplete] Terminal block ${possibleBlockId ?? '<none>'} missing from message ${assistantMsgId} blocks after quiesce; refusing final persist`
           )
@@ -326,9 +429,9 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // Every referenced block must resolve — no silent omission that would
         // fork message.blocks from the persisted block set.
         for (const blockId of referencedIds) {
-          if (!latestBlockEntities[blockId]) {
+          if (!resolveFinalBlock(blockId)) {
             const missingRefError = new Error(
-              `[onComplete] Block ${blockId} missing from Redux after quiesce; refusing final persist without dropping the reference`
+              `[onComplete] Block ${blockId} missing from ${loaded ? 'Redux' : 'execution state'} after quiesce; refusing final persist without dropping the reference`
             )
             logger.error(missingRefError.message, missingRefError)
             throw missingRefError
@@ -336,7 +439,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         }
 
         const duration = Date.now() - startTime
-        const content = getMainTextContent(latestAssistantMsg)
+        const content = loaded ? getMainTextContent(latestAssistantMsg) : getLocalMainTextContent()
 
         const timeOut = duration > 30 * 1000
         // 发送长时间运行消息的成功通知
@@ -377,7 +480,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // still shows whatever quiesce left until the DB-first commit below
         // succeeds). Other blocks keep their latest terminal state as-is.
         const finalBlocks: MessageBlock[] = referencedIds.map((blockId) => {
-          const block = latestBlockEntities[blockId] as MessageBlock
+          const block = resolveFinalBlock(blockId) as MessageBlock
           if (blockId === possibleBlockId) {
             return { ...block, status: MessageBlockStatus.SUCCESS } as MessageBlock
           }
@@ -389,37 +492,44 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           usage: response?.usage,
           blocks: referencedIds
         }
+        executionState.applyMessagePatch(finalMessageUpdates as Partial<Message>)
+        executionState.applyBlockPatch(possibleBlockId, { status: MessageBlockStatus.SUCCESS })
         try {
           await saveFinalUpdatesAtomically(assistantMsgId, topicId, finalMessageUpdates, finalBlocks)
         } catch (error) {
           logger.error(`[onComplete] Final atomic persist failed for message ${assistantMsgId}:`, error as Error)
           throw error
         }
-        // Redux AFTER the successful commit (DB-first): block first, then
-        // message — exactly what the single transaction persisted.
-        dispatch(updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }))
-        dispatch(
-          newMessagesActions.updateMessage({
-            topicId,
-            messageId: assistantMsgId,
-            updates: finalMessageUpdates
-          })
-        )
+        // Redux AFTER the successful commit (DB-first), only when still
+        // loaded: block first, then message. Detached executions never inject.
+        if (isLoaded()) {
+          dispatch(updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }))
+          dispatch(
+            newMessagesActions.updateMessage({
+              topicId,
+              messageId: assistantMsgId,
+              updates: finalMessageUpdates
+            })
+          )
+        }
 
         void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
         logger.debug('onComplete finished')
         return
       }
 
-      const latestBlockEntities = latestState.messageBlocks.entities
+      const resolveNonSuccessBlock = (blockId: string): MessageBlock | undefined =>
+        loaded
+          ? (latestState.messageBlocks.entities[blockId] as MessageBlock | undefined)
+          : executionState.getBlock(blockId)
       const finalBlocks: MessageBlock[] = []
       for (const blockId of latestAssistantMsg.blocks ?? []) {
-        const block = latestBlockEntities[blockId]
+        const block = resolveNonSuccessBlock(blockId)
         if (block) {
           finalBlocks.push(block)
         } else {
           const missingRefError = new Error(
-            `[onComplete] Block ${blockId} missing from Redux after quiesce; refusing final persist without dropping the reference`
+            `[onComplete] Block ${blockId} missing from ${loaded ? 'Redux' : 'execution state'} after quiesce; refusing final persist without dropping the reference`
           )
           logger.error(missingRefError.message, missingRefError)
           throw missingRefError
@@ -431,6 +541,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         usage: response?.usage,
         blocks: [...(latestAssistantMsg.blocks ?? [])]
       }
+      executionState.applyMessagePatch(finalMessageUpdates as Partial<Message>)
       try {
         await saveFinalUpdatesAtomically(assistantMsgId, topicId, finalMessageUpdates, finalBlocks)
       } catch (error) {
@@ -438,14 +549,16 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         throw error
       }
       // Redux AFTER the successful commit (DB-first): the store converges to
-      // exactly what the single transaction persisted.
-      dispatch(
-        newMessagesActions.updateMessage({
-          topicId,
-          messageId: assistantMsgId,
-          updates: finalMessageUpdates
-        })
-      )
+      // exactly what the single transaction persisted. Detached never injects.
+      if (isLoaded()) {
+        dispatch(
+          newMessagesActions.updateMessage({
+            topicId,
+            messageId: assistantMsgId,
+            updates: finalMessageUpdates
+          })
+        )
+      }
 
       void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
       logger.debug('onComplete finished')

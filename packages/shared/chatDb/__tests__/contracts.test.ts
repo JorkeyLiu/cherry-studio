@@ -50,6 +50,8 @@ describe('chatDbContracts', () => {
     'chatdb:purge-expired-topics',
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',
+    'chatdb:resend-user-messages',
+    'chatdb:regenerate-assistant-message',
     'chatdb:delete-messages-with-segments',
     'chatdb:delete-messages-with-dependents',
     'chatdb:paste-messages-to-topic',
@@ -2919,6 +2921,8 @@ describe('coverage consistency', () => {
     // Phase 5.1B: compound mutations
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',
+    'chatdb:resend-user-messages',
+    'chatdb:regenerate-assistant-message',
     'chatdb:delete-messages-with-segments',
     'chatdb:delete-messages-with-dependents',
     'chatdb:paste-messages-to-topic',

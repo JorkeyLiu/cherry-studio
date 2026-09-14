@@ -40,7 +40,7 @@ import {
   getProviderByModel,
   getQuickModel
 } from './AssistantService'
-import { ConversationService } from './ConversationService'
+import { type AuthorityUserSnapshot, ConversationService } from './ConversationService'
 import { logColdPathDiagnostic } from './db/sendTimingDiagnostics'
 import { injectUserMessageWithKnowledgeSearchPrompt } from './KnowledgeService'
 import type { BlockManager } from './messageStreaming'
@@ -176,6 +176,7 @@ export async function transformMessagesAndFetch(
     callbacks: StreamProcessorCallbacks
     topicId?: string // 添加 topicId 用于 trace
     allowedTools?: string[]
+    authorityUser?: AuthorityUserSnapshot
     options: {
       signal?: AbortSignal
       timeout?: number
@@ -190,7 +191,8 @@ export async function transformMessagesAndFetch(
     const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(
       messages,
       assistant,
-      topicId
+      topicId,
+      request.authorityUser
     )
 
     // replace prompt variables

@@ -24,6 +24,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     resetMessagesForResend: vi.fn(),
+    resendUserMessages: vi.fn(),
+    regenerateAssistantMessage: vi.fn(),
     appendMessage: vi.fn(),
     updateMessage: vi.fn(),
     updateMessageAndBlocks: vi.fn(),
@@ -54,6 +56,8 @@ vi.mock('@logger', () => ({
 vi.mock('@renderer/services/db', () => ({
   dbService: {
     resetMessagesForResend: mocks.resetMessagesForResend,
+    resendUserMessages: mocks.resendUserMessages,
+    regenerateAssistantMessage: mocks.regenerateAssistantMessage,
     appendMessage: mocks.appendMessage,
     updateMessage: mocks.updateMessage,
     updateMessageAndBlocks: mocks.updateMessageAndBlocks,
@@ -121,7 +125,7 @@ const createMessage = (overrides: Partial<Message> & Record<string, unknown> = {
     status: AssistantMessageStatus.PENDING,
     blocks: [],
     askId: 'user-msg-1',
-    model: { id: 'model-1' } as any,
+    model: { id: 'model-1', provider: 'test-provider', name: 'test-model', group: 'test-group' } as any,
     modelId: 'model-1',
     ...overrides
   }) as unknown as Message
@@ -213,13 +217,24 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantA.id] = assistantA
     storeState.messages.entities[assistantB.id] = assistantB
+    storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantA.id, assistantB.id]
     storeState.messageBlocks.entities['block-A'] = { id: 'block-A', messageId: 'assistant-A' }
     storeState.messageBlocks.entities['block-B'] = { id: 'block-B', messageId: 'assistant-B' }
     storeState.assistants.assistants = [{ id: 'assistant-1', topics: [], settings: {}, prompt: '' } as never]
     mocks.selectMessagesForTopic.mockReturnValue([userMsg, assistantA, assistantB])
-    mocks.resetMessagesForResend.mockResolvedValue({
+    mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      askId: userMsg.id,
+      userMessage: userMsg,
+      userBlocks: [],
+      executionMessages: [
+        { message: assistantA, blocks: [] },
+        { message: assistantB, blocks: [] }
+      ],
+      removedBlockIds: [],
+      createdMessageIds: [],
       attempts: [
         { messageId: 'assistant-A', attemptId: 'attempt-A' },
         { messageId: 'assistant-B', attemptId: 'attempt-B' }
@@ -228,10 +243,12 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
 
     const dispatch = vi.fn()
     const getState = () => storeState as never
-    await resendMessageThunk('topic-1', userMsg, { id: 'assistant-1', topics: [], settings: {} } as never)(
-      dispatch,
-      getState as never
-    )
+    await resendMessageThunk('topic-1', userMsg, {
+      id: 'assistant-1',
+      model: { id: 'm1', provider: 'p', name: 'n', group: 'g' },
+      topics: [],
+      settings: {}
+    } as never)(dispatch, getState as never)
     expect(mocks.transformMessagesAndFetch).toHaveBeenCalledTimes(2)
 
     // Each captured execution writes with exactly its own attempt.
@@ -317,21 +334,34 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
 
   it('legacy reset without a mapping omits the carrier', async () => {
     const { resendMessageThunk, updateMessage } = await import('../messageThunk')
-    mocks.resetMessagesForResend.mockResolvedValueOnce({
+    mocks.resendUserMessages.mockResolvedValueOnce({
       affectedFileIds: [],
-      remainingReferenceCounts: {}
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      askId: 'user-msg-1',
+      userMessage: createUserMessage(),
+      userBlocks: [],
+      executionMessages: [
+        { message: createMessage({ id: 'assistant-1', askId: 'user-msg-1', blocks: [] }), blocks: [] }
+      ],
+      removedBlockIds: [],
+      createdMessageIds: [],
+      attempts: []
     })
     const userMsg = createUserMessage()
     const assistantMsg = createMessage({ id: 'assistant-1', askId: userMsg.id, blocks: [] })
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantMsg.id] = assistantMsg
+    storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantMsg.id]
     mocks.selectMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
     const dispatch = vi.fn()
     const getState = () => storeState as never
-    await resendMessageThunk('topic-1', userMsg, { id: 'assistant-1', topics: [], settings: {} } as never)(
-      dispatch,
-      getState as never
-    )
+    await resendMessageThunk('topic-1', userMsg, {
+      id: 'assistant-1',
+      model: { id: 'm1', provider: 'p', name: 'n', group: 'g' },
+      topics: [],
+      settings: {}
+    } as never)(dispatch, getState as never)
 
     await updateMessage('topic-1', 'assistant-1', { content: 'x' } as never)
     expect(mocks.updateMessage).toHaveBeenCalledWith('topic-1', 'assistant-1', { content: 'x' }, undefined)
@@ -343,18 +373,28 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     const assistantMsg = createMessage({ id: 'assistant-1', askId: userMsg.id })
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantMsg.id] = assistantMsg
+    storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantMsg.id]
     mocks.selectMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
-    mocks.resetMessagesForResend.mockResolvedValue({
+    mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      askId: userMsg.id,
+      userMessage: userMsg,
+      userBlocks: [],
+      executionMessages: [{ message: assistantMsg, blocks: [] }],
+      removedBlockIds: [],
+      createdMessageIds: [],
       attempts: [{ messageId: 'assistant-1', attemptId: 'attempt-ctx-1' }]
     })
     const dispatch = vi.fn()
     const getState = () => storeState as never
-    await resendMessageThunk('topic-1', userMsg, { id: 'assistant-1', topics: [], settings: {} } as never)(
-      dispatch,
-      getState as never
-    )
+    await resendMessageThunk('topic-1', userMsg, {
+      id: 'assistant-1',
+      model: { id: 'm1', provider: 'p', name: 'n', group: 'g' },
+      topics: [],
+      settings: {}
+    } as never)(dispatch, getState as never)
 
     mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
     const editUpdates = { id: 'assistant-1', content: 'edit' } as never
@@ -522,6 +562,8 @@ describe('Legacy ordinary path: no attempt, no barrier, no flush wiring', () => 
   it('tolerates save mocks returning nothing and keeps the old cancel semantics', () => {
     const dispatch = vi.fn()
     const cancelFn = vi.fn()
+    // Loaded parity: the message stays loaded so the Redux mirror still lands.
+    storeState.messages.entities['assistant-1'] = createMessage({ id: 'assistant-1' })
     const manager = new BlockManager({
       dispatch,
       getState: () => storeState as never,

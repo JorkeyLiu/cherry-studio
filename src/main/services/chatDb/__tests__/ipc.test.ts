@@ -107,16 +107,16 @@ describe('ChatDb IPC Registration', () => {
   // Handler count
   // =========================================================================
 
-  it('registers exactly 43 handlers', () => {
+  it('registers exactly 45 handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
   })
 
   // =========================================================================
-  // All 40 channels
+  // All 42 channels
   // =========================================================================
 
-  it('registers all 40 ChatDb channels', () => {
+  it('registers all 42 ChatDb channels', () => {
     disposer = registerChatDbIpc()
 
     const expectedChannels = [
@@ -156,6 +156,8 @@ describe('ChatDb IPC Registration', () => {
       // Phase 5.1B: compound mutations
       IpcChannel.ChatDb_CloneMessagesToTopic,
       IpcChannel.ChatDb_ResetMessagesForResend,
+      IpcChannel.ChatDb_ResendUserMessages,
+      IpcChannel.ChatDb_RegenerateAssistantMessage,
       IpcChannel.ChatDb_DeleteMessagesWithSegments,
       IpcChannel.ChatDb_DeleteMessagesWithDependents,
       IpcChannel.ChatDb_PasteMessagesToTopic,
@@ -188,11 +190,11 @@ describe('ChatDb IPC Registration', () => {
 
   it('disposer removes all handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     disposer()
     expect(handlers.size).toBe(0)
-    expect(mockRemoveHandler).toHaveBeenCalledTimes(43)
+    expect(mockRemoveHandler).toHaveBeenCalledTimes(45)
   })
 
   // =========================================================================
@@ -797,7 +799,7 @@ describe('ChatDb IPC Registration', () => {
   it('uses ipcMain.handle for registration', () => {
     disposer = registerChatDbIpc()
 
-    expect(mockHandle).toHaveBeenCalledTimes(43)
+    expect(mockHandle).toHaveBeenCalledTimes(45)
     for (const call of mockHandle.mock.calls) {
       expect(typeof call[0]).toBe('string')
       expect(typeof call[1]).toBe('function')
@@ -876,16 +878,16 @@ describe('ChatDb IPC Registration', () => {
   // All 40 commands preserve 40-registration invariant
   // =========================================================================
 
-  it('preserves exactly 43 registrations after multiple calls', () => {
+  it('preserves exactly 45 registrations after multiple calls', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // Call disposer, re-register
     disposer()
     expect(handlers.size).toBe(0)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
   })
 
   // =========================================================================
@@ -894,15 +896,15 @@ describe('ChatDb IPC Registration', () => {
 
   it('re-registration disposes prior handlers before installing new ones', () => {
     const disposer1 = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // Register again without calling disposer1 — should auto-dispose
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // disposer1 is now stale — calling it should be a no-op
     disposer1()
-    expect(handlers.size).toBe(43) // still 43
+    expect(handlers.size).toBe(45) // still 45
 
     // The current disposer works
     disposer()
@@ -914,32 +916,32 @@ describe('ChatDb IPC Registration', () => {
 
     // Re-register — disposer1 becomes stale
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // Stale disposer1 is a no-op
     disposer1()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // Active disposer still works
     disposer()
     expect(handlers.size).toBe(0)
   })
 
-  it('three sequential registrations produce exactly 43 handlers each time', () => {
+  it('three sequential registrations produce exactly 45 handlers each time', () => {
     const d1 = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     const d2 = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // Stale discarders are no-ops
     d1()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
     d2()
-    expect(handlers.size).toBe(43)
+    expect(handlers.size).toBe(45)
 
     // Active disposer works
     disposer()

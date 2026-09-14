@@ -36,12 +36,16 @@ import type {
   FileReferenceWire,
   HardDeleteTopicResponse,
   JsonObject,
+  JsonValue,
+  MessageBlockEntry,
   PurgeExpiredTopicsResponse,
   ResendAttemptMapping,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
   SegmentWire,
   SelectAnswerMessageResponse,
+  SemanticModelSnapshot,
+  SemanticResendResponse,
   StreamWriteDiagnostics,
   TopicWire
 } from '@shared/chatDb'
@@ -79,6 +83,7 @@ import {
   collectAffectedFileIds,
   fileReferenceToWire,
   messagesToWire,
+  messageToWire,
   projectFileReferences,
   reconstructMessageBlockRelations,
   segmentToWire,
@@ -4935,6 +4940,154 @@ export class ChatDbAggregateService {
    *
    * Atomicity: one root SQLite transaction.
    */
+  /**
+   * Transaction-internal reset core shared by the low-level compat path and
+   * the two semantic stable-ID commands.
+   *
+   * Runs INSIDE the caller's root `db.transaction` — never opens its own
+   * transaction and never wraps results. Preserves the exact low-level block
+   * ownership, file cleanup, replaceOrder, frame invalidation, and resend
+   * attempt persistence semantics.
+   */
+  private resetMessagesCoreInTx(
+    _tx: unknown,
+    repos: ChatDbRepositories,
+    stx: SyncTxExecutor,
+    topicId: string,
+    messages: Array<{ message: JsonObject; blocks: JsonObject[] }> | string[],
+    blockIdsToDelete: string[]
+  ): { cleanup: FileCleanupResult; attempts: ResendAttemptMapping[]; removedBlockIds: string[] } {
+    // Phase 1: Resolve every block through its parent message and verify ownership.
+    // Reject any block whose parent message does not belong to request topic.
+    const ownedBlockIds: string[] = []
+    if (blockIdsToDelete.length > 0) {
+      for (const blockId of blockIdsToDelete) {
+        const block = repos.blocks.getById(blockId)
+        if (!block.found) {
+          throw new ChatDbConflictError(`Block ${blockId} does not exist`)
+        }
+        // Resolve block → message → topic ownership
+        const msg = repos.messages.getInTopic(block.data.messageId, topicId)
+        if (!msg.found) {
+          throw new ChatDbConflictError(
+            `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
+          )
+        }
+        ownedBlockIds.push(blockId)
+      }
+    }
+
+    // Capture parent messageIds for frame invalidation before deletion (still present)
+    const ownedBlockParentIds = new Set<string>()
+    const removedByMessage = new Map<string, string[]>()
+    for (const bid of ownedBlockIds) {
+      const blk = repos.blocks.getById(bid)
+      if (blk.found) {
+        ownedBlockParentIds.add(blk.data.messageId)
+        const list = removedByMessage.get(blk.data.messageId)
+        if (list) list.push(bid)
+        else removedByMessage.set(blk.data.messageId, [bid])
+      }
+    }
+
+    // Phase 2: Collect affected file IDs from owned blocks only
+    let affectedFileIds: string[] = []
+    if (ownedBlockIds.length > 0) {
+      const allRefs: FileReferenceData[] = []
+      for (const blockId of ownedBlockIds) {
+        const refs = repos.fileRefs.listByBlock(blockId)
+        allRefs.push(...refs)
+      }
+      affectedFileIds = collectAffectedFileIds(allRefs)
+
+      // Delete owned blocks (FK cascade removes file_references)
+      repos.blocks.deleteMany(ownedBlockIds)
+    }
+
+    // Phase 3: Persist complete reset payloads, preserving existing identity.
+    for (const item of messages) {
+      const entry = typeof item === 'string' ? { message: { id: item, status: null, blocks: [] }, blocks: [] } : item
+      const messageData = wireToMessage(entry.message)
+      messageData.topicId = topicId
+      const blockDataList = entry.blocks.map(wireToBlock)
+      for (const block of blockDataList) block.messageId = messageData.id
+      const existing = repos.messages.getInTopic(messageData.id, topicId)
+      if (!existing.found) {
+        repos.messages.append(messageData)
+      } else {
+        const patch = wireToMessagePatch(entry.message)
+        delete patch.id
+        delete patch.topicId
+        delete patch.sortOrder
+        repos.messages.update(topicId, messageData.id, patch)
+      }
+      if (blockDataList.length > 0) {
+        repos.blocks.upsertMany(blockDataList)
+        this.syncFileReferences(repos, blockDataList)
+      }
+    }
+
+    // Phase 4: Normalize message orders after changes
+    repos.messages.replaceOrder(
+      topicId,
+      repos.messages.listByTopic(topicId).map((m) => m.id)
+    )
+
+    // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
+    syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+    const resetMsgIds = new Set<string>(ownedBlockParentIds)
+    for (const item of messages) {
+      const mid = typeof item === 'string' ? item : ((item as { message: JsonObject }).message?.id as string)
+      if (typeof mid === 'string' && mid.length > 0) resetMsgIds.add(mid)
+    }
+    for (const mid of resetMsgIds) {
+      syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+    }
+
+    // Local-only resend attempt intent (SYNC-DATA-055 intent slice): one
+    // row per reset message in the same transaction. Fresh
+    // Main-authoritative attempt id per message; askId from the reset
+    // payload when present, otherwise from the surviving row; removed ids
+    // are the owned deleted blocks for that message only. Strict
+    // validation throws roll back the whole reset. No outbox, no wire.
+    // The per-message mapping returns in the success response (strictly
+    // closed messageId + attemptId entries) for the resend/regenerate
+    // execution context; consumption happens only in the success-final
+    // stable_replace issuer.
+    const resetTimestamp = Date.now()
+    const attempts: ResendAttemptMapping[] = []
+    for (const item of messages) {
+      const rawMessage = typeof item === 'string' ? null : ((item as { message: JsonObject }).message ?? null)
+      const mid = typeof item === 'string' ? item : ((rawMessage as Record<string, unknown> | null)?.id as string)
+      if (typeof mid !== 'string' || mid.length === 0) {
+        throw new ChatDbConflictError(`resetMessagesForResend message without id in topic ${topicId}`)
+      }
+      let askId: string | null = null
+      const wireAsk = (rawMessage as Record<string, unknown> | null)?.askId
+      if (typeof wireAsk === 'string' && wireAsk.length > 0) {
+        askId = wireAsk
+      } else {
+        const surviving = repos.messages.getInTopic(mid, topicId)
+        if (surviving.found && typeof surviving.data.askId === 'string' && surviving.data.askId.length > 0) {
+          askId = surviving.data.askId
+        }
+      }
+      const attemptId = randomUUID()
+      persistResendAttemptInTx(stx, {
+        messageId: mid,
+        attemptId,
+        topicId,
+        askId,
+        resetTimestamp,
+        removedBlockIds: removedByMessage.get(mid) ?? []
+      })
+      attempts.push({ messageId: mid, attemptId })
+    }
+
+    const cleanup = buildFileCleanupResult(repos, affectedFileIds)
+    return { cleanup, attempts, removedBlockIds: [...ownedBlockIds] }
+  }
+
   resetMessagesForResend(
     topicId: string,
     messages: Array<{ message: JsonObject; blocks: JsonObject[] }> | string[],
@@ -4944,140 +5097,358 @@ export class ChatDbAggregateService {
       syncService.throwIfPublishBarrierHeld('resetMessagesForResend')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
-
-        // Phase 1: Resolve every block through its parent message and verify ownership.
-        // Reject any block whose parent message does not belong to request topic.
-        const ownedBlockIds: string[] = []
-        if (blockIdsToDelete.length > 0) {
-          for (const blockId of blockIdsToDelete) {
-            const block = repos.blocks.getById(blockId)
-            if (!block.found) {
-              throw new ChatDbConflictError(`Block ${blockId} does not exist`)
-            }
-            // Resolve block → message → topic ownership
-            const msg = repos.messages.getInTopic(block.data.messageId, topicId)
-            if (!msg.found) {
-              throw new ChatDbConflictError(
-                `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
-              )
-            }
-            ownedBlockIds.push(blockId)
-          }
-        }
-
-        // Capture parent messageIds for frame invalidation before deletion (still present)
-        const ownedBlockParentIds = new Set<string>()
-        const removedByMessage = new Map<string, string[]>()
-        for (const bid of ownedBlockIds) {
-          const blk = repos.blocks.getById(bid)
-          if (blk.found) {
-            ownedBlockParentIds.add(blk.data.messageId)
-            const list = removedByMessage.get(blk.data.messageId)
-            if (list) list.push(bid)
-            else removedByMessage.set(blk.data.messageId, [bid])
-          }
-        }
-
-        // Phase 2: Collect affected file IDs from owned blocks only
-        let affectedFileIds: string[] = []
-        if (ownedBlockIds.length > 0) {
-          const allRefs: FileReferenceData[] = []
-          for (const blockId of ownedBlockIds) {
-            const refs = repos.fileRefs.listByBlock(blockId)
-            allRefs.push(...refs)
-          }
-          affectedFileIds = collectAffectedFileIds(allRefs)
-
-          // Delete owned blocks (FK cascade removes file_references)
-          repos.blocks.deleteMany(ownedBlockIds)
-        }
-
-        // Phase 3: Persist complete reset payloads, preserving existing identity.
-        for (const item of messages) {
-          const entry =
-            typeof item === 'string' ? { message: { id: item, status: null, blocks: [] }, blocks: [] } : item
-          const messageData = wireToMessage(entry.message)
-          messageData.topicId = topicId
-          const blockDataList = entry.blocks.map(wireToBlock)
-          for (const block of blockDataList) block.messageId = messageData.id
-          const existing = repos.messages.getInTopic(messageData.id, topicId)
-          if (!existing.found) {
-            repos.messages.append(messageData)
-          } else {
-            const patch = wireToMessagePatch(entry.message)
-            delete patch.id
-            delete patch.topicId
-            delete patch.sortOrder
-            repos.messages.update(topicId, messageData.id, patch)
-          }
-          if (blockDataList.length > 0) {
-            repos.blocks.upsertMany(blockDataList)
-            this.syncFileReferences(repos, blockDataList)
-          }
-        }
-
-        // Phase 4: Normalize message orders after changes
-        repos.messages.replaceOrder(
-          topicId,
-          repos.messages.listByTopic(topicId).map((m) => m.id)
-        )
-
-        // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
-        syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
-        const resetMsgIds = new Set<string>(ownedBlockParentIds)
-        for (const item of messages) {
-          const mid = typeof item === 'string' ? item : ((item as { message: JsonObject }).message?.id as string)
-          if (typeof mid === 'string' && mid.length > 0) resetMsgIds.add(mid)
-        }
-        for (const mid of resetMsgIds) {
-          syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'messageBlock', mid)
-        }
-
-        // Local-only resend attempt intent (SYNC-DATA-055 intent slice): one
-        // row per reset message in the same transaction. Fresh
-        // Main-authoritative attempt id per message; askId from the reset
-        // payload when present, otherwise from the surviving row; removed ids
-        // are the owned deleted blocks for that message only. Strict
-        // validation throws roll back the whole reset. No outbox, no wire.
-        // The per-message mapping returns in the success response (strictly
-        // closed messageId + attemptId entries) for the resend/regenerate
-        // execution context; consumption happens only in the success-final
-        // stable_replace issuer.
         const stx = tx as unknown as SyncTxExecutor
-        const resetTimestamp = Date.now()
-        const attempts: ResendAttemptMapping[] = []
-        for (const item of messages) {
-          const rawMessage = typeof item === 'string' ? null : ((item as { message: JsonObject }).message ?? null)
-          const mid = typeof item === 'string' ? item : ((rawMessage as Record<string, unknown> | null)?.id as string)
-          if (typeof mid !== 'string' || mid.length === 0) {
-            throw new ChatDbConflictError(`resetMessagesForResend message without id in topic ${topicId}`)
-          }
-          let askId: string | null = null
-          const wireAsk = (rawMessage as Record<string, unknown> | null)?.askId
-          if (typeof wireAsk === 'string' && wireAsk.length > 0) {
-            askId = wireAsk
-          } else {
-            const surviving = repos.messages.getInTopic(mid, topicId)
-            if (surviving.found && typeof surviving.data.askId === 'string' && surviving.data.askId.length > 0) {
-              askId = surviving.data.askId
-            }
-          }
-          const attemptId = randomUUID()
-          persistResendAttemptInTx(stx, {
-            messageId: mid,
-            attemptId,
-            topicId,
-            askId,
-            resetTimestamp,
-            removedBlockIds: removedByMessage.get(mid) ?? []
-          })
-          attempts.push({ messageId: mid, attemptId })
-        }
-
-        const cleanup = buildFileCleanupResult(repos, affectedFileIds)
+        const { cleanup, attempts } = this.resetMessagesCoreInTx(tx, repos, stx, topicId, messages, blockIdsToDelete)
         return { ...cleanup, attempts }
       })
     }, `resetMessagesForResend(${topicId}, ${messages.length} msgs)`)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Semantic resend/regenerate — stable-ID commands sharing resetMessagesCoreInTx
+  // ---------------------------------------------------------------------------
+
+  private semanticModelId(snapshot: SemanticModelSnapshot): string {
+    return snapshot.id
+  }
+
+  private isFullSemanticSnapshot(value: unknown): value is SemanticModelSnapshot {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+    const rec = value as Record<string, unknown>
+    return (
+      typeof rec.id === 'string' &&
+      rec.id.length > 0 &&
+      typeof rec.provider === 'string' &&
+      rec.provider.length > 0 &&
+      typeof rec.name === 'string' &&
+      rec.name.length > 0 &&
+      typeof rec.group === 'string' &&
+      rec.group.length > 0
+    )
+  }
+
+  private assertFullSemanticSnapshot(value: unknown, path: string): asserts value is SemanticModelSnapshot {
+    if (!this.isFullSemanticSnapshot(value)) {
+      throw new ChatDbConflictError(`${path} must carry full model snapshot (id/provider/name/group non-empty)`)
+    }
+  }
+
+  private mentionSnapshotsFromUserWire(userWire: JsonObject): SemanticModelSnapshot[] {
+    const raw = (userWire as Record<string, unknown>).mentions
+    if (!Array.isArray(raw)) return []
+    const out: SemanticModelSnapshot[] = []
+    for (const item of raw) {
+      if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+        const rec = item as Record<string, unknown>
+        if (typeof rec.id !== 'string' || rec.id.length === 0) continue
+        // Authority mentions become execution models verbatim: an id-only
+        // (or otherwise partial) mention must fail closed here rather than
+        // silently creating a message with an incomplete model.
+        this.assertFullSemanticSnapshot(item, 'authority mention')
+        out.push(item)
+      }
+    }
+    return out
+  }
+
+  private mentionKeyPresent(existingModelWire: unknown, mentionId: string): boolean {
+    if (existingModelWire !== null && typeof existingModelWire === 'object' && !Array.isArray(existingModelWire)) {
+      const rec = existingModelWire as Record<string, unknown>
+      if (typeof rec.id === 'string' && rec.id === mentionId) return true
+    }
+    if (typeof existingModelWire === 'string' && existingModelWire === mentionId) return true
+    return false
+  }
+
+  private buildSemanticResetEntry(
+    existingWire: JsonObject,
+    modelWire: JsonValue | undefined,
+    modelId: string | undefined,
+    nowIso: string
+  ): { message: JsonObject; blocks: JsonObject[] } {
+    const rec = existingWire as Record<string, unknown>
+    const message: JsonObject = {
+      id: rec.id as string,
+      topicId: rec.topicId as string,
+      role: 'assistant',
+      assistantId: rec.assistantId as string,
+      askId: rec.askId as string,
+      status: 'pending',
+      createdAt: rec.createdAt as string,
+      updatedAt: nowIso,
+      blocks: []
+    }
+    if (modelWire !== undefined) {
+      ;(message as Record<string, unknown>).model = modelWire
+    } else if (rec.model !== undefined && rec.model !== null) {
+      ;(message as Record<string, unknown>).model = rec.model as JsonValue
+    }
+    const resolvedModelId = modelId ?? (typeof rec.modelId === 'string' && rec.modelId.length > 0 ? rec.modelId : null)
+    if (resolvedModelId !== null && resolvedModelId !== undefined) {
+      ;(message as Record<string, unknown>).modelId = resolvedModelId
+    }
+    return { message, blocks: [] }
+  }
+
+  private buildSemanticNewEntry(
+    newId: string,
+    topicId: string,
+    assistantId: string,
+    askId: string,
+    traceId: string | null,
+    modelSnapshot: SemanticModelSnapshot,
+    nowIso: string
+  ): { message: JsonObject; blocks: JsonObject[] } {
+    const message: JsonObject = {
+      id: newId,
+      topicId,
+      role: 'assistant',
+      assistantId,
+      askId,
+      status: 'pending',
+      model: { ...(modelSnapshot as Record<string, unknown>) } as JsonObject,
+      modelId: this.semanticModelId(modelSnapshot),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      blocks: []
+    }
+    if (traceId !== null) {
+      ;(message as Record<string, unknown>).traceId = traceId
+    }
+    return { message, blocks: [] }
+  }
+
+  private toSemanticResponse(
+    topicId: string,
+    askId: string,
+    userWire: JsonObject,
+    userBlocksWire: JsonObject[],
+    executionMessages: MessageBlockEntry[],
+    createdMessageIds: string[],
+    core: { cleanup: FileCleanupResult; attempts: ResendAttemptMapping[]; removedBlockIds: string[] }
+  ): SemanticResendResponse {
+    return {
+      affectedFileIds: [...core.cleanup.affectedFileIds],
+      remainingReferenceCounts: { ...core.cleanup.remainingReferenceCounts },
+      topicId,
+      askId,
+      userMessage: userWire,
+      userBlocks: userBlocksWire,
+      executionMessages,
+      removedBlockIds: [...core.removedBlockIds],
+      createdMessageIds: [...createdMessageIds],
+      attempts: core.attempts.map((a) => ({ messageId: a.messageId, attemptId: a.attemptId }))
+    }
+  }
+
+  /**
+   * Semantic resend: resolve the full assistant answer group from authority
+   * and reset/create in one transaction via `resetMessagesCoreInTx`.
+   *
+   * Model rules mirror the renderer legacy path:
+   * - existing=0 + mentions empty: create one currentModel member;
+   * - existing=1 + mentions empty: reset that ID overriding to currentModel;
+   * - existing>1: reset each preserving its own model/modelId;
+   * - mentions non-empty: reset all existing preserving their models, then
+   *   create one member per mention id missing from the existing group.
+   */
+  resendUserMessages(
+    topicId: string,
+    userMessageId: string,
+    assistantId: string,
+    currentModel: SemanticModelSnapshot
+  ): ChatDbResult<SemanticResendResponse> {
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('resendUserMessages')
+      // Defense in depth: the IPC contract validates the same shape, but
+      // direct callers must also fail closed rather than writing an id-only
+      // model into a new/override execution message.
+      this.assertFullSemanticSnapshot(currentModel, 'currentModel')
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const stx = tx as unknown as SyncTxExecutor
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        const userRow = repos.messages.getInTopic(userMessageId, topicId)
+        if (!userRow.found || userRow.data.role !== 'user') {
+          throw new ChatDbNotFoundError(`User message ${userMessageId} does not belong to topic ${topicId}`)
+        }
+        const userWireBefore = messageToWire(userRow.data)
+        const userBlocksBefore = blocksToWire(repos.blocks.listByMessage(userMessageId))
+        const userWithBlocks = reconstructMessageBlockRelations([userWireBefore], userBlocksBefore)[0]
+        const traceId =
+          typeof (userRow.data.overflow.traceId ?? (userWireBefore as Record<string, unknown>).traceId) === 'string'
+            ? ((userRow.data.overflow.traceId ?? (userWireBefore as Record<string, unknown>).traceId) as string)
+            : null
+
+        const ordered = repos.messages.listByTopic(topicId)
+        const existing = ordered.filter((m) => m.role === 'assistant' && m.askId === userMessageId)
+        const existingWires = existing.map((m) => messageToWire(m))
+        const mentions = this.mentionSnapshotsFromUserWire(userWithBlocks)
+        const nowIso = new Date().toISOString()
+
+        const entries: Array<{ message: JsonObject; blocks: JsonObject[] }> = []
+        const createdIds: string[] = []
+        const blockIdsToDelete: string[] = []
+        for (const m of existing) {
+          const blks = repos.blocks.listByMessage(m.id)
+          for (const b of blks) blockIdsToDelete.push(b.id)
+        }
+
+        if (existing.length === 0 && mentions.length === 0) {
+          const newId = randomUUID()
+          entries.push(
+            this.buildSemanticNewEntry(newId, topicId, assistantId, userMessageId, traceId, currentModel, nowIso)
+          )
+          createdIds.push(newId)
+        } else if (existing.length === 1 && mentions.length === 0) {
+          entries.push(
+            this.buildSemanticResetEntry(
+              existingWires[0],
+              currentModel as unknown as JsonValue,
+              currentModel.id,
+              nowIso
+            )
+          )
+        } else if (mentions.length === 0) {
+          for (const w of existingWires) {
+            entries.push(this.buildSemanticResetEntry(w, undefined, undefined, nowIso))
+          }
+        } else {
+          for (const w of existingWires) {
+            entries.push(this.buildSemanticResetEntry(w, undefined, undefined, nowIso))
+          }
+          const originIds = new Set<string>()
+          for (const w of existingWires) {
+            const rec = w as Record<string, unknown>
+            const rawModel = rec.model
+            if (rawModel !== null && typeof rawModel === 'object' && !Array.isArray(rawModel)) {
+              const mid = (rawModel as Record<string, unknown>).id
+              if (typeof mid === 'string' && mid.length > 0) originIds.add(mid)
+            } else if (typeof rawModel === 'string' && rawModel.length > 0) {
+              originIds.add(rawModel)
+            }
+            if (typeof rec.modelId === 'string' && rec.modelId.length > 0) {
+              originIds.add(rec.modelId)
+            }
+          }
+          const seenMention = new Set<string>()
+          for (const mention of mentions) {
+            if (seenMention.has(mention.id)) continue
+            seenMention.add(mention.id)
+            const present =
+              originIds.has(mention.id) ||
+              existingWires.some((w) => this.mentionKeyPresent((w as Record<string, unknown>).model, mention.id))
+            if (!present) {
+              const newId = randomUUID()
+              entries.push(
+                this.buildSemanticNewEntry(newId, topicId, assistantId, userMessageId, traceId, mention, nowIso)
+              )
+              createdIds.push(newId)
+            }
+          }
+        }
+
+        const core = this.resetMessagesCoreInTx(tx, repos, stx, topicId, entries, blockIdsToDelete)
+        const execMessages: MessageBlockEntry[] = []
+        for (const e of entries) {
+          const mid = (e.message as Record<string, unknown>).id as string
+          const row = repos.messages.getInTopic(mid, topicId)
+          if (!row.found) {
+            throw new ChatDbConflictError(`Semantic resend message ${mid} missing after write`)
+          }
+          const wire = messageToWire(row.data)
+          const blks = blocksToWire(repos.blocks.listByMessage(mid))
+          const withRel = reconstructMessageBlockRelations([wire], blks)[0]
+          execMessages.push({ message: withRel, blocks: [] })
+        }
+        return this.toSemanticResponse(
+          topicId,
+          userMessageId,
+          userWithBlocks,
+          userBlocksBefore,
+          execMessages,
+          createdIds,
+          core
+        )
+      })
+    }, `resendUserMessages(${topicId}, ${userMessageId})`)
+  }
+
+  /**
+   * Semantic regenerate: reset only the selected assistant message.
+   * Preserves its own model/modelId when `modelId` is truthy (ignores
+   * `currentModel`), otherwise overrides to `currentModel`. Missing
+   * `currentModel` with no self `modelId` fails closed (typed conflict).
+   * Creates no group members.
+   */
+  regenerateAssistantMessage(
+    topicId: string,
+    assistantMessageId: string,
+    assistantId: string,
+    currentModel?: SemanticModelSnapshot
+  ): ChatDbResult<SemanticResendResponse> {
+    void assistantId
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('regenerateAssistantMessage')
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const stx = tx as unknown as SyncTxExecutor
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        const selected = repos.messages.getInTopic(assistantMessageId, topicId)
+        if (!selected.found || selected.data.role !== 'assistant') {
+          throw new ChatDbNotFoundError(`Assistant message ${assistantMessageId} does not belong to topic ${topicId}`)
+        }
+        const askId = selected.data.askId
+        if (typeof askId !== 'string' || askId.length === 0) {
+          throw new ChatDbNotFoundError(`Assistant message ${assistantMessageId} has no actionable user query`)
+        }
+        const userRow = repos.messages.getInTopic(askId, topicId)
+        if (!userRow.found || userRow.data.role !== 'user') {
+          throw new ChatDbNotFoundError(`User message ${askId} does not belong to topic ${topicId}`)
+        }
+        const userWireBefore = messageToWire(userRow.data)
+        const userBlocksBefore = blocksToWire(repos.blocks.listByMessage(askId))
+        const userWithBlocks = reconstructMessageBlockRelations([userWireBefore], userBlocksBefore)[0]
+
+        const selectedWire = messageToWire(selected.data)
+        const nowIso = new Date().toISOString()
+        const hasOwnModelId = typeof selected.data.modelId === 'string' && selected.data.modelId.length > 0
+        let entry: { message: JsonObject; blocks: JsonObject[] }
+        if (hasOwnModelId) {
+          entry = this.buildSemanticResetEntry(selectedWire, undefined, undefined, nowIso)
+        } else {
+          // Present-but-partial currentModel must fail closed with the same
+          // full-snapshot rule as resend; absent with no self modelId also
+          // fails (typed conflict, never a forged model).
+          this.assertFullSemanticSnapshot(currentModel, 'currentModel')
+          entry = this.buildSemanticResetEntry(
+            selectedWire,
+            currentModel as unknown as JsonValue,
+            currentModel.id,
+            nowIso
+          )
+        }
+        const blks = repos.blocks.listByMessage(assistantMessageId)
+        const blockIdsToDelete = blks.map((b) => b.id)
+
+        const core = this.resetMessagesCoreInTx(tx, repos, stx, topicId, [entry], blockIdsToDelete)
+        const row = repos.messages.getInTopic(assistantMessageId, topicId)
+        if (!row.found) {
+          throw new ChatDbConflictError(`Semantic regenerate message ${assistantMessageId} missing after write`)
+        }
+        const wire = messageToWire(row.data)
+        const postBlks = blocksToWire(repos.blocks.listByMessage(assistantMessageId))
+        const withRel = reconstructMessageBlockRelations([wire], postBlks)[0]
+        const execMessages: MessageBlockEntry[] = [{ message: withRel, blocks: [] }]
+        return this.toSemanticResponse(topicId, askId, userWithBlocks, userBlocksBefore, execMessages, [], core)
+      })
+    }, `regenerateAssistantMessage(${topicId}, ${assistantMessageId})`)
   }
 
   /**

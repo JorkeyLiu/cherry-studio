@@ -386,6 +386,8 @@ export enum IpcChannel {
   // Phase 5.1B — compound mutations
   ChatDb_CloneMessagesToTopic = 'chatdb:clone-messages-to-topic',
   ChatDb_ResetMessagesForResend = 'chatdb:reset-messages-for-resend',
+  ChatDb_ResendUserMessages = 'chatdb:resend-user-messages',
+  ChatDb_RegenerateAssistantMessage = 'chatdb:regenerate-assistant-message',
   ChatDb_DeleteMessagesWithSegments = 'chatdb:delete-messages-with-segments',
   ChatDb_DeleteMessagesWithDependents = 'chatdb:delete-messages-with-dependents',
   ChatDb_PasteMessagesToTopic = 'chatdb:paste-messages-to-topic',

@@ -6,6 +6,7 @@ import {
   turnsToMessages
 } from '@renderer/services/contextTurnService'
 import { isResolvableAnchor, resolveDefaultAnchorIndex } from '@renderer/services/contextWindowService'
+import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import {
@@ -89,7 +90,8 @@ export type ContextInfo = {
 export function computeContextInfo(
   messages: Message[],
   assistant: Assistant | undefined,
-  topicId?: string
+  topicId?: string,
+  overlay?: BlockOverlay
 ): ContextInfo {
   if (!assistant) {
     return {
@@ -146,19 +148,19 @@ export function computeContextInfo(
 
   // --- Steps 4-7: Model filters ---
   const usefulMessages = filterUsefulMessages(expandedMessages)
-  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages)
+  const withoutErrorOnlyPairs = filterErrorOnlyMessagesWithRelated(usefulMessages, overlay)
 
   // uiMessages: model-facing — trailing assistant removed
   const withoutTrailingAssistant = filterLastAssistantMessage(withoutErrorOnlyPairs)
   const withoutAdjacentUsers = filterAdjacentUserMessaegs(withoutTrailingAssistant)
 
   // --- Steps 8-9: Post-filter cleanup ---
-  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers)
+  const nonEmptyMessages = filterEmptyMessages(withoutAdjacentUsers, overlay)
   const uiMessages = filterUserRoleStartMessages(nonEmptyMessages)
 
   // tokenEstimationMessages: retains trailing assistant for token estimation.
   const tokenWithoutAdjacentUsers = filterAdjacentUserMessaegs(withoutErrorOnlyPairs)
-  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers)
+  const tokenNonEmptyMessages = filterEmptyMessages(tokenWithoutAdjacentUsers, overlay)
   const tokenEstimationMessages = filterUserRoleStartMessages(tokenNonEmptyMessages)
 
   return {

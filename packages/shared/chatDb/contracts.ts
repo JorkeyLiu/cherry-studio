@@ -41,8 +41,10 @@ import type {
   ListTrashTopicsRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
+  RegenerateAssistantMessageRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
+  ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
   RestoreTopicRequest,
@@ -1219,6 +1221,168 @@ const branchMessagesToTopicContract: ChatDbContract = {
 
 const RESET_RESEND_VALUE_KEYS = new Set(['affectedFileIds', 'remainingReferenceCounts', 'attempts'])
 const RESET_RESEND_ATTEMPT_KEYS = new Set(['messageId', 'attemptId'])
+
+const SEMANTIC_RESEND_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'topicId',
+  'askId',
+  'userMessage',
+  'userBlocks',
+  'executionMessages',
+  'removedBlockIds',
+  'createdMessageIds',
+  'attempts'
+])
+
+function validateSemanticModelSnapshot(value: unknown, path: string): void {
+  validateJsonObject(value, path)
+  const rec = value as Record<string, unknown>
+  validateNonEmptyString(rec.id, `${path}.id`)
+  validateNonEmptyString(rec.provider, `${path}.provider`)
+  validateNonEmptyString(rec.name, `${path}.name`)
+  validateNonEmptyString(rec.group, `${path}.group`)
+}
+
+function validateSemanticResendResult(channel: string): (result: unknown) => void {
+  return (result: unknown): void => {
+    validateResultEnvelope(result, channel)
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', `[${channel}] Expected SemanticResendResponse object`)
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', `[${channel}] Success value must be a plain object`)
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!SEMANTIC_RESEND_VALUE_KEYS.has(key)) {
+          throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in success value: "${key}"`)
+        }
+      }
+      validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+      validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+      const counts = v.remainingReferenceCounts as Record<string, unknown>
+      for (const key of Object.keys(counts)) {
+        if (key.length === 0) {
+          throw new ValidationError(
+            'result.value.remainingReferenceCounts',
+            `[${channel}] remainingReferenceCounts key must be a non-empty string`
+          )
+        }
+        validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateNonEmptyString(v.askId, 'result.value.askId')
+      validateJsonObject(v.userMessage, 'result.value.userMessage')
+      validateIdField(v.userMessage as any, 'result.value.userMessage')
+      validateJsonObjectArray(v.userBlocks, 'result.value.userBlocks')
+      for (let i = 0; i < (v.userBlocks as unknown[]).length; i++) {
+        const b = (v.userBlocks as Record<string, unknown>[])[i]
+        validateIdField(b as any, `result.value.userBlocks[${i}]`)
+        validateMessageIdField(b as any, `result.value.userBlocks[${i}]`)
+      }
+      if (!Array.isArray(v.executionMessages) || (v.executionMessages as unknown[]).length === 0) {
+        throw new ValidationError('result.value.executionMessages', `[${channel}] Expected non-empty executionMessages`)
+      }
+      validateEntries(v.executionMessages, 'result.value.executionMessages')
+      validateStringArray(v.removedBlockIds, 'result.value.removedBlockIds')
+      validateStringArray(v.createdMessageIds, 'result.value.createdMessageIds')
+      const created = new Set(v.createdMessageIds as string[])
+      if (created.size !== (v.createdMessageIds as string[]).length) {
+        throw new ValidationError('result.value.createdMessageIds', `[${channel}] Duplicate createdMessageId`)
+      }
+      const execIds = (v.executionMessages as Array<{ message: Record<string, unknown> }>).map(
+        (e) => e.message?.id as string
+      )
+      for (const cid of created) {
+        if (!execIds.includes(cid)) {
+          throw new ValidationError('result.value.createdMessageIds', `[${channel}] createdMessageId not in execution`)
+        }
+      }
+      if (!Array.isArray(v.attempts)) {
+        throw new ValidationError('result.value.attempts', `[${channel}] Expected attempts array`)
+      }
+      const seen = new Set<string>()
+      for (let i = 0; i < (v.attempts as unknown[]).length; i++) {
+        const entry = (v.attempts as unknown[])[i]
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+          throw new ValidationError(`result.value.attempts[${i}]`, `[${channel}] Expected attempt mapping object`)
+        }
+        const rec = entry as Record<string, unknown>
+        for (const key of Object.keys(rec)) {
+          if (!RESET_RESEND_ATTEMPT_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.attempts[${i}].${key}`,
+              `[${channel}] Unknown key in attempt mapping: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(rec.messageId, `result.value.attempts[${i}].messageId`)
+        const attemptId = rec.attemptId
+        if (typeof attemptId !== 'string' || attemptId.length < 1 || attemptId.length > 256) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].attemptId`,
+            `[${channel}] Expected a non-empty string up to 256 characters`
+          )
+        }
+        if (attemptId.includes(':')) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].attemptId`,
+            `[${channel}] Attempt id must not contain ":"`
+          )
+        }
+        if (/[\uD800-\uDFFF]/.test(attemptId)) {
+          throw new ValidationError(
+            `result.value.attempts[${i}].attemptId`,
+            `[${channel}] Attempt id must not contain lone surrogates`
+          )
+        }
+        const mid = rec.messageId as string
+        if (seen.has(mid)) {
+          throw new ValidationError(`result.value.attempts[${i}].messageId`, `[${channel}] Duplicate attempt messageId`)
+        }
+        seen.add(mid)
+      }
+      if (seen.size !== execIds.length || !execIds.every((id) => seen.has(id))) {
+        throw new ValidationError('result.value.attempts', `[${channel}] attempts must map executionMessages 1:1`)
+      }
+    }
+  }
+}
+
+const resendUserMessagesContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'userMessageId', 'assistantId', 'currentModel'),
+  validate(value: unknown): void {
+    validateRequest(value, resendUserMessagesContract.allowedKeys)
+    const req = value as ResendUserMessagesRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.userMessageId, 'request.userMessageId')
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+    validateSemanticModelSnapshot(req.currentModel, 'request.currentModel')
+  },
+  validateResult: validateSemanticResendResult('chatdb:resend-user-messages')
+}
+
+const regenerateAssistantMessageContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'assistantMessageId', 'assistantId', 'currentModel'),
+  validate(value: unknown): void {
+    validateRequest(value, regenerateAssistantMessageContract.allowedKeys)
+    const req = value as RegenerateAssistantMessageRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.assistantMessageId, 'request.assistantMessageId')
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+    // Optional absence is legal (self-modelId path); when present it must be
+    // a strict snapshot. Resend keeps currentModel required.
+    if (req.currentModel !== undefined) {
+      validateSemanticModelSnapshot(req.currentModel, 'request.currentModel')
+    }
+  },
+  validateResult: validateSemanticResendResult('chatdb:regenerate-assistant-message')
+}
 
 const resetMessagesForResendContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'messages', 'blockIdsToDelete'),
@@ -2436,6 +2600,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,
+  'chatdb:resend-user-messages': resendUserMessagesContract,
+  'chatdb:regenerate-assistant-message': regenerateAssistantMessageContract,
   'chatdb:delete-messages-with-segments': deleteMessagesWithSegmentsContract,
   'chatdb:delete-messages-with-dependents': deleteMessagesWithDependentsContract,
   'chatdb:paste-messages-to-topic': pasteMessagesToTopicContract,

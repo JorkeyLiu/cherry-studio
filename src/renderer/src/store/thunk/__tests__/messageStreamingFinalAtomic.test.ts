@@ -16,6 +16,7 @@ import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
+import { AssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import { messagesSlice } from '@renderer/store/newMessage'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -475,5 +476,311 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       [],
       undefined
     )
+  })
+})
+
+describe('Detached execution: request-local state completes without Redux injection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.consumeFileCleanupResult.mockResolvedValue(undefined)
+    mocks.getAssistantSettings.mockReturnValue({})
+    mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
+    mocks.autoRenameTopic.mockResolvedValue(undefined)
+  })
+
+  const detachedSnapshot = () =>
+    ({
+      id: ASSISTANT_MSG_ID,
+      assistantId: 'assistant-1',
+      role: 'assistant',
+      topicId: TOPIC_ID,
+      blocks: [],
+      status: AssistantMessageStatus.PENDING,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      askId: 'user-1'
+    }) as unknown as Message
+
+  async function createDetachedHarness(store: TestStore) {
+    const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
+    const executionState = new AssistantExecutionState(detachedSnapshot(), [])
+    const manager = new BlockManager({
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: vi.fn().mockResolvedValue(undefined),
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      resendAttemptId: ATTEMPT,
+      executionState,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn()
+    })
+    const callbacks = createCallbacks({
+      blockManager: manager,
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      topicId: TOPIC_ID,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
+        saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT),
+      assistant: assistantStub,
+      executionState
+    })
+    return { manager, callbacks, executionState }
+  }
+
+  it('detached success: text flow completes DB final with attempt, Redux stays absent without orphans', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    // Redux has no assistant message (window-outside semantic member).
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+    const { callbacks, executionState } = await createDetachedHarness(store)
+
+    await callbacks.onLLMResponseCreated()
+    await callbacks.onTextStart()
+    await callbacks.onTextChunk('hello ')
+    await callbacks.onTextChunk('hello world')
+    await callbacks.onTextComplete('hello world')
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+
+    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
+    const [topicId, updates, blocks, deletes, attempt] = mocks.updateMessageAndBlocks.mock.calls[0] as unknown as [
+      string,
+      Record<string, any>,
+      Array<Record<string, any>>,
+      string[],
+      string
+    ]
+    expect(topicId).toBe(TOPIC_ID)
+    expect(updates.id).toBe(ASSISTANT_MSG_ID)
+    expect(updates.status).toBe(AssistantMessageStatus.SUCCESS)
+    expect(attempt).toBe(ATTEMPT)
+    expect(deletes).toEqual([])
+    expect(blocks.length).toBeGreaterThan(0)
+    expect(updates.blocks).toEqual(blocks.map((b) => b.id))
+    expect(blocks[0].content).toBe('hello world')
+    expect(blocks[0].status).toBe(MessageBlockStatus.SUCCESS)
+    // Local execution fact converged.
+    expect(executionState.getMessage().status).toBe(AssistantMessageStatus.SUCCESS)
+    expect(executionState.getMissingBlockIds()).toEqual([])
+    // Redux never injected: no message, no id, no orphan blocks.
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+    const ids = (store.getState().messages as any).messageIdsByTopic?.[TOPIC_ID] ?? []
+    expect(ids).not.toContain(ASSISTANT_MSG_ID)
+    const orphans = Object.values(store.getState().messageBlocks.entities).filter(
+      (b: any) => b?.messageId === ASSISTANT_MSG_ID
+    )
+    expect(orphans).toEqual([])
+  })
+
+  it('detached onError: persists error/paused final with attempt, Redux stays absent', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    const { saveUpdatesToDB, saveUpdatedBlockToDB } = await import('../messageThunk')
+    const executionState = new AssistantExecutionState(detachedSnapshot(), [])
+    const saveUpdatesForExec = (mid: string, tid: string, mu: any, blocks: any[]) =>
+      saveUpdatesToDB(mid, tid, mu, blocks, ATTEMPT)
+    const saveSingleForExec = (bid: string | null, mid: string, tid: string, gs: any, _attempt?: string, local?: any) =>
+      saveUpdatedBlockToDB(bid, mid, tid, gs, ATTEMPT, local ?? (bid ? executionState.getBlock(bid) : undefined))
+    const manager = new BlockManager({
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: saveSingleForExec as any,
+      saveUpdatesToDB: saveUpdatesForExec as any,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      resendAttemptId: ATTEMPT,
+      executionState,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn()
+    })
+    const callbacks = createCallbacks({
+      blockManager: manager,
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      topicId: TOPIC_ID,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      saveUpdatesToDB: saveUpdatesForExec as any,
+      saveFinalUpdatesAtomically: vi.fn().mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} }),
+      assistant: assistantStub,
+      executionState
+    })
+
+    await callbacks.onLLMResponseCreated()
+    await callbacks.onTextStart()
+    await callbacks.onTextChunk('partial')
+    await callbacks.onError(new Error('boom-detached') as any)
+
+    // Error/paused final persisted through the execution attempt carrier.
+    expect(mocks.updateBlocks).toHaveBeenCalled()
+    for (const call of mocks.updateBlocks.mock.calls) {
+      expect((call as unknown[])[2]).toBe(ATTEMPT)
+    }
+    // Local execution fact carries the terminal error state (message + error block).
+    expect(executionState.getMessage().status).toBe(AssistantMessageStatus.ERROR)
+    expect(executionState.getBlockIds().length).toBeGreaterThanOrEqual(2)
+    // Redux never injected.
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+    const orphans = Object.values(store.getState().messageBlocks.entities).filter(
+      (b: any) => b?.messageId === ASSISTANT_MSG_ID
+    )
+    expect(orphans).toEqual([])
+  })
+
+  it('evicted mid-execution still completes local DB final without re-injection', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: ['b-evict'] })
+    seedBlocks(store, [textBlock({ id: 'b-evict', content: 'partial', status: MessageBlockStatus.STREAMING })])
+    const { saveFinalMessageAndBlocksAtomically } = await import('../messageThunk')
+    const { createAssistantExecutionState } = await import('@renderer/services/messageStreaming/executionState')
+    const executionState = createAssistantExecutionState(
+      store.getState().messages.entities[ASSISTANT_MSG_ID],
+      store.getState as any
+    )
+    const manager = new BlockManager({
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: vi.fn().mockResolvedValue(undefined),
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      resendAttemptId: ATTEMPT,
+      executionState,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn()
+    })
+    const callbacks = createCallbacks({
+      blockManager: manager,
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      topicId: TOPIC_ID,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      saveFinalUpdatesAtomically: (mid: string, tid: string, mu: any, blocks: any[]) =>
+        saveFinalMessageAndBlocksAtomically(tid, mid, mu, blocks, ATTEMPT),
+      assistant: assistantStub,
+      executionState
+    })
+    manager.activeBlockInfo = { id: 'b-evict', type: MessageBlockType.MAIN_TEXT }
+    // Evict the topic projection mid-generation (disposable removal only).
+    store.dispatch(messagesSlice.actions.removeMessages({ topicId: TOPIC_ID, messageIds: [ASSISTANT_MSG_ID] }))
+    store.dispatch(messageBlocksSlice.actions.removeManyBlocks(['b-evict']))
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+
+    // Local throttled chunk still advances the execution fact after eviction.
+    manager.smartBlockUpdate('b-evict', { content: 'evicted partial' }, MessageBlockType.MAIN_TEXT)
+    expect((executionState.getBlock('b-evict') as { content?: unknown })?.content).toBe('evicted partial')
+
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, successResponse)
+
+    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledTimes(1)
+    const [, updates, blocks, , attempt] = mocks.updateMessageAndBlocks.mock.calls[0] as unknown as [
+      string,
+      Record<string, any>,
+      Array<Record<string, any>>,
+      string[],
+      string
+    ]
+    expect(updates.status).toBe(AssistantMessageStatus.SUCCESS)
+    expect(blocks.map((b) => b.id)).toEqual(['b-evict'])
+    expect(blocks[0].status).toBe(MessageBlockStatus.SUCCESS)
+    expect(attempt).toBe(ATTEMPT)
+    // No re-injection after eviction.
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]).toBeUndefined()
+    expect(store.getState().messageBlocks.entities['b-evict']).toBeUndefined()
+  })
+})
+
+describe('BlockManager local-first: transition + patch order/dedup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+  })
+
+  const mkBlock = (id: string, content: string): MessageBlock =>
+    ({
+      id,
+      messageId: ASSISTANT_MSG_ID,
+      type: MessageBlockType.MAIN_TEXT,
+      content,
+      status: MessageBlockStatus.STREAMING,
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }) as MessageBlock
+
+  it('detached transitions keep order/dedup locally without Redux injection; patches apply locally first', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    const saveUpdates = vi.fn().mockResolvedValue(undefined)
+    const executionState = new AssistantExecutionState(
+      {
+        id: ASSISTANT_MSG_ID,
+        assistantId: 'assistant-1',
+        role: 'assistant',
+        topicId: TOPIC_ID,
+        blocks: [],
+        status: AssistantMessageStatus.PENDING,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      } as unknown as Message,
+      []
+    )
+    const dispatchSpy = vi.fn(store.dispatch as any)
+    const manager = new BlockManager({
+      dispatch: dispatchSpy as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: vi.fn().mockResolvedValue(undefined),
+      saveUpdatesToDB: saveUpdates,
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      resendAttemptId: ATTEMPT,
+      executionState,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn()
+    })
+
+    await manager.handleBlockTransition(mkBlock('b1', 'one'), MessageBlockType.MAIN_TEXT)
+    await manager.handleBlockTransition(mkBlock('b2', 'two'), MessageBlockType.MAIN_TEXT)
+    // Duplicate transition dedups the ordered reference.
+    await manager.handleBlockTransition(mkBlock('b1', 'one'), MessageBlockType.MAIN_TEXT)
+    expect(executionState.getBlockIds()).toEqual(['b1', 'b2'])
+    expect(saveUpdates).toHaveBeenCalledTimes(3)
+    expect(saveUpdates.mock.calls[1][2]).toEqual({ blocks: ['b1', 'b2'] })
+    expect(dispatchSpy).not.toHaveBeenCalled()
+
+    // Throttled patch updates local fact immediately (DB mirror is throttled).
+    manager.smartBlockUpdate('b1', { content: 'one-patched' }, MessageBlockType.MAIN_TEXT)
+    expect((executionState.getBlock('b1') as { content?: unknown })?.content).toBe('one-patched')
+    expect(executionState.getOrderedBlocks().map((b) => b.id)).toEqual(['b1', 'b2'])
+  })
+
+  it('loaded transitions mirror to Redux while keeping the same local order', async () => {
+    const store = createTestStore()
+    storeHolder.current = store
+    seedMessage(store, { blocks: [] })
+    const executionState = new AssistantExecutionState(store.getState().messages.entities[ASSISTANT_MSG_ID], [])
+    const manager = new BlockManager({
+      dispatch: store.dispatch as any,
+      getState: store.getState as any,
+      saveUpdatedBlockToDB: vi.fn().mockResolvedValue(undefined),
+      saveUpdatesToDB: vi.fn().mockResolvedValue(undefined),
+      assistantMsgId: ASSISTANT_MSG_ID,
+      topicId: TOPIC_ID,
+      executionState,
+      throttledBlockUpdate: vi.fn(),
+      flushThrottledBlockUpdate: vi.fn(),
+      cancelThrottledBlockUpdate: vi.fn()
+    })
+    await manager.handleBlockTransition(mkBlock('b-loaded', 'hi'), MessageBlockType.MAIN_TEXT)
+    expect(executionState.getBlockIds()).toEqual(['b-loaded'])
+    expect(store.getState().messages.entities[ASSISTANT_MSG_ID]?.blocks).toEqual(['b-loaded'])
+    expect(store.getState().messageBlocks.entities['b-loaded']).toBeDefined()
   })
 })

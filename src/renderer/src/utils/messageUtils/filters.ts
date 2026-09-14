@@ -1,3 +1,5 @@
+import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
+import { resolveOverlayBlock } from '@renderer/services/requestBlockOverlay'
 import store from '@renderer/store'
 import { messageBlocksSelectors } from '@renderer/store/messageBlock'
 import type { Message } from '@renderer/types/newMessage' // Assuming correct Message type import
@@ -42,13 +44,16 @@ export function filterUserRoleStartMessages(messages: Message[]): Message[] {
 
 /**
  * Filters out messages considered "empty" based on block content.
+ *
+ * Accepts an optional request-local block overlay shadowing Redux for
+ * authority IDs (semantic resend/regenerate). Absent overlay = legacy path.
  */
-export function filterEmptyMessages(messages: Message[]): Message[] {
+export function filterEmptyMessages(messages: Message[], overlay?: BlockOverlay): Message[] {
   return messages.filter((message) => {
     const state = store.getState()
     let hasContent = false
     for (const blockId of message.blocks) {
-      const block = messageBlocksSelectors.selectById(state, blockId)
+      const block = resolveOverlayBlock(overlay, blockId) ?? messageBlocksSelectors.selectById(state, blockId)
       if (!block) continue
       if (block.type === MessageBlockType.MAIN_TEXT && !isEmpty((block as any).content?.trim())) {
         // Type assertion needed
@@ -154,7 +159,7 @@ export function filterAdjacentUserMessaegs(messages: Message[]): Message[] {
  * Filters out assistant messages that only contain ErrorBlocks and their associated user messages.
  * An assistant message is associated with a user message via the askId field.
  */
-export function filterErrorOnlyMessagesWithRelated(messages: Message[]): Message[] {
+export function filterErrorOnlyMessagesWithRelated(messages: Message[], overlay?: BlockOverlay): Message[] {
   const state = store.getState()
 
   // Find all assistant messages that only contain ErrorBlocks
@@ -168,7 +173,7 @@ export function filterErrorOnlyMessagesWithRelated(messages: Message[]): Message
     // Check if this assistant message only contains ErrorBlocks
     let hasNonErrorBlock = false
     for (const blockId of message.blocks) {
-      const block = messageBlocksSelectors.selectById(state, blockId)
+      const block = resolveOverlayBlock(overlay, blockId) ?? messageBlocksSelectors.selectById(state, blockId)
       if (!block) continue
 
       if (block.type !== MessageBlockType.ERROR) {

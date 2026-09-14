@@ -916,6 +916,8 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
       }
       case IpcChannel.ChatDb_ReorderMessages:
       case IpcChannel.ChatDb_ResetMessagesForResend:
+      case IpcChannel.ChatDb_ResendUserMessages:
+      case IpcChannel.ChatDb_RegenerateAssistantMessage:
       case IpcChannel.ChatDb_DeleteMessagesWithSegments:
       case IpcChannel.ChatDb_PasteMessagesToTopic:
       case IpcChannel.ChatDb_CloneMessagesToTopic:

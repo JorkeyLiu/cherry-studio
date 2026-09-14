@@ -3,6 +3,7 @@ import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
+import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import type { Assistant } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { createNoModelError } from '@renderer/utils/noModelError'
@@ -13,13 +14,33 @@ import { getDefaultModel } from './AssistantService'
 
 const logger = loggerService.withContext('ConversationService')
 
+/**
+ * Authority user snapshot for semantic resend/regenerate request conversion.
+ * Carries the Main-authoritative user message + blocks so the last-user
+ * content resolves without injecting window-outside blocks into Redux.
+ */
+export interface AuthorityUserSnapshot {
+  message: Message
+  blocks: BlockOverlay
+}
+
 export class ConversationService {
   static async prepareMessagesForModel(
     messages: Message[],
     assistant: Assistant,
-    topicId?: string
+    topicId?: string,
+    authorityUser?: AuthorityUserSnapshot
   ): Promise<{ modelMessages: ModelMessage[]; uiMessages: Message[] }> {
-    const lastUserMessage = findLast(messages, (m) => m.role === 'user')
+    let effectiveMessages = messages
+    let overlay: BlockOverlay | undefined
+    if (authorityUser) {
+      overlay = authorityUser.blocks
+      const hasUser = effectiveMessages.some((m) => m.id === authorityUser.message.id)
+      if (!hasUser) {
+        effectiveMessages = [...effectiveMessages, authorityUser.message]
+      }
+    }
+    const lastUserMessage = findLast(effectiveMessages, (m) => m.role === 'user')
     if (!lastUserMessage) {
       return {
         modelMessages: [],
@@ -29,11 +50,14 @@ export class ConversationService {
 
     // R-06: attempt freshness-gated closure cache for single resolver semantics (centralized helper).
     // Structural + anchor + generation/fingerprint freshness; fail-closed to viewport when freshness cannot be proven.
-    let contextMessages: Message[] = messages
-    if (topicId) {
+    // Authority overlay never routes through the closure cache: the closure is
+    // keyed on loaded-projection fingerprints and must not swallow the
+    // request-local authority user.
+    let contextMessages: Message[] = effectiveMessages
+    if (topicId && !authorityUser) {
       const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
       if (anchorGroupKey) {
-        const currentFp = computeClosureFingerprint(messages as any)
+        const currentFp = computeClosureFingerprint(effectiveMessages as any)
         const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp)
         if (fresh) {
           contextMessages = fresh.messages as unknown as Message[]
@@ -41,7 +65,7 @@ export class ConversationService {
       }
     }
     // Use the unified pipeline — same filtering as computeContextInfo
-    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(contextMessages, assistant, topicId)
+    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(contextMessages, assistant, topicId, overlay)
     const model = assistant.model || getDefaultModel()
     if (!model) {
       // Unconfigured model slot: emit the stable NoModelError marker so
@@ -58,7 +82,7 @@ export class ConversationService {
     }
 
     return {
-      modelMessages: await convertMessagesToSdkMessages(uiMessages, model),
+      modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay),
       uiMessages
     }
   }

@@ -66,7 +66,7 @@ describe('ConversationService closure-sourced', () => {
     }
     const viewport: any = [{ id: 'u2', role: 'user' }]
     const result = await ConversationService.prepareMessagesForModel(viewport, assistant, 't1')
-    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistant, 't1')
+    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistant, 't1', undefined)
     expect(result.uiMessages).toBeDefined()
   })
 
@@ -89,7 +89,7 @@ describe('ConversationService closure-sourced', () => {
       anchorGroupKey: 'u1'
     })
     await ConversationService.prepareMessagesForModel(viewport, assistant, 't1')
-    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1')
+    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined)
   })
 
   it('does not use closure when anchor mismatched (no silent substitution)', async () => {
@@ -125,7 +125,7 @@ describe('ConversationService closure-sourced', () => {
       anchorGroupKey: 'u1'
     })
     await ConversationService.prepareMessagesForModel(viewport, assistant, 't1')
-    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1')
+    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined)
   })
 
   it('contextCount change alone does not affect closure cache hit (stable anchor)', async () => {
@@ -161,7 +161,7 @@ describe('ConversationService closure-sourced', () => {
     const viewport: any = [{ id: 'u1', role: 'user' }]
     // first call with contextCount 5
     await ConversationService.prepareMessagesForModel(viewport, assistantV1, 't1')
-    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV1, 't1')
+    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV1, 't1', undefined)
     vi.clearAllMocks()
     computeMock.mockReturnValue({
       uiMessages: viewport,
@@ -172,6 +172,6 @@ describe('ConversationService closure-sourced', () => {
     })
     // second call with different contextCount but same anchor => still hits cache
     await ConversationService.prepareMessagesForModel(viewport, assistantV2, 't1')
-    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV2, 't1')
+    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV2, 't1', undefined)
   })
 })

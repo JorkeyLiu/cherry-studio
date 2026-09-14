@@ -2,9 +2,10 @@ import { loggerService } from '@logger'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { updateOneBlock, upsertOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
-import type { MessageBlock } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
+import { AssistantExecutionState, createAssistantExecutionState } from './executionState'
 import type { WriteBarrier } from './writeBarrier'
 
 const logger = loggerService.withContext('BlockManager')
@@ -35,7 +36,8 @@ interface BlockManagerDependencies {
     messageId: string,
     topicId: string,
     getState: () => RootState,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    localBlock?: MessageBlock
   ) => Promise<void>
   saveUpdatesToDB: (
     messageId: string,
@@ -54,8 +56,23 @@ interface BlockManagerDependencies {
   resendAttemptId?: string
   /** Execution write barrier for F2 finalization quiescence (optional). */
   barrier?: WriteBarrier
+  /**
+   * Request-local execution state. Every generation owns one instance;
+   * Redux is only an optional mirror. When omitted, one is created from
+   * `initialMessage`/`initialBlocks` or the current Redux lookup so no
+   * construction point falls back to Redux-only.
+   */
+  executionState?: AssistantExecutionState
+  initialMessage?: Message
+  initialBlocks?: MessageBlock[]
   // 节流器管理从外部传入
-  throttledBlockUpdate: (id: string, blockUpdate: any, resendAttemptId?: string, barrier?: WriteBarrier) => void
+  throttledBlockUpdate: (
+    id: string,
+    blockUpdate: any,
+    resendAttemptId?: string,
+    barrier?: WriteBarrier,
+    shouldMirrorToRedux?: () => boolean
+  ) => void
   /**
    * Flush (never drop) a block's pending throttled trailing write, preserving
    * the last state. Falls back to cancel only when no flush fn is provided
@@ -67,6 +84,7 @@ interface BlockManagerDependencies {
 
 export class BlockManager {
   private deps: BlockManagerDependencies
+  private readonly exec: AssistantExecutionState
   /** Block ids this execution sent to the throttler (F2 flush scope). */
   private readonly touchedThrottledBlocks = new Set<string>()
 
@@ -76,7 +94,58 @@ export class BlockManager {
 
   constructor(dependencies: BlockManagerDependencies) {
     this.deps = dependencies
+    if (dependencies.executionState) {
+      this.exec = dependencies.executionState
+    } else if (dependencies.initialMessage) {
+      this.exec = new AssistantExecutionState(dependencies.initialMessage, dependencies.initialBlocks ?? [])
+    } else {
+      try {
+        const reduxMsg = dependencies.getState()?.messages?.entities?.[dependencies.assistantMsgId] as
+          | Message
+          | undefined
+        if (reduxMsg) {
+          this.exec = createAssistantExecutionState(reduxMsg, dependencies.getState as never)
+        } else {
+          this.exec = new AssistantExecutionState(
+            {
+              id: dependencies.assistantMsgId,
+              topicId: dependencies.topicId,
+              role: 'assistant',
+              blocks: []
+            } as unknown as Message,
+            []
+          )
+        }
+      } catch {
+        this.exec = new AssistantExecutionState(
+          {
+            id: dependencies.assistantMsgId,
+            topicId: dependencies.topicId,
+            role: 'assistant',
+            blocks: []
+          } as unknown as Message,
+          []
+        )
+      }
+    }
   }
+
+  /** Request-local execution fact for this generation (never the Redux mirror). */
+  get executionState(): AssistantExecutionState {
+    return this.exec
+  }
+
+  /** Live loaded check: the message may be evicted mid-generation, so never cache. */
+  private isLoaded(): boolean {
+    try {
+      return !!this.deps.getState()?.messages?.entities?.[this.deps.assistantMsgId]
+    } catch {
+      return false
+    }
+  }
+
+  /** Runtime mirror gate for throttled trailing writes (DB always runs). */
+  liveLoaded = (): boolean => this.isLoaded()
 
   /**
    * Track an execution persistence promise on the barrier when present.
@@ -150,6 +219,16 @@ export class BlockManager {
     blockType: MessageBlockType,
     isComplete: boolean = false
   ) {
+    // Local-first: the execution state is updated before any Redux mirror.
+    const existing = this.exec.getBlock(blockId)
+    let localAfter: MessageBlock | undefined
+    if (existing) {
+      localAfter = this.exec.applyBlockPatch(blockId, changes) ?? existing
+    } else {
+      const stub = { id: blockId, messageId: this.deps.assistantMsgId, type: blockType, ...changes } as MessageBlock
+      this.exec.upsertBlock(stub)
+      localAfter = this.exec.getBlock(blockId)
+    }
     const isBlockTypeChanged = this._lastBlockType !== null && this._lastBlockType !== blockType
     if (isBlockTypeChanged || isComplete) {
       // 如果块类型改变，则排空上一个块的节流更新（保留最后状态）
@@ -163,21 +242,29 @@ export class BlockManager {
       } else {
         this._activeBlockInfo = { id: blockId, type: blockType } // 更新活跃块信息
       }
-      this.deps.dispatch(updateOneBlock({ id: blockId, changes }))
+      if (this.isLoaded()) {
+        this.deps.dispatch(updateOneBlock({ id: blockId, changes }))
+      }
       this.trackSave(
         this.deps.saveUpdatedBlockToDB(
           blockId,
           this.deps.assistantMsgId,
           this.deps.topicId,
           this.deps.getState,
-          this.deps.resendAttemptId
+          this.deps.resendAttemptId,
+          localAfter
         )
       )
       this._lastBlockType = blockType
     } else {
       this._activeBlockInfo = { id: blockId, type: blockType } // 更新活跃块信息
       this.touchedThrottledBlocks.add(blockId)
-      this.deps.throttledBlockUpdate(blockId, changes, this.deps.resendAttemptId, this.deps.barrier)
+      this.deps.throttledBlockUpdate(blockId, changes, this.deps.resendAttemptId, this.deps.barrier, () =>
+        this.isLoaded()
+      )
+      // Throttled streaming chunks also advance the local execution fact
+      // immediately; the throttler only mirrors to Redux/DB on its cadence.
+      void localAfter
     }
   }
 
@@ -189,43 +276,46 @@ export class BlockManager {
     this._lastBlockType = newBlockType
     this._activeBlockInfo = { id: newBlock.id, type: newBlockType } // 设置新的活跃块信息
 
-    this.deps.dispatch(
-      newMessagesActions.updateMessage({
-        topicId: this.deps.topicId,
-        messageId: this.deps.assistantMsgId,
-        updates: { blockInstruction: { id: newBlock.id } }
-      })
-    )
-    this.deps.dispatch(upsertOneBlock(newBlock))
-    this.deps.dispatch(
-      newMessagesActions.upsertBlockReference({
-        messageId: this.deps.assistantMsgId,
-        blockId: newBlock.id,
-        status: newBlock.status,
-        blockType: newBlock.type
-      })
-    )
+    // Local-first: execution fact owns the ordered reference.
+    this.exec.upsertBlock(newBlock)
+    this.exec.appendBlockReference(newBlock.id)
+    const localBlock = this.exec.getBlock(newBlock.id) ?? newBlock
+    const orderedIds = this.exec.getBlockIds()
 
-    const currentState = this.deps.getState()
-    const updatedMessage = currentState.messages.entities[this.deps.assistantMsgId]
-    if (updatedMessage) {
-      this.touchedThrottledBlocks.add(newBlock.id)
-      const save = this.deps.saveUpdatesToDB(
-        this.deps.assistantMsgId,
-        this.deps.topicId,
-        { blocks: updatedMessage.blocks },
-        [newBlock],
-        this.deps.resendAttemptId
+    // Redux is an optional live mirror: only when the message is still loaded.
+    // Never inject a window-outside/detached message or orphan blocks.
+    if (this.isLoaded()) {
+      this.deps.dispatch(
+        newMessagesActions.updateMessage({
+          topicId: this.deps.topicId,
+          messageId: this.deps.assistantMsgId,
+          updates: { blockInstruction: { id: newBlock.id } }
+        })
       )
-      if (this.deps.barrier && isThenable(save)) {
-        await this.deps.barrier.track(save)
-      } else {
-        await save
-      }
+      this.deps.dispatch(upsertOneBlock(localBlock))
+      this.deps.dispatch(
+        newMessagesActions.upsertBlockReference({
+          messageId: this.deps.assistantMsgId,
+          blockId: newBlock.id,
+          status: newBlock.status,
+          blockType: newBlock.type
+        })
+      )
+    }
+
+    // DB streaming writes use the local execution fact, never the Redux entity.
+    this.touchedThrottledBlocks.add(newBlock.id)
+    const save = this.deps.saveUpdatesToDB(
+      this.deps.assistantMsgId,
+      this.deps.topicId,
+      { blocks: orderedIds },
+      [localBlock],
+      this.deps.resendAttemptId
+    )
+    if (this.deps.barrier && isThenable(save)) {
+      await this.deps.barrier.track(save)
     } else {
-      logger.error(
-        `[handleBlockTransition] Failed to get updated message ${this.deps.assistantMsgId} from state for DB save.`
-      )
+      await save
     }
   }
 

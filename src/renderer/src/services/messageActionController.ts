@@ -1,4 +1,5 @@
 import { loggerService } from '@logger'
+import type { RootState } from '@renderer/store'
 import store from '@renderer/store'
 import { mergeRequestAssistantSnapshot } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Model } from '@renderer/types'
@@ -53,20 +54,60 @@ export function resolveMessageEntity(target: ActionTarget): Message | null {
   return msg
 }
 
+/**
+ * Single unified assistant lookup: array id match first, then the
+ * `defaultAssistant` fallback when its id matches. All controller resolvers
+ * go through this seam so event-time lookup never diverges per call site.
+ */
+export function findAssistantById(state: RootState, assistantId: string): Assistant | undefined {
+  const fromList = state.assistants.assistants.find((a) => a.id === assistantId)
+  if (fromList) return fromList
+  const fallback = state.assistants.defaultAssistant
+  if (fallback && fallback.id === assistantId) return fallback
+  return undefined
+}
+
+/**
+ * Single unified event-time effective-model resolver.
+ *
+ * Priority mirrors the normal send/UI effective model (`useAssistant`):
+ * explicit per-message model (regenerate/self-model path only) >
+ * `assistant.model` > `assistant.defaultModel` > global `llm.defaultModel`.
+ *
+ * Audit note: `useAssistant` (`assistant?.model ?? assistant?.defaultModel ??
+ * defaultModel`) is the canonical UI chain and the only existing helper that
+ * covers `assistant.defaultModel`. `ApiService`/`parameterBuilder`/
+ * `ConversationService`/`MessagesService` resolve `assistant.model ||
+ * getDefaultModel()` and skip `assistant.defaultModel` — that narrower chain
+ * is intentionally NOT copied here; the `useAssistant` chain wins so
+ * event-time resend/regenerate never diverges from what the UI sends.
+ */
+export function resolveEffectiveModel(state: RootState, fresh: Assistant, explicitModel?: Model): Model | undefined {
+  if (explicitModel) return explicitModel
+  return fresh.model ?? fresh.defaultModel ?? state.llm?.defaultModel
+}
+
 export function resolveAssistantSnapshot(params: {
   topicId: string
   assistantId: string
   explicitModel?: Model | null
 }): ResolvedAssistant | null {
   const state = store.getState()
-  const fresh = state.assistants.assistants.find((a) => a.id === params.assistantId)
+  const fresh = findAssistantById(state, params.assistantId)
   if (!fresh) {
     logger.silly(`[resolveAssistantSnapshot] missing assistant ${params.assistantId}`)
     return null
   }
   const explicitModel = params.explicitModel ?? undefined
-  const origAssistant: Assistant = explicitModel ? { ...fresh, model: explicitModel } : fresh
-  const snapshot = mergeRequestAssistantSnapshot(origAssistant, fresh, params.topicId)
+  // User resend passes explicitModel null so the global default fallback
+  // applies; regenerate passes the per-message model only when its modelId is
+  // truthy (see resolveAssistantSnapshotForMessage). The snapshot always
+  // carries the resolved effective model when one exists; when all slots are
+  // empty the snapshot stays model-less and the thunk fails closed.
+  const effectiveModel = resolveEffectiveModel(state, fresh, explicitModel)
+  const origAssistant: Assistant = effectiveModel ? { ...fresh, model: effectiveModel } : fresh
+  const merged = mergeRequestAssistantSnapshot(origAssistant, fresh, params.topicId)
+  const snapshot: Assistant = effectiveModel ? { ...merged, model: effectiveModel } : merged
   return { fresh, snapshot, explicitModel }
 }
 
@@ -134,6 +175,8 @@ export function resolveEditTarget(target: ActionTarget): Message | null {
 
 export const messageActionController = {
   resolveMessageEntity,
+  findAssistantById,
+  resolveEffectiveModel,
   resolveAssistantSnapshot,
   resolveAssistantSnapshotForMessage,
   resolveAnswerGroup,

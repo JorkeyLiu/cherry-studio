@@ -75,9 +75,11 @@ import type {
   PasteMessagesToTopicResponse,
   PurgeExpiredTopicsRequest,
   PurgeExpiredTopicsResponse,
+  RegenerateAssistantMessageRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
   ReplaceSegmentMembershipResponse,
+  ResendUserMessagesRequest,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
@@ -87,6 +89,7 @@ import type {
   SearchMessagesResponse,
   SelectAnswerMessageRequest,
   SelectAnswerMessageResponse,
+  SemanticResendResponse,
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
   TopicExistsRequest,
@@ -172,6 +175,8 @@ export interface ChatDbApi {
   // Phase 5.1B: compound mutations
   cloneMessagesToTopic(request: CloneMessagesToTopicRequest): Promise<ChatDbResult<CloneMessagesToTopicResponse>>
   resetMessagesForResend(request: ResetMessagesForResendRequest): Promise<ChatDbResult<ResetMessagesForResendResponse>>
+  resendUserMessages?(request: ResendUserMessagesRequest): Promise<ChatDbResult<SemanticResendResponse>>
+  regenerateAssistantMessage?(request: RegenerateAssistantMessageRequest): Promise<ChatDbResult<SemanticResendResponse>>
   deleteMessagesWithSegments(
     request: DeleteMessagesWithSegmentsRequest
   ): Promise<ChatDbResult<DeleteMessagesWithSegmentsResponse>>
@@ -882,6 +887,30 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const request: ResetMessagesForResendRequest = cloneForWire({ topicId, messages, blockIdsToDelete })
     const result = unwrap(await this.api.resetMessagesForResend(request))
     dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async resendUserMessages(request: ResendUserMessagesRequest): Promise<SemanticResendResponse> {
+    if (!this.api.resendUserMessages) {
+      throw new Error('ChatDb API unavailable: resendUserMessages not exposed')
+    }
+    const wireRequest: ResendUserMessagesRequest = cloneForWire(
+      request as unknown as JsonObject
+    ) as unknown as ResendUserMessagesRequest
+    const result = unwrap(await this.api.resendUserMessages(wireRequest))
+    dispatchTopicUpdatedAt(wireRequest.topicId)
+    return result
+  }
+
+  async regenerateAssistantMessage(request: RegenerateAssistantMessageRequest): Promise<SemanticResendResponse> {
+    if (!this.api.regenerateAssistantMessage) {
+      throw new Error('ChatDb API unavailable: regenerateAssistantMessage not exposed')
+    }
+    const wireRequest: RegenerateAssistantMessageRequest = cloneForWire(
+      request as unknown as JsonObject
+    ) as unknown as RegenerateAssistantMessageRequest
+    const result = unwrap(await this.api.regenerateAssistantMessage(wireRequest))
+    dispatchTopicUpdatedAt(wireRequest.topicId)
     return result
   }
 

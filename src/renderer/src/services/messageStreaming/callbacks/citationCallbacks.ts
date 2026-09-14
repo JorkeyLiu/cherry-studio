@@ -6,6 +6,7 @@ import { createCitationBlock } from '@renderer/utils/messageUtils/create'
 import { findMainTextBlocks } from '@renderer/utils/messageUtils/find'
 
 import type { BlockManager } from '../BlockManager'
+import type { AssistantExecutionState } from '../executionState'
 
 const logger = loggerService.withContext('CitationCallbacks')
 
@@ -13,10 +14,22 @@ interface CitationCallbacksDependencies {
   blockManager: BlockManager
   assistantMsgId: string
   getState: any
+  executionState?: AssistantExecutionState
 }
 
 export const createCitationCallbacks = (deps: CitationCallbacksDependencies) => {
   const { blockManager, assistantMsgId, getState } = deps
+  const executionState = deps.executionState ?? blockManager.executionState
+
+  const findLocalMainTextBlock = () => {
+    for (const id of executionState.getBlockIds()) {
+      const block = executionState.getBlock(id)
+      if (block && (block as { type?: string }).type === MessageBlockType.MAIN_TEXT) {
+        return block
+      }
+    }
+    return undefined
+  }
 
   // 内部维护的状态
   let citationBlockId: string | null = null
@@ -80,10 +93,14 @@ export const createCitationCallbacks = (deps: CitationCallbacksDependencies) => 
         }
         blockManager.smartBlockUpdate(blockId, changes, MessageBlockType.CITATION, true)
 
+        // Local-first: detached executions hold the main-text block only locally.
+        const localMain = findLocalMainTextBlock()
         const state = getState()
-        const existingMainTextBlocks = findMainTextBlocks(state.messages.entities[assistantMsgId])
-        if (existingMainTextBlocks.length > 0) {
-          const existingMainTextBlock = existingMainTextBlocks[0]
+        const reduxMainList = findMainTextBlocks(state.messages.entities[assistantMsgId])
+        const existingMainTextBlock = (localMain ?? reduxMainList[0]) as
+          | { id: string; citationReferences?: Array<Record<string, unknown>> }
+          | undefined
+        if (existingMainTextBlock) {
           const currentRefs = existingMainTextBlock.citationReferences || []
           const mainTextChanges = {
             citationReferences: [...currentRefs, { blockId, citationBlockSource: llmWebSearchResult.source }]
@@ -106,10 +123,13 @@ export const createCitationCallbacks = (deps: CitationCallbacksDependencies) => 
         )
         citationBlockId = citationBlock.id
 
+        const localMain = findLocalMainTextBlock()
         const state = getState()
-        const existingMainTextBlocks = findMainTextBlocks(state.messages.entities[assistantMsgId])
-        if (existingMainTextBlocks.length > 0) {
-          const existingMainTextBlock = existingMainTextBlocks[0]
+        const reduxMainList = findMainTextBlocks(state.messages.entities[assistantMsgId])
+        const existingMainTextBlock = (localMain ?? reduxMainList[0]) as
+          | { id: string; citationReferences?: Array<Record<string, unknown>> }
+          | undefined
+        if (existingMainTextBlock) {
           const currentRefs = existingMainTextBlock.citationReferences || []
           const mainTextChanges = {
             citationReferences: [...currentRefs, { citationBlockId, citationBlockSource: llmWebSearchResult.source }]
