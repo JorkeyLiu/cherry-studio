@@ -56,7 +56,11 @@ vi.mock('@renderer/hooks/useTimer', () => ({
 }))
 
 vi.mock('@renderer/hooks/useTopic', () => ({
-  getTopicById: vi.fn()
+  TopicManager: { getTopic: vi.fn() }
+}))
+
+vi.mock('@renderer/utils/topicSnapshot', () => ({
+  loadWholeTopicSnapshot: vi.fn()
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
@@ -92,15 +96,19 @@ vi.mock('@renderer/services/NavigationService', () => ({
   default: { navigate: vi.fn() }
 }))
 
-vi.mock('antd', () => ({
-  Button: ({ children, ...props }: any) => (
-    <button {...props} type="button">
-      {children}
-    </button>
-  ),
-  Divider: () => <hr />,
-  Empty: { PRESENTED_IMAGE_SIMPLE: 'simple' }
-}))
+vi.mock('antd', () => {
+  const EmptyMock = () => null
+  ;(EmptyMock as any).PRESENTED_IMAGE_SIMPLE = 'simple'
+  return {
+    Button: ({ children, ...props }: any) => (
+      <button {...props} type="button">
+        {children}
+      </button>
+    ),
+    Divider: () => <hr />,
+    Empty: EmptyMock
+  }
+})
 
 vi.mock('@ant-design/icons', () => ({
   MessageOutlined: () => null
@@ -122,27 +130,43 @@ vi.mock('react-i18next', () => ({
 
 const { default: TopicMessages } = await import('../TopicMessages')
 const { default: SearchMessage } = await import('../SearchMessage')
-const { getTopicById } = await import('@renderer/hooks/useTopic')
+const { TopicManager } = await import('@renderer/hooks/useTopic')
+const { loadWholeTopicSnapshot } = await import('@renderer/utils/topicSnapshot')
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-const makeTopic = (id: string, messageCount: number): Topic =>
+const makeMessages = (id: string, messageCount: number) =>
+  Array.from({ length: messageCount }, (_, i) => ({
+    id: `${id}-msg-${i}`,
+    role: i % 2 === 0 ? 'user' : 'assistant',
+    content: `Message ${i}`,
+    topicId: id,
+    createdAt: new Date().toISOString(),
+    status: 'success',
+    blocks: []
+  })) as unknown as Message[]
+
+const makeTopic = (id: string): Topic =>
   ({
     id,
     name: `Topic ${id}`,
     assistantId: 'assistant-1',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    messages: Array.from({ length: messageCount }, (_, i) => ({
-      id: `${id}-msg-${i}`,
-      role: i % 2 === 0 ? 'user' : 'assistant',
-      content: `Message ${i}`,
-      topicId: id,
-      createdAt: new Date().toISOString(),
-      status: 'success',
-      blocks: []
-    }))
+    messages: []
   }) as unknown as Topic
+
+const snapshotOf = (topicId: string, messages: Message[]) => ({
+  messages,
+  blocks: [],
+  blocksById: new Map(),
+  snapshot: {
+    completeness: 'whole-topic',
+    topicId,
+    firstMessageId: messages[0]?.id,
+    lastMessageId: messages.at(-1)?.id
+  }
+})
 
 const makeMessage = (id: string, topicId: string): Message =>
   ({
@@ -163,8 +187,10 @@ describe('History entry rendering without EditModeProvider', () => {
   })
 
   it('TopicMessages renders MessageItem without EditModeProvider', async () => {
-    const topic = makeTopic('tp1', 2)
-    vi.mocked(getTopicById).mockResolvedValue(topic)
+    const topic = makeTopic('tp1')
+    const messages = makeMessages('tp1', 2)
+    vi.mocked(TopicManager.getTopic).mockResolvedValue(topic as any)
+    vi.mocked(loadWholeTopicSnapshot).mockResolvedValue(snapshotOf('tp1', messages) as any)
 
     const { getByTestId } = render(<TopicMessages topic={topic} />)
 
@@ -175,9 +201,9 @@ describe('History entry rendering without EditModeProvider', () => {
   })
 
   it('SearchMessage renders MessageItem without EditModeProvider', async () => {
-    const topic = makeTopic('tp2', 1)
+    const topic = makeTopic('tp2')
     const message = makeMessage('m-search', 'tp2')
-    vi.mocked(getTopicById).mockResolvedValue(topic)
+    vi.mocked(TopicManager.getTopic).mockResolvedValue(topic as any)
 
     const { getByTestId } = render(<SearchMessage message={message} />)
 

@@ -4,7 +4,7 @@ import SearchPopup from '@renderer/components/Popups/SearchPopup'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { getTopicById } from '@renderer/hooks/useTopic'
+import { TopicManager } from '@renderer/hooks/useTopic'
 import { getAssistantById } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { isGenerating, locateToMessage } from '@renderer/services/MessagesService'
@@ -16,7 +16,10 @@ import {
   subscribeDeletionGeneration
 } from '@renderer/services/topicDeletionInvalidation'
 import type { Topic } from '@renderer/types'
+import type { Message } from '@renderer/types/newMessage'
 import { classNames, runAsyncFunction } from '@renderer/utils'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
+import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import { Button, Divider, Empty } from 'antd'
 import { t } from 'i18next'
 import { Forward } from 'lucide-react'
@@ -36,6 +39,10 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
   const { setTimeoutTimer } = useTimer()
 
   const [topic, setTopic] = useState<Topic | undefined>(_topic)
+  // Caller-local whole-topic snapshot: complete ordered messages + blocks.
+  // Short-lived component state only; never dispatched into normal Redux.
+  const [snapshotMessages, setSnapshotMessages] = useState<Message[]>([])
+  const [snapshotBlocksById, setSnapshotBlocksById] = useState<SnapshotBlockMap>(() => new Map())
 
   useEffect(() => {
     if (!_topic) return
@@ -46,23 +53,41 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
     // Fail-closed before async fetch: already deleted topic must not publish
     if (getDeletionGeneration(topicId) !== 0 || isDeletionStale(topicId, captured)) {
       setTopic(undefined)
+      setSnapshotMessages([])
+      setSnapshotBlocksById(new Map())
       return
     }
 
     let cancelled = false
 
     void runAsyncFunction(async () => {
-      const fetched = await getTopicById(topicId)
-      if (cancelled) return
-      // Topic identity check plus deletion staleness/current state before publish
-      const fetchedId = (fetched as Topic | undefined)?.id
-      if (fetchedId !== topicId) {
+      try {
+        // Metadata-only read first: missing topic avoids the snapshot IPC.
+        const meta = await TopicManager.getTopic(topicId)
+        if (cancelled) return
+        if (!meta || meta.id !== topicId) {
+          return
+        }
+        if (isDeletionStale(topicId, captured) || getDeletionGeneration(topicId) !== 0) {
+          return
+        }
+        const snapshot = await loadWholeTopicSnapshot(topicId)
+        if (cancelled) return
+        // Topic identity check plus deletion staleness/current state before publish
+        if (snapshot.snapshot.topicId !== topicId) {
+          return
+        }
+        if (isDeletionStale(topicId, captured) || getDeletionGeneration(topicId) !== 0) {
+          return
+        }
+        setTopic(meta)
+        setSnapshotMessages(snapshot.messages)
+        setSnapshotBlocksById(snapshot.blocksById)
+      } catch {
+        // Fail-closed: missing/deleted topic or transient read failure must
+        // not publish a stale projection.
         return
       }
-      if (isDeletionStale(topicId, captured) || getDeletionGeneration(topicId) !== 0) {
-        return
-      }
-      setTopic(fetched)
     })
 
     return () => {
@@ -76,7 +101,11 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
   useEffect(() => {
     if (!_topic?.id) return
     const topicId = _topic.id
-    const clear = () => setTopic(undefined)
+    const clear = () => {
+      setTopic(undefined)
+      setSnapshotMessages([])
+      setSnapshotBlocksById(new Map())
+    }
     // Immediate check: already-deleted topic never renders
     if (getDeletionGeneration(topicId) !== 0) {
       clear()
@@ -104,7 +133,7 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
     return unsub
   }, [_topic?.id])
 
-  const isEmpty = (topic?.messages || []).length === 0
+  const isEmpty = snapshotMessages.length === 0
 
   if (!topic) {
     return null
@@ -123,9 +152,9 @@ const TopicMessages: FC<Props> = ({ topic: _topic, ...props }) => {
       <MessagesContainer {...props} ref={containerRef} onScroll={handleScroll}>
         {/* LOCK-105: message style is always bubble. */}
         <ContainerWrapper className="bubble">
-          {topic?.messages.map((message) => (
+          {snapshotMessages.map((message) => (
             <MessageWrapper key={message.id} className={classNames(['bubble', message.role])}>
-              <MessageItem message={message} topic={topic} hideMenuBar={true} />
+              <MessageItem message={message} topic={topic} hideMenuBar={true} snapshotBlocksById={snapshotBlocksById} />
               <Button
                 type="text"
                 size="middle"

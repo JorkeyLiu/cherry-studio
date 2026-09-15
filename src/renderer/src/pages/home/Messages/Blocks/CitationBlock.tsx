@@ -1,9 +1,10 @@
 import type { GroundingMetadata } from '@google/genai'
 import Spinner from '@renderer/components/Spinner'
 import type { RootState } from '@renderer/store'
-import { selectFormattedCitationsByBlockId } from '@renderer/store/messageBlock'
+import { formatCitationsFromBlock, selectFormattedCitationsByBlockId } from '@renderer/store/messageBlock'
 import { WEB_SEARCH_SOURCE } from '@renderer/types'
 import { type CitationMessageBlock, MessageBlockStatus } from '@renderer/types/newMessage'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import React, { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
@@ -11,9 +12,26 @@ import styled from 'styled-components'
 
 import CitationsList from '../CitationsList'
 
-function CitationBlock({ block }: { block: CitationMessageBlock }) {
+function CitationBlock({
+  block,
+  snapshotBlocksById
+}: {
+  block: CitationMessageBlock
+  /**
+   * Optional caller-local snapshot marker for history rendering.
+   * When provided, formatted citations derive directly from the `block`
+   * prop (already resolved from the snapshot) instead of the loaded Redux
+   * projection. Undefined preserves active-chat Redux behavior.
+   */
+  snapshotBlocksById?: SnapshotBlockMap
+}) {
   const { t } = useTranslation()
-  const formattedCitations = useSelector((state: RootState) => selectFormattedCitationsByBlockId(state, block.id))
+  const selectorCitations = useSelector((state: RootState) => selectFormattedCitationsByBlockId(state, block.id))
+  const snapshotCitations = useMemo(
+    () => (snapshotBlocksById ? formatCitationsFromBlock(block) : undefined),
+    [snapshotBlocksById, block]
+  )
+  const formattedCitations = snapshotBlocksById ? (snapshotCitations ?? []) : selectorCitations
   const { websearch } = useSelector((state: RootState) => state.runtime)
   const message = useSelector((state: RootState) => state.messages.entities[block.messageId])
   const userMessageId = message?.askId || block.messageId // 如果没有 askId 则回退到 messageId

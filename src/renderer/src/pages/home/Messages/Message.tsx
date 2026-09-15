@@ -16,6 +16,7 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, cn } from '@renderer/utils'
 import { scrollIntoView } from '@renderer/utils/dom'
 import { isMessageProcessing } from '@renderer/utils/messageUtils/is'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import type { Dispatch, FC, SetStateAction } from 'react'
 import React, { memo, useCallback, useEffect, useRef } from 'react'
 import styled from 'styled-components'
@@ -43,6 +44,12 @@ interface Props {
   isHorizontalMultiModelLayout?: boolean
   isEditMode?: boolean
   onGroupClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
+  /**
+   * Optional caller-local snapshot block map for history rendering.
+   * When provided, content/outline resolve blocks from the snapshot;
+   * undefined preserves the default active-chat Redux behavior.
+   */
+  snapshotBlocksById?: SnapshotBlockMap
 }
 
 /** Module-level stable reference — avoids creating a new [] on every render when editMode is null. */
@@ -69,7 +76,8 @@ const MessageItem: FC<Props> = ({
   isGroupContextMessage,
   isHorizontalMultiModelLayout = false,
   isEditMode = false,
-  onGroupClick
+  onGroupClick,
+  snapshotBlocksById
 }) => {
   const { assistant, setModel } = useAssistant(message.assistantId)
   const { isMultiSelectMode } = useChatContext(topic)
@@ -284,7 +292,7 @@ const MessageItem: FC<Props> = ({
         {!isEditing && (
           <>
             {!isMultiSelectMode && message.role === 'assistant' && showMessageOutline && (
-              <MessageOutline message={message} />
+              <MessageOutline message={message} snapshotBlocksById={snapshotBlocksById} />
             )}
             <MessageContentContainer
               className="message-content-container"
@@ -293,7 +301,7 @@ const MessageItem: FC<Props> = ({
                 overflowY: isHorizontalMultiModelLayout ? 'auto' : 'visible'
               }}>
               <MessageErrorBoundary>
-                <MessageContent message={message} />
+                <MessageContent message={message} snapshotBlocksById={snapshotBlocksById} />
               </MessageErrorBoundary>
             </MessageContentContainer>
             {showMenubar && (

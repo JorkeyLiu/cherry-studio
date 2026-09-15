@@ -11,6 +11,7 @@ import type {
 } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { isMainTextBlock, isMessageProcessing, isToolBlock, isVideoBlock } from '@renderer/utils/messageUtils/is'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { AnimatePresence, motion, type Variants } from 'motion/react'
 import React, { useMemo } from 'react'
 import { shallowEqual, useSelector } from 'react-redux'
@@ -69,6 +70,13 @@ interface Props {
   blocks: string[] // 可以接收块ID数组或MessageBlock数组
   messageStatus?: Message['status']
   message: Message
+  /**
+   * Optional caller-local snapshot block map for history rendering.
+   * When provided, blocks resolve from the snapshot in `message.blocks`
+   * order instead of the loaded Redux projection. Undefined preserves
+   * the default active-chat Redux behavior.
+   */
+  snapshotBlocksById?: SnapshotBlockMap
 }
 
 const isCompletedToolBlock = (block: MessageBlock): boolean => {
@@ -192,12 +200,26 @@ const groupSimilarBlocks = (
   }, [])
 }
 
-const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
+const MessageBlockRenderer: React.FC<Props> = ({ blocks, message, snapshotBlocksById }) => {
   // LOCK-003: Subscribe only to this message's blocks instead of the whole
   // entity map. `shallowEqual` keeps the subscription silent while an
   // unrelated block (another message's streaming block) commits, so only the
-  // owning message re-renders.
-  const renderedBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, blocks), shallowEqual)
+  // owning message re-renders. The selector stays mounted even for snapshot
+  // rendering so hook order is stable; its result is ignored when a snapshot
+  // map is provided.
+  const reduxBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, blocks), shallowEqual)
+  const snapshotBlocks = useMemo(() => {
+    if (!snapshotBlocksById) return undefined
+    const resolved: MessageBlock[] = []
+    for (const blockId of blocks) {
+      const block = snapshotBlocksById.get(blockId)
+      if (block) {
+        resolved.push(block)
+      }
+    }
+    return resolved
+  }, [snapshotBlocksById, blocks])
+  const renderedBlocks = snapshotBlocksById ? (snapshotBlocks ?? []) : reduxBlocks
   // Check if message is still processing
   const isProcessing = isMessageProcessing(message)
   const allowCollapseExecutionDetails = !(message.role === 'assistant' && isProcessing)
@@ -309,6 +331,7 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
                 // Pass only the ID string
                 citationBlockId={citationBlockId}
                 role={message.role}
+                snapshotBlocksById={snapshotBlocksById}
               />
             )
             break
@@ -323,7 +346,7 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
             blockComponent = <ToolBlock key={block.id} block={block} />
             break
           case MessageBlockType.CITATION:
-            blockComponent = <CitationBlock key={block.id} block={block} />
+            blockComponent = <CitationBlock key={block.id} block={block} snapshotBlocksById={snapshotBlocksById} />
             break
           case MessageBlockType.ERROR:
             blockComponent = <ErrorBlock key={block.id} block={block} message={message} />

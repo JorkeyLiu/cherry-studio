@@ -2,20 +2,22 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
- * Focused deletion invalidation for History TopicMessages local projection (LOCK-004).
+ * Focused deletion invalidation for History TopicMessages local snapshot (LOCK-004).
  * - Synchronous clear after permanent deletion (subscription)
- * - Stale async getTopicById guard during deletion
+ * - Stale async snapshot guard during deletion
  * - Unrelated topic preservation
- * - Normal non-deleted load
+ * - Normal non-deleted snapshot load (whole-topic snapshot + local blocks, no Redux injection)
  * - Soft-delete preserves (no bump)
  */
 
-const { getTopicByIdMock, navigateMock } = vi.hoisted(() => ({
-  getTopicByIdMock: vi.fn(),
+const { getTopicMock, loadWholeTopicSnapshotMock, navigateMock } = vi.hoisted(() => ({
+  getTopicMock: vi.fn(),
+  loadWholeTopicSnapshotMock: vi.fn(),
   navigateMock: vi.fn()
 }))
 
-vi.mock('@renderer/hooks/useTopic', () => ({ getTopicById: getTopicByIdMock }))
+vi.mock('@renderer/hooks/useTopic', () => ({ TopicManager: { getTopic: getTopicMock } }))
+vi.mock('@renderer/utils/topicSnapshot', () => ({ loadWholeTopicSnapshot: loadWholeTopicSnapshotMock }))
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
   default: () => ({ handleScroll: vi.fn(), containerRef: { current: null } })
 }))
@@ -55,7 +57,11 @@ vi.mock('antd', () => ({
 vi.mock('@ant-design/icons', () => ({ MessageOutlined: () => null }))
 vi.mock('lucide-react', () => ({ Forward: () => null }))
 vi.mock('@renderer/pages/home/Messages/Message', () => ({
-  default: ({ message }: any) => <div data-testid="message-item">{message.id}</div>
+  default: ({ message, snapshotBlocksById }: any) => (
+    <div data-testid="message-item" data-snapshot-blocks={snapshotBlocksById ? snapshotBlocksById.size : -1}>
+      {message.id}
+    </div>
+  )
 }))
 vi.mock('i18next', async (importOriginal) => {
   const actual = (await importOriginal()) as any
@@ -68,18 +74,34 @@ import {
   resetAllDeletionGenerationsForTests
 } from '@renderer/services/topicDeletionInvalidation'
 
-const makeTopic = (id: string, messages: any[] = []) =>
+const makeTopic = (id: string) =>
   ({
     id,
     name: `Topic ${id}`,
-    assistantId: 'assistant-1',
-    messages
+    assistantId: 'assistant-1'
   }) as any
 
 const makeMessages = (topicId: string) => [
-  { id: 'msg-1', role: 'user', topicId },
-  { id: 'msg-2', role: 'assistant', topicId }
+  { id: 'msg-1', role: 'user', topicId, blocks: ['b-1'] },
+  { id: 'msg-2', role: 'assistant', topicId, blocks: ['b-2'] }
 ]
+
+const makeBlocks = () => [
+  { id: 'b-1', messageId: 'msg-1', type: 'main_text', content: 'hello' },
+  { id: 'b-2', messageId: 'msg-2', type: 'main_text', content: 'world' }
+]
+
+const snapshotOf = (topicId: string, messages: any[], blocks: any[]) => ({
+  messages,
+  blocks,
+  blocksById: new Map(blocks.map((b) => [b.id, b])),
+  snapshot: {
+    completeness: 'whole-topic',
+    topicId,
+    firstMessageId: messages[0]?.id,
+    lastMessageId: messages.at(-1)?.id
+  }
+})
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -89,26 +111,33 @@ beforeEach(() => {
   if (!(window as any).keyv) {
     ;(window as any).keyv = { get: vi.fn(), set: vi.fn(), remove: vi.fn() }
   }
-  getTopicByIdMock.mockReset()
+  getTopicMock.mockReset()
+  loadWholeTopicSnapshotMock.mockReset()
 })
 
+const seedFetch = (topicId: string, messages: any[] = makeMessages(topicId)) => {
+  getTopicMock.mockResolvedValue(makeTopic(topicId))
+  loadWholeTopicSnapshotMock.mockResolvedValue(snapshotOf(topicId, messages, makeBlocks()))
+}
+
 describe('TopicMessages deletion invalidation (focused)', () => {
-  it('normal non-deleted load renders fetched messages', async () => {
-    const initial = makeTopic('topic-1', [])
-    const fetched = makeTopic('topic-1', makeMessages('topic-1'))
-    getTopicByIdMock.mockResolvedValue(fetched)
+  it('normal non-deleted load renders snapshot messages with local blocks and no Redux injection', async () => {
+    const initial = makeTopic('topic-1')
+    seedFetch('topic-1')
 
     render(<TopicMessages topic={initial} />)
 
-    await waitFor(() => expect(getTopicByIdMock).toHaveBeenCalledWith('topic-1'))
+    await waitFor(() => expect(getTopicMock).toHaveBeenCalledWith('topic-1'))
+    await waitFor(() => expect(loadWholeTopicSnapshotMock).toHaveBeenCalledWith('topic-1'))
     await waitFor(() => expect(screen.getAllByTestId('message-item')).toHaveLength(2))
     expect(screen.getAllByTestId('message-item')[0]).toHaveTextContent('msg-1')
+    // Local snapshot block map is injected (2 blocks), not Redux.
+    expect(screen.getAllByTestId('message-item')[0].getAttribute('data-snapshot-blocks')).toBe('2')
   })
 
   it('clears local topic state synchronously after permanent deletion (post-load)', async () => {
-    const initial = makeTopic('topic-1', [])
-    const fetched = makeTopic('topic-1', makeMessages('topic-1'))
-    getTopicByIdMock.mockResolvedValue(fetched)
+    const initial = makeTopic('topic-1')
+    seedFetch('topic-1')
 
     render(<TopicMessages topic={initial} />)
 
@@ -121,27 +150,27 @@ describe('TopicMessages deletion invalidation (focused)', () => {
     expect(screen.queryAllByTestId('message-item')).toHaveLength(0)
   })
 
-  it('rejects stale async getTopicById response when deletion occurs during fetch', async () => {
-    const initial = makeTopic('topic-1', [])
-    let resolveFetched!: (v: any) => void
-    const fetched = makeTopic('topic-1', makeMessages('topic-1'))
-    getTopicByIdMock.mockImplementation(
+  it('rejects stale async snapshot response when deletion occurs during fetch', async () => {
+    const initial = makeTopic('topic-1')
+    getTopicMock.mockResolvedValue(makeTopic('topic-1'))
+    let resolveSnapshot!: (v: any) => void
+    loadWholeTopicSnapshotMock.mockImplementation(
       () =>
         new Promise((resolve) => {
-          resolveFetched = resolve
+          resolveSnapshot = resolve
         })
     )
 
     render(<TopicMessages topic={initial} />)
 
     // Wait for effect to start fetch
-    await waitFor(() => expect(getTopicByIdMock).toHaveBeenCalledWith('topic-1'))
+    await waitFor(() => expect(getTopicMock).toHaveBeenCalledWith('topic-1'))
 
     // Deletion happens before async resolves
     bumpDeletionGeneration('topic-1')
 
     // Now resolve the stale fetch
-    resolveFetched(fetched)
+    resolveSnapshot(snapshotOf('topic-1', makeMessages('topic-1'), makeBlocks()))
 
     // Allow microtasks to run
     await new Promise((r) => setTimeout(r, 20))
@@ -150,13 +179,12 @@ describe('TopicMessages deletion invalidation (focused)', () => {
     expect(screen.queryByTestId('message-item')).not.toBeInTheDocument()
     expect(screen.queryAllByTestId('message-item')).toHaveLength(0)
     // Ensure only one call (no second publish)
-    expect(getTopicByIdMock).toHaveBeenCalledTimes(1)
+    expect(loadWholeTopicSnapshotMock).toHaveBeenCalledTimes(1)
   })
 
   it('preserves local projection when unrelated topic is deleted', async () => {
-    const initial = makeTopic('topic-1', [])
-    const fetched = makeTopic('topic-1', makeMessages('topic-1'))
-    getTopicByIdMock.mockResolvedValue(fetched)
+    const initial = makeTopic('topic-1')
+    seedFetch('topic-1')
 
     render(<TopicMessages topic={initial} />)
     await waitFor(() => expect(screen.getAllByTestId('message-item')).toHaveLength(2))
@@ -169,9 +197,8 @@ describe('TopicMessages deletion invalidation (focused)', () => {
   })
 
   it('soft-delete (no bump) preserves projection and normal behavior remains', async () => {
-    const initial = makeTopic('topic-1', [])
-    const fetched = makeTopic('topic-1', makeMessages('topic-1'))
-    getTopicByIdMock.mockResolvedValue(fetched)
+    const initial = makeTopic('topic-1')
+    seedFetch('topic-1')
 
     render(<TopicMessages topic={initial} />)
     await waitFor(() => expect(screen.getAllByTestId('message-item')).toHaveLength(2))
@@ -183,35 +210,26 @@ describe('TopicMessages deletion invalidation (focused)', () => {
 
   it('already-deleted before mount never publishes stale fetch', async () => {
     bumpDeletionGeneration('topic-1')
-    const initial = makeTopic('topic-1', [])
-    const fetched = makeTopic('topic-1', makeMessages('topic-1'))
-    getTopicByIdMock.mockResolvedValue(fetched)
+    const initial = makeTopic('topic-1')
+    seedFetch('topic-1')
 
     render(<TopicMessages topic={initial} />)
 
     await new Promise((r) => setTimeout(r, 20))
-    // getTopicById should not have been called or if called, result discarded and projection cleared
-    // With fail-closed before fetch, we expect no messages
+    // Fail-closed before fetch: no messages and no snapshot load publish
     expect(screen.queryByTestId('message-item')).not.toBeInTheDocument()
+    expect(loadWholeTopicSnapshotMock).not.toHaveBeenCalled()
   })
 
   it('identity mismatch (fetched id differs) is not published', async () => {
-    const initial = makeTopic('topic-1', [])
-    const wrong = makeTopic('topic-2', makeMessages('topic-2'))
-    getTopicByIdMock.mockResolvedValue(wrong)
+    const initial = makeTopic('topic-1')
+    getTopicMock.mockResolvedValue(makeTopic('topic-2'))
+    loadWholeTopicSnapshotMock.mockResolvedValue(snapshotOf('topic-2', makeMessages('topic-2'), makeBlocks()))
 
     render(<TopicMessages topic={initial} />)
 
     await new Promise((r) => setTimeout(r, 20))
-    // Should not show wrong topic's messages; projection remains without messages or cleared?
-    // At minimum, wrong identity must not be rendered as topic-1 messages
-    expect(
-      screen.queryAllByTestId('message-item').some((el) => el.textContent === 'msg-1' && wrong.id === 'topic-2')
-    ).toBeFalsy()
-    // Since initial topic had no messages, after rejected publish it shows empty or still initial (no msg)
-    // Ensure no messages from wrong topic appear? Our wrong messages are also msg-1/msg-2 but topic differs
-    // The guard discards, so no update; initial had empty messages, so still no history messages?
-    // But initial state is _topic (empty). After discard, it stays empty -> empty placeholder, no message-item
+    // Wrong identity must not be rendered as topic-1 messages
     expect(screen.queryByTestId('message-item')).not.toBeInTheDocument()
   })
 })

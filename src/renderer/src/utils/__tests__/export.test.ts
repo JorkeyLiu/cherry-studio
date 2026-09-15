@@ -76,10 +76,11 @@ vi.mock('@renderer/utils/topicSnapshot', () => ({
   loadWholeTopicSnapshot: vi.fn()
 }))
 
-// Mock TopicManager for legacy compat (no production export path should use it)
+// TopicManager mock without the removed whole-topic helper: no production
+// export path should load message windows.
 vi.mock('@renderer/hooks/useTopic', () => ({
   TopicManager: {
-    getTopicMessages: vi.fn()
+    getTopic: vi.fn()
   }
 }))
 
@@ -1104,7 +1105,7 @@ describe('topic snapshot exports (whole-topic, no Redux residency)', () => {
     mockTopicSnapshot([msg])
     const markdown = await topicToMarkdown(testTopic)
     expect(markdown).toContain('local-block-content')
-    expect(TopicManager.getTopicMessages).not.toHaveBeenCalled()
+    expect(TopicManager).not.toHaveProperty('getTopicMessages')
   })
 
   it('messagesToMarkdown with explicit snapshot blocks resolves local content', async () => {

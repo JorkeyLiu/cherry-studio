@@ -1,6 +1,6 @@
 import { loggerService } from '@logger'
 import SearchPopup from '@renderer/components/Popups/SearchPopup'
-import { getTopicById } from '@renderer/hooks/useTopic'
+import { TopicManager } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
@@ -130,7 +130,8 @@ export async function locateToMessageTarget(navigate: NavigateFunction, target: 
   await isGenerating()
 
   SearchPopup.hide()
-  const topic = await getTopicById(target.topicId)
+  // Metadata-only topic lookup: never loads a message window or snapshot.
+  const topic = await TopicManager.getTopic(target.topicId)
   if (!topic?.id) {
     window.toast.error(i18n.t('history.error.message_not_found'))
     return

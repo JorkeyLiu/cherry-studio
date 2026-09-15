@@ -1,9 +1,10 @@
 import Scrollbar from '@renderer/components/Scrollbar'
 import type { RootState } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import type { Message } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { scrollIntoView } from '@renderer/utils/dom'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import type { FC } from 'react'
 import React, { useMemo, useRef } from 'react'
 import { shallowEqual, useSelector } from 'react-redux'
@@ -16,6 +17,11 @@ import { createSlugger, extractTextFromNode } from '../Markdown/plugins/rehypeHe
 
 interface MessageOutlineProps {
   message: Message
+  /**
+   * Optional caller-local snapshot block map for history rendering.
+   * When provided, headings resolve from the snapshot instead of Redux.
+   */
+  snapshotBlocksById?: SnapshotBlockMap
 }
 
 interface HeadingItem {
@@ -24,12 +30,25 @@ interface HeadingItem {
   text: string
 }
 
-const MessageOutline: FC<MessageOutlineProps> = ({ message }) => {
+const MessageOutline: FC<MessageOutlineProps> = ({ message, snapshotBlocksById }) => {
   // LOCK-003: Subscribe only to this message's blocks instead of the whole
   // entity map; `shallowEqual` prevents re-renders when unrelated streaming
   // blocks commit, so heading re-parsing is scoped to this message's own
-  // main-text content changes.
-  const messageBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, message.blocks), shallowEqual)
+  // main-text content changes. The selector stays mounted for hook stability;
+  // its result is ignored when a snapshot map is provided.
+  const reduxBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, message.blocks), shallowEqual)
+  const snapshotBlocks = useMemo(() => {
+    if (!snapshotBlocksById) return undefined
+    const resolved: MessageBlock[] = []
+    for (const blockId of message.blocks) {
+      const block = snapshotBlocksById.get(blockId)
+      if (block) {
+        resolved.push(block)
+      }
+    }
+    return resolved
+  }, [snapshotBlocksById, message.blocks])
+  const messageBlocks = snapshotBlocksById ? (snapshotBlocks ?? []) : reduxBlocks
 
   const headings: HeadingItem[] = useMemo(() => {
     const mainTextBlocks = messageBlocks.filter((b) => b?.type === MessageBlockType.MAIN_TEXT)

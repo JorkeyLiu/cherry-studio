@@ -1,6 +1,6 @@
 import { HStack } from '@renderer/components/Layout'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
-import { getTopicById } from '@renderer/hooks/useTopic'
+import { TopicManager } from '@renderer/hooks/useTopic'
 import { default as MessageItem } from '@renderer/pages/home/Messages/Message'
 import { locateToMessage } from '@renderer/services/MessagesService'
 import NavigationService from '@renderer/services/NavigationService'
@@ -38,7 +38,8 @@ const SearchMessage: FC<Props> = ({ message, ...props }) => {
           setTopic(null)
           return
         }
-        const topic = await getTopicById(message.topicId)
+        // Metadata-only lookup: never loads a message window or snapshot.
+        const topic = await TopicManager.getTopic(message.topicId)
         // Re-check after async fetch — topic may have been deleted during fetch
         if (!topic || isDeletionStale(message.topicId, 0) || getDeletionGeneration(message.topicId) !== 0) {
           setTopic(null)

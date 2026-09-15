@@ -95,6 +95,9 @@ describe('HistoryPage selected message clearing (focused)', () => {
     await waitFor(() => expect(screen.getByTestId('trigger-select')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('trigger-select'))
     await waitFor(() => expect(screen.getByTestId('search-message-view')).toBeInTheDocument())
-    expect(dispatchMock).toHaveBeenCalled()
+    // Metadata-only selection: shows selected message without window/snapshot load.
+    expect(screen.getByTestId('search-message-view')).toHaveTextContent('msg-1')
+    expect(dispatchMock).not.toHaveBeenCalled()
+    expect(loadTopicMessagesThunkMock).not.toHaveBeenCalled()
   })
 })

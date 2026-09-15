@@ -6,7 +6,6 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import store from '@renderer/store'
 import { updateTopic } from '@renderer/store/assistants'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import { setNewlyRenamedTopics, setRenamingTopics } from '@renderer/store/runtime'
 import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Topic } from '@renderer/types'
@@ -70,14 +69,6 @@ export function useTopic(assistant: Assistant, topicId?: string) {
 
 export function getTopic(assistant: Assistant, topicId: string) {
   return assistant?.topics.find((topic) => topic.id === topicId)
-}
-
-export async function getTopicById(topicId: string) {
-  const assistants = store.getState().assistants.assistants
-  const topics = assistants.map((assistant) => assistant.topics).flat()
-  const topic = topics.find((topic) => topic.id === topicId)
-  const messages = await TopicManager.getTopicMessages(topicId)
-  return { ...topic, messages } as Topic
 }
 
 /**
@@ -222,25 +213,15 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
 // 只有静态方法,没必要用class，可以export {}
 
 export const TopicManager = {
+  /**
+   * Metadata-only topic lookup from the loaded Redux projection.
+   * Never loads messages, blocks, windows, or snapshots.
+   */
   async getTopic(id: string) {
     return store
       .getState()
       .assistants.assistants.flatMap((a) => a.topics)
       .find((t) => t.id === id)
-  },
-
-  /**
-   * 加载并返回指定话题的消息
-   */
-  async getTopicMessages(id: string) {
-    const topic = await TopicManager.getTopic(id)
-    if (!topic) return []
-
-    await store.dispatch(loadTopicMessagesThunk(id))
-
-    // 从 messages 投影按序读取（SQLite -> typed IPC -> messages Redux），
-    // assistants 中的 topic.messages 已被 reducers 剥离，不能作为消息来源
-    return selectMessagesForTopic(store.getState(), id)
   },
 
   async removeTopic(id: string) {

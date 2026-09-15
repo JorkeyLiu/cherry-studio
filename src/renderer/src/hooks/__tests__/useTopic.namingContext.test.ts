@@ -31,6 +31,7 @@ vi.mock('@renderer/i18n', () => ({
   default: { t: (key: string) => (key === 'chat.default.topic.name' ? 'New Topic' : key) }
 }))
 
+import { loadTopicMessagesThunk } from '@renderer/store/thunk/messageThunk'
 import { MessageBlockType } from '@renderer/types/newMessage'
 
 import { autoRenameTopic, TopicManager } from '../useTopic'
@@ -86,19 +87,19 @@ describe('autoRenameTopic — bounded naming authority', () => {
 
   it('uses naming context (not TopicManager message load) and summarizes latest ≤5', async () => {
     dbServiceMocks.fetchTopicNamingContext.mockResolvedValue(namingContext())
-    const loadSpy = vi.spyOn(TopicManager, 'getTopicMessages')
 
     await autoRenameTopic(assistant, 'topic-1')
 
     expect(dbServiceMocks.fetchTopicNamingContext).toHaveBeenCalledExactlyOnceWith('topic-1')
-    expect(loadSpy).not.toHaveBeenCalled()
+    // Misleading whole-topic helper is removed; naming never loads windows.
+    expect(TopicManager).not.toHaveProperty('getTopicMessages')
+    expect(loadTopicMessagesThunk).not.toHaveBeenCalled()
     expect(summaryMock).toHaveBeenCalledOnce()
     const args = summaryMock.mock.calls[0][0]
     expect(args.messages.map((m: any) => m.id)).toEqual(['m1', 'm2'])
     expect(args.blocksById.get('b1').content).toContain('First message')
     expect(persistMock).toHaveBeenCalledOnce()
     expect(dispatchMock).toHaveBeenCalled()
-    loadSpy.mockRestore()
   })
 
   it('window-size-independent: authority count gates summary even when latest is 5 of many', async () => {

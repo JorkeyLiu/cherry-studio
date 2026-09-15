@@ -7,16 +7,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  * - Locate navigation prevented after deletion.
  * - Normal selected-message behavior preserved when not deleted.
  * - Soft-delete preserves.
+ * - Metadata-only lookup: TopicManager.getTopic only, no snapshot/window load.
  */
 
-const { getTopicByIdMock, locateToMessageMock, navigateMock, toastErrorMock } = vi.hoisted(() => ({
-  getTopicByIdMock: vi.fn(),
-  locateToMessageMock: vi.fn(),
-  navigateMock: vi.fn(),
-  toastErrorMock: vi.fn()
-}))
+const { getTopicMock, loadSnapshotMock, loadWindowMock, locateToMessageMock, navigateMock, toastErrorMock } =
+  vi.hoisted(() => ({
+    getTopicMock: vi.fn(),
+    loadSnapshotMock: vi.fn(),
+    loadWindowMock: vi.fn(),
+    locateToMessageMock: vi.fn(),
+    navigateMock: vi.fn(),
+    toastErrorMock: vi.fn()
+  }))
 
-vi.mock('@renderer/hooks/useTopic', () => ({ getTopicById: getTopicByIdMock }))
+vi.mock('@renderer/hooks/useTopic', () => ({ TopicManager: { getTopic: getTopicMock } }))
+vi.mock('@renderer/utils/topicSnapshot', () => ({ loadWholeTopicSnapshot: loadSnapshotMock }))
+vi.mock('@renderer/store/thunk/messageThunk', () => ({ loadTopicMessagesThunk: loadWindowMock }))
 vi.mock('@renderer/services/MessagesService', () => ({ locateToMessage: locateToMessageMock }))
 vi.mock('@renderer/services/NavigationService', () => ({ default: { navigate: navigateMock } }))
 vi.mock('@renderer/pages/home/Messages/Message', () => ({
@@ -66,16 +72,20 @@ beforeEach(() => {
   vi.clearAllMocks()
   resetAllDeletionGenerationsForTests()
   ;(window as any).toast = { error: toastErrorMock }
-  getTopicByIdMock.mockResolvedValue(makeTopic('topic-1'))
+  getTopicMock.mockResolvedValue(makeTopic('topic-1'))
 })
 
 describe('SearchMessage deletion invalidation (focused)', () => {
-  it('renders normally when not deleted and locate navigates', async () => {
+  it('renders normally when not deleted and locate navigates with metadata-only lookup', async () => {
     const message = makeMessage('msg-1', 'topic-1')
     render(<SearchMessage message={message} />)
 
     await waitFor(() => expect(screen.getByTestId('search-message-view')).toBeInTheDocument())
     expect(screen.getByTestId('message-item')).toHaveTextContent('msg-1')
+    expect(getTopicMock).toHaveBeenCalledWith('topic-1')
+    // Metadata-only: no snapshot or window load
+    expect(loadSnapshotMock).not.toHaveBeenCalled()
+    expect(loadWindowMock).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByTestId('search-message-locate'))
     expect(locateToMessageMock).toHaveBeenCalledTimes(1)
@@ -106,7 +116,7 @@ describe('SearchMessage deletion invalidation (focused)', () => {
     // Fresh instance already stale at mount should not render
     resetAllDeletionGenerationsForTests()
     bumpDeletionGeneration('topic-1')
-    getTopicByIdMock.mockResolvedValue(makeTopic('topic-1'))
+    getTopicMock.mockResolvedValue(makeTopic('topic-1'))
     render(<SearchMessage message={message} />)
     await new Promise((r) => setTimeout(r, 10))
     expect(screen.queryAllByTestId('search-message-view')).toHaveLength(0)
@@ -135,7 +145,7 @@ describe('SearchMessage deletion invalidation (focused)', () => {
 
   it('locate guard blocks navigation when already stale before click', async () => {
     const message = makeMessage('msg-1', 'topic-1')
-    getTopicByIdMock.mockResolvedValue(makeTopic('topic-1'))
+    getTopicMock.mockResolvedValue(makeTopic('topic-1'))
     const utils = render(<SearchMessage message={message} />)
     await waitFor(() => expect(utils.getByTestId('search-message-view')).toBeInTheDocument())
     bumpDeletionGeneration('topic-1')

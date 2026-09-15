@@ -1,5 +1,6 @@
 import { getModelUniqId } from '@renderer/services/ModelService'
 import type { Message } from '@renderer/types/newMessage'
+import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { Flex } from 'antd'
 import { isEmpty } from 'lodash'
 import React from 'react'
@@ -8,9 +9,15 @@ import styled from 'styled-components'
 import MessageBlockRenderer from './Blocks'
 interface Props {
   message: Message
+  /**
+   * Optional caller-local snapshot block map for history rendering.
+   * When provided, blocks resolve from the snapshot; undefined preserves
+   * the default active-chat Redux behavior.
+   */
+  snapshotBlocksById?: SnapshotBlockMap
 }
 
-const MessageContent: React.FC<Props> = ({ message }) => {
+const MessageContent: React.FC<Props> = ({ message, snapshotBlocksById }) => {
   return (
     <>
       {!isEmpty(message.mentions) && (
@@ -20,7 +27,7 @@ const MessageContent: React.FC<Props> = ({ message }) => {
           ))}
         </Flex>
       )}
-      <MessageBlockRenderer blocks={message.blocks} message={message} />
+      <MessageBlockRenderer blocks={message.blocks} message={message} snapshotBlocksById={snapshotBlocksById} />
     </>
   )
 }

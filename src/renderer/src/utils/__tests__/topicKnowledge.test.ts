@@ -15,10 +15,10 @@ vi.mock('@renderer/pages/home/Messages/MessageMenubar', () => ({
   default: {}
 }))
 
-// Legacy compat mock — no production knowledge path should use it
+// No production knowledge path should load message windows.
 vi.mock('@renderer/hooks/useTopic', () => ({
   TopicManager: {
-    getTopicMessages: vi.fn()
+    getTopic: vi.fn()
   }
 }))
 
@@ -96,8 +96,9 @@ describe('Topic Knowledge Functions', () => {
 
     it('should handle TopicManager mock correctly', async () => {
       const { TopicManager } = await import('@renderer/hooks/useTopic')
-      expect(TopicManager).toHaveProperty('getTopicMessages')
-      expect(typeof TopicManager.getTopicMessages).toBe('function')
+      expect(TopicManager).toHaveProperty('getTopic')
+      expect(typeof TopicManager.getTopic).toBe('function')
+      expect(TopicManager).not.toHaveProperty('getTopicMessages')
     })
   })
 
@@ -143,7 +144,7 @@ describe('Topic Knowledge Functions', () => {
       expect(stats.files).toBe(1)
       expect(loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
       expect(loadWholeTopicSnapshot).toHaveBeenCalledWith('test-topic-1')
-      expect(TopicManager.getTopicMessages).not.toHaveBeenCalled()
+      expect(TopicManager).not.toHaveProperty('getTopicMessages')
     })
   })
 
@@ -185,7 +186,7 @@ describe('Topic Knowledge Functions', () => {
       expect(result.files).toHaveLength(1)
       expect(result.files[0]).toMatchObject({ id: 'f2' })
       expect(loadWholeTopicSnapshot).toHaveBeenCalledTimes(1)
-      expect(TopicManager.getTopicMessages).not.toHaveBeenCalled()
+      expect(TopicManager).not.toHaveProperty('getTopicMessages')
     })
   })
 })
