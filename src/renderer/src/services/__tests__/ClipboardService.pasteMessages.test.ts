@@ -18,13 +18,20 @@
  *   - copy/cut semantics, file deltas, and undo payload shapes preserved
  */
 
+import type { CutPasteUndoAction, GroupAnchor } from '@renderer/types/editMode'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType, UserMessageStatus } from '@renderer/types/newMessage'
+import type { TopicSegment } from '@renderer/types/topicSegment'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────────
 
-/** Structural view of the undo actions ClipboardService pushes (type-only). */
+/**
+ * Structural view of the undo actions ClipboardService pushes (type-only).
+ * Mirrors the `paste` / `cut_paste` shapes: cut-only fields stay optional so
+ * `paste` actions typecheck, while `cut_paste` tests narrow to the exact
+ * `CutPasteUndoAction` via type guards below.
+ */
 interface UndoActionLike {
   type: string
   targetTopicId: string
@@ -32,12 +39,9 @@ interface UndoActionLike {
   targetInsertIntent?: { kind: string; messageId?: string }
   insertedMessageIds: string[]
   sourceTopicId?: string
-  sourceGroupAnchors?: Array<{
-    messages: Message[]
-    blocks: MessageBlock[]
-    positionIndex: number
-    anchorMessageId: string | null
-  }>
+  sourceRootIds?: CutPasteUndoAction['sourceRootIds']
+  sourceGroupAnchors?: GroupAnchor[]
+  sourceSegmentSnapshots?: TopicSegment[]
 }
 
 const { mocks } = vi.hoisted(() => ({
@@ -47,6 +51,7 @@ const { mocks } = vi.hoisted(() => ({
     upsertSegment: vi.fn(),
     updateFileCount: vi.fn(),
     deleteMessagesFromDB: vi.fn(),
+    executeDeleteMessagesWithDependents: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     selectMessagesForTopic: vi.fn(),
     messagesReceived: vi.fn((p: { topicId: string; messages: Message[] }) => ({
@@ -86,7 +91,8 @@ vi.mock('@renderer/services/db', () => ({
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
-  deleteMessagesFromDB: mocks.deleteMessagesFromDB
+  deleteMessagesFromDB: mocks.deleteMessagesFromDB,
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents
 }))
 
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
@@ -418,7 +424,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.pushUndoAction).not.toHaveBeenCalled()
   })
 
-  it('cut paste keeps the batch insertion AND the batched source deletion semantics', async () => {
+  it('cut paste keeps the batch insertion AND the single semantic source deletion', async () => {
     // Source topic 'topic-2' holds the cut group; target topic 'topic-1' the paste point.
     const cutMsg = createUserMessage({ id: 'cut-0', topicId: 'topic-2' })
     const cutBlock = createTextBlock(cutMsg.id, { id: 'cutb' })
@@ -431,7 +437,24 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     storeState.messages.entities['cut-0'] = cutMsg
     storeState.messages.messageIdsByTopic['topic-2'] = ['cut-0']
     storeState.messageBlocks.entities['cutb'] = cutBlock
-    mocks.deleteMessagesFromDB.mockResolvedValue(emptyCleanup)
+    const authorityAnchors = [
+      {
+        messages: [cutMsg],
+        blocks: [cutBlock],
+        positionIndex: 0,
+        anchorMessageId: null,
+        loadedMessageIds: ['cut-0']
+      }
+    ]
+    const authoritySegments = [{ id: 'seg-src', topicId: 'topic-2', name: 'Src', messageIds: ['cut-0'] }]
+    mocks.executeDeleteMessagesWithDependents.mockResolvedValue({
+      response: { deletedMessageIds: ['cut-0'] },
+      undoParts: {
+        groupAnchors: authorityAnchors,
+        segmentSnapshots: authoritySegments,
+        fileReferenceDeltas: []
+      }
+    })
 
     const { pasteMessages } = await import('../ClipboardService')
     await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
@@ -440,23 +463,157 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
-    // Source deletion happens once with the cut ids; cleanup consumed once.
-    expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-2', ['cut-0'])
-    expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(emptyCleanup)
-    expect(mocks.removeMessages).toHaveBeenCalledExactlyOnceWith({
-      topicId: 'topic-2',
-      messageIds: ['cut-0']
-    })
+    // Source deletion is ONE semantic transaction with stable MEMBER roots
+    // (all complete clipboard member IDs, deduped authority order); Main
+    // expands user dependents and handles orphan roots directly.
+    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      expect.any(Function),
+      'topic-2',
+      ['cut-0']
+    )
+    expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
+    // The helper owns cleanup/convergence — the service issues no direct
+    // projection or segment mutations for the source.
+    expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
+    expect(mocks.removeMessages).not.toHaveBeenCalled()
+    expect(mocks.removeManyBlocks).not.toHaveBeenCalled()
+    expect(mocks.collectSegmentSnapshots).not.toHaveBeenCalled()
+    expect(mocks.syncSegmentsAfterMessageDeletion).not.toHaveBeenCalled()
     expect(mocks.clearClipboard).toHaveBeenCalledTimes(1)
-    // CutPasteUndoAction keeps its shape: the real per-group anchor builder
-    // captured the cut source group before deletion.
+    // CutPasteUndoAction keeps its shape: source anchors/segments come from
+    // the authority undo parts (full material, never loaded-derived), plus
+    // the stable member roots needed by redo.
     const undoAction = mocks.pushUndoAction.mock.calls[0][0]
     expect(undoAction.type).toBe('cut_paste')
     expect(undoAction.sourceTopicId).toBe('topic-2')
+    expect(undoAction.sourceGroupAnchors).toEqual(authorityAnchors)
+    expect(undoAction.sourceSegmentSnapshots).toEqual(authoritySegments)
+    expect(undoAction.sourceRootIds).toEqual(['cut-0'])
+  })
+
+  it('cut paste sends ALL complete member IDs as stable roots (multi-member group, deduped authority order)', async () => {
+    // Group u1 = user u1 + assistants a1/a2; clipboard item carries the full
+    // authority member set with originalAskId 'u1'.
+    const u1 = createUserMessage({ id: 'u1', topicId: 'topic-2' })
+    const a1 = createAssistantMessage('a1', 'u1')
+    a1.topicId = 'topic-2'
+    const a2 = createAssistantMessage('a2', 'u1')
+    a2.topicId = 'topic-2'
+    storeState.clipboard = {
+      mode: 'cut',
+      items: [
+        {
+          originalAskId: 'u1',
+          messages: [u1, a1, a2],
+          blocks: [],
+          positionIndex: 0
+        }
+      ],
+      sourceTopicId: 'topic-2',
+      segmentSnapshots: []
+    }
+    mocks.executeDeleteMessagesWithDependents.mockResolvedValue({
+      response: { deletedMessageIds: ['u1', 'a1', 'a2'] },
+      undoParts: {
+        groupAnchors: [
+          { messages: [u1, a1, a2], blocks: [], positionIndex: 0, anchorMessageId: null, loadedMessageIds: ['u1'] }
+        ],
+        segmentSnapshots: [],
+        fileReferenceDeltas: []
+      }
+    })
+
+    const { pasteMessages } = await import('../ClipboardService')
+    await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    // All member IDs — not only originalAskId — travel as stable roots.
+    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      expect.any(Function),
+      'topic-2',
+      ['u1', 'a1', 'a2']
+    )
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0]
+    expect(undoAction.type).toBe('cut_paste')
+    expect(undoAction.sourceRootIds).toEqual(['u1', 'a1', 'a2'])
     expect(undoAction.sourceGroupAnchors).toHaveLength(1)
-    const anchors = undoAction.sourceGroupAnchors ?? []
-    expect(anchors[0].messages[0].id).toBe('cut-0')
-    expect(anchors[0].anchorMessageId).toBeNull()
+  })
+
+  it('cut paste deletes an orphan-assistant group via all member roots (no user-root expansion)', async () => {
+    // Orphan group: assistants a1/a2 share askId 'orphan-ask' with no user
+    // message. originalAskId alone ('orphan-ask') belongs to no topic row;
+    // only the member IDs are valid stable roots.
+    const a1 = createAssistantMessage('a1', 'orphan-ask')
+    a1.topicId = 'topic-2'
+    const a2 = createAssistantMessage('a2', 'orphan-ask')
+    a2.topicId = 'topic-2'
+    storeState.clipboard = {
+      mode: 'cut',
+      items: [
+        {
+          originalAskId: 'orphan-ask',
+          messages: [a1, a2],
+          blocks: [],
+          positionIndex: 0
+        }
+      ],
+      sourceTopicId: 'topic-2',
+      segmentSnapshots: []
+    }
+    mocks.executeDeleteMessagesWithDependents.mockResolvedValue({
+      response: { deletedMessageIds: ['a1', 'a2'] },
+      undoParts: {
+        groupAnchors: [
+          { messages: [a1, a2], blocks: [], positionIndex: 0, anchorMessageId: null, loadedMessageIds: [] }
+        ],
+        segmentSnapshots: [],
+        fileReferenceDeltas: []
+      }
+    })
+
+    const { pasteMessages } = await import('../ClipboardService')
+    await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      expect.any(Function),
+      'topic-2',
+      ['a1', 'a2']
+    )
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0]
+    expect(undoAction.type).toBe('cut_paste')
+    expect(undoAction.sourceRootIds).toEqual(['a1', 'a2'])
+    const orphanAnchors = undoAction.sourceGroupAnchors
+    expect(orphanAnchors).toBeDefined()
+    expect(orphanAnchors?.[0]?.messages.map((m) => m.id)).toEqual(['a1', 'a2'])
+  })
+
+  it('cut paste tolerates source-delete failure: insertion stands, clipboard clears, undo carries empty source anchors', async () => {
+    const cutMsg = createUserMessage({ id: 'cut-0', topicId: 'topic-2' })
+    storeState.clipboard = {
+      mode: 'cut',
+      items: [makeClipboardItem(cutMsg, [], 0)],
+      sourceTopicId: 'topic-2',
+      segmentSnapshots: []
+    }
+    storeState.messages.entities['cut-0'] = cutMsg
+    storeState.messages.messageIdsByTopic['topic-2'] = ['cut-0']
+    mocks.executeDeleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+
+    const { pasteMessages } = await import('../ClipboardService')
+    const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    // The successful insertion is preserved (existing swallow semantics).
+    expect(count).toBe(1)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
+    expect(mocks.clearClipboard).toHaveBeenCalledTimes(1)
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0]
+    expect(undoAction.type).toBe('cut_paste')
+    expect(undoAction.sourceGroupAnchors).toEqual([])
+    expect(undoAction.sourceSegmentSnapshots).toEqual([])
+    expect(undoAction.sourceRootIds).toEqual([])
   })
 
   it('file blocks produce per-file count deltas (copy semantics preserved)', async () => {
@@ -496,6 +653,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     expect(mocks.updateFileCount).not.toHaveBeenCalled()
     expect(mocks.upsertSegment).not.toHaveBeenCalled()
+    expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
     expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
     // ...and zero Redux commits.
     expect(mocks.messagesReceived).not.toHaveBeenCalled()

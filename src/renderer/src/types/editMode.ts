@@ -126,6 +126,14 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   targetInsertIntent?: InsertMessageGroupIntent
   /** Source topic ID */
   sourceTopicId: string
+  /**
+   * Stable member roots sent to the semantic delete at paste time: all
+   * complete clipboard member message IDs (deduped, authority order).
+   * Redo re-issues exactly these roots (Main re-expands user dependents).
+   * Optional for backward compatibility with legacy in-memory actions;
+   * redo fails closed when source restoration is needed but roots are absent.
+   */
+  sourceRootIds?: string[]
   /** Per-group anchors for restoring source groups to their original positions */
   sourceGroupAnchors: GroupAnchor[]
   /** Snapshots of affected source segments before deletion (for undo source segment restoration) */

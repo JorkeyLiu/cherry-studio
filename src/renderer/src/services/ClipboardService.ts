@@ -1,16 +1,11 @@
 import { loggerService } from '@logger'
+import { getMessageGroups } from '@renderer/hooks/useMessageGroup'
 import { dbService } from '@renderer/services/db'
-import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
-import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
+import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
-import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
-import {
-  collectSegmentSnapshots,
-  collectWholeSelectedSegmentsForClipboard,
-  syncSegmentsAfterMessageDeletion
-} from '@renderer/store/thunk/topicSegmentThunk'
+import { executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
 import { addSegment } from '@renderer/store/topicSegment'
 import { pushUndoAction } from '@renderer/store/undoStack'
 import type {
@@ -26,6 +21,8 @@ import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from 
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
+import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
+import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import type { InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -63,19 +60,6 @@ function calculateLocalInsertIndex(messages: Message[], targetMessageId: string)
 }
 
 /**
- * Sort group IDs by the position of their first message in the messages array.
- */
-function sortGroupIdsByPosition(messages: Message[], groupIds: string[]): string[] {
-  return [...groupIds].sort((a, b) => {
-    const aMessages = messages.filter((m) => m.askId === a || m.id === a)
-    const bMessages = messages.filter((m) => m.askId === b || m.id === b)
-    const aIndex = aMessages.length > 0 ? messages.findIndex((m) => m.id === aMessages[0].id) : -1
-    const bIndex = bMessages.length > 0 ? messages.findIndex((m) => m.id === bMessages[0].id) : -1
-    return aIndex - bIndex
-  })
-}
-
-/**
  * Find the first message after `positionIndex` whose ID is not in `excludedIds`.
  * Returns the message ID, or null if no such message exists.
  */
@@ -89,203 +73,195 @@ function findAnchorAfterPosition(messages: Message[], positionIndex: number, exc
 }
 
 /**
- * Build per-group anchors for undo positioning.
- * Each group gets its own anchor so non-contiguous selections
- * can be restored to their exact original positions.
+ * Authority-complete clipboard payload for copy/cut under windowed loading.
+ *
+ * Resolves the selected stable group IDs against a caller-local whole-topic
+ * snapshot (never published to Redux) using the canonical grouping semantics
+ * (`getMessageGroups`: user keys own ID, assistants join by askId with an
+ * orphan-askId fallback group, system keys own ID; any other role forms no
+ * selectable group). Ordering and `positionIndex` come from authority topic
+ * order, blocks come from the snapshot-local block map (so outside-loaded
+ * members are complete), and segment inclusion comes from the
+ * authority-enriched segment catalog (a segment is included only when ALL its
+ * authority message IDs are selected — completeness is never inferred from
+ * loaded positions).
+ *
+ * Returns null when no selected group resolves or any authority read fails —
+ * callers publish nothing on null (no partial clipboard).
  */
-function buildGroupAnchors(messages: Message[], blocks: MessageBlock[], selectedGroupIds: string[]): GroupAnchor[] {
-  const anchors: GroupAnchor[] = []
-
-  // Pre-compute all selected message IDs (for anchor exclusion)
-  const selectedIdSet = new Set(
-    selectedGroupIds.flatMap((gid) => messages.filter((m) => m.askId === gid || m.id === gid).map((m) => m.id))
-  )
-
-  for (const groupId of selectedGroupIds) {
-    const groupMessages = messages.filter((m) => m.askId === groupId || m.id === groupId)
-    if (groupMessages.length === 0) continue
-
-    // Find position: index of the first message in this group
-    const firstMsgIndex = messages.findIndex((m) => m.id === groupMessages[0].id)
-    const positionIndex = firstMsgIndex >= 0 ? firstMsgIndex : messages.length
-
-    // Find anchor: first message after the last message in this group that isn't in any selected group
-    let lastGroupIndex = -1
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].askId === groupId || messages[i].id === groupId) {
-        lastGroupIndex = i
-        break
-      }
-    }
-    const anchorMessageId =
-      lastGroupIndex >= 0 ? findAnchorAfterPosition(messages, lastGroupIndex + 1, selectedIdSet) : null
-
-    // Collect blocks for this group
-    const groupBlockIds = new Set(groupMessages.flatMap((m) => m.blocks || []))
-    const groupBlocks = blocks.filter((b) => groupBlockIds.has(b.id))
-
-    anchors.push({
-      messages: structuredClone(groupMessages),
-      blocks: structuredClone(groupBlocks),
-      positionIndex,
-      anchorMessageId,
-      // Built from the loaded projection, so the whole group is loaded.
-      loadedMessageIds: groupMessages.map((m) => m.id)
-    })
-  }
-
-  return anchors
-}
-
-/**
- * Copy selected message groups to clipboard.
- * Returns the number of item groups copied.
- */
-export function copyMessages(
-  dispatch: AppDispatch,
-  getState: () => RootState,
+async function buildAuthorityClipboardPayload(
   topicId: string,
   selectedGroupIds: string[]
-): number {
-  const state = getState()
-  const messages = selectMessagesForTopic(state, topicId)
-
-  if (messages.length === 0 || selectedGroupIds.length === 0) {
-    return 0
+): Promise<{ items: ClipboardItem[]; segmentSnapshots: ClipboardSegmentSnapshot[] } | null> {
+  // Stable group IDs only (dedupe defense-in-depth; same contract as the
+  // semantic delete path).
+  const rootIds = [...new Set(selectedGroupIds.filter((id) => typeof id === 'string' && id.length > 0))]
+  if (rootIds.length === 0) {
+    return null
   }
 
-  // Sort selected groups by their position in the source topic to preserve original order
-  const sortedGroupIds = sortGroupIdsByPosition(messages, selectedGroupIds)
+  // Caller-local whole-topic snapshot; never relies on or mutates Redux.
+  let snapshot: Awaited<ReturnType<typeof loadWholeTopicSnapshot>>
+  try {
+    snapshot = await loadWholeTopicSnapshot(topicId)
+  } catch (error) {
+    logger.error('[buildAuthorityClipboardPayload] Failed to load whole-topic snapshot', error as Error)
+    return null
+  }
+
+  const authorityMessages = snapshot.messages
+  if (authorityMessages.length === 0) {
+    return null
+  }
+
+  // Canonical grouping over authority order; a selected ID absent from the
+  // authority snapshot (e.g. a deletion race) resolves to nothing.
+  const groupById = new Map(getMessageGroups(authorityMessages).map((g) => [g.askId, g]))
+  const matched: Array<{ askId: string; messages: Message[] }> = []
+  for (const gid of rootIds) {
+    const group = groupById.get(gid)
+    if (group) {
+      matched.push(group)
+    } else {
+      logger.warn(`[buildAuthorityClipboardPayload] Selected group ${gid} absent from authority snapshot; skipping`)
+    }
+  }
+  if (matched.length === 0) {
+    return null
+  }
+
+  // Clipboard ordering by authority topic order (first-message authority
+  // index), never by loaded projection positions.
+  const indexById = new Map<string, number>()
+  authorityMessages.forEach((m, idx) => indexById.set(m.id, idx))
+  matched.sort((a, b) => (indexById.get(a.messages[0].id) ?? 0) - (indexById.get(b.messages[0].id) ?? 0))
 
   const items: ClipboardItem[] = []
-
-  // Collect all selected message IDs for segment snapshot collection
   const allSelectedMessageIds: string[] = []
 
-  for (const askId of sortedGroupIds) {
-    const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
-
-    if (groupMessages.length === 0) continue
-
-    // Track selected message IDs
-    for (const msg of groupMessages) {
-      allSelectedMessageIds.push(msg.id)
-    }
-
-    // Deep clone messages and blocks
-    const clonedMessages: Message[] = structuredClone(groupMessages)
+  for (const group of matched) {
+    const clonedMessages: Message[] = structuredClone(group.messages)
     const clonedBlocks: MessageBlock[] = []
 
-    for (const msg of groupMessages) {
+    for (const msg of group.messages) {
+      allSelectedMessageIds.push(msg.id)
+      // Snapshot-local blocks in per-message order; never Redux entities.
       for (const blockId of msg.blocks || []) {
-        const block = state.messageBlocks.entities[blockId]
+        const block = snapshot.blocksById.get(blockId)
         if (block) {
           clonedBlocks.push(structuredClone(block))
+        } else {
+          logger.warn(
+            `[buildAuthorityClipboardPayload] Block ${blockId} of message ${msg.id} absent from snapshot; skipping`
+          )
         }
       }
     }
 
-    // Calculate position: use the first message's position
-    const positionIndex = messages.findIndex((m) => m.id === groupMessages[0].id)
+    // Authority order/group position; the persisted wire shape is unchanged
+    // (no clipboard format migration).
+    const positionIndex = indexById.get(group.messages[0].id) ?? 0
 
     items.push({
-      originalAskId: askId,
+      originalAskId: group.askId,
       messages: clonedMessages,
       blocks: clonedBlocks,
-      positionIndex: positionIndex >= 0 ? positionIndex : 0
+      positionIndex
     })
   }
 
-  // Collect segment snapshots for fully-selected segments
-  const segmentSnapshots: ClipboardSegmentSnapshot[] = collectWholeSelectedSegmentsForClipboard(
-    getState,
-    topicId,
-    allSelectedMessageIds
-  )
-
-  if (items.length > 0) {
-    dispatch(setClipboard({ mode: 'copy', items, sourceTopicId: topicId, segmentSnapshots }))
+  // Authority-enriched segment catalog membership (caller-local read, never
+  // published). A segment snapshot is captured only when every authority
+  // member message is in the complete selected set.
+  const segmentSnapshots: ClipboardSegmentSnapshot[] = []
+  try {
+    const wires = await dbService.listSegments(topicId)
+    const selectedSet = new Set(allSelectedMessageIds)
+    for (const wire of wires) {
+      const memberIds = wire.messageIds ?? []
+      if (memberIds.length > 0 && memberIds.every((id) => selectedSet.has(id))) {
+        segmentSnapshots.push({
+          originalSegmentId: wire.id,
+          name: wire.name ?? '',
+          color: wire.color || getSegmentColor(wire.id),
+          originalMessageIds: [...memberIds]
+        })
+      }
+    }
+  } catch (error) {
+    logger.error(
+      '[buildAuthorityClipboardPayload] Failed to list authority segments; publishing nothing',
+      error as Error
+    )
+    return null
   }
 
-  const totalCount = items.reduce((sum, item) => sum + item.messages.length, 0)
+  return { items, segmentSnapshots }
+}
+
+/**
+ * Copy selected message groups to clipboard.
+ *
+ * Authority-complete under windowed loading: a selected group straddling the
+ * loaded projection is copied with its complete ordered messages and blocks.
+ * Read-only apart from the clipboard publication itself — Redux message and
+ * block projections are never mutated. Returns the number of messages copied.
+ */
+export async function copyMessages(
+  dispatch: AppDispatch,
+  topicId: string,
+  selectedGroupIds: string[]
+): Promise<number> {
+  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds)
+
+  if (!payload || payload.items.length === 0) {
+    return 0
+  }
+
+  dispatch(
+    setClipboard({
+      mode: 'copy',
+      items: payload.items,
+      sourceTopicId: topicId,
+      segmentSnapshots: payload.segmentSnapshots
+    })
+  )
+
+  const totalCount = payload.items.reduce((sum, item) => sum + item.messages.length, 0)
   logger.info(
-    `[copyMessages] Copied ${totalCount} messages from ${items.length} groups, ${segmentSnapshots.length} segment snapshots`
+    `[copyMessages] Copied ${totalCount} messages from ${payload.items.length} groups, ${payload.segmentSnapshots.length} segment snapshots`
   )
   return totalCount
 }
 
 /**
  * Cut selected message groups to clipboard.
- * Returns the number of item groups cut.
+ *
+ * Same authority-complete clipboard publication as copy (mode `cut`); the
+ * source deletion itself happens at paste time through the single semantic
+ * delete transaction there. Read-only apart from the clipboard publication —
+ * Redux message and block projections are never mutated. Returns the number
+ * of messages cut.
  */
-export function cutMessages(
-  dispatch: AppDispatch,
-  getState: () => RootState,
-  topicId: string,
-  selectedGroupIds: string[]
-): number {
-  const state = getState()
-  const messages = selectMessagesForTopic(state, topicId)
+export async function cutMessages(dispatch: AppDispatch, topicId: string, selectedGroupIds: string[]): Promise<number> {
+  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds)
 
-  if (messages.length === 0 || selectedGroupIds.length === 0) {
+  if (!payload || payload.items.length === 0) {
     return 0
   }
 
-  // Sort selected groups by their position in the source topic to preserve original order
-  const sortedGroupIds = sortGroupIdsByPosition(messages, selectedGroupIds)
-
-  const items: ClipboardItem[] = []
-
-  // Collect all selected message IDs for segment snapshot collection
-  const allSelectedMessageIds: string[] = []
-
-  for (const askId of sortedGroupIds) {
-    const groupMessages = messages.filter((m) => m.askId === askId || m.id === askId)
-
-    if (groupMessages.length === 0) continue
-
-    // Track selected message IDs
-    for (const msg of groupMessages) {
-      allSelectedMessageIds.push(msg.id)
-    }
-
-    // Deep clone messages and blocks
-    const clonedMessages: Message[] = structuredClone(groupMessages)
-    const clonedBlocks: MessageBlock[] = []
-
-    for (const msg of groupMessages) {
-      for (const blockId of msg.blocks || []) {
-        const block = state.messageBlocks.entities[blockId]
-        if (block) {
-          clonedBlocks.push(structuredClone(block))
-        }
-      }
-    }
-
-    const positionIndex = messages.findIndex((m) => m.id === groupMessages[0].id)
-
-    items.push({
-      originalAskId: askId,
-      messages: clonedMessages,
-      blocks: clonedBlocks,
-      positionIndex: positionIndex >= 0 ? positionIndex : 0
+  dispatch(
+    setClipboard({
+      mode: 'cut',
+      items: payload.items,
+      sourceTopicId: topicId,
+      segmentSnapshots: payload.segmentSnapshots
     })
-  }
-
-  // Collect segment snapshots for fully-selected segments
-  const segmentSnapshots: ClipboardSegmentSnapshot[] = collectWholeSelectedSegmentsForClipboard(
-    getState,
-    topicId,
-    allSelectedMessageIds
   )
 
-  if (items.length > 0) {
-    dispatch(setClipboard({ mode: 'cut', items, sourceTopicId: topicId, segmentSnapshots }))
-  }
-
-  const totalCount = items.reduce((sum, item) => sum + item.messages.length, 0)
+  const totalCount = payload.items.reduce((sum, item) => sum + item.messages.length, 0)
   logger.info(
-    `[cutMessages] Cut ${totalCount} messages from ${items.length} groups, ${segmentSnapshots.length} segment snapshots`
+    `[cutMessages] Cut ${totalCount} messages from ${payload.items.length} groups, ${payload.segmentSnapshots.length} segment snapshots`
   )
   return totalCount
 }
@@ -341,30 +317,14 @@ export async function pasteMessages(
   const allInsertedMessages: Message[] = []
   const allInsertedBlocks: MessageBlock[] = []
 
-  // C5/C6 fix: Compute source group anchors BEFORE paste loop using pre-paste state.
-  // This must happen before any messages are inserted into the target topic,
-  // because for same-topic cut-paste, the paste loop would contaminate sourceMessages.
+  // Cut source restoration material arrives from the single semantic delete
+  // below (authority undo parts) — never from loaded-projection derivation,
+  // so a straddling selection keeps its outside-loaded members for undo.
+  // No pre-paste loaded read is needed: stable restore intents stay correct
+  // for same-topic cut-paste because undo/redo resolve by stable anchor, not
+  // by numeric position.
   let sourceGroupAnchors: GroupAnchor[] = []
   let sourceSegmentSnapshots: SegmentSnapshot[] = []
-  const sourceMessageIdsToDelete: string[] = []
-  const sourceBlockIdsToDelete: string[] = []
-
-  if (mode === 'cut' && sourceTopicId) {
-    sourceGroupAnchors = buildGroupAnchors(
-      selectMessagesForTopic(state, sourceTopicId),
-      Object.values(state.messageBlocks.entities),
-      items.map((item) => item.originalAskId)
-    )
-
-    const sourceMessages = selectMessagesForTopic(state, sourceTopicId)
-    for (const item of items) {
-      const groupMessages = sourceMessages.filter((m) => m.askId === item.originalAskId || m.id === item.originalAskId)
-      for (const msg of groupMessages) {
-        sourceMessageIdsToDelete.push(msg.id)
-        sourceBlockIdsToDelete.push(...(msg.blocks || []))
-      }
-    }
-  }
 
   // ID mapping: original message ID → new message ID
   const idMapping = new Map<string, string>()
@@ -568,35 +528,42 @@ export async function pasteMessages(
     )
   }
 
-  // If cut mode: remove source messages (DB-first)
+  // If cut mode: remove source messages through the single semantic delete
+  // transaction. Stable member roots only — ALL complete clipboard member
+  // message IDs (deduped, authority order), never just `originalAskId`. Main
+  // expands user dependents (so outside-loaded siblings are deleted too),
+  // dedupes overlapping expansions, and handles orphan-assistant roots
+  // directly (a user root alone cannot expand an orphan group). The helper
+  // returns the full authority undo snapshot (actual expanded deleted IDs as
+  // restore groups + segment snapshots). It owns file cleanup, loaded-
+  // intersection removal, authority segment convergence, and anchor transfer,
+  // so no second delete protocol lives here. Multi-group cuts stay one
+  // transaction. A failed source delete keeps the existing swallow semantics:
+  // the successful insertion stands, the clipboard is still cleared, and the
+  // undo action carries empty source anchors/roots (nothing was deleted).
+  let sourceRootIds: string[] = []
   if (mode === 'cut' && sourceTopicId) {
-    // Collect segment snapshots BEFORE deletion (needed for undo)
-    sourceSegmentSnapshots = collectSegmentSnapshots(getState, sourceTopicId, sourceMessageIdsToDelete)
+    const stableRoots = [
+      ...new Set(
+        items.flatMap((item) => item.messages.map((m) => m.id)).filter((id) => typeof id === 'string' && id.length > 0)
+      )
+    ]
 
-    // DB-first: delete from DB before dispatching to Redux (LOCK-001)
-    if (sourceMessageIdsToDelete.length > 0) {
+    if (stableRoots.length > 0) {
       try {
-        const cleanup = await deleteMessagesFromDB(sourceTopicId, sourceMessageIdsToDelete)
-
-        // Consume file cleanup exactly once after commit
-        await consumeFileCleanupResult(cleanup)
-
-        // Dispatch to Redux only after DB delete succeeds
-        dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMessageIdsToDelete }))
-        if (sourceBlockIdsToDelete.length > 0) {
-          dispatch(removeManyBlocks(sourceBlockIdsToDelete))
-        }
-
-        // Sync segments after source message deletion
-        await syncSegmentsAfterMessageDeletion(dispatch, getState, sourceTopicId, sourceMessageIdsToDelete)
+        const result = await executeDeleteMessagesWithDependents(dispatch, getState, sourceTopicId, stableRoots)
+        sourceGroupAnchors = result.undoParts.groupAnchors
+        sourceSegmentSnapshots = result.undoParts.segmentSnapshots
+        sourceRootIds = [...stableRoots]
       } catch (error) {
-        logger.error('[pasteMessages] Failed to delete source messages from DB', error as Error)
+        logger.error('[pasteMessages] Failed to delete source messages (semantic cut delete)', error as Error)
       }
     }
 
     // LOCK-P5.3-1: No separate updateFileCount for source blocks here.
-    // consumeFileCleanupResult above already handled physical file cleanup
-    // via FileManager.deleteFile which decrements Dexie files.count.
+    // consumeFileCleanupResult inside the helper already handled physical
+    // file cleanup via FileManager.deleteFile which decrements Dexie
+    // files.count.
 
     dispatch(clearClipboard())
   }
@@ -622,6 +589,7 @@ export async function pasteMessages(
       targetAnchorMessageId: anchorMessageId,
       targetInsertIntent: stableIntent,
       sourceTopicId,
+      sourceRootIds,
       sourceGroupAnchors,
       sourceSegmentSnapshots,
       targetSegmentSnapshots,

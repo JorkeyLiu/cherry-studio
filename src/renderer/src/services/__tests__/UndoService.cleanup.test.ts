@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     deleteMessagesFromDB: vi.fn(),
+    executeDeleteMessagesWithDependents: vi.fn(),
     deleteMessagesWithDependents: vi.fn(),
     replaceSegmentsForTopic: vi.fn((p: unknown) => ({ type: 'replaceSegmentsForTopic', p })),
     saveMessageAndBlocksToDB: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
   saveMessageAndBlocksToDB: mocks.saveMessageAndBlocksToDB
 }))
 
@@ -339,11 +341,14 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
   })
 
   describe('redoCutPaste', () => {
-    it('source deletion consumes cleanup once, no updateFileCount for source blocks', async () => {
+    it('source re-delete uses the semantic plural helper with stored member roots (no legacy plain delete)', async () => {
       const srcMsg = makeMessage('src-msg-1', ['src-blk-1'])
       storeState.messages.entities = { 'src-msg-1': srcMsg }
 
-      mocks.deleteMessagesFromDB.mockResolvedValue(cleanupWithFiles)
+      mocks.executeDeleteMessagesWithDependents.mockResolvedValue({
+        response: { deletedMessageIds: ['src-msg-1'] },
+        undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }
+      })
 
       const sourceAnchor = {
         messages: [srcMsg],
@@ -363,6 +368,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
         pastedBlocksSnapshot: [],
         fileReferenceDeltas: [{ fileId: 'file-1', delta: 1 }],
         sourceTopicId: 'source-topic',
+        sourceRootIds: ['src-msg-1'],
         sourceGroupAnchors: [sourceAnchor],
         sourceSegmentSnapshots: [],
         targetSegmentSnapshots: [],
@@ -377,11 +383,63 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       await executeRedo(dispatch, () => storeState)
 
-      // Source deletion consumed cleanup exactly once
-      expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(cleanupWithFiles)
+      // Semantic helper owns cleanup/convergence/anchor transfer.
+      expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+        dispatch,
+        expect.any(Function),
+        'source-topic',
+        ['src-msg-1']
+      )
+      // No legacy plain-delete protocol for the source.
+      expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
+      expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
+      expect(mocks.syncSegmentsAfterMessageDeletion).not.toHaveBeenCalled()
+      expect(mocks.removeManyBlocks).not.toHaveBeenCalled()
 
       // No separate updateFileCount for source blocks
       expect(mocks.updateFileCount).not.toHaveBeenCalled()
+    })
+
+    it('legacy action without sourceRootIds fails closed (no DB mutation, redo returns null)', async () => {
+      const srcMsg = makeMessage('src-msg-1', ['src-blk-1'])
+      storeState.messages.entities = { 'src-msg-1': srcMsg }
+
+      const sourceAnchor = {
+        messages: [srcMsg],
+        blocks: [],
+        positionIndex: 0,
+        anchorMessageId: null,
+        loadedMessageIds: ['src-msg-1']
+      }
+
+      const legacyAction: CutPasteUndoAction = {
+        id: 'redo-cut-legacy',
+        type: 'cut_paste',
+        timestamp: Date.now(),
+        targetTopicId: 'target-topic',
+        insertedMessageIds: [],
+        pastedMessagesSnapshot: [],
+        pastedBlocksSnapshot: [],
+        fileReferenceDeltas: [],
+        sourceTopicId: 'source-topic',
+        sourceGroupAnchors: [sourceAnchor],
+        sourceSegmentSnapshots: [],
+        targetSegmentSnapshots: [],
+        targetAnchorMessageId: null,
+        targetInsertPositionIndex: 0
+      }
+      // No sourceRootIds: legacy in-memory action.
+
+      const { executeRedo } = await import('../UndoService')
+      const dispatch = vi.fn() as unknown as AppDispatch
+
+      storeState.undoStack = { undoStack: [], redoStack: [legacyAction] }
+
+      const result = await executeRedo(dispatch, () => storeState)
+
+      expect(result).toBeNull()
+      expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
+      expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
     })
   })
 

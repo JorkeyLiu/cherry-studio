@@ -4,7 +4,7 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
-import { deleteMessagesFromDB } from '@renderer/store/thunk/messageThunk'
+import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
 import {
   deleteSegmentsBySnapshots,
   restoreSegmentsAfterUndo,
@@ -347,25 +347,40 @@ async function undoPaste(
 }
 
 /**
- * Undo cut_paste = remove pasted messages + restore source messages
+ * Undo cut_paste = restore source messages + remove pasted copies.
+ *
+ * Same-topic hazard: source restore anchors are authority-generated AFTER
+ * the paste insertion, so an anchor may reference an inserted copy. Deleting
+ * the copies first would make that anchor missing and lose the source.
+ * Restoring the source FIRST keeps every inserted anchor present, so the
+ * stable restore transaction succeeds; the copies are deleted afterwards.
+ * Cross-topic anchors never reference target copies, so restore-first is
+ * equally correct there (behavior preserved).
+ *
+ * Failure semantics (explicit, no data loss):
+ * - source restore failure → throw BEFORE touching paste copies; the copies
+ *   remain and history does not advance (executeUndo moves the action back).
+ * - paste-copy removal failure AFTER a successful source restore → throw and
+ *   retain the duplicate (restored source + remaining copies) rather than
+ *   losing the source. History likewise does not advance.
  */
 async function undoCutPaste(
   dispatch: AppDispatch,
   getState: () => RootState,
   action: CutPasteUndoAction
 ): Promise<void> {
-  // First: undo the paste part (remove pasted messages from target topic)
-  await undoPaste(dispatch, getState, action)
-
-  // Second: restore the deleted source messages using per-group anchors
   const { sourceTopicId, sourceGroupAnchors, sourceSegmentSnapshots = [] } = action
 
   if (sourceGroupAnchors.length === 0) {
+    // Nothing was deleted at paste time (e.g. paste source-delete failure):
+    // only the pasted copies need removal.
+    await undoPaste(dispatch, getState, action)
     logger.warn('[undoCutPaste] No source group anchors to restore')
     return
   }
 
-  // Restore file reference counts for source blocks
+  // Phase 1: restore the deleted source messages using the stable restore
+  // groups. Any throw leaves the pasted copies untouched (no data loss).
   const sourceFileDeltas: Array<{ fileId: string; delta: number }> = []
   for (const anchor of sourceGroupAnchors) {
     for (const block of anchor.blocks) {
@@ -381,14 +396,21 @@ async function undoCutPaste(
     await updateFileReferenceCounts(sourceFileDeltas, true)
   }
 
-  // Restore source groups with one atomic stable command (no numeric index)
+  // Stable restore: one atomic command with before-message/topic-tail intents
+  // (no numeric index). Throws on missing/cross-topic anchors with no partial
+  // writes and no Redux changes — the copies below are then never touched.
   await restoreGroupsByStableAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors)
 
-  // Restore source segment membership
+  // Restore source segment membership before removing the copies.
   await restoreSegmentsAfterUndo(dispatch, getState, sourceSegmentSnapshots)
 
   const totalMessages = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(`[undoCutPaste] Restored ${totalMessages} source messages to ${sourceTopicId}`)
+
+  // Phase 2: remove the pasted copies from the target topic (plus the target
+  // segments created at paste time). A throw here retains the duplicate
+  // (restored source + remaining copies) rather than losing the source.
+  await undoPaste(dispatch, getState, action)
 }
 
 // ==================== Redo Implementations ====================
@@ -522,7 +544,16 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
 }
 
 /**
- * Redo cut_paste = re-execute the cut+paste using snapshots
+ * Redo cut_paste = re-execute the cut+paste using snapshots.
+ *
+ * Source deletion uses the SAME semantic plural delete helper as the initial
+ * cut-paste (`executeDeleteMessagesWithDependents` with the stored stable
+ * member roots). The helper owns Main segment catalog convergence, authority
+ * anchor transfer, file cleanup, and loaded-intersection projection, so no
+ * legacy `deleteMessagesFromDB` + local block/segment sync lives here.
+ * Fail-closed: a source restore that needs roots but lacks `sourceRootIds`
+ * (legacy in-memory action) throws before any DB mutation rather than
+ * issuing a numeric/plain-delete authority mutation.
  */
 async function redoCutPaste(
   dispatch: AppDispatch,
@@ -539,41 +570,27 @@ async function redoCutPaste(
     targetSegmentSnapshots = []
   } = action
 
-  // Step 1: Delete source messages (DB-first)
+  // Step 1: Re-delete the source via the semantic plural helper.
   if (sourceGroupAnchors.length > 0) {
-    const sourceMsgIds = sourceGroupAnchors.flatMap((a) => a.messages.map((m) => m.id))
-    const stateBefore = getState()
-    const blockIdsToRemove: string[] = []
-    for (const msgId of sourceMsgIds) {
-      const message = stateBefore.messages.entities[msgId]
-      if (message?.blocks) {
-        blockIdsToRemove.push(...message.blocks)
-      }
+    const roots = Array.isArray(action.sourceRootIds)
+      ? [...new Set(action.sourceRootIds.filter((id) => typeof id === 'string' && id.length > 0))]
+      : []
+    if (roots.length === 0) {
+      logger.error('[redoCutPaste] Missing sourceRootIds for legacy action; refusing plain delete')
+      throw new Error('[redoCutPaste] Missing sourceRootIds; cannot safely re-delete source')
     }
 
-    // DB-first: delete from DB before dispatching to Redux (LOCK-001)
-    let cleanup
     try {
-      cleanup = await deleteMessagesFromDB(sourceTopicId, sourceMsgIds)
+      await executeDeleteMessagesWithDependents(dispatch, getState, sourceTopicId, roots)
     } catch (error) {
-      logger.error('[redoCutPaste] Failed to delete source messages from DB', error as Error)
+      logger.error('[redoCutPaste] Failed to delete source messages (semantic redo delete)', error as Error)
       throw error
     }
 
-    // Consume file cleanup exactly once after commit
-    await consumeFileCleanupResult(cleanup)
-
-    dispatch(newMessagesActions.removeMessages({ topicId: sourceTopicId, messageIds: sourceMsgIds }))
-    if (blockIdsToRemove.length > 0) {
-      dispatch(removeManyBlocks(blockIdsToRemove))
-    }
-
-    // Sync segments after source message deletion
-    await syncSegmentsAfterMessageDeletion(dispatch, getState, sourceTopicId, sourceMsgIds)
-
-    // LOCK-P5.3-1: No separate updateFileReferenceCounts for source blocks here.
-    // consumeFileCleanupResult above already handled physical file cleanup
-    // via FileManager.deleteFile which decrements Dexie files.count.
+    // LOCK-P5.3-1: No separate updateFileReferenceCounts / segment sync here.
+    // The helper already consumed file cleanup, converged the authority
+    // segment catalog, transferred anchors, and removed only the loaded
+    // intersection.
   }
 
   // Step 2: Re-insert pasted messages to target topic with the stored stable

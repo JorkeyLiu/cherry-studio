@@ -1,5 +1,8 @@
+import { loggerService } from '@logger'
 import { copyMessages, cutMessages, deleteSelectedMessages, pasteMessages } from '@renderer/services/ClipboardService'
 import { executeRedo, executeUndo } from '@renderer/services/UndoService'
+
+const logger = loggerService.withContext('useEditMode')
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   clearSelection,
@@ -115,14 +118,24 @@ export function useCreateEditMode(
     if (isProcessing) return
     if (!isEnabled || selectedGroupIds.length === 0) return
     dispatch(startProcessing())
-    try {
-      const count = copyMessages(dispatch, store.getState, topicId, selectedGroupIds)
-      if (count > 0) {
-        window.toast.success(i18n.t('chat.edit.copied', { count }))
+    // Authority-complete clipboard read (caller-local whole-topic snapshot).
+    // Fire-and-forget: copy is read-only apart from the clipboard publication
+    // and reports expected snapshot failures as a zero count
+    // (no success toast), matching the existing zero-selection semantics.
+    // Unexpected rejections are logged via loggerService (never console).
+    // The lock always releases in finally.
+    void (async () => {
+      try {
+        const count = await copyMessages(dispatch, topicId, selectedGroupIds)
+        if (count > 0) {
+          window.toast.success(i18n.t('chat.edit.copied', { count }))
+        }
+      } catch (error) {
+        logger.error('[handleCopy] Unexpected copy failure', error as Error)
+      } finally {
+        dispatch(finishProcessing())
       }
-    } finally {
-      dispatch(finishProcessing())
-    }
+    })()
   }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
 
   // 剪切
@@ -130,14 +143,20 @@ export function useCreateEditMode(
     if (isProcessing) return
     if (!isEnabled || selectedGroupIds.length === 0) return
     dispatch(startProcessing())
-    try {
-      const count = cutMessages(dispatch, store.getState, topicId, selectedGroupIds)
-      if (count > 0) {
-        window.toast.success(i18n.t('chat.edit.cut', { count }))
+    // Same authority-complete publication as copy (mode `cut`); the source
+    // deletion itself happens at paste time. Failure semantics as handleCopy.
+    void (async () => {
+      try {
+        const count = await cutMessages(dispatch, topicId, selectedGroupIds)
+        if (count > 0) {
+          window.toast.success(i18n.t('chat.edit.cut', { count }))
+        }
+      } catch (error) {
+        logger.error('[handleCut] Unexpected cut failure', error as Error)
+      } finally {
+        dispatch(finishProcessing())
       }
-    } finally {
-      dispatch(finishProcessing())
-    }
+    })()
   }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
 
   // 粘贴

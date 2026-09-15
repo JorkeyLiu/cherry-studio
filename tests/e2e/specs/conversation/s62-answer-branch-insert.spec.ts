@@ -9,6 +9,11 @@
  *   true for the clicked tail).
  * - Branch by anchor: real MessageMenubar NEW_BRANCH click → branchMessagesToTopic (Main prefix)
  * - Insert after anchor: real MessageMenubar insert click → insertMessagesAfterAnchor (group-tail)
+ * - Authority-complete clipboard copy: real edit-mode Meta+c copies an outside-loaded answer group
+ *   (all members + blocks in authority order) with bounded Redux/DOM, then real Meta+v at topic-tail
+ *   persists the copies (in-test getRawTopic + post-exit SQLite order/content proof).
+ * - Same-topic cut→paste→undo→redo: real Meta+x / Meta+v / Meta+z / Meta+Shift+z on the outside group
+ *   prove no-data-loss restore plus semantic re-delete (in-test authority + post-exit SQLite).
  *
  * Deterministic seed via ensureTopic + pasteMessagesToTopic; displayCount=20 groups (R-02: counts complete viewport groups, not raw messages), synthetic total=50.
  * When the oldest visible group straddles the boundary, messageIds length may exceed DISPLAY_LIMIT (e.g. 21-22); bootstrap invariant is >= DISPLAY_LIMIT.
@@ -290,61 +295,45 @@ async function hoverMessageAndOpenMore(page: any, messageId: string) {
 }
 
 // LOCK-E2E-CLEAN-005: portal-scoped branch/insert action — no document-global querySelector fallback.
-// Scoped to currently visible opened dropdown portal (.ant-dropdown visible), assert exact data-testid
-// and exact menuitem target, Playwright locator click as primary. Evaluate fallback operates only on
-// that exact visible portal locator and fails if none/multiple.
+// Atomic single-evaluate select+click inside expect.poll: the tick that proves exactly one visible
+// portal holds the testid also clicks its menuitem ancestor, so poll success cannot be followed by
+// a fresh disappearing portal scan. Exact data-testid + exact menuitem target, no locale text.
 async function clickPortalScopedMenuAction(page: any, dataTestId: string): Promise<void> {
-  const dropdownLocator = page.locator('.ant-dropdown')
   await expect
     .poll(
       async () => {
-        const count = await dropdownLocator.count()
-        let matches = 0
-        for (let i = 0; i < count; i++) {
-          const p = dropdownLocator.nth(i)
-          if (!(await p.isVisible())) continue
-          const has = await p.locator(`[data-testid="${dataTestId}"]`).count()
-          if (has === 1) matches++
+        try {
+          return await page.evaluate((testId: string) => {
+            const portals = Array.from(document.querySelectorAll('.ant-dropdown')) as HTMLElement[]
+            const isShown = (el: HTMLElement): boolean => {
+              const rect = el.getBoundingClientRect()
+              if (rect.width === 0 && rect.height === 0) return false
+              const style = window.getComputedStyle(el)
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
+              return true
+            }
+            const holders = portals
+              .filter(isShown)
+              .filter((p) => p.querySelectorAll(`[data-testid="${testId}"]`).length === 1)
+            if (holders.length !== 1) return false
+            const target = holders[0].querySelector(`[data-testid="${testId}"]`) as HTMLElement | null
+            if (!target) return false
+            const menuItem = target.closest('[role="menuitem"]') as HTMLElement | null
+            const clickTarget = menuItem ?? target
+            if (!isShown(clickTarget)) {
+              const r = target.getBoundingClientRect()
+              if (r.width === 0 && r.height === 0) return false
+            }
+            clickTarget.click()
+            return true
+          }, dataTestId)
+        } catch {
+          return false
         }
-        return matches
       },
       { timeout: 10000, intervals: [100, 250] }
     )
-    .toBe(1)
-  let portal: any = null
-  const total = await dropdownLocator.count()
-  for (let i = 0; i < total; i++) {
-    const p = dropdownLocator.nth(i)
-    if (!(await p.isVisible())) continue
-    if ((await p.locator(`[data-testid="${dataTestId}"]`).count()) === 1) {
-      portal = p
-      break
-    }
-  }
-  if (!portal) throw new Error(`portal-scoped action failed: no visible portal with [data-testid="${dataTestId}"]`)
-  await expect(portal.locator(`[data-testid="${dataTestId}"]`)).toHaveCount(1)
-  const actionBtn = portal.locator(`[data-testid="${dataTestId}"]`)
-  await expect(actionBtn, `${dataTestId} inside visible portal must be visible`).toBeVisible({ timeout: 10000 })
-  const menuItem = actionBtn.locator('xpath=ancestor::*[@role="menuitem"]').first()
-  const hasMenuItem = (await menuItem.count()) > 0
-  const clickTarget = hasMenuItem ? menuItem : actionBtn
-  await expect(clickTarget).toBeVisible({ timeout: 5000 })
-  try {
-    await clickTarget.click({ timeout: 5000 })
-    return
-  } catch {}
-  try {
-    await clickTarget.evaluate((el: HTMLElement) => el.click())
-    return
-  } catch {}
-  await portal.evaluate((portalEl: HTMLElement, testId: string) => {
-    const candidates = portalEl.querySelectorAll(`[data-testid="${testId}"]`)
-    if (candidates.length !== 1)
-      throw new Error(`expected exactly one [data-testid="${testId}"] in visible portal, got ${candidates.length}`)
-    const el = candidates[0] as HTMLElement
-    const mi = el.closest('[role="menuitem"]') as HTMLElement | null
-    ;(mi ?? el).click()
-  }, dataTestId)
+    .toBe(true)
 }
 
 // LOCK-E2E-CLEAN-006: meaningful DB readiness polling — no fixed post-close sleeps.
@@ -924,40 +913,50 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(tailIdxPre).toBe(anchorIdxPre + 1) // contiguous tail
     expect(preIds).toContain(missingId)
 
-    // Trigger real insert via UI on anchor 30 — if fold-hidden (group selected at 29), use visible group member 29 as equivalent anchor (Main group-tail insertion after tail 31).
-    // Preserve effective visible group member selection (29 when 30 is folded) via exact Redux window + foldSelected, no global fallback.
+    // Trigger real insert via UI — fold-aware visible-member selection over the same authority
+    // answer-group IDs. Prefer the foldSelected + visible resident (expected 00029), then any visible
+    // resident candidate. Read-only: no stable navigation/reveal (it mutates foldSelected). Any group
+    // member anchor resolves to the same Main group-tail insertion after tail 31 (asserted below).
     const insertCandidates = [missingId, anchorId, tailId]
-    const resolvedAnchor: string = await page.evaluate(
+    const resolvedSelection: { resolved: string | null; details: Array<Record<string, unknown>> } = await page.evaluate(
       ({ topicId, candidates }: { topicId: string; candidates: string[] }) => {
         const store: any = (window as any).store
         const s = store?.getState?.()
         const windowIds: string[] = s?.messages?.messageIdsByTopic?.[topicId] ?? []
         const entities: Record<string, any> = s?.messages?.entities ?? {}
-        // Prefer selected (foldSelected true) among window-visible candidates
-        const windowCandidates = candidates.filter((id) => windowIds.includes(id))
-        if (windowCandidates.length > 0) {
-          for (const id of windowCandidates) {
-            if (entities[id]?.foldSelected === true) return id
-          }
-          return windowCandidates[0]
-        }
-        // Fallback: any candidate present in entities with foldSelected, else first candidate that exists in DOM
-        for (const id of candidates) {
-          if (entities[id]?.foldSelected === true) {
-            const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
-            const sel = `[id="message-${esc}"][data-message-id="${esc}"]`
-            if (document.querySelector(sel)) return id
-          }
-        }
-        for (const id of candidates) {
+        const inspect = (id: string) => {
+          const inWindow = windowIds.includes(id)
+          const foldSelected = entities[id]?.foldSelected
           const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
-          const sel = `[id="message-${esc}"][data-message-id="${esc}"]`
-          if (document.querySelector(sel)) return id
+          const el = document.querySelector(`[id="message-${esc}"][data-message-id="${esc}"]`) as HTMLElement | null
+          if (!el) return { id, inWindow, foldSelected: foldSelected ?? null, hasDom: false, visible: false }
+          const style = window.getComputedStyle(el)
+          const rect = el.getBoundingClientRect()
+          const visible = style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0
+          return {
+            id,
+            inWindow,
+            foldSelected: foldSelected ?? null,
+            hasDom: true,
+            display: style.display,
+            rect: { w: rect.width, h: rect.height },
+            visible
+          }
         }
-        return candidates[0]
+        const details = candidates.map(inspect) as Array<Record<string, unknown>>
+        const residentVisible = details.filter((d) => d.inWindow === true && d.visible === true)
+        const foldVisible = residentVisible.find((d) => d.foldSelected === true)
+        if (foldVisible) return { resolved: foldVisible.id as string, details }
+        if (residentVisible.length > 0) return { resolved: residentVisible[0].id as string, details }
+        return { resolved: null, details }
       },
       { topicId, candidates: insertCandidates }
     )
+    expect(
+      resolvedSelection.resolved,
+      `no fold-aware visible insert anchor among group members ${JSON.stringify(resolvedSelection.details)}`
+    ).toBeTruthy()
+    const resolvedAnchor: string = resolvedSelection.resolved as string
     await expect(
       page.locator(
         `[id="message-${resolvedAnchor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"][data-message-id="${resolvedAnchor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`
@@ -1531,5 +1530,779 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     )
     expect(blockProbe.ok, `SQLite undo block probe failed: ${JSON.stringify(blockProbe)}`).toBe(true)
     expect(((blockProbe as any).rows ?? []).length).toBe(4)
+  })
+
+  test('authority-complete copy: outside answer group copies every member with bounded projection, topic-tail paste persists in order', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CLIPBOARD-COPY INTEGRATED UI: seed 50 with early answer group (user 00004 + assistants 00005/00006/00007) outside the loaded window; real edit-mode Meta+c copies the complete authority group (clipboard holds all 4 members + blocks in authority order) with loaded Redux/DOM unchanged; real Meta+v at topic-tail persists 4 copies; in-test getRawTopic + post-exit SQLite prove order/content/blocks. No segment atomicity claimed (no segment seed in fixture; unit-covered).'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `s62-clip-copy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const groupStart = 5
+    const {
+      groupAskUserId: outsideUserId,
+      missingId,
+      visibleIds,
+      tailId: outsideTailId
+    } = await seedTopicWithStraddleGroup(page, liveAssistantId, topicId, groupStart)
+    const sourceIds = [outsideUserId, missingId, ...visibleIds]
+    const sourceBlocks = sourceIds.map((id) => id.replace('-msg-', '-block-'))
+    const expectedContents = [4, 5, 6, 7].map((i) => `s62-content-${pad(i, 5)}`)
+    const successorId = `${topicId}-msg-${pad(8, 5)}`
+    expect(outsideTailId).toBe(visibleIds[1])
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const preLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(preLoaded.count).toBeGreaterThanOrEqual(DISPLAY_LIMIT)
+    for (const id of sourceIds) {
+      expect(preLoaded.ids, `[E2E] source ${id} must be outside the loaded projection`).not.toContain(id)
+    }
+    const preDomCount: number = await page.evaluate(
+      () => document.querySelectorAll('#messages [data-message-id]').length
+    )
+    // Pre-copy block probe: capture exact entity keys + source presence so post-copy can assert
+    // unchanged (context closure may have preloaded source blocks; absence is not a valid oracle).
+    const preCopyBlocks: { keyCount: number; keys: string[]; hits: boolean[] } = await page.evaluate(
+      ({ bids }: { bids: string[] }) => {
+        const entities = (window as any).store.getState().messageBlocks?.entities ?? {}
+        const keys = Object.keys(entities).sort()
+        return { keyCount: keys.length, keys, hits: bids.map((bid) => entities[bid] !== undefined) }
+      },
+      { bids: sourceBlocks }
+    )
+
+    const preRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(preRaw.ok).toBe(true)
+    const preOrder: string[] = (preRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(preOrder.length).toBe(TOTAL)
+    expect(preOrder.slice(4, 8)).toEqual(sourceIds)
+    expect(preOrder[8]).toBe(successorId)
+    const preById = new Map((preRaw.value?.messages ?? []).map((m: any) => [m.id as string, m]))
+    expect((preById.get(outsideUserId) as any)?.role).toBe('user')
+    for (const id of [missingId, ...visibleIds]) {
+      expect((preById.get(id) as any)?.role).toBe('assistant')
+      expect((preById.get(id) as any)?.askId).toBe(outsideUserId)
+      expect((((preById.get(id) as any)?.blocks ?? []) as string[]).length).toBeGreaterThan(0)
+    }
+
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, null, {
+      timeout: 15000
+    })
+    await page.evaluate(
+      ({ mids }: { mids: string[] }) => {
+        const store = (window as any).store
+        store.dispatch({ type: 'editMode/setSelectedGroupIds', payload: mids })
+      },
+      { mids: [outsideUserId] }
+    )
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+c')
+
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        const c = s.clipboard
+        return (
+          c?.mode === 'copy' &&
+          Array.isArray(c.items) &&
+          c.items.length === 1 &&
+          c.items[0]?.messages?.length === 4 &&
+          s.editMode?.isProcessing === false
+        )
+      },
+      null,
+      { timeout: 30000 }
+    )
+    const clip: any = await page.evaluate(() => {
+      const c = (window as any).store.getState().clipboard
+      const item = c.items[0]
+      return {
+        mode: c.mode,
+        originalAskId: item.originalAskId,
+        messageIds: item.messages.map((m: any) => m.id),
+        roles: item.messages.map((m: any) => m.role),
+        askIds: item.messages.map((m: any) => (m.askId ?? null) as string | null),
+        blockIds: item.blocks.map((b: any) => b.id),
+        blockMids: item.blocks.map((b: any) => b.messageId)
+      }
+    })
+    expect(clip.mode).toBe('copy')
+    expect(clip.originalAskId).toBe(outsideUserId)
+    expect(clip.messageIds).toEqual(sourceIds)
+    expect(clip.roles).toEqual(['user', 'assistant', 'assistant', 'assistant'])
+    expect(clip.askIds).toEqual([null, outsideUserId, outsideUserId, outsideUserId])
+    expect([...clip.blockIds].sort()).toEqual([...sourceBlocks].sort())
+    expect(clip.blockMids).toEqual(sourceIds)
+
+    const postCopyLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(postCopyLoaded.count).toBe(preLoaded.count)
+    expect(postCopyLoaded.ids).toEqual(preLoaded.ids)
+    for (const id of sourceIds) {
+      expect(postCopyLoaded.ids, `[E2E] copy must not inject outside ${id}`).not.toContain(id)
+    }
+    const postCopyDomCount: number = await page.evaluate(
+      () => document.querySelectorAll('#messages [data-message-id]').length
+    )
+    expect(postCopyDomCount).toBe(preDomCount)
+    const postCopyBlocks: { keyCount: number; keys: string[]; hits: boolean[] } = await page.evaluate(
+      ({ bids }: { bids: string[] }) => {
+        const entities = (window as any).store.getState().messageBlocks?.entities ?? {}
+        const keys = Object.keys(entities).sort()
+        return { keyCount: keys.length, keys, hits: bids.map((bid) => entities[bid] !== undefined) }
+      },
+      { bids: sourceBlocks }
+    )
+    // Copy must leave block projection exactly unchanged (keys + source presence), not absent:
+    // context closure may have preloaded source blocks before copy.
+    expect(postCopyBlocks.keyCount, '[E2E] copy must not change block entity count').toBe(preCopyBlocks.keyCount)
+    expect(postCopyBlocks.keys, '[E2E] copy must not change block entity keys').toEqual(preCopyBlocks.keys)
+    expect(postCopyBlocks.hits, '[E2E] copy must not change source block presence').toEqual(preCopyBlocks.hits)
+    const copyRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(copyRaw.ok).toBe(true)
+    expect((copyRaw.value?.messages ?? []).length).toBe(TOTAL)
+
+    await page.evaluate(() => {
+      ;(window as any).store.dispatch({ type: 'editMode/clearSelection' })
+    })
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+v')
+
+    await page.waitForFunction(
+      async ({ topicId, expectedLen }: { topicId: string; expectedLen: number }) => {
+        const api: any = (window as any).api?.chatDb
+        if (!api || typeof api.getRawTopic !== 'function') return false
+        try {
+          const raw = await api.getRawTopic({ topicId })
+          return raw?.ok === true && (raw.value?.messages ?? []).length === expectedLen
+        } catch {
+          return false
+        }
+      },
+      { topicId, expectedLen: TOTAL + 4 },
+      { timeout: 30000 }
+    )
+    const postRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postRaw.ok).toBe(true)
+    const postIds: string[] = (postRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(postIds.length).toBe(TOTAL + 4)
+    expect(postIds.filter((id) => preOrder.includes(id))).toEqual(preOrder)
+    const newIds = postIds.filter((id) => !preOrder.includes(id))
+    expect(newIds.length).toBe(4)
+    expect(postIds.slice(-4)).toEqual(newIds)
+    const postById = new Map((postRaw.value?.messages ?? []).map((m: any) => [m.id as string, m]))
+    expect((postById.get(newIds[0]) as any)?.role).toBe('user')
+    for (const id of newIds.slice(1)) {
+      expect((postById.get(id) as any)?.role).toBe('assistant')
+      expect((postById.get(id) as any)?.askId).toBe(newIds[0])
+    }
+    for (const id of newIds) {
+      expect((((postById.get(id) as any)?.blocks ?? []) as string[]).length).toBeGreaterThan(0)
+    }
+    const undoTop: any = await page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const stack: any[] = s.undoStack?.undoStack ?? []
+      return stack[stack.length - 1] ?? null
+    })
+    expect(undoTop, '[E2E] copy-paste must push a paste undo').not.toBeNull()
+    expect(undoTop.type).toBe('paste')
+    expect(undoTop?.targetInsertIntent?.kind).toBe('topic-tail')
+    expect(undoTop.insertedMessageIds).toEqual(newIds)
+    const postPasteLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(postPasteLoaded.count).toBe(preLoaded.count + 4)
+    expect(postPasteLoaded.ids.slice(0, preLoaded.count)).toEqual(preLoaded.ids)
+    expect(postPasteLoaded.ids.slice(-4)).toEqual(newIds)
+
+    await electronApp.close()
+    const dbPath = getChatDbPath()
+    expect(dbPath).not.toBeNull()
+    await expect.poll(() => fs.existsSync(dbPath!), { timeout: 30000, intervals: [250, 500] }).toBe(true)
+    const esc = (v: string) => v.replace(/'/g, "''")
+    const sqlOrder = `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' ORDER BY sort_order ASC, id ASC`
+    await pollDbUntil(dbPath!, sqlOrder, (rows) => rows.length === TOTAL + 4, 30000)
+    const probe = queryChatDbViaElectron(dbPath!, sqlOrder)
+    expect(probe.ok, `SQLite order probe failed: ${JSON.stringify(probe)}`).toBe(true)
+    expect(((probe as any).rows ?? []).map((r: any) => r.id)).toEqual(postIds)
+    const inSrc = sourceIds.map((v) => `'${esc(v)}'`).join(',')
+    const srcBlocksProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT mb.content AS content FROM message_blocks mb JOIN messages m ON m.id = mb.message_id WHERE m.topic_id = '${esc(topicId)}' AND mb.message_id IN (${inSrc}) ORDER BY m.sort_order ASC, mb.sort_order ASC, mb.id ASC`
+    )
+    expect(srcBlocksProbe.ok, `SQLite source block probe failed: ${JSON.stringify(srcBlocksProbe)}`).toBe(true)
+    expect(((srcBlocksProbe as any).rows ?? []).map((r: any) => r.content)).toEqual(expectedContents)
+    const inNew = newIds.map((v) => `'${esc(v)}'`).join(',')
+    const newBlocksProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT mb.content AS content FROM message_blocks mb JOIN messages m ON m.id = mb.message_id WHERE m.topic_id = '${esc(topicId)}' AND mb.message_id IN (${inNew}) ORDER BY m.sort_order ASC, mb.sort_order ASC, mb.id ASC`
+    )
+    expect(newBlocksProbe.ok, `SQLite pasted block probe failed: ${JSON.stringify(newBlocksProbe)}`).toBe(true)
+    expect(((newBlocksProbe as any).rows ?? []).map((r: any) => r.content)).toEqual(expectedContents)
+  })
+
+  test('same-topic cut→paste→undo→redo restores complete outside source with no data loss', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CLIPBOARD-CUT INTEGRATED UI: seed 50 with early answer group (user 00004 + assistants 00005/00006/00007) outside the loaded window; real edit-mode Meta+x stages the complete group (cut defers deletion to paste, Redux stays bounded); real Meta+v at topic-tail inserts 4 copies then semantic-deletes the source; real Meta+z restores the exact pre-cut authority order and removes copies; real Meta+Shift+z re-deletes the source and re-inserts the same copies. In-test getRawTopic + post-exit SQLite prove no data loss. No segment atomicity claimed (no segment seed in fixture; unit-covered).'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `s62-clip-cut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const groupStart = 5
+    const {
+      groupAskUserId: outsideUserId,
+      missingId,
+      visibleIds
+    } = await seedTopicWithStraddleGroup(page, liveAssistantId, topicId, groupStart)
+    const sourceIds = [outsideUserId, missingId, ...visibleIds]
+    const sourceSet = new Set(sourceIds)
+    const sourceBlocks = sourceIds.map((id) => id.replace('-msg-', '-block-'))
+    const expectedContents = [4, 5, 6, 7].map((i) => `s62-content-${pad(i, 5)}`)
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const preLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(preLoaded.count).toBeGreaterThanOrEqual(DISPLAY_LIMIT)
+    for (const id of sourceIds) {
+      expect(preLoaded.ids, `[E2E] source ${id} must be outside the loaded projection`).not.toContain(id)
+    }
+    const preBlockKeyCount: number = await page.evaluate(
+      () => Object.keys((window as any).store.getState().messageBlocks?.entities ?? {}).length
+    )
+    const preRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(preRaw.ok).toBe(true)
+    const preOrder: string[] = (preRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(preOrder.length).toBe(TOTAL)
+    expect(preOrder.slice(4, 8)).toEqual(sourceIds)
+
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, null, {
+      timeout: 15000
+    })
+    await page.evaluate(
+      ({ mids }: { mids: string[] }) => {
+        const store = (window as any).store
+        store.dispatch({ type: 'editMode/setSelectedGroupIds', payload: mids })
+      },
+      { mids: [outsideUserId] }
+    )
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+x')
+
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        const c = s.clipboard
+        return (
+          c?.mode === 'cut' &&
+          Array.isArray(c.items) &&
+          c.items.length === 1 &&
+          c.items[0]?.messages?.length === 4 &&
+          s.editMode?.isProcessing === false
+        )
+      },
+      null,
+      { timeout: 30000 }
+    )
+    const cutClip: any = await page.evaluate(() => {
+      const c = (window as any).store.getState().clipboard
+      const item = c.items[0]
+      return {
+        mode: c.mode,
+        messageIds: item.messages.map((m: any) => m.id),
+        blockMids: item.blocks.map((b: any) => b.messageId)
+      }
+    })
+    expect(cutClip.mode).toBe('cut')
+    expect(cutClip.messageIds).toEqual(sourceIds)
+    expect(cutClip.blockMids).toEqual(sourceIds)
+    const postCutLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    expect(postCutLoaded.count).toBe(preLoaded.count)
+    expect(postCutLoaded.ids).toEqual(preLoaded.ids)
+    const postCutBlocks: number = await page.evaluate(
+      () => Object.keys((window as any).store.getState().messageBlocks?.entities ?? {}).length
+    )
+    expect(postCutBlocks).toBe(preBlockKeyCount)
+    const cutRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(cutRaw.ok).toBe(true)
+    expect((cutRaw.value?.messages ?? []).length).toBe(TOTAL)
+    expect((cutRaw.value?.messages ?? []).map((m: any) => m.id)).toEqual(expect.arrayContaining(sourceIds))
+
+    await page.evaluate(() => {
+      ;(window as any).store.dispatch({ type: 'editMode/clearSelection' })
+    })
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+v')
+
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        return s.clipboard?.mode === null && s.clipboard?.items?.length === 0 && s.editMode?.isProcessing === false
+      },
+      null,
+      { timeout: 30000 }
+    )
+    await page.waitForFunction(
+      async ({ topicId, goneId, expectedLen }: { topicId: string; goneId: string; expectedLen: number }) => {
+        const api: any = (window as any).api?.chatDb
+        if (!api || typeof api.getRawTopic !== 'function') return false
+        try {
+          const raw = await api.getRawTopic({ topicId })
+          if (raw?.ok !== true) return false
+          const ids: string[] = (raw.value?.messages ?? []).map((m: any) => m.id)
+          return ids.length === expectedLen && !ids.includes(goneId)
+        } catch {
+          return false
+        }
+      },
+      { topicId, goneId: outsideUserId, expectedLen: TOTAL },
+      { timeout: 30000 }
+    )
+    const postPasteRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postPasteRaw.ok).toBe(true)
+    const postPasteIds: string[] = (postPasteRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(postPasteIds.length).toBe(TOTAL)
+    for (const id of sourceIds) {
+      expect(postPasteIds, `[E2E] source ${id} must be semantic-deleted after cut-paste`).not.toContain(id)
+    }
+    const pasteNewIds = postPasteIds.filter((id) => !preOrder.includes(id))
+    expect(pasteNewIds.length).toBe(4)
+    expect(postPasteIds.slice(-4)).toEqual(pasteNewIds)
+    const pasteNewSet = new Set(pasteNewIds)
+    expect(postPasteIds.filter((id) => !pasteNewSet.has(id))).toEqual(preOrder.filter((id) => !sourceSet.has(id)))
+    const pasteById = new Map((postPasteRaw.value?.messages ?? []).map((m: any) => [m.id as string, m]))
+    expect((pasteById.get(pasteNewIds[0]) as any)?.role).toBe('user')
+    for (const id of pasteNewIds.slice(1)) {
+      expect((pasteById.get(id) as any)?.role).toBe('assistant')
+      expect((pasteById.get(id) as any)?.askId).toBe(pasteNewIds[0])
+    }
+    const cutUndoTop: any = await page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const stack: any[] = s.undoStack?.undoStack ?? []
+      return stack[stack.length - 1] ?? null
+    })
+    expect(cutUndoTop, '[E2E] cut-paste must push a cut_paste undo').not.toBeNull()
+    expect(cutUndoTop.type).toBe('cut_paste')
+    expect(cutUndoTop.sourceTopicId).toBe(topicId)
+    expect(cutUndoTop?.targetInsertIntent?.kind).toBe('topic-tail')
+    expect(cutUndoTop.sourceRootIds).toEqual(sourceIds)
+    expect(cutUndoTop.insertedMessageIds).toEqual(pasteNewIds)
+    const anchorIds: string[] = (cutUndoTop.sourceGroupAnchors ?? []).flatMap((a: any) =>
+      (a.messages ?? []).map((m: any) => m.id)
+    )
+    expect(anchorIds).toEqual(sourceIds)
+    const postPasteLoaded: { ids: string[]; count: number } = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const ids: string[] = (window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], count: ids.length }
+      },
+      { topicId }
+    )
+    const pasteProjectionDiff: {
+      preLoadedIds: string[]
+      postPasteLoadedIds: string[]
+      pasteNewIds: string[]
+      addedIds: string[]
+      missingPasteIds: string[]
+      missingPreIds: string[]
+      unexpectedIds: string[]
+    } = (() => {
+      const preSet = new Set(preLoaded.ids)
+      const postSet = new Set(postPasteLoaded.ids)
+      const newSet = new Set(pasteNewIds)
+      const addedIds = postPasteLoaded.ids.filter((id) => !preSet.has(id))
+      const missingPasteIds = pasteNewIds.filter((id) => !postSet.has(id))
+      const missingPreIds = preLoaded.ids.filter((id) => !postSet.has(id))
+      const unexpectedIds = addedIds.filter((id) => !newSet.has(id))
+      return {
+        preLoadedIds: [...preLoaded.ids],
+        postPasteLoadedIds: [...postPasteLoaded.ids],
+        pasteNewIds: [...pasteNewIds],
+        addedIds,
+        missingPasteIds,
+        missingPreIds,
+        unexpectedIds
+      }
+    })()
+    // Bounded-latest projection: pasted tail is appended while the oldest
+    // prefix is evicted to stay bounded. Monotonic [...pre,...new] is invalid
+    // once two new viewport groups enter (oldest 00030/00031 drop).
+    expect(
+      pasteProjectionDiff.missingPasteIds,
+      `[E2E] all pasted copies must be projected exactly once ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual([])
+    expect(
+      pasteProjectionDiff.unexpectedIds,
+      `[E2E] no unexpected IDs outside preLoaded ∪ pasted ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual([])
+    expect(
+      postPasteLoaded.ids.slice(-pasteNewIds.length),
+      `[E2E] pasted copies must be in authority order at projection tail ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual(pasteNewIds)
+    for (const id of pasteNewIds) {
+      expect(
+        postPasteLoaded.ids.filter((loadedId) => loadedId === id).length,
+        `[E2E] pasted copy ${id} must appear exactly once ${JSON.stringify(pasteProjectionDiff)}`
+      ).toBe(1)
+    }
+    expect(
+      new Set(postPasteLoaded.ids).size,
+      `[E2E] projection must not duplicate IDs ${JSON.stringify(pasteProjectionDiff)}`
+    ).toBe(postPasteLoaded.ids.length)
+    const survivingPreIds = preLoaded.ids.filter((id) => new Set(postPasteLoaded.ids).has(id))
+    const missingCount = pasteProjectionDiff.missingPreIds.length
+    expect(
+      pasteProjectionDiff.missingPreIds,
+      `[E2E] missing pre IDs must form only the contiguous oldest prefix ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual(preLoaded.ids.slice(0, missingCount))
+    expect(
+      survivingPreIds,
+      `[E2E] surviving pre IDs must form the contiguous suffix ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual(preLoaded.ids.slice(missingCount))
+    expect(
+      postPasteLoaded.ids.slice(0, survivingPreIds.length),
+      `[E2E] surviving pre IDs must preserve order before pasted tail ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual(survivingPreIds)
+    for (const id of sourceIds) {
+      expect(
+        postPasteLoaded.ids,
+        `[E2E] outside source ${id} must remain absent after cut-paste ${JSON.stringify(pasteProjectionDiff)}`
+      ).not.toContain(id)
+    }
+    expect(
+      postPasteLoaded.count,
+      `[E2E] projection count must stay bounded by pre + inserted ${JSON.stringify(pasteProjectionDiff)}`
+    ).toBeLessThanOrEqual(preLoaded.count + pasteNewIds.length)
+    expect(
+      postPasteLoaded.count,
+      `[E2E] projection must contain at least all new IDs ${JSON.stringify(pasteProjectionDiff)}`
+    ).toBeGreaterThanOrEqual(pasteNewIds.length)
+
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+z')
+    await page.waitForFunction(
+      async ({ topicId, expected }: { topicId: string; expected: string[] }) => {
+        const api: any = (window as any).api?.chatDb
+        if (!api || typeof api.getRawTopic !== 'function') return false
+        try {
+          const raw = await api.getRawTopic({ topicId })
+          if (raw?.ok !== true) return false
+          const ids: string[] = (raw.value?.messages ?? []).map((m: any) => m.id)
+          return ids.length === expected.length && ids.every((id, i) => id === expected[i])
+        } catch {
+          return false
+        }
+      },
+      { topicId, expected: preOrder },
+      { timeout: 30000 }
+    )
+    const postUndoRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postUndoRaw.ok).toBe(true)
+    const postUndoIds: string[] = (postUndoRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(postUndoIds).toEqual(preOrder)
+    const undoById = new Map((postUndoRaw.value?.messages ?? []).map((m: any) => [m.id as string, m]))
+    for (const id of sourceIds) {
+      expect(undoById.has(id), `[E2E] undo must restore ${id}`).toBe(true)
+      expect((((undoById.get(id) as any)?.blocks ?? []) as string[]).length).toBeGreaterThan(0)
+    }
+    const postUndoLoaded: any = await page.evaluate(
+      ({ topicId, copies }: { topicId: string; copies: string[] }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+        return { ids: [...ids], entities: s.messages?.entities ?? {}, copies }
+      },
+      { topicId, copies: pasteNewIds }
+    )
+    const undoProjectionDiff: {
+      postUndoLoadedIds: string[]
+      pastedPresent: string[]
+      outsidePresent: string[]
+      unknownIds: string[]
+    } = (() => {
+      const authoritySet = new Set(postUndoIds)
+      const loadedIds: string[] = [...postUndoLoaded.ids]
+      return {
+        postUndoLoadedIds: loadedIds,
+        pastedPresent: pasteNewIds.filter((id) => loadedIds.includes(id)),
+        outsidePresent: sourceIds.filter((id) => loadedIds.includes(id)),
+        unknownIds: loadedIds.filter((id) => !authoritySet.has(id))
+      }
+    })()
+    for (const id of pasteNewIds) {
+      expect(
+        postUndoLoaded.ids,
+        `[E2E] undo must remove pasted copy ${id} ${JSON.stringify(undoProjectionDiff)}`
+      ).not.toContain(id)
+    }
+    // Bounded invariant tied to current Main authority (postUndoIds === preOrder):
+    // every loaded ID exists in authority and loaded order is an authority-order
+    // subsequence. Outside source IDs may remain absent and must not be injected
+    // merely by undo; no data loss is judged by authority, not by projection.
+    expect(
+      undoProjectionDiff.unknownIds,
+      `[E2E] every loaded ID must exist in undo authority ${JSON.stringify(undoProjectionDiff)}`
+    ).toEqual([])
+    const undoOrderIndex = new Map(postUndoIds.map((id, idx) => [id, idx] as [string, number]))
+    const undoLoadedIndexes = (postUndoLoaded.ids as string[]).map((id) => undoOrderIndex.get(id) ?? -1)
+    for (const idx of undoLoadedIndexes) {
+      expect(
+        idx,
+        `[E2E] undo loaded ID must be a known authority ID ${JSON.stringify(undoProjectionDiff)}`
+      ).toBeGreaterThanOrEqual(0)
+    }
+    expect(
+      [...undoLoadedIndexes].sort((a, b) => a - b),
+      `[E2E] undo loaded order must follow authority order ${JSON.stringify(undoProjectionDiff)}`
+    ).toEqual(undoLoadedIndexes)
+    expect(
+      (postUndoLoaded.ids as string[]).length,
+      `[E2E] undo projection must stay bounded ${JSON.stringify(undoProjectionDiff)}`
+    ).toBeLessThanOrEqual(preLoaded.count + sourceIds.length)
+    for (const id of sourceIds) {
+      expect(
+        postUndoLoaded.ids,
+        `[E2E] outside restored ${id} must stay absent from Redux (undo must not inject) ${JSON.stringify(undoProjectionDiff)}`
+      ).not.toContain(id)
+    }
+    const redoTop: any = await page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const stack: any[] = s.undoStack?.redoStack ?? []
+      return stack[stack.length - 1] ?? null
+    })
+    expect(redoTop, '[E2E] undo must stage a cut_paste redo').not.toBeNull()
+    expect(redoTop.type).toBe('cut_paste')
+
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+Shift+z')
+    await page.waitForFunction(
+      async ({ topicId, gone, back }: { topicId: string; gone: string[]; back: string[] }) => {
+        const api: any = (window as any).api?.chatDb
+        if (!api || typeof api.getRawTopic !== 'function') return false
+        try {
+          const raw = await api.getRawTopic({ topicId })
+          if (raw?.ok !== true) return false
+          const ids: string[] = (raw.value?.messages ?? []).map((m: any) => m.id)
+          return ids.length === TOTAL && gone.every((id) => !ids.includes(id)) && back.every((id) => ids.includes(id))
+        } catch {
+          return false
+        }
+      },
+      { topicId, gone: sourceIds, back: pasteNewIds },
+      { timeout: 30000 }
+    )
+    const postRedoRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postRedoRaw.ok).toBe(true)
+    const postRedoIds: string[] = (postRedoRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(postRedoIds.length).toBe(TOTAL)
+    for (const id of sourceIds) {
+      expect(postRedoIds, `[E2E] redo must re-delete source ${id}`).not.toContain(id)
+    }
+    expect(postRedoIds.slice(-4)).toEqual(pasteNewIds)
+    const postRedoLoaded: string[] = await page.evaluate(
+      ({ topicId }: { topicId: string }) => [
+        ...((window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? [])
+      ],
+      { topicId }
+    )
+    const redoProjectionDiff: {
+      postRedoLoadedIds: string[]
+      pastedPresent: string[]
+      pastedMissing: string[]
+      outsidePresent: string[]
+      unknownIds: string[]
+    } = (() => {
+      const authoritySet = new Set(postRedoIds)
+      const loadedIds: string[] = [...postRedoLoaded]
+      const loadedSet = new Set(loadedIds)
+      return {
+        postRedoLoadedIds: loadedIds,
+        pastedPresent: pasteNewIds.filter((id) => loadedSet.has(id)),
+        pastedMissing: pasteNewIds.filter((id) => !loadedSet.has(id)),
+        outsidePresent: sourceIds.filter((id) => loadedSet.has(id)),
+        unknownIds: loadedIds.filter((id) => !authoritySet.has(id))
+      }
+    })()
+    // Bounded invariant tied to current Main authority (source absent + same
+    // pasted IDs at tail): production locally inserts all pasted copies, so
+    // assert all are resident in correct relative authority order.
+    expect(
+      redoProjectionDiff.pastedMissing,
+      `[E2E] redo must re-project all pasted copies ${JSON.stringify(redoProjectionDiff)}`
+    ).toEqual([])
+    expect(
+      redoProjectionDiff.unknownIds,
+      `[E2E] every redo loaded ID must belong to redo authority ${JSON.stringify(redoProjectionDiff)}`
+    ).toEqual([])
+    expect(
+      postRedoLoaded.filter((id) => new Set(pasteNewIds).has(id)),
+      `[E2E] resident pasted copies must keep authority relative order ${JSON.stringify(redoProjectionDiff)}`
+    ).toEqual(pasteNewIds)
+    for (const id of pasteNewIds) {
+      expect(
+        postRedoLoaded.filter((loadedId) => loadedId === id).length,
+        `[E2E] redo pasted copy ${id} must appear exactly once ${JSON.stringify(redoProjectionDiff)}`
+      ).toBe(1)
+    }
+    for (const id of sourceIds) {
+      expect(
+        postRedoLoaded,
+        `[E2E] redo must not inject outside source ${id} ${JSON.stringify(redoProjectionDiff)}`
+      ).not.toContain(id)
+    }
+    const redoOrderIndex = new Map(postRedoIds.map((id, idx) => [id, idx] as [string, number]))
+    const redoLoadedIndexes = postRedoLoaded.map((id) => redoOrderIndex.get(id) ?? -1)
+    expect(
+      [...redoLoadedIndexes].sort((a, b) => a - b),
+      `[E2E] redo loaded order must follow authority order ${JSON.stringify(redoProjectionDiff)}`
+    ).toEqual(redoLoadedIndexes)
+    expect(
+      postRedoLoaded.length,
+      `[E2E] redo projection must stay bounded ${JSON.stringify(redoProjectionDiff)}`
+    ).toBeLessThanOrEqual(preLoaded.count + pasteNewIds.length)
+    expect(
+      postRedoLoaded.length,
+      `[E2E] redo projection must contain at least all pasted IDs ${JSON.stringify(redoProjectionDiff)}`
+    ).toBeGreaterThanOrEqual(pasteNewIds.length)
+    const postRedoOutsideBlocks: boolean[] = await page.evaluate(
+      ({ bids }: { bids: string[] }) => {
+        const entities = (window as any).store.getState().messageBlocks?.entities ?? {}
+        return bids.map((bid) => entities[bid] !== undefined)
+      },
+      { bids: sourceBlocks }
+    )
+    expect(postRedoOutsideBlocks).toEqual([false, false, false, false])
+
+    await electronApp.close()
+    const dbPath = getChatDbPath()
+    expect(dbPath).not.toBeNull()
+    await expect.poll(() => fs.existsSync(dbPath!), { timeout: 30000, intervals: [250, 500] }).toBe(true)
+    const esc = (v: string) => v.replace(/'/g, "''")
+    const sqlOrder = `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' ORDER BY sort_order ASC, id ASC`
+    await pollDbUntil(dbPath!, sqlOrder, (rows) => rows.length === TOTAL, 30000)
+    const probe = queryChatDbViaElectron(dbPath!, sqlOrder)
+    expect(probe.ok, `SQLite redo order probe failed: ${JSON.stringify(probe)}`).toBe(true)
+    expect(((probe as any).rows ?? []).map((r: any) => r.id)).toEqual(postRedoIds)
+    const inSrc = sourceIds.map((v) => `'${esc(v)}'`).join(',')
+    const srcGoneProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' AND id IN (${inSrc})`
+    )
+    expect(srcGoneProbe.ok, `SQLite source-absence probe failed: ${JSON.stringify(srcGoneProbe)}`).toBe(true)
+    expect(((srcGoneProbe as any).rows ?? []).length).toBe(0)
+    const inNew = pasteNewIds.map((v) => `'${esc(v)}'`).join(',')
+    const redoBlocksProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT mb.content AS content FROM message_blocks mb JOIN messages m ON m.id = mb.message_id WHERE m.topic_id = '${esc(topicId)}' AND mb.message_id IN (${inNew}) ORDER BY m.sort_order ASC, mb.sort_order ASC, mb.id ASC`
+    )
+    expect(redoBlocksProbe.ok, `SQLite redo block probe failed: ${JSON.stringify(redoBlocksProbe)}`).toBe(true)
+    expect(((redoBlocksProbe as any).rows ?? []).map((r: any) => r.content)).toEqual(expectedContents)
   })
 })
