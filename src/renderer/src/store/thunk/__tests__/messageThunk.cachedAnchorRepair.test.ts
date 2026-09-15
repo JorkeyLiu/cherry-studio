@@ -1,16 +1,18 @@
 /**
- * Cached-path compatibility repair against the REAL `ensureTopicAnchorEstablished`
- * (docs/context-window.md §10, CW-FIX-2).
+ * Cached-path compatibility repair via the authority resolver
+ * (docs/context-window.md §10).
  *
  * `loadTopicMessagesThunk` must run compatibility repair for a NON-EMPTY
  * cached topic (messages already in Redux, e.g. a fresh branch pre-populated
- * by `cloneMessagesToNewTopicThunk`) before the cached early return. This file
- * proves the PERSISTED-RESULT semantics with the real decision pipeline
- * (`buildContextTurns` + `resolveAnchorEstablishDecision`):
+ * by `cloneMessagesToNewTopicThunk`) before the cached early return. Repair
+ * is authority-resolved (`chatdb:resolve-context-closure`, intent
+ * `establish`): no loaded-viewport authority decisions, only the non-stale
+ * returned anchor is persisted (key removed on empty). Transport failures
+ * preserve settings.
  *
- *   - cached non-empty topic, no anchor       → repair writes the default anchor
- *   - cached non-empty topic, valid anchor    → no write (never recalculated)
- *   - cached non-empty topic, ghost anchor    → repaired to the default anchor
+ *   - cached non-empty topic, no anchor       → repair writes the resolver anchor
+ *   - cached non-empty topic, valid anchor    → no write (resolver echo)
+ *   - cached non-empty topic, ghost anchor    → repaired to the resolver anchor
  *   - cached empty topic                      → fetch path runs; no write
  *
  * Call-sequence contract tests (hook mocked) live in
@@ -51,7 +53,8 @@ const { mocks } = vi.hoisted(() => ({
     setCurrentTopicId: vi.fn((p: unknown) => ({ type: 'newMessages/setCurrentTopicId', payload: p })),
     updateTopicUpdatedAt: vi.fn((p: unknown) => ({ type: 'updateTopicUpdatedAt', payload: p })),
     updateAssistantSettings: vi.fn((p: unknown) => ({ type: 'updateAssistantSettings', payload: p })),
-    loadTopicSegmentsThunk: vi.fn()
+    loadTopicSegmentsThunk: vi.fn(),
+    resolveContextClosure: vi.fn()
   }
 }))
 
@@ -117,6 +120,8 @@ vi.mock('@renderer/services/db', () => ({
   dbService: {
     fetchMessages: mocks.fetchMessages,
     fetchMessagesWindow: mocks.fetchMessagesWindow,
+    resolveContextClosure: (...args: unknown[]) =>
+      (mocks.resolveContextClosure as (...a: unknown[]) => unknown)(...args),
     appendMessage: vi.fn(),
     deleteMessagesWithSegments: vi.fn(),
     resetMessagesForResend: vi.fn(),
@@ -189,12 +194,31 @@ const makeStoreState = (settings: Record<string, unknown>, messageIds: string[])
 
 // --- Tests ----------------------------------------------------------------
 
-describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', () => {
+describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () => {
   beforeEach(() => {
     // clearAllMocks (not reset) preserves the hoisted fetchMessagesWindow
     // implementation while isolating call counts between its.
     vi.clearAllMocks()
     storeState = makeStoreState({ contextCount: 1 }, ['u1', 'a1', 'u2'])
+    const success = (resolvedAnchorGroupKey: string | null) =>
+      ({
+        messages: [],
+        blocks: [],
+        closure: {
+          completeness: 'context-closure',
+          topicId: 'topic-1',
+          anchorGroupKey: resolvedAnchorGroupKey,
+          firstMessageId: resolvedAnchorGroupKey ? 'm1' : null,
+          lastMessageId: resolvedAnchorGroupKey ? 'm1' : null,
+          returnedCount: resolvedAnchorGroupKey ? 1 : 0,
+          totalTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+          selectedTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+          boundaryMessageId: null
+        },
+        resolvedAnchorGroupKey,
+        changed: true
+      }) as unknown
+    mocks.resolveContextClosure.mockResolvedValue(success('u2'))
   })
 
   afterEach(() => {
@@ -229,6 +253,25 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
       'a1',
       'u2'
     ])
+    // Authority echo: the persisted anchor is valid, so the resolver returns it.
+    const echo = {
+      messages: [],
+      blocks: [],
+      closure: {
+        completeness: 'context-closure',
+        topicId: 'topic-1',
+        anchorGroupKey: 'u1',
+        firstMessageId: 'm1',
+        lastMessageId: 'm1',
+        returnedCount: 1,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
+      },
+      resolvedAnchorGroupKey: 'u1',
+      changed: false
+    } as unknown
+    mocks.resolveContextClosure.mockResolvedValueOnce(echo)
 
     const dispatch = vi.fn()
     const getState = () => storeState as never
@@ -237,8 +280,7 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
 
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
     expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
-    // Valid persisted anchor (u1, resolvable in the cached turns) is left
-    // untouched — exactly-once repair never recalcules a valid anchor.
+    // Valid persisted anchor (resolver echo) is left untouched.
     expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
   })
 
@@ -266,6 +308,25 @@ describe('loadTopicMessagesThunk cached-path repair (real decision pipeline)', (
   it('an EMPTY cached topic falls through to the fetch path and never receives an anchor', async () => {
     storeState = makeStoreState({ contextCount: 1 }, [])
     // empty topic via window fetch already mocked to return empty window
+    // Authority reports an existing empty target (null anchor).
+    const empty = {
+      messages: [],
+      blocks: [],
+      closure: {
+        completeness: 'context-closure',
+        topicId: 'topic-1',
+        anchorGroupKey: null,
+        firstMessageId: null,
+        lastMessageId: null,
+        returnedCount: 0,
+        totalTurnCount: 0,
+        selectedTurnCount: 0,
+        boundaryMessageId: null
+      },
+      resolvedAnchorGroupKey: null,
+      changed: false
+    } as unknown
+    mocks.resolveContextClosure.mockResolvedValueOnce(empty)
 
     const dispatch = vi.fn()
     const getState = () => storeState as never

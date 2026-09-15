@@ -53,6 +53,7 @@ import type {
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
+  ResolveContextClosureRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
@@ -2710,6 +2711,329 @@ const fetchContextClosureContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Authority context-closure resolver — one transaction resolve + same-snapshot closure
+// ---------------------------------------------------------------------------
+
+const RESOLVE_CONTEXT_CLOSURE_VALUE_KEYS = new Set([
+  'messages',
+  'blocks',
+  'closure',
+  'resolvedAnchorGroupKey',
+  'changed'
+])
+const RESOLVE_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
+  'completeness',
+  'topicId',
+  'anchorGroupKey',
+  'firstMessageId',
+  'lastMessageId',
+  'returnedCount',
+  'totalTurnCount',
+  'selectedTurnCount',
+  'boundaryMessageId'
+])
+const RESOLVE_CONTEXT_CLOSURE_INTENTS = new Set(['establish', 'reanchor-default', 'move', 'inherit'])
+
+function validateOptionalAnchorKey(value: unknown, path: string): void {
+  if (value === undefined) return
+  if (value === null) return
+  validateNonEmptyString(value, path)
+}
+
+function validateOptionalContextCount(value: unknown, path: string): void {
+  if (value === undefined) return
+  if (value === null) return
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new ValidationError(path, '[chatdb:resolve-context-closure] Expected finite number contextCount or null')
+  }
+}
+
+const resolveContextClosureContract: ChatDbContract = {
+  allowedKeys: keySet(
+    'topicId',
+    'intent',
+    'contextCount',
+    'currentAnchorGroupKey',
+    'messageId',
+    'groupKey',
+    'sourceTopicId',
+    'sourceAnchorGroupKey'
+  ),
+  validate(value: unknown): void {
+    validateRequest(value, resolveContextClosureContract.allowedKeys)
+    const req = value as ResolveContextClosureRequest & Record<string, unknown>
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (typeof req.intent !== 'string' || !RESOLVE_CONTEXT_CLOSURE_INTENTS.has(req.intent)) {
+      throw new ValidationError(
+        'request.intent',
+        '[chatdb:resolve-context-closure] Expected intent one of establish|reanchor-default|move|inherit'
+      )
+    }
+    validateOptionalAnchorKey(req.currentAnchorGroupKey, 'request.currentAnchorGroupKey')
+    validateOptionalContextCount(req.contextCount, 'request.contextCount')
+    const hasMessageId = req.messageId !== undefined
+    const hasGroupKey = req.groupKey !== undefined
+    const hasContextCount = (req as Record<string, unknown>).contextCount !== undefined
+    const hasSourceTopicId = req.sourceTopicId !== undefined
+    const hasSourceAnchor = (req as Record<string, unknown>).sourceAnchorGroupKey !== undefined
+    if (req.intent === 'establish' || req.intent === 'reanchor-default') {
+      if (!hasContextCount) {
+        throw new ValidationError(
+          'request.contextCount',
+          '[chatdb:resolve-context-closure] contextCount is required for establish/reanchor-default'
+        )
+      }
+      if (hasMessageId || hasGroupKey || hasSourceTopicId || hasSourceAnchor) {
+        throw new ValidationError(
+          'request',
+          '[chatdb:resolve-context-closure] establish/reanchor-default forbids messageId/groupKey/sourceTopicId/sourceAnchorGroupKey'
+        )
+      }
+    } else if (req.intent === 'move') {
+      if (hasContextCount || hasSourceTopicId || hasSourceAnchor) {
+        throw new ValidationError(
+          'request',
+          '[chatdb:resolve-context-closure] move forbids contextCount/sourceTopicId/sourceAnchorGroupKey'
+        )
+      }
+      if ((hasMessageId ? 1 : 0) + (hasGroupKey ? 1 : 0) !== 1) {
+        throw new ValidationError(
+          'request',
+          '[chatdb:resolve-context-closure] move requires exactly one of messageId/groupKey'
+        )
+      }
+      if (hasMessageId) validateNonEmptyString(req.messageId, 'request.messageId')
+      if (hasGroupKey) validateNonEmptyString(req.groupKey, 'request.groupKey')
+    } else {
+      // inherit
+      if (hasMessageId || hasGroupKey) {
+        throw new ValidationError('request', '[chatdb:resolve-context-closure] inherit forbids messageId/groupKey')
+      }
+      if (!hasSourceTopicId) {
+        throw new ValidationError(
+          'request.sourceTopicId',
+          '[chatdb:resolve-context-closure] sourceTopicId is required for inherit'
+        )
+      }
+      validateNonEmptyString(req.sourceTopicId, 'request.sourceTopicId')
+      validateOptionalAnchorKey(req.sourceAnchorGroupKey, 'request.sourceAnchorGroupKey')
+      if (!hasContextCount) {
+        throw new ValidationError(
+          'request.contextCount',
+          '[chatdb:resolve-context-closure] contextCount is required for inherit fallback'
+        )
+      }
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:resolve-context-closure', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:resolve-context-closure] Expected object with messages, blocks, closure, resolvedAnchorGroupKey, changed'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:resolve-context-closure] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!RESOLVE_CONTEXT_CLOSURE_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:resolve-context-closure] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      if (v.closure === null || typeof v.closure !== 'object' || Array.isArray(v.closure)) {
+        throw new ValidationError('result.value.closure', '[chatdb:resolve-context-closure] Expected closure object')
+      }
+      const cProto = Object.getPrototypeOf(v.closure)
+      if (cProto !== Object.prototype && cProto !== null) {
+        throw new ValidationError(
+          'result.value.closure',
+          '[chatdb:resolve-context-closure] Success closure must be a plain object'
+        )
+      }
+      const c = v.closure as Record<string, unknown>
+      for (const key of Object.keys(c)) {
+        if (!RESOLVE_CONTEXT_CLOSURE_CLOSURE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.closure.${key}`,
+            `[chatdb:resolve-context-closure] Unknown key in closure: "${key}"`
+          )
+        }
+      }
+      if (c.completeness !== 'context-closure') {
+        throw new ValidationError(
+          'result.value.closure.completeness',
+          '[chatdb:resolve-context-closure] Expected completeness "context-closure"'
+        )
+      }
+      validateNonEmptyString(c.topicId, 'result.value.closure.topicId')
+      if (v.resolvedAnchorGroupKey !== null && typeof v.resolvedAnchorGroupKey !== 'string') {
+        throw new ValidationError(
+          'result.value.resolvedAnchorGroupKey',
+          '[chatdb:resolve-context-closure] Expected string resolvedAnchorGroupKey or null'
+        )
+      }
+      if (typeof v.resolvedAnchorGroupKey === 'string' && v.resolvedAnchorGroupKey.length === 0) {
+        throw new ValidationError(
+          'result.value.resolvedAnchorGroupKey',
+          '[chatdb:resolve-context-closure] resolvedAnchorGroupKey must be non-empty or null'
+        )
+      }
+      if (typeof v.changed !== 'boolean') {
+        throw new ValidationError('result.value.changed', '[chatdb:resolve-context-closure] Expected boolean changed')
+      }
+      // closure.anchorGroupKey must mirror resolvedAnchorGroupKey
+      if (c.anchorGroupKey !== v.resolvedAnchorGroupKey) {
+        throw new ValidationError(
+          'result.value.closure.anchorGroupKey',
+          '[chatdb:resolve-context-closure] closure.anchorGroupKey must equal resolvedAnchorGroupKey'
+        )
+      }
+      if (c.anchorGroupKey !== null) {
+        validateNonEmptyString(c.anchorGroupKey, 'result.value.closure.anchorGroupKey')
+      }
+      if (c.firstMessageId !== null) {
+        validateNonEmptyString(c.firstMessageId, 'result.value.closure.firstMessageId')
+      }
+      if (c.lastMessageId !== null) {
+        validateNonEmptyString(c.lastMessageId, 'result.value.closure.lastMessageId')
+      }
+      if (
+        typeof c.returnedCount !== 'number' ||
+        !Number.isFinite(c.returnedCount) ||
+        !Number.isInteger(c.returnedCount) ||
+        c.returnedCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.closure.returnedCount',
+          '[chatdb:resolve-context-closure] Expected non-negative integer returnedCount'
+        )
+      }
+      const msgs = v.messages as unknown[]
+      if (c.returnedCount !== msgs.length) {
+        throw new ValidationError(
+          'result.value.closure.returnedCount',
+          '[chatdb:resolve-context-closure] returnedCount must equal messages length'
+        )
+      }
+      if (
+        typeof c.totalTurnCount !== 'number' ||
+        !Number.isFinite(c.totalTurnCount) ||
+        !Number.isInteger(c.totalTurnCount) ||
+        c.totalTurnCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.closure.totalTurnCount',
+          '[chatdb:resolve-context-closure] Expected integer totalTurnCount >=0'
+        )
+      }
+      if (
+        typeof c.selectedTurnCount !== 'number' ||
+        !Number.isFinite(c.selectedTurnCount) ||
+        !Number.isInteger(c.selectedTurnCount) ||
+        c.selectedTurnCount < 0
+      ) {
+        throw new ValidationError(
+          'result.value.closure.selectedTurnCount',
+          '[chatdb:resolve-context-closure] Expected integer selectedTurnCount >=0'
+        )
+      }
+      if (c.selectedTurnCount > c.totalTurnCount) {
+        throw new ValidationError(
+          'result.value.closure.selectedTurnCount',
+          '[chatdb:resolve-context-closure] selectedTurnCount must be <= totalTurnCount'
+        )
+      }
+      if (v.resolvedAnchorGroupKey === null) {
+        // Empty target success: no turns, no selection, null bounds.
+        if (
+          c.totalTurnCount !== 0 ||
+          c.selectedTurnCount !== 0 ||
+          c.returnedCount !== 0 ||
+          c.firstMessageId !== null ||
+          c.lastMessageId !== null ||
+          c.boundaryMessageId !== null
+        ) {
+          throw new ValidationError(
+            'result.value.closure',
+            '[chatdb:resolve-context-closure] Empty (null anchor) closure must have zero counts and null bounds'
+          )
+        }
+      } else {
+        if (c.returnedCount === 0) {
+          throw new ValidationError(
+            'result.value.closure.returnedCount',
+            '[chatdb:resolve-context-closure] Non-null anchor must have non-empty closure'
+          )
+        }
+        if (c.firstMessageId === null || c.lastMessageId === null) {
+          throw new ValidationError(
+            'result.value.closure',
+            '[chatdb:resolve-context-closure] Non-empty closure must have first/lastMessageId'
+          )
+        }
+        {
+          const firstId = (msgs[0] as Record<string, unknown>).id
+          const lastId = (msgs[msgs.length - 1] as Record<string, unknown>).id
+          if (c.firstMessageId !== firstId) {
+            throw new ValidationError(
+              'result.value.closure.firstMessageId',
+              '[chatdb:resolve-context-closure] firstMessageId must match first message id'
+            )
+          }
+          if (c.lastMessageId !== lastId) {
+            throw new ValidationError(
+              'result.value.closure.lastMessageId',
+              '[chatdb:resolve-context-closure] lastMessageId must match last message id'
+            )
+          }
+        }
+        if (c.totalTurnCount < 1 || c.selectedTurnCount < 1) {
+          throw new ValidationError(
+            'result.value.closure',
+            '[chatdb:resolve-context-closure] Non-empty closure must have total/selected >=1'
+          )
+        }
+        if (c.selectedTurnCount === c.totalTurnCount) {
+          if (c.boundaryMessageId !== null) {
+            throw new ValidationError(
+              'result.value.closure.boundaryMessageId',
+              '[chatdb:resolve-context-closure] boundaryMessageId must be null when selected===total (whole-topic)'
+            )
+          }
+        } else {
+          if (typeof c.boundaryMessageId !== 'string' || c.boundaryMessageId.length === 0) {
+            throw new ValidationError(
+              'result.value.closure.boundaryMessageId',
+              '[chatdb:resolve-context-closure] boundaryMessageId must be non-empty string when selected<total (partial)'
+            )
+          }
+          if (c.boundaryMessageId !== c.firstMessageId) {
+            throw new ValidationError(
+              'result.value.closure.boundaryMessageId',
+              '[chatdb:resolve-context-closure] boundaryMessageId must equal firstMessageId when partial'
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Whole-topic snapshot READ — one-shot export/knowledge snapshot (distinct completeness)
 // ---------------------------------------------------------------------------
 
@@ -3344,6 +3668,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-answer-group': fetchAnswerGroupContract,
   // S6.3 R-06: authoritative context closure READ (anchor through newest)
   'chatdb:fetch-context-closure': fetchContextClosureContract,
+  // Authority context-closure resolver (additive; preserves fetch-context-closure)
+  'chatdb:resolve-context-closure': resolveContextClosureContract,
   // One-shot whole-topic snapshot READ (topic exports / knowledge)
   'chatdb:fetch-whole-topic-snapshot': fetchWholeTopicSnapshotContract,
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)

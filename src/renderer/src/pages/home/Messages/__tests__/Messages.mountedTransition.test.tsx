@@ -144,7 +144,14 @@ const mocks = vi.hoisted(() => {
     regenerateAssistant: vi.fn().mockResolvedValue(undefined),
     resendUser: vi.fn().mockResolvedValue(undefined),
     editSave: vi.fn().mockResolvedValue(true),
-    resendWithEdit: vi.fn().mockResolvedValue(true)
+    resendWithEdit: vi.fn().mockResolvedValue(true),
+
+    // Context resolver: stable stub so the static `dbService` import never
+    // loads the real SqliteMessageDataSource/store/assistants graph.
+    // NEW_BRANCH inherit path is not exercised here; the null anchor is a
+    // no-op that keeps test semantics unchanged.
+    resolveContextClosure: vi.fn(async () => ({ resolvedAnchorGroupKey: null }) as any),
+    fetchMessagesWindow: vi.fn(async () => ({ messages: [], blocks: [] }) as any)
   }
 })
 
@@ -322,8 +329,25 @@ vi.mock('@renderer/services/anchorService', () => ({
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
+  DEFAULT_ASSISTANT_SETTINGS: { contextCount: 25, contextWindowAnchor: {} },
   getAssistantSettings: vi.fn(() => ({})),
+  getDefaultAssistant: vi.fn(() => ({ id: 'assistant-1', settings: {} })),
   getDefaultTopic: vi.fn(() => ({ id: 'default-topic', name: 'Default' }))
+}))
+
+vi.mock('@renderer/services/db/DbService', () => ({
+  dbService: {
+    resolveContextClosure: (...args: unknown[]) => (mocks as any).resolveContextClosure(...args),
+    fetchMessagesWindow: (...args: unknown[]) => (mocks as any).fetchMessagesWindow(...args)
+  },
+  DbService: vi.fn()
+}))
+
+vi.mock('@renderer/services/db', () => ({
+  dbService: {
+    resolveContextClosure: (...args: unknown[]) => (mocks as any).resolveContextClosure(...args),
+    fetchMessagesWindow: (...args: unknown[]) => (mocks as any).fetchMessagesWindow(...args)
+  }
 }))
 
 vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({

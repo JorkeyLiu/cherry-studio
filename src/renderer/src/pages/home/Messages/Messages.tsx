@@ -52,9 +52,10 @@ import {
   reconcileMessageWindow
 } from '@renderer/pages/home/Messages/messageWindow'
 import SelectionBox from '@renderer/pages/home/Messages/SelectionBox'
-import { buildGroupList, ensureTopicAnchorEstablished, inheritAnchorForBranch } from '@renderer/services/anchorService'
+import { ensureTopicAnchorEstablished } from '@renderer/services/anchorService'
 import { getAssistantSettings, getDefaultTopic } from '@renderer/services/AssistantService'
 import type { computeContextInfo } from '@renderer/services/contextInfoService'
+import { dbService } from '@renderer/services/db/DbService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
@@ -1011,47 +1012,74 @@ const Messages = ({
             void Promise.resolve(autoRenameTopic(assistant, newTopic.id)).catch((error: unknown) =>
               logger.error('autoRenameTopic failed', error as Error)
             )
-            // Branch inheritance (docs/context-window.md §9): the new branch
-            // deterministically inherits the parent topic's persisted anchor
-            // by position (group-list index transfer), never by recomputing
-            // from `contextCount`. An out-of-range parent position clamps to
-            // the branch's last available group (nearest available
-            // predecessor). Only the persisted anchor map is manipulated; the
-            // branch topic's resolved anchor projection is derived by
-            // computeContextInfo on every render.
-            const assistantSettings = getAssistantSettings(assistant)
-            const sourceAnchor = assistantSettings.contextWindowAnchor?.[topic.id]
-
-            try {
-              const sourceState = store.getState()
-              const sourceMessageIds = sourceState.messages.messageIdsByTopic[topic.id] || []
-              const sourceEntities = sourceState.messages.entities
-              const sourceGroupList = buildGroupList(sourceMessageIds, (id) => sourceEntities[id])
-              const newMessageIds = sourceState.messages.messageIdsByTopic[newTopic.id] || []
-              const newEntities = sourceState.messages.entities
-              const newGroupList = buildGroupList(newMessageIds, (id) => newEntities[id])
-
-              const inheritedAnchor = inheritAnchorForBranch(sourceAnchor, sourceGroupList, newGroupList)
-              if (inheritedAnchor) {
-                // Persist the inherited branch anchor FIRST (synchronous Redux
-                // dispatch) so the establishment pass below resolves it.
+            // Branch inheritance (docs/context-window.md §9) via the authority
+            // resolver: one `chatdb:resolve-context-closure` (intent `inherit`)
+            // call maps the parent's persisted anchor by index into the new
+            // branch with clamp, falling back to the target default when the
+            // source anchor is invalid. No loaded messageIds group lists. Main
+            // never persists settings; only the non-stale returned anchor is
+            // persisted (empty branch stays anchorless). Resolver
+            // messages/blocks are caller-local and never enter normal Redux.
+            void (async () => {
+              try {
+                const latestAssistant = (() => {
+                  try {
+                    return store.getState().assistants.assistants.find((a) => a.id === assistant.id) ?? assistant
+                  } catch {
+                    return assistant
+                  }
+                })()
+                const latestSettings = getAssistantSettings(latestAssistant)
+                const sourceAnchor = latestSettings.contextWindowAnchor?.[topic.id]
+                const sourceKey =
+                  sourceAnchor && (sourceAnchor as { kind: string; groupKey: string }).kind === 'active'
+                    ? (sourceAnchor as { kind: string; groupKey: string }).groupKey
+                    : null
+                const response = await dbService.resolveContextClosure({
+                  topicId: newTopic.id,
+                  intent: 'inherit',
+                  sourceTopicId: topic.id,
+                  sourceAnchorGroupKey: sourceKey,
+                  contextCount: latestSettings.contextCount ?? null,
+                  currentAnchorGroupKey: null
+                })
+                const resolved = response.resolvedAnchorGroupKey
+                if (resolved === null || resolved === undefined) {
+                  return
+                }
+                // Stale guard: only persist when the new branch still has no
+                // anchor (the inherit call captured a null target anchor).
+                const freshAssistant = (() => {
+                  try {
+                    return store.getState().assistants.assistants.find((a) => a.id === assistant.id) ?? assistant
+                  } catch {
+                    return assistant
+                  }
+                })()
+                const freshSettings = getAssistantSettings(freshAssistant)
+                const freshAnchor = freshSettings.contextWindowAnchor?.[newTopic.id] as
+                  | { kind: string; groupKey: string }
+                  | undefined
+                if (freshAnchor?.kind === 'active') {
+                  return
+                }
                 updateAssistantSettings({
                   contextWindowAnchor: {
-                    ...assistantSettings.contextWindowAnchor,
-                    [newTopic.id]: inheritedAnchor
+                    ...freshSettings.contextWindowAnchor,
+                    [newTopic.id]: { kind: 'active', groupKey: resolved }
                   }
                 })
+              } catch (error) {
+                // Inherit failure (NOT_FOUND/transport) preserves settings;
+                // fall back to establishment so a non-empty branch still
+                // receives an anchor without loaded-viewport decisions.
+                try {
+                  await ensureTopicAnchorEstablished(dispatch, store.getState, assistant.id, newTopic.id)
+                } catch {
+                  logger.error('[NEW_BRANCH] Failed to inherit context window anchor', error as Error)
+                }
               }
-
-              // A non-empty branch that could not inherit (missing/invalid
-              // source anchor) must still receive a persisted anchor
-              // immediately: establish at the default window position.
-              // Empty branches and branches with a just-inherited valid
-              // anchor are idempotent no-ops (docs/context-window.md §10).
-              void ensureTopicAnchorEstablished(dispatch, store.getState, assistant.id, newTopic.id)
-            } catch (error) {
-              logger.error('[NEW_BRANCH] Failed to inherit context window anchor', error as Error)
-            }
+            })()
 
             window.toast.success(t('chat.message.new.branch.created'))
           },

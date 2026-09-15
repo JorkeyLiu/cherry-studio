@@ -74,6 +74,8 @@ describe('chatDbContracts', () => {
     'chatdb:insert-message-groups',
     // S6.3 R-06: authoritative context closure READ
     'chatdb:fetch-context-closure',
+    // Authority context-closure resolver (additive; preserves fetch-context-closure)
+    'chatdb:resolve-context-closure',
     // One-shot whole-topic snapshot READ (topic exports / knowledge)
     'chatdb:fetch-whole-topic-snapshot',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
@@ -3455,6 +3457,8 @@ describe('coverage consistency', () => {
     'chatdb:insert-message-groups',
     // S6.3 R-06: authoritative context closure READ
     'chatdb:fetch-context-closure',
+    // Authority context-closure resolver (additive)
+    'chatdb:resolve-context-closure',
     // One-shot whole-topic snapshot READ
     'chatdb:fetch-whole-topic-snapshot',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)

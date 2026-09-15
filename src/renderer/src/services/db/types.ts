@@ -15,6 +15,8 @@ import type {
   RegenerateAssistantMessageRequest,
   ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
+  ResolveContextClosureRequest,
+  ResolveContextClosureResponse,
   SelectAnswerMessageResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics
@@ -268,6 +270,15 @@ export interface MessageDataSource {
    * Distinct completeness 'context-closure', no cap, no hasMore.
    */
   fetchContextClosure?(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse>
+
+  /**
+   * Authority context-closure resolver — establish / reanchor-default / move / inherit.
+   * One Main transaction resolves intent against full ordered turns and returns
+   * the same-snapshot closure. Caller-local only (never normal Redux); the
+   * caller persists resolvedAnchorGroupKey with stale guards (remove on null).
+   * Missing topic/target → ChatDbResultError (NOT_FOUND); ignored move roles → validation.
+   */
+  resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResponse>
 
   /**
    * Explicit short-lived whole-topic snapshot for one-shot topic exports /

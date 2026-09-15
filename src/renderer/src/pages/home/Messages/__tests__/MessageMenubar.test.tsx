@@ -7,15 +7,17 @@
  *     AnchorGroupProvider) — never from persisted anchor/source state.
  *     A non-empty user-led topic has exactly one highlighted anchor button.
  *   - Clicking the button writes ONLY the persisted `contextWindowAnchor`
- *     through the real `resolveMessageAnchorDecision` decision helper
- *     (docs/context-window.md §8): clicking a non-anchored turn moves the
- *     anchor there; clicking the CURRENT anchored turn re-anchors to the
- *     current default window position (from the current `contextCount`) —
- *     the interaction never leaves a non-empty initialized topic anchorless.
+ *     through `chatdb:resolve-context-closure` authority calls
+ *     (docs/context-window.md §8): a first `move` (`messageId`) call is the
+ *     authority determination with no loaded-turn inference; an echo of the
+ *     still-current persisted key issues a second `reanchor-default` call
+ *     (current `contextCount` + current target anchor baseline). No
+ *     `selectMessagesForTopic` / `buildContextTurns` authority decisions.
+ *     Only a non-stale returned anchor is persisted (key removed on empty);
+ *     transport failures and stale/racing results preserve settings.
  *
  * The heavy menubar surface is mocked; the anchor button, the real
- * AnchorGroupProvider, the real turn builder, and the real click decision
- * semantics are exercised.
+ * AnchorGroupProvider, and the real click decision semantics are exercised.
  */
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -24,7 +26,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest' // ── Mocks (h
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
-    selectMessagesForTopic: vi.fn(() => [] as Message[])
+    selectMessagesForTopic: vi.fn(() => [] as Message[]),
+    resolveContextClosure: vi.fn(),
+    buildContextTurns: vi.fn((..._args: unknown[]) => [] as unknown[]),
+    getStateAssistants: [] as any[]
   }
 }))
 
@@ -106,8 +111,21 @@ vi.mock('@renderer/services/TranslateService', () => ({
 }))
 
 vi.mock('@renderer/store', () => ({
-  default: { getState: () => ({ messages: { entities: {} } }), dispatch: vi.fn() },
+  default: {
+    getState: () => ({ messages: { entities: {} }, assistants: { assistants: mocks.getStateAssistants } }),
+    dispatch: vi.fn()
+  },
   useAppDispatch: () => vi.fn()
+}))
+
+vi.mock('@renderer/services/contextTurnService', () => ({
+  isMessageInContextTurn: (message: { role: string; id: string; askId?: string }, groupKey: string | null) => {
+    if (groupKey === null || groupKey === undefined) return false
+    if (message.role === 'user' || message.role === 'system') return message.id === groupKey
+    if (message.role === 'assistant') return (message.askId ?? message.id) === groupKey
+    return false
+  },
+  buildContextTurns: (...args: unknown[]) => mocks.buildContextTurns(...args)
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -117,6 +135,18 @@ vi.mock('@renderer/store/messageBlock', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   selectMessagesForTopic: mocks.selectMessagesForTopic
+}))
+
+vi.mock('@renderer/services/db/DbService', () => ({
+  dbService: {
+    resolveContextClosure: (...args: unknown[]) => mocks.resolveContextClosure(...args)
+  }
+}))
+
+vi.mock('@renderer/services/db', () => ({
+  dbService: {
+    resolveContextClosure: (...args: unknown[]) => mocks.resolveContextClosure(...args)
+  }
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
@@ -256,7 +286,34 @@ describe('MessageMenubar context-anchor button', () => {
     updateAssistantSettingsMock.mockReset()
     mocks.selectMessagesForTopic.mockReset()
     mocks.selectMessagesForTopic.mockReturnValue([])
+    mocks.resolveContextClosure.mockReset()
+    mocks.buildContextTurns.mockClear()
+    mocks.getStateAssistants = []
   })
+
+  const expectNoLoadedTurnAuthority = () => {
+    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.buildContextTurns).not.toHaveBeenCalled()
+  }
+
+  const resolverSuccess = (resolvedAnchorGroupKey: string | null) =>
+    ({
+      messages: [],
+      blocks: [],
+      closure: {
+        completeness: 'context-closure',
+        topicId: 'topic-1',
+        anchorGroupKey: resolvedAnchorGroupKey,
+        firstMessageId: resolvedAnchorGroupKey ? 'm1' : null,
+        lastMessageId: resolvedAnchorGroupKey ? 'm1' : null,
+        returnedCount: resolvedAnchorGroupKey ? 1 : 0,
+        totalTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+        selectedTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+        boundaryMessageId: null
+      },
+      resolvedAnchorGroupKey,
+      changed: true
+    }) as any
 
   it('highlights exactly the rendered user turn matching the resolved anchor', () => {
     const message = makeUserMessage('u2')
@@ -297,77 +354,199 @@ describe('MessageMenubar context-anchor button', () => {
     expect(anchorBtn.getAttribute('data-context-anchor-active')).toBe('false')
   })
 
-  it('clicking a non-anchored user turn moves the persisted anchor to that turn', () => {
+  it('clicking a non-anchored user turn moves the persisted anchor via the authority resolver', async () => {
     const message = makeUserMessage('u3')
     const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' })
-    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u3')])
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
     renderMenubar(message, assistant, 'u3')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await vi.waitFor(() => expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1))
 
-    expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(1)
+    expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
+      topicId: 'topic-1',
+      intent: 'move',
+      messageId: 'u3',
+      currentAnchorGroupKey: 'u1'
+    })
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
       contextWindowAnchor: {
         'topic-1': { kind: 'active', groupKey: 'u3' }
       }
     })
+    expectNoLoadedTurnAuthority()
   })
 
-  it('clicking the CURRENT anchored turn re-anchors to the current default window position', () => {
-    // Current anchor is u3; with contextCount=25 and turns [u1,u2,u3] the
-    // default window position is the FIRST turn (u1). Clicking the anchored
-    // turn re-anchors to u1 — it never clears the anchor.
+  it('clicking the currently anchored turn re-anchors to the authority default', async () => {
     const message = makeUserMessage('u3')
-    const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' })
-    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u2'), makeUserMessage('u3')])
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' }, 2)
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u1'))
     renderMenubar(message, assistant, 'u3')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await vi.waitFor(() => expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1))
 
-    expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(2)
+    expect(mocks.resolveContextClosure).toHaveBeenNthCalledWith(1, {
+      topicId: 'topic-1',
+      intent: 'move',
+      messageId: 'u3',
+      currentAnchorGroupKey: 'u3'
+    })
+    expect(mocks.resolveContextClosure).toHaveBeenNthCalledWith(2, {
+      topicId: 'topic-1',
+      intent: 'reanchor-default',
+      contextCount: 2,
+      currentAnchorGroupKey: 'u3'
+    })
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
       contextWindowAnchor: {
         'topic-1': { kind: 'active', groupKey: 'u1' }
       }
     })
+    expectNoLoadedTurnAuthority()
   })
 
-  it('clicking a resolved default-derived anchor persists it at the same position (freeze)', () => {
-    // No persisted anchor; the resolved anchor is u2 (default-derived). Clicking
-    // the resolved anchor persists it at the same position.
+  it('same-turn re-anchor to an already-default anchor produces no dispatch', async () => {
+    const message = makeUserMessage('u3')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' }, 2)
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
+    renderMenubar(message, assistant, 'u3')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(2)
+    expect(updateAssistantSettingsMock).not.toHaveBeenCalled()
+    expectNoLoadedTurnAuthority()
+  })
+
+  it('same-turn re-anchor removing the key on empty persists removal', async () => {
+    const message = makeUserMessage('u3')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' }, 2)
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess(null))
+    renderMenubar(message, assistant, 'u3')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await vi.waitFor(() => expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1))
+
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(2)
+    const arg = updateAssistantSettingsMock.mock.calls[0][0] as { contextWindowAnchor: Record<string, unknown> }
+    expect(arg.contextWindowAnchor['topic-1']).toBeUndefined()
+    expectNoLoadedTurnAuthority()
+  })
+
+  it('transport failure on the first call preserves settings (no dispatch, no second call)', async () => {
     const message = makeUserMessage('u2')
-    const assistant = makeAssistant()
-    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u2')])
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockRejectedValueOnce(new Error('IPC fail'))
     renderMenubar(message, assistant, 'u2')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await new Promise((r) => setTimeout(r, 0))
 
-    expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
-    expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
-      contextWindowAnchor: {
-        'topic-1': { kind: 'active', groupKey: 'u2' }
-      }
-    })
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(1)
+    expect(updateAssistantSettingsMock).not.toHaveBeenCalled()
+    expectNoLoadedTurnAuthority()
   })
 
-  it('clicking an unresolvable/stale turn re-anchors to the current default position', () => {
-    // The clicked message u9 is not part of the current turns; the interaction
-    // must never leave a non-empty initialized topic anchorless, so it
-    // re-anchors to the current default position (contextCount=1 → last turn
-    // u3, a different position from the current anchor u1).
+  it('transport failure on the second call preserves settings (no dispatch)', async () => {
+    const message = makeUserMessage('u3')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' }, 2)
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
+    mocks.resolveContextClosure.mockRejectedValueOnce(new Error('IPC fail'))
+    renderMenubar(message, assistant, 'u3')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(2)
+    expect(updateAssistantSettingsMock).not.toHaveBeenCalled()
+    expectNoLoadedTurnAuthority()
+  })
+
+  it('stale result after a concurrent anchor change does not overwrite', async () => {
+    const message = makeUserMessage('u3')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' })
+    const updated = makeAssistant({ kind: 'active', groupKey: 'u9' })
+    mocks.getStateAssistants = [assistant]
+    let resolveFirst!: (v: unknown) => void
+    mocks.resolveContextClosure.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveFirst = res
+        })
+    )
+    renderMenubar(message, assistant, 'u3')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await new Promise((r) => setTimeout(r, 0))
+    mocks.getStateAssistants = [updated]
+    resolveFirst(resolverSuccess('u3'))
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(updateAssistantSettingsMock).not.toHaveBeenCalled()
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(1)
+    expectNoLoadedTurnAuthority()
+  })
+
+  it('race between first and second calls does not overwrite newer anchor state', async () => {
+    const message = makeUserMessage('u3')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u3' }, 2)
+    const updated = makeAssistant({ kind: 'active', groupKey: 'u9' }, 2)
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
+    let resolveSecond!: (v: unknown) => void
+    mocks.resolveContextClosure.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveSecond = res
+        })
+    )
+    renderMenubar(message, assistant, 'u3')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await vi.waitFor(() => expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(2))
+    mocks.getStateAssistants = [updated]
+    resolveSecond(resolverSuccess('u1'))
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(updateAssistantSettingsMock).not.toHaveBeenCalled()
+    expectNoLoadedTurnAuthority()
+  })
+
+  it('uses messageId (not loaded group lists) so orphan assistant turns resolve by authority', async () => {
     const message = makeUserMessage('u9')
     const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' }, 1)
-    mocks.selectMessagesForTopic.mockReturnValue([makeUserMessage('u1'), makeUserMessage('u2'), makeUserMessage('u3')])
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u3'))
     renderMenubar(message, assistant, 'u1')
 
     fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await vi.waitFor(() => expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1))
 
-    expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1)
+    expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
+      topicId: 'topic-1',
+      intent: 'move',
+      messageId: 'u9',
+      currentAnchorGroupKey: 'u1'
+    })
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
       contextWindowAnchor: {
         'topic-1': { kind: 'active', groupKey: 'u3' }
       }
     })
+    expectNoLoadedTurnAuthority()
   })
 
   it('never renders the anchor button for assistant messages', () => {

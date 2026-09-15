@@ -94,6 +94,8 @@ import type {
   ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
+  ResolveContextClosureRequest,
+  ResolveContextClosureResponse,
   RestoreTopicRequest,
   RestoreTopicResponse,
   SearchMessagesRequest,
@@ -134,6 +136,7 @@ export interface ChatDbApi {
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<ChatDbResult<FetchMessagesWindowResponse>>
   fetchAnswerGroup?(request: FetchAnswerGroupRequest): Promise<ChatDbResult<FetchAnswerGroupResponse>>
   fetchContextClosure?(request: FetchContextClosureRequest): Promise<ChatDbResult<FetchContextClosureResponse>>
+  resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ChatDbResult<ResolveContextClosureResponse>>
   fetchWholeTopicSnapshot?(
     request: FetchWholeTopicSnapshotRequest
   ): Promise<ChatDbResult<FetchWholeTopicSnapshotResponse>>
@@ -1045,6 +1048,30 @@ export class SqliteMessageDataSource implements MessageDataSource {
       blocks: result.blocks as unknown as FetchContextClosureResponse['blocks'],
       closure: result.closure
     } as unknown as FetchContextClosureResponse
+  }
+
+  // ============ Authority context-closure resolver (establish/reanchor/move/inherit) ============
+
+  /**
+   * Resolve the authoritative context anchor in one Main transaction and return
+   * the same-snapshot closure. Caller-local only: converts wires minimally and
+   * dispatches nothing — the caller persists only `resolvedAnchorGroupKey`
+   * with stale guards (removing the key on null). Missing topic/target throws
+   * ChatDbResultError (NOT_FOUND); transport rejection propagates unchanged.
+   */
+  async resolveContextClosure(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResponse> {
+    if (!this.api.resolveContextClosure) {
+      throw new Error('ChatDb API unavailable: resolve-context-closure not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as ResolveContextClosureRequest
+    const result = unwrap(await this.api.resolveContextClosure(wireRequest))
+    return {
+      messages: result.messages as unknown as ResolveContextClosureResponse['messages'],
+      blocks: result.blocks as unknown as ResolveContextClosureResponse['blocks'],
+      closure: result.closure,
+      resolvedAnchorGroupKey: result.resolvedAnchorGroupKey,
+      changed: result.changed
+    } as unknown as ResolveContextClosureResponse
   }
 
   // ============ Whole-topic snapshot READ (one-shot exports/knowledge, read-only) ============

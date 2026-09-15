@@ -49,6 +49,8 @@ import type {
   ResendAttemptMapping,
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
+  ResolveContextClosureRequest,
+  ResolveContextClosureResponse,
   SegmentWire,
   SelectAnswerMessageResponse,
   SemanticModelSnapshot,
@@ -109,6 +111,7 @@ export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[]
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
 export type FetchContextClosureResult = FetchContextClosureResponse
+export type ResolveContextClosureResult = ResolveContextClosureResponse
 export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
 export type FetchTopicNamingContextResult = FetchTopicNamingContextResponse
 export type FetchTopicActivityResult = FetchTopicActivityResponse
@@ -1157,6 +1160,208 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchContextClosure(${request.topicId}, ${request.anchorGroupKey})`)
+  }
+
+  /**
+   * Authority context-closure resolver (additive; preserves fetch-context-closure).
+   *
+   * One authoritative SQLite transaction builds full ordered context turns,
+   * resolves `intent`, and returns the same-snapshot closure. Main never
+   * persists renderer settings; the caller persists `resolvedAnchorGroupKey`
+   * (removing the key when null for an existing empty target).
+   *
+   * - establish(contextCount, currentAnchor): preserves a valid current anchor,
+   *   repairs a ghost/missing anchor to the default position.
+   * - reanchor-default(contextCount, currentAnchor): always resolves to default.
+   * - move(messageId|groupKey, currentAnchor): messageId resolves to the
+   *   message's own user / assistant askId-or-own / system turn (ignored roles
+   *   reject as validation); groupKey uses the canonical 3-step anchor match.
+   *   Missing message/target is NOT_FOUND.
+   * - inherit(sourceTopicId, sourceAnchor, contextCount, current target anchor):
+   *   valid source index maps to the target by index with clamp to the last
+   *   target turn; invalid source anchor falls back to the target default.
+   *   Missing source/target topic is NOT_FOUND.
+   *
+   * Existing empty target succeeds with null anchor and zero counts; missing
+   * topic is NOT_FOUND. Default index: null => 0, else max(0,total-max(1,floor(N))).
+   */
+  resolveContextClosure(request: ResolveContextClosureRequest): ChatDbResult<ResolveContextClosureResponse> {
+    return wrapResult(() => {
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        type AuthorityTurn = { key: string; messages: MessageData[] }
+        const buildTurns = (rows: MessageData[]): AuthorityTurn[] => {
+          const turns: AuthorityTurn[] = []
+          let currentKey: string | null = null
+          for (const msg of rows) {
+            const role = msg.role
+            const askId = (msg as unknown as { askId: string | null }).askId
+            if (role === 'system') {
+              currentKey = msg.id
+              turns.push({ key: currentKey, messages: [msg] })
+            } else if (role === 'user') {
+              currentKey = msg.id
+              turns.push({ key: currentKey, messages: [msg] })
+            } else if (role === 'assistant') {
+              if (askId && askId === currentKey) {
+                turns[turns.length - 1].messages.push(msg)
+              } else {
+                currentKey = askId ? askId : msg.id
+                turns.push({ key: currentKey, messages: [msg] })
+              }
+            } else {
+              continue
+            }
+          }
+          return turns
+        }
+        const resolveAnchorIndex = (turns: AuthorityTurn[], groupKey: string): number => {
+          let idx = turns.findIndex((t) => t.messages.some((m) => m.role === 'user' && m.id === groupKey))
+          if (idx !== -1) return idx
+          idx = turns.findIndex((t) =>
+            t.messages.some(
+              (m) => m.role === 'assistant' && (m as unknown as { askId: string | null }).askId === groupKey
+            )
+          )
+          if (idx !== -1) return idx
+          idx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
+          return idx
+        }
+        const resolveDefaultIndex = (total: number, contextCount: number | null | undefined): number => {
+          if (total <= 0) return -1
+          if (contextCount === null || contextCount === undefined) return 0
+          const n = Math.max(1, Math.floor(contextCount))
+          return Math.max(0, total - n)
+        }
+
+        const allMessages = repos.messages.listByTopic(request.topicId)
+        const turns = buildTurns(allMessages)
+        const total = turns.length
+        const currentKey: string | null =
+          typeof request.currentAnchorGroupKey === 'string' ? request.currentAnchorGroupKey : null
+
+        if (total === 0) {
+          const changed = currentKey !== null
+          return {
+            messages: [],
+            blocks: [],
+            closure: {
+              completeness: 'context-closure' as const,
+              topicId: request.topicId,
+              anchorGroupKey: null,
+              firstMessageId: null,
+              lastMessageId: null,
+              returnedCount: 0,
+              totalTurnCount: 0,
+              selectedTurnCount: 0,
+              boundaryMessageId: null
+            },
+            resolvedAnchorGroupKey: null,
+            changed
+          }
+        }
+
+        let resolvedIdx = -1
+        if (request.intent === 'establish') {
+          if (currentKey !== null && resolveAnchorIndex(turns, currentKey) !== -1) {
+            resolvedIdx = resolveAnchorIndex(turns, currentKey)
+          } else {
+            resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
+          }
+        } else if (request.intent === 'reanchor-default') {
+          resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
+        } else if (request.intent === 'move') {
+          if (typeof request.messageId === 'string') {
+            const target = allMessages.find((m) => m.id === request.messageId)
+            if (!target) {
+              throw new ChatDbNotFoundError(`Message ${request.messageId} does not belong to topic ${request.topicId}`)
+            }
+            if (target.role !== 'user' && target.role !== 'assistant' && target.role !== 'system') {
+              throw new ChatDbValidationError(
+                `Message ${request.messageId} has an ignored role and cannot anchor a context turn`
+              )
+            }
+            const ownIdx = turns.findIndex((t) => t.messages.some((m) => m.id === target.id))
+            if (ownIdx === -1) {
+              throw new ChatDbValidationError(
+                `Message ${request.messageId} has an ignored role and cannot anchor a context turn`
+              )
+            }
+            resolvedIdx = ownIdx
+          } else if (typeof request.groupKey === 'string') {
+            resolvedIdx = resolveAnchorIndex(turns, request.groupKey)
+            if (resolvedIdx === -1) {
+              throw new ChatDbNotFoundError(
+                `Anchor groupKey ${request.groupKey} does not belong to topic ${request.topicId}`
+              )
+            }
+          } else {
+            throw new ChatDbValidationError('move requires messageId or groupKey')
+          }
+        } else {
+          // inherit
+          const sourceId = request.sourceTopicId as string
+          const sourceTopic = repos.topics.getById(sourceId)
+          if (!sourceTopic.found) {
+            throw new ChatDbNotFoundError(`Topic ${sourceId} does not exist`)
+          }
+          const sourceMessages = repos.messages.listByTopic(sourceId)
+          const sourceTurns = buildTurns(sourceMessages)
+          const sourceKey = typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
+          const sourceIdx = sourceKey !== null ? resolveAnchorIndex(sourceTurns, sourceKey) : -1
+          if (sourceIdx !== -1) {
+            resolvedIdx = Math.min(sourceIdx, total - 1)
+          } else {
+            resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
+          }
+        }
+
+        if (resolvedIdx < 0 || resolvedIdx >= total) {
+          throw new ChatDbNotFoundError(`Unable to resolve context anchor for topic ${request.topicId}`)
+        }
+        const resolvedKey = turns[resolvedIdx].key
+        const anchorStartId = turns[resolvedIdx].messages[0].id
+        const anchorStartIdx = allMessages.findIndex((m) => m.id === anchorStartId)
+        if (anchorStartIdx === -1) {
+          throw new ChatDbNotFoundError(`Anchor groupKey ${resolvedKey} does not belong to topic ${request.topicId}`)
+        }
+        const closureMessages = allMessages.slice(anchorStartIdx)
+        const closureIds = closureMessages.map((m) => m.id)
+        const blockMap = repos.blocks.listByMessages(closureIds)
+        const allBlocks: MessageBlockData[] = []
+        for (const id of closureIds) {
+          allBlocks.push(...(blockMap.get(id) ?? []))
+        }
+        const wireMessages = messagesToWire(closureMessages)
+        const wireBlocks = blocksToWire(allBlocks)
+        const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+        const firstMessageId = closureMessages.length > 0 ? closureMessages[0].id : null
+        const lastMessageId = closureMessages.length > 0 ? closureMessages[closureMessages.length - 1].id : null
+        const selectedTurnCount = total - resolvedIdx
+        const boundaryMessageId = resolvedIdx > 0 ? turns[resolvedIdx].messages[0].id : null
+        return {
+          messages: messagesWithBlocks,
+          blocks: wireBlocks,
+          closure: {
+            completeness: 'context-closure' as const,
+            topicId: request.topicId,
+            anchorGroupKey: resolvedKey,
+            firstMessageId,
+            lastMessageId,
+            returnedCount: closureMessages.length,
+            totalTurnCount: total,
+            selectedTurnCount,
+            boundaryMessageId
+          },
+          resolvedAnchorGroupKey: resolvedKey,
+          changed: resolvedKey !== currentKey
+        }
+      })
+    }, `resolveContextClosure(${request.topicId}, ${request.intent})`)
   }
 
   /**

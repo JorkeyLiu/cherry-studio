@@ -17,6 +17,8 @@ import type {
   ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
   ResetMessagesForResendResponse,
+  ResolveContextClosureRequest,
+  ResolveContextClosureResponse,
   SelectAnswerMessageResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics
@@ -81,6 +83,10 @@ class DbService implements MessageDataSource {
   fetchContextClosure(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse> {
     if (!this.ordinarySource.fetchContextClosure) throw new Error('fetchContextClosure unavailable')
     return this.ordinarySource.fetchContextClosure(request)
+  }
+  resolveContextClosure(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResponse> {
+    if (!this.ordinarySource.resolveContextClosure) throw new Error('resolveContextClosure unavailable')
+    return this.ordinarySource.resolveContextClosure(request)
   }
   fetchWholeTopicSnapshot(topicId: string): Promise<{
     messages: Message[]

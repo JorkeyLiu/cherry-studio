@@ -17,10 +17,9 @@ import { useEnableDeveloperMode, useMessageStyle, useSettings } from '@renderer/
 import { useTemporaryValue } from '@renderer/hooks/useTemporaryValue'
 import useTranslate from '@renderer/hooks/useTranslate'
 import { useAnchorGroupKey } from '@renderer/pages/home/Messages/anchorGroupContext'
-import { resolveGroupKey } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { buildContextTurns, isMessageInContextTurn } from '@renderer/services/contextTurnService'
-import { resolveMessageAnchorDecision } from '@renderer/services/contextWindowService'
+import { isMessageInContextTurn } from '@renderer/services/contextTurnService'
+import { dbService } from '@renderer/services/db/DbService'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
@@ -200,29 +199,103 @@ const MessageMenubar: FC<Props> = (props) => {
   const { updateAssistantSettings } = useAssistant(assistant.id)
 
   // Context-window anchor control for the single stable anchor-to-end model
-  // (docs/context-window.md §8). Clicking a user message moves the persisted
-  // topic anchor to that turn; clicking the CURRENT anchored turn re-anchors
-  // to the current default window position (from the assistant's current
-  // `contextCount`) — the interaction never leaves a non-empty initialized
-  // topic anchorless. Only the persisted anchor map is read here; the
-  // resolved anchor highlight projection is independent (see `isContextAnchor`).
+  // (docs/context-window.md §8). Clicking a message anchor is an explicit
+  // move resolved by `chatdb:resolve-context-closure` in Main against full
+  // ordered turns — no `selectMessagesForTopic` / `buildContextTurns`
+  // authority decisions and no loaded-turn inference. The first `move`
+  // (`messageId`) response is the authority determination: a different key
+  // persists directly, while an echo of the still-current persisted key means
+  // the currently anchored turn was clicked and re-anchors to the authority
+  // default via a second `reanchor-default` call. Main never persists
+  // settings; only a non-stale returned anchor is persisted (key removed on
+  // empty). Transport failures preserve current settings. Resolver
+  // messages/blocks are caller-local and never enter normal Redux.
   const assistantSettings = getAssistantSettings(assistant)
-  const handleSetContextAnchor = useCallback(() => {
-    const desiredGroupKey = resolveGroupKey(message)
-    if (!desiredGroupKey) return
-
-    const turns = buildContextTurns(selectMessagesForTopic(store.getState(), topic.id))
-    const decision = resolveMessageAnchorDecision(
-      assistantSettings.contextWindowAnchor,
-      topic.id,
-      turns,
-      desiredGroupKey,
-      assistantSettings.contextCount
-    )
-    if (decision.changed) {
-      updateAssistantSettings({ contextWindowAnchor: decision.anchorMap })
+  const handleSetContextAnchor = useCallback(async () => {
+    const assistantId = assistant.id
+    const topicId = topic.id
+    const clickedMessageId = message.id
+    const preAnchor = assistantSettings.contextWindowAnchor?.[topicId]
+    const preKey = preAnchor?.kind === 'active' ? preAnchor.groupKey : null
+    const readFresh = () => {
+      try {
+        const assistants = store.getState().assistants.assistants
+        const found = assistants.find((a) => a.id === assistantId) ?? assistant
+        const settings = getAssistantSettings(found)
+        const anchor = settings.contextWindowAnchor?.[topicId]
+        const key = anchor?.kind === 'active' ? anchor.groupKey : null
+        return { settings, key }
+      } catch {
+        return { settings: assistantSettings, key: preKey }
+      }
     }
-  }, [assistantSettings, topic.id, message, updateAssistantSettings])
+    const persistResolved = (
+      fresh: { settings: typeof assistantSettings; key: string | null },
+      resolved: string | null | undefined
+    ) => {
+      if (resolved === fresh.key) {
+        return
+      }
+      if (resolved === null || resolved === undefined) {
+        if (fresh.key === null) return
+        const updated = { ...fresh.settings.contextWindowAnchor }
+        delete updated[topicId]
+        updateAssistantSettings({ contextWindowAnchor: updated })
+        return
+      }
+      updateAssistantSettings({
+        contextWindowAnchor: {
+          ...fresh.settings.contextWindowAnchor,
+          [topicId]: { kind: 'active', groupKey: resolved }
+        }
+      })
+    }
+    let moveResolved: string | null | undefined
+    try {
+      const response = await dbService.resolveContextClosure({
+        topicId,
+        intent: 'move',
+        messageId: clickedMessageId,
+        currentAnchorGroupKey: preKey
+      })
+      moveResolved = response.resolvedAnchorGroupKey
+    } catch {
+      return
+    }
+    const freshAfterMove = readFresh()
+    if (freshAfterMove.key !== preKey) {
+      return
+    }
+    if (moveResolved !== freshAfterMove.key) {
+      persistResolved(freshAfterMove, moveResolved)
+      return
+    }
+    const currentContextCount = freshAfterMove.settings.contextCount ?? null
+    const baseline = freshAfterMove.key
+    let defaultResolved: string | null | undefined
+    try {
+      const response = await dbService.resolveContextClosure({
+        topicId,
+        intent: 'reanchor-default',
+        contextCount: currentContextCount,
+        currentAnchorGroupKey: baseline
+      })
+      defaultResolved = response.resolvedAnchorGroupKey
+    } catch {
+      return
+    }
+    const freshAfterDefault = readFresh()
+    if (freshAfterDefault.key !== preKey) {
+      return
+    }
+    if (freshAfterDefault.key !== baseline) {
+      return
+    }
+    if ((freshAfterDefault.settings.contextCount ?? null) !== currentContextCount) {
+      return
+    }
+    persistResolved(freshAfterDefault, defaultResolved)
+  }, [assistantSettings, topic.id, message.id, assistant, updateAssistantSettings])
 
   // Anchor-icon highlight: the button is active iff this message's
   // turn is the single resolved anchor of the context window. The resolved

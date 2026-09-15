@@ -64,6 +64,7 @@ import type {
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
+  ResolveContextClosureRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
@@ -385,6 +386,11 @@ export function registerChatDbIpc(): () => void {
   // 1d. fetch-context-closure (S6.3 R-06 authoritative context closure READ)
   handleCommand(IpcChannel.ChatDb_FetchContextClosure, (agg, req: FetchContextClosureRequest) => {
     return agg.fetchContextClosure(req)
+  })
+
+  // 1d2. resolve-context-closure (authority resolver; additive, preserves fetch-context-closure)
+  handleCommand(IpcChannel.ChatDb_ResolveContextClosure, (agg, req: ResolveContextClosureRequest) => {
+    return agg.resolveContextClosure(req)
   })
 
   // 1e. fetch-whole-topic-snapshot (one-shot whole-topic snapshot for exports/knowledge)

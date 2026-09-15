@@ -1,12 +1,8 @@
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { buildContextTurns } from '@renderer/services/contextTurnService'
 import type { ContextWindowAnchorMap } from '@renderer/services/contextWindowService'
-import { resolveAnchorEstablishDecision } from '@renderer/services/contextWindowService'
 import { dbService } from '@renderer/services/db'
-import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
 import type { RootState } from '@renderer/store'
 import { updateAssistantSettings } from '@renderer/store/assistants'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
 import type { ContextWindowAnchor } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 
@@ -198,61 +194,24 @@ export function inheritAnchorForBranch(
 }
 
 /**
- * Checks the persisted anchor against the topic messages without constructing
- * context turns. The predicates intentionally mirror `isResolvableAnchor`:
- * user ids, assistant askIds, and non-user message ids are all valid anchor
- * keys.
- */
-function isActiveAnchorResolvableInMessages(
-  anchor: ContextWindowAnchor | undefined,
-  messages: readonly Message[]
-): anchor is ContextWindowAnchor {
-  if (anchor?.kind !== 'active') {
-    return false
-  }
-
-  return messages.some(
-    (message) =>
-      (message.role === 'user' && message.id === anchor.groupKey) ||
-      (message.role === 'assistant' && message.askId === anchor.groupKey) ||
-      (message.role !== 'user' && message.id === anchor.groupKey)
-  )
-}
-
-/**
- * First-establishment / compatibility-repair dispatch glue (idempotent,
- * exactly-once per topic).
+ * First-establishment / compatibility-repair dispatch glue via the authority resolver.
  *
- * Reads the topic's current real turns and the assistant's current
- * `contextCount` from the store, resolves the establish/repair decision, and
- * dispatches `updateAssistantSettings` only when the anchor was missing or
- * unresolvable. A valid persisted anchor is never recalculated, and an empty
- * topic never receives an anchor. Ordinary startup with a valid anchor
- * dispatches nothing.
+ * Single authority path: one `chatdb:resolve-context-closure` (intent
+ * `establish`) call builds full ordered turns in Main, preserves a valid
+ * persisted anchor or repairs a ghost to the default position, and returns
+ * the same-snapshot closure. Main never persists settings; this helper
+ * persists only the non-stale returned anchor (removing the key on empty).
  *
- * Viewport-aware authority distinction (R-06 fix): when an active anchor is
- * not resolvable in the current viewport projection (truncated latest window,
- * e.g. 20 rows of a 50-row topic), viewport absence alone is not proof of
- * invalidity. The helper probes the authoritative Main closure via the
- * existing typed `fetchContextClosure` read path: a successful closure read
- * proves the anchor exists somewhere in the authoritative topic and the
- * viewport miss is preserved without repair; a NOT_FOUND proves a ghost
- * anchor and the deterministic default repair proceeds. Transport failures
- * fail closed (preserve current anchor, no spurious repair). Missing or
- * non-active anchors skip the probe and go directly to the deterministic
- * repair path. Empty topics still remain anchorless.
+ * No loaded-viewport authority decisions: no `selectMessagesForTopic`, no
+ * `buildContextTurns`, no viewport resolvability check. A persisted anchor
+ * outside the loaded viewport is never treated invalid or moved — validity is
+ * decided by Main against the full topic. Transport failures and NOT_FOUND
+ * (missing topic) preserve current settings with no dispatch.
  *
- * This is the bounded hook for:
- *   - first establishment in `sendMessage` (after the user message is
- *     persisted + added to Redux), and
- *   - compatibility repair after a successful topic message load/import into
- *     Redux (`loadTopicMessagesThunk`) — on BOTH the fetch path (after
- *     `messagesReceived`) and the cached path (a non-empty cached topic whose
- *     messages are already in Redux, e.g. a fresh branch pre-populated by
- *     `branchMessagesToTopicThunk`).
- *
- * Note: contains a side-effect (dispatch); it is the integration glue kept
- * separate from the pure decision helpers in `contextWindowService`.
+ * Resolver messages/blocks are caller-local and never enter normal Redux.
+ * In-flight deduplication coalesces overlapping calls per assistant/topic;
+ * the post-await re-read is the stale guard: if the persisted anchor changed
+ * during the call, the stale result is dropped without dispatch.
  */
 // In-flight deduplication: coalesce overlapping establishment calls for the same assistant/topic.
 // The guard is local to anchorService; it does not change public anchor semantics.
@@ -278,101 +237,57 @@ export async function ensureTopicAnchorEstablished(
       return
     }
     const settings = getAssistantSettings(assistant)
-    const messages = selectMessagesForTopic(state, topicId)
-    const activeAnchor = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
-    if (isActiveAnchorResolvableInMessages(activeAnchor, messages)) {
+    const preAnchor = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    const preKey = preAnchor?.kind === 'active' ? preAnchor.groupKey : null
+    const contextCount = settings.contextCount ?? null
+    let resolved: string | null | undefined
+    try {
+      const response = await dbService.resolveContextClosure({
+        topicId,
+        intent: 'establish',
+        contextCount,
+        currentAnchorGroupKey: preKey
+      })
+      // Caller-local closure: messages/blocks are intentionally ignored and
+      // never enter normal Redux.
+      resolved = response.resolvedAnchorGroupKey
+    } catch {
+      // Transport failures and NOT_FOUND (missing topic) preserve settings.
       return
     }
-
-    const anchorForProbe = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
-    if (anchorForProbe?.kind === 'active') {
-      const probedGroupKey = anchorForProbe.groupKey
-      // Active but outside viewport — distinguish ghost from valid out-of-viewport.
-      try {
-        if (typeof dbService?.fetchContextClosure === 'function') {
-          await dbService.fetchContextClosure({ topicId, anchorGroupKey: probedGroupKey })
-          // Authoritative anchor exists → valid out-of-viewport, preserve.
-          // Re-read current anchor before preserving: if it changed during the probe,
-          // do not overwrite the newer value (still preserve by returning without dispatch).
-          const freshState = getState()
-          const freshAssistant = freshState.assistants.assistants.find((asst) => asst.id === assistantId)
-          if (!freshAssistant) {
-            return
-          }
-          const freshSettings = getAssistantSettings(freshAssistant)
-          const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
-          if (freshAnchor?.kind !== 'active' || freshAnchor.groupKey !== probedGroupKey) {
-            return
-          }
-          const freshMessages = selectMessagesForTopic(freshState, topicId)
-          if (isActiveAnchorResolvableInMessages(freshAnchor, freshMessages)) {
-            return
-          }
-          return
-        }
-      } catch (e) {
-        const code = (e as { code?: unknown })?.code
-        const codeStr = typeof code === 'string' ? code : String(code ?? '')
-        const msgStr = e instanceof Error ? e.message : String(e ?? '')
-        const isNotFound =
-          (e instanceof ChatDbResultError && (e.code === 'NOT_FOUND' || e.code.includes('NOT_FOUND'))) ||
-          codeStr.includes('NOT_FOUND') ||
-          msgStr.includes('NOT_FOUND')
-        if (isNotFound) {
-          // Ghost anchor — fall through to deterministic repair only after
-          // re-reading current state. This prevents a stale pre-await snapshot
-          // from overwriting a newer anchor established concurrently.
-          const freshState = getState()
-          const freshAssistant = freshState.assistants.assistants.find((asst) => asst.id === assistantId)
-          if (!freshAssistant) {
-            return
-          }
-          const freshSettings = getAssistantSettings(freshAssistant)
-          const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
-          if (freshAnchor?.kind !== 'active' || freshAnchor.groupKey !== probedGroupKey) {
-            return
-          }
-          const freshMessages = selectMessagesForTopic(freshState, topicId)
-          if (isActiveAnchorResolvableInMessages(freshAnchor, freshMessages)) {
-            return
-          }
-          if (freshMessages.length === 0) {
-            return
-          }
-          const freshTurns = buildContextTurns(freshMessages)
-          const decision = resolveAnchorEstablishDecision(
-            freshSettings.contextWindowAnchor,
-            topicId,
-            freshTurns,
-            freshSettings.contextCount
-          )
-          if (decision.changed) {
-            dispatch(
-              updateAssistantSettings({
-                assistantId,
-                settings: { contextWindowAnchor: decision.anchorMap }
-              })
-            )
-          }
-          return
-        } else {
-          // Transport/unknown failure — fail closed, preserve current anchor.
-          // Re-read guard: if anchor changed during probe, still preserve (no dispatch).
-          return
-        }
+    // Stale guard: if the persisted anchor changed during the call, drop the
+    // stale result without dispatch.
+    const freshState = getState()
+    const freshAssistant = freshState.assistants.assistants.find((asst) => asst.id === assistantId)
+    if (!freshAssistant) {
+      return
+    }
+    const freshSettings = getAssistantSettings(freshAssistant)
+    const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    const freshKey = freshAnchor?.kind === 'active' ? freshAnchor.groupKey : null
+    if (freshKey !== preKey) {
+      return
+    }
+    if (resolved === freshKey) {
+      return
+    }
+    const updatedAnchors: ContextWindowAnchorMap = { ...freshSettings.contextWindowAnchor }
+    if (resolved === null || resolved === undefined) {
+      delete updatedAnchors[topicId]
+      // Removing a key when nothing was persisted is a no-op shape change;
+      // dispatch only when a key actually existed.
+      if (freshAnchor === undefined) {
+        return
       }
+    } else {
+      updatedAnchors[topicId] = { kind: 'active', groupKey: resolved }
     }
-
-    const turns = buildContextTurns(messages)
-    const decision = resolveAnchorEstablishDecision(settings.contextWindowAnchor, topicId, turns, settings.contextCount)
-    if (decision.changed) {
-      dispatch(
-        updateAssistantSettings({
-          assistantId,
-          settings: { contextWindowAnchor: decision.anchorMap }
-        })
-      )
-    }
+    dispatch(
+      updateAssistantSettings({
+        assistantId,
+        settings: { contextWindowAnchor: updatedAnchors }
+      })
+    )
   })()
   inFlightRepairs.set(key, task)
   try {

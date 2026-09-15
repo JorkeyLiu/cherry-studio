@@ -40,6 +40,7 @@ import type {
   ResendUserMessagesRequest,
   ResetAssistantTopicsRequest,
   ResetMessagesForResendRequest,
+  ResolveContextClosureRequest,
   RestoreTopicRequest,
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
@@ -662,6 +663,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchAnswerGroup, request),
     fetchContextClosure: (request: FetchContextClosureRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchContextClosure, request),
+    resolveContextClosure: (request: ResolveContextClosureRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ResolveContextClosure, request),
     fetchWholeTopicSnapshot: (request: FetchWholeTopicSnapshotRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchWholeTopicSnapshot, request),
     fetchTopicNamingContext: (request: FetchTopicNamingContextRequest) =>

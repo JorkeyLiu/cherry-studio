@@ -403,6 +403,10 @@ export enum IpcChannel {
   // S6.3 R-06 — authoritative context closure READ (anchor through newest)
   ChatDb_FetchContextClosure = 'chatdb:fetch-context-closure',
 
+  // Authority context-closure resolver (establish / reanchor-default / move / inherit).
+  // One Main transaction resolves intent against full ordered turns and returns same-snapshot closure.
+  ChatDb_ResolveContextClosure = 'chatdb:resolve-context-closure',
+
   // One-shot whole-topic snapshot for topic exports / knowledge (short-lived, no Redux residency)
   ChatDb_FetchWholeTopicSnapshot = 'chatdb:fetch-whole-topic-snapshot',
 

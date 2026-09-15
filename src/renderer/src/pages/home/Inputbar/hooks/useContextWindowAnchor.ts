@@ -1,40 +1,110 @@
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { buildContextTurns } from '@renderer/services/contextTurnService'
-import { resolveAnchorReanchorDecision } from '@renderer/services/contextWindowService'
-import type { Assistant, AssistantSettings } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import { dbService } from '@renderer/services/db'
+import store from '@renderer/store'
+import type { Assistant, AssistantSettings, ContextWindowAnchor } from '@renderer/types'
 import { useCallback } from 'react'
 
 /**
  * The single persisted anchor mutation surface of the Inputbar: the
  * TokenCount re-anchor interaction.
  *
- * Anchor semantics (`docs/context-window.md`): `contextWindowAnchor[topicId]`
- * is the stable persisted topic context start. Clicking TokenCount is an
- * explicit re-anchor (CW-4): the anchor moves to the CURRENT default window
- * position derived from the current topic turns and the CURRENT `contextCount`.
- * An empty topic is a no-op (empty topics have no anchor), and the
- * interaction never leaves a non-empty initialized topic anchorless.
+ * Authority path: clicking TokenCount is an explicit re-anchor (CW-4) resolved
+ * by one `chatdb:resolve-context-closure` (intent `reanchor-default`) call in
+ * Main against full ordered turns. No `buildContextTurns`, no loaded-viewport
+ * authority decisions. Main never persists settings; this hook persists only
+ * the non-stale returned anchor (removing the key on empty). Transport
+ * failures and NOT_FOUND preserve current settings.
  *
+ * Resolver messages/blocks are caller-local and never enter normal Redux.
  * There is deliberately NO effect here (and none in the Inputbar) that
- * synchronizes anchors to message loading, message-list changes, or default
- * computation. Changing `contextCount` alone never moves an existing anchor;
- * re-anchoring happens only on the explicit click.
+ * synchronizes anchors to message loading or message-list changes. Changing
+ * `contextCount` alone never moves an existing anchor; re-anchoring happens
+ * only on the explicit click.
  */
 export function useContextWindowAnchor(
   assistant: Assistant,
   topicId: string,
-  topicMessages: Message[],
-  updateAssistantSettings: (settings: Partial<AssistantSettings>) => void
-): { onReanchor: () => void } {
-  const onReanchor = useCallback(() => {
+  _topicMessagesOrUpdate?: unknown,
+  _maybeUpdate?: (settings: Partial<AssistantSettings>) => void
+): { onReanchor: () => Promise<void> } {
+  const updateAssistantSettings: (settings: Partial<AssistantSettings>) => void =
+    typeof _maybeUpdate === 'function'
+      ? _maybeUpdate
+      : typeof _topicMessagesOrUpdate === 'function'
+        ? (_topicMessagesOrUpdate as (settings: Partial<AssistantSettings>) => void)
+        : () => {}
+
+  const onReanchor = useCallback(async () => {
     const settings = getAssistantSettings(assistant)
-    const turns = buildContextTurns(topicMessages)
-    const decision = resolveAnchorReanchorDecision(settings.contextWindowAnchor, topicId, turns, settings.contextCount)
-    if (decision.changed) {
-      updateAssistantSettings({ contextWindowAnchor: decision.anchorMap })
+    const preAnchor = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    const preKey = preAnchor?.kind === 'active' ? preAnchor.groupKey : null
+    const contextCount = settings.contextCount ?? null
+    let resolved: string | null | undefined
+    try {
+      const response = await dbService.resolveContextClosure({
+        topicId,
+        intent: 'reanchor-default',
+        contextCount,
+        currentAnchorGroupKey: preKey
+      })
+      resolved = response.resolvedAnchorGroupKey
+    } catch {
+      return
     }
-  }, [assistant, topicId, topicMessages, updateAssistantSettings])
+    // Stale guard: re-read the latest persisted anchor; if it changed during
+    // the call, drop the stale result without dispatch.
+    let freshKey: string | null = preKey
+    try {
+      const freshAssistant = (
+        store.getState() as { assistants: { assistants: Assistant[] } }
+      ).assistants.assistants.find((a) => a.id === assistant.id)
+      if (freshAssistant) {
+        const freshSettings = getAssistantSettings(freshAssistant)
+        const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+        freshKey = freshAnchor?.kind === 'active' ? freshAnchor.groupKey : null
+      }
+    } catch {
+      freshKey = preKey
+    }
+    if (freshKey !== preKey) {
+      return
+    }
+    if (resolved === freshKey) {
+      return
+    }
+    if (resolved === null || resolved === undefined) {
+      if (freshKey === null) return
+      const latestAssistant = (() => {
+        try {
+          return (store.getState() as { assistants: { assistants: Assistant[] } }).assistants.assistants.find(
+            (a) => a.id === assistant.id
+          )
+        } catch {
+          return undefined
+        }
+      })()
+      const baseMap = latestAssistant
+        ? (getAssistantSettings(latestAssistant).contextWindowAnchor ?? {})
+        : (settings.contextWindowAnchor ?? {})
+      const updated = { ...baseMap }
+      delete updated[topicId]
+      updateAssistantSettings({ contextWindowAnchor: updated })
+      return
+    }
+    const latestAssistant = (() => {
+      try {
+        return (store.getState() as { assistants: { assistants: Assistant[] } }).assistants.assistants.find(
+          (a) => a.id === assistant.id
+        )
+      } catch {
+        return undefined
+      }
+    })()
+    const baseMap = latestAssistant
+      ? (getAssistantSettings(latestAssistant).contextWindowAnchor ?? {})
+      : (settings.contextWindowAnchor ?? {})
+    updateAssistantSettings({ contextWindowAnchor: { ...baseMap, [topicId]: { kind: 'active', groupKey: resolved } } })
+  }, [assistant, topicId, updateAssistantSettings])
 
   return { onReanchor }
 }

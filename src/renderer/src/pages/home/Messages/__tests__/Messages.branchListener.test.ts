@@ -49,11 +49,16 @@ describe('Messages NEW_BRANCH primary listener — S6.2c-1', () => {
   })
 
   it('context-window inheritance and navigation semantics preserved', () => {
-    // Inheritance code must remain after branch success
+    // Inheritance is authority-resolved via resolve-context-closure (inherit),
+    // never via loaded messageIds group lists.
     const newBranchIdx = source.indexOf('EVENT_NAMES.NEW_BRANCH')
-    const segment = source.slice(newBranchIdx, newBranchIdx + 5000)
-    expect(segment).toMatch(/inheritAnchorForBranch/)
+    const segment = source.slice(newBranchIdx, newBranchIdx + 6000)
+    expect(segment).toMatch(/resolveContextClosure/)
+    expect(segment).toMatch(/intent.*inherit|inherit.*intent/)
     expect(segment).toMatch(/ensureTopicAnchorEstablished/)
     expect(segment).toMatch(/setActiveTopic/)
+    expect(segment).not.toMatch(/inheritAnchorForBranch/)
+    expect(segment).not.toMatch(/buildGroupList/)
+    expect(segment).not.toMatch(/messageIdsByTopic/)
   })
 })

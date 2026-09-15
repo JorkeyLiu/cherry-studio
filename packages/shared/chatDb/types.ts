@@ -417,6 +417,80 @@ export interface FetchContextClosureResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Authority context-closure resolver DTOs (additive; Main never persists settings)
+// ---------------------------------------------------------------------------
+
+/** Authority resolver intent for `chatdb:resolve-context-closure`. */
+export type ResolveContextClosureIntent = 'establish' | 'reanchor-default' | 'move' | 'inherit'
+
+/**
+ * @see IpcChannel.ChatDb_ResolveContextClosure — additive authority resolver.
+ *
+ * One Main SQLite transaction builds full ordered context turns, resolves
+ * `intent`, and returns the same-snapshot closure. Main never persists
+ * renderer settings; the caller persists `resolvedAnchorGroupKey` with
+ * stale guards (remove key when null for an existing empty target).
+ *
+ * - establish: `contextCount` + optional `currentAnchorGroupKey`. Preserves a
+ *   valid current anchor, repairs a ghost to the default position.
+ * - reanchor-default: `contextCount` + optional `currentAnchorGroupKey` (for
+ *   `changed`). Always resolves to the default position.
+ * - move: exactly one of `messageId` / `groupKey` + optional
+ *   `currentAnchorGroupKey` (for `changed`). Resolves the message to its
+ *   user / assistant askId-or-own / system turn; ignored roles reject.
+ * - inherit: `sourceTopicId` + optional `sourceAnchorGroupKey` + `contextCount`
+ *   (fallback when the source anchor is invalid) + optional
+ *   `currentAnchorGroupKey` (target, for `changed`). Valid source index maps
+ *   to the target by index with clamp to the last target turn.
+ *
+ * Existing empty target succeeds with null anchor; missing topic/target is NOT_FOUND.
+ * Default index: null => 0; otherwise max(0, total - max(1, floor(N))).
+ */
+export interface ResolveContextClosureRequest {
+  topicId: string
+  intent: ResolveContextClosureIntent
+  contextCount?: number | null
+  currentAnchorGroupKey?: string | null
+  messageId?: string
+  groupKey?: string
+  sourceTopicId?: string
+  sourceAnchorGroupKey?: string | null
+}
+
+/** Typed resolver closure metadata — same completeness as fetch-context-closure. */
+export interface ResolveContextClosureMeta {
+  /** Completeness is always 'context-closure'. */
+  completeness: 'context-closure'
+  /** Target topic that was read. */
+  topicId: string
+  /** Resolved anchor group key, or null when the target is empty. */
+  anchorGroupKey: string | null
+  /** First returned message ID, or null when no messages. */
+  firstMessageId: string | null
+  /** Last returned message ID, or null when no messages. */
+  lastMessageId: string | null
+  /** Number of messages returned. */
+  returnedCount: number
+  /** Total turn count in the target topic (authority-ordered context turns). */
+  totalTurnCount: number
+  /** Selected turn count from resolved anchor through newest (0 when empty). */
+  selectedTurnCount: number
+  /** Boundary divider message id, null iff selected===total (or empty) else firstMessageId. */
+  boundaryMessageId: string | null
+}
+
+/** @see IpcChannel.ChatDb_ResolveContextClosure */
+export interface ResolveContextClosureResponse {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  closure: ResolveContextClosureMeta
+  /** Resolved anchor group key (mirrors closure.anchorGroupKey). Null when empty. */
+  resolvedAnchorGroupKey: string | null
+  /** True when resolved anchor differs from (currentAnchorGroupKey ?? null). */
+  changed: boolean
+}
+
+// ---------------------------------------------------------------------------
 // Whole-topic snapshot DTOs (one-shot topic exports / knowledge)
 // ---------------------------------------------------------------------------
 
@@ -1284,6 +1358,11 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:fetch-answer-group': { request: FetchAnswerGroupRequest; response: FetchAnswerGroupResponse }
   // S6.3 R-06: authoritative context closure READ (anchor through newest)
   'chatdb:fetch-context-closure': { request: FetchContextClosureRequest; response: FetchContextClosureResponse }
+  // Authority context-closure resolver (additive; Main never persists settings)
+  'chatdb:resolve-context-closure': {
+    request: ResolveContextClosureRequest
+    response: ResolveContextClosureResponse
+  }
   // One-shot whole-topic snapshot READ (topic exports / knowledge; short-lived, no Redux residency)
   'chatdb:fetch-whole-topic-snapshot': {
     request: FetchWholeTopicSnapshotRequest

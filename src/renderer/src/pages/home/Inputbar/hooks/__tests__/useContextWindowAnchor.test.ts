@@ -2,24 +2,25 @@
  * Focused tests for useContextWindowAnchor — the ONLY Inputbar persisted
  * anchor mutation surface: the TokenCount re-anchor interaction.
  *
- * Semantics (docs/context-window.md §7):
- *   - Clicking TokenCount re-anchors the topic to the CURRENT default window
- *     position derived from the current topic turns + the current
- *     `contextCount`, and persists it as `contextWindowAnchor[topicId]`.
- *   - The interaction never leaves a non-empty initialized topic anchorless;
- *     an empty topic is a no-op (no dispatch).
- *   - Changing `contextCount` alone never moves an existing anchor — only the
- *     explicit click re-anchors.
+ * Authority path (resolver): clicking TokenCount resolves
+ * `chatdb:resolve-context-closure` (intent `reanchor-default`) in Main against
+ * full ordered turns. No `buildContextTurns`, no loaded-viewport authority
+ * decisions. Only the non-stale returned anchor is persisted (key removed on
+ * empty); transport failures preserve settings.
  */
-import type { ContextWindowAnchor } from '@renderer/types'
 import type { Assistant, AssistantSettings } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
-import { renderHook } from '@testing-library/react'
+import type { ContextWindowAnchor } from '@renderer/types'
+import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useContextWindowAnchor } from '../useContextWindowAnchor'
 
-// ── Mocks (hoisted) ────────────────────────────────────────────────────────
+const { mocks } = vi.hoisted(() => ({
+  mocks: {
+    resolveContextClosure: vi.fn(),
+    getStateAssistants: [] as Assistant[]
+  }
+}))
 
 vi.mock('@renderer/services/AssistantService', () => ({
   getAssistantSettings: (assistant: {
@@ -34,9 +35,24 @@ vi.mock('@renderer/services/AssistantService', () => ({
   DEFAULT_ASSISTANT_SETTINGS: { contextCount: 25, contextWindowAnchor: {} }
 }))
 
-// ── Fixtures ───────────────────────────────────────────────────────────────
+vi.mock('@renderer/services/db', () => ({
+  dbService: {
+    resolveContextClosure: (...args: unknown[]) => mocks.resolveContextClosure(...args)
+  }
+}))
 
-const user = (id: string): Message => ({ id, role: 'user', topicId: 'topic-1' }) as unknown as Message
+vi.mock('@renderer/services/db/DbService', () => ({
+  dbService: {
+    resolveContextClosure: (...args: unknown[]) => mocks.resolveContextClosure(...args)
+  }
+}))
+
+vi.mock('@renderer/store', () => ({
+  default: {
+    getState: () => ({ assistants: { assistants: mocks.getStateAssistants } }),
+    dispatch: vi.fn()
+  }
+}))
 
 const assistantWith = (settings: Partial<AssistantSettings>): Assistant =>
   ({
@@ -45,85 +61,117 @@ const assistantWith = (settings: Partial<AssistantSettings>): Assistant =>
   }) as unknown as Assistant
 
 const TOPIC_ID = 'topic-1'
+const resolverSuccess = (resolvedAnchorGroupKey: string | null) =>
+  ({
+    messages: [],
+    blocks: [],
+    closure: {
+      completeness: 'context-closure',
+      topicId: TOPIC_ID,
+      anchorGroupKey: resolvedAnchorGroupKey,
+      firstMessageId: resolvedAnchorGroupKey ? 'm1' : null,
+      lastMessageId: resolvedAnchorGroupKey ? 'm1' : null,
+      returnedCount: resolvedAnchorGroupKey ? 1 : 0,
+      totalTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+      selectedTurnCount: resolvedAnchorGroupKey ? 1 : 0,
+      boundaryMessageId: null
+    },
+    resolvedAnchorGroupKey,
+    changed: true
+  }) as any
 
 describe('useContextWindowAnchor', () => {
   const updateAssistantSettings = vi.fn()
 
   beforeEach(() => {
     updateAssistantSettings.mockReset()
+    mocks.resolveContextClosure.mockReset()
+    mocks.getStateAssistants = []
   })
 
-  it('re-anchors to the current default window position and persists it', () => {
-    // Turns u1/u2/u3 with contextCount=2 → default position is u2.
+  it('re-anchors via the authority resolver and persists the returned anchor', async () => {
     const assistant = assistantWith({
       contextCount: 2,
       contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
     })
-    const topicMessages = [user('u1'), user('u2'), user('u3')]
-    const { result } = renderHook(() =>
-      useContextWindowAnchor(assistant, TOPIC_ID, topicMessages, updateAssistantSettings)
-    )
-
-    result.current.onReanchor()
-
-    expect(updateAssistantSettings).toHaveBeenCalledTimes(1)
-    expect(updateAssistantSettings).toHaveBeenCalledWith({
-      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u2' } }
-    })
-  })
-
-  it('re-anchoring with null contextCount moves to the first turn (whole topic)', () => {
-    const assistant = assistantWith({
-      contextCount: null,
-      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u3' } }
-    })
-    const topicMessages = [user('u1'), user('u2'), user('u3')]
-    const { result } = renderHook(() =>
-      useContextWindowAnchor(assistant, TOPIC_ID, topicMessages, updateAssistantSettings)
-    )
-
-    result.current.onReanchor()
-
-    expect(updateAssistantSettings).toHaveBeenCalledWith({
-      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
-    })
-  })
-
-  it('does not dispatch when the anchor already sits at the default position', () => {
-    const assistant = assistantWith({
-      contextCount: 2,
-      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u2' } }
-    })
-    const topicMessages = [user('u1'), user('u2'), user('u3')]
-    const { result } = renderHook(() =>
-      useContextWindowAnchor(assistant, TOPIC_ID, topicMessages, updateAssistantSettings)
-    )
-
-    result.current.onReanchor()
-
-    expect(updateAssistantSettings).not.toHaveBeenCalled()
-  })
-
-  it('empty topic is a no-op (never creates an anchor)', () => {
-    const assistant = assistantWith({ contextCount: 2, contextWindowAnchor: {} })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u2'))
     const { result } = renderHook(() => useContextWindowAnchor(assistant, TOPIC_ID, [], updateAssistantSettings))
+    await result.current.onReanchor()
+    expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
+      topicId: TOPIC_ID,
+      intent: 'reanchor-default',
+      contextCount: 2,
+      currentAnchorGroupKey: 'u1'
+    })
+    await waitFor(() => expect(updateAssistantSettings).toHaveBeenCalledTimes(1))
+    expect(updateAssistantSettings).toHaveBeenCalledWith({
+      contextWindowAnchor: expect.objectContaining({ [TOPIC_ID]: { kind: 'active', groupKey: 'u2' } })
+    })
+  })
 
-    result.current.onReanchor()
-
+  it('does not dispatch when the resolver echoes the current anchor', async () => {
+    const assistant = assistantWith({
+      contextCount: 2,
+      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u2' } }
+    })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess('u2'))
+    const { result } = renderHook(() => useContextWindowAnchor(assistant, TOPIC_ID, [], updateAssistantSettings))
+    await result.current.onReanchor()
     expect(updateAssistantSettings).not.toHaveBeenCalled()
   })
 
-  it('establishes an anchor from nothing on a non-empty topic', () => {
-    const assistant = assistantWith({ contextCount: 1, contextWindowAnchor: {} })
-    const topicMessages = [user('u1'), user('u2'), user('u3')]
-    const { result } = renderHook(() =>
-      useContextWindowAnchor(assistant, TOPIC_ID, topicMessages, updateAssistantSettings)
-    )
-
-    result.current.onReanchor()
-
-    expect(updateAssistantSettings).toHaveBeenCalledWith({
-      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u3' } }
+  it('removes the key when the resolver reports empty', async () => {
+    const assistant = assistantWith({
+      contextCount: 2,
+      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
     })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce(resolverSuccess(null))
+    const { result } = renderHook(() => useContextWindowAnchor(assistant, TOPIC_ID, [], updateAssistantSettings))
+    await result.current.onReanchor()
+    await waitFor(() => expect(updateAssistantSettings).toHaveBeenCalledTimes(1))
+    const arg = updateAssistantSettings.mock.calls[0][0] as {
+      contextWindowAnchor: Record<string, unknown>
+    }
+    expect(arg.contextWindowAnchor[TOPIC_ID]).toBeUndefined()
+  })
+
+  it('transport failure preserves settings', async () => {
+    const assistant = assistantWith({
+      contextCount: 2,
+      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
+    })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockRejectedValueOnce(new Error('IPC fail'))
+    const { result } = renderHook(() => useContextWindowAnchor(assistant, TOPIC_ID, [], updateAssistantSettings))
+    await result.current.onReanchor()
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
+  })
+
+  it('stale result after concurrent change does not overwrite', async () => {
+    const assistant = assistantWith({
+      contextCount: 2,
+      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
+    })
+    const updated = assistantWith({
+      contextCount: 2,
+      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u9' } }
+    })
+    mocks.getStateAssistants = [assistant]
+    let resolve!: (v: unknown) => void
+    mocks.resolveContextClosure.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolve = res
+        })
+    )
+    const { result } = renderHook(() => useContextWindowAnchor(assistant, TOPIC_ID, [], updateAssistantSettings))
+    const p = result.current.onReanchor()
+    mocks.getStateAssistants = [updated]
+    resolve(resolverSuccess('u2'))
+    await p
+    expect(updateAssistantSettings).not.toHaveBeenCalled()
   })
 })
