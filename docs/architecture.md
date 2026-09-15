@@ -4,7 +4,7 @@
 
 This is the detailed architecture reference for the Cherry Chat codebase. The top-level [AGENTS.md](../AGENTS.md) guide is the always-on repository contract and keeps the awareness-level rules; this document carries the full detailed tables (services, directories, Redux slices, AI Core layering, database, IPC, multi-window, tracing, tech stack, source compatibility).
 
-Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](./cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](./sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), and the [Context window governance](./context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary). Multi-client synchronization is governed by the current [Personal Multi-Device Sync](./multi-device-sync.md) reference (limited validation, not production-ready full sync) with target connection/channel/pairing semantics in the approved [Sync Connection & Channel ADR](./sync-connection-channel.md); the [Sync Architecture Selection](./sync-architecture-selection.md) is a fallback/reference candidate analysis for conditional reuse only. This reference links those documents instead of duplicating their decision tables.
+Governance is owned by the canonical decision documents, not restated as canonical here: the [Application Identity ADR](./cherry-chat-application-identity.md) (Cherry Chat identity, compatibility boundary, updater/release freeze, platform scope), the [SQLite migration governance](./sqlite-migration.md) (SQLite chat authority, L2 Cherry Studio ZIP compatibility import), the [Context window governance](./context-window.md) (stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary), and the [Projection Completeness and Authority Intents](./projection-completeness-authority.md) (loaded projection semantics, typed completeness capabilities, stable-ID navigation/mutation, caller-local complete reads, request-local execution overlay). Multi-client synchronization is governed by the current [Personal Multi-Device Sync](./multi-device-sync.md) reference (limited validation, not production-ready full sync) with target connection/channel/pairing semantics in the approved [Sync Connection & Channel ADR](./sync-connection-channel.md); the [Sync Architecture Selection](./sync-architecture-selection.md) is a fallback/reference candidate analysis for conditional reuse only. This reference links those documents instead of duplicating their decision tables.
 
 ## Contents
 
@@ -102,7 +102,8 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 | `settings` | App-wide settings |
 | `llm` | LLM provider/model configs |
 | `mcp` | MCP server configs |
-| `messageBlock` | Message block rendering state |
+| `messageBlock` | Message block rendering state (block entities may cover a broader cache than the loaded message projection; block presence never proves message completeness — see [Projection Completeness and Authority Intents](./projection-completeness-authority.md)) |
+| `messages` | Ordinary topic message projection — loaded ID lists per topic (`messageIdsByTopic`) with entity dictionary; completeness is always `'loaded-projection'` (resident/loaded vs explicit-empty vs unloaded are distinct); never the whole topic — see [Projection Completeness and Authority Intents](./projection-completeness-authority.md) |
 | `knowledge` | Knowledge base entries |
 | `memory` | Memory system config |
 | `websearch` | Web search settings |
@@ -114,8 +115,12 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 
 ### SQLite (authoritative for ordinary chat)
 
-- `Data/chat.db` lives in the main process, written through `ChatDbAggregateService` (Drizzle ORM + better-sqlite3).
+- `Data/chat.db` lives in the main process, written through `ChatDbAggregateService` (Drizzle ORM + better-sqlite3). Main SQLite is the sole authority for complete topic messages, deterministic `sort_order`->`id` order, answer-group membership/order, mutation scope, Segment membership/catalog, and context closure derivation — see [Projection Completeness and Authority Intents](./projection-completeness-authority.md).
 - The renderer never holds a SQLite connection — it accesses chat data via typed IPC (`api.*` wrappers) through `SqliteMessageDataSource` (`src/renderer/src/services/db/SqliteMessageDataSource.ts`).
+  Ordinary Redux message state is only a loaded projection (`completeness: 'loaded-projection'`); typed completeness reads (`'window'`, `'answer-group'`, `'context-closure'`, `'whole-topic'`, `'naming-context'`, `'topic-activity'`) are caller-local,
+  short-lived capabilities whose complete messages/blocks never enter ordinary Redux. Window-outside navigation uses stable message ID + `around` reads with atomic merge;
+  Main mutations resolve stable-ID authority intents transactionally while the renderer commits only the loaded intersection;
+  resend/regenerate executes under a request-local overlay that survives renderer eviction (Redux is an optional mirror).
 - See `src/main/services/chatDb/` (connection lifecycle, migrations, repositories, import) and `src/main/services/chatDbImport/` (L2 ZIP compatibility import). Governance: [SQLite migration governance](./sqlite-migration.md).
 - Sync (2026-09-03, `cef4689726` plus audited hardening): additive sync metadata migrations `005_sync_metadata` (`sync_outbox`, `sync_applied`, `sync_state`, `sync_entity_clock`) + `006_sync_field_merge` (`sync_field_clock`, `sync_conflict_log`); Main-owned better-sqlite3 remains local authority; sync runs manual endpoint-driven with automatic online convergence + cursor recovery as target — limited validation, not production-ready full sync (see [Personal Multi-Device Sync](./multi-device-sync.md)).
 
@@ -136,7 +141,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 - Main → Renderer: `webContents.send(channel, data)`.
 - Tracing: `tracedInvoke()` in preload attaches OpenTelemetry span context to IPC calls.
 - Typed API surface exposed via `contextBridge` as `window.api`.
-- Data-access contract R-02..R-06 (Phase 5) implemented via S6.1-S6.3: windowed reads R-02/R-03 (`chatdb:fetch-messages-window`), authority-aware answer-group/branch/insert/search-hit (R-05/R-04), context closure R-06 with typed completeness, stable-ID anchoring, deterministic `sort_order`->`id`, viewport/context separation, generation applicability-only; Main SQLite remains authoritative; coordinated IPC contract preserved; Phase 5 closed 2026-08-29 (outcome/residual-risk).
+- Data-access contract R-02..R-06 (Phase 5) implemented via S6.1-S6.3: windowed reads R-02/R-03 (`chatdb:fetch-messages-window`), authority-aware answer-group/branch/insert/search-hit (R-05/R-04), context closure R-06 with typed completeness, stable-ID anchoring, deterministic `sort_order`->`id`, viewport/context separation, generation applicability-only; Main SQLite remains authoritative; coordinated IPC contract preserved; Phase 5 closed 2026-08-29 (outcome/residual-risk). Current completeness/authority semantics are owned by [Projection Completeness and Authority Intents](./projection-completeness-authority.md): Main window-read metadata vs renderer viewport `MessageWindow` vs local latest-window completeness stay distinct; whole-topic/context-closure/answer-group/naming/activity reads are caller-local and short-lived; request-local execution overlay (not Redux) owns resend/regenerate execution.
 - Sync MVP (2026-09-03, `cef4689726` plus audited hardening): manual sync channels `sync:get-config` / `set-config` / `get-status` / `sync:sync` (typed via `packages/shared/IpcChannel.ts` + preload `window.api.sync`); limited validation, not production-ready full sync.
 
 ## AI Core (`packages/aiCore/`)
