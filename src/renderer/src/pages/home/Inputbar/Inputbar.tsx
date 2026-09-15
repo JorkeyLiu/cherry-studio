@@ -10,7 +10,7 @@ import {
 } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
-import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
+import { useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTextareaResize } from '@renderer/hooks/useTextareaResize'
@@ -166,7 +166,6 @@ const InputbarInner: FC<InputbarInnerProps> = ({
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
-  const topicMessages = useTopicMessages(topic.id)
   const loading = useTopicLoading(topic)
 
   // --- Token estimation (Inputbar-owned) ---
@@ -345,7 +344,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   // startup cannot mutate a persisted anchor. The only Inputbar mutation is
   // re-anchor (TokenCount click): move the anchor to the CURRENT default
   // window position (current topic turns + current `contextCount`).
-  const { onReanchor } = useContextWindowAnchor(assistant, topic.id, topicMessages, updateAssistantSettings)
+  const { onReanchor } = useContextWindowAnchor(assistant, topic.id, updateAssistantSettings)
 
   const onPause = useCallback(async () => {
     await pauseMessages()

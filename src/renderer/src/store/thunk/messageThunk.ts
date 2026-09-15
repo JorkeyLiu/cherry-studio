@@ -95,7 +95,7 @@ import { LRUCache } from 'lru-cache'
 
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
-import { newMessagesActions, selectMessagesForTopic } from '../newMessage'
+import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
 import { replaceSegmentsForTopic } from '../topicSegment'
 // import {
@@ -652,7 +652,10 @@ const fetchAndProcessAssistantResponseImpl = async (
       cancelThrottledBlockUpdate
     })
 
-    const allMessagesForTopic = selectMessagesForTopic(getState(), topicId)
+    // Explicit provisional loaded candidate for the request only; context
+    // closure authority stays with the persisted anchor + Main.
+    const provisionalLoadedMessagesForRequest = (selectLoadedMessagesForTopic(getState(), topicId) ?? []) as Message[]
+    const allMessagesForTopic = provisionalLoadedMessagesForRequest
 
     let messagesForContext: Message[] = []
     const userMessageId = assistantMessage.askId
@@ -1517,7 +1520,9 @@ export const insertMessagesThunk =
       // Local projection insertion: best-effort window-relative placement for immediate UI.
       // Authority order is already correct in Main; this projection step does not affect authority.
       const state = getState()
-      const topicMessages = selectMessagesForTopic(state, topicId)
+      // Explicit provisional loaded fallback for local placement only.
+      const provisionalLoadedMessagesForInsertion = (selectLoadedMessagesForTopic(state, topicId) ?? []) as Message[]
+      const topicMessages = provisionalLoadedMessagesForInsertion
       let insertIndex: number | null = null
       if (topicMessages && topicMessages.length > 0) {
         const afterIdx = topicMessages.findIndex((msg) => msg.id === afterMessageId)
@@ -1551,99 +1556,6 @@ export const insertMessagesThunk =
       logger.info(`[insertMessagesThunk] Inserted messages after ${afterMessageId} via Main-authoritative anchor`)
     } catch (error) {
       logger.error(`[insertMessagesThunk] Error inserting messages:`, error as Error)
-      throw error
-    }
-  }
-
-/**
- * Compatibility-only: renderer-window-relative insert via positional appendMessage.
- * Preserved for backward compatibility; not the primary S6.2c-2 path.
- * New code must use insertMessagesThunk (anchor-based).
- */
-export const insertMessagesThunkLegacy =
-  (topicId: string, afterMessageId: string, assistantId: string) =>
-  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
-    try {
-      const state = getState()
-      const topicMessages = selectMessagesForTopic(state, topicId)
-
-      if (!topicMessages || topicMessages.length === 0) {
-        logger.error(`[insertMessagesThunkLegacy] Topic ${topicId} not found or is empty.`)
-        return
-      }
-
-      const afterMessageIndex = topicMessages.findIndex((msg) => msg.id === afterMessageId)
-      if (afterMessageIndex === -1) {
-        logger.error(`[insertMessagesThunkLegacy] Message ${afterMessageId} not found in topic ${topicId}.`)
-        return
-      }
-
-      let insertIndex = afterMessageIndex + 1
-      const afterMessage = topicMessages[afterMessageIndex]
-      if (afterMessage?.role === 'assistant' && afterMessage.askId) {
-        for (let i = afterMessageIndex + 1; i < topicMessages.length; i++) {
-          if (topicMessages[i].role === 'assistant' && topicMessages[i].askId === afterMessage.askId) {
-            insertIndex = i + 1
-          } else {
-            break
-          }
-        }
-      }
-      const now = new Date().toISOString()
-
-      const userMessageId = uuid()
-      const userBlockId = uuid()
-      const userBlock: MessageBlock = {
-        id: userBlockId,
-        messageId: userMessageId,
-        type: MessageBlockType.MAIN_TEXT,
-        content: t('chat.message.insert.newUserMessage'),
-        status: MessageBlockStatus.SUCCESS,
-        createdAt: now
-      }
-      const userMessage: Message = {
-        id: userMessageId,
-        role: 'user',
-        assistantId,
-        topicId,
-        createdAt: now,
-        status: UserMessageStatus.SUCCESS,
-        blocks: [userBlockId]
-      }
-
-      const assistantMessageId = uuid()
-      const assistantBlockId = uuid()
-      const assistantBlock: MessageBlock = {
-        id: assistantBlockId,
-        messageId: assistantMessageId,
-        type: MessageBlockType.MAIN_TEXT,
-        content: t('chat.message.insert.newAssistantMessage'),
-        status: MessageBlockStatus.SUCCESS,
-        createdAt: now
-      }
-      const assistantMessage: Message = {
-        id: assistantMessageId,
-        role: 'assistant',
-        assistantId,
-        topicId,
-        createdAt: now,
-        status: AssistantMessageStatus.SUCCESS,
-        blocks: [assistantBlockId],
-        askId: userMessageId
-      }
-
-      dispatch(upsertOneBlock(userBlock))
-      dispatch(upsertOneBlock(assistantBlock))
-
-      dispatch(newMessagesActions.insertMessageAtIndex({ topicId, message: userMessage, index: insertIndex }))
-      dispatch(newMessagesActions.insertMessageAtIndex({ topicId, message: assistantMessage, index: insertIndex + 1 }))
-
-      await saveMessageAndBlocksToDB(topicId, userMessage, [userBlock], insertIndex)
-      await saveMessageAndBlocksToDB(topicId, assistantMessage, [assistantBlock], insertIndex + 1)
-
-      logger.info(`[insertMessagesThunkLegacy] Inserted messages after ${afterMessageId} at index ${insertIndex}`)
-    } catch (error) {
-      logger.error(`[insertMessagesThunkLegacy] Error inserting messages:`, error as Error)
       throw error
     }
   }

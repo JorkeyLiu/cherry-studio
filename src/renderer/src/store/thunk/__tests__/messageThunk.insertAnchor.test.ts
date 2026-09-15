@@ -53,7 +53,7 @@ vi.mock('@renderer/store/newMessage', async (importOriginal) => {
       insertMessageAtIndex: mocks.insertMessageAtIndex,
       addMessage: mocks.addMessage
     },
-    selectMessagesForTopic: vi.fn(() => [
+    selectLoadedMessagesForTopic: vi.fn(() => [
       { id: 'm-anchor', role: 'user' } as any,
       { id: 'm-next', role: 'assistant' } as any
     ])
@@ -99,11 +99,11 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     const segment = src.slice(start, start + 8000)
     // Must contain insertMessagesAfterAnchor call
     expect(segment).toContain('insertMessagesAfterAnchor')
-    // Must not call saveMessageAndBlocksToDB with insertIndex in primary path (legacy path is separate)
-    // Ensure primary path does not contain saveMessageAndBlocksToDB(topicId, userMessage, ..., insertIndex)
-    const primaryPart = segment.slice(0, segment.indexOf('insertMessagesThunkLegacy'))
-    expect(primaryPart).not.toMatch(/saveMessageAndBlocksToDB\(topicId,\s*userMessage,\s*\[userBlock\],\s*insertIndex/)
-    expect(primaryPart).not.toMatch(/appendMessage\(topicId,\s*userMessage/)
+    // No positional legacy path remains: the legacy thunk symbol is absent and
+    // the primary path never passes a numeric insertIndex to Main.
+    expect(src).not.toContain('insertMessagesThunkLegacy')
+    expect(segment).not.toMatch(/saveMessageAndBlocksToDB\(topicId,\s*userMessage,\s*\[userBlock\],\s*insertIndex/)
+    expect(segment).not.toMatch(/appendMessage\(topicId,\s*userMessage/)
   })
 
   it('dispatches Redux only after Main success (fail closed)', async () => {
@@ -135,16 +135,16 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     )
     const primaryThunk = src.slice(
       src.indexOf('export const insertMessagesThunk'),
-      src.indexOf('export const insertMessagesThunkLegacy')
+      src.indexOf('export const branchMessagesToTopicThunk')
     )
     // Should not contain explicit updateTopicUpdatedAt dispatch in primary thunk
     expect(primaryThunk).not.toContain('updateTopicUpdatedAt')
   })
 
   it('handles anchor outside projection without throwing (appends)', async () => {
-    // Mock selectMessagesForTopic to return empty / not containing anchor
+    // Mock selectLoadedMessagesForTopic to return empty / not containing anchor
     const mod = await import('@renderer/store/newMessage')
-    const selectMock = (mod as any).selectMessagesForTopic
+    const selectMock = (mod as any).selectLoadedMessagesForTopic
     selectMock.mockReturnValue([{ id: 'different', role: 'user' } as any])
 
     const { insertMessagesThunk } = await import('../messageThunk')
@@ -155,15 +155,12 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     expect(mocks.dispatch).toHaveBeenCalled()
   })
 
-  it('legacy thunk still exists for compatibility and uses positional logic', async () => {
+  it('legacy positional thunk is removed (no positional DB write reachable)', async () => {
     const mod = await import('../messageThunk')
-    expect(typeof mod.insertMessagesThunkLegacy).toBe('function')
-    // Legacy source should contain findIndex and insertIndex
+    expect((mod as any).insertMessagesThunkLegacy).toBeUndefined()
+    // No positional DB write remains reachable: the legacy source block is gone.
     const fs = await import('node:fs')
     const src = fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')
-    const legacyStart = src.indexOf('export const insertMessagesThunkLegacy')
-    const legacySegment = src.slice(legacyStart, legacyStart + 4000)
-    expect(legacySegment).toContain('findIndex')
-    expect(legacySegment).toContain('insertIndex')
+    expect(src).not.toContain('insertMessagesThunkLegacy')
   })
 })

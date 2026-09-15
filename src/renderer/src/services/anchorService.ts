@@ -202,7 +202,7 @@ export function inheritAnchorForBranch(
  * the same-snapshot closure. Main never persists settings; this helper
  * persists only the non-stale returned anchor (removing the key on empty).
  *
- * No loaded-viewport authority decisions: no `selectMessagesForTopic`, no
+ * No loaded-viewport authority decisions: no `selectLoadedMessagesForTopic`, no
  * `buildContextTurns`, no viewport resolvability check. A persisted anchor
  * outside the loaded viewport is never treated invalid or moved — validity is
  * decided by Main against the full topic. Transport failures and NOT_FOUND

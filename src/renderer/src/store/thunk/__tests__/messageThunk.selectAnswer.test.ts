@@ -62,7 +62,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicLoading: mocks.setTopicLoadingAction,
     setTopicFulfilled: mocks.setTopicFulfilledAction
   },
-  selectMessagesForTopic: vi.fn()
+  selectLoadedMessagesForTopic: vi.fn()
 }))
 
 vi.mock('@renderer/store/assistants', () => ({

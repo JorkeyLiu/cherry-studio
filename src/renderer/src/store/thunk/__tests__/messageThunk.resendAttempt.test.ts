@@ -33,7 +33,7 @@ const { mocks } = vi.hoisted(() => ({
     updateSingleBlock: vi.fn(),
     bulkAddBlocks: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     transformMessagesAndFetch: vi.fn(),
     autoRenameTopic: vi.fn(),
     computeContextInfo: vi.fn(),
@@ -165,7 +165,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'setTopicFulfilled', p })),
     upsertBlockReference: vi.fn((p: unknown) => ({ type: 'upsertBlockReference', p }))
   },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -204,7 +204,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
       assistants: { assistants: [] }
     }
     mocks.transformMessagesAndFetch.mockResolvedValue(undefined)
-    mocks.selectMessagesForTopic.mockImplementation(() => [])
+    mocks.selectLoadedMessagesForTopic.mockImplementation(() => [])
     mocks.updateBlocks.mockResolvedValue(undefined)
     mocks.updateMessage.mockResolvedValue(undefined)
   })
@@ -221,7 +221,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messageBlocks.entities['block-A'] = { id: 'block-A', messageId: 'assistant-A' }
     storeState.messageBlocks.entities['block-B'] = { id: 'block-B', messageId: 'assistant-B' }
     storeState.assistants.assistants = [{ id: 'assistant-1', topics: [], settings: {}, prompt: '' } as never]
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg, assistantA, assistantB])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, assistantA, assistantB])
     mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
@@ -353,7 +353,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantMsg.id] = assistantMsg
     storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantMsg.id]
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
     const dispatch = vi.fn()
     const getState = () => storeState as never
     await resendMessageThunk('topic-1', userMsg, {
@@ -374,7 +374,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantMsg.id] = assistantMsg
     storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantMsg.id]
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
     mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
@@ -412,7 +412,7 @@ describe('F2: success-final awaits quiescence', () => {
       assistants: { assistants: [] }
     }
     mocks.transformMessagesAndFetch.mockResolvedValue(undefined)
-    mocks.selectMessagesForTopic.mockImplementation(() => [])
+    mocks.selectLoadedMessagesForTopic.mockImplementation(() => [])
     mocks.getAssistantSettings.mockReturnValue({})
     mocks.computeContextInfo.mockReturnValue({ uiMessages: [] })
     mocks.updateBlocks.mockResolvedValue(undefined)
@@ -472,7 +472,7 @@ describe('F2: success-final awaits quiescence', () => {
       content: 'final answer',
       status: MessageBlockStatus.SUCCESS
     }
-    mocks.selectMessagesForTopic.mockReturnValue([assistantMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([assistantMsg])
 
     const barrier = new WriteBarrier()
     const gate = deferred<void>()

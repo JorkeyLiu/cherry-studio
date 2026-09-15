@@ -116,7 +116,7 @@ const mocks = vi.hoisted(() => {
       return vi.fn() // unsubscribe
     }),
 
-    // useTopicMessages mock — returns empty messages by default
+    // useLoadedTopicMessages mock — returns empty messages by default
     topicMessages: [] as Message[],
 
     // Unified navigation: controllable ensure + observable dispatches/toast.
@@ -189,7 +189,7 @@ vi.mock('@renderer/hooks/useClipboardKeyboard', () => ({
 }))
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useTopicMessages: () => mocks.topicMessages,
+  useLoadedTopicMessages: () => mocks.topicMessages,
   useTopicLoading: () => false,
   useMessageOperations: () => ({
     displayCount: 20,

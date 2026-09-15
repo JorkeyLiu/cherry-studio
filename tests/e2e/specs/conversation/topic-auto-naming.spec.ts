@@ -12,7 +12,7 @@
  * reducer-stripped `assistant.topic.messages` (always empty), so both naming
  * paths saw `messages.length < 2`, never issued the summary request, and the
  * topic kept the default name. The repaired path awaits
- * `loadTopicMessagesThunk` and reads `selectMessagesForTopic` from the
+ * `loadTopicMessagesThunk` and reads `selectLoadedMessagesForTopic` from the
  * messages projection, so the summary request fires and the deterministic
  * mock-generated title is persisted.
  *

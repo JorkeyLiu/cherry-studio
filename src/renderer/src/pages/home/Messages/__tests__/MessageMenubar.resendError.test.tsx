@@ -22,7 +22,7 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     resendUser: vi.fn(),
     regenerateAssistant: vi.fn(),
-    selectMessagesForTopic: vi.fn(() => [] as Message[]),
+    selectLoadedMessagesForTopic: vi.fn(() => [] as Message[]),
     loggerError: vi.fn(),
     toastError: vi.fn()
   }
@@ -131,7 +131,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({

@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
   estimateUsage: vi.fn().mockResolvedValue(undefined),
   resolveRegenerate: vi.fn(),
   resolveResend: vi.fn(),
-  resolveAnswerGroup: vi.fn(),
   resolveEditTarget: vi.fn(),
   resolveAssistantSnapshot: vi.fn()
 }))
@@ -26,7 +25,6 @@ vi.mock('@renderer/services/messageActionController', () => ({
   messageActionController: {
     resolveRegenerateForAssistant: mocks.resolveRegenerate,
     resolveResendForUser: mocks.resolveResend,
-    resolveAnswerGroup: mocks.resolveAnswerGroup,
     resolveEditTarget: mocks.resolveEditTarget,
     resolveAssistantSnapshot: mocks.resolveAssistantSnapshot
   }

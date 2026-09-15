@@ -386,8 +386,6 @@ export const newMessagesActions = messagesSlice.actions
 export default messagesSlice.reducer
 
 // --- Selectors ---
-import { createSelector } from '@reduxjs/toolkit'
-
 import type { RootState } from './index' // Adjust path if necessary
 
 // Base selector for the messages slice state
@@ -401,18 +399,90 @@ export const {
   selectEntities: selectMessageEntities // Selects the entity dictionary { id: message }
 } = messagesAdapter.getSelectors(selectMessagesState)
 
-// Custom Selector: Selects messages for a specific topic in order
-export const selectMessagesForTopic = createSelector(
-  [
-    selectMessageEntities, // Input 1: Get the dictionary of all messages { id: message }
-    (state: RootState, topicId: string) => state.messages.messageIdsByTopic[topicId] // Input 2: Get the ordered IDs for the specific topic
-  ],
-  (messageEntities, topicMessageIds) => {
-    // Logger.log(`[Selector selectMessagesForTopic] Running for topicId: ${topicId}`); // Uncomment for debugging selector runs
-    if (!topicMessageIds) {
-      return [] // Return an empty array if the topic or its IDs don't exist
+// Custom Selectors: explicit bounded loaded projection for a topic.
+// Ordinary renderer Redux message data is a loaded projection of the
+// resident topic window — never the whole topic. `undefined` means the topic
+// is not a complete resident projection or has no loaded ID list; a resident
+// topic with an explicit `[]` returns a defined empty projection.
+export interface LoadedTopicMessageProjection {
+  topicId: string
+  messageIds: readonly string[]
+  messages: readonly Message[]
+  completeness: 'loaded-projection'
+}
+
+// Stable empty singleton for loaded message arrays. Loaded ID lists always
+// return the stored `messageIdsByTopic[topicId]` reference, never a copy.
+export const EMPTY_LOADED_MESSAGES: readonly Message[] = []
+
+function isResidentLoadedTopic(state: RootState, topicId: string): boolean {
+  const entries = (state as unknown as { residentRegistry?: { entries?: Record<string, { residentTopic?: boolean }> } })
+    ?.residentRegistry?.entries
+  return !!entries?.[topicId]?.residentTopic
+}
+
+interface LoadedProjectionCacheEntry {
+  entityRefs: readonly (Message | undefined)[]
+  messages: readonly Message[]
+  projection: LoadedTopicMessageProjection
+}
+
+// Keyed by the stored ID array reference (stable across unrelated updates via
+// Immer structural sharing). Distinct stores hold distinct array objects, so
+// no cross-store leakage. Resident gating happens before lookup, so a cached
+// entry is only reused for a currently resident topic.
+const loadedProjectionCache = new WeakMap<readonly string[], LoadedProjectionCacheEntry>()
+
+function getCachedLoadedProjection(
+  topicId: string,
+  ids: readonly string[],
+  entities: Record<string, Message | undefined>
+): LoadedTopicMessageProjection {
+  const cached = loadedProjectionCache.get(ids)
+  if (cached && cached.entityRefs.length === ids.length) {
+    let stable = true
+    for (let i = 0; i < ids.length; i++) {
+      if (entities[ids[i]] !== cached.entityRefs[i]) {
+        stable = false
+        break
+      }
     }
-    // Map the ordered IDs to the actual message objects from the dictionary
-    return topicMessageIds.map((id) => messageEntities[id]).filter((m): m is Message => !!m) // Filter out undefined/null in case of inconsistencies
+    if (stable) return cached.projection
   }
-)
+  const entityRefs = ids.map((id) => entities[id])
+  const messages: readonly Message[] =
+    entityRefs.length === 0 ? EMPTY_LOADED_MESSAGES : entityRefs.filter((m): m is Message => !!m)
+  const projection: LoadedTopicMessageProjection = {
+    topicId,
+    messageIds: ids,
+    messages,
+    completeness: 'loaded-projection'
+  }
+  loadedProjectionCache.set(ids, { entityRefs, messages, projection })
+  return projection
+}
+
+export function selectLoadedMessageIdsForTopic(state: RootState, topicId: string): readonly string[] | undefined {
+  if (!isResidentLoadedTopic(state, topicId)) return undefined
+  const ids = state.messages.messageIdsByTopic[topicId]
+  if (ids === undefined) return undefined
+  return ids
+}
+
+export function selectLoadedMessagesForTopic(state: RootState, topicId: string): readonly Message[] | undefined {
+  if (!isResidentLoadedTopic(state, topicId)) return undefined
+  const ids = state.messages.messageIdsByTopic[topicId]
+  if (ids === undefined) return undefined
+  return getCachedLoadedProjection(topicId, ids, state.messages.entities as Record<string, Message | undefined>)
+    .messages
+}
+
+export function selectLoadedTopicProjection(
+  state: RootState,
+  topicId: string
+): LoadedTopicMessageProjection | undefined {
+  if (!isResidentLoadedTopic(state, topicId)) return undefined
+  const ids = state.messages.messageIdsByTopic[topicId]
+  if (ids === undefined) return undefined
+  return getCachedLoadedProjection(topicId, ids, state.messages.entities as Record<string, Message | undefined>)
+}

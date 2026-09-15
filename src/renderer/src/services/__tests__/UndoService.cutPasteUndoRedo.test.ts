@@ -31,7 +31,7 @@ const { mocks } = vi.hoisted(() => ({
       removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p })),
       insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p }))
     },
-    selectMessagesForTopic: vi.fn(() => []),
+    selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
     restoreSegmentsAfterUndo: vi.fn().mockResolvedValue(undefined),
@@ -82,7 +82,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: mocks.newMessagesActions,
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/topicSegment', () => ({
@@ -164,7 +164,10 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
       'paste-copy-2': copy2
     } as unknown as Record<string, Message>
     storeState.messages.messageIdsByTopic = { 'topic-1': ['paste-copy-1', 'paste-copy-2'] }
-    mocks.selectMessagesForTopic.mockImplementation((() => [{ id: 'paste-copy-1' }, { id: 'paste-copy-2' }]) as any)
+    mocks.selectLoadedMessagesForTopic.mockImplementation((() => [
+      { id: 'paste-copy-1' },
+      { id: 'paste-copy-2' }
+    ]) as any)
     storeState.undoStack = { undoStack: [action], redoStack: [] }
 
     const callOrder: string[] = []
@@ -289,7 +292,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     } as unknown as Record<string, Message>
     storeState.messages.messageIdsByTopic = { 'topic-1': ['u1', 'a1'] }
     storeState.undoStack = { undoStack: [], redoStack: [action] }
-    mocks.selectMessagesForTopic.mockImplementation((() => [{ id: 'u1' }, { id: 'a1' }]) as any)
+    mocks.selectLoadedMessagesForTopic.mockImplementation((() => [{ id: 'u1' }, { id: 'a1' }]) as any)
 
     const { executeRedo } = await import('../UndoService')
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)

@@ -8,7 +8,7 @@ import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
 import { updateOneBlock } from '@renderer/store/messageBlock'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
+import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant } from '@renderer/types'
 import { ERROR_I18N_KEY_REQUEST_TIMEOUT, ERROR_I18N_KEY_STREAM_PAUSED } from '@renderer/types/error'
@@ -396,7 +396,10 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       }
 
       if (status === 'success') {
-        const orderedMsgs = selectMessagesForTopic(latestState, topicId)
+        // Explicit provisional loaded candidate for usage estimate only; final
+        // persistence and context closure authority are unchanged.
+        const provisionalLoadedMessages = (selectLoadedMessagesForTopic(latestState, topicId) ?? []) as Message[]
+        const orderedMsgs = provisionalLoadedMessages
         let contextMsgs = orderedMsgs
         const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
         if (anchorGroupKey) {

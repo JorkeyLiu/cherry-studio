@@ -41,7 +41,7 @@ vi.mock('@renderer/store', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectMessagesForTopic: () => []
+  selectLoadedMessagesForTopic: () => []
 }))
 
 vi.mock('@renderer/utils', () => ({

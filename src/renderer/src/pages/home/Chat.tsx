@@ -9,7 +9,7 @@ import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useContextClosure } from '@renderer/hooks/useContextClosure'
-import { useTopicMessages, useTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages, useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
@@ -92,7 +92,7 @@ const Chat: FC<Props> = (props) => {
   // blocks through block-dependent filters (filterEmptyMessages /
   // filterErrorOnlyMessagesWithRelated): a block-only Redux update (updateOneBlock)
   // can change the projection without changing the topic message array.
-  // useTopicReferencedBlocks subscribes only to active-topic referenced blocks
+  // useLoadedTopicReferencedBlocks subscribes only to active-topic referenced blocks
   // (selectMessageBlocksByIds + shallowEqual), so unrelated block commits do
   // not invalidate this projection.
   //
@@ -100,12 +100,16 @@ const Chat: FC<Props> = (props) => {
   // for the one shared computation — echo.sharedContextInfo on the echo path and
   // topic.contextInfo on topic-switch paths. No second computeContextInfo call is
   // ever made for diagnostics; outside measurement mode this wraps nothing.
-  const topicMessages = useTopicMessages(props.activeTopic.id)
-  const topicBlocks = useTopicReferencedBlocks(props.activeTopic.id)
+  // Bounded loaded projection: resident topic only; the `?? []` fallback is
+  // memoized so the shared-projection memo keeps a stable identity while the
+  // topic is non-resident (`undefined` stays at the API boundary).
+  const loadedTopicMessages = useLoadedTopicMessages(props.activeTopic.id)
+  const topicMessages = useMemo(() => (loadedTopicMessages ?? []) as any, [loadedTopicMessages])
+  const topicBlocks = useLoadedTopicReferencedBlocks(props.activeTopic.id)
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[props.activeTopic.id]?.groupKey ?? null
   const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey)
   // R-06: authoritative closure supplies message lists and full-topic metadata; fallback preserves bounded behavior
-  const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages as any), [topicMessages])
+  const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages), [topicMessages])
   const freshClosure = useMemo(() => {
     void closure // keep hook subscription; actual freshness is gated via centralized helper reading cache
     return getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint)
@@ -124,8 +128,8 @@ const Chat: FC<Props> = (props) => {
     // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; otherwise bounded fallback
     const result = freshClosure
       ? deriveContextInfoFromClosure(freshClosure as any)
-      : computeContextInfo(topicMessages as any, assistant, props.activeTopic.id)
-    if (active && (topicMessages as any).length > 0) {
+      : computeContextInfo(topicMessages, assistant, props.activeTopic.id)
+    if (active && topicMessages.length > 0) {
       recordPhaseDurationForCorrelation(
         active.correlationId,
         active.path,

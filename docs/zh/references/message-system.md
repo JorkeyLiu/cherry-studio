@@ -394,9 +394,9 @@ function MyComponent({ currentTopic, currentAssistant }: MyComponentProps) {
 
 在同一文件中还定义了两个辅助 Hook：
 
-- **`useTopicMessages(topic: Topic)`**:
+- **`useLoadedTopicMessages(topicId: string)`**:
 
-  - 使用 `selectMessagesForTopic` selector 来获取并返回指定主题的消息列表。
+  - 使用 `selectLoadedMessagesForTopic` selector 来获取并返回指定主题的已加载消息投影（非常驻主题返回 `undefined`）。
 
 - **`useTopicLoading(topic: Topic)`**:
   - 使用 `selectNewTopicLoading` selector 来获取并返回指定主题的加载状态。

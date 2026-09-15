@@ -38,7 +38,7 @@ const { mocks } = vi.hoisted(() => ({
       type: 'newMessages/reorderLoadedMessageIdsForTopic',
       payload: p
     })),
-    selectMessagesForTopic: vi.fn()
+    selectLoadedMessagesForTopic: vi.fn()
   }
 }))
 
@@ -64,7 +64,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     reorderLoadedMessageIdsForTopic: mocks.reorderLoadedIdsAction,
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p }))
   },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('i18next', () => ({
@@ -152,14 +152,14 @@ describe('reorderMessageGroupThunk — semantic authority reorder', () => {
     expect(dbIdx).toBeLessThan(reduxIdx)
   })
 
-  it('never reads loaded messages to build a full topic list (no selectMessagesForTopic)', async () => {
+  it('never reads loaded messages to build a full topic list (no selectLoadedMessagesForTopic)', async () => {
     const { reorderMessageGroupThunk } = await import('../messageGroupReorder')
     const { state } = makeLoadedState()
     const dispatch = vi.fn()
 
     await reorderMessageGroupThunk(topicId, ['assistant-2', 'assistant-1'])(dispatch, () => state)
 
-    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     // The legacy full-list path is gone: no messagesReceived with a partial
     // Messages array masquerading as complete topic content.
     expect(dispatch).toHaveBeenCalledTimes(1)

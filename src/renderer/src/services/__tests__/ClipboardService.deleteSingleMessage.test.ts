@@ -22,7 +22,7 @@ const { mocks } = vi.hoisted(() => ({
     executeDeleteMessagesWithDependents: vi.fn(),
     deleteMessagesFromDB: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     removeMessages: vi.fn((p: unknown) => ({ type: 'removeMessages', p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
     pushUndoAction: vi.fn((p: unknown) => ({ type: 'pushUndoAction', p })),
@@ -65,7 +65,7 @@ vi.mock('@renderer/store/clipboard', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: { removeMessages: mocks.removeMessages },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -195,7 +195,7 @@ describe('ClipboardService.deleteSingleMessage (semantic)', () => {
       'topic-1',
       ['msg-1']
     )
-    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     // Undo carries original roots + expanded IDs + authority snapshots.
     expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
     const undoAction = mocks.pushUndoAction.mock.calls[0][0] as any
@@ -259,7 +259,7 @@ describe('ClipboardService.deleteSelectedMessages (semantic multi)', () => {
       'topic-1',
       ['u1', 'u2']
     )
-    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(count).toBe(3)
     const undoAction = mocks.pushUndoAction.mock.calls[0][0] as any
     expect(undoAction.rootMessageIds).toEqual(['u1', 'u2'])

@@ -47,7 +47,7 @@ vi.mock('@renderer/store/thunk/messageThunk', () => ({
 vi.mock('@renderer/store/messageBlock', () => ({ updateOneBlock: vi.fn() }))
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: { setTopicLoading: vi.fn() },
-  selectMessagesForTopic: vi.fn()
+  selectLoadedMessagesForTopic: vi.fn()
 }))
 vi.mock('@renderer/services/ClipboardService', () => ({ deleteSingleMessage: vi.fn() }))
 vi.mock('@renderer/services/EventService', () => ({ EVENT_NAMES: {}, EventEmitter: { emit: vi.fn() } }))

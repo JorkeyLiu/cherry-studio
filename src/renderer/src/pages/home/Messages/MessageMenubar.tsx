@@ -26,7 +26,7 @@ import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
 import store, { useAppDispatch } from '@renderer/store'
 import { messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
+import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
@@ -201,7 +201,7 @@ const MessageMenubar: FC<Props> = (props) => {
   // Context-window anchor control for the single stable anchor-to-end model
   // (docs/context-window.md §8). Clicking a message anchor is an explicit
   // move resolved by `chatdb:resolve-context-closure` in Main against full
-  // ordered turns — no `selectMessagesForTopic` / `buildContextTurns`
+  // ordered turns — no `selectLoadedMessagesForTopic` / `buildContextTurns`
   // authority decisions and no loaded-turn inference. The first `move`
   // (`messageId`) response is the authority determination: a different key
   // persists directly, while an echo of the still-current persisted key means
@@ -661,7 +661,9 @@ const MessageMenubar: FC<Props> = (props) => {
       return defaultFilter
     }
     const state = store.getState()
-    const topicMessages: Message[] = selectMessagesForTopic(state, topic.id)
+    // Bounded loaded projection for related user lookup (fail-open local).
+    const loadedTopicMessages: readonly Message[] = selectLoadedMessagesForTopic(state, topic.id) ?? []
+    const topicMessages: Message[] = loadedTopicMessages as Message[]
     // 理论上助手消息只会关联一条用户消息
     const relatedUserMessage = topicMessages.find((msg) => {
       return msg.role === 'user' && message.askId === msg.id

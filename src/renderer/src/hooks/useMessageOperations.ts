@@ -6,7 +6,11 @@ import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import store, { type RootState, useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds, updateOneBlock } from '@renderer/store/messageBlock'
-import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
+import {
+  newMessagesActions,
+  selectLoadedMessagesForTopic,
+  selectLoadedTopicProjection
+} from '@renderer/store/newMessage'
 import {
   appendAssistantResponseThunk,
   branchMessagesToTopicThunk,
@@ -162,10 +166,10 @@ export function useMessageOperations(topic: Topic) {
    */
   const pauseMessages = useCallback(async () => {
     const state = store.getState()
-    const topicMessages = selectMessagesForTopic(state, topic.id)
-    if (!topicMessages) return
+    const loadedMessages = selectLoadedMessagesForTopic(state, topic.id)
+    if (!loadedMessages) return
 
-    const streamingMessages = topicMessages.filter((m) => m.status === 'processing' || m.status === 'pending')
+    const streamingMessages = loadedMessages.filter((m) => m.status === 'processing' || m.status === 'pending')
     const askIds = [...new Set(streamingMessages?.map((m) => m.askId).filter((id) => !!id) as string[])]
 
     for (const askId of askIds) {
@@ -528,8 +532,12 @@ export function useMessageOperations(topic: Topic) {
   }
 }
 
-export const useTopicMessages = (topicId: string) => {
-  return useAppSelector((state) => selectMessagesForTopic(state, topicId))
+export const useLoadedTopicMessages = (topicId: string): readonly Message[] | undefined => {
+  return useAppSelector((state) => selectLoadedMessagesForTopic(state, topicId))
+}
+
+export const useLoadedTopicProjection = (topicId: string) => {
+  return useAppSelector((state) => selectLoadedTopicProjection(state, topicId))
 }
 
 /**
@@ -539,14 +547,17 @@ export const useTopicMessages = (topicId: string) => {
  * (filterEmptyMessages, filterErrorOnlyMessagesWithRelated), so a block-only
  * Redux update (updateOneBlock) can change the projection output without
  * changing the topic message array. This hook subscribes ONLY to the blocks
- * referenced by the topic's messages — `selectMessageBlocksByIds` +
+ * referenced by the topic's loaded messages — `selectMessageBlocksByIds` +
  * `shallowEqual` keep the subscription silent while an unrelated block (e.g.
  * another topic's streaming block) commits, so the shared projection is not
  * recomputed for block changes it cannot read.
+ *
+ * Loaded-projection boundary: when the topic is not a complete resident
+ * projection the loaded messages are `undefined` and no blocks are subscribed.
  */
-export const useTopicReferencedBlocks = (topicId: string): MessageBlock[] => {
-  const topicMessages = useTopicMessages(topicId)
-  const topicBlockIds = useMemo(() => topicMessages.flatMap((m) => m.blocks ?? []), [topicMessages])
+export const useLoadedTopicReferencedBlocks = (topicId: string): MessageBlock[] => {
+  const loadedMessages = useLoadedTopicMessages(topicId)
+  const topicBlockIds = useMemo(() => (loadedMessages ?? []).flatMap((m) => m.blocks ?? []), [loadedMessages])
   return useAppSelector((state) => selectMessageBlocksByIds(state, topicBlockIds), shallowEqual)
 }
 

@@ -35,7 +35,7 @@ const { mocks } = vi.hoisted(() => ({
       updateManyMessages: vi.fn(),
       updateMessage: vi.fn()
     },
-    selectMessagesForTopic: vi.fn(() => []),
+    selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
     restoreGroupsByAnchors: vi.fn(),
@@ -92,7 +92,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: mocks.newMessagesActions,
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/topicSegment', () => ({

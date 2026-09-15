@@ -7,15 +7,16 @@
  * block-dependent filters (filterEmptyMessages,
  * filterErrorOnlyMessagesWithRelated), so a block-only Redux update
  * (updateOneBlock) can change the projection output without changing the topic
- * message array. This test proves useTopicReferencedBlocks — the dependency
+ * message array. This test proves useLoadedTopicReferencedBlocks — the dependency
  * added to that memo — invalidates exactly on active-topic referenced block
  * changes and stays silent for unrelated block commits.
  */
 
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
-import { useTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
 import { messageBlocksSlice, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
 import messagesReducer, { newMessagesActions } from '@renderer/store/newMessage'
+import residentRegistryReducer, { bumpGeneration, publishResidentComplete } from '@renderer/store/residentRegistry'
 import type { MainTextMessageBlock, Message } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { act, renderHook } from '@testing-library/react'
@@ -63,7 +64,8 @@ vi.mock('@renderer/utils/messageUtils/usage', () => ({ estimateMessageBlocksUsag
 // ---------------------------------------------------------------------------
 const reducer = combineReducers({
   messages: messagesReducer,
-  messageBlocks: messageBlocksSlice.reducer
+  messageBlocks: messageBlocksSlice.reducer,
+  residentRegistry: residentRegistryReducer
 })
 
 const createStore = () =>
@@ -96,24 +98,32 @@ const TOPIC_ID = 'topic-1'
 
 /** Seed topic-1 with two messages (b1, b2) plus one unrelated block b-other. */
 const seedStore = (store: ReturnType<typeof createStore>) => {
+  const messages = [makeMessage('m1', ['b1']), makeMessage('m2', ['b2'])]
+  store.dispatch(newMessagesActions.messagesReceived({ topicId: TOPIC_ID, messages }))
+  // Loaded-projection boundary: the topic must be a complete resident
+  // projection or the loaded hooks stay `undefined` (empty subscription).
+  store.dispatch(bumpGeneration(TOPIC_ID))
+  const generation = store.getState().residentRegistry.entries[TOPIC_ID].applicabilityGeneration
   store.dispatch(
-    newMessagesActions.messagesReceived({
+    publishResidentComplete({
       topicId: TOPIC_ID,
-      messages: [makeMessage('m1', ['b1']), makeMessage('m2', ['b2'])]
+      generation,
+      windowResponse: { messages, blocks: [] } as never,
+      segments: []
     })
   )
   store.dispatch(upsertManyBlocks([makeMainTextBlock('b1'), makeMainTextBlock('b2'), makeMainTextBlock('b-other')]))
 }
 
 const renderTopicBlocksHook = (store: ReturnType<typeof createStore>) =>
-  renderHook(() => useTopicReferencedBlocks(TOPIC_ID), {
+  renderHook(() => useLoadedTopicReferencedBlocks(TOPIC_ID), {
     wrapper: ({ children }: { children: ReactNode }) => <Provider store={store}>{children}</Provider>
   })
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-describe('useTopicReferencedBlocks (Phase 2B shared-projection freshness)', () => {
+describe('useLoadedTopicReferencedBlocks (Phase 2B shared-projection freshness)', () => {
   it('invalidates on a block-only update of an active-topic referenced block', () => {
     const store = createStore()
     seedStore(store)

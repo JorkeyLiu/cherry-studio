@@ -14,7 +14,8 @@ import {
   startProcessing,
   toggleEditMode as toggleEditModeAction
 } from '@renderer/store/editMode'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
+import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import type { Message } from '@renderer/types/newMessage'
 import i18n from 'i18next'
 import { useCallback, useEffect, useMemo } from 'react'
 
@@ -35,7 +36,11 @@ export function useCreateEditMode(
   const focusedIndex = useAppSelector((state) => state.editMode.focusedIndex)
   const clipboard = useAppSelector((state) => state.clipboard)
   const undoStack = useAppSelector((state) => state.undoStack)
-  const messages = useAppSelector((state) => selectMessagesForTopic(state, topicId))
+  // Bounded loaded projection: resident topic only. The `?? []` fallback is
+  // memoized so the edit-group memo keeps a stable identity while non-resident
+  // (`undefined` stays at the API boundary).
+  const loadedMessages = useAppSelector((state) => selectLoadedMessagesForTopic(state, topicId))
+  const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
 
   // 消息组
   const allGroups = useMessageGroups(messages)

@@ -4,7 +4,7 @@ import { dbService } from '@renderer/services/db'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
+import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
 import { addSegment } from '@renderer/store/topicSegment'
 import { pushUndoAction } from '@renderer/store/undoStack'
@@ -298,10 +298,10 @@ export async function pasteMessages(
   // Sort items by their original position to preserve document order
   const items = [...rawItems].sort((a, b) => a.positionIndex - b.positionIndex)
 
-  // Pre-batch ordered target message projection (captured BEFORE any DB or
+  // Pre-batch ordered target loaded projection (captured BEFORE any DB or
   // Redux mutation; used ONLY for the bounded local projection commit, never
   // as an authority index).
-  const targetMessages = selectMessagesForTopic(state, targetTopicId)
+  const targetMessages = (selectLoadedMessagesForTopic(state, targetTopicId) ?? []) as Message[]
 
   // Stable insertion intent for Main (authority). Never derived from loaded
   // positions: the supplied stable target ID travels unchanged even when it
@@ -572,7 +572,7 @@ export async function pasteMessages(
   // Calculate anchor: first non-pasted message after the locally visible paste
   // region when projected; otherwise after the loaded end. The stable redo
   // authority is `stableIntent` (never the numeric index).
-  const finalTargetMessages = selectMessagesForTopic(getState(), targetTopicId)
+  const finalTargetMessages = (selectLoadedMessagesForTopic(getState(), targetTopicId) ?? []) as Message[]
   const afterInsertIndex = localInsertIndex ?? finalTargetMessages.length
   const insertedIdSet = new Set(insertedMessageIds)
   const anchorMessageId = findAnchorAfterPosition(finalTargetMessages, afterInsertIndex, insertedIdSet)

@@ -12,7 +12,7 @@
  *     authority determination with no loaded-turn inference; an echo of the
  *     still-current persisted key issues a second `reanchor-default` call
  *     (current `contextCount` + current target anchor baseline). No
- *     `selectMessagesForTopic` / `buildContextTurns` authority decisions.
+ *     `selectLoadedMessagesForTopic` / `buildContextTurns` authority decisions.
  *     Only a non-stale returned anchor is persisted (key removed on empty);
  *     transport failures and stale/racing results preserve settings.
  *
@@ -26,7 +26,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest' // ── Mocks (h
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
-    selectMessagesForTopic: vi.fn(() => [] as Message[]),
+    selectLoadedMessagesForTopic: vi.fn(() => [] as Message[]),
     resolveContextClosure: vi.fn(),
     buildContextTurns: vi.fn((..._args: unknown[]) => [] as unknown[]),
     getStateAssistants: [] as any[]
@@ -134,7 +134,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/services/db/DbService', () => ({
@@ -284,15 +284,15 @@ const renderMenubar = (message: Message, assistant: Assistant, anchorGroupKey: s
 describe('MessageMenubar context-anchor button', () => {
   beforeEach(() => {
     updateAssistantSettingsMock.mockReset()
-    mocks.selectMessagesForTopic.mockReset()
-    mocks.selectMessagesForTopic.mockReturnValue([])
+    mocks.selectLoadedMessagesForTopic.mockReset()
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([])
     mocks.resolveContextClosure.mockReset()
     mocks.buildContextTurns.mockClear()
     mocks.getStateAssistants = []
   })
 
   const expectNoLoadedTurnAuthority = () => {
-    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(mocks.buildContextTurns).not.toHaveBeenCalled()
   }
 

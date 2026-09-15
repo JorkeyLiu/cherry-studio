@@ -57,7 +57,7 @@ vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: {
     updateMessage: mocks.updateMessageAction
   },
-  selectMessagesForTopic: vi.fn()
+  selectLoadedMessagesForTopic: vi.fn()
 }))
 
 vi.mock('@renderer/store/assistants', () => ({

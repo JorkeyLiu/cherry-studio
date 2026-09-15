@@ -25,7 +25,7 @@ const { mocks } = vi.hoisted(() => ({
   mocks: {
     fetchWholeTopicSnapshot: vi.fn(),
     listSegments: vi.fn(),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     setClipboard: vi.fn((p: unknown) => ({ type: 'clipboard/setClipboard', payload: p })),
     clearClipboard: vi.fn(() => ({ type: 'clipboard/clearClipboard' })),
     executeDeleteMessagesWithDependents: vi.fn()
@@ -61,7 +61,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),
     removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p }))
   },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -194,7 +194,7 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
       snapshot: snapshotMeta
     })
     mocks.listSegments.mockResolvedValue([segFullWire, segPartWire])
-    mocks.selectMessagesForTopic.mockImplementation((_state: unknown, topicId: string) => {
+    mocks.selectLoadedMessagesForTopic.mockImplementation((_state: unknown, topicId: string) => {
       const ids = storeState.messages.messageIdsByTopic[topicId] ?? []
       return ids.map((id) => storeState.messages.entities[id]).filter((m): m is Message => !!m)
     })
@@ -210,7 +210,7 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     expect(count).toBe(3)
     expect(mocks.fetchWholeTopicSnapshot).toHaveBeenCalledExactlyOnceWith('topic-1')
     // Never reads the loaded projection for group/block resolution.
-    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(dispatch).toHaveBeenCalledTimes(1)
     const action = dispatch.mock.calls[0][0]
     expect(action.type).toBe('clipboard/setClipboard')

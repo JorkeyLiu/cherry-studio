@@ -108,7 +108,7 @@ vi.mock('@renderer/store', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectMessagesForTopic: vi.fn(() => [])
+  selectLoadedMessagesForTopic: vi.fn(() => [])
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({

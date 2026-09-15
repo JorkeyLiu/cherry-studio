@@ -195,7 +195,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     setCurrentTopicId: mocks.setCurrentTopicId,
     insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p }))
   },
-  selectMessagesForTopic: () => []
+  selectLoadedMessagesForTopic: () => []
 }))
 
 // --- Helpers --------------------------------------------------------------

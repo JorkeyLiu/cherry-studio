@@ -23,11 +23,6 @@ export type ResolvedAssistant = {
   explicitModel?: Model
 }
 
-export type ResolvedAnswerGroup = {
-  targetMessage: Message
-  groupIds: string[]
-}
-
 /**
  * Single renderer-local event-time resolution seam for regenerate,
  * edit/resend, and answer-switch. All reads are synchronous against the
@@ -124,22 +119,6 @@ export function resolveAssistantSnapshotForMessage(message: Message, topicId: st
   })
 }
 
-export function resolveAnswerGroup(target: ActionTarget): ResolvedAnswerGroup | null {
-  const state = store.getState()
-  const msg = resolveMessageEntity(target)
-  if (!msg) return null
-  if (msg.role !== 'assistant' || !msg.askId) return null
-  const askId = msg.askId
-  const allIds = state.messages.messageIdsByTopic[target.topicId] || []
-  const groupIds = allIds
-    .map((id) => state.messages.entities[id])
-    .filter((m): m is Message => !!m && m.role === 'assistant' && m.askId === askId)
-    .map((m) => m.id)
-  if (!groupIds.includes(target.messageId)) return null
-  if (groupIds.length === 0) return null
-  return { targetMessage: msg, groupIds }
-}
-
 /**
  * High-level resolvers that combine the primitives above.
  * Return null on invalid/missing/cross-topic targets so callers preserve
@@ -179,7 +158,6 @@ export const messageActionController = {
   resolveEffectiveModel,
   resolveAssistantSnapshot,
   resolveAssistantSnapshotForMessage,
-  resolveAnswerGroup,
   resolveRegenerateForAssistant,
   resolveResendForUser,
   resolveEditTarget

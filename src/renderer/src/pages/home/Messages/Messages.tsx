@@ -7,7 +7,7 @@ import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
-import { useMessageOperations, useTopicLoading, useTopicMessages } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages, useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
 import useScrollPosition from '@renderer/hooks/useScrollPosition'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -363,7 +363,11 @@ const Messages = ({
   const { addTopic, updateAssistantSettings } = useAssistant(assistant.id)
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
-  const messages = useTopicMessages(topic.id)
+  // Bounded loaded projection: resident topic only. The `?? []` fallback is
+  // memoized so viewport effects keep a stable identity while non-resident
+  // (`undefined` stays at the API boundary).
+  const loadedMessages = useLoadedTopicMessages(topic.id)
+  const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
   const isTopicLoading = useTopicLoading(topic)
   const { displayCount, createTopicBranchByAnchor } = useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()

@@ -15,11 +15,12 @@ describe('MessageMenubar insert anchor — S6.2c-2', () => {
     expect(src).toContain('insertMessagesThunk(topic.id, message.id, assistant.id)')
     // Ensure no direct appendMessage for insert path
     expect(src).not.toMatch(/appendMessage\(topic\.id,\s*message/)
-    // Verify thunk source is anchor-based
+    // Verify thunk source is anchor-based with no legacy positional path
     const thunkSrc = fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')
+    expect(thunkSrc).not.toContain('insertMessagesThunkLegacy')
     const primary = thunkSrc.slice(
       thunkSrc.indexOf('export const insertMessagesThunk'),
-      thunkSrc.indexOf('export const insertMessagesThunkLegacy')
+      thunkSrc.indexOf('export const branchMessagesToTopicThunk')
     )
     expect(primary).toContain('insertMessagesAfterAnchor')
     expect(primary).not.toMatch(/saveMessageAndBlocksToDB\(topicId,\s*userMessage,\s*\[userBlock\],\s*insertIndex/)

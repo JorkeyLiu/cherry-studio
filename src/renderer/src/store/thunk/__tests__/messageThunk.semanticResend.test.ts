@@ -8,7 +8,7 @@ const { mocks } = vi.hoisted(() => ({
     regenerateAssistantMessage: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     transformMessagesAndFetch: vi.fn(),
-    selectMessagesForTopic: vi.fn()
+    selectLoadedMessagesForTopic: vi.fn()
   }
 }))
 
@@ -70,7 +70,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicLoading: (p: unknown) => ({ type: 'loading', p }),
     setTopicFulfilled: (p: unknown) => ({ type: 'fulfilled', p })
   },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 vi.mock('@renderer/store/messageBlock', () => ({
   removeManyBlocks: (p: unknown) => ({ type: 'removeBlocks', p }),
@@ -89,7 +89,7 @@ describe('semantic resend/regenerate renderer', () => {
       assistants: { assistants: [] }
     }
     mocks.transformMessagesAndFetch.mockResolvedValue(undefined)
-    mocks.selectMessagesForTopic.mockReturnValue([])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([])
   })
 
   it('resend uses stable IDs only, converges loaded intersection without injecting window-outside members', async () => {

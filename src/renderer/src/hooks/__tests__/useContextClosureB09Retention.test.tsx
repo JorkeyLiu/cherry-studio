@@ -18,7 +18,7 @@ const {
   dispatchMock,
   getStateMock,
   upsertManyBlocksMock,
-  selectMessagesForTopicMock,
+  selectLoadedMessagesForTopicMock,
   captureDeletionGenerationMock,
   isDeletionStaleMock,
   topicMessagesMap,
@@ -31,7 +31,9 @@ const {
     dispatchMock: vi.fn(),
     getStateMock: vi.fn(),
     upsertManyBlocksMock: vi.fn((blocks: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: blocks })),
-    selectMessagesForTopicMock: vi.fn((_state: unknown, topicId: string) => messagesForTopicMap.get(topicId) ?? []),
+    selectLoadedMessagesForTopicMock: vi.fn(
+      (_state: unknown, topicId: string) => messagesForTopicMap.get(topicId) ?? []
+    ),
     captureDeletionGenerationMock: vi.fn(() => 0),
     isDeletionStaleMock: vi.fn(() => false),
     topicMessagesMap,
@@ -42,7 +44,7 @@ const {
 // ── Mocks (must be before hook import) ─────────────────────────────────────
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({
-  useTopicMessages: (topicId: string) => topicMessagesMap.get(topicId) ?? []
+  useLoadedTopicMessages: (topicId: string) => topicMessagesMap.get(topicId) ?? []
 }))
 
 vi.mock('@renderer/services/db', () => ({
@@ -81,7 +83,7 @@ vi.mock('@renderer/store/newMessage', async () => {
   const actual: any = await vi.importActual('@renderer/store/newMessage')
   return {
     ...actual,
-    selectMessagesForTopic: selectMessagesForTopicMock
+    selectLoadedMessagesForTopic: selectLoadedMessagesForTopicMock
   }
 })
 
@@ -165,7 +167,7 @@ describe('B-09 hook-level retention (useContextClosure)', () => {
     fetchClosureMock.mockReset()
     dispatchMock.mockReset()
     upsertManyBlocksMock.mockClear()
-    selectMessagesForTopicMock.mockClear()
+    selectLoadedMessagesForTopicMock.mockClear()
   })
 
   it('activation and switch prune inactive closures — only active cache remains', async () => {

@@ -17,13 +17,13 @@ import * as contextTurnService from '../contextTurnService'
 const { mocks: anchorMocks } = vi.hoisted(() => ({
   mocks: {
     updateAssistantSettings: vi.fn(),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     getAssistantSettings: vi.fn(),
     resolveContextClosure: vi.fn()
   }
 }))
 const updateAssistantSettings = anchorMocks.updateAssistantSettings
-const selectMessagesForTopic = anchorMocks.selectMessagesForTopic
+const selectLoadedMessagesForTopic = anchorMocks.selectLoadedMessagesForTopic
 const getAssistantSettings = anchorMocks.getAssistantSettings
 const resolveContextClosureMock = anchorMocks.resolveContextClosure
 const buildContextTurnsSpy = vi.spyOn(contextTurnService, 'buildContextTurns')
@@ -36,7 +36,7 @@ vi.mock('@renderer/store/assistants', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   default: (state: unknown = {}) => state,
-  selectMessagesForTopic: (...args: unknown[]) => anchorMocks.selectMessagesForTopic(...args),
+  selectLoadedMessagesForTopic: (...args: unknown[]) => anchorMocks.selectLoadedMessagesForTopic(...args),
   newMessagesActions: {
     messagesReceived: vi.fn(),
     setTopicLoading: vi.fn(),
@@ -83,7 +83,7 @@ vi.mock('@renderer/services/db/SqliteMessageDataSource', async () => {
 
 beforeEach(() => {
   updateAssistantSettings.mockReset()
-  selectMessagesForTopic.mockReset()
+  selectLoadedMessagesForTopic.mockReset()
   getAssistantSettings.mockReset()
   buildContextTurnsSpy.mockClear()
   resolveContextClosureMock.mockReset()
@@ -373,7 +373,7 @@ describe('ensureTopicAnchorEstablished', () => {
       settings: { contextWindowAnchor: { [topicId]: g('u2') } }
     })
     expect(dispatch).toHaveBeenCalledTimes(1)
-    expect(selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
@@ -390,7 +390,7 @@ describe('ensureTopicAnchorEstablished', () => {
     })
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
-    expect(selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
@@ -403,7 +403,7 @@ describe('ensureTopicAnchorEstablished', () => {
       assistantId: 'asst-1',
       settings: { contextWindowAnchor: { [topicId]: g('u1') } }
     })
-    expect(selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
   })
 
@@ -510,7 +510,7 @@ describe('ensureTopicAnchorEstablished', () => {
       contextCount: 2,
       currentAnchorGroupKey: 'msg-00000'
     })
-    expect(selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()
     expect(updateAssistantSettings).not.toHaveBeenCalled()
   })

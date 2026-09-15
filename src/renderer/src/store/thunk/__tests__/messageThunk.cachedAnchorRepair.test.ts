@@ -101,7 +101,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicFulfilled: mocks.setTopicFulfilled,
     setCurrentTopicId: mocks.setCurrentTopicId
   },
-  selectMessagesForTopic: (state: unknown, topicId: string) =>
+  selectLoadedMessagesForTopic: (state: unknown, topicId: string) =>
     ((state as StoreState).messages.messageIdsByTopic[topicId] ?? [])
       .map((id: string) => (state as StoreState).messages.entities[id])
       .filter((m: Message | undefined): m is Message => !!m)

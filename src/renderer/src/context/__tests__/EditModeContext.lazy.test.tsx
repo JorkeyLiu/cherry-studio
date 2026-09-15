@@ -38,7 +38,12 @@ function makeStore(enabled: boolean, _extra?: any) {
         state: any = { entities: {}, messageIdsByTopic: {}, loadingByTopic: {}, displayCount: 20, currentTopicId: 't1' }
       ) => state,
       messageBlocks: (state: any = { entities: {} }) => state,
-      topicSegments: (state: any = { segments: { entities: {}, ids: [] }, segmentsByTopic: {} }) => state
+      topicSegments: (state: any = { segments: { entities: {}, ids: [] }, segmentsByTopic: {} }) => state,
+      residentRegistry: (
+        state: any = {
+          entries: { t1: { chatData: true, segments: true, residentTopic: true, applicabilityGeneration: 1 } }
+        }
+      ) => state
     } as any,
     preloadedState: {
       editMode: {
@@ -67,7 +72,10 @@ function makeStore(enabled: boolean, _extra?: any) {
         currentTopicId: 't1'
       },
       messageBlocks: { entities: {} },
-      topicSegments: { segments: { entities: {}, ids: [] }, segmentsByTopic: {} }
+      topicSegments: { segments: { entities: {}, ids: [] }, segmentsByTopic: {} },
+      residentRegistry: {
+        entries: { t1: { chatData: true, segments: true, residentTopic: true, applicabilityGeneration: 1 } }
+      }
     } as any
   })
 }

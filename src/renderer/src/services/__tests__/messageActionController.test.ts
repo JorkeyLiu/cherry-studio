@@ -33,7 +33,6 @@ vi.mock('@renderer/store/thunk/messageThunk', () => ({
 
 import {
   findAssistantById,
-  resolveAnswerGroup,
   resolveAssistantSnapshot,
   resolveAssistantSnapshotForMessage,
   resolveEditTarget,
@@ -93,7 +92,6 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     expect(resolveMessageEntity({ topicId: 'topic-2', messageId: 'msg-1' })).toBeNull()
     expect(resolveRegenerateForAssistant({ topicId: 'topic-2', messageId: 'msg-1' })).toBeNull()
     expect(resolveResendForUser({ topicId: 'topic-2', messageId: 'msg-1' })).toBeNull()
-    expect(resolveAnswerGroup({ topicId: 'topic-2', messageId: 'msg-1' })).toBeNull()
   })
 
   it('invalid/missing targets preserve rejection (null, no dispatch)', () => {
@@ -104,7 +102,6 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     })
     expect(resolveMessageEntity({ topicId: 'topic-1', messageId: 'missing' })).toBeNull()
     expect(resolveRegenerateForAssistant({ topicId: 'topic-1', messageId: 'missing' })).toBeNull()
-    expect(resolveAnswerGroup({ topicId: 'topic-1', messageId: 'missing' })).toBeNull()
   })
 
   it('ambient Assistant change before click is observed (event-time fresh)', () => {
@@ -166,52 +163,6 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     expect(resolved!.fresh.settings?.contextCount).toBe(5)
   })
 
-  it('answer-switch includes complete latest group after projection update', () => {
-    const askId = 'user-1'
-    const msg1 = makeMessage({ id: 'a-1', topicId: 'topic-1', role: 'assistant', askId, assistantId: 'asst-1' })
-    const msg2 = makeMessage({ id: 'a-2', topicId: 'topic-1', role: 'assistant', askId, assistantId: 'asst-1' })
-    const msg3 = makeMessage({ id: 'a-3', topicId: 'topic-1', role: 'assistant', askId, assistantId: 'asst-1' })
-    // Projection has expanded to include a-3
-    mocks.storeGetState.mockReturnValue({
-      messages: {
-        entities: { 'a-1': msg1, 'a-2': msg2, 'a-3': msg3 },
-        messageIdsByTopic: { 'topic-1': ['user-1', 'a-1', 'a-2', 'a-3'] }
-      },
-      assistants: { assistants: [makeAssistant('asst-1', makeModel('m1'))] },
-      messageBlocks: { entities: {} }
-    })
-    const resolved = resolveAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
-    expect(resolved).not.toBeNull()
-    expect(resolved!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
-  })
-
-  it('answer-switch does not use stale captured array — derives from store', () => {
-    const askId = 'ask-1'
-    const msg1 = makeMessage({ id: 'a-1', topicId: 'topic-1', role: 'assistant', askId })
-    const msg2 = makeMessage({ id: 'a-2', topicId: 'topic-1', role: 'assistant', askId })
-    const msg3 = makeMessage({ id: 'a-3', topicId: 'topic-1', role: 'assistant', askId })
-    mocks.storeGetState.mockReturnValueOnce({
-      messages: {
-        entities: { 'a-1': msg1, 'a-2': msg2 },
-        messageIdsByTopic: { 'topic-1': ['a-1', 'a-2'] }
-      },
-      assistants: { assistants: [] },
-      messageBlocks: { entities: {} }
-    })
-    mocks.storeGetState.mockReturnValue({
-      messages: {
-        entities: { 'a-1': msg1, 'a-2': msg2, 'a-3': msg3 },
-        messageIdsByTopic: { 'topic-1': ['a-1', 'a-2', 'a-3'] }
-      },
-      assistants: { assistants: [] },
-      messageBlocks: { entities: {} }
-    })
-    const first = resolveAnswerGroup({ topicId: 'topic-1', messageId: 'a-1' })
-    expect(first!.groupIds).toEqual(['a-1', 'a-2'])
-    const second = resolveAnswerGroup({ topicId: 'topic-1', messageId: 'a-1' })
-    expect(second!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
-  })
-
   it('resend for user resolves latest entity and fresh assistant', () => {
     const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'asst-1' })
     const fresh = makeAssistant('asst-1', makeModel('fresh'), { contextCount: 99 })
@@ -244,17 +195,6 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     })
     expect(resolveRegenerateForAssistant({ topicId: 'topic-1', messageId: 'msg-1' })).not.toBeNull()
     expect(resolveMessageEntity({ topicId: 'topic-1', messageId: 'msg-1' })).not.toBeNull()
-  })
-
-  it('rejects cross-topic answer-switch even if askId matches', () => {
-    const askId = 'ask-1'
-    const msg = makeMessage({ id: 'a-1', topicId: 'topic-1', role: 'assistant', askId })
-    mocks.storeGetState.mockReturnValue({
-      messages: { entities: { 'a-1': msg }, messageIdsByTopic: { 'topic-1': ['a-1'] } },
-      assistants: { assistants: [] },
-      messageBlocks: { entities: {} }
-    })
-    expect(resolveAnswerGroup({ topicId: 'topic-2', messageId: 'a-1' })).toBeNull()
   })
 
   it('override predicate aligns with thunk: modelId falsy => no explicit override even if model present', () => {
@@ -297,27 +237,6 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     // Legacy partial: modelId without model keeps fresh (documents compatibility: no crash, no any)
     expect(resolved!.snapshot.model?.id).toBe('fresh')
     expect(resolved!.explicitModel).toBeUndefined()
-  })
-
-  it('folded navigation controller path uses explicit IDs only (no stale group array)', () => {
-    const askId = 'ask-1'
-    const msg = makeMessage({ id: 'a-2', topicId: 'topic-1', role: 'assistant', askId })
-    const fresh = makeAssistant('asst-1', makeModel('m1'))
-    // Store has expanded group; controller derives from store, not captured array
-    mocks.storeGetState.mockReturnValue({
-      messages: {
-        entities: {
-          'a-1': makeMessage({ id: 'a-1', topicId: 'topic-1', role: 'assistant', askId }),
-          'a-2': msg,
-          'a-3': makeMessage({ id: 'a-3', topicId: 'topic-1', role: 'assistant', askId })
-        },
-        messageIdsByTopic: { 'topic-1': ['a-1', 'a-2', 'a-3'] }
-      },
-      assistants: { assistants: [fresh] },
-      messageBlocks: { entities: {} }
-    })
-    const group = resolveAnswerGroup({ topicId: 'topic-1', messageId: 'a-2' })
-    expect(group!.groupIds).toEqual(['a-1', 'a-2', 'a-3'])
   })
 
   it('unified lookup: empty array falls back to defaultAssistant id (user resend still resolves)', () => {

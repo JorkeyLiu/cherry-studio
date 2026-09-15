@@ -9,7 +9,7 @@ import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
 import FileManager from '@renderer/services/FileManager'
 import PasteService from '@renderer/services/PasteService'
 import { useAppSelector } from '@renderer/store'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
+import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import type { FileMetadata } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -97,8 +97,11 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   const { t } = useTranslation()
   const textareaRef = useRef<TextAreaRef>(null)
   const isUserMessage = message.role === 'user'
-
-  const topicMessages = useAppSelector((state) => selectMessagesForTopic(state, topicId))
+  // Bounded loaded projection for related-message lookup (fail-open local).
+  // The `?? []` fallback is memoized so capability memos keep a stable
+  // identity while non-resident (`undefined` stays at the API boundary).
+  const loadedTopicMessages = useAppSelector((state) => selectLoadedMessagesForTopic(state, topicId))
+  const topicMessages = useMemo(() => (loadedTopicMessages ?? []) as Message[], [loadedTopicMessages])
 
   const noopQuickPanel = useMemo<ToolQuickPanelApi>(
     () => ({

@@ -53,7 +53,7 @@ const { mocks } = vi.hoisted(() => ({
     deleteMessagesFromDB: vi.fn(),
     executeDeleteMessagesWithDependents: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     messagesReceived: vi.fn((p: { topicId: string; messages: Message[] }) => ({
       type: 'newMessages/messagesReceived',
       payload: p
@@ -106,7 +106,7 @@ vi.mock('@renderer/store/clipboard', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: { messagesReceived: mocks.messagesReceived, removeMessages: mocks.removeMessages },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -251,7 +251,7 @@ function baseStoreState(): StoreState {
 }
 
 function mockTargetMessages(state: StoreState): void {
-  mocks.selectMessagesForTopic.mockImplementation((_state: unknown, topicId: string) => {
+  mocks.selectLoadedMessagesForTopic.mockImplementation((_state: unknown, topicId: string) => {
     const ids = state.messages.messageIdsByTopic[topicId] ?? []
     return ids.map((id) => state.messages.entities[id]).filter((m): m is Message => !!m)
   })

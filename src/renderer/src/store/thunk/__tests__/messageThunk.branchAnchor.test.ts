@@ -35,7 +35,7 @@ vi.mock('@renderer/services/db', () => ({
 vi.mock('@renderer/store', () => ({ default: { dispatch: vi.fn(), getState: vi.fn() } }))
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: { messagesReceived: mocks.messagesReceived },
-  selectMessagesForTopic: vi.fn()
+  selectLoadedMessagesForTopic: vi.fn()
 }))
 vi.mock('@renderer/store/messageBlock', () => ({
   upsertManyBlocks: mocks.upsertManyBlocks

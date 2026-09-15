@@ -17,7 +17,7 @@ const { mocks } = vi.hoisted(() => ({
     regenerateAssistantMessage: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'removeManyBlocks', p })),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     dispatch: vi.fn()
   }
 }))
@@ -128,7 +128,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicLoading: vi.fn((p: unknown) => ({ type: 'setTopicLoading', p })),
     setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'setTopicFulfilled', p }))
   },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -164,7 +164,7 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'msg-1']
     }
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.resendUserMessages.mockResolvedValue({
       ...emptyCleanup,
       topicId: 'topic-1',
@@ -205,7 +205,7 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
       'old-block-1': { id: 'old-block-1' },
       'old-block-2': { id: 'old-block-2' }
     }
-    mocks.selectMessagesForTopic.mockReturnValue([asstMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([asstMsg])
     mocks.resendUserMessages.mockResolvedValue({
       ...emptyCleanup,
       topicId: 'topic-1',
@@ -255,7 +255,7 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'asst-1']
     }
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.regenerateAssistantMessage.mockResolvedValue({
       ...emptyCleanup,
       topicId: 'topic-1',
@@ -308,7 +308,7 @@ describe('resendUserMessageWithEditThunk — failure propagation (LOCK-005)', ()
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'msg-1']
     }
-    mocks.selectMessagesForTopic.mockReturnValue([userMsg, asstMsg])
+    mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.resendUserMessages.mockRejectedValue(new Error('DB write failed'))
 
     const { resendUserMessageWithEditThunk } = await import('../messageThunk')

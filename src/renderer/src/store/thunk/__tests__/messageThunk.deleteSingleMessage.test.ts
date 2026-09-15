@@ -24,7 +24,7 @@ const { mocks } = vi.hoisted(() => ({
     transferAnchorsWithAuthorityGroupKeys: vi.fn(),
     transferAnchorsAfterDeletion: vi.fn(),
     buildGroupList: vi.fn(() => []),
-    selectMessagesForTopic: vi.fn(),
+    selectLoadedMessagesForTopic: vi.fn(),
     updateTopicUpdatedAt: vi.fn((p: unknown) => ({ type: 'updateTopicUpdatedAt', p }))
   }
 }))
@@ -174,7 +174,7 @@ vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: {
     removeMessages: mocks.removeMessages
   },
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({
@@ -217,7 +217,7 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
       await deleteSingleMessageThunk('topic-1', 'msg-1')(dispatch, () => storeState as any)
 
       expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'])
-      expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+      expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
       expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(semanticResponse)
       expect(mocks.replaceSegmentsForTopic).toHaveBeenCalledTimes(1)
       expect(mocks.transferAnchorsWithAuthorityGroupKeys).toHaveBeenCalledWith(
@@ -301,7 +301,7 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
 
     // Roots pass through untouched — no loaded expansion, no cascade derivation.
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'other-root'])
-    expect(mocks.selectMessagesForTopic).not.toHaveBeenCalled()
+    expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(mocks.buildGroupList).not.toHaveBeenCalled()
     // Authority convergence.
     expect(mocks.removeMessages).toHaveBeenCalledWith({

@@ -1,4 +1,4 @@
-import { useTopicMessages } from '@renderer/hooks/useMessageOperations'
+import { useLoadedTopicMessages } from '@renderer/hooks/useMessageOperations'
 import {
   bumpAndInvalidate,
   computeClosureFingerprint,
@@ -13,7 +13,7 @@ import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store, { useAppDispatch } from '@renderer/store'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
-import { selectMessagesForTopic } from '@renderer/store/newMessage'
+import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import type { FetchContextClosureRequest, FetchContextClosureResponse } from '@shared/chatDb'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
@@ -34,14 +34,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
  */
 export function useContextClosure(topicId: string, anchorGroupKey: string | null) {
   const dispatch = useAppDispatch()
-  const topicMessages = useTopicMessages(topicId)
+  // Explicit provisional loaded candidate for closure freshness only; context
+  // closure authority stays with the persisted anchor + Main closure response.
+  // The `?? []` fallback is memoized so downstream memo/effect dependencies
+  // keep a stable identity while the topic is non-resident.
+  const provisionalLoadedMessages = useLoadedTopicMessages(topicId)
+  const topicMessages = useMemo(() => (provisionalLoadedMessages ?? []) as any, [provisionalLoadedMessages])
   const [closure, setClosure] = useState<FetchContextClosureResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const seqRef = useRef(0)
   const topicRef = useRef(topicId)
   const anchorRef = useRef(anchorGroupKey)
   // LOCK-R06-006: fingerprint for visible mutations; generation covers outside-viewport
-  const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages as any), [topicMessages])
+  const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages), [topicMessages])
 
   // Keep refs updated for stale checks inside async
   useEffect(() => {
@@ -123,7 +128,9 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         if (curGenNow !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
-        const curFpNow = computeClosureFingerprint(selectMessagesForTopic(store.getState(), topicId) as any)
+        const curFpNow = computeClosureFingerprint(
+          (selectLoadedMessagesForTopic(store.getState(), topicId) ?? []) as any
+        )
         if (curFpNow !== fingerprintAtFetch && curFpNow !== 'empty' && fingerprintAtFetch !== 'empty') {
           return
         }

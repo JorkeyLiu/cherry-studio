@@ -18,7 +18,7 @@ const { mocks } = vi.hoisted(() => ({
       removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p })),
       insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p }))
     },
-    selectMessagesForTopic: vi.fn(() => []),
+    selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
     prepareRedo: vi.fn(() => ({ type: 'prepareRedo' })),
     restoreSegmentsAfterUndo: vi.fn().mockResolvedValue(undefined),
@@ -69,7 +69,7 @@ vi.mock('@renderer/store/messageBlock', () => ({
 
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: mocks.newMessagesActions,
-  selectMessagesForTopic: mocks.selectMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
 vi.mock('@renderer/store/topicSegment', () => ({
@@ -105,7 +105,7 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       messageBlocks: { entities: {} }
     } as unknown as RootState
     mocks.insertMessageGroups.mockResolvedValue(emptyCleanup)
-    mocks.selectMessagesForTopic.mockImplementation((() => [{ id: 'survivor' } as Message]) as any)
+    mocks.selectLoadedMessagesForTopic.mockImplementation((() => [{ id: 'survivor' } as Message]) as any)
   })
 
   it('undoDelete sends ONE atomic stable call with before/tail intents and no per-message saves', async () => {
@@ -273,7 +273,7 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       targetSegmentSnapshots: []
     }
     storeState.undoStack = { undoStack: [], redoStack: [action] }
-    mocks.selectMessagesForTopic.mockImplementation((() => [{ id: 'orig-target' } as Message]) as any)
+    mocks.selectLoadedMessagesForTopic.mockImplementation((() => [{ id: 'orig-target' } as Message]) as any)
     const { executeRedo } = await import('../UndoService')
     await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
@@ -305,7 +305,7 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       targetSegmentSnapshots: []
     }
     storeState.undoStack = { undoStack: [], redoStack: [action] }
-    mocks.selectMessagesForTopic.mockImplementation((() => loaded) as any)
+    mocks.selectLoadedMessagesForTopic.mockImplementation((() => loaded) as any)
     const { executeRedo } = await import('../UndoService')
     await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
@@ -341,7 +341,7 @@ describe('UndoService stable restore (insert-message-groups)', () => {
       targetInsertIntent: { kind: 'topic-tail' }
     }
     storeState.undoStack = { undoStack: [], redoStack: [action] }
-    mocks.selectMessagesForTopic.mockImplementation((() => [] as Message[]) as any)
+    mocks.selectLoadedMessagesForTopic.mockImplementation((() => [] as Message[]) as any)
     const { executeRedo } = await import('../UndoService')
     await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 

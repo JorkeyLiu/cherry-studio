@@ -3,7 +3,7 @@ import { dbService } from '@renderer/services/db'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions, selectMessagesForTopic } from '@renderer/store/newMessage'
+import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
 import {
   deleteSegmentsBySnapshots,
@@ -136,7 +136,7 @@ async function restoreGroupsByStableAnchors(
 
   // Bounded local projection: evolve a loaded copy so later groups account
   // for earlier visible inserts without assuming whole-topic order.
-  const evolving = [...selectMessagesForTopic(getState(), topicId)]
+  const evolving = [...((selectLoadedMessagesForTopic(getState(), topicId) ?? []) as Message[])]
   for (const anchor of groupAnchors) {
     // Fail-closed for legacy actions lacking the field: empty set injects nothing.
     const allowed = new Set(anchor.loadedMessageIds ?? [])
@@ -502,7 +502,7 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   }
 
   // Bounded local projection only when the stable target is locally visible.
-  const loaded = selectMessagesForTopic(getState(), targetTopicId)
+  const loaded = (selectLoadedMessagesForTopic(getState(), targetTopicId) ?? []) as Message[]
   let localIdx: number | null = null
   if (intent.kind === 'topic-tail') {
     localIdx = loaded.length
@@ -609,7 +609,7 @@ async function redoCutPaste(
       throw error
     }
 
-    const loaded = selectMessagesForTopic(getState(), targetTopicId)
+    const loaded = (selectLoadedMessagesForTopic(getState(), targetTopicId) ?? []) as Message[]
     let localIdx: number | null = null
     if (intent.kind === 'topic-tail') {
       localIdx = loaded.length
