@@ -329,4 +329,232 @@ test.describe('search-hit around window (R-04) — integrated UI', () => {
     expect(probe.value.window.requested.after).toBe(19)
     expect(probe.value.messages.some((m: any) => m.id === hitId)).toBe(true)
   })
+
+  test('segment authority catalog order drives drawer and early-segment navigate loads window-outside first', async ({
+    mainWindow
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'SEG-CATALOG INTEGRATED UI: deterministic 50-msg seed + displayCount 20; reverse-order real upsertSegment (late before early) proves Main conversation-position sortOrder (0/1) not creation order; cold activation joint-publishes catalog via production loadTopicMessagesThunk; real Inputbar Layers trigger + Ant Popover asserts early→late with authority counts; real early click → NAVIGATE_TO_MESSAGE around loads window-outside first into Redux + #messages DOM; catalog invariant before/after; supplemental fetchMessagesWindow around oracle only.'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `segcat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    console.log(`[E2E] seg-catalog seeding topic ${topicId}`)
+
+    await seedWindowTopic(page, liveAssistantId, topicId)
+
+    const earlyIds = [5, 6, 7].map((i) => `${topicId}-msg-${pad(i, 5)}`)
+    const lateIds = [35, 36].map((i) => `${topicId}-msg-${pad(i, 5)}`)
+    const earlyFirst = earlyIds[0]
+    const lateFirst = lateIds[0]
+    const segEarlyId = `${topicId}-seg-early`
+    const segLateId = `${topicId}-seg-late`
+    const earlyName = 'Seg Authority Early'
+    const lateName = 'Seg Authority Late'
+
+    // Real Main writes in reverse creation order: late first, early second.
+    // Created before cold activation so the catalog reaches Redux only via
+    // the production joint publication (loadTopicMessagesThunk staged
+    // listSegments); no test-only segment dispatch.
+    const created: any = await page.evaluate(
+      async ({ topicId, segEarlyId, segLateId, earlyName, lateName, earlyIds, lateIds }: Record<string, any>) => {
+        try {
+          const api: any = (window as any).api.chatDb
+          const late = await api.upsertSegment({ segmentId: segLateId, topicId, name: lateName, messageIds: lateIds })
+          if (!late?.ok) return { ok: false, err: `late upsert ${JSON.stringify(late)}` }
+          const early = await api.upsertSegment({
+            segmentId: segEarlyId,
+            topicId,
+            name: earlyName,
+            messageIds: earlyIds
+          })
+          if (!early?.ok) return { ok: false, err: `early upsert ${JSON.stringify(early)}` }
+          const listed = await api.listSegments({ topicId })
+          if (!listed?.ok) return { ok: false, err: `list ${JSON.stringify(listed)}` }
+          return { ok: true, early: early.value, late: late.value, listed: listed.value }
+        } catch (e) {
+          return { ok: false, err: e instanceof Error ? e.message : String(e) }
+        }
+      },
+      { topicId, segEarlyId, segLateId, earlyName, lateName, earlyIds, lateIds }
+    )
+    expect(created.ok, `segment upserts failed: ${created.err}`).toBe(true)
+    // Mutation snapshots vs final catalog: each upsert response is the
+    // then-legit snapshot at its own mutation time, not the final catalog.
+    // Late is created first into an empty catalog so its snapshot is 0; early
+    // is inserted before it so its own snapshot is also 0. The stale late
+    // snapshot (0) must never be written back — only the final listSegments
+    // carries the shifted authority (early:0/late:1).
+    expect(created.late.sortOrder).toBe(0)
+    expect(created.early.sortOrder).toBe(0)
+    expect(created.early.firstMessageId).toBe(earlyFirst)
+    expect(created.early.lastMessageId).toBe(earlyIds[earlyIds.length - 1])
+    expect(created.early.messageCount).toBe(earlyIds.length)
+    expect(created.early.messageIds).toEqual(earlyIds)
+    expect(created.late.firstMessageId).toBe(lateFirst)
+    expect(created.late.messageCount).toBe(lateIds.length)
+    expect(created.late.messageIds).toEqual(lateIds)
+    // Final authority catalog: conversation-position order, not creation order.
+    expect((created.listed as any[]).map((s: any) => s.id)).toEqual([segEarlyId, segLateId])
+    expect((created.listed as any[]).find((s: any) => s.id === segEarlyId).sortOrder).toBe(0)
+    expect((created.listed as any[]).find((s: any) => s.id === segLateId).sortOrder).toBe(1)
+    console.log('[E2E] seg-catalog Main authority order early→late confirmed')
+
+    // Cold activation publishes messages + catalog jointly via production path.
+    await activateTopicAndWaitForBootstrap(page, topicId)
+
+    const pre = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+      const domCount = document.querySelectorAll('#messages [data-message-id]').length
+      return { ids, domCount }
+    }, topicId)
+    expect(pre.ids.length).toBe(DISPLAY_LIMIT)
+    expect(pre.domCount).toBe(DISPLAY_LIMIT)
+    const expectedTail: string[] = []
+    for (let i = SYNTHETIC_TOTAL - DISPLAY_LIMIT; i < SYNTHETIC_TOTAL; i++)
+      expectedTail.push(`${topicId}-msg-${pad(i, 5)}`)
+    expect(pre.ids).toEqual(expectedTail)
+    expect(pre.ids).not.toContain(earlyFirst)
+    expect(pre.ids).toContain(lateFirst)
+
+    // Wait for the real joint catalog publication (no test-only segment dispatch).
+    await page.waitForFunction(
+      ({ topicId, segEarlyId, segLateId }: { topicId: string; segEarlyId: string; segLateId: string }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.topicSegments?.segmentsByTopic?.[topicId] ?? []
+        return ids.length === 2 && ids[0] === segEarlyId && ids[1] === segLateId
+      },
+      { topicId, segEarlyId, segLateId },
+      { timeout: 30000 }
+    )
+    const reduxSegs: any = await page.evaluate(
+      ({ topicId, segEarlyId, segLateId }: { topicId: string; segEarlyId: string; segLateId: string }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.topicSegments?.segmentsByTopic?.[topicId] ?? []
+        const e: Record<string, any> = s.topicSegments?.segments?.entities ?? {}
+        const pick = (id: string) => ({
+          id,
+          name: e[id]?.name ?? null,
+          sortOrder: e[id]?.sortOrder ?? null,
+          firstMessageId: e[id]?.firstMessageId ?? null,
+          lastMessageId: e[id]?.lastMessageId ?? null,
+          messageCount: e[id]?.messageCount ?? null,
+          messageIds: e[id]?.messageIds ?? null
+        })
+        return { ids, early: pick(segEarlyId), late: pick(segLateId) }
+      },
+      { topicId, segEarlyId, segLateId }
+    )
+    expect(reduxSegs.ids).toEqual([segEarlyId, segLateId])
+    expect(reduxSegs.early).toMatchObject({
+      name: earlyName,
+      sortOrder: 0,
+      firstMessageId: earlyFirst,
+      messageCount: 3
+    })
+    expect(reduxSegs.early.messageIds).toEqual(earlyIds)
+    expect(reduxSegs.late).toMatchObject({ name: lateName, sortOrder: 1, firstMessageId: lateFirst, messageCount: 2 })
+    expect(reduxSegs.late.messageIds).toEqual(lateIds)
+
+    const catalogBefore: string = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.topicSegments?.segmentsByTopic?.[topicId] ?? []
+      const e: Record<string, any> = s.topicSegments?.segments?.entities ?? {}
+      return JSON.stringify(ids.map((id) => ({ id, ...e[id] })))
+    }, topicId)
+
+    // Real drawer trigger: existing Inputbar overlay Layers icon (no testid), Ant Popover portal.
+    const trigger = page.locator('#inputbar svg.lucide-layers, .inputbar-container svg.lucide-layers').first()
+    await trigger.waitFor({ state: 'attached', timeout: 15000 })
+    await trigger.waitFor({ state: 'visible', timeout: 15000 })
+    await trigger.hover()
+    await trigger.click()
+    const popover = page.locator('.ant-popover').filter({ hasText: earlyName })
+    await expect(popover, 'segment popover must show early name').toBeVisible({ timeout: 15000 })
+    await expect(popover, 'segment popover must show late name').toContainText(lateName)
+    const orderOk = await page.evaluate(
+      ({ earlyName, lateName }: { earlyName: string; lateName: string }) => {
+        const pop = document.querySelector('.ant-popover')
+        if (!pop) return false
+        const text = pop.textContent ?? ''
+        const ei = text.indexOf(earlyName)
+        const li = text.indexOf(lateName)
+        if (ei < 0 || li < 0 || !(ei < li)) return false
+        // Authority counts rendered per row even though early first is window-outside.
+        const spans = Array.from(pop.querySelectorAll('span'))
+        const rowText = (name: string): string | null => {
+          const el = spans.find((s) => s.textContent === name)
+          return el?.parentElement?.textContent ?? null
+        }
+        const eRow = rowText(earlyName)
+        const lRow = rowText(lateName)
+        if (!eRow || !lRow) return false
+        return eRow.includes('3') && lRow.includes('2')
+      },
+      { earlyName, lateName }
+    )
+    expect(orderOk, 'popover UI order must be early→late with authority counts').toBe(true)
+    console.log('[E2E] seg-catalog drawer order early→late confirmed')
+
+    // Real early click → unified NAVIGATE_TO_MESSAGE around read.
+    await page.locator('.ant-popover').getByText(earlyName, { exact: true }).click()
+    await page.waitForFunction(
+      ({ topicId, earlyFirst }: { topicId: string; earlyFirst: string }) => {
+        const s = (window as any).store.getState()
+        const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
+        return ids.includes(earlyFirst)
+      },
+      { topicId, earlyFirst },
+      { timeout: 30000 }
+    )
+    const targetInMessages = page.locator(`#messages [data-message-id="${earlyFirst}"]`)
+    await expect(targetInMessages, `early first ${earlyFirst} must render inside #messages`).toBeAttached({
+      timeout: 30000
+    })
+    await expect(targetInMessages, `early first ${earlyFirst} must be visible`).toBeVisible({ timeout: 15000 })
+    await expect(targetInMessages, `early first ${earlyFirst} must be viewport-reachable`).toBeInViewport({
+      timeout: 15000
+    })
+
+    // Supplemental around-window oracle only.
+    const probe: any = await page.evaluate(
+      async ({ topicId, earlyFirst }: { topicId: string; earlyFirst: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.fetchMessagesWindow({
+          kind: 'around',
+          topicId,
+          anchorMessageId: earlyFirst,
+          before: 10,
+          after: 19
+        })
+      },
+      { topicId, earlyFirst }
+    )
+    expect(probe.ok).toBe(true)
+    expect(probe.value.window.kind).toBe('around')
+    expect(probe.value.messages.some((m: any) => m.id === earlyFirst)).toBe(true)
+
+    // Catalog invariant: navigation extends message projection only, never segment entities/counts/order.
+    const catalogAfter: string = await page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const ids: string[] = s.topicSegments?.segmentsByTopic?.[topicId] ?? []
+      const e: Record<string, any> = s.topicSegments?.segments?.entities ?? {}
+      return JSON.stringify(ids.map((id) => ({ id, ...e[id] })))
+    }, topicId)
+    expect(catalogAfter).toBe(catalogBefore)
+    const noForgery: any = await page.evaluate(
+      ({ segEarlyId, segLateId }: { segEarlyId: string; segLateId: string }) => {
+        const s = (window as any).store.getState()
+        const entities: Record<string, any> = s.messages?.entities ?? {}
+        return { earlyForged: !!entities[segEarlyId], lateForged: !!entities[segLateId] }
+      },
+      { segEarlyId, segLateId }
+    )
+    expect(noForgery.earlyForged).toBe(false)
+    expect(noForgery.lateForged).toBe(false)
+    console.log('[E2E] seg-catalog navigate loaded early-first, catalog invariant')
+  })
 })

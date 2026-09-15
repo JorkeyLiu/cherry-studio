@@ -252,7 +252,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
                     segment={segment}
                     isFirst={isFirst}
                     isLast={isLast}
-                    messageCount={isFirst ? segment.messageIds.length : undefined}
+                    messageCount={isFirst ? segment.messageCount : undefined}
                   />
                 )}
                 <MessageGroup

@@ -2071,6 +2071,143 @@ describe('ChatDbAggregateService', () => {
     })
   })
 
+  describe('segment authority catalog derived fields', () => {
+    it('list/upsert/update/replace readbacks derive sortOrder/first/last/count', () => {
+      const topicId = `t-${uid()}`
+      const m1 = makeMessageJson(topicId)
+      const m2 = makeMessageJson(topicId)
+      const m3 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      agg.appendMessage(topicId, m3 as any, [])
+      const up = okValue(agg.upsertSegment('seg-a', topicId, 'A', [m1.id as string, m2.id as string], null))
+      expect(up.sortOrder).toBe(0)
+      expect(up.firstMessageId).toBe(m1.id)
+      expect(up.lastMessageId).toBe(m2.id)
+      expect(up.messageCount).toBe(2)
+      const listed = okValue(agg.listSegments(topicId))
+      expect(listed[0].sortOrder).toBe(0)
+      expect(listed[0].firstMessageId).toBe(m1.id)
+      expect(listed[0].lastMessageId).toBe(m2.id)
+      expect(listed[0].messageCount).toBe(2)
+      const upd = okValue(agg.updateSegmentMetadata('seg-a', 'A2', undefined))
+      expect(upd.sortOrder).toBe(0)
+      expect(upd.firstMessageId).toBe(m1.id)
+      expect(upd.messageCount).toBe(2)
+      const rep = okValue(agg.replaceSegmentMembership('seg-a', [m3.id as string, m1.id as string]))
+      expect(rep!.firstMessageId).toBe(m3.id)
+      expect(rep!.lastMessageId).toBe(m1.id)
+      expect(rep!.messageCount).toBe(2)
+      expect(rep!.messageIds).toEqual([m3.id, m1.id])
+      expect(() =>
+        validateChatDbResult('chatdb:list-segments', { ok: true, value: okValue(agg.listSegments(topicId)) })
+      ).not.toThrow()
+      expect(JSON.parse(JSON.stringify(rep))).toEqual(rep)
+    })
+
+    it('upsert empty readback is null/null/0 consistent', () => {
+      const topicId = `t-${uid()}`
+      const res = okValue(agg.upsertSegment(`seg-${uid()}`, topicId, 'E', [], null))
+      expect(res.messageIds).toEqual([])
+      expect(res.firstMessageId).toBeNull()
+      expect(res.lastMessageId).toBeNull()
+      expect(res.messageCount).toBe(0)
+      expect(res.sortOrder).toBe(0)
+      expect('color' in (res as unknown as Record<string, unknown>)).toBe(false)
+      expect(() => validateChatDbResult('chatdb:upsert-segment', { ok: true, value: res })).not.toThrow()
+    })
+
+    it('semantic delete post catalog and undo snapshot carry authority fields', () => {
+      const topicId = `t-${uid()}`
+      const u1 = makeMessageJson(topicId, { role: 'user' })
+      const a1 = makeMessageJson(topicId, { role: 'assistant', askId: (u1 as any).id })
+      const u2 = makeMessageJson(topicId, { role: 'user' })
+      agg.appendMessage(topicId, u1 as any, [])
+      agg.appendMessage(topicId, a1 as any, [])
+      agg.appendMessage(topicId, u2 as any, [])
+      const segId = `seg-${uid()}`
+      agg.upsertSegment(segId, topicId, 'seg', [u1.id as string, a1.id as string, u2.id as string], undefined)
+      const response = okValue(agg.deleteMessagesWithDependents(topicId, [u1.id as string]))
+      expect(response.segments).toHaveLength(1)
+      expect(response.segments[0].firstMessageId).toBe(u2.id)
+      expect(response.segments[0].lastMessageId).toBe(u2.id)
+      expect(response.segments[0].messageCount).toBe(1)
+      expect(response.segmentSnapshots).toHaveLength(1)
+      expect(response.segmentSnapshots[0].firstMessageId).toBe(u1.id)
+      expect(response.segmentSnapshots[0].lastMessageId).toBe(u2.id)
+      expect(response.segmentSnapshots[0].messageCount).toBe(3)
+      expect(() =>
+        validateChatDbResult('chatdb:delete-messages-with-dependents', { ok: true, value: response })
+      ).not.toThrow()
+      expect(JSON.parse(JSON.stringify(response.segments))).toEqual(response.segments)
+      expect(JSON.parse(JSON.stringify(response.segmentSnapshots))).toEqual(response.segmentSnapshots)
+    })
+
+    it('new segments insert by authority first-message position, not UUID/creation order', () => {
+      const topicId = `t-${uid()}`
+      const msgs = [makeMessageJson(topicId), makeMessageJson(topicId), makeMessageJson(topicId)]
+      for (const m of msgs) agg.appendMessage(topicId, m as any, [])
+      const [m1, m2, m3] = msgs.map((m) => m.id as string)
+      // Reverse-lexical ids + reverse creation order: tail created first.
+      const tail = okValue(agg.upsertSegment('seg-zzz-tail', topicId, 'Tail', [m3], null))
+      expect(tail.sortOrder).toBe(0)
+      const head = okValue(agg.upsertSegment('seg-aaa-head', topicId, 'Head', [m1], null))
+      expect(head.sortOrder).toBe(0)
+      const listed = okValue(agg.listSegments(topicId))
+      expect(listed.map((s) => s.id)).toEqual(['seg-aaa-head', 'seg-zzz-tail'])
+      expect(listed.map((s) => s.sortOrder)).toEqual([0, 1])
+      expect(listed[0].firstMessageId).toBe(m1)
+      expect(listed[1].firstMessageId).toBe(m3)
+      expect(m2).toBeTruthy()
+      expect(() => validateChatDbResult('chatdb:list-segments', { ok: true, value: listed })).not.toThrow()
+    })
+
+    it('middle insert preserves existing relative order with dense readback', () => {
+      const topicId = `t-${uid()}`
+      const msgs = [
+        makeMessageJson(topicId),
+        makeMessageJson(topicId),
+        makeMessageJson(topicId),
+        makeMessageJson(topicId),
+        makeMessageJson(topicId)
+      ]
+      for (const m of msgs) agg.appendMessage(topicId, m as any, [])
+      const [m1, , m3, , m5] = msgs.map((m) => m.id as string)
+      okValue(agg.upsertSegment('seg-head', topicId, 'Head', [m1], null))
+      okValue(agg.upsertSegment('seg-tail', topicId, 'Tail', [m5], null))
+      const mid = okValue(agg.upsertSegment('seg-mid', topicId, 'Mid', [m3], null))
+      expect(mid.sortOrder).toBe(1)
+      const listed = okValue(agg.listSegments(topicId))
+      expect(listed.map((s) => s.id)).toEqual(['seg-head', 'seg-mid', 'seg-tail'])
+      expect(listed.map((s) => s.sortOrder)).toEqual([0, 1, 2])
+      expect(listed.map((s) => s.messageCount)).toEqual([1, 1, 1])
+    })
+
+    it('equal first-message position is stable: newcomer goes after existing, existing order kept', () => {
+      const topicId = `t-${uid()}`
+      const msgs = [makeMessageJson(topicId), makeMessageJson(topicId)]
+      for (const m of msgs) agg.appendMessage(topicId, m as any, [])
+      const [m1, m2] = msgs.map((m) => m.id as string)
+      okValue(agg.upsertSegment('seg-first', topicId, 'First', [m1], null))
+      okValue(agg.upsertSegment('seg-second', topicId, 'Second', [m2], null))
+      const tie = okValue(agg.upsertSegment('seg-tie', topicId, 'Tie', [m1], null))
+      expect(tie.sortOrder).toBe(1)
+      const listed = okValue(agg.listSegments(topicId))
+      expect(listed.map((s) => s.id)).toEqual(['seg-first', 'seg-tie', 'seg-second'])
+      expect(listed.map((s) => s.sortOrder)).toEqual([0, 1, 2])
+    })
+
+    it('upsert validates request membership against the complete topic authority order', () => {
+      const topicId = `t-${uid()}`
+      const m1 = makeMessageJson(topicId)
+      agg.appendMessage(topicId, m1 as any, [])
+      const bad = agg.upsertSegment('seg-bad', topicId, 'Bad', ['missing-message-id'], null)
+      expect(bad.ok).toBe(false)
+      const listed = okValue(agg.listSegments(topicId))
+      expect(listed.map((s) => s.id)).not.toContain('seg-bad')
+    })
+  })
+
   // =========================================================================
   // Phase 5.1A: reorderMessages
   // =========================================================================

@@ -546,6 +546,14 @@ export interface SegmentWire {
   color?: string | null
   createdAt: string | null
   updatedAt: string | null
+  /** Authority catalog order from Main SQLite `topic_segments.sort_order` (dense 0..n-1). */
+  sortOrder: number
+  /** First message in authoritative ordered membership, null when empty. */
+  firstMessageId: string | null
+  /** Last message in authoritative ordered membership, null when empty. */
+  lastMessageId: string | null
+  /** Authoritative membership size; always equals messageIds.length. */
+  messageCount: number
 }
 
 /** @see IpcChannel.ChatDb_ListSegments */

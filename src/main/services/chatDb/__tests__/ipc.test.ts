@@ -749,13 +749,23 @@ describe('ChatDb IPC Registration', () => {
       expect(upsert2.ok).toBe(true)
       if (upsert2.ok) {
         expect('color' in (upsert2.value as Record<string, unknown>)).toBe(false)
+        const wire = upsert2.value as Record<string, unknown>
+        expect(wire.sortOrder).toBe(0)
+        expect(wire.firstMessageId).toBe(msgId)
+        expect(wire.lastMessageId).toBe(msgId)
+        expect(wire.messageCount).toBe(1)
         expect(() => validateChatDbResult('chatdb:upsert-segment', upsert2)).not.toThrow()
+        expect(JSON.parse(JSON.stringify(upsert2.value))).toEqual(upsert2.value)
       }
       const list2 = await listHandler({}, { topicId })
       expect(list2.ok).toBe(true)
       if (list2.ok) {
         expect(list2.value).toHaveLength(1)
         expect('color' in (list2.value[0] as Record<string, unknown>)).toBe(false)
+        expect(list2.value[0].sortOrder).toBe(0)
+        expect(list2.value[0].firstMessageId).toBe(msgId)
+        expect(list2.value[0].lastMessageId).toBe(msgId)
+        expect(list2.value[0].messageCount).toBe(1)
         expect(() => validateChatDbResult('chatdb:list-segments', list2)).not.toThrow()
         expect(JSON.parse(JSON.stringify(list2.value))).toEqual(list2.value)
       }

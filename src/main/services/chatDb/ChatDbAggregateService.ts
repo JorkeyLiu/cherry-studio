@@ -4117,16 +4117,69 @@ export class ChatDbAggregateService {
             repos.segments.updateMetadata(segmentId, patch as any)
           }
         } else {
-          // Create new segment
-          repos.segments.create({
-            id: segmentId,
-            topicId,
-            name: name ?? null,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            sortOrder: 0,
-            overflow
-          })
+          if (messageIds.length === 0) {
+            // New segment with empty membership must not survive: no phantom
+            // row. Return the empty authority wire directly (topic ensured).
+            const emptyNew = {
+              id: segmentId,
+              topicId,
+              name: name ?? null,
+              messageIds: [] as string[],
+              createdAt: null as string | null,
+              updatedAt: null as string | null,
+              sortOrder: 0,
+              firstMessageId: null as string | null,
+              lastMessageId: null as string | null,
+              messageCount: 0
+            }
+            if (typeof color === 'string') {
+              return { ...emptyNew, color }
+            }
+            return emptyNew
+          }
+          // Deterministic conversation-position placement: insert the new
+          // segment according to its authority first message position in the
+          // complete topic order; existing segments retain relative order.
+          // No global recompute of imported/existing catalog.
+          const orderedMessages = repos.messages.listByTopic(topicId)
+          const positionByMessageId = new Map<string, number>()
+          orderedMessages.forEach((m, idx) => positionByMessageId.set(m.id, idx))
+          // Same-transaction authority validation: every requested membership
+          // id must belong to the complete topic authority order.
+          for (const mid of messageIds) {
+            if (!positionByMessageId.has(mid)) {
+              throw new Error(`Message ${mid} does not belong to topic ${topicId}`)
+            }
+          }
+          const newFirstIdx = positionByMessageId.get(messageIds[0])
+          const existingCatalog = repos.segments.listByTopic(topicId)
+          let targetIndex = existingCatalog.length
+          if (newFirstIdx !== undefined) {
+            for (let i = 0; i < existingCatalog.length; i++) {
+              const seg = existingCatalog[i]
+              const mids = repos.segments.getMessageIds(seg.id)
+              const first = mids.length > 0 ? mids[0] : undefined
+              const idx = first !== undefined ? positionByMessageId.get(first) : undefined
+              const existingIdx = idx ?? Number.POSITIVE_INFINITY
+              if (existingIdx > newFirstIdx) {
+                targetIndex = i
+                break
+              }
+            }
+          }
+          // Repository primitive shifts dense catalog atomically; avoids UUID tie order.
+          repos.segments.createAtCatalogIndex(
+            {
+              id: segmentId,
+              topicId,
+              name: name ?? null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              sortOrder: targetIndex,
+              overflow
+            },
+            targetIndex
+          )
         }
 
         // Replace membership atomically
@@ -4137,14 +4190,19 @@ export class ChatDbAggregateService {
         if (!segment.found) {
           // Segment was deleted (empty membership) — return empty wire.
           // Same JSON-safety rule as segmentToWire: omit `color` unless it
-          // is a legal string (never `color: undefined`).
+          // is a legal string (never `color: undefined`). Authority empty
+          // consistency is null/null/0 with a deterministic 0 sortOrder.
           const emptyBase = {
             id: segmentId,
             topicId,
             name: name ?? null,
             messageIds: [] as string[],
             createdAt: null as string | null,
-            updatedAt: null as string | null
+            updatedAt: null as string | null,
+            sortOrder: 0,
+            firstMessageId: null as string | null,
+            lastMessageId: null as string | null,
+            messageCount: 0
           }
           if (typeof color === 'string') {
             return { ...emptyBase, color }
@@ -6369,6 +6427,7 @@ export class ChatDbAggregateService {
               name: string | null
               createdAt: string | null
               updatedAt: string | null
+              sortOrder: number
               overflow: Record<string, unknown>
             },
             mids: string[]

@@ -25,6 +25,7 @@ import type {
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import type { InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -540,27 +541,26 @@ export async function pasteMessages(
         continue
       }
 
-      // Create new segment with new ID in target topic
-      const newSegment: TopicSegment = {
-        id: uuidv4(),
-        topicId: targetTopicId,
-        name: clipSnap.name,
-        color: clipSnap.color,
-        messageIds: newMessageIds,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      }
-
-      // Persist to DB + Redux
-      await dbService.upsertSegment(
-        newSegment.id,
-        newSegment.topicId,
-        newSegment.name,
-        newSegment.messageIds,
-        newSegment.color
-      )
-      dispatch(addSegment(newSegment))
+      // Create new segment with new ID in target topic.
+      // DB-first: collect the Main wire mapping; Redux convergence happens
+      // once below via a single list+replace so shifted siblings converge.
+      const newId = uuidv4()
+      const wire = await dbService.upsertSegment(newId, targetTopicId, clipSnap.name, newMessageIds, clipSnap.color)
+      const newSegment = mapSegmentWireToTopicSegment(wire)
+      if (wire.name == null) newSegment.name = clipSnap.name
       targetSegmentSnapshots.push(newSegment)
+    }
+
+    // Batch convergence: exactly one list+replace for the target topic.
+    // No per-item stale adds. listSegments failure never rolls back the
+    // successful Main upserts: keep per-wire adds so pasted segments stay visible.
+    if (targetSegmentSnapshots.length > 0) {
+      try {
+        await convergeTopicSegmentCatalog(dispatch, targetTopicId)
+      } catch (error) {
+        logger.warn('[pasteMessages] segment catalog convergence failed, keeping per-wire fallback', error as Error)
+        for (const seg of targetSegmentSnapshots) dispatch(addSegment(seg))
+      }
     }
 
     logger.info(

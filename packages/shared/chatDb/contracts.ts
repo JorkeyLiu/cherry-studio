@@ -607,28 +607,150 @@ const listSegmentsContract: ChatDbContract = {
       if (!Array.isArray(obj.value)) {
         throw new ValidationError('result.value', '[chatdb:list-segments] Expected array of segments')
       }
+      const arr = obj.value as unknown[]
+      const seen = new Set<string>()
+      for (let i = 0; i < arr.length; i++) {
+        const sid = validateSegmentWireBody(arr[i], `result.value[${i}]`, 'chatdb:list-segments', SEGMENT_VALUE_KEYS)
+        if (seen.has(sid)) {
+          throw new ValidationError(`result.value[${i}].id`, '[chatdb:list-segments] Duplicate segment id')
+        }
+        seen.add(sid)
+      }
     }
   }
 }
 
-const SEGMENT_VALUE_KEYS = new Set(['id', 'topicId', 'name', 'messageIds', 'color', 'createdAt', 'updatedAt'])
+const SEGMENT_VALUE_KEYS = new Set([
+  'id',
+  'topicId',
+  'name',
+  'messageIds',
+  'color',
+  'createdAt',
+  'updatedAt',
+  'sortOrder',
+  'firstMessageId',
+  'lastMessageId',
+  'messageCount'
+])
+
+/**
+ * Strict SegmentWire body validator (authority catalog).
+ *
+ * Exact keys (color optional omission preserved), nonnegative sortOrder/
+ * messageCount, null/bounds consistency for empty vs non-empty membership,
+ * and first/last membership with count === messageIds.length.
+ * Empty membership (deleted-before-cleanup readback) is consistently
+ * null/null/0; it should not normally survive repository empty-delete.
+ */
+function validateSegmentWireBody(
+  seg: unknown,
+  path: string,
+  channel: string,
+  allowedKeys: ReadonlySet<string>
+): string {
+  if (seg === null || typeof seg !== 'object' || Array.isArray(seg)) {
+    throw new ValidationError(path, `[${channel}] Expected segment object`)
+  }
+  const rec = seg as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (!allowedKeys.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in segment: "${key}"`)
+    }
+  }
+  validateNonEmptyString(rec.id, `${path}.id`)
+  validateNonEmptyString(rec.topicId, `${path}.topicId`)
+  if (rec.name !== null && typeof rec.name !== 'string') {
+    throw new ValidationError(`${path}.name`, `[${channel}] Expected string|null for name`)
+  }
+  if (typeof rec.name === 'string' && rec.name.length === 0) {
+    // Renderer maps null->'' for display; wire allows empty string but Main
+    // always emits string|null. Accept empty to avoid rejecting legacy display mapping.
+  }
+  if (!Array.isArray(rec.messageIds)) {
+    throw new ValidationError(`${path}.messageIds`, `[${channel}] Expected messageIds array`)
+  }
+  {
+    const seenMsg = new Set<string>()
+    const mids = rec.messageIds as unknown[]
+    for (let j = 0; j < mids.length; j++) {
+      const mid = mids[j]
+      if (typeof mid !== 'string' || mid.length === 0) {
+        throw new ValidationError(`${path}.messageIds[${j}]`, 'Expected a non-empty string')
+      }
+      if (seenMsg.has(mid)) {
+        throw new ValidationError(`${path}.messageIds[${j}]`, `[${channel}] Duplicate segment messageId`)
+      }
+      seenMsg.add(mid)
+    }
+  }
+  if (rec.color !== undefined && rec.color !== null && typeof rec.color !== 'string') {
+    throw new ValidationError(`${path}.color`, `[${channel}] Expected string|null for color`)
+  }
+  if (rec.createdAt !== null && rec.createdAt !== undefined && typeof rec.createdAt !== 'string') {
+    throw new ValidationError(`${path}.createdAt`, `[${channel}] Expected string|null for createdAt`)
+  }
+  if (rec.updatedAt !== null && rec.updatedAt !== undefined && typeof rec.updatedAt !== 'string') {
+    throw new ValidationError(`${path}.updatedAt`, `[${channel}] Expected string|null for updatedAt`)
+  }
+  validateNonNegativeInteger(rec.sortOrder, `${path}.sortOrder`)
+  validateNonNegativeInteger(rec.messageCount, `${path}.messageCount`)
+  const mids = rec.messageIds as string[]
+  const count = rec.messageCount as number
+  if (count !== mids.length) {
+    throw new ValidationError(
+      `${path}.messageCount`,
+      `[${channel}] messageCount (${String(count)}) must equal messageIds.length (${String(mids.length)})`
+    )
+  }
+  const first = rec.firstMessageId
+  const last = rec.lastMessageId
+  if (mids.length === 0) {
+    if (first !== null) {
+      throw new ValidationError(`${path}.firstMessageId`, `[${channel}] Expected null for empty membership`)
+    }
+    if (last !== null) {
+      throw new ValidationError(`${path}.lastMessageId`, `[${channel}] Expected null for empty membership`)
+    }
+  } else {
+    if (typeof first !== 'string' || first.length === 0) {
+      throw new ValidationError(
+        `${path}.firstMessageId`,
+        `[${channel}] Expected non-empty string for non-empty membership`
+      )
+    }
+    if (typeof last !== 'string' || last.length === 0) {
+      throw new ValidationError(
+        `${path}.lastMessageId`,
+        `[${channel}] Expected non-empty string for non-empty membership`
+      )
+    }
+    if (first !== mids[0]) {
+      throw new ValidationError(`${path}.firstMessageId`, `[${channel}] firstMessageId must equal messageIds[0]`)
+    }
+    if (last !== mids[mids.length - 1]) {
+      throw new ValidationError(
+        `${path}.lastMessageId`,
+        `[${channel}] lastMessageId must equal messageIds[messageIds.length - 1]`
+      )
+    }
+    const set = new Set(mids)
+    if (!set.has(first)) {
+      throw new ValidationError(`${path}.firstMessageId`, `[${channel}] firstMessageId not in messageIds`)
+    }
+    if (!set.has(last)) {
+      throw new ValidationError(`${path}.lastMessageId`, `[${channel}] lastMessageId not in messageIds`)
+    }
+  }
+  return rec.id as string
+}
 
 function validateSegmentResult(channel: string): (result: unknown) => void {
   return (result: unknown): void => {
     validateResultEnvelope(result, channel)
     const obj = result as Record<string, unknown>
     if (obj.ok === true && obj.value !== null && typeof obj.value === 'object' && !Array.isArray(obj.value)) {
-      const v = obj.value as Record<string, unknown>
-      for (const key of Object.keys(v)) {
-        if (!SEGMENT_VALUE_KEYS.has(key)) {
-          throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in segment value: "${key}"`)
-        }
-      }
-      validateNonEmptyString(v.id, 'result.value.id')
-      validateNonEmptyString(v.topicId, 'result.value.topicId')
-      if (!Array.isArray(v.messageIds)) {
-        throw new ValidationError('result.value.messageIds', `[${channel}] Expected array of message IDs`)
-      }
+      validateSegmentWireBody(obj.value, 'result.value', channel, SEGMENT_VALUE_KEYS)
     }
   }
 }
@@ -1616,7 +1738,11 @@ const DELETE_WITH_DEPENDENTS_SEGMENT_KEYS = new Set([
   'messageIds',
   'color',
   'createdAt',
-  'updatedAt'
+  'updatedAt',
+  'sortOrder',
+  'firstMessageId',
+  'lastMessageId',
+  'messageCount'
 ])
 const DELETE_WITH_DEPENDENTS_RESTORE_GROUP_KEYS = new Set(['entries', 'positionIndex', 'anchorMessageId'])
 const DELETE_WITH_DEPENDENTS_RESTORE_ENTRY_KEYS = new Set(['message', 'blocks'])
@@ -1626,61 +1752,11 @@ const DELETE_WITH_DEPENDENTS_CHANNEL = 'chatdb:delete-messages-with-dependents'
 /**
  * Strict SegmentWire validator shared by the post-delete catalog and the
  * pre-delete affected snapshots (same shape, same unknown-key fail-closed).
+ * Delegates to the authority catalog body validator so dependents stay in
+ * lockstep with list/upsert/update/replace contracts.
  */
 function validateDependentsSegmentWire(seg: unknown, path: string): string {
-  if (seg === null || typeof seg !== 'object' || Array.isArray(seg)) {
-    throw new ValidationError(path, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected segment object`)
-  }
-  const rec = seg as Record<string, unknown>
-  for (const key of Object.keys(rec)) {
-    if (!DELETE_WITH_DEPENDENTS_SEGMENT_KEYS.has(key)) {
-      throw new ValidationError(
-        `${path}.${key}`,
-        `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Unknown key in segment: "${key}"`
-      )
-    }
-  }
-  validateNonEmptyString(rec.id, `${path}.id`)
-  validateNonEmptyString(rec.topicId, `${path}.topicId`)
-  if (rec.name !== null && rec.name !== undefined && typeof rec.name !== 'string') {
-    throw new ValidationError(`${path}.name`, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for name`)
-  }
-  if (!Array.isArray(rec.messageIds)) {
-    throw new ValidationError(`${path}.messageIds`, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected messageIds array`)
-  }
-  {
-    const seenMsg = new Set<string>()
-    const mids = rec.messageIds as unknown[]
-    for (let j = 0; j < mids.length; j++) {
-      const mid = mids[j]
-      if (typeof mid !== 'string' || mid.length === 0) {
-        throw new ValidationError(`${path}.messageIds[${j}]`, 'Expected a non-empty string')
-      }
-      if (seenMsg.has(mid)) {
-        throw new ValidationError(
-          `${path}.messageIds[${j}]`,
-          `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Duplicate segment messageId`
-        )
-      }
-      seenMsg.add(mid)
-    }
-  }
-  if (rec.color !== undefined && rec.color !== null && typeof rec.color !== 'string') {
-    throw new ValidationError(`${path}.color`, `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for color`)
-  }
-  if (rec.createdAt !== null && rec.createdAt !== undefined && typeof rec.createdAt !== 'string') {
-    throw new ValidationError(
-      `${path}.createdAt`,
-      `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for createdAt`
-    )
-  }
-  if (rec.updatedAt !== null && rec.updatedAt !== undefined && typeof rec.updatedAt !== 'string') {
-    throw new ValidationError(
-      `${path}.updatedAt`,
-      `[${DELETE_WITH_DEPENDENTS_CHANNEL}] Expected string|null for updatedAt`
-    )
-  }
-  return rec.id as string
+  return validateSegmentWireBody(seg, path, DELETE_WITH_DEPENDENTS_CHANNEL, DELETE_WITH_DEPENDENTS_SEGMENT_KEYS)
 }
 
 const deleteMessagesWithDependentsContract: ChatDbContract = {

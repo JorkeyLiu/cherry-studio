@@ -420,12 +420,27 @@ describe('buildDeleteDependentsUndoParts (response adapter)', () => {
     const response = {
       ...semanticResponse,
       segmentSnapshots: [
-        { id: 's1', topicId: 'topic-1', name: 'seg', messageIds: ['msg-1'], createdAt: null, updatedAt: null }
+        {
+          id: 's1',
+          topicId: 'topic-1',
+          name: 'seg',
+          messageIds: ['msg-1'],
+          createdAt: null,
+          updatedAt: null,
+          sortOrder: 0,
+          firstMessageId: 'msg-1',
+          lastMessageId: 'msg-1',
+          messageCount: 1
+        }
       ]
     }
     const parts = buildDeleteDependentsUndoParts(response as any)
     expect(parts.segmentSnapshots).toHaveLength(1)
     expect(parts.segmentSnapshots[0].id).toBe('s1')
     expect(parts.segmentSnapshots[0].messageIds).toEqual(['msg-1'])
+    expect(parts.segmentSnapshots[0].sortOrder).toBe(0)
+    expect(parts.segmentSnapshots[0].firstMessageId).toBe('msg-1')
+    expect(parts.segmentSnapshots[0].lastMessageId).toBe('msg-1')
+    expect(parts.segmentSnapshots[0].messageCount).toBe(1)
   })
 })

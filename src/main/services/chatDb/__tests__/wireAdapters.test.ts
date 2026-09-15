@@ -703,6 +703,7 @@ describe('wireAdapters', () => {
       name: 'Seg',
       createdAt: null as string | null,
       updatedAt: null as string | null,
+      sortOrder: 2,
       overflow: {} as Record<string, unknown>
     }
 
@@ -715,7 +716,11 @@ describe('wireAdapters', () => {
         name: 'Seg',
         messageIds: ['m1'],
         createdAt: null,
-        updatedAt: null
+        updatedAt: null,
+        sortOrder: 2,
+        firstMessageId: 'm1',
+        lastMessageId: 'm1',
+        messageCount: 1
       })
     })
 
@@ -730,6 +735,22 @@ describe('wireAdapters', () => {
       const wire = segmentToWire({ ...baseSeg, overflow: { color: '#ff0000' } }, ['m1'])
       expect(wire.color).toBe('#ff0000')
       expect('color' in wire).toBe(true)
+    })
+
+    it('derives first/last/count from ordered membership', () => {
+      const wire = segmentToWire(baseSeg, ['m1', 'm2', 'm3'])
+      expect(wire.sortOrder).toBe(2)
+      expect(wire.firstMessageId).toBe('m1')
+      expect(wire.lastMessageId).toBe('m3')
+      expect(wire.messageCount).toBe(3)
+    })
+
+    it('empty membership derives null/null/0 consistently', () => {
+      const wire = segmentToWire(baseSeg, [])
+      expect(wire.firstMessageId).toBeNull()
+      expect(wire.lastMessageId).toBeNull()
+      expect(wire.messageCount).toBe(0)
+      expect(wire.sortOrder).toBe(2)
     })
   })
 

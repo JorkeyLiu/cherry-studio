@@ -4,13 +4,15 @@ import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { addSegment, removeSegment, updateSegment } from '@renderer/store/topicSegment'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
+import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import { useCallback, useMemo } from 'react'
 
 /**
- * Returns the index of the first message in the segment that still exists in the ordered list.
- * Iterates through messageIds to find the first one present in the index map,
- * which is more robust than using messageIds[0] directly (it may have been deleted).
+ * Compatibility helper: index of first messageId present in a loaded index map.
+ * NOT an authority catalog primitive — catalog ordering/boundaries/navigation
+ * must use authority sortOrder/firstMessageId/lastMessageId/messageCount.
+ * Retained only for explicit loaded-local continuity callers; unused by catalog.
  */
 export function getSegmentFirstMessageIndex(messageIds: string[], indexMap: Map<string, number>): number {
   for (const id of messageIds) {
@@ -42,12 +44,15 @@ export function useTopicSegments(topicId: string) {
   }, [messageIdsForTopic])
 
   const orderedSegmentsForTopic = useMemo(() => {
+    // Authority catalog order: Main sortOrder asc, then stable id.
+    // Never derived from loaded messageIdsByTopic/windowed indexes.
     return [...segmentsForTopic].sort((a, b) => {
-      const aIndex = getSegmentFirstMessageIndex(a.messageIds, messageIndexById)
-      const bIndex = getSegmentFirstMessageIndex(b.messageIds, messageIndexById)
-      return aIndex - bIndex
+      const ao = typeof a.sortOrder === 'number' && Number.isFinite(a.sortOrder) ? a.sortOrder : Infinity
+      const bo = typeof b.sortOrder === 'number' && Number.isFinite(b.sortOrder) ? b.sortOrder : Infinity
+      if (ao !== bo) return ao - bo
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
-  }, [segmentsForTopic, messageIndexById])
+  }, [segmentsForTopic])
 
   const getSegmentsForTopic = useCallback(
     (tid: string) => {
@@ -59,21 +64,21 @@ export function useTopicSegments(topicId: string) {
 
   const createSegment = useCallback(
     async (tid: string, name: string, messageIds: string[]): Promise<TopicSegment> => {
-      const now = new Date().toISOString()
+      // DB-first with read-after catalog convergence: the single upsert wire
+      // cannot carry shifted siblings, so follow with exactly one list+replace.
+      // listSegments failure must not roll back the successful Main mutation:
+      // keep at least the new wire visible and log via the safe logger.
       const id = uuid()
-      const segment: TopicSegment = {
-        id,
-        topicId: tid,
-        name,
-        messageIds,
-        color: getSegmentColor(id),
-        createdAt: now,
-        updatedAt: now
+      const color = getSegmentColor(id)
+      const wire = await dbService.upsertSegment(id, tid, name, messageIds, color)
+      const segment = mapSegmentWireToTopicSegment(wire)
+      try {
+        await convergeTopicSegmentCatalog(dispatch, tid)
+      } catch (error) {
+        logger.warn('[createSegment] catalog convergence failed, keeping new segment wire', error as Error)
+        dispatch(addSegment(segment))
       }
-      // DB-first: write to DB before updating Redux
-      await dbService.upsertSegment(segment.id, segment.topicId, segment.name, segment.messageIds, segment.color)
-      dispatch(addSegment(segment))
-      logger.info(`Created segment "${name}" with ${messageIds.length} messages`)
+      logger.info(`Created segment "${name}" with ${segment.messageCount} messages`)
       return segment
     },
     [dispatch]
@@ -81,20 +86,48 @@ export function useTopicSegments(topicId: string) {
 
   const updateSegmentName = useCallback(
     async (segmentId: string, name: string) => {
-      const now = new Date().toISOString()
-      // DB-first
-      await dbService.updateSegmentMetadata(segmentId, name)
-      dispatch(updateSegment({ id: segmentId, changes: { name, updatedAt: now } }))
+      // DB-first enriched: Redux converges from the Main wire, not fabricated now.
+      const wire = await dbService.updateSegmentMetadata(segmentId, name)
+      const changes: Record<string, unknown> = {
+        name: wire.name ?? name,
+        messageIds: [...wire.messageIds],
+        sortOrder: wire.sortOrder,
+        firstMessageId: wire.firstMessageId,
+        lastMessageId: wire.lastMessageId,
+        messageCount: wire.messageCount,
+        createdAt: wire.createdAt ?? undefined,
+        updatedAt: wire.updatedAt ?? new Date().toISOString()
+      }
+      // Omit color unless the wire carries a legal string (never `color: undefined`).
+      if (typeof wire.color === 'string') {
+        changes.color = wire.color
+      }
+      dispatch(updateSegment({ id: segmentId, changes: changes as any }))
     },
     [dispatch]
   )
 
   const updateSegmentMessageIds = useCallback(
     async (segmentId: string, newMessageIds: string[]) => {
-      const now = new Date().toISOString()
-      // DB-first
-      await dbService.replaceSegmentMembership(segmentId, newMessageIds)
-      dispatch(updateSegment({ id: segmentId, changes: { messageIds: newMessageIds, updatedAt: now } }))
+      // DB-first enriched: empty membership deletes per repo semantics (null wire).
+      const wire = await dbService.replaceSegmentMembership(segmentId, newMessageIds)
+      if (wire === null) {
+        dispatch(removeSegment(segmentId))
+        return
+      }
+      dispatch(
+        updateSegment({
+          id: segmentId,
+          changes: {
+            messageIds: [...wire.messageIds],
+            sortOrder: wire.sortOrder,
+            firstMessageId: wire.firstMessageId,
+            lastMessageId: wire.lastMessageId,
+            messageCount: wire.messageCount,
+            updatedAt: wire.updatedAt ?? new Date().toISOString()
+          }
+        })
+      )
     },
     [dispatch]
   )
@@ -118,11 +151,12 @@ export function useTopicSegments(topicId: string) {
 
   const getSegmentMessageRange = useCallback(
     (segmentId: string): { firstMessageId: string; lastMessageId: string } | undefined => {
+      // Authority boundaries: never array endpoints/loaded indexes.
       const segment = segmentsEntities[segmentId]
-      if (!segment || segment.messageIds.length === 0) return undefined
+      if (!segment || segment.firstMessageId === null || segment.lastMessageId === null) return undefined
       return {
-        firstMessageId: segment.messageIds[0],
-        lastMessageId: segment.messageIds[segment.messageIds.length - 1]
+        firstMessageId: segment.firstMessageId,
+        lastMessageId: segment.lastMessageId
       }
     },
     [segmentsEntities]
@@ -130,14 +164,16 @@ export function useTopicSegments(topicId: string) {
 
   const isMessageFirstInSegment = useCallback(
     (messageId: string): TopicSegment | undefined => {
-      return segmentsForTopic.find((seg) => seg.messageIds[0] === messageId)
+      // Authority first boundary; membership includes stays on full messageIds.
+      return segmentsForTopic.find((seg) => seg.firstMessageId === messageId)
     },
     [segmentsForTopic]
   )
 
   const isMessageLastInSegment = useCallback(
     (messageId: string): TopicSegment | undefined => {
-      return segmentsForTopic.find((seg) => seg.messageIds[seg.messageIds.length - 1] === messageId)
+      // Authority last boundary; membership includes stays on full messageIds.
+      return segmentsForTopic.find((seg) => seg.lastMessageId === messageId)
     },
     [segmentsForTopic]
   )

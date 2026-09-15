@@ -62,7 +62,27 @@ function makeSegment(id: string, topicId: string, messageIds: string[] = ['m1'])
     messageIds,
     color: undefined,
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    sortOrder: 0,
+    firstMessageId: messageIds.length > 0 ? messageIds[0] : null,
+    lastMessageId: messageIds.length > 0 ? messageIds[messageIds.length - 1] : null,
+    messageCount: messageIds.length
+  }
+}
+
+function makeOrderedSegment(id: string, topicId: string, sortOrder: number, messageIds: string[]): any {
+  return {
+    id,
+    topicId,
+    name: `Seg-${id}`,
+    messageIds,
+    color: undefined,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    sortOrder,
+    firstMessageId: messageIds.length > 0 ? messageIds[0] : null,
+    lastMessageId: messageIds.length > 0 ? messageIds[messageIds.length - 1] : null,
+    messageCount: messageIds.length
   }
 }
 
@@ -581,5 +601,14 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
     // cleanup for isolation
     store.dispatch(resetAllResidentRegistry())
     expect(getResidentDiagnosticsFromState(store.getState()).entryCount).toBe(0)
+  })
+
+  it('loadSegments preserves Main authority order (sortOrder then id)', () => {
+    const topicId = 't-authority-order'
+    const segB = makeOrderedSegment('seg-b', topicId, 1, ['m2'])
+    const segA = makeOrderedSegment('seg-a', topicId, 0, ['m1'])
+    // Input in reverse Main order; slice must still store authority order.
+    store.dispatch(loadSegments([segB, segA]))
+    expect((store.getState() as any).topicSegments.segmentsByTopic[topicId]).toEqual(['seg-a', 'seg-b'])
   })
 })

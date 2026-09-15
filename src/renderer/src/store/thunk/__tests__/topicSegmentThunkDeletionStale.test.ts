@@ -38,9 +38,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'Old',
         messageIds: ['m1'],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: 'm1',
+        lastMessageId: 'm1',
+        messageCount: 1
       }
     ]
 
@@ -90,9 +93,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'Fresh',
         messageIds: ['m2'],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: 'm2',
+        lastMessageId: 'm2',
+        messageCount: 1
       }
     ]
     mockListSegments.mockResolvedValue(segments as any)
@@ -121,9 +127,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'PerTopic',
         messageIds: [],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: null,
+        lastMessageId: null,
+        messageCount: 0
       }
     ]
     let resolveList: (v: typeof segments) => void
@@ -158,9 +167,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'A',
         messageIds: [],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: null,
+        lastMessageId: null,
+        messageCount: 0
       }
     ]
     const segmentsB = [
@@ -169,9 +181,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'B',
         messageIds: [],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: null,
+        lastMessageId: null,
+        messageCount: 0
       }
     ]
     let resolveA: (v: typeof segmentsA) => void
@@ -223,9 +238,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'Solo',
         messageIds: [],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: null,
+        lastMessageId: null,
+        messageCount: 0
       }
     ]
     mockListSegments.mockResolvedValue(segments as any)
@@ -258,9 +276,12 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         topicId,
         name: 'Gen',
         messageIds: [],
-        color: undefined,
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z'
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: null,
+        lastMessageId: null,
+        messageCount: 0
       }
     ]
     let resolveList: (v: typeof segments) => void
@@ -298,10 +319,13 @@ describe('loadTopicSegmentsThunk stale discard', () => {
       id: 'seg-standalone-blocker',
       topicId,
       name: 'SoloBlocker',
-      messageIds: [],
-      color: undefined,
+      messageIds: ['m-blocker-1'],
       createdAt: '2026-01-01T00:00:00.000Z',
-      updatedAt: '2026-01-01T00:00:00.000Z'
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-blocker-1',
+      lastMessageId: 'm-blocker-1',
+      messageCount: 1
     }
     mockListSegments.mockResolvedValue([segStandalone] as any)
 
@@ -335,10 +359,13 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         id: 'seg-joint-1',
         topicId,
         name: 'Joint',
-        messageIds: [],
-        color: undefined,
+        messageIds: ['m-joint-1'],
         createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        sortOrder: 0,
+        firstMessageId: 'm-joint-1',
+        lastMessageId: 'm-joint-1',
+        messageCount: 1
       }
     ]
     store.dispatch(publishResidentComplete({ topicId, generation: gen1, windowResponse, segments: jointSegments }))
@@ -418,10 +445,13 @@ describe('loadTopicSegmentsThunk stale discard', () => {
         id: 'seg-joint-2',
         topicId,
         name: 'Joint2',
-        messageIds: [],
-        color: undefined,
+        messageIds: ['m-joint-2'],
         createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        sortOrder: 0,
+        firstMessageId: 'm-joint-2',
+        lastMessageId: 'm-joint-2',
+        messageCount: 1
       }
     ]
     store.dispatch(

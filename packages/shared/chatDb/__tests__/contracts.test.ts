@@ -1633,7 +1633,18 @@ describe('validateChatDbResult — valid success envelopes', () => {
             }
           ],
           segmentSnapshots: [
-            { id: 's1', topicId: 't1', name: null, messageIds: ['u1', 'u2'], createdAt: null, updatedAt: null }
+            {
+              id: 's1',
+              topicId: 't1',
+              name: null,
+              messageIds: ['u1', 'u2'],
+              createdAt: null,
+              updatedAt: null,
+              sortOrder: 0,
+              firstMessageId: 'u1',
+              lastMessageId: 'u2',
+              messageCount: 2
+            }
           ]
         }
       })
@@ -1803,7 +1814,18 @@ describe('validateChatDbResult — valid success envelopes', () => {
   })
 
   it('delete-messages-with-dependents: rejects duplicate segment ids', () => {
-    const seg = { id: 's1', topicId: 't1', name: null, messageIds: [], createdAt: null, updatedAt: null }
+    const seg = {
+      id: 's1',
+      topicId: 't1',
+      name: null,
+      messageIds: [],
+      createdAt: null,
+      updatedAt: null,
+      sortOrder: 0,
+      firstMessageId: null,
+      lastMessageId: null,
+      messageCount: 0
+    }
     expect(() =>
       validateChatDbResult('chatdb:delete-messages-with-dependents', {
         ok: true,
@@ -1825,7 +1847,18 @@ describe('validateChatDbResult — valid success envelopes', () => {
   })
 
   it('delete-messages-with-dependents: rejects duplicate segment snapshot ids and unknown segment keys', () => {
-    const seg = { id: 's1', topicId: 't1', name: null, messageIds: ['m1'], createdAt: null, updatedAt: null }
+    const seg = {
+      id: 's1',
+      topicId: 't1',
+      name: null,
+      messageIds: ['m1'],
+      createdAt: null,
+      updatedAt: null,
+      sortOrder: 0,
+      firstMessageId: 'm1',
+      lastMessageId: 'm1',
+      messageCount: 1
+    }
     const base = {
       affectedFileIds: [],
       remainingReferenceCounts: {},
@@ -1907,7 +1940,20 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:list-segments', {
         ok: true,
-        value: [{ id: 'seg-1', topicId: 't1', name: 'Seg', messageIds: ['m1', 'm2'], createdAt: null, updatedAt: null }]
+        value: [
+          {
+            id: 'seg-1',
+            topicId: 't1',
+            name: 'Seg',
+            messageIds: ['m1', 'm2'],
+            createdAt: null,
+            updatedAt: null,
+            sortOrder: 0,
+            firstMessageId: 'm1',
+            lastMessageId: 'm2',
+            messageCount: 2
+          }
+        ]
       })
     ).not.toThrow()
   })
@@ -1923,7 +1969,11 @@ describe('validateChatDbResult — valid success envelopes', () => {
           messageIds: ['m1'],
           color: '#ff0000',
           createdAt: null,
-          updatedAt: null
+          updatedAt: null,
+          sortOrder: 1,
+          firstMessageId: 'm1',
+          lastMessageId: 'm1',
+          messageCount: 1
         }
       })
     ).not.toThrow()
@@ -1933,7 +1983,18 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:update-segment-metadata', {
         ok: true,
-        value: { id: 'seg-1', topicId: 't1', name: 'Updated', messageIds: [], createdAt: null, updatedAt: null }
+        value: {
+          id: 'seg-1',
+          topicId: 't1',
+          name: 'Updated',
+          messageIds: [],
+          createdAt: null,
+          updatedAt: null,
+          sortOrder: 0,
+          firstMessageId: null,
+          lastMessageId: null,
+          messageCount: 0
+        }
       })
     ).not.toThrow()
   })
@@ -1946,13 +2007,133 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() =>
       validateChatDbResult('chatdb:replace-segment-membership', {
         ok: true,
-        value: { id: 'seg-1', topicId: 't1', name: 'Seg', messageIds: ['m1'], createdAt: null, updatedAt: null }
+        value: {
+          id: 'seg-1',
+          topicId: 't1',
+          name: 'Seg',
+          messageIds: ['m1'],
+          createdAt: null,
+          updatedAt: null,
+          sortOrder: 0,
+          firstMessageId: 'm1',
+          lastMessageId: 'm1',
+          messageCount: 1
+        }
       })
     ).not.toThrow()
   })
 
   it('replace-segment-membership: null (deleted)', () => {
     expect(() => validateChatDbResult('chatdb:replace-segment-membership', { ok: true, value: null })).not.toThrow()
+  })
+
+  it('segment authority catalog: accepts empty null/null/0 and omits optional color', () => {
+    const emptyWire = {
+      id: 'seg-e',
+      topicId: 't1',
+      name: null,
+      messageIds: [],
+      createdAt: null,
+      updatedAt: null,
+      sortOrder: 0,
+      firstMessageId: null,
+      lastMessageId: null,
+      messageCount: 0
+    }
+    expect(() => validateChatDbResult('chatdb:upsert-segment', { ok: true, value: emptyWire })).not.toThrow()
+    expect('color' in emptyWire).toBe(false)
+    expect(JSON.parse(JSON.stringify(emptyWire))).toEqual(emptyWire)
+  })
+
+  it('segment authority catalog: rejects missing derived fields', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: { id: 'seg-1', topicId: 't1', name: 'Seg', messageIds: ['m1'], createdAt: null, updatedAt: null }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('segment authority catalog: rejects count/bounds mismatch', () => {
+    const base = {
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['m1', 'm2'],
+      createdAt: null,
+      updatedAt: null,
+      sortOrder: 0
+    }
+    // count mismatch
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: { ...base, firstMessageId: 'm1', lastMessageId: 'm2', messageCount: 1 }
+      })
+    ).toThrow(ValidationError)
+    // first not endpoint
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: { ...base, firstMessageId: 'm2', lastMessageId: 'm2', messageCount: 2 }
+      })
+    ).toThrow(ValidationError)
+    // last not endpoint
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: { ...base, firstMessageId: 'm1', lastMessageId: 'm1', messageCount: 2 }
+      })
+    ).toThrow(ValidationError)
+    // non-null bounds on empty
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: {
+          id: 'seg-1',
+          topicId: 't1',
+          name: 'Seg',
+          messageIds: [],
+          createdAt: null,
+          updatedAt: null,
+          sortOrder: 0,
+          firstMessageId: 'm1',
+          lastMessageId: null,
+          messageCount: 0
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('segment authority catalog: rejects negative/non-integer sortOrder and unknown keys', () => {
+    const good = {
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['m1'],
+      createdAt: null,
+      updatedAt: null,
+      firstMessageId: 'm1',
+      lastMessageId: 'm1',
+      messageCount: 1
+    }
+    for (const bad of [-1, 1.5, Number.NaN, '0' as unknown as number]) {
+      expect(() =>
+        validateChatDbResult('chatdb:upsert-segment', { ok: true, value: { ...good, sortOrder: bad } })
+      ).toThrow(ValidationError)
+    }
+    expect(() =>
+      validateChatDbResult('chatdb:upsert-segment', {
+        ok: true,
+        value: { ...good, sortOrder: 0, extra: 1 }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:list-segments', {
+        ok: true,
+        value: [{ ...good, sortOrder: 0, extra: 1 }]
+      })
+    ).toThrow(ValidationError)
   })
 
   // Phase 5.1A: message reorder

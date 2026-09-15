@@ -15,6 +15,7 @@ import {
   assertNoSortOrderChange,
   assignDenseOrders,
   buildColumnMap,
+  clampIndex,
   found,
   fromDrizzleResult,
   type GetResult,
@@ -164,6 +165,36 @@ export class TopicSegmentsRepository {
         .values(values as any)
         .run()
       const ids = loadOrderedIds(tx, topicSegments, topicSegments.topicId, data.topicId)
+      assignDenseOrders(tx, topicSegments, ids)
+      return fromDrizzleResult<TopicSegmentData>(
+        tx.select().from(topicSegments).where(eq(topicSegments.id, data.id)).get() ?? ({} as any),
+        'topic_segments',
+        data.id
+      )
+    })
+  }
+
+  /**
+   * Create a segment at a dense catalog index, shifting siblings atomically.
+   *
+   * Preserves historical conversation-position ordering for new segments:
+   * the caller derives `targetIndex` from authority message positions, and
+   * this primitive splices the new id into the ordered sibling list then
+   * assigns dense 0..n-1 orders in the same transaction. No global
+   * recompute of existing catalog order beyond the shift. Target is clamped
+   * to [0, siblingCount]; ties are stable by existing order (no UUID order).
+   */
+  createAtCatalogIndex(data: TopicSegmentData, targetIndex: number): TopicSegmentData {
+    this.assertTopicExists(data.topicId)
+    return this.db.transaction((tx) => {
+      const values = toInsertValues(data)
+      tx.insert(topicSegments)
+        .values(values as any)
+        .run()
+      let ids = loadOrderedIds(tx, topicSegments, topicSegments.topicId, data.topicId)
+      ids = ids.filter((id) => id !== data.id)
+      const clamped = clampIndex(targetIndex, ids.length)
+      ids.splice(clamped, 0, data.id)
       assignDenseOrders(tx, topicSegments, ids)
       return fromDrizzleResult<TopicSegmentData>(
         tx.select().from(topicSegments).where(eq(topicSegments.id, data.id)).get() ?? ({} as any),

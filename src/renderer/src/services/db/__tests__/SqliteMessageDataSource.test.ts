@@ -375,10 +375,14 @@ describe('SqliteMessageDataSource', () => {
         messageIds: ['m1'],
         color: '#ff0000',
         createdAt: null,
-        updatedAt: null
+        updatedAt: null,
+        sortOrder: 0,
+        firstMessageId: 'm1',
+        lastMessageId: 'm1',
+        messageCount: 1
       }
       api.upsertSegment.mockResolvedValue(successResult(segWire))
-      await ds.upsertSegment('seg-1', 't1', 'Seg', ['m1'], '#ff0000')
+      const wire = await ds.upsertSegment('seg-1', 't1', 'Seg', ['m1'], '#ff0000')
       expect(api.upsertSegment).toHaveBeenCalledOnce()
       const req = api.upsertSegment.mock.calls[0][0]
       expect(req.segmentId).toBe('seg-1')
@@ -386,10 +390,25 @@ describe('SqliteMessageDataSource', () => {
       expect(req.name).toBe('Seg')
       expect(req.messageIds).toEqual(['m1'])
       expect(req.color).toBe('#ff0000')
+      // Datasource passes through the enriched authority wire unchanged.
+      expect(wire.sortOrder).toBe(0)
+      expect(wire.firstMessageId).toBe('m1')
+      expect(wire.messageCount).toBe(1)
     })
 
     it('updateSegmentMetadata calls api.updateSegmentMetadata', async () => {
-      const segWire = { id: 'seg-1', topicId: 't1', name: 'Updated', messageIds: [], createdAt: null, updatedAt: null }
+      const segWire = {
+        id: 'seg-1',
+        topicId: 't1',
+        name: 'Updated',
+        messageIds: [],
+        createdAt: null,
+        updatedAt: null,
+        sortOrder: 0,
+        firstMessageId: null,
+        lastMessageId: null,
+        messageCount: 0
+      }
       api.updateSegmentMetadata.mockResolvedValue(successResult(segWire))
       await ds.updateSegmentMetadata('seg-1', 'Updated', '#00ff00')
       expect(api.updateSegmentMetadata).toHaveBeenCalledOnce()
@@ -413,7 +432,11 @@ describe('SqliteMessageDataSource', () => {
         name: 'Seg',
         messageIds: ['m1', 'm2'],
         createdAt: null,
-        updatedAt: null
+        updatedAt: null,
+        sortOrder: 0,
+        firstMessageId: 'm1',
+        lastMessageId: 'm2',
+        messageCount: 2
       }
       api.replaceSegmentMembership.mockResolvedValue(successResult(segWire))
       await ds.replaceSegmentMembership('seg-1', ['m1', 'm2'])

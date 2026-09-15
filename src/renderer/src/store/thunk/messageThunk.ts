@@ -886,15 +886,24 @@ export function buildDeleteDependentsUndoParts(
     }
   })
   const now = new Date().toISOString()
-  const segmentSnapshots: TopicSegment[] = response.segmentSnapshots.map((wire) => ({
-    id: wire.id,
-    topicId: wire.topicId,
-    name: wire.name ?? '',
-    color: wire.color ?? undefined,
-    messageIds: [...wire.messageIds],
-    createdAt: wire.createdAt ?? now,
-    updatedAt: wire.updatedAt ?? now
-  }))
+  const segmentSnapshots: TopicSegment[] = response.segmentSnapshots.map((wire) => {
+    const seg: TopicSegment = {
+      id: wire.id,
+      topicId: wire.topicId,
+      name: wire.name ?? '',
+      messageIds: [...wire.messageIds],
+      createdAt: wire.createdAt ?? now,
+      updatedAt: wire.updatedAt ?? now,
+      sortOrder: wire.sortOrder,
+      firstMessageId: wire.firstMessageId,
+      lastMessageId: wire.lastMessageId,
+      messageCount: wire.messageCount
+    }
+    if (typeof wire.color === 'string') {
+      seg.color = wire.color
+    }
+    return seg
+  })
   const fileReferenceDeltas: Array<{ fileId: string; delta: number }> = []
   for (const anchor of groupAnchors) {
     for (const block of anchor.blocks) {
@@ -2128,13 +2137,21 @@ export const loadTopicMessagesThunk =
         hasMoreAfter: response!.window.hasMoreAfter
       })
 
-      const segments = segmentsRaw.map((segment: any) => ({
-        ...segment,
-        name: segment.name ?? '',
-        color: segment.color ?? undefined,
-        createdAt: segment.createdAt ?? new Date().toISOString(),
-        updatedAt: segment.updatedAt ?? new Date().toISOString()
-      }))
+      const segments = segmentsRaw.map((segment: any) => {
+        // Omit the optional `color` own property unless the wire carries a
+        // legal string (never `color: undefined`); authority fields ride along via spread.
+        const { color: _omitColor, ...rest } = segment
+        const mapped: any = {
+          ...rest,
+          name: segment.name ?? '',
+          createdAt: segment.createdAt ?? new Date().toISOString(),
+          updatedAt: segment.updatedAt ?? new Date().toISOString()
+        }
+        if (typeof segment.color === 'string') {
+          mapped.color = segment.color
+        }
+        return mapped
+      })
 
       const hasRegistry = !!(getState() as any).residentRegistry
       // Retain authoritative completeness for viewport model (both joint and legacy paths)

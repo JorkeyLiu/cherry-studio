@@ -110,8 +110,13 @@ export function useEditModeContextMenuItems(topicId: string) {
       let downSegment: TopicSegment | undefined
 
       for (const seg of segments) {
-        const segFirstIdx = allMessageIds.indexOf(seg.messageIds[0])
-        const segLastIdx = allMessageIds.indexOf(seg.messageIds[seg.messageIds.length - 1])
+        // Authority endpoints drive adjacency; loaded indexes only decide
+        // whether the adjacency is currently actionable (resident).
+        const firstId = seg.firstMessageId
+        const lastId = seg.lastMessageId
+        if (firstId === null || lastId === null) continue
+        const segFirstIdx = allMessageIds.indexOf(firstId)
+        const segLastIdx = allMessageIds.indexOf(lastId)
         if (segFirstIdx === -1 || segLastIdx === -1) continue
 
         // segment 在选区上方且相邻（segment 的最后一条消息紧邻选区第一条消息之前）

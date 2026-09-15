@@ -1,12 +1,16 @@
+import { loggerService } from '@logger'
 import { createAsyncThunk } from '@reduxjs/toolkit'
 import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import { addSegment, removeSegment, replaceSegmentsForTopic, updateSegment } from '@renderer/store/topicSegment'
 import type { ClipboardSegmentSnapshot, SegmentSnapshot } from '@renderer/types/editMode'
 import type { TopicSegment } from '@renderer/types/topicSegment'
+import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 
 import type { AppDispatch, RootState } from '../index'
+
+const logger = loggerService.withContext('topicSegmentThunk')
 
 export const syncSegmentsAfterMessageDeletion = async (
   dispatch: AppDispatch,
@@ -24,9 +28,25 @@ export const syncSegmentsAfterMessageDeletion = async (
       await dbService.deleteSegment(segId)
       dispatch(removeSegment(segId))
     } else if (newMessageIds.length !== segment.messageIds.length) {
-      const now = new Date().toISOString()
-      await dbService.replaceSegmentMembership(segId, newMessageIds)
-      dispatch(updateSegment({ id: segId, changes: { messageIds: newMessageIds, updatedAt: now } }))
+      // DB-first enriched: converge from the Main wire authority fields.
+      const wire = await dbService.replaceSegmentMembership(segId, newMessageIds)
+      if (wire === null) {
+        dispatch(removeSegment(segId))
+      } else {
+        dispatch(
+          updateSegment({
+            id: segId,
+            changes: {
+              messageIds: [...wire.messageIds],
+              sortOrder: wire.sortOrder,
+              firstMessageId: wire.firstMessageId,
+              lastMessageId: wire.lastMessageId,
+              messageCount: wire.messageCount,
+              updatedAt: wire.updatedAt ?? new Date().toISOString()
+            }
+          })
+        )
+      }
     }
   }
 }
@@ -48,13 +68,24 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
     const currentApplicabilityGeneration: number =
       (getState() as any)?.residentRegistry?.entries?.[topicId]?.applicabilityGeneration ?? 0
     if (currentApplicabilityGeneration !== capturedApplicabilityGeneration) return
-    const segments = segmentsRaw.map((segment) => ({
-      ...segment,
-      name: segment.name ?? '',
-      color: segment.color ?? undefined,
-      createdAt: segment.createdAt ?? new Date().toISOString(),
-      updatedAt: segment.updatedAt ?? new Date().toISOString()
-    }))
+    const segments = segmentsRaw.map((segment) => {
+      const mapped: TopicSegment = {
+        id: segment.id,
+        topicId: segment.topicId,
+        name: segment.name ?? '',
+        messageIds: [...segment.messageIds],
+        createdAt: segment.createdAt ?? new Date().toISOString(),
+        updatedAt: segment.updatedAt ?? new Date().toISOString(),
+        sortOrder: segment.sortOrder,
+        firstMessageId: segment.firstMessageId,
+        lastMessageId: segment.lastMessageId,
+        messageCount: segment.messageCount
+      }
+      if (typeof segment.color === 'string') {
+        mapped.color = segment.color
+      }
+      return mapped
+    })
     // Just-before-publication stale check — ensures no newer generation slipped in
     if (isDeletionStale(topicId, capturedDeletionGeneration)) return
     if (latestSegmentLoadByTopic.get(topicId) !== requestSeq) return
@@ -104,9 +135,24 @@ export const removeMessageFromSegmentsThunk = createAsyncThunk<
         await dbService.deleteSegment(segId)
         dispatch(removeSegment(segId))
       } else {
-        const now = new Date().toISOString()
-        await dbService.replaceSegmentMembership(segId, newMessageIds)
-        dispatch(updateSegment({ id: segId, changes: { messageIds: newMessageIds, updatedAt: now } }))
+        const wire = await dbService.replaceSegmentMembership(segId, newMessageIds)
+        if (wire === null) {
+          dispatch(removeSegment(segId))
+        } else {
+          dispatch(
+            updateSegment({
+              id: segId,
+              changes: {
+                messageIds: [...wire.messageIds],
+                sortOrder: wire.sortOrder,
+                firstMessageId: wire.firstMessageId,
+                lastMessageId: wire.lastMessageId,
+                messageCount: wire.messageCount,
+                updatedAt: wire.updatedAt ?? new Date().toISOString()
+              }
+            })
+          )
+        }
       }
     }
   }
@@ -140,6 +186,11 @@ export const collectSegmentSnapshots = (
  * For each snapshot:
  *   - If the segment still exists, restore its original messageIds.
  *   - If the segment was removed (empty after deletion), recreate it from the snapshot.
+ * Batch convergence: all Main mutations first, then exactly one
+ * list+replace per affected topic so shifted siblings converge. The single
+ * upsert/replace wires cannot carry siblings. listSegments failure never
+ * rolls back the successful Main mutations: fall back to the per-wire
+ * add/update/remove so restored segments stay visible.
  */
 export const restoreSegmentsAfterUndo = async (
   dispatch: AppDispatch,
@@ -148,29 +199,57 @@ export const restoreSegmentsAfterUndo = async (
 ): Promise<void> => {
   if (!segmentSnapshots || segmentSnapshots.length === 0) return
 
+  const affectedTopics = new Set<string>()
+  const fallbackRemoves: { topicId: string; id: string }[] = []
+  const fallbackUpdates: { id: string; changes: Partial<TopicSegment>; topicId: string }[] = []
+  const fallbackAdds: { segment: TopicSegment; topicId: string }[] = []
+
   for (const snap of segmentSnapshots) {
+    affectedTopics.add(snap.topicId)
     const state = getState()
     const existingSegment = state.topicSegments.segments.entities[snap.id]
 
     if (existingSegment) {
-      // Segment still exists — restore original messageIds
-      const now = new Date().toISOString()
-      await dbService.replaceSegmentMembership(snap.id, snap.messageIds)
-      dispatch(updateSegment({ id: snap.id, changes: { messageIds: snap.messageIds, updatedAt: now } }))
-    } else {
-      // Segment was removed (all messages were deleted) — recreate from snapshot
-      const restoredSegment: TopicSegment = {
-        ...snap,
-        updatedAt: new Date().toISOString()
+      // Segment still exists — restore original messageIds.
+      const wire = await dbService.replaceSegmentMembership(snap.id, snap.messageIds)
+      if (wire === null) {
+        fallbackRemoves.push({ topicId: snap.topicId, id: snap.id })
+      } else {
+        fallbackUpdates.push({
+          topicId: snap.topicId,
+          id: snap.id,
+          changes: {
+            messageIds: [...wire.messageIds],
+            sortOrder: wire.sortOrder,
+            firstMessageId: wire.firstMessageId,
+            lastMessageId: wire.lastMessageId,
+            messageCount: wire.messageCount,
+            updatedAt: wire.updatedAt ?? new Date().toISOString()
+          }
+        })
       }
-      await dbService.upsertSegment(
-        restoredSegment.id,
-        restoredSegment.topicId,
-        restoredSegment.name,
-        restoredSegment.messageIds,
-        restoredSegment.color
-      )
-      dispatch(addSegment(restoredSegment))
+    } else {
+      // Segment was removed (all messages were deleted) — recreate from snapshot.
+      // Authority order/boundaries come from Main, not the snapshot guess.
+      const wire = await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color)
+      const restoredSegment = mapSegmentWireToTopicSegment(wire)
+      // Preserve snapshot createdAt when Main carries none (fallback path only;
+      // the converged list carries authority createdAt on success).
+      if (wire.createdAt == null) restoredSegment.createdAt = snap.createdAt
+      if (wire.name == null) restoredSegment.name = snap.name
+      fallbackAdds.push({ topicId: snap.topicId, segment: restoredSegment })
+    }
+  }
+
+  for (const topicId of affectedTopics) {
+    try {
+      await convergeTopicSegmentCatalog(dispatch, topicId)
+    } catch (error) {
+      logger.warn('[restoreSegmentsAfterUndo] catalog convergence failed, keeping per-wire fallback', error as Error)
+      for (const r of fallbackRemoves.filter((f) => f.topicId === topicId)) dispatch(removeSegment(r.id))
+      for (const u of fallbackUpdates.filter((f) => f.topicId === topicId))
+        dispatch(updateSegment({ id: u.id, changes: u.changes }))
+      for (const a of fallbackAdds.filter((f) => f.topicId === topicId)) dispatch(addSegment(a.segment))
     }
   }
 }
@@ -223,10 +302,28 @@ export const deleteSegmentsBySnapshots = async (dispatch: AppDispatch, snapshots
 /**
  * Restore target segments from snapshots to DB and Redux.
  * Used by redo to re-create segments that were created during paste.
+ * Batch convergence: all Main upserts first, then exactly one list+replace
+ * per affected topic. listSegments failure never rolls back the successful
+ * Main mutations: fall back to per-wire adds.
  */
 export const restoreTargetSegments = async (dispatch: AppDispatch, snapshots: TopicSegment[]): Promise<void> => {
+  if (!snapshots || snapshots.length === 0) return
+  const affectedTopics = new Set<string>()
+  const fallbackAdds: { segment: TopicSegment; topicId: string }[] = []
   for (const snap of snapshots) {
-    await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color)
-    dispatch(addSegment(snap))
+    affectedTopics.add(snap.topicId)
+    const wire = await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color)
+    const restored = mapSegmentWireToTopicSegment(wire)
+    if (wire.createdAt == null) restored.createdAt = snap.createdAt
+    if (wire.name == null) restored.name = snap.name
+    fallbackAdds.push({ topicId: snap.topicId, segment: restored })
+  }
+  for (const topicId of affectedTopics) {
+    try {
+      await convergeTopicSegmentCatalog(dispatch, topicId)
+    } catch (error) {
+      logger.warn('[restoreTargetSegments] catalog convergence failed, keeping per-wire fallback', error as Error)
+      for (const a of fallbackAdds.filter((f) => f.topicId === topicId)) dispatch(addSegment(a.segment))
+    }
   }
 }

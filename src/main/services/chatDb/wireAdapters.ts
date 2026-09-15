@@ -403,7 +403,11 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
 
 /**
  * Convert a TopicSegmentData + ordered messageIds to a SegmentWire.
- * Color is bridged from/to overflow.
+ * Color is bridged from/to overflow. Authority catalog derivation:
+ * sortOrder comes from TopicSegmentData.sortOrder; first/last/count are
+ * derived from the ordered complete membership (messageIds[0], last,
+ * length). Empty membership (deleted-before-cleanup readback) yields
+ * null/null/0 consistently and should not normally survive.
  *
  * JSON-safety: the optional `color` own property is emitted ONLY when
  * overflow carries a legal string. When absent/null/non-string it is fully
@@ -419,17 +423,24 @@ export function segmentToWire(
     name: string | null
     createdAt: string | null
     updatedAt: string | null
+    sortOrder: number
     overflow: Record<string, unknown>
   },
   messageIds: string[]
 ): SegmentWire {
+  const firstMessageId = messageIds.length > 0 ? messageIds[0] : null
+  const lastMessageId = messageIds.length > 0 ? messageIds[messageIds.length - 1] : null
   const base = {
     id: segment.id,
     topicId: segment.topicId,
     name: segment.name,
     messageIds,
     createdAt: segment.createdAt,
-    updatedAt: segment.updatedAt
+    updatedAt: segment.updatedAt,
+    sortOrder: segment.sortOrder,
+    firstMessageId,
+    lastMessageId,
+    messageCount: messageIds.length
   }
   const color = segment.overflow.color
   if (typeof color === 'string') {

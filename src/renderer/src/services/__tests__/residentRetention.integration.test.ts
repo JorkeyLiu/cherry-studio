@@ -902,6 +902,32 @@ describe('B-01..B-05 retention integration — renderer-local only (production r
   it('fail-closed: missing indexed segment entity is treated as oversized (RETENTION_MAX_BYTES+1)', () => {
     const store = buildStore()
     seedResidentTopic(store, 't-missing-seg', ['m1'])
+    // Seed helper publishes an empty segment (filtered as phantom) — publish a legal
+    // non-empty enriched segment so the index genuinely references an entity.
+    const segGen = (store.getState() as any).residentRegistry.entries['t-missing-seg'].applicabilityGeneration
+    const segNow = new Date().toISOString()
+    store.dispatch(
+      publishResidentComplete({
+        topicId: 't-missing-seg',
+        generation: segGen,
+        windowResponse: makeWindowResponse('t-missing-seg', ['m1']),
+        segments: [
+          {
+            id: 'seg-t-missing-seg',
+            topicId: 't-missing-seg',
+            name: 'S',
+            messageIds: ['m1'],
+            color: undefined,
+            createdAt: segNow,
+            updatedAt: segNow,
+            sortOrder: 0,
+            firstMessageId: 'm1',
+            lastMessageId: 'm1',
+            messageCount: 1
+          } as any
+        ]
+      } as any)
+    )
     retention.startResidentRetention(store as any)
     store.dispatch(newMessagesActions.setCurrentTopicId(null as any))
     retention.invalidateRetentionByteCache('t-missing-seg')
