@@ -40,6 +40,31 @@ describe('SqliteMessageDataSource — resolveContextClosure', () => {
     expect(mockDispatch).not.toHaveBeenCalled()
   })
 
+  it('passes detail anchor through and returns the metadata-only anchor response', async () => {
+    const anchorValue = { resolvedAnchorGroupKey: 'u2', changed: true }
+    const api = {
+      resolveContextClosure: vi.fn(async () => ({ ok: true, value: anchorValue }))
+    } as any
+    const ds = new SqliteMessageDataSource(api)
+    const res = await ds.resolveContextClosure({
+      topicId: 't1',
+      intent: 'establish',
+      contextCount: 2,
+      currentAnchorGroupKey: null,
+      detail: 'anchor'
+    })
+    expect(api.resolveContextClosure).toHaveBeenCalledWith({
+      topicId: 't1',
+      intent: 'establish',
+      contextCount: 2,
+      currentAnchorGroupKey: null,
+      detail: 'anchor'
+    })
+    expect(res).toEqual(anchorValue)
+    expect(res).not.toHaveProperty('messages')
+    expect(res).not.toHaveProperty('blocks')
+    expect(res).not.toHaveProperty('closure')
+  })
   it('throws ChatDbResultError on NOT_FOUND without dispatch', async () => {
     const api = {
       resolveContextClosure: vi.fn(async () => ({

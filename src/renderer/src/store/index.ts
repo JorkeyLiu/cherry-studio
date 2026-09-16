@@ -157,6 +157,62 @@ export function getSegmentAffectedTopicIds(state: any, action: any): string[] | 
   return null
 }
 
+function isTopicSegmentFieldEqual(a: any, b: any): boolean {
+  if (a === b) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false
+  if (a.id !== b.id || a.topicId !== b.topicId) return false
+  if (a.name !== b.name || (a.color ?? null) !== (b.color ?? null)) return false
+  if (a.sortOrder !== b.sortOrder || a.firstMessageId !== b.firstMessageId) return false
+  if (a.lastMessageId !== b.lastMessageId || a.messageCount !== b.messageCount) return false
+  const aIds = Array.isArray(a.messageIds) ? a.messageIds : []
+  const bIds = Array.isArray(b.messageIds) ? b.messageIds : []
+  if (aIds.length !== bIds.length) return false
+  for (let i = 0; i < aIds.length; i++) {
+    if (aIds[i] !== bIds[i]) return false
+  }
+  return true
+}
+
+/**
+ * Joint follow-up dedup: true when the incoming segment catalog is field-identical
+ * (order-sensitive, authority fields + membership) to the current projection for
+ * the topic. Order follows the stored authority order; incoming is compared in the
+ * authority (sortOrder, id) order the slice would store.
+ */
+function areJointSegmentsIdentical(state: any, topicId: string, incoming: any[]): boolean {
+  try {
+    const ids: string[] = state?.topicSegments?.segmentsByTopic?.[topicId] ?? []
+    const entities = state?.topicSegments?.segments?.entities ?? {}
+    const current = ids.map((id) => entities[id]).filter(Boolean)
+    const orderedIncoming = [...incoming].sort((x: any, y: any) => {
+      const ax = typeof x?.sortOrder === 'number' && Number.isFinite(x.sortOrder) ? x.sortOrder : Infinity
+      const bx = typeof y?.sortOrder === 'number' && Number.isFinite(y.sortOrder) ? y.sortOrder : Infinity
+      if (ax !== bx) return ax - bx
+      const ai = typeof x?.id === 'string' ? x.id : ''
+      const bi = typeof y?.id === 'string' ? y.id : ''
+      return ai < bi ? -1 : ai > bi ? 1 : 0
+    })
+    // Empty readbacks never store phantoms — both sides filter empties before comparing.
+    // Mirrors topicSegment isEmptySegment (messageCount/messageIds/first/last).
+    const isEmpty = (s: any) =>
+      !s ||
+      s.messageCount === 0 ||
+      !Array.isArray(s.messageIds) ||
+      s.messageIds.length === 0 ||
+      s.firstMessageId === null ||
+      s.lastMessageId === null
+    const currentNonEmpty = current.filter((s) => !isEmpty(s))
+    const incomingNonEmpty = orderedIncoming.filter((s) => !isEmpty(s))
+    if (currentNonEmpty.length !== incomingNonEmpty.length) return false
+    for (let i = 0; i < currentNonEmpty.length; i++) {
+      if (!isTopicSegmentFieldEqual(currentNonEmpty[i], incomingNonEmpty[i])) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === JOINT_PUBLISH_COMPLETE) {
     if (shouldDiscardJointPublish(state, action.payload)) {
@@ -167,6 +223,8 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
       const windowResponse = action.payload?.windowResponse
       const topicId = action.payload?.topicId as string
       if (windowResponse?.window) {
+        // Single atomic completeness commit for the joint publication.
+        // setLatestWindowCompleteness skips identical values — no double commit.
         setLatestWindowCompleteness(topicId, {
           hasMoreBefore: !!windowResponse.window.hasMoreBefore,
           hasMoreAfter: !!windowResponse.window.hasMoreAfter
@@ -174,6 +232,22 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
       }
     } catch {
       // best-effort window completeness; never break dispatch
+    }
+  }
+
+  // Local paired joint follow-up carrying segments identical to the just-published
+  // joint state must not commit a second local segment state. The follow-up still
+  // flows through the StoreSync middleware (which broadcasts after next), so other
+  // windows receive it as fromSync; only the originating window skips the local apply.
+  if (
+    action?.type === 'topicSegments/replaceSegmentsForTopic' &&
+    !action?.meta?.fromSync &&
+    !!action?.meta?.isJointFollowUp
+  ) {
+    const tid = action?.payload?.topicId
+    const incoming = action?.payload?.segments
+    if (typeof tid === 'string' && Array.isArray(incoming) && areJointSegmentsIdentical(state, tid, incoming)) {
+      return state as any
     }
   }
 

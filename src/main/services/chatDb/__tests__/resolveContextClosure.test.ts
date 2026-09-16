@@ -13,6 +13,7 @@ vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 const { mockCleanTopic } = vi.hoisted(() => ({ mockCleanTopic: vi.fn() }))
 vi.mock('../../SpanCacheService', () => ({ spanCacheService: { cleanTopic: mockCleanTopic } }))
 
+import type { ResolveContextClosureResponse } from '@shared/chatDb'
 import { ERR_NOT_FOUND, ERR_VALIDATION, isSuccess, validateChatDbResult } from '@shared/chatDb'
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
@@ -112,7 +113,7 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
       currentAnchorGroupKey: 'u1'
     })
     expect(res.ok).toBe(true)
-    const v = okValue(res)
+    const v = okValue(res) as unknown as ResolveContextClosureResponse
     expect(v.resolvedAnchorGroupKey).toBe('u1')
     expect(v.changed).toBe(false)
     expect(v.closure.anchorGroupKey).toBe('u1')
@@ -131,7 +132,7 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
       contextCount: 2,
       currentAnchorGroupKey: 'ghost'
     })
-    const v = okValue(res)
+    const v = okValue(res) as unknown as ResolveContextClosureResponse
     expect(v.resolvedAnchorGroupKey).toBe('u2')
     expect(v.changed).toBe(true)
     expect(v.closure.selectedTurnCount).toBe(2)
@@ -252,7 +253,7 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
       currentAnchorGroupKey: 'u1'
     })
     expect(empty.ok).toBe(true)
-    const v = okValue(empty)
+    const v = okValue(empty) as unknown as ResolveContextClosureResponse
     expect(v.resolvedAnchorGroupKey).toBeNull()
     expect(v.changed).toBe(true)
     expect(v.closure.totalTurnCount).toBe(0)
@@ -265,7 +266,9 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
   it('same-snapshot closure counts and boundary match the resolved anchor', () => {
     const topicId = `t-${uid()}`
     seedTurns(agg, topicId, ['u1', 'u2', 'u3'])
-    const v = okValue(agg.resolveContextClosure({ topicId, intent: 'establish', contextCount: 2 }))
+    const v = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'establish', contextCount: 2 })
+    ) as unknown as ResolveContextClosureResponse
     expect(v.closure.totalTurnCount).toBe(3)
     expect(v.closure.selectedTurnCount).toBe(2)
     expect(v.closure.boundaryMessageId).toBe(v.closure.firstMessageId)

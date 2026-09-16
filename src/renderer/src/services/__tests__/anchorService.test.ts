@@ -340,22 +340,23 @@ describe('ensureTopicAnchorEstablished', () => {
 
   const resolverSuccess = (resolvedAnchorGroupKey: string | null) =>
     ({
-      messages: [],
-      blocks: [],
-      closure: {
-        completeness: 'context-closure',
-        topicId,
-        anchorGroupKey: resolvedAnchorGroupKey,
-        firstMessageId: resolvedAnchorGroupKey ? 'm1' : null,
-        lastMessageId: resolvedAnchorGroupKey ? 'm1' : null,
-        returnedCount: resolvedAnchorGroupKey ? 1 : 0,
-        totalTurnCount: resolvedAnchorGroupKey ? 1 : 0,
-        selectedTurnCount: resolvedAnchorGroupKey ? 1 : 0,
-        boundaryMessageId: null
-      },
       resolvedAnchorGroupKey,
       changed: true
     }) as any
+
+  it('requests the metadata-only anchor detail for establishment', async () => {
+    resolveContextClosureMock.mockResolvedValueOnce(resolverSuccess('u2'))
+    const getState = makeGetState({})
+    const dispatch = vi.fn()
+    await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
+    expect(resolveContextClosureMock).toHaveBeenCalledWith({
+      topicId,
+      intent: 'establish',
+      contextCount: 2,
+      currentAnchorGroupKey: null,
+      detail: 'anchor'
+    })
+  })
 
   it('establishes the resolver anchor for a topic with no anchor', async () => {
     resolveContextClosureMock.mockResolvedValueOnce(resolverSuccess('u2'))
@@ -366,7 +367,8 @@ describe('ensureTopicAnchorEstablished', () => {
       topicId,
       intent: 'establish',
       contextCount: 2,
-      currentAnchorGroupKey: null
+      currentAnchorGroupKey: null,
+      detail: 'anchor'
     })
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
@@ -386,7 +388,8 @@ describe('ensureTopicAnchorEstablished', () => {
       topicId,
       intent: 'establish',
       contextCount: 2,
-      currentAnchorGroupKey: 'u1'
+      currentAnchorGroupKey: 'u1',
+      detail: 'anchor'
     })
     expect(updateAssistantSettings).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
@@ -508,7 +511,8 @@ describe('ensureTopicAnchorEstablished', () => {
       topicId,
       intent: 'establish',
       contextCount: 2,
-      currentAnchorGroupKey: 'msg-00000'
+      currentAnchorGroupKey: 'msg-00000',
+      detail: 'anchor'
     })
     expect(selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(buildContextTurnsSpy).not.toHaveBeenCalled()

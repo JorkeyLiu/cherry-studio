@@ -94,8 +94,10 @@ import type {
   ResetAssistantTopicsResponse,
   ResetMessagesForResendRequest,
   ResetMessagesForResendResponse,
+  ResolveContextClosureAnchorResponse,
   ResolveContextClosureRequest,
   ResolveContextClosureResponse,
+  ResolveContextClosureResult,
   RestoreTopicRequest,
   RestoreTopicResponse,
   SearchMessagesRequest,
@@ -136,7 +138,7 @@ export interface ChatDbApi {
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<ChatDbResult<FetchMessagesWindowResponse>>
   fetchAnswerGroup?(request: FetchAnswerGroupRequest): Promise<ChatDbResult<FetchAnswerGroupResponse>>
   fetchContextClosure?(request: FetchContextClosureRequest): Promise<ChatDbResult<FetchContextClosureResponse>>
-  resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ChatDbResult<ResolveContextClosureResponse>>
+  resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ChatDbResult<ResolveContextClosureResult>>
   fetchWholeTopicSnapshot?(
     request: FetchWholeTopicSnapshotRequest
   ): Promise<ChatDbResult<FetchWholeTopicSnapshotResponse>>
@@ -1058,19 +1060,26 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * dispatches nothing — the caller persists only `resolvedAnchorGroupKey`
    * with stale guards (removing the key on null). Missing topic/target throws
    * ChatDbResultError (NOT_FOUND); transport rejection propagates unchanged.
+   * With `detail: 'anchor'` (establish only) Main returns the metadata-only
+   * anchor response with no messages/blocks/closure hydration.
    */
-  async resolveContextClosure(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResponse> {
+  async resolveContextClosure(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResult> {
     if (!this.api.resolveContextClosure) {
       throw new Error('ChatDb API unavailable: resolve-context-closure not exposed')
     }
     const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as ResolveContextClosureRequest
     const result = unwrap(await this.api.resolveContextClosure(wireRequest))
+    if (request.detail === 'anchor') {
+      const anchor = result as unknown as ResolveContextClosureAnchorResponse
+      return { resolvedAnchorGroupKey: anchor.resolvedAnchorGroupKey, changed: anchor.changed }
+    }
+    const closure = result as unknown as ResolveContextClosureResponse
     return {
-      messages: result.messages as unknown as ResolveContextClosureResponse['messages'],
-      blocks: result.blocks as unknown as ResolveContextClosureResponse['blocks'],
-      closure: result.closure,
-      resolvedAnchorGroupKey: result.resolvedAnchorGroupKey,
-      changed: result.changed
+      messages: closure.messages as unknown as ResolveContextClosureResponse['messages'],
+      blocks: closure.blocks as unknown as ResolveContextClosureResponse['blocks'],
+      closure: closure.closure,
+      resolvedAnchorGroupKey: closure.resolvedAnchorGroupKey,
+      changed: closure.changed
     } as unknown as ResolveContextClosureResponse
   }
 

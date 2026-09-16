@@ -2721,6 +2721,7 @@ const RESOLVE_CONTEXT_CLOSURE_VALUE_KEYS = new Set([
   'resolvedAnchorGroupKey',
   'changed'
 ])
+const RESOLVE_CONTEXT_CLOSURE_ANCHOR_VALUE_KEYS = new Set(['resolvedAnchorGroupKey', 'changed'])
 const RESOLVE_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
   'completeness',
   'topicId',
@@ -2757,7 +2758,8 @@ const resolveContextClosureContract: ChatDbContract = {
     'messageId',
     'groupKey',
     'sourceTopicId',
-    'sourceAnchorGroupKey'
+    'sourceAnchorGroupKey',
+    'detail'
   ),
   validate(value: unknown): void {
     validateRequest(value, resolveContextClosureContract.allowedKeys)
@@ -2767,6 +2769,18 @@ const resolveContextClosureContract: ChatDbContract = {
       throw new ValidationError(
         'request.intent',
         '[chatdb:resolve-context-closure] Expected intent one of establish|reanchor-default|move|inherit'
+      )
+    }
+    if (req.detail !== undefined && req.detail !== 'closure' && req.detail !== 'anchor') {
+      throw new ValidationError(
+        'request.detail',
+        "[chatdb:resolve-context-closure] Expected detail one of 'closure'|'anchor'"
+      )
+    }
+    if (req.detail === 'anchor' && req.intent !== 'establish') {
+      throw new ValidationError(
+        'request.detail',
+        "[chatdb:resolve-context-closure] detail 'anchor' is allowed only for intent 'establish'"
       )
     }
     validateOptionalAnchorKey(req.currentAnchorGroupKey, 'request.currentAnchorGroupKey')
@@ -2844,6 +2858,34 @@ const resolveContextClosureContract: ChatDbContract = {
         )
       }
       const v = value as Record<string, unknown>
+      const isAnchorShape =
+        !('messages' in v) && !('blocks' in v) && !('closure' in v) && 'resolvedAnchorGroupKey' in v && 'changed' in v
+      if (isAnchorShape) {
+        for (const key of Object.keys(v)) {
+          if (!RESOLVE_CONTEXT_CLOSURE_ANCHOR_VALUE_KEYS.has(key)) {
+            throw new ValidationError(
+              `result.value.${key}`,
+              `[chatdb:resolve-context-closure] Unknown key in anchor success value: "${key}"`
+            )
+          }
+        }
+        if (v.resolvedAnchorGroupKey !== null && typeof v.resolvedAnchorGroupKey !== 'string') {
+          throw new ValidationError(
+            'result.value.resolvedAnchorGroupKey',
+            '[chatdb:resolve-context-closure] Expected string resolvedAnchorGroupKey or null'
+          )
+        }
+        if (typeof v.resolvedAnchorGroupKey === 'string' && v.resolvedAnchorGroupKey.length === 0) {
+          throw new ValidationError(
+            'result.value.resolvedAnchorGroupKey',
+            '[chatdb:resolve-context-closure] resolvedAnchorGroupKey must be non-empty or null'
+          )
+        }
+        if (typeof v.changed !== 'boolean') {
+          throw new ValidationError('result.value.changed', '[chatdb:resolve-context-closure] Expected boolean changed')
+        }
+        return
+      }
       for (const key of Object.keys(v)) {
         if (!RESOLVE_CONTEXT_CLOSURE_VALUE_KEYS.has(key)) {
           throw new ValidationError(

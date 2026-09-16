@@ -550,7 +550,14 @@ export function setLatestWindowCompleteness(
   topicId: string,
   completeness: { hasMoreBefore: boolean; hasMoreAfter: boolean }
 ): void {
-  latestWindowCompletenessByTopic.set(topicId, completeness)
+  const prev = latestWindowCompletenessByTopic.get(topicId)
+  if (prev && prev.hasMoreBefore === completeness.hasMoreBefore && prev.hasMoreAfter === completeness.hasMoreAfter) {
+    return
+  }
+  latestWindowCompletenessByTopic.set(topicId, {
+    hasMoreBefore: completeness.hasMoreBefore,
+    hasMoreAfter: completeness.hasMoreAfter
+  })
 }
 
 export function getLatestWindowCompleteness(

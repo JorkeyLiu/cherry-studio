@@ -18,7 +18,6 @@ import { loggerService } from '@logger'
 import { AiSdkToChunkAdapter } from '@renderer/aiCore/chunk/AiSdkToChunkAdapter'
 import { INITIAL_MESSAGES_COUNT } from '@renderer/config/constant'
 import { getModel } from '@renderer/hooks/useModel'
-import { setLatestWindowCompleteness } from '@renderer/pages/home/Messages/messageWindow'
 import { ensureTopicAnchorEstablished, transferAnchorsWithAuthorityGroupKeys } from '@renderer/services/anchorService'
 import { transformMessagesAndFetch } from '@renderer/services/ApiService'
 import type { AuthorityUserSnapshot } from '@renderer/services/ConversationService'
@@ -1798,6 +1797,31 @@ let loadTopicMessagesRequestSeq = 0
 const latestLoadTopicMessagesRequestByTopic = new Map<string, number>()
 
 /**
+ * Non-blocking anchor scheduling for topic activation.
+ *
+ * Topic activation is interactively complete once the bounded latest window +
+ * segment catalog are atomically published. Anchor establishment is a context
+ * concern (persisted settings + Main closure resolver) and must never block
+ * topic loading: it is scheduled fire-and-forget after publication. The
+ * authority resolver keeps its own in-flight dedup and post-await stale guard,
+ * so scheduling preserves repair semantics while loading settles immediately.
+ */
+function scheduleTopicAnchorEstablishment(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  assistantId: string,
+  topicId: string
+): void {
+  try {
+    void ensureTopicAnchorEstablished(dispatch, getState, assistantId, topicId).catch(() => {
+      // best-effort; anchor repair never breaks topic activation
+    })
+  } catch {
+    // best-effort; anchor repair never breaks topic activation
+  }
+}
+
+/**
  * Load messages for a topic using windowed reads (S6.1 R-02 latest).
  *
  * Cold bootstrap uses the existing renderer sizing (displayCount / INITIAL_MESSAGES_COUNT,
@@ -1872,7 +1896,7 @@ export const loadTopicMessagesThunk =
               asst.topics.some((t) => t.id === topicId)
             )
             if (cachedTopicOwner) {
-              await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+              scheduleTopicAnchorEstablishment(dispatch, getState, cachedTopicOwner.id, topicId)
             }
             return
           }
@@ -1895,7 +1919,7 @@ export const loadTopicMessagesThunk =
               asst.topics.some((t) => t.id === topicId)
             )
             if (cachedTopicOwner) {
-              await ensureTopicAnchorEstablished(dispatch, getState, cachedTopicOwner.id, topicId)
+              scheduleTopicAnchorEstablishment(dispatch, getState, cachedTopicOwner.id, topicId)
             }
             return
           }
@@ -2066,17 +2090,13 @@ export const loadTopicMessagesThunk =
       })
 
       const hasRegistry = !!(getState() as any).residentRegistry
-      // Retain authoritative completeness for viewport model (both joint and legacy paths)
-      try {
-        setLatestWindowCompleteness(topicId, {
-          hasMoreBefore: response!.window.hasMoreBefore,
-          hasMoreAfter: response!.window.hasMoreAfter
-        })
-      } catch {
-        // best-effort
-      }
+      // Authoritative window completeness is committed exactly once, atomically
+      // inside the joint publication (rootReducer side-effect). No direct
+      // setLatestWindowCompleteness here — a second identical commit is skipped.
       if (hasRegistry) {
-        // Single controlled Redux publication consumed by relevant projection slices and registry
+        // Single controlled Redux publication consumed by relevant projection slices and registry.
+        // Topic activation is interactively complete at this point: bounded latest
+        // window + segment catalog are atomically published.
         dispatch(
           publishResidentComplete({
             topicId,
@@ -2089,8 +2109,8 @@ export const loadTopicMessagesThunk =
         // updates segments, without broadcasting/syncing resident registry lifecycle state itself.
         // The joint publication atomically updates local segments via its extraReducer; a separate
         // syncable topicSegments/ action carries the same segments across windows via StoreSync.
-        // Local duplicate is idempotent (same segments) and must not invalidate the
-        // originating window's just-established residency — inbound StoreSync copies
+        // An identical follow-up commits no second local segment state (rootReducer dedups);
+        // only a differing catalog applies locally. Inbound StoreSync copies
         // (meta.fromSync:true) still invalidate receiving windows (LOCK-302).
         try {
           const syncAction = replaceSegmentsForTopic({ topicId, segments }) as any
@@ -2109,16 +2129,30 @@ export const loadTopicMessagesThunk =
         dispatch(newMessagesActions.messagesReceived({ topicId, messages } as any))
       }
 
-      const loadedState = getState()
-      const topicOwner = loadedState.assistants.assistants.find((asst) => asst.topics.some((t) => t.id === topicId))
-      if (topicOwner) {
-        await ensureTopicAnchorEstablished(dispatch, getState, topicOwner.id, topicId)
+      // Anchor/context work is scheduled after interactive completion and never blocks
+      // topic loading. Retention enforcement is likewise background best-effort.
+      try {
+        const topicOwner = getState().assistants.assistants.find((asst) => asst.topics.some((t) => t.id === topicId))
+        if (topicOwner) {
+          scheduleTopicAnchorEstablishment(dispatch, getState, topicOwner.id, topicId)
+        }
+      } catch {
+        // best-effort anchor scheduling; never break load
       }
       // Renderer-local retention enforcement after joint publication (admission while pinned).
       // Does not retain content; pinned topics are excluded via policy.
       try {
-        const { enforceRetention } = await import('@renderer/services/residentRetention')
-        enforceRetention(Date.now(), store as any)
+        void import('@renderer/services/residentRetention')
+          .then(({ enforceRetention }) => {
+            try {
+              enforceRetention(Date.now(), store as any)
+            } catch {
+              // best-effort retention enforcement; never break load
+            }
+          })
+          .catch(() => {
+            // best-effort retention enforcement; never break load
+          })
       } catch {
         // best-effort retention enforcement; never break load
       }

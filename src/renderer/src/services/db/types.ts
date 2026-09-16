@@ -16,7 +16,7 @@ import type {
   ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
   ResolveContextClosureRequest,
-  ResolveContextClosureResponse,
+  ResolveContextClosureResult,
   SelectAnswerMessageResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics
@@ -277,8 +277,9 @@ export interface MessageDataSource {
    * the same-snapshot closure. Caller-local only (never normal Redux); the
    * caller persists resolvedAnchorGroupKey with stale guards (remove on null).
    * Missing topic/target → ChatDbResultError (NOT_FOUND); ignored move roles → validation.
+   * `detail: 'anchor'` (establish only) returns the metadata-only anchor response.
    */
-  resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResponse>
+  resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResult>
 
   /**
    * Explicit short-lived whole-topic snapshot for one-shot topic exports /

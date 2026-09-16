@@ -445,7 +445,14 @@ export type ResolveContextClosureIntent = 'establish' | 'reanchor-default' | 'mo
  *
  * Existing empty target succeeds with null anchor; missing topic/target is NOT_FOUND.
  * Default index: null => 0; otherwise max(0, total - max(1, floor(N))).
+ *
+ * `detail` selects the response shape (backward-compatible, default
+ * `'closure'`): `'closure'` returns the full same-snapshot closure;
+ * `'anchor'` (allowed only for `intent: 'establish'`) returns a
+ * metadata-only anchor response with no messages/blocks/closure materialization.
  */
+export type ResolveContextClosureDetail = 'closure' | 'anchor'
+
 export interface ResolveContextClosureRequest {
   topicId: string
   intent: ResolveContextClosureIntent
@@ -455,6 +462,7 @@ export interface ResolveContextClosureRequest {
   groupKey?: string
   sourceTopicId?: string
   sourceAnchorGroupKey?: string | null
+  detail?: ResolveContextClosureDetail
 }
 
 /** Typed resolver closure metadata — same completeness as fetch-context-closure. */
@@ -489,6 +497,21 @@ export interface ResolveContextClosureResponse {
   /** True when resolved anchor differs from (currentAnchorGroupKey ?? null). */
   changed: boolean
 }
+
+/**
+ * Metadata-only anchor response for `detail: 'anchor'` establish reads.
+ * Contains only the resolved anchor + changed flag; no messages, blocks,
+ * or closure metadata are materialized, hydrated, or serialized.
+ */
+export interface ResolveContextClosureAnchorResponse {
+  /** Resolved anchor group key. Null when the target has no context turns. */
+  resolvedAnchorGroupKey: string | null
+  /** True when resolved anchor differs from (currentAnchorGroupKey ?? null). */
+  changed: boolean
+}
+
+/** Discriminated result for `chatdb:resolve-context-closure` (closure default, anchor metadata-only). */
+export type ResolveContextClosureResult = ResolveContextClosureResponse | ResolveContextClosureAnchorResponse
 
 // ---------------------------------------------------------------------------
 // Whole-topic snapshot DTOs (one-shot topic exports / knowledge)
@@ -1361,7 +1384,7 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   // Authority context-closure resolver (additive; Main never persists settings)
   'chatdb:resolve-context-closure': {
     request: ResolveContextClosureRequest
-    response: ResolveContextClosureResponse
+    response: ResolveContextClosureResult
   }
   // One-shot whole-topic snapshot READ (topic exports / knowledge; short-lived, no Redux residency)
   'chatdb:fetch-whole-topic-snapshot': {

@@ -50,7 +50,7 @@ import type {
   ResetAssistantTopicsResponse,
   ResetMessagesForResendResponse,
   ResolveContextClosureRequest,
-  ResolveContextClosureResponse,
+  ResolveContextClosureResult,
   SegmentWire,
   SelectAnswerMessageResponse,
   SemanticModelSnapshot,
@@ -111,7 +111,6 @@ export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[]
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
 export type FetchContextClosureResult = FetchContextClosureResponse
-export type ResolveContextClosureResult = ResolveContextClosureResponse
 export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
 export type FetchTopicNamingContextResult = FetchTopicNamingContextResponse
 export type FetchTopicActivityResult = FetchTopicActivityResponse
@@ -831,9 +830,17 @@ export class ChatDbAggregateService {
    * getMessageGroupSemanticKey / createMessageViewportGroupModel).
    *
    * One authoritative SQLite transaction:
-   * - Deterministic order: sort_order ASC, id ASC with id tie-break.
-   * - Stable-ID anchoring for around reads; no tuple cursors.
-   * - Complete groups returned (never split a consecutive same-askId assistant run).
+   * - Deterministic order: sort_order ASC, id ASC with id tie-break; all
+   *   seeks use the `(sort_order,id)` tuple over the existing
+   *   `messages_topic_id_sort_order_idx` — no new index/migration.
+   * - True SQL-level bounds: `latest`/`around` never call `listByTopic`.
+   *   Tail/neighbor chunk scans (`getLatestByTopic` / `listBefore` /
+   *   `listAfter`, 256 rows per chunk) plus at most one single-row
+   *   predecessor/successor probe per edge. Total rows read scale with the
+   *   returned window plus its pathological group extensions — never the
+   *   whole topic. No per-row N+1: groups resolve from bounded chunks.
+   * - Complete groups returned (never split a consecutive same-askId assistant run,
+   *   even when that run is pathologically large — the run itself is read fully).
    * - Window metadata declares intent, bounds, and hasMore flags; completeness is 'window'.
    * - Missing topic → ERR_NOT_FOUND; missing anchor → ERR_NOT_FOUND; empty topic → empty window success.
    * - hasMoreBefore/After derived from group boundaries, not raw message indexes.
@@ -846,21 +853,20 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const allMessages = repos.messages.listByTopic(request.topicId)
-        const total = allMessages.length
 
-        const computeGroups = (
-          msgs: typeof allMessages
-        ): Array<{ semanticKey: string; start: number; end: number }> => {
-          if (msgs.length === 0) return []
-          const groups: Array<{ semanticKey: string; start: number; end: number }> = []
-          const keyFor = (m: (typeof msgs)[number]): string => {
-            const askId = (m as unknown as { askId: string | null }).askId
-            if (m.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
-              return `assistant:${askId}`
-            }
-            return `message:${m.role ?? ''}:${m.id}`
+        type WindowMessage = MessageData
+        type WindowGroup = { semanticKey: string; start: number; end: number }
+        const WINDOW_SCAN_CHUNK = 256
+        const keyFor = (m: WindowMessage): string => {
+          const askId = (m as unknown as { askId: string | null }).askId
+          if (m.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
+            return `assistant:${askId}`
           }
+          return `message:${m.role ?? ''}:${m.id}`
+        }
+        const computeGroups = (msgs: WindowMessage[]): WindowGroup[] => {
+          if (msgs.length === 0) return []
+          const groups: WindowGroup[] = []
           let curKey = keyFor(msgs[0])
           let curStart = 0
           for (let i = 1; i < msgs.length; i++) {
@@ -873,114 +879,255 @@ export class ChatDbAggregateService {
           groups.push({ semanticKey: curKey, start: curStart, end: msgs.length - 1 })
           return groups
         }
-
-        let windowMessages: typeof allMessages
-        let hasMoreBefore = false
-        let hasMoreAfter = false
-        let firstMessageId: string | null = null
-        let lastMessageId: string | null = null
+        const buildWindowResponse = (
+          windowMessages: WindowMessage[],
+          meta: {
+            kind: 'latest' | 'around'
+            anchorMessageId: string | null
+            requested: { limit?: number; before?: number; after?: number }
+            hasMoreBefore: boolean
+            hasMoreAfter: boolean
+          }
+        ): FetchMessagesWindowResponse => {
+          const firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
+          const lastMessageId = windowMessages.length > 0 ? windowMessages[windowMessages.length - 1].id : null
+          const ids = windowMessages.map((m) => m.id)
+          const blockDataMap = repos.blocks.listByMessages(ids)
+          const allBlocks: MessageBlockData[] = []
+          for (const id of ids) allBlocks.push(...(blockDataMap.get(id) ?? []))
+          const wireMessages = messagesToWire(windowMessages)
+          const wireBlocks = blocksToWire(allBlocks)
+          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+          return {
+            messages: messagesWithBlocks,
+            blocks: wireBlocks,
+            window: {
+              kind: meta.kind,
+              completeness: 'window' as const,
+              topicId: request.topicId,
+              anchorMessageId: meta.anchorMessageId,
+              requested: meta.requested,
+              firstMessageId,
+              lastMessageId,
+              returnedCount: windowMessages.length,
+              hasMoreBefore: meta.hasMoreBefore,
+              hasMoreAfter: meta.hasMoreAfter
+            }
+          }
+        }
 
         if (request.kind === 'latest') {
-          if (total === 0) {
-            windowMessages = []
-            hasMoreBefore = false
-            hasMoreAfter = false
-          } else {
-            const groups = computeGroups(allMessages)
-            const totalGroups = groups.length
-            let startGroupIdx: number
-            let endGroupIdx: number
-            if (request.limit >= totalGroups) {
-              startGroupIdx = 0
-              endGroupIdx = totalGroups - 1
-            } else {
-              startGroupIdx = totalGroups - request.limit
-              endGroupIdx = totalGroups - 1
-            }
-            const startMsgIdx = groups[startGroupIdx].start
-            const endExclusive = groups[endGroupIdx].end + 1
-            windowMessages = allMessages.slice(startMsgIdx, endExclusive)
-            hasMoreBefore = startGroupIdx > 0
-            hasMoreAfter = false
-          }
-          firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
-          lastMessageId = windowMessages.length > 0 ? windowMessages[windowMessages.length - 1].id : null
-          const ids = windowMessages.map((m) => m.id)
-          const blockDataMap = repos.blocks.listByMessages(ids)
-          const allBlocks: MessageBlockData[] = []
-          for (const id of ids) allBlocks.push(...(blockDataMap.get(id) ?? []))
-          const wireMessages = messagesToWire(windowMessages)
-          const wireBlocks = blocksToWire(allBlocks)
-          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
-          return {
-            messages: messagesWithBlocks,
-            blocks: wireBlocks,
-            window: {
-              kind: 'latest',
-              completeness: 'window' as const,
-              topicId: request.topicId,
-              anchorMessageId: null,
-              requested: { limit: request.limit },
-              firstMessageId,
-              lastMessageId,
-              returnedCount: windowMessages.length,
-              hasMoreBefore,
-              hasMoreAfter
-            }
-          }
-        } else {
-          // around — anchor plus N complete groups before and after the anchor's group
-          const anchorIdx = allMessages.findIndex((m) => m.id === request.anchorMessageId)
-          if (anchorIdx === -1) {
-            throw new ChatDbNotFoundError(
-              `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
-            )
-          }
-          const groups = computeGroups(allMessages)
-          let anchorGroupIdx = -1
-          for (let gi = 0; gi < groups.length; gi++) {
-            if (anchorIdx >= groups[gi].start && anchorIdx <= groups[gi].end) {
-              anchorGroupIdx = gi
+          // Tail chunk scan: accumulate DESC chunks until the last `limit`
+          // complete groups are provably complete (oldest retained group
+          // start is interior, or a predecessor probe proves the boundary).
+          let acc: WindowMessage[] = []
+          let cursor: { sortOrder: number; id: string } | null = null
+          let reachedStart = false
+          for (;;) {
+            const page =
+              cursor === null
+                ? repos.messages.getLatestByTopic(request.topicId, WINDOW_SCAN_CHUNK)
+                : repos.messages.listBefore(request.topicId, cursor.sortOrder, cursor.id, WINDOW_SCAN_CHUNK)
+            if (page.length === 0) {
+              reachedStart = true
               break
             }
+            acc = [...page, ...acc]
+            const head = acc[0]
+            cursor = { sortOrder: head.sortOrder, id: head.id }
+            const groups = computeGroups(acc)
+            if (groups.length > request.limit) break
+            if (page.length < WINDOW_SCAN_CHUNK) {
+              reachedStart = true
+              break
+            }
+            if (groups.length < request.limit) continue
+            // groups.length === limit: oldest group is complete only when
+            // the row before it differs (or nothing is before it).
+            const pred = repos.messages.findPredecessor(request.topicId, cursor.sortOrder, cursor.id)
+            if (pred === null) {
+              reachedStart = true
+              break
+            }
+            if (keyFor(pred) !== groups[0].semanticKey) break
+            // Oldest group truncated — scan further back.
           }
-          if (anchorGroupIdx === -1) {
+          if (acc.length === 0) {
+            return buildWindowResponse([], {
+              kind: 'latest',
+              anchorMessageId: null,
+              requested: { limit: request.limit },
+              hasMoreBefore: false,
+              hasMoreAfter: false
+            })
+          }
+          const groups = computeGroups(acc)
+          const totalGroups = groups.length
+          let startGroupIdx: number
+          let endGroupIdx: number
+          if (request.limit >= totalGroups) {
+            startGroupIdx = 0
+            endGroupIdx = totalGroups - 1
+          } else {
+            startGroupIdx = totalGroups - request.limit
+            endGroupIdx = totalGroups - 1
+          }
+          const windowMessages = acc.slice(groups[startGroupIdx].start, groups[endGroupIdx].end + 1)
+          let hasMoreBefore: boolean
+          if (startGroupIdx > 0) {
+            hasMoreBefore = true
+          } else if (reachedStart) {
+            hasMoreBefore = false
+          } else {
+            const head = acc[0]
+            hasMoreBefore = repos.messages.findPredecessor(request.topicId, head.sortOrder, head.id) !== null
+          }
+          return buildWindowResponse(windowMessages, {
+            kind: 'latest',
+            anchorMessageId: null,
+            requested: { limit: request.limit },
+            hasMoreBefore,
+            hasMoreAfter: false
+          })
+        } else {
+          // Around: stable-ID anchor, then bounded backward/forward chunk
+          // scans. Rows sharing the anchor's assistant askId key on either
+          // side extend the anchor group itself (never counted toward
+          // before/after); beyond that, complete adjacent groups are counted.
+          const anchor = repos.messages.getInTopic(request.anchorMessageId, request.topicId)
+          if (!anchor.found) {
             throw new ChatDbNotFoundError(
               `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
             )
           }
-          const startGroupIdx = Math.max(0, anchorGroupIdx - request.before)
-          const endGroupIdx = Math.min(groups.length - 1, anchorGroupIdx + request.after)
-          const startMsgIdx = groups[startGroupIdx].start
-          const endExclusive = groups[endGroupIdx].end + 1
-          windowMessages = allMessages.slice(startMsgIdx, endExclusive)
-          hasMoreBefore = startGroupIdx > 0
-          hasMoreAfter = endGroupIdx < groups.length - 1
-          firstMessageId = windowMessages.length > 0 ? windowMessages[0].id : null
-          lastMessageId = windowMessages.length > 0 ? windowMessages[windowMessages.length - 1].id : null
-          const ids = windowMessages.map((m) => m.id)
-          const blockDataMap = repos.blocks.listByMessages(ids)
-          const allBlocks: MessageBlockData[] = []
-          for (const id of ids) allBlocks.push(...(blockDataMap.get(id) ?? []))
-          const wireMessages = messagesToWire(windowMessages)
-          const wireBlocks = blocksToWire(allBlocks)
-          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
-          return {
-            messages: messagesWithBlocks,
-            blocks: wireBlocks,
-            window: {
-              kind: 'around',
-              completeness: 'window' as const,
-              topicId: request.topicId,
-              anchorMessageId: request.anchorMessageId,
-              requested: { before: request.before, after: request.after },
-              firstMessageId,
-              lastMessageId,
-              returnedCount: windowMessages.length,
-              hasMoreBefore,
-              hasMoreAfter
+          const anchorMsg = anchor.data
+          const anchorKey = keyFor(anchorMsg)
+
+          // Backward scan (exclusive of anchor).
+          let backAcc: WindowMessage[] = []
+          let backCursor = { sortOrder: anchorMsg.sortOrder, id: anchorMsg.id }
+          let reachedBackStart = false
+          for (;;) {
+            const page = repos.messages.listBefore(
+              request.topicId,
+              backCursor.sortOrder,
+              backCursor.id,
+              WINDOW_SCAN_CHUNK
+            )
+            if (page.length === 0) {
+              reachedBackStart = true
+              break
             }
+            backAcc = [...page, ...backAcc]
+            const head = backAcc[0]
+            backCursor = { sortOrder: head.sortOrder, id: head.id }
+            const backGroups = computeGroups(backAcc)
+            const mergedWithAnchor =
+              backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
+            const beyondCount = backGroups.length - (mergedWithAnchor ? 1 : 0)
+            if (beyondCount > request.before) break
+            if (page.length < WINDOW_SCAN_CHUNK) {
+              reachedBackStart = true
+              break
+            }
+            if (beyondCount < request.before) continue
+            const pred = repos.messages.findPredecessor(request.topicId, backCursor.sortOrder, backCursor.id)
+            if (pred === null) {
+              reachedBackStart = true
+              break
+            }
+            if (keyFor(pred) !== backGroups[0].semanticKey) break
           }
+
+          // Forward scan (exclusive of anchor).
+          let fwdAcc: WindowMessage[] = []
+          let fwdCursor = { sortOrder: anchorMsg.sortOrder, id: anchorMsg.id }
+          let reachedFwdEnd = false
+          for (;;) {
+            const page = repos.messages.listAfter(request.topicId, fwdCursor.sortOrder, fwdCursor.id, WINDOW_SCAN_CHUNK)
+            if (page.length === 0) {
+              reachedFwdEnd = true
+              break
+            }
+            fwdAcc = [...fwdAcc, ...page]
+            const tail = fwdAcc[fwdAcc.length - 1]
+            fwdCursor = { sortOrder: tail.sortOrder, id: tail.id }
+            const fwdGroups = computeGroups(fwdAcc)
+            const mergedWithAnchor = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
+            const beyondCount = fwdGroups.length - (mergedWithAnchor ? 1 : 0)
+            if (beyondCount > request.after) break
+            if (page.length < WINDOW_SCAN_CHUNK) {
+              reachedFwdEnd = true
+              break
+            }
+            if (beyondCount < request.after) continue
+            const succ = repos.messages.findSuccessor(request.topicId, fwdCursor.sortOrder, fwdCursor.id)
+            if (succ === null) {
+              reachedFwdEnd = true
+              break
+            }
+            if (keyFor(succ) !== fwdGroups[fwdGroups.length - 1].semanticKey) break
+          }
+
+          // Assemble: anchor group (prefix + anchor + suffix) plus the
+          // nearest `before`/`after` complete beyond-groups.
+          const backGroups = computeGroups(backAcc)
+          const backMerged = backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
+          const backBeyond = backMerged ? backGroups.slice(0, -1) : backGroups
+          const backStartGroupIdx = Math.max(0, backBeyond.length - request.before)
+          const backStartMsgIdx = backBeyond.length === 0 ? 0 : backBeyond[backStartGroupIdx].start
+
+          const fwdGroups = computeGroups(fwdAcc)
+          const fwdMerged = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
+          const fwdBeyond = fwdMerged ? fwdGroups.slice(1) : fwdGroups
+          const fwdEndGroupIdx = Math.min(fwdBeyond.length - 1, request.after - 1)
+          const fwdEndExclusive = fwdBeyond.length === 0 ? fwdAcc.length : fwdBeyond[fwdEndGroupIdx].end + 1
+
+          const windowMessages: WindowMessage[] = [
+            ...backAcc.slice(backStartMsgIdx),
+            anchorMsg,
+            ...fwdAcc.slice(0, fwdEndExclusive)
+          ]
+
+          let hasMoreBefore: boolean
+          if (backBeyond.length > request.before) {
+            hasMoreBefore = true
+          } else if (windowMessages.length === 0) {
+            hasMoreBefore = false
+          } else if (backStartMsgIdx > 0) {
+            hasMoreBefore = true
+          } else if (backAcc.length === 0) {
+            hasMoreBefore = repos.messages.findPredecessor(request.topicId, anchorMsg.sortOrder, anchorMsg.id) !== null
+          } else if (reachedBackStart) {
+            hasMoreBefore = false
+          } else {
+            const start = windowMessages[0]
+            hasMoreBefore = repos.messages.findPredecessor(request.topicId, start.sortOrder, start.id) !== null
+          }
+
+          let hasMoreAfter: boolean
+          if (fwdBeyond.length > request.after) {
+            hasMoreAfter = true
+          } else if (windowMessages.length === 0) {
+            hasMoreAfter = false
+          } else if (fwdEndExclusive < fwdAcc.length) {
+            hasMoreAfter = true
+          } else if (fwdAcc.length === 0) {
+            hasMoreAfter = repos.messages.findSuccessor(request.topicId, anchorMsg.sortOrder, anchorMsg.id) !== null
+          } else if (reachedFwdEnd) {
+            hasMoreAfter = false
+          } else {
+            const end = windowMessages[windowMessages.length - 1]
+            hasMoreAfter = repos.messages.findSuccessor(request.topicId, end.sortOrder, end.id) !== null
+          }
+
+          return buildWindowResponse(windowMessages, {
+            kind: 'around',
+            anchorMessageId: request.anchorMessageId,
+            requested: { before: request.before, after: request.after },
+            hasMoreBefore,
+            hasMoreAfter
+          })
         }
       })
     }, `fetchMessagesWindow(${request.topicId}, ${request.kind})`)
@@ -1185,13 +1332,113 @@ export class ChatDbAggregateService {
    * Existing empty target succeeds with null anchor and zero counts; missing
    * topic is NOT_FOUND. Default index: null => 0, else max(0,total-max(1,floor(N))).
    */
-  resolveContextClosure(request: ResolveContextClosureRequest): ChatDbResult<ResolveContextClosureResponse> {
+  resolveContextClosure(request: ResolveContextClosureRequest): ChatDbResult<ResolveContextClosureResult> {
     return wrapResult(() => {
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const topic = repos.topics.getById(request.topicId)
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        // Metadata-only anchor establishment (detail:'anchor', establish only):
+        // explicit authority read with point lookups + bounded tuple scans.
+        // Never calls listByTopic, never touches blocks, never builds wire closure.
+        if (request.detail === 'anchor') {
+          if (request.intent !== 'establish') {
+            throw new ChatDbValidationError(`detail 'anchor' is allowed only for intent 'establish'`)
+          }
+          const currentKey: string | null =
+            typeof request.currentAnchorGroupKey === 'string' ? request.currentAnchorGroupKey : null
+          const buildTurnKeys = (rows: MessageData[]): string[] => {
+            const keys: string[] = []
+            let cur: string | null = null
+            for (const msg of rows) {
+              const role = msg.role
+              const askId = (msg as unknown as { askId: string | null }).askId
+              if (role === 'system') {
+                cur = msg.id
+                keys.push(cur)
+              } else if (role === 'user') {
+                cur = msg.id
+                keys.push(cur)
+              } else if (role === 'assistant') {
+                if (askId && askId === cur) {
+                  continue
+                }
+                cur = askId ? askId : msg.id
+                keys.push(cur)
+              } else {
+                continue
+              }
+            }
+            return keys
+          }
+          // Empty-message fast path (no turn can exist).
+          const firstRow = repos.messages.getFirstByTopic(request.topicId)
+          if (!firstRow) {
+            return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+          }
+          // Preserve a valid existing anchor regardless of contextCount.
+          if (currentKey !== null) {
+            const inTopic = repos.messages.getInTopic(currentKey, request.topicId)
+            if (inTopic.found && inTopic.data.role === 'user') {
+              return { resolvedAnchorGroupKey: currentKey, changed: false }
+            }
+            if (repos.messages.hasAssistantWithAskId(request.topicId, currentKey)) {
+              return { resolvedAnchorGroupKey: currentKey, changed: false }
+            }
+            if (inTopic.found && (inTopic.data.role === 'assistant' || inTopic.data.role === 'system')) {
+              return { resolvedAnchorGroupKey: currentKey, changed: false }
+            }
+          }
+          const contextCount = request.contextCount ?? null
+          // Null => first authority turn (bounded head scan skipping ignored roles).
+          if (contextCount === null || contextCount === undefined) {
+            const HEAD_CHUNK = 64
+            let acc: MessageData[] = [firstRow]
+            for (;;) {
+              const keys = buildTurnKeys(acc)
+              if (keys.length > 0) {
+                return { resolvedAnchorGroupKey: keys[0], changed: keys[0] !== currentKey }
+              }
+              const tail = acc[acc.length - 1]
+              const page = repos.messages.listAfter(request.topicId, tail.sortOrder, tail.id, HEAD_CHUNK)
+              if (page.length === 0) {
+                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+              }
+              acc = [...acc, ...page]
+            }
+          }
+          // Finite N => max(0, total-N) turn via bounded tail expansion.
+          const n = Math.max(1, Math.floor(contextCount))
+          const TAIL_CHUNK = 128
+          let acc: MessageData[] = repos.messages.getLatestByTopic(request.topicId, TAIL_CHUNK)
+          if (acc.length === 0) {
+            return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+          }
+          let reachedStart = acc.length < TAIL_CHUNK
+          for (;;) {
+            const keys = buildTurnKeys(acc)
+            if (keys.length >= n) {
+              const resolved = keys[keys.length - n]
+              return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+            }
+            if (reachedStart) {
+              if (keys.length === 0) {
+                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+              }
+              const resolved = keys[Math.max(0, keys.length - n)]
+              return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+            }
+            const head = acc[0]
+            const page = repos.messages.listBefore(request.topicId, head.sortOrder, head.id, TAIL_CHUNK)
+            if (page.length === 0) {
+              reachedStart = true
+              continue
+            }
+            if (page.length < TAIL_CHUNK) reachedStart = true
+            acc = [...page, ...acc]
+          }
         }
         type AuthorityTurn = { key: string; messages: MessageData[] }
         const buildTurns = (rows: MessageData[]): AuthorityTurn[] => {

@@ -196,11 +196,11 @@ export function inheritAnchorForBranch(
 /**
  * First-establishment / compatibility-repair dispatch glue via the authority resolver.
  *
- * Single authority path: one `chatdb:resolve-context-closure` (intent
- * `establish`) call builds full ordered turns in Main, preserves a valid
- * persisted anchor or repairs a ghost to the default position, and returns
- * the same-snapshot closure. Main never persists settings; this helper
- * persists only the non-stale returned anchor (removing the key on empty).
+ * Single authority path: one metadata-only `chatdb:resolve-context-closure`
+ * (intent `establish`, `detail: 'anchor'`) call resolves the anchor in Main
+ * via point lookups + bounded tail scans — no closure messages/blocks are
+ * materialized, hydrated, or serialized. Main never persists settings; this
+ * helper persists only the non-stale returned anchor (removing the key on empty).
  *
  * No loaded-viewport authority decisions: no `selectLoadedMessagesForTopic`, no
  * `buildContextTurns`, no viewport resolvability check. A persisted anchor
@@ -218,6 +218,53 @@ export function inheritAnchorForBranch(
 // The post-await re-read guard below is the required stale-repair protection — this
 // in-flight map is the smallest additional mechanism to make overlapping ghosts at-most-once.
 const inFlightRepairs = new Map<string, Promise<void>>()
+
+type E2EAnchorGate = {
+  blocked?: boolean
+  entered?: number
+  enteredByTopic?: Record<string, number>
+  waiters?: Array<() => void>
+}
+
+function getE2EAnchorGate(): E2EAnchorGate | null {
+  try {
+    const scoped = globalThis as { window?: { __e2eAnchorGate?: unknown } }
+    const gate = scoped.window?.__e2eAnchorGate
+    if (gate && typeof gate === 'object') return gate as E2EAnchorGate
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * E2E-only deterministic anchor gate (test-scoped).
+ *
+ * Activated only when the E2E spec sets `window.__e2eAnchorGate.blocked = true`
+ * inside the disposable renderer context. Production never creates this key,
+ * so the check is a single inert property lookup with no behavior change.
+ * When armed, establishment waits on the spec-controlled waiter list until the
+ * spec releases it — no wall-clock delays, no timeouts.
+ */
+async function awaitE2EAnchorGateIfArmed(topicId: string): Promise<void> {
+  const gate = getE2EAnchorGate()
+  if (!gate || gate.blocked !== true) return
+  try {
+    gate.entered = (typeof gate.entered === 'number' ? gate.entered : 0) + 1
+    const byTopic = (gate.enteredByTopic ??= {})
+    byTopic[topicId] = (typeof byTopic[topicId] === 'number' ? byTopic[topicId] : 0) + 1
+  } catch {
+    // best-effort gate accounting; never break establishment
+  }
+  await new Promise<void>((resolve) => {
+    try {
+      if (!Array.isArray(gate.waiters)) gate.waiters = []
+      gate.waiters.push(resolve)
+    } catch {
+      resolve()
+    }
+  })
+}
 
 export async function ensureTopicAnchorEstablished(
   dispatch: (action: { type: string; payload?: unknown }) => void,
@@ -242,14 +289,16 @@ export async function ensureTopicAnchorEstablished(
     const contextCount = settings.contextCount ?? null
     let resolved: string | null | undefined
     try {
+      await awaitE2EAnchorGateIfArmed(topicId)
       const response = await dbService.resolveContextClosure({
         topicId,
         intent: 'establish',
         contextCount,
-        currentAnchorGroupKey: preKey
+        currentAnchorGroupKey: preKey,
+        detail: 'anchor'
       })
-      // Caller-local closure: messages/blocks are intentionally ignored and
-      // never enter normal Redux.
+      // Metadata-only anchor response carries no messages/blocks/closure;
+      // nothing enters normal Redux.
       resolved = response.resolvedAnchorGroupKey
     } catch {
       // Transport failures and NOT_FOUND (missing topic) preserve settings.

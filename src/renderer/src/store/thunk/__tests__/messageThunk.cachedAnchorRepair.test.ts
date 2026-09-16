@@ -2,18 +2,21 @@
  * Cached-path compatibility repair via the authority resolver
  * (docs/context-window.md §10).
  *
- * `loadTopicMessagesThunk` must run compatibility repair for a NON-EMPTY
+ * `loadTopicMessagesThunk` must schedule compatibility repair for a NON-EMPTY
  * cached topic (messages already in Redux, e.g. a fresh branch pre-populated
- * by `cloneMessagesToNewTopicThunk`) before the cached early return. Repair
- * is authority-resolved (`chatdb:resolve-context-closure`, intent
- * `establish`): no loaded-viewport authority decisions, only the non-stale
- * returned anchor is persisted (key removed on empty). Transport failures
- * preserve settings.
+ * by `cloneMessagesToNewTopicThunk`) without blocking the cached early
+ * return. Repair is authority-resolved (`chatdb:resolve-context-closure`,
+ * intent `establish`): no loaded-viewport authority decisions, only the
+ * non-stale returned anchor is persisted (key removed on empty). Transport
+ * failures preserve settings. Because repair is fire-and-forget background
+ * work, these tests await eventual convergence via `vi.waitFor` (polling,
+ * no wall-clock sleeps) rather than asserting synchronously after the thunk.
  *
  *   - cached non-empty topic, no anchor       → repair writes the resolver anchor
  *   - cached non-empty topic, valid anchor    → no write (resolver echo)
  *   - cached non-empty topic, ghost anchor    → repaired to the resolver anchor
  *   - cached empty topic                      → fetch path runs; no write
+ *   - deferred resolver                       → thunk settles while repair pending
  *
  * Call-sequence contract tests (hook mocked) live in
  * `messageThunk.anchorEstablishment.test.ts`.
@@ -222,7 +225,9 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
   })
 
   afterEach(() => {
-    // Drop any late timeout-continuation calls so the next test starts clean.
+    // Each test awaits background repair convergence, so no in-flight repair
+    // leaks into the next test. Clear call history for isolation (mock
+    // implementations set in beforeEach are preserved).
     vi.clearAllMocks()
   })
 
@@ -239,8 +244,58 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
     expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
     expect(mocks.messagesReceived).not.toHaveBeenCalled()
 
-    // Repair writes the anchor through the ordinary settings dispatch.
-    expect(mocks.updateAssistantSettings).toHaveBeenCalledTimes(1)
+    // Repair is scheduled fire-and-forget: the thunk settles first, then the
+    // background repair eventually writes the anchor through the ordinary
+    // settings dispatch. Await convergence by polling (no wall-clock sleep).
+    await vi.waitFor(() => expect(mocks.resolveContextClosure).toHaveBeenCalled())
+    await vi.waitFor(() => expect(mocks.updateAssistantSettings).toHaveBeenCalledTimes(1))
+    expect(mocks.updateAssistantSettings).toHaveBeenCalledWith({
+      assistantId: 'asst-1',
+      settings: { contextWindowAnchor: { 'topic-1': active('u2') } }
+    })
+  })
+
+  it('thunk settles without awaiting background repair (deferred resolver)', async () => {
+    // Hold the authority resolver open: the cached early return must still
+    // settle while repair is pending, and the repair must converge once the
+    // resolver releases.
+    let releaseResolver!: (value: unknown) => void
+    mocks.resolveContextClosure.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseResolver = resolve as (value: unknown) => void
+        })
+    )
+    const dispatch = vi.fn()
+    const getState = () => storeState as never
+
+    await loadTopicMessagesThunk('topic-1')(dispatch, getState)
+
+    // Thunk resolved while the resolver is still pending — anchor never
+    // blocked topic activation.
+    expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(1)
+    expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
+    expect(mocks.fetchMessages).not.toHaveBeenCalled()
+    expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
+
+    releaseResolver({
+      messages: [],
+      blocks: [],
+      closure: {
+        completeness: 'context-closure',
+        topicId: 'topic-1',
+        anchorGroupKey: 'u2',
+        firstMessageId: 'm1',
+        lastMessageId: 'm1',
+        returnedCount: 1,
+        totalTurnCount: 1,
+        selectedTurnCount: 1,
+        boundaryMessageId: null
+      },
+      resolvedAnchorGroupKey: 'u2',
+      changed: true
+    } as unknown)
+    await vi.waitFor(() => expect(mocks.updateAssistantSettings).toHaveBeenCalledTimes(1))
     expect(mocks.updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
       settings: { contextWindowAnchor: { 'topic-1': active('u2') } }
@@ -280,7 +335,14 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
 
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
     expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
-    // Valid persisted anchor (resolver echo) is left untouched.
+    // Background repair must have run to completion before asserting no
+    // write — otherwise the assertion would pass vacuously. The resolver was
+    // invoked; drain the repair continuation, then confirm the valid
+    // persisted anchor (resolver echo) is left untouched with no late write.
+    await vi.waitFor(() => expect(mocks.resolveContextClosure).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
   })
 
@@ -298,7 +360,9 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
 
     expect(mocks.fetchMessages).not.toHaveBeenCalled()
     expect(mocks.fetchMessagesWindow).not.toHaveBeenCalled()
-    expect(mocks.updateAssistantSettings).toHaveBeenCalledTimes(1)
+    // Background repair converges after the non-blocking return.
+    await vi.waitFor(() => expect(mocks.resolveContextClosure).toHaveBeenCalled())
+    await vi.waitFor(() => expect(mocks.updateAssistantSettings).toHaveBeenCalledTimes(1))
     expect(mocks.updateAssistantSettings).toHaveBeenCalledWith({
       assistantId: 'asst-1',
       settings: { contextWindowAnchor: { 'topic-1': active('u2') } }
@@ -334,9 +398,14 @@ describe('loadTopicMessagesThunk cached-path repair (authority resolver)', () =>
     await loadTopicMessagesThunk('topic-1')(dispatch, getState)
 
     // Empty cached topic is not "cached" — the fetch path runs and the empty
-    // topic stays anchorless (I-1).
+    // topic stays anchorless (I-1). The fetch path also schedules background
+    // anchor work, so wait for the resolver before asserting no write.
     expect(mocks.fetchMessagesWindow).toHaveBeenCalled()
     expect(mocks.messagesReceived).toHaveBeenCalled()
+    await vi.waitFor(() => expect(mocks.resolveContextClosure).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(mocks.updateAssistantSettings).not.toHaveBeenCalled()
   })
 })

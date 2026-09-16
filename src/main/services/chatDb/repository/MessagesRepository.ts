@@ -217,6 +217,100 @@ export class MessagesRepository {
   }
 
   /**
+   * Bounded authority point lookup: does any assistant message in the topic
+   * carry the given askId?
+   *
+   * Single indexed existence probe for the canonical 3-step anchor match
+   * (step 2: assistant askId). One row max, never materializes the topic.
+   */
+  hasAssistantWithAskId(topicId: string, askId: string): boolean {
+    if (askId.length === 0) return false
+    const row = this.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.topicId, topicId), eq(messages.askId, askId), eq(messages.role, 'assistant')))
+      .limit(1)
+      .get()
+    return !!row
+  }
+
+  /**
+   * Bounded authority read: messages strictly before a (sort_order,id) tuple.
+   *
+   * Window-scan helper: tuple predicate `(sort_order,id) < (so,id)` over the
+   * existing topic_id/sort_order authority ordering. Fetches DESC then
+   * reverses so callers observe authority ASC order. Never materializes the
+   * whole topic; each call reads at most `limit` rows plus the index seek.
+   */
+  listBefore(topicId: string, sortOrder: number, id: string, limit: number): MessageData[] {
+    if (!Number.isInteger(limit) || limit <= 0) return []
+    const rows = this.db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) < (${sortOrder}, ${id})`))
+      .orderBy(desc(messages.sortOrder), desc(messages.id))
+      .limit(limit)
+      .all()
+    return rows.reverse().map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
+   * Bounded authority read: messages strictly after a (sort_order,id) tuple.
+   *
+   * Window-scan helper: tuple predicate `(sort_order,id) > (so,id)` over the
+   * existing authority ordering, already ASC. Never materializes the whole
+   * topic; each call reads at most `limit` rows plus the index seek.
+   */
+  listAfter(topicId: string, sortOrder: number, id: string, limit: number): MessageData[] {
+    if (!Number.isInteger(limit) || limit <= 0) return []
+    const rows = this.db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) > (${sortOrder}, ${id})`))
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .limit(limit)
+      .all()
+    return rows.map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
+   * Bounded authority read: immediate predecessor of a (sort_order,id) tuple.
+   *
+   * Single-row existence + continuity probe for window edges: tells whether
+   * anything exists before a row AND whether the oldest fetched group is
+   * truncated (same semantic key continues). One indexed seek, one row max.
+   */
+  findPredecessor(topicId: string, sortOrder: number, id: string): MessageData | null {
+    const row = this.db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) < (${sortOrder}, ${id})`))
+      .orderBy(desc(messages.sortOrder), desc(messages.id))
+      .limit(1)
+      .get()
+    if (!row) return null
+    return fromDrizzleResult<MessageData>(row, 'messages', (row as any).id)
+  }
+
+  /**
+   * Bounded authority read: immediate successor of a (sort_order,id) tuple.
+   *
+   * Mirror of {@link findPredecessor} for the after edge. One indexed seek,
+   * one row max.
+   */
+  findSuccessor(topicId: string, sortOrder: number, id: string): MessageData | null {
+    const row = this.db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) > (${sortOrder}, ${id})`))
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .limit(1)
+      .get()
+    if (!row) return null
+    return fromDrizzleResult<MessageData>(row, 'messages', (row as any).id)
+  }
+
+  /**
    * Bounded authority read: first message in deterministic order.
    *
    * Uses the existing topic_id/sort_order authority ordering
