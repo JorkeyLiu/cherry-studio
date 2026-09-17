@@ -123,4 +123,91 @@ describe('StoreSyncService resident lifecycle', () => {
     // cleanup
     ;(window as any).api = undefined
   })
+
+  it('local identical joint follow-up is reducer no-op but still broadcast (convergence transport); fromSync never rebroadcasts', async () => {
+    const { configureStore } = await import('@reduxjs/toolkit')
+    const { rootReducer } = await import('@renderer/store')
+    const { replaceSegmentsForTopic } = await import('@renderer/store/topicSegment')
+    const { bumpGeneration, publishResidentComplete } = await import('@renderer/store/residentRegistry')
+    const { default: storeSyncService } = await import('../StoreSyncService')
+    storeSyncService.setOptions({
+      syncList: ['assistants/', 'settings/', 'llm/', 'selectionStore/', 'note/', 'topicSegments/']
+    })
+    // residentRegistry must stay off the sync list
+    const shouldSync = (storeSyncService as any).shouldSyncAction.bind(storeSyncService)
+    expect(shouldSync('resident/jointPublishComplete')).toBe(false)
+    expect(shouldSync('residentRegistry/bumpGeneration')).toBe(false)
+
+    const onUpdateSpy = vi.fn()
+    ;(window as any).api = {
+      storeSync: { onUpdate: onUpdateSpy, subscribe: vi.fn(), unsubscribe: vi.fn() }
+    }
+    try {
+      const store: any = configureStore({
+        reducer: rootReducer as any,
+        middleware: (gdm: any) => gdm({ serializableCheck: false }).concat(storeSyncService.createMiddleware())
+      })
+      const topicId = 't-joint-transport'
+      store.dispatch(bumpGeneration(topicId))
+      const gen = store.getState().residentRegistry.entries[topicId].applicabilityGeneration as number
+      const seg: any = {
+        id: 'seg-transport',
+        topicId,
+        name: 'Seg',
+        messageIds: ['m1'],
+        color: undefined,
+        createdAt: '2026-09-15T00:00:00.000Z',
+        updatedAt: '2026-09-15T00:00:00.000Z',
+        sortOrder: 0,
+        firstMessageId: 'm1',
+        lastMessageId: 'm1',
+        messageCount: 1
+      }
+      const windowResponse: any = {
+        messages: [{ id: 'm1' }],
+        blocks: [],
+        window: {
+          kind: 'latest',
+          completeness: 'window',
+          topicId,
+          anchorMessageId: null,
+          requested: { limit: 10 },
+          firstMessageId: 'm1',
+          lastMessageId: 'm1',
+          returnedCount: 1,
+          hasMoreBefore: false,
+          hasMoreAfter: false
+        }
+      }
+      store.dispatch(publishResidentComplete({ topicId, generation: gen, windowResponse, segments: [seg] }))
+      expect(store.getState().residentRegistry.entries[topicId].residentTopic).toBe(true)
+      onUpdateSpy.mockClear()
+
+      // Local identical joint follow-up: reducer no-op but transport still occurs
+      const beforeState = store.getState()
+      store.dispatch({
+        ...replaceSegmentsForTopic({ topicId, segments: [{ ...seg }] }),
+        meta: { isJointFollowUp: true }
+      } as any)
+      const afterLocal = store.getState()
+      expect(afterLocal).toBe(beforeState)
+      expect(afterLocal.residentRegistry.entries[topicId].residentTopic).toBe(true)
+      expect(onUpdateSpy).toHaveBeenCalledTimes(1)
+      expect(onUpdateSpy.mock.calls[0][0].type).toBe('topicSegments/replaceSegmentsForTopic')
+      expect(onUpdateSpy.mock.calls[0][0].meta?.isJointFollowUp).toBe(true)
+      expect(onUpdateSpy.mock.calls[0][0].meta?.fromSync).toBeFalsy()
+
+      // Inbound fromSync identical: reducer no-op and never rebroadcast (no echo)
+      onUpdateSpy.mockClear()
+      const beforeInbound = store.getState()
+      store.dispatch({
+        ...replaceSegmentsForTopic({ topicId, segments: [{ ...seg }] }),
+        meta: { fromSync: true }
+      } as any)
+      expect(store.getState()).toBe(beforeInbound)
+      expect(onUpdateSpy).not.toHaveBeenCalled()
+    } finally {
+      ;(window as any).api = undefined
+    }
+  })
 })

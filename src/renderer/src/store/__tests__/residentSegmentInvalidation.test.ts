@@ -12,6 +12,10 @@
  *    invalidate originating, while inbound copy (fromSync) still does.
  */
 import { configureStore } from '@reduxjs/toolkit'
+import {
+  clearAllLatestWindowCompleteness,
+  getLatestWindowCompleteness
+} from '@renderer/pages/home/Messages/messageWindow'
 import { getPhase4BoundScalars, getPhase4Snapshot } from '@renderer/services/phase4Observability'
 import { getResidentDiagnostics, getResidentDiagnosticsFromState } from '@renderer/services/residentDiagnostics'
 import { rootReducer } from '@renderer/store'
@@ -165,6 +169,97 @@ describe('resident segment invalidation — centralized LOCK-302', () => {
     entry = (store.getState() as any).residentRegistry.entries['t-joint']
     expect(entry.residentTopic).toBe(false)
     expect(entry.applicabilityGeneration).toBe(2)
+  })
+
+  it('inbound identical fromSync replace is state-identity no-op (generation/flags/completeness unchanged)', () => {
+    clearAllLatestWindowCompleteness()
+    const gen = establishResident('t-sync-ident')
+    const beforeState = store.getState() as any
+    const beforeEntry = beforeState.residentRegistry.entries['t-sync-ident']
+    expect(beforeEntry.residentTopic).toBe(true)
+    expect(beforeEntry.chatData).toBe(true)
+    expect(beforeEntry.segments).toBe(true)
+    const beforeSegIdsRef = beforeState.topicSegments.segmentsByTopic['t-sync-ident']
+    const beforeCompleteness = getLatestWindowCompleteness('t-sync-ident')
+    // Build field-identical incoming catalog from the current projection
+    const entities = beforeState.topicSegments.segments.entities as Record<string, any>
+    const identicalCatalog = (beforeSegIdsRef as string[]).map((id) => ({ ...entities[id] }))
+
+    store.dispatch({
+      ...replaceSegmentsForTopic({ topicId: 't-sync-ident', segments: identicalCatalog }),
+      meta: { fromSync: true }
+    } as any)
+
+    const afterState = store.getState() as any
+    expect(afterState).toBe(beforeState)
+    expect(afterState.topicSegments.segmentsByTopic['t-sync-ident']).toBe(beforeSegIdsRef)
+    const afterEntry = afterState.residentRegistry.entries['t-sync-ident']
+    expect(afterEntry).toBe(beforeEntry)
+    expect(afterEntry.applicabilityGeneration).toBe(gen)
+    expect(afterEntry.residentTopic).toBe(true)
+    expect(afterEntry.chatData).toBe(true)
+    expect(afterEntry.segments).toBe(true)
+    expect(getLatestWindowCompleteness('t-sync-ident')).toEqual(beforeCompleteness)
+    void gen
+  })
+
+  it('inbound identical fromSync+isJointFollowUp is no-op while differing still invalidates', () => {
+    clearAllLatestWindowCompleteness()
+    establishResident('t-sync-joint')
+    const beforeState = store.getState() as any
+    const beforeEntry = beforeState.residentRegistry.entries['t-sync-joint']
+    const beforeSegIdsRef = beforeState.topicSegments.segmentsByTopic['t-sync-joint']
+    const entities = beforeState.topicSegments.segments.entities as Record<string, any>
+    const identicalCatalog = (beforeSegIdsRef as string[]).map((id) => ({ ...entities[id] }))
+
+    // Identical inbound joint follow-up — full no-op
+    store.dispatch({
+      ...replaceSegmentsForTopic({ topicId: 't-sync-joint', segments: identicalCatalog }),
+      meta: { fromSync: true, isJointFollowUp: true }
+    } as any)
+    let afterState = store.getState() as any
+    expect(afterState).toBe(beforeState)
+    expect(afterState.residentRegistry.entries['t-sync-joint']).toBe(beforeEntry)
+    expect(afterState.residentRegistry.entries['t-sync-joint'].applicabilityGeneration).toBe(
+      beforeEntry.applicabilityGeneration
+    )
+    expect(afterState.residentRegistry.entries['t-sync-joint'].residentTopic).toBe(true)
+
+    // Differing inbound joint follow-up — must replace, bump +1, invalidate resident/chatData
+    const genBefore = (store.getState() as any).residentRegistry.entries['t-sync-joint'].applicabilityGeneration
+    const diffSeg = makeSegment('seg-sync-joint-diff', 't-sync-joint', ['m-diff'])
+    const stateBeforeDiff = store.getState()
+    store.dispatch({
+      ...replaceSegmentsForTopic({ topicId: 't-sync-joint', segments: [diffSeg] }),
+      meta: { fromSync: true, isJointFollowUp: true }
+    } as any)
+    afterState = store.getState() as any
+    expect(afterState).not.toBe(stateBeforeDiff)
+    const afterEntry = afterState.residentRegistry.entries['t-sync-joint']
+    expect(afterEntry.applicabilityGeneration).toBe(genBefore + 1)
+    expect(afterEntry.residentTopic).toBe(false)
+    expect(afterEntry.chatData).toBe(false)
+    expect(afterEntry.segments).toBe(true)
+    expect(afterState.topicSegments.segmentsByTopic['t-sync-joint']).toEqual(['seg-sync-joint-diff'])
+  })
+
+  it('inbound differing fromSync replace bumps generation, invalidates resident/chatData, applies new catalog', () => {
+    clearAllLatestWindowCompleteness()
+    const gen = establishResident('t-sync-diff')
+    const beforeState = store.getState() as any
+    const diffSeg = makeSegment('seg-sync-diff-new', 't-sync-diff', ['m-new'])
+    store.dispatch({
+      ...replaceSegmentsForTopic({ topicId: 't-sync-diff', segments: [diffSeg] }),
+      meta: { fromSync: true }
+    } as any)
+    const afterState = store.getState() as any
+    expect(afterState).not.toBe(beforeState)
+    const afterEntry = afterState.residentRegistry.entries['t-sync-diff']
+    expect(afterEntry.applicabilityGeneration).toBe(gen + 1)
+    expect(afterEntry.residentTopic).toBe(false)
+    expect(afterEntry.chatData).toBe(false)
+    expect(afterEntry.segments).toBe(true)
+    expect(afterState.topicSegments.segmentsByTopic['t-sync-diff']).toEqual(['seg-sync-diff-new'])
   })
 
   // ---- Local structural mutation families ----

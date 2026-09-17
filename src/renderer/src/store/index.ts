@@ -37,6 +37,7 @@ import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
+import { getClosureTopicIds } from './closureOwnership'
 import copilot from './copilot'
 import editMode from './editMode'
 import inputToolsReducer from './inputTools'
@@ -45,7 +46,6 @@ import llm from './llm'
 import mcp from './mcp'
 import memory from './memory'
 import messageBlocksReducer from './messageBlock'
-import { getClosureTopicIds } from './closureOwnership'
 import migrate from './migrate'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
@@ -105,9 +105,14 @@ const appReducer = combineReducers({
  * - Only `resident/jointPublishComplete` may establish or retain residency.
  * - Every unpaired structural segment change must advance generation and make
  *   residentTopic false atomically in the same dispatch.
- * - Inbound StoreSync actions carry `meta.fromSync:true`; they must
- *   invalidate the receiving window's resident claim — fromSync precedence
- *   overrides any joint follow-up flag.
+ * - Inbound StoreSync `topicSegments/replaceSegmentsForTopic` with
+ *   `meta.fromSync:true` is an authoritative complete catalog: when it is
+ *   field-identical (empty-filtered, authority-ordered) to the receiving
+ *   projection, the entire receive is a state-identity no-op (no generation
+ *   bump, no resident/chatData clearing). When it differs it replaces the
+ *   catalog, bumps the affected topic generation, and invalidates
+ *   residentTopic/chatData — fromSync precedence overrides any joint
+ *   follow-up flag for the differing case.
  * - The ONLY local exemption is the exact paired
  *   `topicSegments/replaceSegmentsForTopic` with `meta.isJointFollowUp:true`
  *   and `meta.fromSync:false`, dispatched solely for StoreSync projection
@@ -175,10 +180,14 @@ function isTopicSegmentFieldEqual(a: any, b: any): boolean {
 }
 
 /**
- * Joint follow-up dedup: true when the incoming segment catalog is field-identical
- * (order-sensitive, authority fields + membership) to the current projection for
- * the topic. Order follows the stored authority order; incoming is compared in the
- * authority (sortOrder, id) order the slice would store.
+ * Complete-catalog equality: true when the incoming `replaceSegmentsForTopic`
+ * segment catalog is field-identical (order-sensitive, authority fields +
+ * membership) to the current projection for the topic. Order follows the stored
+ * authority order; incoming is compared in the authority (sortOrder, id) order
+ * the slice would store. Reused for both the local joint follow-up dedup and
+ * the inbound StoreSync identical-receive no-op. Only the authoritative
+ * replacement shape is compared here; add/update/remove are never treated as
+ * complete catalogs.
  */
 function areJointSegmentsIdentical(state: any, topicId: string, incoming: any[]): boolean {
   try {
@@ -236,19 +245,26 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
     }
   }
 
-  // Local paired joint follow-up carrying segments identical to the just-published
-  // joint state must not commit a second local segment state. The follow-up still
-  // flows through the StoreSync middleware (which broadcasts after next), so other
-  // windows receive it as fromSync; only the originating window skips the local apply.
-  if (
-    action?.type === 'topicSegments/replaceSegmentsForTopic' &&
-    !action?.meta?.fromSync &&
-    !!action?.meta?.isJointFollowUp
-  ) {
-    const tid = action?.payload?.topicId
-    const incoming = action?.payload?.segments
-    if (typeof tid === 'string' && Array.isArray(incoming) && areJointSegmentsIdentical(state, tid, incoming)) {
-      return state as any
+  // Identical complete-catalog receive no-op (before any segment side effects,
+  // generation bump, or resident/chatData clearing).
+  // - Local paired joint follow-up (!fromSync + isJointFollowUp) identical to the
+  //   just-published joint state must not commit a second local segment state.
+  //   The follow-up still flows through the StoreSync middleware (which broadcasts
+  //   after next), so other windows receive it as fromSync; only the originating
+  //   window skips the local apply. Broadcast is never gated by this guard.
+  // - Inbound StoreSync replacement (fromSync, with or without isJointFollowUp)
+  //   identical to the receiving projection is a full state-identity no-op.
+  // Only the authoritative `replaceSegmentsForTopic` shape is compared; local
+  // standalone replaces (neither flag) still apply even when identical.
+  if (action?.type === 'topicSegments/replaceSegmentsForTopic') {
+    const isFromSync = !!action?.meta?.fromSync
+    const isJointFollowUp = !!action?.meta?.isJointFollowUp
+    if (isFromSync || isJointFollowUp) {
+      const tid = action?.payload?.topicId
+      const incoming = action?.payload?.segments
+      if (typeof tid === 'string' && Array.isArray(incoming) && areJointSegmentsIdentical(state, tid, incoming)) {
+        return state as any
+      }
     }
   }
 
