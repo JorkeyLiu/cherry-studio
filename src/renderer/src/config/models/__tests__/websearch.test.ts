@@ -77,7 +77,6 @@ vi.mock('@renderer/hooks/useSettings', () => ({
 }))
 
 import type { Model, Provider } from '@renderer/types'
-import { SystemProviderIds } from '@renderer/types'
 
 import { isOpenAIDeepResearchModel } from '../openai'
 import {
@@ -188,7 +187,7 @@ describe('websearch helpers', () => {
     })
 
     it('handles Anthropic providers on unsupported platforms', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds['aws-bedrock'] }))
+      providerMock.mockReturnValueOnce(createProvider({ id: 'aws-bedrock' }))
       const model = createModel({ id: 'claude-2-sonnet' })
       expect(isWebSearchModel(model)).toBe(false)
     })
@@ -275,7 +274,7 @@ describe('websearch helpers', () => {
     })
 
     it('falls back to Gemini/Vertex provider regex matching', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.vertexai }))
+      providerMock.mockReturnValueOnce(createProvider({ id: 'vertexai' }))
       providerMocks.isGeminiProvider.mockReturnValueOnce(true)
       expect(isWebSearchModel(createModel({ id: 'gemini-2.0-flash-latest' }))).toBe(true)
     })
@@ -444,7 +443,7 @@ describe('websearch helpers', () => {
       'gemini-flash-lite-latest',
       'gemini-pro-latest'
     ])('Gemini provider supports %s', (id) => {
-      providerMock.mockReturnValue(createProvider({ id: SystemProviderIds.vertexai }))
+      providerMock.mockReturnValue(createProvider({ id: 'vertexai' }))
       providerMocks.isGeminiProvider.mockReturnValue(true)
       expect(isWebSearchModel(createModel({ id }))).toBe(true)
     })

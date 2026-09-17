@@ -70,7 +70,6 @@ function makeProvider(overrides: Partial<Provider> & { id: string }): Provider {
     apiKey: 'sk-test',
     apiHost: 'https://api.example.com/v1',
     models: [],
-    isSystem: true,
     enabled: true,
     ...overrides
   } as Provider
@@ -221,6 +220,30 @@ describe('listModels protocol selection', () => {
       mockGetFromApi.mockRejectedValue(new Error('ECONNREFUSED'))
       const models = await listModels(makeProvider({ id: 'openai', type: 'openai' }))
       expect(models).toEqual([])
+    })
+  })
+
+  describe('default grouping ignores Provider.isSystem', () => {
+    it('yields identical groups for isSystem true/false/undefined', async () => {
+      mockGetFromApi.mockResolvedValue({
+        value: {
+          object: 'list',
+          data: [
+            { id: 'deepseek-chat', object: 'model' },
+            { id: 'acme/widget-1', object: 'model' }
+          ]
+        }
+      })
+      const base = { id: 'my-brand', type: 'openai' } as const
+      const withTrue = await listModels(makeProvider({ ...base, isSystem: true }))
+      const withFalse = await listModels(makeProvider({ ...base, isSystem: false }))
+      const withUndefined = await listModels(makeProvider({ ...base, isSystem: undefined }))
+
+      assertValidModels(withTrue)
+      assertValidModels(withFalse)
+      assertValidModels(withUndefined)
+      expect(withFalse.map((m) => m.group)).toEqual(withTrue.map((m) => m.group))
+      expect(withUndefined.map((m) => m.group)).toEqual(withTrue.map((m) => m.group))
     })
   })
 

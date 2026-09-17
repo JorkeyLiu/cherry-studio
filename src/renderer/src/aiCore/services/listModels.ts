@@ -102,12 +102,7 @@ function defaultHeaders(provider: Provider): Record<string, string> {
 }
 
 function defaultGroup(modelId: string, provider: Provider): string {
-  if (provider.isSystem === false) {
-    return getDefaultGroupName(modelId, provider.id)
-  }
-
-  const parts = modelId.split('/')
-  return parts.length > 1 ? parts[0] : provider.id
+  return getDefaultGroupName(modelId, provider.id)
 }
 
 function toModel(id: string, provider: Provider, extra?: Partial<Model>): Model {

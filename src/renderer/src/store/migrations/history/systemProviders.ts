@@ -14,9 +14,10 @@
  * isUntouchedStockProvider); migrations 222-224 operate on the migrating
  * state's own providers and read no stock.
  */
-import type { Provider, SystemProvider, SystemProviderId } from '@renderer/types'
+import type { Provider } from '@renderer/types'
 import { OpenAIServiceTiers } from '@renderer/types'
 
+import type { SystemProvider, SystemProviderId } from './brandIds'
 import { SYSTEM_MODELS } from './systemModels'
 
 // History-only catalog entry shape (slice 3): the built-in catalog still

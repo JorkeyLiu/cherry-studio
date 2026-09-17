@@ -6,7 +6,6 @@
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import type { SettingsState } from '@renderer/store/settings'
 import type { Assistant, Model } from '@renderer/types'
-import { SystemProviderIds } from '@renderer/types'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -58,7 +57,7 @@ vi.mock('@renderer/config/constant', () => ({
 
 vi.mock('@renderer/utils/provider', () => ({
   isSupportEnableThinkingProvider: vi.fn((provider) => {
-    return [SystemProviderIds.dashscope, SystemProviderIds.silicon].includes(provider.id)
+    return ['dashscope', 'silicon'].includes(provider.id)
   })
 }))
 
@@ -373,7 +372,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gpt-4',
         name: 'GPT-4',
-        provider: SystemProviderIds.openai
+        provider: 'openai'
       } as Model
 
       const assistant: Assistant = {
@@ -390,7 +389,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'o1-preview',
         name: 'O1 Preview',
-        provider: SystemProviderIds.openai
+        provider: 'openai'
       } as Model
 
       const assistant: Assistant = {
@@ -415,7 +414,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gpt-5.1',
         name: 'GPT 5.1',
-        provider: SystemProviderIds.openai
+        provider: 'openai'
       } as Model
 
       const assistant: Assistant = {
@@ -444,7 +443,7 @@ describe('reasoning utils', () => {
 
       const model: Model = {
         id: 'gpt-5',
-        provider: SystemProviderIds.openai
+        provider: 'openai'
       } as Model
 
       const assistant: Assistant = {
@@ -475,7 +474,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'o1-pro',
         name: 'O1 Pro',
-        provider: SystemProviderIds.openai
+        provider: 'openai'
       } as Model
 
       const assistant: Assistant = {
@@ -507,7 +506,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'o3-deep-research',
         name: 'O3 Mini',
-        provider: SystemProviderIds.openai
+        provider: 'openai'
       } as Model
 
       const assistant: Assistant = {
@@ -535,7 +534,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-3-5-sonnet',
         name: 'Claude 3.5 Sonnet',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const assistant: Assistant = {
@@ -557,7 +556,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-3-7-sonnet',
         name: 'Claude 3.7 Sonnet',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const assistant: Assistant = {
@@ -585,7 +584,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-3-7-sonnet',
         name: 'Claude 3.7 Sonnet',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const assistant: Assistant = {
@@ -620,7 +619,7 @@ describe('reasoning utils', () => {
         const model: Model = {
           id,
           name,
-          provider: SystemProviderIds.anthropic
+          provider: 'anthropic'
         } as Model
 
         const assistant: Assistant = {
@@ -646,7 +645,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-opus-4-10',
         name: 'Claude Opus 4.10',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const assistant: Assistant = {
@@ -671,7 +670,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-opus-4-7',
         name: 'Claude Opus 4.7',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const assistant: Assistant = {
@@ -698,7 +697,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-unknown-model',
         name: 'Claude Unknown',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const assistant: Assistant = {
@@ -771,7 +770,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'claude-unknown-model',
         name: 'Claude Unknown',
-        provider: SystemProviderIds.anthropic
+        provider: 'anthropic'
       } as Model
 
       const lowAssistant: Assistant = {
@@ -930,7 +929,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.0-flash',
         name: 'Gemini 2.0 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -950,7 +949,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'some-reasoning-model',
         name: 'Some Model',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -970,7 +969,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -990,7 +989,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1010,7 +1009,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-flash',
         name: 'Gemini 2.5 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1037,7 +1036,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1064,7 +1063,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1090,7 +1089,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1116,7 +1115,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1142,7 +1141,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1168,7 +1167,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1194,7 +1193,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1221,7 +1220,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-3-flash-preview',
         name: 'Gemini 3 Flash',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1247,7 +1246,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemma-4-31b-it',
         name: 'Gemma 4 31B',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1273,7 +1272,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemma-4-31b-it',
         name: 'Gemma 4 31B',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1298,7 +1297,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1325,7 +1324,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1351,7 +1350,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1379,7 +1378,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro-unknown',
         name: 'Gemini 2.5 Pro Unknown',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {
@@ -1405,7 +1404,7 @@ describe('reasoning utils', () => {
       const model: Model = {
         id: 'gemini-2.5-pro',
         name: 'Gemini 2.5 Pro',
-        provider: SystemProviderIds.gemini
+        provider: 'gemini'
       } as Model
 
       const assistant: Assistant = {

@@ -29,6 +29,7 @@ import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER 
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
 import i18n from '@renderer/i18n'
+import { isSystemProvider, SystemProviderIds } from '@renderer/store/migrations/history/brandIds'
 import { qwenModel, SYSTEM_MODELS } from '@renderer/store/migrations/history/systemModels'
 import { SYSTEM_PROVIDERS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/store/migrations/history/systemProviders'
 import { defaultPreprocessProviders } from '@renderer/store/preprocess'
@@ -42,7 +43,7 @@ import type {
   TranslateLanguageCode,
   WebSearchProvider
 } from '@renderer/types'
-import { isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
+import { isBuiltinMCPServer } from '@renderer/types'
 import { getDefaultGroupName, getLeadingEmoji, getLowerBaseModelName } from '@renderer/utils/naming'
 import {
   isSupportArrayContentProvider,

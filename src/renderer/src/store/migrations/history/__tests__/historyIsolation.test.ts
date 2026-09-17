@@ -4,6 +4,9 @@
  * up to 221 actually read stock (provider adds through 200, model backfills
  * at 9/95/111/117/123/139/194/198/204, and migration 221 deep-equality);
  * migrations 222-224 operate on the migrating state's own providers.
+ * The frozen 62-ID brand identity (`brandIds.ts`) carries the retired
+ * `SystemProviderId` union/map plus `isSystemProviderId`/`isSystemProvider`;
+ * no active type-layer module defines or re-exports these symbols.
  * This boundary proves:
  *  - history stock keeps migration 221 deep-equality drop/preserve semantics;
  *  - historically missing dead ids stay absent (replay no-op unchanged);
@@ -17,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import migrate from '../../../migrate'
+import { isSystemProvider, isSystemProviderId, SystemProviderIdList, SystemProviderIds } from '../brandIds'
 import { qwenModel, SYSTEM_MODELS } from '../systemModels'
 import { SYSTEM_PROVIDERS, SYSTEM_PROVIDERS_CONFIG } from '../systemProviders'
 
@@ -31,8 +35,9 @@ const REPO_ROOT = resolve(RENDERER_SRC, '..', '..', '..')
 
 // Production may import history only from the migration entrypoint, using
 // direct exact-module specifiers (the general `migrations/history` barrel was
-// deleted). Migration tests may import the same exact modules, but only in
-// test scope (test files). Every other importer is a boundary violation.
+// deleted): `brandIds`, `systemModels`, `systemProviders`. Migration tests may
+// import the same exact modules, but only in test scope (test files). Every
+// other importer is a boundary violation.
 const ALLOWED_PRODUCTION_HISTORY_IMPORTERS = new Set(['src/renderer/src/store/migrate.ts'])
 const ALLOWED_TEST_HISTORY_IMPORTERS = new Set([
   'src/renderer/src/store/__tests__/migrate.test.ts',
@@ -171,7 +176,7 @@ function isHistorySpecifier(spec: string, importerAbs: string): boolean {
 function isBarrelHistorySpecifier(spec: string, importerAbs: string): boolean {
   if (!isHistorySpecifier(spec, importerAbs)) return false
   if (spec.includes('migrations/history')) {
-    return !spec.includes('systemModels') && !spec.includes('systemProviders')
+    return !spec.includes('systemModels') && !spec.includes('systemProviders') && !spec.includes('brandIds')
   }
   // Relative form: resolves to the history dir itself or its index, not to an
   // exact history module file.
@@ -210,6 +215,30 @@ function collectSourceFiles(roots: string[]): string[] {
 }
 
 describe('history isolation', () => {
+  it('keeps the frozen history brand identity intact (62 ids)', () => {
+    expect(SystemProviderIdList).toHaveLength(62)
+    expect(new Set(SystemProviderIdList).size).toBe(62)
+    expect(Object.keys(SystemProviderIds)).toHaveLength(62)
+    // Map keys and values mirror the frozen id list exactly.
+    expect(new Set(Object.keys(SystemProviderIds))).toEqual(new Set(SystemProviderIdList))
+    for (const id of SystemProviderIdList) {
+      expect(SystemProviderIds[id]).toBe(id)
+    }
+    // Spot-check well-known replay ids used by migrate.ts.
+    for (const id of ['openai', 'anthropic', 'groq', 'ollama', 'gateway', 'longcat', 'qiniu']) {
+      expect(isSystemProviderId(id)).toBe(true)
+    }
+    expect(isSystemProviderId('brand-free')).toBe(false)
+    expect(isSystemProviderId('')).toBe(false)
+    expect(
+      isSystemProvider({ id: 'openai', isSystem: true } as unknown as Parameters<typeof isSystemProvider>[0])
+    ).toBe(true)
+    expect(isSystemProvider({ id: 'openai' } as unknown as Parameters<typeof isSystemProvider>[0])).toBe(false)
+    expect(
+      isSystemProvider({ id: 'brand-free', isSystem: true } as unknown as Parameters<typeof isSystemProvider>[0])
+    ).toBe(false)
+  })
+
   it('keeps qwenModel/defaultModel history data intact', () => {
     expect(qwenModel).toEqual({ id: 'qwen', name: 'Qwen', provider: 'cherryai', group: 'Qwen' })
     expect(SYSTEM_MODELS.defaultModel).toHaveLength(4)
@@ -281,7 +310,7 @@ describe('history isolation', () => {
           historyImporters.add(repoRel)
           if (isBarrelHistorySpecifier(hit.spec, full)) {
             violations.push(
-              `${repoRel}:${hit.line}: [${hit.kind}] barrel history import ${JSON.stringify(hit.spec)} (use exact systemModels/systemProviders modules)`
+              `${repoRel}:${hit.line}: [${hit.kind}] barrel history import ${JSON.stringify(hit.spec)} (use exact brandIds/systemModels/systemProviders modules)`
             )
             continue
           }

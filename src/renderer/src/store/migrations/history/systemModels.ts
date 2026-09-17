@@ -9,7 +9,9 @@
  * 194/198/204 and provider adds through 200); migrations 222-224 operate on
  * the migrating state's own providers and read no stock.
  */
-import type { Model, SystemProviderId } from '@renderer/types'
+import type { Model } from '@renderer/types'
+
+import type { SystemProviderId } from './brandIds'
 
 /**
  * @deprecated CherryAI platform was removed. This model is kept solely for
