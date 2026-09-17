@@ -12,6 +12,7 @@ import {
 import { dbService } from '@renderer/services/db'
 import { captureDeletionGeneration, isDeletionStale } from '@renderer/services/topicDeletionInvalidation'
 import store, { useAppDispatch } from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import type { FetchContextClosureRequest, FetchContextClosureResponse } from '@shared/chatDb'
@@ -141,7 +142,9 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         if (getGlobalBlockGeneration() !== globalAtFetch) return
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
         if (response.blocks.length > 0) {
-          dispatch(upsertManyBlocks(response.blocks as any))
+          // Closure hydration for this topic only: scoped ownership so other
+          // topics' cached closures are never flushed by this publication.
+          dispatch(withClosureTopics(upsertManyBlocks(response.blocks as any), topicId))
         }
         // Cache publication stores snapshot of generation at fetch start (which equals current)
         setCachedContextClosureWithFingerprint(topicId, response, fingerprintAtFetch)

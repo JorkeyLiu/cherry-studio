@@ -7,6 +7,7 @@ import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { updateOneBlock } from '@renderer/store/messageBlock'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { newMessagesActions } from '@renderer/store/newMessage'
@@ -225,7 +226,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
                 changes.thinking_millsec = thinkingInfo.millsec
               }
               executionState.applyBlockPatch(block.id, changes)
-              dispatch(updateOneBlock({ id: block.id, changes }))
+              dispatch(withClosureTopics(updateOneBlock({ id: block.id, changes }), topicId))
               updatedBlockIds.push(block.id)
             }
 
@@ -252,7 +253,7 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
                   }
                 }
                 executionState.applyBlockPatch(block.id, toolChanges)
-                dispatch(updateOneBlock({ id: block.id, changes: toolChanges }))
+                dispatch(withClosureTopics(updateOneBlock({ id: block.id, changes: toolChanges }), topicId))
                 updatedBlockIds.push(block.id)
               }
             }
@@ -503,7 +504,12 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // Redux AFTER the successful commit (DB-first), only when still
         // loaded: block first, then message. Detached executions never inject.
         if (isLoaded()) {
-          dispatch(updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }))
+          dispatch(
+            withClosureTopics(
+              updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }),
+              topicId
+            )
+          )
           dispatch(
             newMessagesActions.updateMessage({
               topicId,

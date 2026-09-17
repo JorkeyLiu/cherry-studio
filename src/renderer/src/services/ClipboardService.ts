@@ -2,6 +2,7 @@ import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
@@ -467,8 +468,10 @@ export async function pasteMessages(
   }
 
   // ONE block commit for all pasted blocks (after the message projection).
+  // Paste ownership is the target topic only; cut-mode source deletion is a
+  // separate annotated dispatch inside executeDeleteMessagesWithDependents.
   if (allInsertedBlocks.length > 0) {
-    dispatch(upsertManyBlocks(allInsertedBlocks))
+    dispatch(withClosureTopics(upsertManyBlocks(allInsertedBlocks), targetTopicId))
   }
 
   // Increment file reference counts for pasted content

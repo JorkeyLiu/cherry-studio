@@ -5,6 +5,7 @@ import i18n from '@renderer/i18n'
 import { fetchMessagesSummary } from '@renderer/services/ApiService'
 import { dbService } from '@renderer/services/db'
 import store from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, removeManyBlocks } from '@renderer/store/messageBlock'
 import type { Assistant, FileMetadata, Model, Topic, Usage } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
@@ -260,7 +261,7 @@ export function getMessageModelId(message: Message) {
 export function resetAssistantMessage(message: Message, model?: Model): Message {
   const blockIdsToRemove = message.blocks
   if (blockIdsToRemove.length > 0) {
-    store.dispatch(removeManyBlocks(blockIdsToRemove))
+    store.dispatch(withClosureTopics(removeManyBlocks(blockIdsToRemove), message.topicId))
   }
 
   return {

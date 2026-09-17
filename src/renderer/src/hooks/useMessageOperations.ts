@@ -5,6 +5,7 @@ import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecy
 import { appendMessageTrace, pauseTrace, restartTrace } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import store, { type RootState, useAppDispatch, useAppSelector } from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { selectMessageBlocksByIds, updateOneBlock } from '@renderer/store/messageBlock'
 import {
   newMessagesActions,
@@ -280,7 +281,7 @@ export function useMessageOperations(topic: Topic) {
             sourceLanguage
           }
         }
-        dispatch(updateOneBlock({ id: blockId, changes }))
+        dispatch(withClosureTopics(updateOneBlock({ id: blockId, changes }), topic.id))
         await dispatch(updateTranslationBlockThunk(blockId, '', false))
       } else {
         blockId = await dispatch(

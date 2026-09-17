@@ -94,6 +94,7 @@ import { LRUCache } from 'lru-cache'
 
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
+import { withClosureTopics } from '../closureOwnership'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
 import { replaceSegmentsForTopic } from '../topicSegment'
@@ -227,6 +228,11 @@ export interface ThrottledBlockWriteContext {
    * stopping the DB patch. Absent = mirror (legacy/test compat).
    */
   shouldMirrorToRedux?: () => boolean
+  /**
+   * Trustworthy topic ownership for scoped closure invalidation (Task A).
+   * Absent = unknown ownership -> deliberate global fallback in middleware.
+   */
+  topicId?: string
 }
 
 /**
@@ -254,7 +260,10 @@ const getBlockThrottler = (id: string) => {
           }
         }
         if (shouldMirror) {
-          store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
+          const mirrorAction = updateOneBlock({ id, changes: blockUpdate })
+          // Scoped invalidation when ownership is trustworthy; otherwise the
+          // middleware falls back to global invalidation.
+          store.dispatch(ctx?.topicId ? withClosureTopics(mirrorAction, ctx.topicId) : mirrorAction)
         }
         blockUpdateRafs.delete(id)
       })
@@ -645,7 +654,8 @@ const fetchAndProcessAssistantResponseImpl = async (
         throttledBlockUpdate(id, blockUpdate, {
           resendAttemptId: attemptId ?? resendAttemptId,
           barrier: barrier ?? writeBarrier,
-          shouldMirrorToRedux: shouldMirror ?? isExecLoaded
+          shouldMirrorToRedux: shouldMirror ?? isExecLoaded,
+          topicId
         }),
       flushThrottledBlockUpdate,
       cancelThrottledBlockUpdate
@@ -779,7 +789,7 @@ export const sendMessage =
       dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
       if (phase) recordPhaseDuration('echo.userDispatch', dispatchStartedAt, phase.path)
       if (userMessageBlocks.length > 0) {
-        dispatch(upsertManyBlocks(userMessageBlocks))
+        dispatch(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
 
@@ -943,7 +953,7 @@ export const executeDeleteMessagesWithDependents = async (
   // affect only the loaded intersection, never injecting window-outside entities.
   dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
   if (response.deletedBlockIds.length > 0) {
-    dispatch(removeManyBlocks(response.deletedBlockIds))
+    dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
   }
   dispatch(
     replaceSegmentsForTopic({
@@ -1072,7 +1082,7 @@ export const resendMessageThunk =
       const blocksToRemove = (response.removedBlockIds ?? []).filter((id) => loadedBlockIds.has(id))
       blocksToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
       if (blocksToRemove.length > 0) {
-        dispatch(removeManyBlocks(blocksToRemove))
+        dispatch(withClosureTopics(removeManyBlocks(blocksToRemove), topicId))
       }
       await consumeFileCleanupResult(response)
 
@@ -1204,7 +1214,7 @@ export const regenerateAssistantResponseThunk =
         newMessagesActions.updateMessage({ topicId, messageId: resetAssistantMsg.id, updates: resetAssistantMsg })
       )
       if (blocksToRemove.length > 0) {
-        dispatch(removeManyBlocks(blocksToRemove))
+        dispatch(withClosureTopics(removeManyBlocks(blocksToRemove), topicId))
       }
 
       // 8. Add fetch/process call to the queue
@@ -1273,7 +1283,7 @@ export const initiateTranslationThunk =
 
       // 2. Update Redux State
       const updatedBlockIds = [...(originalMessage.blocks || []), newBlock.id]
-      dispatch(upsertOneBlock(newBlock)) // Add the new block
+      dispatch(withClosureTopics(upsertOneBlock(newBlock), topicId)) // Add the new block
       dispatch(
         newMessagesActions.updateMessage({
           topicId,
@@ -1306,6 +1316,9 @@ export const updateTranslationBlockThunk =
       }
 
       // 更新Redux状态
+      // Intentional global fallback (Task A): this thunk carries only blockId,
+      // so trustworthy topic ownership cannot be guaranteed here. The
+      // middleware invalidates globally rather than inferring from projection.
       dispatch(updateOneBlock({ id: blockId, changes }))
 
       await updateSingleBlock(blockId, changes)
@@ -1513,8 +1526,8 @@ export const insertMessagesThunk =
       ])
 
       // Publish to Redux only after Main success (fail closed, no partial)
-      dispatch(upsertOneBlock(userBlock))
-      dispatch(upsertOneBlock(assistantBlock))
+      dispatch(withClosureTopics(upsertOneBlock(userBlock), topicId))
+      dispatch(withClosureTopics(upsertOneBlock(assistantBlock), topicId))
 
       // Local projection insertion: best-effort window-relative placement for immediate UI.
       // Authority order is already correct in Main; this projection step does not affect authority.
@@ -1613,7 +1626,8 @@ export const branchMessagesToTopicThunk =
         )
       }
       if (clonedBlocks.length > 0) {
-        dispatch(upsertManyBlocks(clonedBlocks))
+        // Branch clones into the new topic only; the source topic is untouched.
+        dispatch(withClosureTopics(upsertManyBlocks(clonedBlocks), newTopic.id))
       }
       return true
     } catch (error) {
@@ -1684,11 +1698,11 @@ export const updateMessageAndBlocksThunk =
     }
 
     if (blockUpdatesList.length > 0) {
-      dispatch(upsertManyBlocks(blockUpdatesList))
+      dispatch(withClosureTopics(upsertManyBlocks(blockUpdatesList), topicId))
     }
 
     if (blockIdsToDelete.length > 0) {
-      dispatch(removeManyBlocks(blockIdsToDelete))
+      dispatch(withClosureTopics(removeManyBlocks(blockIdsToDelete), topicId))
     }
 
     dispatch(updateTopicUpdatedAt({ topicId }))
@@ -1766,7 +1780,7 @@ export const removeBlocksThunk =
 
       // File cleanup already consumed; Redux-only block removal
       if (blockIdsToRemove.length > 0) {
-        dispatch(removeManyBlocks(blockIdsToRemove))
+        dispatch(withClosureTopics(removeManyBlocks(blockIdsToRemove), topicId))
       }
 
       dispatch(updateTopicUpdatedAt({ topicId }))
@@ -2124,7 +2138,7 @@ export const loadTopicMessagesThunk =
         const blocks = response!.blocks as unknown as MessageBlock[]
         const messages = response!.messages as unknown as Message[]
         if (blocks.length > 0) {
-          dispatch(upsertManyBlocks(blocks as any))
+          dispatch(withClosureTopics(upsertManyBlocks(blocks as any), topicId))
         }
         dispatch(newMessagesActions.messagesReceived({ topicId, messages } as any))
       }
@@ -2391,7 +2405,7 @@ export const addChannelUserMessage = (
   }
 
   for (const block of allBlocks) {
-    dispatch(upsertOneBlock(block))
+    dispatch(withClosureTopics(upsertOneBlock(block), topicId))
   }
   dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
 
@@ -2454,17 +2468,18 @@ export const setupChannelStream = (
     topicId,
     barrier: channelBarrier,
     executionState: channelExecutionState,
-    throttledBlockUpdate: (
-      id: string,
-      blockUpdate: any,
-      _attemptId?: string,
-      barrier?: WriteBarrier,
-      shouldMirror?: () => boolean
-    ) =>
-      throttledBlockUpdate(id, blockUpdate, {
-        barrier: barrier ?? channelBarrier,
-        shouldMirrorToRedux: shouldMirror ?? channelIsLoaded
-      }),
+      throttledBlockUpdate: (
+        id: string,
+        blockUpdate: any,
+        _attemptId?: string,
+        barrier?: WriteBarrier,
+        shouldMirror?: () => boolean
+      ) =>
+        throttledBlockUpdate(id, blockUpdate, {
+          barrier: barrier ?? channelBarrier,
+          shouldMirrorToRedux: shouldMirror ?? channelIsLoaded,
+          topicId
+        }),
     flushThrottledBlockUpdate,
     cancelThrottledBlockUpdate
   })

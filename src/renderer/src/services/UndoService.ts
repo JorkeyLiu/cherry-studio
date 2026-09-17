@@ -2,6 +2,7 @@ import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import type { AppDispatch, RootState } from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
@@ -151,7 +152,7 @@ async function restoreGroupsByStableAnchors(
     if (localIdx === null) continue
     const visibleBlocks = anchor.blocks.filter((b) => allowed.has(b.messageId))
     if (visibleBlocks.length > 0) {
-      dispatch(upsertManyBlocks(visibleBlocks))
+      dispatch(withClosureTopics(upsertManyBlocks(visibleBlocks), topicId))
     }
     for (let i = 0; i < visibleMessages.length; i++) {
       const message = visibleMessages[i]
@@ -324,7 +325,7 @@ async function undoPaste(
 
   // Remove blocks from Redux
   if (blockIdsToRemove.length > 0) {
-    dispatch(removeManyBlocks(blockIdsToRemove))
+    dispatch(withClosureTopics(removeManyBlocks(blockIdsToRemove), targetTopicId))
   }
 
   // Delete target segments that were created during paste BEFORE syncing,
@@ -449,7 +450,7 @@ async function redoDelete(dispatch: AppDispatch, _getState: () => RootState, act
 
   // Remove blocks from Redux (authority-owned set, no loaded lookup)
   if (response.deletedBlockIds.length > 0) {
-    dispatch(removeManyBlocks(response.deletedBlockIds))
+    dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), targetTopicId))
   }
 
   // Converge segments from the authority post-delete catalog (no loaded sync read)
@@ -513,7 +514,7 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
   }
   if (localIdx !== null) {
     if (pastedBlocksSnapshot.length > 0) {
-      dispatch(upsertManyBlocks(pastedBlocksSnapshot))
+      dispatch(withClosureTopics(upsertManyBlocks(pastedBlocksSnapshot), targetTopicId))
     }
     let index = localIdx
     for (const message of pastedMessagesSnapshot) {
@@ -620,7 +621,7 @@ async function redoCutPaste(
     }
     if (localIdx !== null) {
       if (pastedBlocksSnapshot.length > 0) {
-        dispatch(upsertManyBlocks(pastedBlocksSnapshot))
+        dispatch(withClosureTopics(upsertManyBlocks(pastedBlocksSnapshot), targetTopicId))
       }
       let index = localIdx
       for (const message of pastedMessagesSnapshot) {

@@ -1,5 +1,6 @@
 import { loggerService } from '@logger'
 import type { AppDispatch, RootState } from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { updateOneBlock, upsertOneBlock } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -243,7 +244,7 @@ export class BlockManager {
         this._activeBlockInfo = { id: blockId, type: blockType } // 更新活跃块信息
       }
       if (this.isLoaded()) {
-        this.deps.dispatch(updateOneBlock({ id: blockId, changes }))
+        this.deps.dispatch(withClosureTopics(updateOneBlock({ id: blockId, changes }), this.deps.topicId))
       }
       this.trackSave(
         this.deps.saveUpdatedBlockToDB(
@@ -292,7 +293,7 @@ export class BlockManager {
           updates: { blockInstruction: { id: newBlock.id } }
         })
       )
-      this.deps.dispatch(upsertOneBlock(localBlock))
+      this.deps.dispatch(withClosureTopics(upsertOneBlock(localBlock), this.deps.topicId))
       this.deps.dispatch(
         newMessagesActions.upsertBlockReference({
           messageId: this.deps.assistantMsgId,

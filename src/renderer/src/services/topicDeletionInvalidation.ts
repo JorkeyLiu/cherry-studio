@@ -27,6 +27,7 @@ import { bumpAndInvalidate, clearCachedContextClosure } from '@renderer/services
 import { clearRetentionForTopicIfAvailable } from '@renderer/services/retentionClearHandler'
 import { removeScrollSnapshotsForTopicIds } from '@renderer/services/scrollSnapshotCache'
 import store from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { removeManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import {
@@ -214,7 +215,7 @@ function purgeResidentProjectionsForTopics(deletedTopicIds: string[]): void {
         if (exclusiveBlockIds.length > 0) {
           // Deduplicate
           const unique = [...new Set(exclusiveBlockIds)]
-          store.dispatch(removeManyBlocks(unique))
+          store.dispatch(withClosureTopics(removeManyBlocks(unique), topicId))
         }
       }
       // Segments

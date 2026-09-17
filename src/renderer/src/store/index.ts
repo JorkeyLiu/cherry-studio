@@ -45,6 +45,7 @@ import llm from './llm'
 import mcp from './mcp'
 import memory from './memory'
 import messageBlocksReducer from './messageBlock'
+import { getClosureTopicIds } from './closureOwnership'
 import migrate from './migrate'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
@@ -423,16 +424,24 @@ storeSyncService.setOptions({
 })
 
 /**
- * R-06 closure freshness invalidation middleware.
+ * R-06 closure freshness invalidation middleware (Task A: topic-scoped).
  * Authoritative renderer publication/mutation paths for messages/blocks bump
  * the per-topic closure generation and invalidate cached closure entries.
- * Conservative: block-only changes invalidate all cached topics (full closure
- * includes blocks); message actions invalidate their topic only.
+ *
+ * - `newMessages/*` actions invalidate their payload topic only (unchanged).
+ * - `messageBlocks/*` CONTENT mutations consume ONLY the explicit trustworthy
+ *   topic ownership in `action.meta.closureTopicIds` (see `withClosureTopics`
+ *   in store/closureOwnership.ts): one/many unique topics -> `bumpAndInvalidate`
+ *   each; absent/invalid/explicit-unknown -> `bumpAndInvalidateAll` (deliberate
+ *   global fallback). Ownership is never inferred from Redux entities or
+ *   projections here.
+ * - `messageBlocks/setMessageBlocksLoading|setMessageBlocksError` are not
+ *   block-content mutations and never invalidate.
  * This gives same-length/outside-viewport mutations a generation signal
  * without a new IPC protocol. Generation check before cache publication
  * and before cache use ensures stale data is never claimed.
  */
-const closureInvalidationMiddleware: Middleware = () => (next) => (action: any) => {
+export const closureInvalidationMiddleware: Middleware = () => (next) => (action: any) => {
   const result = next(action)
   try {
     const type = typeof action?.type === 'string' ? (action.type as string) : ''
@@ -442,8 +451,19 @@ const closureInvalidationMiddleware: Middleware = () => (next) => (action: any) 
         closureCache.bumpAndInvalidate(topicId)
       }
     } else if (type.startsWith('messageBlocks/')) {
-      // Block mutations may affect any closure's block association — conservatively invalidate all
-      closureCache.bumpAndInvalidateAll()
+      if (type === 'messageBlocks/setMessageBlocksLoading' || type === 'messageBlocks/setMessageBlocksError') {
+        // Loading/error markers are not block-content mutations: no invalidation.
+      } else {
+        const topicIds = getClosureTopicIds(action)
+        if (topicIds === null) {
+          // Unknown/unreliable ownership: deliberate global fallback.
+          closureCache.bumpAndInvalidateAll()
+        } else {
+          for (const topicId of topicIds) {
+            closureCache.bumpAndInvalidate(topicId)
+          }
+        }
+      }
     }
   } catch {
     // invalidation is best-effort; never break dispatch

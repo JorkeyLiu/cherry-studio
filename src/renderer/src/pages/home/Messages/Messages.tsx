@@ -77,6 +77,7 @@ import {
 } from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse, isWindowCovering } from '@renderer/services/windowCoverage'
 import store, { useAppDispatch } from '@renderer/store'
+import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
@@ -859,7 +860,7 @@ const Messages = ({
         // with no interleaving await). No manual `messagesRef` assignment: the
         // transaction below runs only after the projection commit is observable.
         if (ensured.blocks.length > 0) {
-          dispatch(upsertManyBlocks(ensured.blocks))
+          dispatch(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart))
         }
         dispatch(newMessagesActions.messagesReceived({ topicId: topicIdAtStart, messages: ensured.messages }))
 
@@ -1123,7 +1124,7 @@ const Messages = ({
               await consumeFileCleanupResult(cleanup)
 
               // Redux AFTER successful SQLite persistence
-              dispatch(updateOneBlock({ id: msgBlockId, changes: { content: updatedRaw } }))
+              dispatch(withClosureTopics(updateOneBlock({ id: msgBlockId, changes: { content: updatedRaw } }), topic.id))
 
               window.toast.success(t('code_block.edit.save.success'))
             } catch (error) {
@@ -1336,7 +1337,7 @@ const Messages = ({
           const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
 
           if (blocks.length > 0) {
-            dispatch(upsertManyBlocks(blocks))
+            dispatch(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart))
           }
           // install merged ordered list as single Redux transition
           dispatch(newMessagesActions.messagesReceived({ topicId: topicIdAtStart, messages: merged }))
@@ -1484,7 +1485,7 @@ const Messages = ({
           const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
 
           if (blocks.length > 0) {
-            dispatch(upsertManyBlocks(blocks))
+            dispatch(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart))
           }
           dispatch(newMessagesActions.messagesReceived({ topicId: topicIdAtStart, messages: merged }))
 
