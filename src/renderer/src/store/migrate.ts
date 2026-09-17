@@ -4444,6 +4444,101 @@ const migrateConfig = {
       logger.error('migrate 223 error', error as Error)
       return state
     }
+  },
+  '224': (state: RootState) => {
+    try {
+      // Capability-flag carryover for the debranded active runtime (slice 4):
+      //  - Generic service-tier carryover: for any provider with a genuinely
+      //    configured non-null, non-empty `serviceTier`, set
+      //    `apiOptions.isSupportServiceTier=true` only when currently
+      //    undefined; preserve explicit false/true and all other apiOptions.
+      //    `undefined`, `null` (explicitly off), and empty/whitespace-only
+      //    strings are never backfilled. No brand id participates.
+      //  - Qwen local soft-switch carryover: for unmistakable migrated local
+      //    no-key OpenAI-compatible entries already covered by migration 223's
+      //    conservative local criteria (type exactly `openai`, id exactly one
+      //    of ollama/lmstudio/gpustack, authType not oauth, empty apiKey,
+      //    loopback-local or empty apiHost), set
+      //    `apiOptions.isNotSupportEnableThinking=true` only when undefined;
+      //    preserve explicit true/false. History-only id criteria are
+      //    permitted inside this migration, never in active runtime.
+      //  - Touches only `llm.providers[*].apiOptions` (shallow merge).
+      //    Models, messages, history snapshots, and provider
+      //    ids/types/hosts/keys are never changed. Reads no stock.
+      const LOCAL_LEGACY_NO_KEY_IDS_224 = new Set(['ollama', 'lmstudio', 'gpustack'])
+      const LOCAL_HOSTNAMES_224 = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
+      const isLocalHost224 = (host: unknown): boolean => {
+        if (typeof host !== 'string') return false
+        const trimmed = host.trim()
+        if (trimmed.length === 0) return true
+        const lower = trimmed.toLowerCase()
+        const withoutScheme = lower.includes('://') ? lower.slice(lower.indexOf('://') + 3) : lower
+        const authority = withoutScheme.split(/[/?#]/, 1)[0] ?? ''
+        if (authority.length === 0 || authority.includes('@')) return false
+        let hostname: string
+        if (authority.startsWith('[')) {
+          const bracketEnd = authority.indexOf(']')
+          if (bracketEnd < 0) return false
+          hostname = authority.slice(1, bracketEnd)
+          const rest = authority.slice(bracketEnd + 1)
+          if (rest.length > 0 && !/^:\d+$/.test(rest)) return false
+        } else if (authority === '::1') {
+          hostname = authority
+        } else {
+          const lastColon = authority.lastIndexOf(':')
+          if (lastColon >= 0 && /^\d+$/.test(authority.slice(lastColon + 1) ?? '')) {
+            const before = authority.slice(0, lastColon)
+            hostname = before.includes(':') ? authority : before
+          } else {
+            hostname = authority
+          }
+        }
+        return LOCAL_HOSTNAMES_224.has(hostname)
+      }
+      const providers = Array.isArray(state.llm?.providers) ? state.llm.providers : []
+      for (const provider of providers) {
+        if (!provider || typeof (provider as { id?: unknown }).id !== 'string') continue
+        const apiOptions = (provider as unknown as { apiOptions?: Record<string, unknown> }).apiOptions
+        const nextOptions: Record<string, unknown> =
+          typeof apiOptions === 'object' && apiOptions !== null ? { ...apiOptions } : {}
+        let changed = false
+        // 1) serviceTier carryover: genuinely configured non-null, non-empty tier opts in.
+        const serviceTier = (provider as unknown as { serviceTier?: unknown }).serviceTier
+        const hasConfiguredServiceTier =
+          serviceTier !== undefined &&
+          serviceTier !== null &&
+          (typeof serviceTier !== 'string' || serviceTier.trim().length > 0)
+        if (
+          hasConfiguredServiceTier &&
+          (nextOptions as { isSupportServiceTier?: unknown }).isSupportServiceTier === undefined
+        ) {
+          ;(nextOptions as { isSupportServiceTier?: unknown }).isSupportServiceTier = true
+          changed = true
+        }
+        // 2) local soft-switch carryover: conservative 223 local criteria.
+        const isLocalCandidate =
+          (provider as unknown as { type?: unknown }).type === 'openai' &&
+          LOCAL_LEGACY_NO_KEY_IDS_224.has(provider.id) &&
+          (provider as unknown as { authType?: unknown }).authType !== 'oauth' &&
+          !(typeof provider.apiKey === 'string' && provider.apiKey.trim().length > 0) &&
+          isLocalHost224((provider as unknown as { apiHost?: unknown }).apiHost)
+        if (
+          isLocalCandidate &&
+          (nextOptions as { isNotSupportEnableThinking?: unknown }).isNotSupportEnableThinking === undefined
+        ) {
+          ;(nextOptions as { isNotSupportEnableThinking?: unknown }).isNotSupportEnableThinking = true
+          changed = true
+        }
+        if (changed) {
+          provider.apiOptions = nextOptions as unknown as Provider['apiOptions']
+        }
+      }
+      logger.info('migrate 224 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 224 error', error as Error)
+      return state
+    }
   }
 }
 

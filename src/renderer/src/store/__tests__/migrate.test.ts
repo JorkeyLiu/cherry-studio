@@ -1748,4 +1748,197 @@ describe('store migrations', () => {
       expect(migrated.assistants.assistants[0].topics[0].messages[0].model).toEqual(snapshotModel)
     })
   })
+
+  describe('migration 224: serviceTier and local-thinking capability backfills', () => {
+    const approved224 = (overrides: Record<string, unknown> = {}) => ({
+      id: 'custom-openai',
+      name: 'Custom OpenAI',
+      type: 'openai',
+      apiKey: '',
+      apiHost: 'https://proxy.example.com/v1',
+      models: [],
+      isSystem: false,
+      enabled: true,
+      ...overrides
+    })
+    const makeState224 = (state: Record<string, unknown>) => ({
+      llm: { providers: [], settings: {}, ...(state.llm as Record<string, unknown>) },
+      assistants: { defaultAssistant: {}, assistants: [], ...(state.assistants as Record<string, unknown>) },
+      _persist: { version: 223, rehydrated: false }
+    })
+
+    it('opts in serviceTier capability only when a tier is configured and the flag is unset', async () => {
+      const state = makeState224({
+        llm: {
+          providers: [
+            approved224({ id: 'openai', serviceTier: 'auto' }),
+            approved224({ id: 'custom-a', serviceTier: 'flex' }),
+            approved224({ id: 'no-tier' }),
+            approved224({ id: 'null-tier', serviceTier: null }),
+            approved224({ id: 'empty-tier', serviceTier: '' }),
+            approved224({ id: 'blank-tier', serviceTier: '   ' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 224)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      expect(byId['openai'].apiOptions).toMatchObject({ isSupportServiceTier: true })
+      expect(byId['custom-a'].apiOptions).toMatchObject({ isSupportServiceTier: true })
+      // No brand id needed: custom ids opt in the same way.
+      expect(byId['no-tier'].apiOptions).toBeUndefined()
+      // Null (explicitly off) and empty/blank tiers are not genuinely configured: never backfilled.
+      expect(byId['null-tier'].apiOptions?.isSupportServiceTier).toBeUndefined()
+      expect(byId['empty-tier'].apiOptions?.isSupportServiceTier).toBeUndefined()
+      expect(byId['blank-tier'].apiOptions?.isSupportServiceTier).toBeUndefined()
+    })
+
+    it('preserves explicit serviceTier flags and all other apiOptions', async () => {
+      const state = makeState224({
+        llm: {
+          providers: [
+            approved224({
+              id: 'explicit-false',
+              serviceTier: 'auto',
+              apiOptions: { isSupportServiceTier: false, isNotSupportStreamOptions: true }
+            }),
+            approved224({
+              id: 'explicit-true',
+              serviceTier: 'auto',
+              apiOptions: { isSupportServiceTier: true, requiresApiKey: false }
+            })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 224)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      expect(byId['explicit-false'].apiOptions).toMatchObject({
+        isSupportServiceTier: false,
+        isNotSupportStreamOptions: true
+      })
+      expect(byId['explicit-true'].apiOptions).toMatchObject({
+        isSupportServiceTier: true,
+        requiresApiKey: false
+      })
+    })
+
+    it('backfills local soft-switch only for conservative local legacy entries', async () => {
+      const state = makeState224({
+        llm: {
+          providers: [
+            approved224({ id: 'ollama', apiHost: 'http://localhost:11434/v1', apiKey: '' }),
+            approved224({ id: 'lmstudio', apiHost: 'http://127.0.0.1:1234/v1', apiKey: '' }),
+            approved224({ id: 'gpustack', apiHost: '', apiKey: '' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 224)
+
+      for (const p of migrated.llm.providers) {
+        expect(p.apiOptions).toMatchObject({ isNotSupportEnableThinking: true })
+      }
+    })
+
+    it('preserves explicit thinking flags and avoids remote false positives', async () => {
+      const state = makeState224({
+        llm: {
+          providers: [
+            approved224({
+              id: 'ollama',
+              apiHost: 'http://localhost:11434/v1',
+              apiKey: '',
+              apiOptions: { isNotSupportEnableThinking: false }
+            }),
+            approved224({
+              id: 'lmstudio',
+              apiHost: 'http://127.0.0.1:1234/v1',
+              apiKey: '',
+              apiOptions: { isNotSupportEnableThinking: true }
+            }),
+            // Remote host with legacy id: untouched.
+            approved224({ id: 'ollama', apiHost: 'https://remote.example.com/v1', apiKey: '' }),
+            // Local host with non-legacy id: untouched.
+            approved224({ id: 'my-remote', apiHost: 'http://localhost:11434/v1', apiKey: '' }),
+            // Keyed local legacy entry: untouched.
+            approved224({ id: 'ollama', apiHost: 'http://localhost:11434/v1', apiKey: 'k' }),
+            // OAuth local legacy entry: untouched.
+            approved224({ id: 'ollama', apiHost: 'http://localhost:11434/v1', apiKey: '', authType: 'oauth' }),
+            // Non-openai protocol with legacy id: untouched.
+            approved224({ id: 'ollama', type: 'anthropic', apiHost: 'http://localhost:11434/v1', apiKey: '' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 224)
+
+      const byId = Object.fromEntries(
+        migrated.llm.providers.map((p: any) => [p.id + '|' + p.apiHost + '|' + p.type, p])
+      )
+      const localFalse = migrated.llm.providers[0]
+      const localTrue = migrated.llm.providers[1]
+      expect(localFalse.apiOptions).toMatchObject({ isNotSupportEnableThinking: false })
+      expect(localTrue.apiOptions).toMatchObject({ isNotSupportEnableThinking: true })
+      for (const p of migrated.llm.providers.slice(2)) {
+        expect(p.apiOptions?.isNotSupportEnableThinking).toBeUndefined()
+      }
+      expect(byId).toBeDefined()
+    })
+
+    it('combines both backfills, preserves other fields, and leaves snapshots untouched', async () => {
+      const snapshotModel = { id: 'm1', name: 'm1', provider: 'ollama', group: 'ollama' }
+      const before = approved224({
+        id: 'ollama',
+        name: 'Ollama',
+        type: 'openai',
+        apiKey: '',
+        apiHost: 'http://127.0.0.1:11434/v1',
+        serviceTier: 'auto',
+        models: [snapshotModel],
+        enabled: true,
+        apiOptions: { isNotSupportStreamOptions: true }
+      })
+      const state = makeState224({
+        llm: { providers: [before] },
+        assistants: {
+          defaultAssistant: {},
+          assistants: [{ id: 'a1', topics: [{ id: 't1', messages: [{ id: 'm1', model: snapshotModel }] }] }]
+        }
+      })
+      const migrated: any = await migrate(state as any, 224)
+
+      const p = migrated.llm.providers[0]
+      expect(p.apiOptions).toMatchObject({
+        isSupportServiceTier: true,
+        isNotSupportEnableThinking: true,
+        isNotSupportStreamOptions: true
+      })
+      // Identity and connection fields untouched.
+      expect(p.id).toBe('ollama')
+      expect(p.type).toBe('openai')
+      expect(p.apiHost).toBe('http://127.0.0.1:11434/v1')
+      expect(p.apiKey).toBe('')
+      expect(p.models).toEqual([snapshotModel])
+      expect(migrated.assistants.assistants[0].topics[0].messages[0].model).toEqual(snapshotModel)
+    })
+
+    it('recovers options/plugin behavior from migrated flags', async () => {
+      const { isSupportServiceTierProvider, isSupportEnableThinkingProvider } = await import('@renderer/utils/provider')
+      const state = makeState224({
+        llm: {
+          providers: [
+            approved224({ id: 'openai', serviceTier: 'auto' }),
+            approved224({ id: 'ollama', apiHost: 'http://localhost:11434/v1', apiKey: '' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 224)
+
+      const tiered = migrated.llm.providers.find((p: any) => p.id === 'openai')
+      const local = migrated.llm.providers.find((p: any) => p.id === 'ollama')
+      // Service-tier opt-in enables tiered requests; local soft-switch routes
+      // Qwen thinking through the plugin path.
+      expect(isSupportServiceTierProvider(tiered)).toBe(true)
+      expect(isSupportEnableThinkingProvider(local)).toBe(false)
+    })
+  })
 })

@@ -1,5 +1,4 @@
 import type { Model } from '@renderer/types'
-import { isSystemProviderId } from '@renderer/types'
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
@@ -91,25 +90,18 @@ export function isFunctionCallingModel(model?: Model): boolean {
     return externalToolCall
   }
 
-  if (model.provider === 'stepfun' && STEPFUN_FUNCTION_CALLING_MODELS.has(modelId)) {
+  if (STEPFUN_FUNCTION_CALLING_MODELS.has(modelId)) {
     return true
   }
 
-  if (model.provider === 'doubao' || modelId.includes('doubao')) {
+  if (modelId.includes('doubao') || (model.name && getLowerBaseModelName(model.name).includes('doubao'))) {
     return FUNCTION_CALLING_REGEX.test(modelId) || FUNCTION_CALLING_REGEX.test(model.name)
   }
 
   // 2025/08/26 百炼与火山引擎均不支持 v3.1 函数调用
-  // 先默认支持
+  // Debranded: capability follows the model family only. Provider ids are
+  // opaque join keys and never gate tool calling.
   if (isDeepSeekHybridInferenceModel(model)) {
-    if (isSystemProviderId(model.provider)) {
-      switch (model.provider) {
-        case 'dashscope':
-        case 'doubao':
-          // case 'nvidia': // nvidia api 太烂了 测不了能不能用 先假设能用
-          return false
-      }
-    }
     return true
   }
 

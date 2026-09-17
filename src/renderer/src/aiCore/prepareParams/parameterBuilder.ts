@@ -119,12 +119,16 @@ export async function buildStreamTextParams(
 
   // 判断是否使用内置搜索
   // 条件：没有外部搜索提供商 && (用户开启了内置搜索 || 模型强制使用内置搜索)
+  // Built-in is claimed only when a safe standard emitter exists:
+  // isWebSearchModel/isOpenRouterBuiltInWebSearchModel are already gated so
+  // generic OpenAI-compatible is true only for the web_search_options family.
+  // The raw `sonar` substring fallback is intentionally gone: it bypassed
+  // capability gating and forced built-in on generic connections that cannot
+  // emit safe params. External RAG (webSearchProviderId) stays distinct.
   const hasExternalSearch = !!options.webSearchProviderId
   const enableWebSearch =
     !hasExternalSearch &&
-    ((assistant.enableWebSearch && isWebSearchModel(model)) ||
-      isOpenRouterBuiltInWebSearchModel(model) ||
-      model.id.includes('sonar'))
+    ((assistant.enableWebSearch && isWebSearchModel(model)) || isOpenRouterBuiltInWebSearchModel(model))
 
   // Validate provider and model support to prevent stale state from triggering urlContext
   const enableUrlContext = !!(

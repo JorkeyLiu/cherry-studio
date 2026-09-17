@@ -62,10 +62,12 @@ export function supportsImageInput(model: Model): boolean {
  * 检查提供商是否支持大文件上传（如Gemini File API）
  */
 export function supportsLargeFileUpload(model: Model): boolean {
-  // 基于AI SDK文档，以下模型或提供商支持大文件上传
+  // Protocol-derived AI SDK id only (`google` for the Gemini protocol).
+  // Retired brand adapters resolve through generic OpenAI-compatible and
+  // never reach a brand-specific bucket here.
   return modelSupportValidator(model, {
     supportedModels: ['qwen-long', 'qwen-doc'],
-    supportedProviders: ['google', 'google-generative-ai', 'google-vertex']
+    supportedProviders: ['google']
   })
 }
 
@@ -86,13 +88,8 @@ export function getFileSizeLimit(model: Model, fileType: string | null): number 
   }
 
   // Gemini小文件限制20MB（超过此限制会使用File API上传）
-  if (['google', 'google-generative-ai', 'google-vertex'].includes(aiSdkId)) {
+  if (aiSdkId === 'google') {
     return 20 * 1024 * 1024 // 20MB
-  }
-
-  // Dashscope如果模型支持大文件上传优先使用File API上传
-  if (aiSdkId === 'dashscope' && supportsLargeFileUpload(model)) {
-    return 0 // 使用较小的默认值
   }
 
   // 其他提供商没有明确限制，使用较大的默认值

@@ -135,9 +135,11 @@ describe('isFunctionCallingModel', () => {
     expect(isFunctionCallingModel(createModel({ id: 'deepseek-v3-1', provider: 'custom' }))).toBe(true)
   })
 
-  it('returns false for deepseek hybrid models behind restricted system providers', () => {
+  it('returns true for deepseek hybrid models on any connection (no brand gate)', () => {
     deepSeekHybridMock.mockReturnValueOnce(true)
-    expect(isFunctionCallingModel(createModel({ id: 'deepseek-v3-1', provider: 'dashscope' }))).toBe(false)
+    expect(isFunctionCallingModel(createModel({ id: 'deepseek-v3-1', provider: 'dashscope' }))).toBe(true)
+    deepSeekHybridMock.mockReturnValueOnce(true)
+    expect(isFunctionCallingModel(createModel({ id: 'deepseek-v3-1', provider: 'custom-x' }))).toBe(true)
   })
 
   it('supports anthropic models through claude regex match', () => {

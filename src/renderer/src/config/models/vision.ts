@@ -261,10 +261,6 @@ export function isVisionModel(model?: Model): boolean {
   if (!model || isEmbeddingModel(model) || isRerankModel(model)) {
     return false
   }
-  // 新添字段 copilot-vision-request 后可使用 vision
-  // if (model.provider === 'copilot') {
-  //   return false
-  // }
   if (isUserSelectedModelType(model, 'vision') !== undefined) {
     return isUserSelectedModelType(model, 'vision')!
   }
@@ -277,11 +273,11 @@ export function isVisionModel(model?: Model): boolean {
   }
 
   const modelId = getLowerBaseModelName(model.id)
-  if (model.provider === 'stepfun' && STEPFUN_VISION_MODELS.has(modelId)) {
+  if (STEPFUN_VISION_MODELS.has(modelId)) {
     return true
   }
 
-  if (model.provider === 'doubao' || modelId.includes('doubao')) {
+  if (modelId.includes('doubao') || (model.name && getLowerBaseModelName(model.name).includes('doubao'))) {
     return VISION_REGEX.test(model.name) || VISION_REGEX.test(modelId) || false
   }
 

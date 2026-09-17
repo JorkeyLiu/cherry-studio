@@ -1,9 +1,9 @@
 /**
  * History-isolation boundary for the built-in provider/model catalogs.
- * Stock inputs support replay through current migration 223. Only migrations
+ * Stock inputs support replay through current migration 224. Only migrations
  * up to 221 actually read stock (provider adds through 200, model backfills
  * at 9/95/111/117/123/139/194/198/204, and migration 221 deep-equality);
- * migrations 222-223 operate on the migrating state's own providers.
+ * migrations 222-224 operate on the migrating state's own providers.
  * This boundary proves:
  *  - history stock keeps migration 221 deep-equality drop/preserve semantics;
  *  - historically missing dead ids stay absent (replay no-op unchanged);
@@ -306,7 +306,7 @@ describe('history isolation', () => {
     // Explicit allowed-importer set: production history may only come from
     // `store/migrate.ts`; test-scope history may only come from the migration
     // tests. Any drift (new importer, or the entrypoint losing its import and
-    // silently breaking 1-223 replay) fails here.
+    // silently breaking 1-224 replay) fails here.
     const allowedHistoryImporters = new Set([
       ...ALLOWED_PRODUCTION_HISTORY_IMPORTERS,
       ...ALLOWED_TEST_HISTORY_IMPORTERS

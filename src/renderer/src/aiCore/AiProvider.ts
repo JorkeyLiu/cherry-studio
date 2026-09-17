@@ -6,7 +6,6 @@ import { logColdPathDiagnostic } from '@renderer/services/db/sendTimingDiagnosti
 import { addSpan, endSpan } from '@renderer/services/SpanManagerService'
 import type { StartSpanParams } from '@renderer/trace/types/ModelSpanEntity'
 import type { Assistant, EditImageParams, GenerateImageParams, Model, Provider } from '@renderer/types'
-import { SystemProviderIds } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
 import { buildClaudeCodeSystemModelMessage } from '@shared/anthropic'
@@ -26,11 +25,9 @@ const logger = loggerService.withContext('AiProvider')
  * (LOCK-002: never logs apiKey, token values, or custom provider settings).
  */
 function classifyProviderConfigCategory(provider: Provider): string {
-  if (provider.id === SystemProviderIds.copilot) {
-    return 'copilot'
-  }
   // Protocol-gated: any entry speaking the Anthropic protocol in oauth mode
-  // (official or custom id) is Anthropic OAuth. Never gate on brand/provider.id.
+  // (official or custom id) is Anthropic OAuth. No provider brand id
+  // participates; every other connection is 'other'.
   if (provider.type === 'anthropic' && provider.authType === 'oauth') {
     return 'anthropic-oauth'
   }

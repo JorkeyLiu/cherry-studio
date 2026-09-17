@@ -8,7 +8,6 @@ import type { LanguageModelV3FilePart, LanguageModelV3Message } from '@ai-sdk/pr
 import { definePlugin } from '@cherrystudio/ai-core/core/plugins'
 import { loggerService } from '@logger'
 import type { Model, Provider, ProviderType } from '@renderer/types'
-import { SystemProviderIds } from '@renderer/types'
 import { extractPdfText } from '@shared/utils/pdf'
 import type { LanguageModelMiddleware } from 'ai'
 import i18n from 'i18next'
@@ -29,18 +28,12 @@ const PDF_NATIVE_PROVIDER_TYPES = new Set<ProviderType>([
   'gemini' // Google Gemini API
 ])
 
-const PDF_FORCE_TEXT_EXTRACTION_PROVIDER_IDS = new Set<string>([SystemProviderIds.qiniu])
-
 function isPdfFilePart(part: ContentPart): part is LanguageModelV3FilePart & { mediaType: 'application/pdf' } {
   return part.type === 'file' && part.mediaType === 'application/pdf'
 }
 
 function supportsNativePdf(provider: Provider, _model: Model): boolean {
   void _model
-  if (PDF_FORCE_TEXT_EXTRACTION_PROVIDER_IDS.has(provider.id)) {
-    return false
-  }
-
   // endpoint_type is a preserved legacy field only and never routes PDF
   // behavior. Native support follows the provider protocol only.
   if (PDF_NATIVE_PROVIDER_TYPES.has(provider.type)) {

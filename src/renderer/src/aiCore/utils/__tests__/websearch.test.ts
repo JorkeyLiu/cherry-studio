@@ -20,38 +20,25 @@ vi.mock('@renderer/utils/blacklistMatchPattern', () => ({
 }))
 
 describe('websearch utils', () => {
-  describe('getWebSearchParams', () => {
-    it('should return enhancement params for hunyuan provider', () => {
+  describe('getWebSearchParams (debranded: protocol-standard only)', () => {
+    it('should return empty object for hunyuan models (no brand-specific params)', () => {
       const model: Model = {
         id: 'hunyuan-model',
         name: 'Hunyuan Model',
         provider: 'hunyuan'
       } as Model
 
-      const result = getWebSearchParams(model)
-
-      expect(result).toEqual({
-        enable_enhancement: true,
-        citation: true,
-        search_info: true
-      })
+      expect(getWebSearchParams(model)).toEqual({})
     })
 
-    it('should return search params for dashscope provider', () => {
+    it('should return empty object for dashscope models (no brand-specific params)', () => {
       const model: Model = {
         id: 'qwen-model',
         name: 'Qwen Model',
         provider: 'dashscope'
       } as Model
 
-      const result = getWebSearchParams(model)
-
-      expect(result).toEqual({
-        enable_search: true,
-        search_options: {
-          forced_search: true
-        }
-      })
+      expect(getWebSearchParams(model)).toEqual({})
     })
 
     it('should return web_search_options for OpenAI web search models', () => {
@@ -68,20 +55,37 @@ describe('websearch utils', () => {
       })
     })
 
-    it('should return extra_body with web_search for poe provider', () => {
+    it('should return empty object for poe models (no brand-specific extra_body)', () => {
       const model: Model = {
         id: 'Gemini-3-Flash',
         name: 'Gemini 3 Flash',
         provider: 'poe'
       } as Model
 
-      const result = getWebSearchParams(model)
+      expect(getWebSearchParams(model)).toEqual({})
+    })
 
-      expect(result).toEqual({
-        extra_body: {
-          web_search: true
-        }
-      })
+    it('should return empty object for sonar/qwen/hunyuan families (no safe generic emitter)', () => {
+      for (const id of ['sonar-pro', 'sonar-deep-research', 'qwen-max-latest', 'hunyuan-pro']) {
+        expect(getWebSearchParams({ id, name: id, provider: 'custom-a' } as Model)).toEqual({})
+      }
+    })
+
+    it('should never emit vendor-private search keys from the generic path', () => {
+      for (const id of ['sonar-pro', 'qwen-max-latest', 'hunyuan-pro', 'gpt-4o', 'custom-model']) {
+        const result: any = getWebSearchParams({ id, name: id, provider: 'custom-a' } as Model)
+        expect(result).not.toHaveProperty('enable_search')
+        expect(result).not.toHaveProperty('enable_enhancement')
+        expect(result).not.toHaveProperty('search_options')
+        expect(result).not.toHaveProperty('extra_body')
+      }
+    })
+
+    it('should yield identical results for different provider ids with the same model id', () => {
+      const a = getWebSearchParams({ id: 'gpt-4', name: 'GPT-4', provider: 'brand-a' } as Model)
+      const b = getWebSearchParams({ id: 'gpt-4', name: 'GPT-4', provider: 'brand-b' } as Model)
+      expect(a).toEqual(b)
+      expect(a).toEqual({})
     })
 
     it('should return empty object for other providers', () => {

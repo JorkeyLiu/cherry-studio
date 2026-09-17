@@ -1,7 +1,7 @@
 import type OpenAI from '@cherrystudio/openai'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models/embedding'
 import type { Assistant } from '@renderer/types'
-import { type Model, SystemProviderIds } from '@renderer/types'
+import { type Model } from '@renderer/types'
 import type { OpenAIVerbosity, ValidOpenAIVerbosity } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
 
@@ -147,7 +147,7 @@ export function isGemmaModel(model?: Model): boolean {
 
 export function isZhipuModel(model: Model): boolean {
   const modelId = getLowerBaseModelName(model.id)
-  return modelId.includes('glm') || model.provider === SystemProviderIds.zhipu
+  return modelId.includes('glm')
 }
 
 export function isMoonshotModel(model: Model): boolean {

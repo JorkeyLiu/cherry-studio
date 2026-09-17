@@ -1,5 +1,5 @@
 /**
- * History-only built-in provider catalog for Redux migrations 1-223 replay.
+ * History-only built-in provider catalog for Redux migrations 1-224 replay.
  * Moved verbatim from `src/renderer/src/config/providers.ts` stock records.
  * Active runtime must NOT import this module — only `store/migrate*`.
  * Stock object contents, field values, and model arrays are preserved exactly
@@ -8,10 +8,10 @@
  * INITIAL_STATE_EXCLUDED_PROVIDER_IDS, dimension constants) was removed here
  * because it is not a migration input. Historically missing providers
  * (zhinao/gitee-ai/o3/cherryin) stay absent: replay no-op behavior unchanged.
- * Stock inputs support replay through current migration 223. Only migrations
+ * Stock inputs support replay through current migration 224. Only migrations
  * up to 221 actually read stock (provider adds through 200 via
  * addProvider/fixMissing, plus migration 221 deep-equality via
- * isUntouchedStockProvider); migrations 222-223 operate on the migrating
+ * isUntouchedStockProvider); migrations 222-224 operate on the migrating
  * state's own providers and read no stock.
  */
 import type { Provider, SystemProvider, SystemProviderId } from '@renderer/types'
@@ -21,7 +21,7 @@ import { SYSTEM_MODELS } from './systemModels'
 
 // History-only catalog entry shape (slice 3): the built-in catalog still
 // carries retired protocol strings (ollama/new-api/azure/vertex/...) so stock
-// inputs support replay through migration 223 (only migrations up to 221
+// inputs support replay through migration 224 (only migrations up to 221
 // actually read stock). Active ProviderType stays narrowed; this legacy
 // shape must never be used for new creation or active request selection.
 export type LegacyCatalogProvider = Omit<SystemProvider, 'type'> & { type: string }

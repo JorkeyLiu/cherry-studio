@@ -23,7 +23,3 @@ export function isAzureOpenAIProvider(provider: Provider): boolean {
 export function isVertexProvider(provider: Provider): boolean {
   return (provider as unknown as { type: string }).type === 'vertexai'
 }
-
-export function isPerplexityProvider(provider: Provider): boolean {
-  return provider.id === 'perplexity'
-}

@@ -560,12 +560,14 @@ describe('model utils', () => {
     })
 
     describe('isZhipuModel', () => {
-      it('detects Zhipu models by provider', () => {
-        expect(isZhipuModel(createModel({ provider: 'zhipu' }))).toBe(true)
+      it('detects Zhipu models by model id only (no provider gate)', () => {
+        expect(isZhipuModel(createModel({ id: 'glm-4-plus', provider: 'custom-a' }))).toBe(true)
+        expect(isZhipuModel(createModel({ id: 'glm-5', provider: 'zhipu' }))).toBe(true)
       })
 
       it('returns false for non-Zhipu models', () => {
         expect(isZhipuModel(createModel({ provider: 'openai' }))).toBe(false)
+        expect(isZhipuModel(createModel({ provider: 'zhipu' }))).toBe(false)
       })
     })
 

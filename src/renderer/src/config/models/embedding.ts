@@ -18,12 +18,8 @@ export function isEmbeddingModel(model: Model): boolean {
     return isUserSelectedModelType(model, 'embedding')!
   }
 
-  if (['anthropic'].includes(model?.provider)) {
-    return false
-  }
-
-  if (model.provider === 'doubao' || modelId.includes('doubao')) {
-    return EMBEDDING_REGEX.test(model.name)
+  if (modelId.includes('doubao') || (model.name && getLowerBaseModelName(model.name).includes('doubao'))) {
+    return EMBEDDING_REGEX.test(model.name || '')
   }
 
   return EMBEDDING_REGEX.test(modelId) || false

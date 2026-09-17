@@ -53,8 +53,6 @@ export type ProviderApiOptions = {
   isSupportServiceTier?: boolean
   /** Whether the enable_thinking parameter is not supported */
   isNotSupportEnableThinking?: boolean
-  /** Whether APIVersion is not supported */
-  isNotSupportAPIVersion?: boolean
   /** Whether verbosity is not supported. For OpenAI API (completions & responses). */
   isNotSupportVerbosity?: boolean
 }

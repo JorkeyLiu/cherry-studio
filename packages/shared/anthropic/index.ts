@@ -97,20 +97,6 @@ export function getSdkClient(
 
   logger.debug('Anthropic API baseURL', { baseURL, providerId: provider.id })
 
-  if (provider.id === 'aihubmix') {
-    return new Anthropic({
-      apiKey: provider.apiKey,
-      baseURL,
-      dangerouslyAllowBrowser: true,
-      defaultHeaders: {
-        'anthropic-beta': 'output-128k-2025-02-19',
-        'APP-Code': 'MLTG2087',
-        ...provider.extra_headers,
-        ...extraHeaders
-      }
-    })
-  }
-
   return new Anthropic({
     apiKey: provider.apiKey,
     authToken: provider.apiKey,

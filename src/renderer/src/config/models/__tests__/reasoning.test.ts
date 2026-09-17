@@ -1422,9 +1422,9 @@ describe('Gemini Models', () => {
       ).toBe(true)
     })
 
-    it('should keep non-Gemini Gemma 4 ids out of Gemini thinking token detection', () => {
+    it('should detect hosted gemma 4 ids by model id on any connection (no provider gate)', () => {
       expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma-4-31b-it', provider: 'openrouter' }))).toBe(
-        false
+        true
       )
       expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma4:31b' }))).toBe(false)
       expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma4:e2b' }))).toBe(false)

@@ -127,10 +127,12 @@ describe('websearch helpers', () => {
   })
 
   describe('isOpenAIDeepResearchModel', () => {
-    it('detects deep research ids for OpenAI only', () => {
+    it('detects deep research ids by model id only (no provider gate)', () => {
       expect(isOpenAIDeepResearchModel(createModel({ id: 'openai/deep-research-preview' }))).toBe(true)
       expect(isOpenAIDeepResearchModel(createModel({ provider: 'openai', id: 'gpt-4o' }))).toBe(false)
-      expect(isOpenAIDeepResearchModel(createModel({ provider: 'openrouter', id: 'deep-research' }))).toBe(false)
+      // Debranded: same model id on any connection yields the same result.
+      expect(isOpenAIDeepResearchModel(createModel({ provider: 'openrouter', id: 'deep-research' }))).toBe(true)
+      expect(isOpenAIDeepResearchModel(createModel({ provider: 'custom-x', id: 'deep-research' }))).toBe(true)
     })
   })
 
@@ -206,25 +208,52 @@ describe('websearch helpers', () => {
       expect(isWebSearchModel(nonSearch)).toBe(false)
     })
 
-    it('supports Perplexity sonar families including mandatory variants', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.perplexity }))
+    it('supports sonar families by model id on non-generic connections (no brand gate)', () => {
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-a' }))
       expect(isWebSearchModel(createModel({ id: 'sonar-deep-research' }))).toBe(true)
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-b' }))
+      expect(isWebSearchModel(createModel({ id: 'sonar-pro' }))).toBe(true)
     })
 
-    it('handles AIHubMix Gemini and OpenAI search models', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.aihubmix }))
-      expect(isWebSearchModel(createModel({ id: 'gemini-2.5-pro-preview' }))).toBe(true)
+    it('excludes sonar families on generic connections (no safe standard emitter)', () => {
+      for (const id of ['sonar-pro', 'sonar-deep-research', 'sonar-reasoning']) {
+        providerMock.mockReturnValueOnce(createProvider({ id: 'custom-generic', type: 'openai' }))
+        providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+        expect(isWebSearchModel(createModel({ id }))).toBe(false)
+      }
+    })
 
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.aihubmix }))
+    it('handles only the web_search_options family on generic compatible connections', () => {
+      // Gemini-search-regex ids have no generic emitter: false on generic.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-a', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+      expect(isWebSearchModel(createModel({ id: 'gemini-2.5-pro-preview' }))).toBe(false)
+
+      // Chat-completion-only family keeps the standard web_search_options emitter.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-b', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
       const openaiSearch = createModel({ id: 'gpt-4o-search-preview' })
       expect(isWebSearchModel(openaiSearch)).toBe(true)
+
+      // Broad OpenAI-search ids (gpt-4o/o3/gpt-5) have no generic emitter.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-c', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+      expect(isWebSearchModel(createModel({ id: 'gpt-4o' }))).toBe(false)
+
+      // qwen/hunyuan vendor-private families have no generic emitter.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-d', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+      expect(isWebSearchModel(createModel({ id: 'qwen-max-latest' }))).toBe(false)
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-e', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+      expect(isWebSearchModel(createModel({ id: 'hunyuan-pro' }))).toBe(false)
     })
 
-    it('supports OpenAI-compatible or folded new-api providers for Gemini/OpenAI models', () => {
+    it('supports OpenAI-compatible or folded new-api providers only for the web_search_options family', () => {
       const model = createModel({ id: 'gemini-2.5-flash-lite-latest' })
       providerMock.mockReturnValueOnce(createProvider({ id: 'custom' }))
       providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
-      expect(isWebSearchModel(model)).toBe(true)
+      expect(isWebSearchModel(model)).toBe(false)
 
       resetMocks()
       // Slice 3: folded new-api entries are generic `openai` protocol, so the
@@ -235,66 +264,112 @@ describe('websearch helpers', () => {
       expect(isWebSearchModel(createModel({ id: 'gpt-4o-search-preview' }))).toBe(true)
     })
 
+    it('honors explicit user web_search override on generic connections', () => {
+      // User override returns before provider lookup: no provider mocks
+      // needed (setting Once mocks here would leak into later tests).
+      const enabled = createModel({
+        id: 'sonar-pro',
+        capabilities: [{ type: 'web_search', isUserSelected: true }]
+      })
+      expect(isWebSearchModel(enabled)).toBe(true)
+    })
+
     it('falls back to Gemini/Vertex provider regex matching', () => {
       providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.vertexai }))
       providerMocks.isGeminiProvider.mockReturnValueOnce(true)
       expect(isWebSearchModel(createModel({ id: 'gemini-2.0-flash-latest' }))).toBe(true)
     })
 
-    it('evaluates hunyuan/dashscope/openrouter/grok providers', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: 'hunyuan' }))
+    it('evaluates hunyuan/qwen model-id families on non-generic connections (no brand gate)', () => {
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-a' }))
       expect(isWebSearchModel(createModel({ id: 'hunyuan-pro' }))).toBe(true)
       expect(isWebSearchModel(createModel({ id: 'hunyuan-lite', provider: 'hunyuan' }))).toBe(false)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: 'dashscope' }))
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-b' }))
       expect(isWebSearchModel(createModel({ id: 'qwen-max-latest' }))).toBe(true)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: 'openrouter' }))
-      expect(isWebSearchModel(createModel())).toBe(true)
+      // Former openrouter brand fallback removed: generic models without a
+      // search-capable model id are not searchable.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-c' }))
+      expect(isWebSearchModel(createModel())).toBe(false)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: 'grok', type: 'openai-response' }))
+      // Former grok brand fallback removed: grok-2 has no generic search heuristic.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-d', type: 'openai-response' }))
       providerMocks.isOpenAIProvider.mockReturnValueOnce(true)
-      expect(isWebSearchModel(createModel({ id: 'grok-2' }))).toBe(true)
+      expect(isWebSearchModel(createModel({ id: 'grok-2' }))).toBe(false)
 
-      // zhipu provider does not have built-in search capability
-      providerMock.mockReturnValueOnce(createProvider({ id: 'zhipu' }))
+      // zhipu/glm ids have no built-in search heuristic.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-e' }))
       expect(isWebSearchModel(createModel({ id: 'glm-4-air' }))).toBe(false)
-      providerMock.mockReturnValueOnce(createProvider({ id: 'zhipu' }))
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-e' }))
       expect(isWebSearchModel(createModel({ id: 'glm-5' }))).toBe(false)
+    })
+
+    it('proves no brand-id behavioral difference for websearch capability', () => {
+      const ids = ['perplexity', 'openrouter', 'aihubmix', 'hunyuan', 'dashscope', 'custom-x']
+      for (const modelId of ['sonar-pro', 'qwen-max-latest', 'gpt-4o', 'glm-5']) {
+        const results = ids.map((pid) => {
+          providerMock.mockReturnValueOnce(createProvider({ id: pid }))
+          // Reset protocol mocks to default false for a level field.
+          providerMocks.isOpenAIProvider.mockReturnValue(false)
+          providerMocks.isOpenAICompatibleProvider.mockReturnValue(false)
+          providerMocks.isGeminiProvider.mockReturnValue(false)
+          return isWebSearchModel(createModel({ id: modelId }))
+        })
+        expect(new Set(results).size).toBe(1)
+      }
     })
   })
 
   describe('isMandatoryWebSearchModel', () => {
-    it('requires sonar ids for perplexity/openrouter providers', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.perplexity }))
+    it('requires sonar ids by model id on non-generic connections (no brand gate)', () => {
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-a' }))
       expect(isMandatoryWebSearchModel(createModel({ id: 'sonar-pro' }))).toBe(true)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: SystemProviderIds.openrouter }))
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-b' }))
       expect(isMandatoryWebSearchModel(createModel({ id: 'sonar-reasoning' }))).toBe(true)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: 'openai' }))
-      expect(isMandatoryWebSearchModel(createModel({ id: 'sonar-pro' }))).toBe(false)
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-c' }))
+      expect(isMandatoryWebSearchModel(createModel({ id: 'gpt-4o-search-preview' }))).toBe(false)
+    })
+
+    it('never forces mandatory built-in on generic connections (no safe emitter)', () => {
+      for (const id of ['sonar-pro', 'sonar-reasoning', 'sonar-deep-research']) {
+        providerMock.mockReturnValueOnce(createProvider({ id: 'custom-generic', type: 'openai' }))
+        providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+        expect(isMandatoryWebSearchModel(createModel({ id }))).toBe(false)
+      }
     })
 
     it.each([
-      ['perplexity', 'non-sonar'],
-      ['openrouter', 'gpt-4o-search-preview']
-    ])('returns false for %s provider when id is %s', (providerId, modelId) => {
+      ['custom-a', 'non-sonar'],
+      ['custom-b', 'gpt-4o-search-preview']
+    ])('returns false for %s connection when id is %s', (providerId, modelId) => {
       providerMock.mockReturnValueOnce(createProvider({ id: providerId }))
       expect(isMandatoryWebSearchModel(createModel({ id: modelId }))).toBe(false)
     })
   })
 
   describe('isOpenRouterBuiltInWebSearchModel', () => {
-    it('checks for sonar ids or OpenAI chat-completion-only variants', () => {
-      providerMock.mockReturnValueOnce(createProvider({ id: 'openrouter' }))
+    it('checks for sonar ids or OpenAI chat-completion-only variants by model id', () => {
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-a' }))
       expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'sonar-reasoning' }))).toBe(true)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: 'openrouter' }))
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-b' }))
       expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'gpt-4o-search-preview' }))).toBe(true)
 
-      providerMock.mockReturnValueOnce(createProvider({ id: 'custom' }))
-      expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'sonar-reasoning' }))).toBe(false)
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-c' }))
+      expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'gpt-4o' }))).toBe(false)
+    })
+
+    it('allows only the web_search_options family on generic connections', () => {
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-generic', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+      expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'gpt-4o-search-preview' }))).toBe(true)
+
+      providerMock.mockReturnValueOnce(createProvider({ id: 'custom-generic', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
+      expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'sonar-pro' }))).toBe(false)
     })
   })
 
@@ -330,35 +405,35 @@ describe('websearch helpers', () => {
   })
 
   describe('isHunyuanSearchModel', () => {
-    it('identifies hunyuan models except lite', () => {
-      expect(isHunyuanSearchModel(createModel({ id: 'hunyuan-pro', provider: 'hunyuan' }))).toBe(true)
-      expect(isHunyuanSearchModel(createModel({ id: 'hunyuan-lite', provider: 'hunyuan' }))).toBe(false)
+    it('identifies hunyuan model ids except lite (no provider gate)', () => {
+      expect(isHunyuanSearchModel(createModel({ id: 'hunyuan-pro', provider: 'custom-a' }))).toBe(true)
+      expect(isHunyuanSearchModel(createModel({ id: 'hunyuan-lite', provider: 'custom-a' }))).toBe(false)
       expect(isHunyuanSearchModel(createModel())).toBe(false)
     })
 
     it.each(['hunyuan-standard', 'hunyuan-advanced'])('accepts %s', (suffix) => {
-      expect(isHunyuanSearchModel(createModel({ id: suffix, provider: 'hunyuan' }))).toBe(true)
+      expect(isHunyuanSearchModel(createModel({ id: suffix, provider: 'custom-a' }))).toBe(true)
     })
   })
 
-  describe('provider-specific regex coverage', () => {
+  describe('model-id family coverage (no brand gates)', () => {
     it.each(['qwen-turbo', 'qwen-max-0919', 'qwen3-max', 'qwen-plus-2024', 'qwq-32b'])(
-      'dashscope treats %s as searchable',
+      'treats %s as searchable on non-generic connections',
       (id) => {
-        providerMock.mockReturnValue(createProvider({ id: 'dashscope' }))
+        providerMock.mockReturnValue(createProvider({ id: 'custom-a' }))
         expect(isWebSearchModel(createModel({ id }))).toBe(true)
       }
     )
 
-    it.each(['qwen-1.5-chat', 'custom-model'])('dashscope ignores %s', (id) => {
-      providerMock.mockReturnValue(createProvider({ id: 'dashscope' }))
+    it.each(['qwen-1.5-chat', 'custom-model'])('ignores %s', (id) => {
+      providerMock.mockReturnValue(createProvider({ id: 'custom-a' }))
       expect(isWebSearchModel(createModel({ id }))).toBe(false)
     })
 
     it.each(['sonar', 'sonar-pro', 'sonar-reasoning-pro', 'sonar-deep-research'])(
-      'perplexity provider supports %s',
+      'supports sonar model id %s on non-generic connections',
       (id) => {
-        providerMock.mockReturnValue(createProvider({ id: SystemProviderIds.perplexity }))
+        providerMock.mockReturnValue(createProvider({ id: 'custom-a' }))
         expect(isWebSearchModel(createModel({ id }))).toBe(true)
       }
     )

@@ -1,5 +1,4 @@
-import type { ProviderType } from '@renderer/types'
-import { isSystemProvider, type Provider, type SystemProviderId, SystemProviderIds } from '@renderer/types'
+import type { Provider, ProviderType } from '@renderer/types'
 
 /**
  * Custom-connection product: Claude/Agent-capable connections are determined
@@ -18,91 +17,57 @@ export const isAnthropicSupportedProvider = (provider: Provider) => {
   return provider.type === 'anthropic' || !!provider.anthropicApiHost
 }
 
-const NOT_SUPPORT_ARRAY_CONTENT_PROVIDERS = [
-  'deepseek',
-  'baichuan',
-  'minimax',
-  'xirang',
-  'poe',
-  'cephalon'
-] as const satisfies SystemProviderId[]
-
 /**
- * 判断提供商是否支持 message 的 content 为数组类型。 Only for OpenAI Chat Completions API.
+ * Whether message content as array type is supported. Only for OpenAI Chat Completions API.
+ * Pure per-connection opt-out: `apiOptions.isNotSupportArrayContent !== true`
+ * (default permissive). Provider brand ids never participate.
  */
 export const isSupportArrayContentProvider = (provider: Provider) => {
-  return (
-    provider.apiOptions?.isNotSupportArrayContent !== true &&
-    !NOT_SUPPORT_ARRAY_CONTENT_PROVIDERS.some((pid) => pid === provider.id)
-  )
+  return provider.apiOptions?.isNotSupportArrayContent !== true
 }
 
-const NOT_SUPPORT_DEVELOPER_ROLE_PROVIDERS = ['poe', 'qiniu'] as const satisfies SystemProviderId[]
-
 /**
- * 判断提供商是否支持 developer 作为 message role。 Only for OpenAI API.
+ * Whether the provider supports developer as message role. Only for OpenAI API.
+ * Pure explicit opt-in: `apiOptions.isSupportDeveloperRole === true`.
  */
 export const isSupportDeveloperRoleProvider = (provider: Provider) => {
-  return (
-    provider.apiOptions?.isSupportDeveloperRole === true ||
-    (isSystemProvider(provider) && !NOT_SUPPORT_DEVELOPER_ROLE_PROVIDERS.some((pid) => pid === provider.id))
-  )
+  return provider.apiOptions?.isSupportDeveloperRole === true
 }
 
-const NOT_SUPPORT_STREAM_OPTIONS_PROVIDERS = ['mistral'] as const satisfies SystemProviderId[]
-
 /**
- * 判断提供商是否支持 stream_options 参数。Only for OpenAI API.
+ * Whether the provider supports the stream_options parameter. Only for OpenAI API.
+ * Pure opt-out: `isNotSupportStreamOptions !== true`.
  */
 export const isSupportStreamOptionsProvider = (provider: Provider) => {
-  return (
-    provider.apiOptions?.isNotSupportStreamOptions !== true &&
-    !NOT_SUPPORT_STREAM_OPTIONS_PROVIDERS.some((pid) => pid === provider.id)
-  )
+  return provider.apiOptions?.isNotSupportStreamOptions !== true
 }
 
-const NOT_SUPPORT_QWEN3_ENABLE_THINKING_PROVIDER = [
-  'ollama',
-  'lmstudio',
-  'nvidia',
-  'gpustack'
-] as const satisfies SystemProviderId[]
-
 /**
- * 判断提供商是否支持使用 enable_thinking 参数来控制 Qwen3 等模型的思考。 Only for OpenAI Chat Completions API.
+ * Whether the provider supports the enable_thinking parameter for Qwen3 etc.
+ * Only for OpenAI Chat Completions API. Pure opt-out:
+ * `isNotSupportEnableThinking !== true`.
  */
 export const isSupportEnableThinkingProvider = (provider: Provider) => {
-  return (
-    provider.apiOptions?.isNotSupportEnableThinking !== true &&
-    !NOT_SUPPORT_QWEN3_ENABLE_THINKING_PROVIDER.some((pid) => pid === provider.id)
-  )
+  return provider.apiOptions?.isNotSupportEnableThinking !== true
 }
-
-const SUPPORT_SERVICE_TIER_PROVIDERS = [SystemProviderIds.openai, SystemProviderIds.groq]
 
 /**
- * 判断提供商是否支持 service_tier 设置
+ * Whether the provider supports the service_tier setting.
+ * Pure opt-in: `isSupportServiceTier === true`.
  */
 export const isSupportServiceTierProvider = (provider: Provider) => {
-  return (
-    provider.apiOptions?.isSupportServiceTier === true ||
-    (isSystemProvider(provider) && SUPPORT_SERVICE_TIER_PROVIDERS.some((pid) => pid === provider.id))
-  )
+  return provider.apiOptions?.isSupportServiceTier === true
 }
-
-const NOT_SUPPORT_VERBOSITY_PROVIDERS = ['groq'] as const satisfies SystemProviderId[]
 
 /**
  * Determines whether the provider supports the verbosity option.
- * Only applies to system providers that are not in the exclusion list.
+ * Pure opt-out: `isNotSupportVerbosity !== true` (model resolver still
+ * decides model-side support).
  * @param provider - The provider to check
  * @returns true if the provider supports verbosity, false otherwise
  */
 export const isSupportVerbosityProvider = (provider: Provider) => {
-  return (
-    provider.apiOptions?.isNotSupportVerbosity !== true &&
-    !NOT_SUPPORT_VERBOSITY_PROVIDERS.some((pid) => pid === provider.id)
-  )
+  return provider.apiOptions?.isNotSupportVerbosity !== true
 }
 
 const SUPPORT_URL_CONTEXT_PROVIDER_TYPES = ['gemini', 'anthropic'] as const satisfies ProviderType[]
@@ -111,18 +76,9 @@ export const isSupportUrlContextProvider = (provider: Provider) => {
   return SUPPORT_URL_CONTEXT_PROVIDER_TYPES.some((type) => type === provider.type)
 }
 
-const SUPPORT_GEMINI_NATIVE_WEB_SEARCH_PROVIDERS = ['gemini'] as const satisfies SystemProviderId[]
-
-/** 判断是否是使用 Gemini 原生搜索工具的 provider. 目前假设只有官方 API 使用原生工具 */
+/** Gemini native websearch follows protocol only: `type === 'gemini'`. */
 export const isGeminiWebSearchProvider = (provider: Provider) => {
-  return SUPPORT_GEMINI_NATIVE_WEB_SEARCH_PROVIDERS.some((id) => id === provider.id)
-}
-
-// History-only legacy protocol checks (retired in slice 3). Active request
-// config must not use these; they exist only so migration history and old
-// tests remain importable without making retired values active.
-export const isNewApiProvider = (provider: Provider) => {
-  return ['new-api', 'aionly'].includes(provider.id) || (provider as unknown as { type: string }).type === 'new-api'
+  return provider.type === 'gemini'
 }
 
 /**
@@ -138,44 +94,21 @@ export function isOpenAIProvider(provider: Provider): boolean {
   return provider.type === 'openai-response'
 }
 
-export function isAwsBedrockProvider(provider: Provider): boolean {
-  return (provider as unknown as { type: string }).type === 'aws-bedrock'
-}
-
 // Re-export approved protocol helpers from shared, plus legacy history-only
-// helpers (isAzure/isOllama/isVertex/isPerplexity) for migration/test
+// type-based helpers (isAzure/isOllama/isVertex) for migration/test
 // compatibility. Active request config must not use the legacy ones.
+// Note: isPerplexityProvider (brand-id based) was removed; no active consumer
+// remains. isNewApiProvider/isAIGatewayProvider/isAwsBedrockProvider and the
+// API-version/API-key brand allowlists were removed with it (no active
+// consumer; API-key requirement is protocol-neutral via
+// `apiOptions.requiresApiKey`).
 export {
   isAnthropicProvider,
   isAzureOpenAIProvider,
   isGeminiProvider,
   isOllamaProvider,
-  isPerplexityProvider,
   isVertexProvider
 } from '@shared/aiCore/provider/utils'
-
-export function isAIGatewayProvider(provider: Provider): boolean {
-  return (provider as unknown as { type: string }).type === 'gateway'
-}
-
-const NOT_SUPPORT_API_VERSION_PROVIDERS = ['github', 'copilot', 'perplexity'] as const satisfies SystemProviderId[]
-
-export const isSupportAPIVersionProvider = (provider: Provider) => {
-  if (isSystemProvider(provider)) {
-    return !NOT_SUPPORT_API_VERSION_PROVIDERS.some((pid) => pid === provider.id)
-  }
-  return provider.apiOptions?.isNotSupportAPIVersion !== false
-}
-
-export const NOT_SUPPORT_API_KEY_PROVIDERS: readonly SystemProviderId[] = [
-  'ollama',
-  'lmstudio',
-  'vertexai',
-  'aws-bedrock',
-  'copilot'
-]
-
-export const NOT_SUPPORT_API_KEY_PROVIDER_TYPES: readonly ProviderType[] = []
 
 /**
  * Protocol-neutral per-connection API-key requirement.

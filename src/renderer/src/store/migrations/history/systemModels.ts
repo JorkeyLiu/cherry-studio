@@ -1,12 +1,12 @@
 /**
- * History-only built-in model catalog for Redux migrations 1-223 replay.
+ * History-only built-in model catalog for Redux migrations 1-224 replay.
  * Moved verbatim from `src/renderer/src/config/models/default.ts`.
  * Active runtime must NOT import this module — only `store/migrate*`.
  * Object contents, field values, and model arrays are preserved exactly so
  * migration 221 deep-equality semantics stay identical.
- * Stock inputs support replay through current migration 223. Only migrations
+ * Stock inputs support replay through current migration 224. Only migrations
  * up to 221 actually read stock (model backfills at 9/95/111/117/123/139/
- * 194/198/204 and provider adds through 200); migrations 222-223 operate on
+ * 194/198/204 and provider adds through 200); migrations 222-224 operate on
  * the migrating state's own providers and read no stock.
  */
 import type { Model, SystemProviderId } from '@renderer/types'
@@ -14,7 +14,7 @@ import type { Model, SystemProviderId } from '@renderer/types'
 /**
  * @deprecated CherryAI platform was removed. This model is kept solely for
  * historical migrations 111/194/204 (early migrations are frozen; stock
- * supports replay through migration 223).
+ * supports replay through migration 224).
  * Fresh runtime must NOT use it — default model slots are explicitly
  * unconfigured (undefined) after migration 217.
  */
@@ -31,7 +31,7 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
    * CherryAI qwen default. Fresh runtime no longer reads this key — see
    * `src/renderer/src/store/llm.ts` (initialized undefined).
    * Kept for historical migrations 111/194/204 compilation (early migrations
-   * are frozen; stock supports replay through migration 223).
+   * are frozen; stock supports replay through migration 224).
    */
   defaultModel: [
     // Default assistant model

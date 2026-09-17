@@ -50,7 +50,7 @@ vi.mock(import('@renderer/utils/provider'), async (importOriginal) => {
   return {
     ...(await importOriginal()),
     isSupportServiceTierProvider: vi.fn((provider) => {
-      return [SystemProviderIds.openai, SystemProviderIds.groq].includes(provider.id)
+      return provider?.apiOptions?.isSupportServiceTier === true
     })
   }
 })
@@ -185,9 +185,10 @@ describe('options utils', () => {
         expect(result.providerOptions.openai.reasoningEffort).toBe('medium')
       })
 
-      it('should include service tier when supported', () => {
+      it('should include service tier when explicitly opted in via apiOptions', () => {
         const providerWithServiceTier: Provider = {
           ...openaiProvider,
+          apiOptions: { isSupportServiceTier: true },
           serviceTier: OpenAIServiceTiers.auto
         }
 
@@ -199,6 +200,21 @@ describe('options utils', () => {
 
         expect(result.providerOptions.openai).toHaveProperty('serviceTier')
         expect(result.providerOptions.openai.serviceTier).toBe(OpenAIServiceTiers.auto)
+      })
+
+      it('should omit service tier without explicit apiOptions opt-in (no brand allowlist)', () => {
+        const providerWithServiceTier: Provider = {
+          ...openaiProvider,
+          serviceTier: OpenAIServiceTiers.auto
+        }
+
+        const result = buildProviderOptions(mockAssistant, mockModel, providerWithServiceTier, {
+          enableReasoning: false,
+          enableWebSearch: false,
+          enableGenerateImage: false
+        })
+
+        expect(result.providerOptions.openai.serviceTier).toBeUndefined()
       })
 
       it('should not throw when model.provider is not in the provider store (regression: issue #14999)', () => {
@@ -409,14 +425,50 @@ describe('options utils', () => {
         expect(result.providerOptions['openai-compatible']).toBeDefined()
       })
 
-      it('should include generic web search parameters when enabled', () => {
+      it('should emit no brand-specific web search params for generic models', async () => {
+        // Real debranded behavior: unknown/generic compatible has no built-in
+        // search params (this file mocks getWebSearchParams to enable_search
+        // by default, so restore the real empty shape here).
+        const { getWebSearchParams } = await import('../websearch')
+        vi.mocked(getWebSearchParams).mockReturnValue({})
+
         const result = buildProviderOptions(mockAssistant, openrouterModel, openrouterProvider, {
           enableReasoning: false,
           enableWebSearch: true,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions['openai-compatible']).toHaveProperty('enable_search')
+        // Debranded: unknown/generic compatible has no built-in search params.
+        expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_search')
+      })
+
+      it('should keep generic websearch coherence: only web_search_options family emits', async () => {
+        const mocked = await import('../websearch')
+        const actual = await vi.importActual<typeof mocked>('../websearch')
+        vi.mocked(mocked.getWebSearchParams).mockImplementation((model: Model) => actual.getWebSearchParams(model))
+
+        const searchPreview = { id: 'gpt-4o-search-preview', name: 'Search', provider: 'custom-x' } as Model
+        const previewResult = buildProviderOptions(mockAssistant, searchPreview, openrouterProvider, {
+          enableReasoning: false,
+          enableWebSearch: true,
+          enableGenerateImage: false
+        })
+        expect(previewResult.providerOptions['openai-compatible']).toMatchObject({ web_search_options: {} })
+
+        for (const id of ['sonar-pro', 'qwen-max-latest', 'hunyuan-pro', 'gemini-2.5-pro', 'gpt-4o']) {
+          const model = { id, name: id, provider: 'custom-x' } as Model
+          const result = buildProviderOptions(mockAssistant, model, openrouterProvider, {
+            enableReasoning: false,
+            enableWebSearch: true,
+            enableGenerateImage: false
+          })
+          // No true-capability/empty-param mismatch: these families emit
+          // nothing on generic, and never vendor-private keys.
+          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('web_search_options')
+          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_search')
+          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('enable_enhancement')
+          expect(result.providerOptions['openai-compatible']).not.toHaveProperty('extra_body')
+        }
       })
     })
 
@@ -444,7 +496,7 @@ describe('options utils', () => {
           extra_body: {
             reasoning_effort: 'medium'
           }
-        })
+        } as any)
         vi.mocked(getWebSearchParams).mockReturnValue({
           extra_body: {
             web_search: true

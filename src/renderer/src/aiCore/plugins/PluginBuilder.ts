@@ -9,15 +9,12 @@ import {
 } from '@renderer/config/models'
 import { getEnableDeveloperMode } from '@renderer/hooks/useSettings'
 import type { Assistant, Model, Provider } from '@renderer/types'
-import { SystemProviderIds } from '@renderer/types'
 import { isSupportEnableThinkingProvider } from '@renderer/utils/provider'
 
 import type { AiSdkMiddlewareConfig } from '../types/middlewareConfig'
 import { getReasoningTagName } from '../utils/reasoning'
 import { createAnthropicCachePlugin } from './anthropicCachePlugin'
 import { createDeepseekDsmlParserPlugin } from './deepseekDsmlParserPlugin'
-import { createNoThinkPlugin } from './noThinkPlugin'
-import { createOpenrouterReasoningPlugin } from './openrouterReasoningPlugin'
 import { createPdfCompatibilityPlugin } from './pdfCompatibilityPlugin'
 import { createQwenThinkingPlugin } from './qwenThinkingPlugin'
 import { createReasoningExtractionPlugin } from './reasoningExtractionPlugin'
@@ -86,19 +83,10 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
     plugins.push(createAnthropicCachePlugin(provider))
   }
 
-  // 0.3 OpenRouter reasoning redaction
-  if (provider.id === SystemProviderIds.openrouter) {
-    plugins.push(createOpenrouterReasoningPlugin())
-  }
-
-  // 0.3.1 DeepSeek DSML tool-call parser — converts leaked DSML tags into proper tool calls
+  // 0.3 DeepSeek DSML tool-call parser — converts leaked DSML tags into proper tool calls.
+  // Pure model-name plugin (generic, tested); no provider brand gate.
   if (isDeepSeekModel(model)) {
     plugins.push(createDeepseekDsmlParserPlugin())
-  }
-
-  // 0.4 OVMS no-think for MCP tools
-  if (provider.id === 'ovms' && config.mcpTools && config.mcpTools.length > 0) {
-    plugins.push(createNoThinkPlugin())
   }
 
   // 0.5 Qwen thinking control for providers without enable_thinking support.

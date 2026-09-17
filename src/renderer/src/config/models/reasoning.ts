@@ -366,12 +366,11 @@ export function isSupportedReasoningEffortGrokModel(model?: Model): boolean {
   }
 
   const modelId = getLowerBaseModelName(model.id)
-  const providerId = model?.provider?.toLowerCase()
   if (modelId.includes('grok-3-mini')) {
     return true
   }
 
-  if (providerId === 'openrouter' && modelId.includes('grok-4-fast')) {
+  if (modelId.includes('grok-4-fast') && !modelId.includes('non-reasoning')) {
     return true
   }
 
@@ -464,7 +463,7 @@ export const isHostedGemma4ThinkingModel = (model?: Model): boolean => {
   }
 
   const modelId = getLowerBaseModelName(model.id, '/')
-  return model.provider?.toLowerCase() === 'gemini' && modelId.startsWith('gemma-4-')
+  return modelId.startsWith('gemma-4-')
 }
 
 export const isSupportedThinkingTokenGeminiModel = (model: Model): boolean => {
@@ -831,7 +830,7 @@ export function isReasoningModel(model?: Model): boolean {
 
   const modelId = getLowerBaseModelName(model.id)
 
-  if (model.provider === 'doubao' || modelId.includes('doubao')) {
+  if (modelId.includes('doubao') || (model.name && getLowerBaseModelName(model.name).includes('doubao'))) {
     return (
       REASONING_REGEX.test(modelId) ||
       REASONING_REGEX.test(model.name) ||

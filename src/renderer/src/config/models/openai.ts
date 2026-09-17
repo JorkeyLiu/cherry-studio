@@ -154,11 +154,6 @@ export function isOpenAIDeepResearchModel(model?: Model): boolean {
     return false
   }
 
-  const providerId = model.provider
-  if (providerId !== 'openai' && providerId !== 'openai-chat') {
-    return false
-  }
-
   const modelId = getLowerBaseModelName(model.id, '/')
   return OPENAI_DEEP_RESEARCH_MODEL_REGEX.test(modelId)
 }

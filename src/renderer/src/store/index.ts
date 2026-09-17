@@ -404,7 +404,7 @@ const persistedReducer = persistReducer(
   {
     key: 'cherry-studio',
     storage,
-    version: 223,
+    version: 224,
     blacklist: [
       'runtime',
       'messages',

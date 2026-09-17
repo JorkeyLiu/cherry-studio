@@ -20,9 +20,6 @@ import {
   isMiniMaxReasoningModel,
   isOpenAIDeepResearchModel,
   isOpenAIModel,
-  isOpenAIReasoningModel,
-  isQwen35to39Model,
-  isQwenAlwaysThinkModel,
   isQwenReasoningModel,
   isReasoningModel,
   isSupportAdaptiveThinkingClaudeModel,
@@ -35,51 +32,26 @@ import {
   isSupportedThinkingTokenKimiModel,
   isSupportedThinkingTokenMiMoModel,
   isSupportedThinkingTokenModel,
-  isSupportedThinkingTokenQwenModel,
   isSupportedThinkingTokenZhipuModel,
   isSupportNoneReasoningEffortModel
 } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import { getAssistantSettings, getProviderByModel } from '@renderer/services/AssistantService'
 import type { Assistant, Model, ReasoningEffortOption } from '@renderer/types'
-import { EFFORT_RATIO, isSystemProvider, SystemProviderIds } from '@renderer/types'
+import { EFFORT_RATIO } from '@renderer/types'
 import type { OpenAIReasoningEffort, OpenAIReasoningSummary } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
-import { isSupportEnableThinkingProvider } from '@renderer/utils/provider'
-import { toInteger } from 'lodash'
 
 const logger = loggerService.withContext('reasoning')
 
 type ReasoningEffortOptionalParams = {
   thinking?: { type: 'disabled' | 'enabled' | 'auto'; budget_tokens?: number }
   reasoning?: { max_tokens?: number; exclude?: boolean; effort?: string; enabled?: boolean } | OpenAI.Reasoning
+  // Generic OpenAI-compatible emits only this camelCase key (AI SDK
+  // openai-compatible accepts `reasoningEffort` and overwrites snake_case
+  // `reasoning_effort` to undefined). Persisted/user `reasoning_effort`
+  // settings and custom-parameter conversion stay snake_case; see options.ts.
   reasoningEffort?: OpenAIReasoningEffort
-  // WARN: This field will be overwrite to undefined by aisdk if the provider is openai-compatible. Use reasoningEffort instead.
-  reasoning_effort?: OpenAIReasoningEffort
-  enable_thinking?: boolean
-  thinking_budget?: number
-  incremental_output?: boolean
-  enable_reasoning?: boolean
-  // nvidia, etc.
-  chat_template_kwargs?: {
-    thinking?: boolean
-    enable_thinking?: boolean
-    thinking_budget?: number
-  }
-  extra_body?: {
-    google?: {
-      thinking_config: {
-        thinking_budget: number
-        include_thoughts?: boolean
-      }
-    }
-    thinking?: {
-      type: 'enabled' | 'disabled'
-    }
-    thinking_budget?: number
-    reasoning_effort?: OpenAIReasoningEffort
-  }
-  disable_reasoning?: boolean
   // Add any other potential reasoning-related keys here if they exist
 }
 
@@ -92,9 +64,6 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     throw new Error('Model provider is not configured')
   }
   const modelId = getLowerBaseModelName(model.id)
-  if (provider.id === 'groq') {
-    return {}
-  }
 
   if (!isReasoningModel(model)) {
     return {}
@@ -112,8 +81,10 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   }
 
   if (isOpenAIDeepResearchModel(model)) {
+    // Generic emits AI-SDK-supported camelCase only; snake_case is overwritten
+    // to undefined by the openai-compatible provider.
     return {
-      reasoning_effort: 'medium'
+      reasoningEffort: 'medium'
     }
   }
   const reasoningEffort = assistant?.settings?.reasoning_effort
@@ -126,204 +97,53 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   }
 
   // Handle 'none' reasoningEffort. It's explicitly off.
+  // Debranded: capability follows the model family only. Only generic
+  // protocol-standard shapes are emitted (`thinking`, `reasoningEffort`,
+  // `reasoning`); vendor private keys (`enable_thinking`,
+  // `chat_template_kwargs`, vendor-specific `extra_body`) are never derived
+  // from names/providers. Provider ids are opaque join keys.
   if (reasoningEffort === 'none') {
-    // openrouter: use reasoning
-    if (model.provider === SystemProviderIds.openrouter) {
-      if (isSupportNoneReasoningEffortModel(model) && reasoningEffort === 'none') {
-        return { reasoning: { effort: 'none' } }
+    // Models with an explicit none-effort level (GPT-5.x sub-versions,
+    // Mistral Small): use the generic effort shape.
+    if (isSupportNoneReasoningEffortModel(model) || modelId.includes('mistral-small-2603')) {
+      return { reasoningEffort: 'none' }
+    }
+
+    // Thinking-token families (Qwen, Doubao, Zhipu, MiMo, Kimi, Hunyuan,
+    // Gemini, Claude, DeepSeek V4+/hybrid, MiniMax handled above): generic
+    // disable shape.
+    if (
+      isSupportedThinkingTokenModel(model) ||
+      isDeepSeekV4PlusModel(model) ||
+      isDeepSeekHybridInferenceModel(model) ||
+      isQwenReasoningModel(model) ||
+      isSupportedThinkingTokenHunyuanModel(model)
+    ) {
+      return { thinking: { type: 'disabled' } }
+    }
+
+    // Effort families that publish a none level: generic effort shape.
+    if (isSupportedReasoningEffortModel(model)) {
+      const supportedOptions = getModelSupportedReasoningEffortOptions(model)?.filter((option) => option !== 'default')
+      if (supportedOptions?.includes('none')) {
+        return { reasoningEffort: 'none' }
       }
       return { reasoning: { enabled: false, exclude: true } }
-    }
-
-    // nvidia: must use chat_template_kwargs
-    // Since limited documentation, it's hard to find what parameters should be set
-    // only part of mainstream oss model covered, all verified by nvidia api
-    if (model.provider === SystemProviderIds.nvidia) {
-      if (isSupportedThinkingTokenQwenModel(model)) {
-        return { chat_template_kwargs: { enable_thinking: false } }
-      } else if (isDeepSeekHybridInferenceModel(model)) {
-        return { chat_template_kwargs: { thinking: false } }
-      } else if (isSupportedThinkingTokenKimiModel(model)) {
-        return { chat_template_kwargs: { thinking: false } }
-      } else if (isSupportedThinkingTokenZhipuModel(model)) {
-        return { chat_template_kwargs: { enable_thinking: false } }
-      }
-    }
-
-    // providers that use enable_thinking
-    if (
-      (isSupportEnableThinkingProvider(provider) &&
-        (isSupportedThinkingTokenQwenModel(model) || isSupportedThinkingTokenHunyuanModel(model))) ||
-      (provider.id === SystemProviderIds.dashscope &&
-        (isDeepSeekHybridInferenceModel(model) ||
-          isSupportedThinkingTokenZhipuModel(model) ||
-          isSupportedThinkingTokenKimiModel(model))) ||
-      // SiliconFlow uses enable_thinking for DeepSeek and Zhipu models, same as positive path
-      (provider.id === SystemProviderIds.silicon &&
-        (isDeepSeekHybridInferenceModel(model) || isSupportedThinkingTokenZhipuModel(model)))
-    ) {
-      return { enable_thinking: false }
-    }
-
-    // together
-    if (provider.id === SystemProviderIds.together) {
-      return { reasoning: { enabled: false } }
-    }
-
-    // gemini
-    if (isSupportedThinkingTokenGeminiModel(model)) {
-      if (GEMINI_FLASH_MODEL_REGEX.test(model.id)) {
-        return {
-          extra_body: {
-            google: {
-              thinking_config: {
-                thinking_budget: 0
-              }
-            }
-          }
-        }
-      } else {
-        logger.warn(`Model ${model.id} cannot disable reasoning. Fallback to empty reasoning param.`)
-        return {}
-      }
-    }
-
-    // use thinking, doubao, zhipu, etc.
-    if (
-      isSupportedThinkingTokenDoubaoModel(model) ||
-      isSupportedThinkingTokenZhipuModel(model) ||
-      isSupportedThinkingTokenMiMoModel(model) ||
-      isSupportedThinkingTokenKimiModel(model)
-    ) {
-      if (provider.id === SystemProviderIds.cerebras) {
-        return {
-          disable_reasoning: true
-        }
-      }
-      return { thinking: { type: 'disabled' } }
-    }
-
-    // DeepSeek V4+ defaults to thinking enabled, explicitly disable it
-    if (isDeepSeekV4PlusModel(model)) {
-      return { thinking: { type: 'disabled' } }
-    }
-
-    // DeepSeek V3.x hybrid, default behavior is non-thinking
-    if (isDeepSeekHybridInferenceModel(model)) {
-      return {}
-    }
-
-    // GPT 5.1, GPT 5.2, or newer
-    if (isSupportNoneReasoningEffortModel(model)) {
-      return {
-        reasoningEffort: 'none'
-      }
-    }
-
-    // Qwen 3.5 without direct enable_thinking
-    // https://huggingface.co/Qwen/Qwen3.5-397B-A17B#instruct-or-non-thinking-mode
-    if (isQwen35to39Model(model)) {
-      return {
-        chat_template_kwargs: {
-          enable_thinking: false
-        }
-      }
-    }
-
-    // Mistral Small models: reasoningEffort 'none'
-    if (modelId.includes('mistral-small-2603')) {
-      return { reasoningEffort: 'none' }
     }
 
     logger.warn(`Model ${model.id} doesn't match any disable reasoning behavior. Fallback to empty reasoning param.`)
     return {}
   }
 
-  // reasoningEffort有效的情况
-  // https://creator.poe.com/docs/external-applications/openai-compatible-api#additional-considerations
-  // Poe provider - supports custom bot parameters via extra_body
-  if (provider.id === SystemProviderIds.poe) {
-    if (isOpenAIReasoningModel(model)) {
-      return {
-        extra_body: {
-          reasoning_effort: reasoningEffort === 'auto' ? 'medium' : reasoningEffort
-        }
-      }
-    }
-
-    // Claude models use thinking_budget parameter in extra_body
-    if (isSupportedThinkingTokenClaudeModel(model)) {
-      const effortRatio = EFFORT_RATIO[reasoningEffort]
-      const tokenLimit = findTokenLimit(model.id)
-      const maxTokens = assistant.settings?.maxTokens
-
-      if (!tokenLimit) {
-        logger.warn(
-          `No token limit configuration found for Claude model "${model.id}" on Poe provider. ` +
-            `Reasoning effort setting "${reasoningEffort}" will not be applied.`
-        )
-        return {}
-      }
-
-      let budgetTokens = Math.floor((tokenLimit.max - tokenLimit.min) * effortRatio + tokenLimit.min)
-      budgetTokens = Math.floor(Math.max(1024, Math.min(budgetTokens, (maxTokens || DEFAULT_MAX_TOKENS) * effortRatio)))
-
-      return {
-        extra_body: {
-          thinking_budget: budgetTokens
-        }
-      }
-    }
-
-    // Gemini models use thinking_budget parameter in extra_body
-    if (isSupportedThinkingTokenGeminiModel(model)) {
-      const effortRatio = EFFORT_RATIO[reasoningEffort]
-      const tokenLimit = findTokenLimit(model.id)
-      let budgetTokens: number | undefined
-      if (tokenLimit && reasoningEffort !== 'auto') {
-        budgetTokens = Math.floor((tokenLimit.max - tokenLimit.min) * effortRatio + tokenLimit.min)
-      } else if (!tokenLimit && reasoningEffort !== 'auto') {
-        logger.warn(
-          `No token limit configuration found for Gemini model "${model.id}" on Poe provider. ` +
-            `Using auto (-1) instead of requested effort "${reasoningEffort}".`
-        )
-      }
-      return {
-        extra_body: {
-          thinking_budget: budgetTokens ?? -1
-        }
-      }
-    }
-
-    // Poe reasoning model not in known categories (GPT-5, Claude, Gemini)
-    logger.warn(
-      `Poe provider reasoning model "${model.id}" does not match known categories ` +
-        `(GPT-5, Claude, Gemini). Reasoning effort setting "${reasoningEffort}" will not be applied.`
-    )
-    return {}
-  }
-
-  // OpenRouter models
-  if (model.provider === SystemProviderIds.openrouter) {
-    // Grok 4 Fast doesn't support effort levels, always use enabled: true
-    if (isGrok4FastReasoningModel(model)) {
-      return {
-        reasoning: {
-          enabled: true // Ignore effort level, just enable reasoning
-        }
-      }
-    }
-
-    // Other OpenRouter models that support effort levels
-    if (isSupportedReasoningEffortModel(model) || isSupportedThinkingTokenModel(model)) {
-      return {
-        reasoning: {
-          effort: reasoningEffort === 'auto' ? 'medium' : reasoningEffort
-        }
-      }
-    }
-  }
-
+  // Positive effort path. Debranded: model family/name heuristics and
+  // external reasoning metadata/UI controls only. No brand-id branches.
+  // Generic OpenAI-compatible
+  // emits only generic shapes (`thinking`, `reasoningEffort`, `reasoning`);
+  // snake_case `reasoning_effort` is never emitted here (AI SDK
+  // openai-compatible overwrites it to undefined) — user custom
+  // `reasoning_effort` params still convert via options.ts. Vendor private
+  // keys are never derived from names/providers. Unknown models without
+  // metadata fall through to {} so basic requests are never blocked.
   const effortRatio = EFFORT_RATIO[reasoningEffort]
   const tokenLimit = findTokenLimit(modelId)
   let budgetTokens: number | undefined
@@ -331,186 +151,55 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     budgetTokens = Math.floor((tokenLimit.max - tokenLimit.min) * effortRatio + tokenLimit.min)
   }
 
-  // nvidia: must use chat_template_kwargs
-  // Since limited documentation, it's hard to find what parameters should be set
-  // only part of mainstream oss model covered, all verified by nvidia api
-  if (model.provider === SystemProviderIds.nvidia) {
-    if (isSupportedThinkingTokenQwenModel(model)) {
-      const enableThinkingConfig = isQwenAlwaysThinkModel(model) ? {} : { enable_thinking: true }
-      return {
-        chat_template_kwargs: {
-          ...enableThinkingConfig,
-          thinking_budget: budgetTokens
-        }
+  // Grok 4 Fast doesn't support effort levels, always use enabled: true.
+  // Pure model-id heuristic; same result on any connection.
+  if (isGrok4FastReasoningModel(model)) {
+    return {
+      reasoning: {
+        enabled: true // Ignore effort level, just enable reasoning
       }
-    } else if (isDeepSeekHybridInferenceModel(model)) {
-      return { chat_template_kwargs: { thinking: true } }
-    } else if (isSupportedThinkingTokenKimiModel(model)) {
-      return { chat_template_kwargs: { thinking: true } }
-    } else if (isSupportedThinkingTokenZhipuModel(model)) {
-      return { chat_template_kwargs: { enable_thinking: true } }
     }
   }
 
-  // See https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions
-  if (model.provider === SystemProviderIds.silicon) {
-    if (
-      isDeepSeekHybridInferenceModel(model) ||
-      isSupportedThinkingTokenZhipuModel(model) ||
-      isSupportedThinkingTokenQwenModel(model) ||
-      isSupportedThinkingTokenHunyuanModel(model)
-    ) {
-      return {
-        enable_thinking: true,
-        // Hard-encoded maximum, only for silicon
-        thinking_budget: budgetTokens ? toInteger(Math.max(budgetTokens, 32768)) : undefined
-      }
-    }
-    return {}
-  }
-
-  // DeepSeek V4+ models support reasoning_effort: "high" | "max" alongside thinking control
-  // UI uses "xhigh" which maps to API's "max"; all other effort levels map to "high"
+  // DeepSeek V4+ models support reasoningEffort: "high" | "max" alongside thinking control
+  // UI uses "xhigh" which maps to API's "max"; all other effort levels map to "high".
+  // Generic emits AI-SDK-supported camelCase only.
   if (isDeepSeekV4PlusModel(model)) {
     return {
       thinking: { type: 'enabled' as const },
-      reasoning_effort: reasoningEffort === 'xhigh' ? ('max' as OpenAIReasoningEffort) : 'high'
+      reasoningEffort: reasoningEffort === 'xhigh' ? ('max' as OpenAIReasoningEffort) : 'high'
     }
   }
 
-  // DeepSeek hybrid inference models, v3.1 and maybe more in the future
-  // 不同的 provider 有不同的思考控制方式，在这里统一解决
+  // DeepSeek hybrid inference models (v3.1+): generic enabled shape.
+  // Former per-brand switches (dashscope/new-api/hunyuan/doubao/deepseek/
+  // aihubmix/sophnet/ppio/dmxapi/openrouter/together) collapsed: provider ids
+  // are opaque join keys, so every connection uses the least-assumptive
+  // generic representation.
   if (isDeepSeekHybridInferenceModel(model)) {
-    if (isSystemProvider(provider)) {
-      switch (provider.id) {
-        case SystemProviderIds.dashscope:
-          return {
-            enable_thinking: true,
-            incremental_output: true
-          }
-        // TODO: 支持 new-api类型
-        case SystemProviderIds['new-api']: {
-          return {
-            extra_body: {
-              thinking: {
-                type: 'enabled' // auto is invalid
-              }
-            }
-          }
-        }
-        case SystemProviderIds.hunyuan:
-        case SystemProviderIds['tencent-cloud-ti']:
-        case SystemProviderIds.doubao:
-        case SystemProviderIds.deepseek:
-        case SystemProviderIds.aihubmix:
-        case SystemProviderIds.sophnet:
-        case SystemProviderIds.ppio:
-        case SystemProviderIds.dmxapi:
-          return {
-            thinking: {
-              type: 'enabled' // auto is invalid
-            }
-          }
-        case SystemProviderIds.openrouter:
-        case SystemProviderIds.together:
-          return {
-            reasoning: {
-              enabled: true
-            }
-          }
-        default:
-          break
-      }
-    }
-    logger.warn(
-      `Use default thinking options for provider ${provider.name} as DeepSeek v3.1+ thinking control method is unknown`
-    )
     return {
       thinking: {
-        type: 'enabled'
+        type: 'enabled' // auto is invalid
       }
     }
   }
 
-  // OpenRouter models, use reasoning
-  // FIXME: duplicated openrouter handling. remove one
-  if (model.provider === SystemProviderIds.openrouter) {
-    if (isSupportedReasoningEffortModel(model) || isSupportedThinkingTokenModel(model)) {
-      return {
-        reasoning: {
-          effort: reasoningEffort === 'auto' ? 'medium' : reasoningEffort
-        }
-      }
-    }
-  }
-
-  // https://help.aliyun.com/zh/model-studio/deep-thinking
-  if (provider.id === SystemProviderIds.dashscope) {
-    // For dashscope: Qwen, DeepSeek, and GLM models use enable_thinking to control thinking
-    // No effort, only on/off
-    if (
-      isQwenReasoningModel(model) ||
-      isSupportedThinkingTokenZhipuModel(model) ||
-      isSupportedThinkingTokenKimiModel(model)
-    ) {
-      return {
-        enable_thinking: true,
-        thinking_budget: budgetTokens
-      }
-    }
-  }
-
-  // https://docs.together.ai/reference/chat-completions-1#body-reasoning-effort
-  if (provider.id === SystemProviderIds.together) {
-    let adjustedReasoningEffort: 'low' | 'medium' | 'high' = 'medium'
-    switch (reasoningEffort) {
-      case 'minimal':
-        adjustedReasoningEffort = 'low'
-        break
-      case 'xhigh':
-        adjustedReasoningEffort = 'high'
-        break
-      case 'auto':
-        adjustedReasoningEffort = 'medium'
-        break
-      default:
-        adjustedReasoningEffort = reasoningEffort
-        break
-    }
-    return {
-      // Only low, medium, high
-      reasoningEffort: adjustedReasoningEffort,
-      reasoning: { enabled: true }
-    }
-  }
-
-  // Qwen models, use enable_thinking
+  // Qwen reasoning families: generic enabled shape. Former
+  // enable_thinking/chat_template_kwargs vendor keys removed.
   if (isQwenReasoningModel(model)) {
-    const supportEnableThinking = isSupportEnableThinkingProvider(provider)
-    const enableThinkingConfig = isQwenAlwaysThinkModel(model) ? {} : { enable_thinking: true }
-    if (supportEnableThinking) {
-      return {
-        ...enableThinkingConfig,
-        thinking_budget: budgetTokens
-      }
-    } else {
-      return {
-        chat_template_kwargs: {
-          ...enableThinkingConfig,
-          thinking_budget: budgetTokens
-        }
-      }
-    }
-  }
-
-  // Hunyuan models, use enable_thinking
-  if (isSupportedThinkingTokenHunyuanModel(model) && isSupportEnableThinkingProvider(provider)) {
     return {
-      enable_thinking: true
+      thinking: { type: 'enabled' as const }
     }
   }
 
-  // Grok models/Perplexity models/OpenAI models, use reasoning_effort
+  // Hunyuan thinking family: generic enabled shape.
+  if (isSupportedThinkingTokenHunyuanModel(model)) {
+    return {
+      thinking: { type: 'enabled' as const }
+    }
+  }
+
+  // Grok models/Perplexity models/OpenAI models, use reasoningEffort
   if (isSupportedReasoningEffortModel(model)) {
     // 检查模型是否支持所选选项
     const supportedOptions = getModelSupportedReasoningEffortOptions(model)?.filter((option) => option !== 'default')
@@ -531,35 +220,13 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     return { reasoningEffort: 'high' }
   }
 
-  // gemini series, openai compatible api
+  // gemini series, openai compatible api: generic effort shape.
+  // Former vendor-specific extra_body.google.thinking_config removed; every
+  // Gemini thinking family uses the protocol-standard representation.
+  // https://ai.google.dev/gemini-api/docs/gemini-3?thinking=high#openai_compatibility
   if (isSupportedThinkingTokenGeminiModel(model)) {
-    // https://ai.google.dev/gemini-api/docs/gemini-3?thinking=high#openai_compatibility
-    if (isGemini3ThinkingTokenModel(model)) {
-      return {
-        reasoningEffort
-      }
-    }
-    if (reasoningEffort === 'auto') {
-      return {
-        extra_body: {
-          google: {
-            thinking_config: {
-              thinking_budget: -1,
-              include_thoughts: true
-            }
-          }
-        }
-      }
-    }
     return {
-      extra_body: {
-        google: {
-          thinking_config: {
-            thinking_budget: budgetTokens ?? -1,
-            include_thoughts: true
-          }
-        }
-      }
+      reasoningEffort
     }
   }
 
@@ -591,9 +258,6 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     return {}
   }
   if (isSupportedThinkingTokenZhipuModel(model)) {
-    if (provider.id === SystemProviderIds.cerebras) {
-      return {}
-    }
     return { thinking: { type: 'enabled' } }
   }
 

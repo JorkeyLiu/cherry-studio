@@ -5,7 +5,7 @@
 
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import type { SettingsState } from '@renderer/store/settings'
-import type { Assistant, Model, Provider } from '@renderer/types'
+import type { Assistant, Model } from '@renderer/types'
 import { SystemProviderIds } from '@renderer/types'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -77,6 +77,7 @@ vi.mock('@renderer/config/models', async (importOriginal) => {
     isSupportedThinkingTokenDoubaoModel: vi.fn(() => false),
     isSupportedThinkingTokenZhipuModel: vi.fn(() => false),
     isSupportedThinkingTokenMiMoModel: vi.fn(() => false),
+    isSupportedThinkingTokenKimiModel: vi.fn(() => false),
     isSupportedReasoningEffortModel: vi.fn(() => false),
     isDeepSeekHybridInferenceModel: vi.fn(() => false),
     isDeepSeekV4PlusModel: vi.fn(() => false),
@@ -91,6 +92,9 @@ vi.mock('@renderer/config/models', async (importOriginal) => {
     isHostedGemma4ThinkingModel: vi.fn(() => false),
     isSupportedThinkingTokenHunyuanModel: vi.fn(() => false),
     isSupportedThinkingTokenModel: vi.fn(() => false),
+    isMiniMaxReasoningModel: vi.fn(() => false),
+    isSupportNoneReasoningEffortModel: vi.fn(() => false),
+    getModelSupportedReasoningEffortOptions: vi.fn(() => undefined),
     isGPT51SeriesModel: vi.fn(() => false),
     isGemini3ThinkingTokenModel: vi.fn(() => false),
     findTokenLimit: vi.fn(actual.findTokenLimit)
@@ -130,598 +134,237 @@ describe('reasoning utils', () => {
     vi.resetAllMocks()
   })
 
-  describe('getReasoningEffort', () => {
+  describe('getReasoningEffort (debranded: model family + user controls only)', () => {
+    const makeModel = (overrides: Partial<Model> = {}): Model =>
+      ({
+        id: 'qwen3-max-123',
+        name: 'Qwen3 Max',
+        provider: 'custom-a',
+        ...overrides
+      }) as Model
+
+    const makeAssistant = (reasoning_effort?: any): Assistant =>
+      ({
+        id: 'test',
+        name: 'Test',
+        settings: { reasoning_effort }
+      }) as Assistant
+
     it('should return empty object for non-reasoning model', async () => {
-      const model: Model = {
-        id: 'gpt-4',
-        name: 'GPT-4',
-        provider: SystemProviderIds.openai
-      } as Model
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(false)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {}
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({})
+      expect(getReasoningEffort(makeAssistant('high'), makeModel())).toEqual({})
     })
 
-    it('should not override reasoning for OpenRouter when reasoning effort undefined', async () => {
-      const { isReasoningModel } = await import('@renderer/config/models')
+    it('should return {} when reasoning effort is unset or default', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'anthropic/claude-sonnet-4',
-        name: 'Claude Sonnet 4',
-        provider: SystemProviderIds.openrouter
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {}
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({})
+      expect(getReasoningEffort(makeAssistant(undefined), makeModel())).toEqual({})
+      expect(getReasoningEffort(makeAssistant('default'), makeModel())).toEqual({})
     })
 
-    it('should disable reasoning for OpenRouter when reasoning effort explicitly none', async () => {
-      const { isReasoningModel } = await import('@renderer/config/models')
+    it('should throw when the owning provider entry is missing (never silently substitute)', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue(null as any)
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'anthropic/claude-sonnet-4',
-        name: 'Claude Sonnet 4',
-        provider: SystemProviderIds.openrouter
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({ reasoning: { enabled: false, exclude: true } })
+      expect(() => getReasoningEffort(makeAssistant('high'), makeModel())).toThrow('Model provider is not configured')
     })
 
-    it('should handle Qwen models with enable_thinking', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenQwenModel, isQwenReasoningModel } = await import(
-        '@renderer/config/models'
-      )
+    it('should yield identical results for different provider ids with same type/model/options', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isSupportedThinkingTokenModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenQwenModel).mockReturnValue(true)
-      vi.mocked(isQwenReasoningModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'qwen-plus',
-        name: 'Qwen Plus',
-        provider: SystemProviderIds.dashscope
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'medium'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toHaveProperty('enable_thinking')
+      const assistant = makeAssistant('high')
+      const results: any[] = []
+      for (const pid of ['dashscope', 'silicon', 'nvidia', 'openrouter', 'custom-a', 'custom-b']) {
+        vi.mocked(gpm).mockReturnValue({ id: pid, name: pid, type: 'openai' } as any)
+        results.push(getReasoningEffort(assistant, makeModel({ provider: pid })))
+      }
+      for (const r of results.slice(1)) {
+        expect(r).toEqual(results[0])
+      }
+      expect(results[0]).toEqual({ thinking: { type: 'enabled' } })
+      expect(results[0]).not.toHaveProperty('enable_thinking')
+      expect(results[0]).not.toHaveProperty('chat_template_kwargs')
+      expect(results[0]).not.toHaveProperty('extra_body')
     })
 
-    it('should handle Claude models with thinking config', async () => {
-      const {
-        isSupportedThinkingTokenClaudeModel,
-        isReasoningModel,
-        isQwenReasoningModel,
-        isSupportedThinkingTokenGeminiModel,
-        isSupportedThinkingTokenDoubaoModel,
-        isSupportedThinkingTokenZhipuModel,
-        isSupportedReasoningEffortModel
-      } = await import('@renderer/config/models')
+    it('should disable thinking generically when effort is none (no vendor keys)', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isSupportedThinkingTokenModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-      vi.mocked(isQwenReasoningModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenGeminiModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenDoubaoModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenZhipuModel).mockReturnValue(false)
-      vi.mocked(isSupportedReasoningEffortModel).mockReturnValue(false)
-
-      const model: Model = {
-        id: 'claude-3-7-sonnet',
-        name: 'Claude 3.7 Sonnet',
-        provider: SystemProviderIds.anthropic
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'high',
-          maxTokens: 4096
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({
-        thinking: {
-          type: 'enabled',
-          budget_tokens: expect.any(Number)
-        }
-      })
+      expect(getReasoningEffort(makeAssistant('none'), makeModel())).toEqual({ thinking: { type: 'disabled' } })
     })
 
-    it('should handle Gemini Flash models with thinking budget 0', async () => {
-      const {
-        isSupportedThinkingTokenGeminiModel,
-        isReasoningModel,
-        isQwenReasoningModel,
-        isSupportedThinkingTokenClaudeModel,
-        isSupportedThinkingTokenDoubaoModel,
-        isSupportedThinkingTokenZhipuModel,
-        isOpenAIDeepResearchModel,
-        isSupportedThinkingTokenQwenModel,
-        isSupportedThinkingTokenHunyuanModel,
-        isDeepSeekHybridInferenceModel
-      } = await import('@renderer/config/models')
+    it('should use generic reasoningEffort none for none-capable effort models', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isSupportNoneReasoningEffortModel).mockReturnValue(true)
+      vi.mocked(models.isSupportedThinkingTokenModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(false)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isOpenAIDeepResearchModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenGeminiModel).mockReturnValue(true)
-      vi.mocked(isQwenReasoningModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenDoubaoModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenZhipuModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenQwenModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
-      vi.mocked(isDeepSeekHybridInferenceModel).mockReturnValue(false)
-
-      const model: Model = {
-        id: 'gemini-2.5-flash',
-        name: 'Gemini 2.5 Flash',
-        provider: SystemProviderIds.openai
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({
-        extra_body: {
-          google: {
-            thinking_config: {
-              thinking_budget: 0
-            }
-          }
-        }
-      })
-    })
-
-    it('should handle GPT-5.1 reasoning model with effort levels', async () => {
-      const {
-        isReasoningModel,
-        isOpenAIDeepResearchModel,
-        isSupportedReasoningEffortModel,
-        isGPT51SeriesModel,
-        getThinkModelType
-      } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isOpenAIDeepResearchModel).mockReturnValue(false)
-      vi.mocked(isSupportedReasoningEffortModel).mockReturnValue(true)
-      vi.mocked(getThinkModelType).mockReturnValue('gpt5_1')
-      vi.mocked(isGPT51SeriesModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'gpt-5.1',
-        name: 'GPT-5.1',
-        provider: SystemProviderIds.openai
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({
+      expect(getReasoningEffort(makeAssistant('none'), makeModel({ id: 'gpt-5.1' }))).toEqual({
         reasoningEffort: 'none'
       })
     })
 
-    it('should disable thinking for MiMo models when reasoning effort is none', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenMiMoModel } = await import('@renderer/config/models')
+    it('should enable DeepSeek hybrid generically on any connection', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(true)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenMiMoModel).mockReturnValue(true)
+      const assistant = makeAssistant('high')
+      vi.mocked(gpm).mockReturnValue({ id: 'brand-a', name: 'A', type: 'openai' } as any)
+      const ra = getReasoningEffort(assistant, makeModel({ id: 'deepseek-chat', provider: 'brand-a' }))
+      vi.mocked(gpm).mockReturnValue({ id: 'brand-b', name: 'B', type: 'openai' } as any)
+      const rb = getReasoningEffort(assistant, makeModel({ id: 'deepseek-chat', provider: 'brand-b' }))
+      expect(ra).toEqual({ thinking: { type: 'enabled' } })
+      expect(rb).toEqual(ra)
+    })
 
-      const model: Model = {
-        id: 'mimo-v2-pro',
-        name: 'MiMo V2 Pro',
-        provider: SystemProviderIds.mimo
-      } as Model
+    it('should use generic reasoningEffort for effort families with supported-option fallback', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(false)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedReasoningEffortModel).mockReturnValue(true)
+      vi.mocked(models.getModelSupportedReasoningEffortOptions).mockReturnValue(['default', 'low', 'medium', 'high'])
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({
-        thinking: {
-          type: 'disabled'
-        }
+      expect(getReasoningEffort(makeAssistant('medium'), makeModel({ id: 'grok-3-mini' }))).toEqual({
+        reasoningEffort: 'medium'
+      })
+      // Unsupported selection falls back to the first supported value, never a vendor key.
+      expect(getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toEqual({
+        reasoningEffort: 'low'
       })
     })
 
-    it('should enable thinking for MiMo models when reasoning effort is auto', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenMiMoModel } = await import('@renderer/config/models')
+    it('should use generic reasoningEffort for Gemini thinking families (no extra_body)', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(false)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedReasoningEffortModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenGeminiModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenMiMoModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'mimo-v2-pro',
-        name: 'MiMo V2 Pro',
-        provider: SystemProviderIds.mimo
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'auto'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({
-        thinking: {
-          type: 'enabled'
-        }
-      })
-    })
-
-    it('should handle DeepSeek hybrid inference models', async () => {
-      const { isReasoningModel, isDeepSeekHybridInferenceModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isDeepSeekHybridInferenceModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'deepseek-v3.1',
-        name: 'DeepSeek V3.1',
-        provider: SystemProviderIds.silicon
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'high'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({
-        enable_thinking: true
-      })
-    })
-
-    it('should use enable_thinking:false for SiliconFlow + DeepSeek-V4-Flash when reasoning_effort is none', async () => {
-      const { isReasoningModel, isDeepSeekHybridInferenceModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isDeepSeekHybridInferenceModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'deepseek-ai/DeepSeek-V4-Flash',
-        name: 'DeepSeek V4 Flash',
-        provider: SystemProviderIds.silicon
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({ enable_thinking: false })
-    })
-
-    it('should use enable_thinking:false for SiliconFlow + Zhipu model when reasoning_effort is none', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenZhipuModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenZhipuModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'THUDM/glm-4.5-thinking',
-        name: 'GLM-4.5 Thinking',
-        provider: SystemProviderIds.silicon
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({ enable_thinking: false })
-    })
-
-    it('should return medium effort for deep research models', async () => {
-      const { isReasoningModel, isOpenAIDeepResearchModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isOpenAIDeepResearchModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'o3-deep-research',
-        provider: SystemProviderIds.openai
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {}
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({ reasoning_effort: 'medium' })
-    })
-
-    it('should return camelCase reasoningEffort for Gemini 3 models', async () => {
-      const {
-        isReasoningModel,
-        isOpenAIDeepResearchModel,
-        isSupportedThinkingTokenGeminiModel,
-        isGemini3ThinkingTokenModel,
-        isQwenReasoningModel,
-        isSupportedThinkingTokenClaudeModel,
-        isSupportedThinkingTokenDoubaoModel,
-        isSupportedThinkingTokenZhipuModel,
-        isSupportedReasoningEffortModel,
-        isSupportedThinkingTokenQwenModel,
-        isSupportedThinkingTokenHunyuanModel,
-        isDeepSeekHybridInferenceModel
-      } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isOpenAIDeepResearchModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenGeminiModel).mockReturnValue(true)
-      vi.mocked(isGemini3ThinkingTokenModel).mockReturnValue(true)
-      vi.mocked(isQwenReasoningModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenDoubaoModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenZhipuModel).mockReturnValue(false)
-      vi.mocked(isSupportedReasoningEffortModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenQwenModel).mockReturnValue(false)
-      vi.mocked(isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
-      vi.mocked(isDeepSeekHybridInferenceModel).mockReturnValue(false)
-
-      const model: Model = {
-        id: 'gemini-3-flash-preview',
-        name: 'Gemini 3 Flash',
-        provider: 'custom-provider'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'high'
-        }
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      // Should use camelCase 'reasoningEffort' for AI SDK openai-compatible provider compatibility
+      const result = getReasoningEffort(makeAssistant('high'), makeModel({ id: 'gemini-2.5-flash' }))
       expect(result).toEqual({ reasoningEffort: 'high' })
+      expect(result).not.toHaveProperty('extra_body')
     })
 
-    it('should return empty for groq provider', async () => {
-      const { getProviderByModel } = await import('@renderer/services/AssistantService')
+    it('should keep unknown models requestable (empty params, never throws when provider exists)', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(false)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedReasoningEffortModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenGeminiModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenDoubaoModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenZhipuModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenMiMoModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenKimiModel).mockReturnValue(false)
+      vi.mocked(models.isMiniMaxReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      vi.mocked(getProviderByModel).mockReturnValue({
-        id: 'groq',
-        name: 'Groq'
-      } as Provider)
-
-      const model: Model = {
-        id: 'groq-model',
-        name: 'Groq Model',
-        provider: 'groq'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {}
-      } as Assistant
-
-      const result = getReasoningEffort(assistant, model)
-      expect(result).toEqual({})
+      expect(getReasoningEffort(makeAssistant('high'), makeModel({ id: 'some-unknown-model-xyz' }))).toEqual({})
     })
 
-    // Mistral models use reasoningEffort with only 'none' | 'high' support
-    describe('Mistral models (mistral-small-2603 and magistral-*)', () => {
-      // Helper: Create a Mistral model
-      const createMistralModel = (id: string): Model => ({
-        id,
-        name: id,
-        provider: 'mistral',
-        group: 'Mistral'
-      })
+    it('should never emit vendor private keys from the generic path', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isSupportedThinkingTokenModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      // Helper: Create an assistant with specific reasoning_effort setting
-      const createAssistantWithReasoning = (effort: string | undefined): Assistant =>
-        ({
-          id: 'test',
-          name: 'Test',
-          settings: {
-            reasoning_effort: effort as any
-          }
-        }) as Assistant
+      for (const effort of ['low', 'medium', 'high', 'none'] as const) {
+        const result: any = getReasoningEffort(makeAssistant(effort), makeModel())
+        expect(result).not.toHaveProperty('enable_thinking')
+        expect(result).not.toHaveProperty('chat_template_kwargs')
+        expect(result).not.toHaveProperty('extra_body')
+        expect(result).not.toHaveProperty('disable_reasoning')
+        expect(result).not.toHaveProperty('thinking_budget')
+        expect(result).not.toHaveProperty('incremental_output')
+      }
+    })
 
-      describe('mistral-small-2603', () => {
-        const mistralModel = createMistralModel('mistral-small-2603')
+    it('should emit camelCase reasoningEffort for deep-research models (never snake_case)', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-        it('should return { reasoningEffort: "high" } when reasoning_effort is "high"', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
+      const result: any = getReasoningEffort(
+        makeAssistant('high'),
+        makeModel({ id: 'o3-deep-research', provider: 'custom-a' })
+      )
+      expect(result).toEqual({ reasoningEffort: 'medium' })
+      expect(result).not.toHaveProperty('reasoning_effort')
+    })
 
-          const assistant = createAssistantWithReasoning('high')
-          const result = getReasoningEffort(assistant, mistralModel)
-          expect(result).toEqual({ reasoningEffort: 'high' })
-        })
+    it('should emit camelCase reasoningEffort for DeepSeek V4+ models (never snake_case)', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isReasoningModel).mockReturnValue(true)
+      vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(true)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-        it('should return { reasoningEffort: "none" } when reasoning_effort is "none"', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
+      const high: any = getReasoningEffort(
+        makeAssistant('high'),
+        makeModel({ id: 'deepseek-v4', provider: 'custom-a' })
+      )
+      expect(high).toEqual({ thinking: { type: 'enabled' }, reasoningEffort: 'high' })
+      expect(high).not.toHaveProperty('reasoning_effort')
 
-          const assistant = createAssistantWithReasoning('none')
-          const result = getReasoningEffort(assistant, mistralModel)
-          expect(result).toEqual({ reasoningEffort: 'none' })
-        })
-
-        it('should return { reasoningEffort: "high" } when reasoning_effort is "low" (mapping)', async () => {
-          // Mistral models only support 'none' and 'high', so other values map to 'high'
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('low')
-          const result = getReasoningEffort(assistant, mistralModel)
-          expect(result).toEqual({ reasoningEffort: 'high' })
-        })
-
-        it('should return { reasoningEffort: "high" } when reasoning_effort is "medium" (mapping)', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('medium')
-          const result = getReasoningEffort(assistant, mistralModel)
-          expect(result).toEqual({ reasoningEffort: 'high' })
-        })
-
-        it('should return {} when reasoning_effort is "default"', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('default')
-          const result = getReasoningEffort(assistant, mistralModel)
-          expect(result).toEqual({})
-        })
-
-        it('should return {} when reasoning_effort is undefined', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = {
-            id: 'test',
-            name: 'Test',
-            settings: {
-              reasoning_effort: undefined
-            }
-          } as Assistant
-          const result = getReasoningEffort(assistant, mistralModel)
-          expect(result).toEqual({})
-        })
-      })
-
-      describe('magistral-small-latest', () => {
-        // Magistral models reason natively — they do NOT accept reasoning_effort parameter
-        const magistralModel = createMistralModel('magistral-small-latest')
-
-        it('should return {} for magistral (native reasoning, no parameter)', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('high')
-          const result = getReasoningEffort(assistant, magistralModel)
-          expect(result).toEqual({})
-        })
-
-        it('should return {} for magistral when reasoning_effort is "none"', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('none')
-          const result = getReasoningEffort(assistant, magistralModel)
-          expect(result).toEqual({})
-        })
-      })
-
-      describe('magistral-medium-latest', () => {
-        // Magistral models reason natively — no reasoning_effort parameter accepted
-        const magistralModel = createMistralModel('magistral-medium-latest')
-
-        it('should return {} for magistral-medium (native reasoning)', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('xhigh')
-          const result = getReasoningEffort(assistant, magistralModel)
-          expect(result).toEqual({})
-        })
-
-        it('should return {} for magistral-medium with auto effort', async () => {
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const assistant = createAssistantWithReasoning('auto')
-          const result = getReasoningEffort(assistant, magistralModel)
-          expect(result).toEqual({})
-        })
-      })
-
-      describe('edge cases', () => {
-        it('should return {} for non-reasoning Mistral models', async () => {
-          // isReasoningModel returns false by default in the top-level mock
-          const nonReasoningModel = createMistralModel('mistral-large-2407')
-          const assistant = createAssistantWithReasoning('high')
-          const result = getReasoningEffort(assistant, nonReasoningModel)
-          expect(result).toEqual({})
-        })
-
-        it('should handle model ID with different case', async () => {
-          // getLowerBaseModelName converts to lowercase, so case shouldn't matter
-          const { isReasoningModel } = await import('@renderer/config/models')
-          vi.mocked(isReasoningModel).mockReturnValue(true)
-
-          const upperCaseModel = createMistralModel('MISTRAL-SMALL-2603')
-          const assistant = createAssistantWithReasoning('high')
-          const result = getReasoningEffort(assistant, upperCaseModel)
-          expect(result).toEqual({ reasoningEffort: 'high' })
-        })
-      })
+      const xhigh: any = getReasoningEffort(
+        makeAssistant('xhigh' as any),
+        makeModel({ id: 'deepseek-v4', provider: 'custom-a' })
+      )
+      expect(xhigh).toEqual({ thinking: { type: 'enabled' }, reasoningEffort: 'max' })
+      expect(xhigh).not.toHaveProperty('reasoning_effort')
     })
   })
 

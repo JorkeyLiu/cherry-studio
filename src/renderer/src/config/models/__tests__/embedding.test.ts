@@ -68,21 +68,28 @@ describe('isEmbeddingModel', () => {
     expect(isEmbeddingModel(model)).toBe(false)
   })
 
-  it('uses the model name when provider is doubao', () => {
+  it('uses the model name for doubao model-id families (no provider gate)', () => {
     const model = createModel({
-      id: 'custom-id',
+      id: 'doubao-custom-id',
       name: 'BGE-Large-zh-v1.5',
-      provider: 'doubao'
+      provider: 'custom-a'
     })
     expect(isEmbeddingModel(model)).toBe(true)
   })
 
-  it('returns false for anthropic provider models', () => {
+  it('applies the embedding regex on any connection (no anthropic brand gate)', () => {
     const model = createModel({
       id: 'text-embedding-ada-002',
       provider: 'anthropic'
     })
-    expect(isEmbeddingModel(model)).toBe(false)
+    expect(isEmbeddingModel(model)).toBe(true)
+  })
+
+  it('proves no brand-id behavioral difference for embedding capability', () => {
+    const a = isEmbeddingModel(createModel({ id: 'text-embedding-3-small', provider: 'brand-a' }))
+    const b = isEmbeddingModel(createModel({ id: 'text-embedding-3-small', provider: 'brand-b' }))
+    expect(a).toBe(b)
+    expect(a).toBe(true)
   })
 })
 
