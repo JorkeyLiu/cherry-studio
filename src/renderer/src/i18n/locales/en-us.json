@@ -5173,7 +5173,10 @@
           "placeholder": "Example: OpenAI"
         },
         "title": "Add Provider",
-        "type": "Provider Type"
+        "type": "Provider Type",
+        "type_anthropic": "Anthropic",
+        "type_gemini": "Gemini",
+        "type_openai_compatible": "OpenAI Compatible"
       },
       "anthropic": {
         "apikey": "API key",

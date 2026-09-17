@@ -5173,7 +5173,10 @@
           "placeholder": "例如 OpenAI"
         },
         "title": "添加提供商",
-        "type": "提供商类型"
+        "type": "提供商类型",
+        "type_anthropic": "Anthropic",
+        "type_gemini": "Gemini",
+        "type_openai_compatible": "OpenAI 兼容"
       },
       "anthropic": {
         "apikey": "API 密钥",

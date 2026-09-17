@@ -17,9 +17,8 @@
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
 import { isLocalAi } from '@renderer/config/env'
-import { INITIAL_STATE_EXCLUDED_PROVIDER_IDS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import type { AwsBedrockAuthType, Model, Provider } from '@renderer/types'
-import { omit, uniqBy } from 'lodash'
+import { uniqBy } from 'lodash'
 
 type LlmSettings = {
   ollama: {
@@ -72,7 +71,11 @@ export const initialState: LlmState = {
   quickModel: undefined,
   translateModel: undefined,
   quickAssistantId: '',
-  providers: Object.values(omit(SYSTEM_PROVIDERS_CONFIG, INITIAL_STATE_EXCLUDED_PROVIDER_IDS)),
+  // Custom-connection bootstrap: fresh state contains no built-in/system
+  // provider instances and no default model. The user adds ordinary
+  // (isSystem:false) connections for the approved protocols explicitly;
+  // nothing is silently pre-configured or substituted.
+  providers: [],
   settings: {
     ollama: {
       keepAliveTime: 0

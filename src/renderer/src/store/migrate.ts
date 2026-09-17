@@ -25,11 +25,12 @@ import {
 import { isFunctionCallingModel, isNotSupportTextDeltaModel, qwenModel, SYSTEM_MODELS } from '@renderer/config/models'
 import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER } from '@renderer/config/ocr'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
-import { SYSTEM_PROVIDERS } from '@renderer/config/providers'
+import { SYSTEM_PROVIDERS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
 import { getModel } from '@renderer/hooks/useModel'
 import i18n from '@renderer/i18n'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
+import { isPreservedCompatibleProtocol } from '@renderer/services/customProviderRegistry'
 import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,
@@ -50,7 +51,7 @@ import {
 } from '@renderer/utils/provider'
 import { API_SERVER_DEFAULTS } from '@shared/config/constant'
 import { defaultByPassRules, UpgradeChannel } from '@shared/config/constant'
-import { isEmpty } from 'lodash'
+import { isEmpty, isEqual } from 'lodash'
 import { createMigrate } from 'redux-persist'
 
 import type { RootState } from '.'
@@ -91,13 +92,44 @@ function addProvider(state: RootState, id: string) {
   }
 }
 
-// Fix missing provider
+// Fix missing provider (historical helper — do NOT call from migration 221 or
+// later: the custom-connection bootstrap never re-adds missing system
+// providers; unconfigured entries stay absent and configured compatible
+// entries are converted to ordinary user providers by migration 221).
 function fixMissingProvider(state: RootState) {
   SYSTEM_PROVIDERS.forEach((p) => {
     if (!state.llm.providers.find((provider) => provider.id === p.id)) {
       state.llm.providers.push(p)
     }
   })
+}
+
+// Strip undefined-valued keys recursively so a JSON-persisted provider can be
+// compared structurally against its stock config (persist drops undefined,
+// in-memory stock may carry explicit undefined optionals).
+function stripUndefinedDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefinedDeep)
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (entry !== undefined) out[key] = stripUndefinedDeep(entry)
+    }
+    return out
+  }
+  return value
+}
+
+// True only when the entry is unmistakably an untouched stock catalog copy:
+// deep-equal to the current built-in config for its id (credentials, hosts,
+// enabled state, models, and every other configuration field identical).
+// Anything materially customized — custom host, apiVersion, extra headers,
+// added/renamed models, toggled flags — compares unequal and is preserved.
+// Entries with no stock counterpart can never be proven untouched, so they
+// are preserved as well. Safe over-preservation beats data loss.
+function isUntouchedStockProvider(provider: Provider): boolean {
+  const stock = (SYSTEM_PROVIDERS_CONFIG as Record<string, Provider | undefined>)[provider.id]
+  if (!stock) return false
+  return isEqual(stripUndefinedDeep(provider), stripUndefinedDeep(stock))
 }
 
 // add ocr provider
@@ -3802,6 +3834,114 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 220 error', error as Error)
+      return state
+    }
+  },
+  '221': (state: RootState) => {
+    try {
+      // Custom-connection bootstrap (slice 1):
+      //  - Fresh state starts with no system providers (see store/llm.ts), so
+      //    this migration converts the persisted registry to the same shape:
+      //    existing configured/useful OpenAI/Anthropic/Gemini-compatible
+      //    entries (see customProviderRegistry) become ordinary user providers
+      //    (isSystem:false) with ids, credentials, hosts, enabled state,
+      //    models, and custom logos preserved (logos are keyed by provider id
+      //    in ImageStorage, so stable ids preserve them). All live model
+      //    references (llm slots, assistants, presets, legacy agents, memory,
+      //    websearch RAG compression models, knowledge bases) are left
+      //    untouched — never substituted, never defaulted. Historical message
+      //    snapshots are not references and are left alone.
+      //  - Only unmistakably untouched catalog copies (deep-equal to the
+      //    built-in stock config — no key, stock host/flags, stock models)
+      //    are dropped. Anything materially customized (custom host,
+      //    apiVersion, extra headers, added/renamed models, toggled flags,
+      //    any other configuration delta) is preserved: over-preservation
+      //    beats data loss, and user intent is never inferred from the
+      //    current model catalog alone.
+      //  - Legacy unsupported adapter entries (Bedrock/Vertex/Azure/Copilot
+      //    OAuth and other historical types) are retained verbatim ONLY when
+      //    a live model slot still references them, so no reference is
+      //    orphaned. They are not offered for new creation (see
+      //    AddProviderPopup) and a later slice retires their execution.
+      //  - Message historical model snapshots and the L2 import path are
+      //    untouched by this migration.
+      const collectReferencedProviderIds = (): Set<string> => {
+        const ids = new Set<string>()
+        const collectModel = (model?: Model) => {
+          if (model && typeof model.provider === 'string' && model.provider.length > 0) {
+            ids.add(model.provider)
+          }
+        }
+        collectModel(state.llm?.defaultModel)
+        collectModel(state.llm?.topicNamingModel)
+        collectModel(state.llm?.quickModel)
+        collectModel(state.llm?.translateModel)
+        collectModel(state.assistants?.defaultAssistant?.model)
+        collectModel(state.assistants?.defaultAssistant?.defaultModel)
+        state.assistants?.assistants?.forEach((assistant) => {
+          collectModel(assistant.model)
+          collectModel(assistant.defaultModel)
+        })
+        state.assistants?.presets?.forEach((preset) => {
+          // @ts-ignore AssistantPreset does not carry model fields on the runtime type
+          collectModel(preset.model)
+          // @ts-ignore AssistantPreset does not carry model fields on the runtime type
+          collectModel(preset.defaultModel)
+        })
+        // @ts-ignore legacy agents slice may exist in old persisted state
+        state.agents?.agents?.forEach((agent: any) => {
+          collectModel(agent.model)
+          collectModel(agent.defaultModel)
+        })
+        collectModel(state.memory?.memoryConfig?.llmModel)
+        collectModel(state.memory?.memoryConfig?.embeddingModel)
+        collectModel(state.websearch?.compressionConfig?.embeddingModel)
+        collectModel(state.websearch?.compressionConfig?.rerankModel)
+        state.knowledge?.bases?.forEach((base) => {
+          collectModel(base.model)
+          collectModel(base.rerankModel)
+        })
+        return ids
+      }
+
+      const referencedIds = collectReferencedProviderIds()
+      const providers = Array.isArray(state.llm?.providers) ? state.llm.providers : []
+      const nextProviders: Provider[] = []
+
+      for (const provider of providers) {
+        if (!provider || typeof provider.id !== 'string') continue
+        if (!provider.isSystem) {
+          // Already an ordinary user (custom-connection) provider: keep verbatim.
+          nextProviders.push(provider)
+          continue
+        }
+        if (isPreservedCompatibleProtocol(provider.type)) {
+          const hasKey = typeof provider.apiKey === 'string' && provider.apiKey.length > 0
+          const isEnabled = provider.enabled === true
+          const isReferenced = referencedIds.has(provider.id)
+          if (hasKey || isEnabled || isReferenced || !isUntouchedStockProvider(provider)) {
+            // Convert to an ordinary user provider; every other field
+            // (credentials, hosts, enabled, models, and all other
+            // configuration) is preserved as-is.
+            nextProviders.push({ ...provider, isSystem: false })
+          }
+          // Else: unmistakably untouched catalog copy — dropped, and by
+          // construction it backs no live reference so nothing is orphaned
+          // and nothing is substituted.
+        } else if (referencedIds.has(provider.id)) {
+          // Legacy adapter still backing a live reference: retain verbatim
+          // for this slice so the reference is not orphaned. A later slice
+          // retires execution for these types.
+          nextProviders.push(provider)
+        }
+        // Else: unreferenced legacy adapter entry — dropped.
+      }
+
+      state.llm.providers = nextProviders
+      logger.info('migrate 221 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 221 error', error as Error)
       return state
     }
   }

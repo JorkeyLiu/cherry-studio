@@ -5173,7 +5173,10 @@
           "placeholder": "Por ejemplo, OpenAI"
         },
         "title": "Agregar proveedor",
-        "type": "Tipo de proveedor"
+        "type": "Tipo de proveedor",
+        "type_anthropic": "[to be translated]:Anthropic",
+        "type_gemini": "[to be translated]:Gemini",
+        "type_openai_compatible": "[to be translated]:OpenAI Compatible"
       },
       "anthropic": {
         "apikey": "Clave de API",
@@ -5521,6 +5524,7 @@
       "actions": "[to be translated]:Actions",
       "cancel": "[to be translated]:Cancel",
       "capture_error": "[to be translated]:Capture error",
+      "config_load_error": "[to be translated]:Failed to load sync configuration: {{message}}",
       "conflicts_pending": "[to be translated]:Conflicting edits: {{count}} field(s) kept the newest value; the overwritten value is stored for a future restore (automatic restore not available yet).",
       "connect": "[to be translated]:Connect",
       "connect_success": "[to be translated]:Connected to relay",

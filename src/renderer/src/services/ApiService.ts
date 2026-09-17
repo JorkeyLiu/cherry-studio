@@ -29,7 +29,7 @@ import {
   getMainTextSnapshotContent,
   type SnapshotBlockMap
 } from '@renderer/utils/messageUtils/snapshotBlocks'
-import { assertProviderMatchesModel, createNoModelError } from '@renderer/utils/noModelError'
+import { assertProviderMatchesModel, createNoModelError, isNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
 import { NOT_SUPPORT_API_KEY_PROVIDER_TYPES, NOT_SUPPORT_API_KEY_PROVIDERS } from '@renderer/utils/provider'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
@@ -530,9 +530,21 @@ export async function fetchMessagesSummary({
 
   // 总结上下文总是取最后5条消息
   const contextMessages = takeRight(messages, 5)
-  const provider = getProviderByModel(model)
+  // Exact-provider resolution: a stale quickModel (its provider is gone or
+  // belongs to another entry) fails explicitly before any provider/API
+  // access instead of silently substituting the default provider. Unknown
+  // manually added model ids with a valid exact provider still proceed.
+  let provider: Provider
+  try {
+    provider = resolveModelAndProvider(model).provider
+  } catch (error) {
+    if (isNoModelError(error)) {
+      return { text: null, error: i18n.t('message.error.enter.model') }
+    }
+    throw error
+  }
 
-  if (!provider || !hasApiKey(provider)) {
+  if (!hasApiKey(provider)) {
     return { text: null, error: i18n.t('error.no_api_key') }
   }
 
@@ -649,9 +661,20 @@ export async function fetchNoteSummary({ content, assistant }: { content: string
     prompt = await replacePromptVariables(prompt, model.name)
   }
 
-  const provider = getProviderByModel(model)
+  // Exact-provider resolution (see fetchMessagesSummary): stale references
+  // fail before any provider/API access; unknown ids with a valid exact
+  // provider still proceed.
+  let provider: Provider
+  try {
+    provider = resolveModelAndProvider(model).provider
+  } catch (error) {
+    if (isNoModelError(error)) {
+      return null
+    }
+    throw error
+  }
 
-  if (!provider || !hasApiKey(provider)) {
+  if (!hasApiKey(provider)) {
     return null
   }
 
@@ -753,9 +776,20 @@ export async function fetchGenerate({
     // Unconfigured model slot: fail explicitly, no provider/API access.
     return ''
   }
-  const provider = getProviderByModel(model)
+  // Exact-provider resolution (see fetchMessagesSummary): stale references
+  // fail before any provider/API access; unknown ids with a valid exact
+  // provider still proceed.
+  let provider: Provider
+  try {
+    provider = resolveModelAndProvider(model).provider
+  } catch (error) {
+    if (isNoModelError(error)) {
+      return ''
+    }
+    throw error
+  }
 
-  if (!provider || !hasApiKey(provider)) {
+  if (!hasApiKey(provider)) {
     return ''
   }
 

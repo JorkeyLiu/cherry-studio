@@ -5173,7 +5173,10 @@
           "placeholder": "例如：OpenAI"
         },
         "title": "新增提供者",
-        "type": "供應商類型"
+        "type": "供應商類型",
+        "type_anthropic": "[to be translated]:Anthropic",
+        "type_gemini": "[to be translated]:Gemini",
+        "type_openai_compatible": "[to be translated]:OpenAI Compatible"
       },
       "anthropic": {
         "apikey": "API 金鑰",

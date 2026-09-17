@@ -4,6 +4,11 @@ import { ProviderAvatarPrimitive } from '@renderer/components/ProviderAvatar'
 import ProviderLogoPicker from '@renderer/components/ProviderLogoPicker'
 import { TopView } from '@renderer/components/TopView'
 import { PROVIDER_LOGO_MAP } from '@renderer/config/providers'
+import {
+  CUSTOM_CREATABLE_PROTOCOLS,
+  isCustomCreatableProtocol,
+  normalizeEditedProviderType
+} from '@renderer/services/customProviderRegistry'
 import ImageStorage from '@renderer/services/ImageStorage'
 import type { Provider, ProviderType } from '@renderer/types'
 import { compressImage, generateColorFromChar, getForegroundColor } from '@renderer/utils'
@@ -52,7 +57,9 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
     // 返回结果，但不包含文件对象，因为文件已经直接保存到 ImageStorage
     const result = {
       name: name.trim(),
-      type,
+      // A retained legacy entry keeps its unsupported protocol regardless of
+      // popup interaction; new creation only offers approved protocols.
+      type: normalizeEditedProviderType(provider?.type ?? type, type),
       logo: logo || undefined
     }
     resolve(result)
@@ -64,7 +71,11 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   }
 
   const onClose = () => {
-    resolve({ name: name.trim(), type, logo: logo || undefined })
+    resolve({
+      name: name.trim(),
+      type: normalizeEditedProviderType(provider?.type ?? type, type),
+      logo: logo || undefined
+    })
   }
 
   const buttonDisabled = name.trim().length === 0
@@ -176,6 +187,26 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   const backgroundColor = generateColorFromChar(name)
   const color = name ? getForegroundColor(backgroundColor) : 'white'
 
+  // Custom-connection product path: only the three approved protocols may be
+  // created. Protocol labels come from i18n — no hardcoded user-visible text.
+  // Existing entries of other types are preserved by migration 221 but are
+  // not offered here. When editing a retained legacy entry, the protocol
+  // field is read-only and keeps showing its stored type id so the value is
+  // never blanked; the resolve path additionally preserves it.
+  const legacyType = provider && !isCustomCreatableProtocol(provider.type) ? provider.type : undefined
+  const editingLegacyType = legacyType !== undefined
+  const protocolOptions = CUSTOM_CREATABLE_PROTOCOLS.map((protocol) => ({
+    label:
+      protocol === 'openai'
+        ? t('settings.provider.add.type_openai_compatible')
+        : protocol === 'anthropic'
+          ? t('settings.provider.add.type_anthropic')
+          : t('settings.provider.add.type_gemini'),
+    value: protocol
+  }))
+  const typeOptions =
+    legacyType !== undefined ? [...protocolOptions, { label: legacyType, value: legacyType }] : protocolOptions
+
   return (
     <Modal
       open={open}
@@ -246,16 +277,9 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
         <Form.Item label={t('settings.provider.add.type')} style={{ marginBottom: 0 }}>
           <Select
             value={type}
+            disabled={editingLegacyType}
             onChange={(value: ProviderType) => setType(value)}
-            options={[
-              { label: 'OpenAI', value: 'openai' },
-              { label: 'OpenAI-Response', value: 'openai-response' },
-              { label: 'Gemini', value: 'gemini' },
-              { label: 'Anthropic', value: 'anthropic' },
-              { label: 'Azure OpenAI', value: 'azure-openai' },
-              { label: 'New API', value: 'new-api' },
-              { label: 'Ollama', value: 'ollama' }
-            ]}
+            options={typeOptions}
           />
         </Form.Item>
       </Form>

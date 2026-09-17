@@ -1,3 +1,4 @@
+import { SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import { describe, expect, it } from 'vitest'
 
 import migrate from '../migrate'
@@ -974,6 +975,255 @@ describe('store migrations', () => {
       expect(migrated.assistants.assistants[0].settings.contextCount).toBe(5)
       // 218: quick-settings cleanup ran on the settings slice.
       expect(migrated.settings.messageNavigation).toBe(false)
+    })
+  })
+
+  describe('migration 221: custom-connection bootstrap conversion', () => {
+    const sysOpenai = (overrides: Record<string, unknown> = {}) => ({
+      id: 'openai',
+      name: 'OpenAI',
+      type: 'openai',
+      apiKey: '',
+      apiHost: 'https://api.openai.com',
+      models: [],
+      isSystem: true,
+      enabled: false,
+      ...overrides
+    })
+    const unknownModel = (provider: string, id = 'my-renamed-unknown-1') => ({
+      id,
+      name: id,
+      provider,
+      group: provider
+    })
+
+    const makeState = (state: Record<string, unknown>) => ({
+      llm: { providers: [], settings: {}, ...(state.llm as Record<string, unknown>) },
+      assistants: {
+        defaultAssistant: {},
+        assistants: [],
+        ...(state.assistants as Record<string, unknown>)
+      },
+      ...(state.memory ? { memory: state.memory } : {}),
+      ...(state.agents ? { agents: state.agents } : {}),
+      ...(state.websearch ? { websearch: state.websearch } : {}),
+      ...(state.knowledge ? { knowledge: state.knowledge } : {}),
+      _persist: { version: 220, rehydrated: false }
+    })
+
+    it('converts a configured compatible system provider to an ordinary user provider, preserving everything', async () => {
+      const models = [unknownModel('openai')]
+      const state = makeState({
+        llm: {
+          providers: [
+            sysOpenai({ apiKey: 'sk-live', enabled: true, models }),
+            // Unmistakably untouched stock copy: dropped.
+            { ...SYSTEM_PROVIDERS_CONFIG.deepseek }
+          ],
+          defaultModel: unknownModel('openai')
+        },
+        assistants: {
+          defaultAssistant: {},
+          assistants: [{ id: 'a1', model: unknownModel('openai') }]
+        }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      expect(migrated.llm.providers).toHaveLength(1)
+      const kept = migrated.llm.providers[0]
+      expect(kept.id).toBe('openai')
+      expect(kept.isSystem).toBe(false)
+      expect(kept.apiKey).toBe('sk-live')
+      expect(kept.apiHost).toBe('https://api.openai.com')
+      expect(kept.enabled).toBe(true)
+      expect(kept.models).toEqual(models)
+      // Live model references are never substituted or defaulted.
+      expect(migrated.llm.defaultModel).toEqual(unknownModel('openai'))
+      expect(migrated.assistants.assistants[0].model).toEqual(unknownModel('openai'))
+    })
+
+    it('keeps compatible providers that are enabled, referenced, or carry user-added models', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            sysOpenai({ id: 'anthropic', name: 'Anthropic', type: 'anthropic', enabled: true }),
+            sysOpenai({ id: 'gemini', name: 'Gemini', type: 'gemini' }),
+            sysOpenai({ id: 'ollama', name: 'Ollama', type: 'ollama', models: [unknownModel('ollama')] })
+          ],
+          quickModel: unknownModel('gemini')
+        }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      const ids = migrated.llm.providers.map((p: { id: string }) => p.id).sort()
+      expect(ids).toEqual(['anthropic', 'gemini', 'ollama'])
+      for (const p of migrated.llm.providers) {
+        expect(p.isSystem).toBe(false)
+      }
+      expect(migrated.llm.quickModel).toEqual(unknownModel('gemini'))
+    })
+
+    it('drops only unmistakably untouched catalog copies and unreferenced legacy adapters without substitution', async () => {
+      const openaiModel = unknownModel('openai')
+      const state = makeState({
+        llm: {
+          providers: [
+            sysOpenai({ apiKey: 'k', enabled: true, models: [openaiModel] }),
+            // Unmistakably untouched stock copy: deep-equal to the built-in config.
+            { ...SYSTEM_PROVIDERS_CONFIG.deepseek },
+            {
+              id: 'azure-openai',
+              name: 'Azure OpenAI',
+              type: 'azure-openai',
+              apiKey: '',
+              models: [],
+              isSystem: true,
+              enabled: false
+            }
+          ],
+          defaultModel: openaiModel
+        }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      expect(migrated.llm.providers.map((p: { id: string }) => p.id)).toEqual(['openai'])
+      expect(migrated.llm.defaultModel).toEqual(openaiModel)
+    })
+
+    it('preserves materially customized keyless/disabled/unreferenced compatible providers', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            sysOpenai({
+              apiHost: 'https://proxy.example.com/v1',
+              apiVersion: '2024-01-01',
+              extra_headers: { 'X-Custom': '1' },
+              notes: 'my notes',
+              rateLimit: 5
+            }),
+            // Unmistakably untouched stock copy for contrast: dropped.
+            { ...SYSTEM_PROVIDERS_CONFIG.moonshot }
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      expect(migrated.llm.providers.map((p: { id: string }) => p.id)).toEqual(['openai'])
+      const kept = migrated.llm.providers[0]
+      expect(kept.isSystem).toBe(false)
+      expect(kept.apiHost).toBe('https://proxy.example.com/v1')
+      expect(kept.apiVersion).toBe('2024-01-01')
+      expect(kept.extra_headers).toEqual({ 'X-Custom': '1' })
+      expect(kept.notes).toBe('my notes')
+      expect(kept.rateLimit).toBe(5)
+    })
+
+    it('preserves providers referenced by websearch compression and knowledge base models', async () => {
+      // Entries below are unmistakably untouched stock copies (no key,
+      // disabled) — only live references keep them. This proves the
+      // reference collector covers websearch RAG compression models and
+      // knowledge base models, not just llm/assistant slots.
+      const embedding = unknownModel('silicon', 'emb-1')
+      const rerank = unknownModel('zhipu', 're-1')
+      const kbModel = unknownModel('dashscope', 'kb-1')
+      const kbRerank = unknownModel('dashscope', 'kb-re-1')
+      const state = makeState({
+        llm: {
+          providers: [
+            { ...SYSTEM_PROVIDERS_CONFIG.silicon },
+            { ...SYSTEM_PROVIDERS_CONFIG.zhipu },
+            { ...SYSTEM_PROVIDERS_CONFIG.dashscope },
+            { ...SYSTEM_PROVIDERS_CONFIG.deepseek }
+          ]
+        },
+        websearch: {
+          compressionConfig: { method: 'rag', embeddingModel: embedding, rerankModel: rerank }
+        },
+        knowledge: {
+          bases: [{ id: 'b1', model: kbModel, rerankModel: kbRerank }]
+        }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      const ids = migrated.llm.providers.map((p: { id: string }) => p.id).sort()
+      expect(ids).toEqual(['dashscope', 'silicon', 'zhipu'])
+      for (const p of migrated.llm.providers) {
+        expect(p.isSystem).toBe(false)
+      }
+    })
+
+    it('retains a referenced legacy adapter verbatim instead of orphaning the reference', async () => {
+      const azureModel = { id: 'my-deploy', name: 'my-deploy', provider: 'azure-openai', group: 'azure' }
+      const state = makeState({
+        llm: {
+          providers: [
+            sysOpenai({ apiKey: 'k', enabled: true }),
+            {
+              id: 'azure-openai',
+              name: 'Azure OpenAI',
+              type: 'azure-openai',
+              apiKey: 'azure-key',
+              apiHost: 'https://my-azure.example.com',
+              models: [azureModel],
+              isSystem: true,
+              enabled: true
+            }
+          ]
+        },
+        assistants: {
+          defaultAssistant: {},
+          assistants: [{ id: 'a1', model: azureModel }]
+        }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      expect(migrated.llm.providers.map((p: { id: string }) => p.id).sort()).toEqual(['azure-openai', 'openai'])
+      const azure = migrated.llm.providers.find((p: { id: string }) => p.id === 'azure-openai')
+      expect(azure.apiKey).toBe('azure-key')
+      expect(azure.apiHost).toBe('https://my-azure.example.com')
+      expect(azure.models).toEqual([azureModel])
+      expect(migrated.assistants.assistants[0].model).toEqual(azureModel)
+    })
+
+    it('preserves ordinary custom providers and memory model references verbatim', async () => {
+      const customModels = [unknownModel('my-gateway')]
+      const state = makeState({
+        llm: {
+          providers: [
+            {
+              id: 'my-gateway',
+              name: 'My Gateway',
+              type: 'openai',
+              apiKey: 'gw-key',
+              apiHost: 'https://gw.example.com',
+              models: customModels,
+              isSystem: false,
+              enabled: true
+            }
+          ]
+        },
+        memory: { memoryConfig: { llmModel: unknownModel('my-gateway'), embeddingModel: undefined } }
+      })
+      const migrated: any = await migrate(state as any, 221)
+
+      expect(migrated.llm.providers).toHaveLength(1)
+      expect(migrated.llm.providers[0]).toMatchObject({
+        id: 'my-gateway',
+        apiKey: 'gw-key',
+        apiHost: 'https://gw.example.com',
+        isSystem: false,
+        enabled: true
+      })
+      expect(migrated.llm.providers[0].models).toEqual(customModels)
+      expect(migrated.memory.memoryConfig.llmModel).toEqual(unknownModel('my-gateway'))
+    })
+
+    it('never re-adds missing system providers and injects no default model', async () => {
+      const state = makeState({ llm: { providers: [] } })
+      const migrated: any = await migrate(state as any, 221)
+
+      expect(migrated.llm.providers).toEqual([])
+      expect(migrated.llm.defaultModel).toBeUndefined()
     })
   })
 })

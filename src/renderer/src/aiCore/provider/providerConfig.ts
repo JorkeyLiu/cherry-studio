@@ -18,6 +18,7 @@ import {
   isWithTrailingSharp,
   routeToEndpoint
 } from '@renderer/utils/api'
+import { assertProviderMatchesModel } from '@renderer/utils/noModelError'
 import {
   isAnthropicProvider,
   isAzureOpenAIProvider,
@@ -144,11 +145,13 @@ export function providerToAiSdkConfig(
 
 export function getActualProvider(model: Model): Provider {
   const provider = getProviderByModel(model)
-  if (!provider) {
-    // Unconfigured model/provider: fail explicitly before any provider/API
-    // invocation.
-    throw new Error('Model provider is not configured')
-  }
+  // Never silently substitute another (e.g. default) provider when the
+  // model's own provider is gone: the stale model fails explicitly before
+  // any provider/API invocation, same as the ApiService boundary. Catalog or
+  // external model metadata presence is not consulted — manually configured
+  // or renamed model ids resolve with basic protocol behavior as long as
+  // their owning provider entry exists.
+  assertProviderMatchesModel(model, provider)
   return adaptProvider({ provider, model })
 }
 

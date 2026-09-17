@@ -39,7 +39,7 @@ const ProviderList: FC<ProviderListProps> = () => {
   const providers = useAllProviders()
   const { updateProviders, addProvider, removeProvider, updateProvider } = useProviders()
   const { setTimeoutTimer } = useTimer()
-  const [selectedProvider, _setSelectedProvider] = useState<Provider>(providers[0])
+  const [selectedProvider, _setSelectedProvider] = useState<Provider | undefined>(providers[0])
   const { t } = useTranslation()
   const [searchText, setSearchText] = useState<string>('')
   const [dragging, setDragging] = useState(false)
@@ -47,7 +47,7 @@ const ProviderList: FC<ProviderListProps> = () => {
   const [providerLogos, setProviderLogos] = useState<Record<string, string>>({})
   const listRef = useRef<DraggableVirtualListRef>(null)
 
-  const setSelectedProvider = useCallback((provider: Provider) => {
+  const setSelectedProvider = useCallback((provider: Provider | undefined) => {
     startTransition(() => _setSelectedProvider(provider))
   }, [])
 
@@ -268,7 +268,11 @@ const ProviderList: FC<ProviderListProps> = () => {
               }
             }
 
-            setSelectedProvider(providers.filter((p) => isSystemProvider(p))[0])
+            // Custom-connection bootstrap: no system providers are guaranteed
+            // to exist, so fall back to the first remaining entry instead of
+            // assuming a system provider is present.
+            const remaining = providers.filter((p) => p.id !== provider.id)
+            setSelectedProvider(remaining[0])
             removeProvider(provider)
           }
         })
@@ -424,7 +428,13 @@ const ProviderList: FC<ProviderListProps> = () => {
           </Button>
         </AddButtonWrapper>
       </ProviderListContainer>
-      <ProviderSetting providerId={selectedProvider.id} key={selectedProvider.id} />
+      {selectedProvider ? (
+        <ProviderSetting providerId={selectedProvider.id} key={selectedProvider.id} />
+      ) : (
+        <EmptyProviderHint>
+          <span>{t('settings.no_provider_selected')}</span>
+        </EmptyProviderHint>
+      )}
     </Container>
   )
 }
@@ -513,6 +523,15 @@ const CheckPlaceholder = styled.span`
   display: inline-block;
   width: 14px;
   height: 14px;
+`
+
+const EmptyProviderHint = styled.div`
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-3);
+  font-size: 14px;
 `
 
 export default ProviderList

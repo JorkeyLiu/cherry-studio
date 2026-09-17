@@ -129,4 +129,15 @@ describe('resolveModelAndProvider — no-model and stale-provider guards', () =>
     const result = resolveModelAndProvider(openaiModel)
     expect(result).toEqual({ model: openaiModel, provider: openaiProvider })
   })
+
+  it('resolves an unknown manually added model id when its provider entry exists (no catalog/metadata required)', () => {
+    // The model id is absent from every external catalog; the resolver
+    // consults only the owning provider entry, so basic protocol behavior
+    // stays requestable for manually configured/renamed ids.
+    const unknownModel = { id: 'my-renamed-unknown-1', name: 'my-renamed-unknown-1', provider: 'my-openai' } as Model
+    const customProvider = { id: 'my-openai', name: 'My OpenAI' } as Provider
+    vi.mocked(getProviderByModel).mockReturnValue(customProvider)
+    const result = resolveModelAndProvider(unknownModel)
+    expect(result).toEqual({ model: unknownModel, provider: customProvider })
+  })
 })

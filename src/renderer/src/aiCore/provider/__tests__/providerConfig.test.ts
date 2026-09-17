@@ -506,6 +506,29 @@ describe('getActualProvider', () => {
     // Should not mutate original
     expect(provider.apiHost).toBe('https://api.openai.com')
   })
+
+  it('resolves an unknown manually added model id without catalog/metadata', () => {
+    // The model id exists in no external catalog; resolution consults only
+    // the owning provider entry and keeps basic protocol behavior.
+    const provider = makeProvider({
+      id: 'my-openai',
+      type: 'openai',
+      apiHost: 'https://my.example.com'
+    })
+    vi.mocked(getProviderByModel).mockReturnValue(provider)
+
+    const result = getActualProvider(makeModel('my-renamed-unknown-1', 'my-openai'))
+
+    expect(result.id).toBe('my-openai')
+    expect(result.apiHost).toBe('https://my.example.com/v1')
+  })
+
+  it('rejects a stale provider instead of silently substituting another provider', () => {
+    const other = makeProvider({ id: 'other', type: 'openai', apiHost: 'https://other.example.com' })
+    vi.mocked(getProviderByModel).mockReturnValue(other)
+
+    expect(() => getActualProvider(makeModel('gpt-4', 'openai'))).toThrow()
+  })
 })
 
 describe('adaptProvider', () => {
@@ -881,6 +904,24 @@ describe('providerToAiSdkConfig', () => {
       // identity.
       expect(settings.headers!['HTTP-Referer']).toBeUndefined()
       expect(settings.headers!['X-Title']).toBe('Cherry Chat')
+    })
+
+    it('builds basic openai-compatible config for an unknown manually added model id', async () => {
+      // The model id exists in no external catalog; basic protocol behavior
+      // must still be requestable through the owning custom provider entry.
+      const provider = makeProvider({
+        id: 'my-openai',
+        type: 'openai',
+        apiHost: 'https://my.example.com/v1'
+      })
+
+      const config = (await providerToAiSdkConfig(
+        provider,
+        makeModel('my-renamed-unknown-1', provider.id)
+      )) as ProviderConfig<'openai-compatible'>
+
+      expect(config.providerId).toBe('openai-compatible')
+      expect(config.providerSettings.baseURL).toBe('https://my.example.com/v1')
     })
 
     it('merges extra_headers from provider', async () => {
