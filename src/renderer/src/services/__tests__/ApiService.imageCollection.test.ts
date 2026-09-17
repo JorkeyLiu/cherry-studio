@@ -86,8 +86,8 @@ vi.mock('@renderer/services/KnowledgeService', () => ({
 }))
 
 // `@renderer/utils/analytics` imports the real ProviderService, which drags in
-// the real useStore → config/providers → config/models chain; mock it so the
-// (unused-in-this-test) provider lookups never load that graph.
+// the real useStore graph; mock it so the (unused-in-this-test) provider
+// lookups never load that graph.
 vi.mock('@renderer/services/ProviderService', () => ({
   getProviderById: vi.fn()
 }))

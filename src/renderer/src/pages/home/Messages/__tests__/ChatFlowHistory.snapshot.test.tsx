@@ -1,4 +1,3 @@
-import type * as ConfigModelsModule from '@renderer/config/models'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { act, render, screen, waitFor } from '@testing-library/react'
@@ -47,15 +46,6 @@ vi.mock('@renderer/context/ThemeProvider', () => ({
 vi.mock('@renderer/hooks/useAvatar', () => ({
   default: () => 'avatar-url'
 }))
-
-vi.mock('@renderer/config/models', async (importOriginal) => {
-  const actual = await importOriginal<typeof ConfigModelsModule>()
-  return {
-    ...actual,
-    getModelLogo: () => undefined,
-    getModelLogoById: () => undefined
-  }
-})
 
 vi.mock('@renderer/components/Avatar/EmojiAvatar', () => ({
   default: ({ children }: any) => <div>{children}</div>

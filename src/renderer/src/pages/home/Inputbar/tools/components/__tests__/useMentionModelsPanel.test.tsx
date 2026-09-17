@@ -33,7 +33,6 @@ vi.mock('@renderer/components/QuickPanel', () => ({
 }))
 
 vi.mock('@renderer/config/models', () => ({
-  getModelLogo: () => undefined,
   isEmbeddingModel: () => false,
   isRerankModel: () => false,
   isVisionModel: () => false

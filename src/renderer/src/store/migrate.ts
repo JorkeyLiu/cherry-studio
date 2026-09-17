@@ -23,14 +23,14 @@ import {
   DEFAULT_TEMPERATURE,
   isMac
 } from '@renderer/config/constant'
-import { qwenModel, SYSTEM_MODELS } from '@renderer/config/models/default'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models/embedding'
 import { resolveCapabilityWithOverride, resolveExternalToolCallSupport } from '@renderer/config/models/modelMetadata'
 import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER } from '@renderer/config/ocr'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
-import { SYSTEM_PROVIDERS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
 import i18n from '@renderer/i18n'
+import { qwenModel, SYSTEM_MODELS } from '@renderer/store/migrations/history/systemModels'
+import { SYSTEM_PROVIDERS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/store/migrations/history/systemProviders'
 import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,

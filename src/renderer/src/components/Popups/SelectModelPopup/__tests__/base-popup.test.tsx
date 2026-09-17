@@ -35,7 +35,6 @@ vi.mock('@renderer/services/ProviderService', () => ({
 }))
 
 vi.mock('@renderer/config/models', () => ({
-  getModelLogo: () => undefined,
   isVisionModel: () => false,
   isEmbeddingModel: () => false,
   isReasoningModel: () => false,

@@ -122,7 +122,6 @@ vi.mock('@renderer/config/models', async (importOriginal) => {
       gpustack: [],
       voyageai: []
     },
-    getModelLogo: vi.fn(),
     isVisionModel: vi.fn(() => false),
     isFunctionCallingModel: vi.fn(() => false),
     isEmbeddingModel: vi.fn(() => false),

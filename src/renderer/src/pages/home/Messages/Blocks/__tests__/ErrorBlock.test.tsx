@@ -80,8 +80,8 @@ vi.mock('@ant-design/icons', () => ({
 
 vi.mock('@renderer/i18n/label', () => ({
   getHttpMessageLabel: (code: string) => `HTTP ${code}`
-  // Note: no getProviderLabel mock — ErrorBlock must use the stored
-  // connection name via getProviderById, never the built-in brand catalog.
+  // Note: ErrorBlock must use the stored connection name via getProviderById,
+  // never a built-in brand catalog.
 }))
 
 vi.mock('react-i18next', () => ({

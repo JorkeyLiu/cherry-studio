@@ -1,4 +1,4 @@
-import { SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
+import { SYSTEM_PROVIDERS_CONFIG } from '@renderer/store/migrations/history/systemProviders'
 import { describe, expect, it } from 'vitest'
 
 import migrate from '../migrate'
