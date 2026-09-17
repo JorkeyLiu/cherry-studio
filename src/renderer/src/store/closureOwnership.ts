@@ -53,7 +53,7 @@ export function withClosureTopics<T>(action: T, topics: ClosureTopicOwnership): 
   const base = (action ?? {}) as Record<string, any>
   return {
     ...base,
-    meta: { ...(base.meta ?? {}), [CLOSURE_TOPIC_IDS_META_KEY]: normalizeClosureTopicIds(topics) }
+    meta: { ...base.meta, [CLOSURE_TOPIC_IDS_META_KEY]: normalizeClosureTopicIds(topics) }
   } as T
 }
 
@@ -64,9 +64,7 @@ export function withClosureTopics<T>(action: T, topics: ClosureTopicOwnership): 
  * Never inspects Redux state or projections.
  */
 export function getClosureTopicIds(action: unknown): string[] | null {
-  const raw = (action as { meta?: Record<string, unknown> } | null | undefined)?.meta?.[
-    CLOSURE_TOPIC_IDS_META_KEY
-  ]
+  const raw = (action as { meta?: Record<string, unknown> } | null | undefined)?.meta?.[CLOSURE_TOPIC_IDS_META_KEY]
   if (!Array.isArray(raw)) return null
   const ids = normalizeClosureTopicIds(raw)
   return ids.length > 0 ? ids : null

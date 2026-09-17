@@ -86,7 +86,10 @@ describe('closureInvalidationMiddleware topic scoping (Task A)', () => {
   it.each([
     ['absent meta', { type: 'messageBlocks/upsertManyBlocks', payload: [] }],
     ['empty ownership', withClosureTopics({ type: 'messageBlocks/upsertManyBlocks', payload: [] }, [])],
-    ['non-array ownership', { type: 'messageBlocks/upsertManyBlocks', payload: [], meta: { closureTopicIds: 'topicA' } }],
+    [
+      'non-array ownership',
+      { type: 'messageBlocks/upsertManyBlocks', payload: [], meta: { closureTopicIds: 'topicA' } }
+    ],
     ['blank ids only', { type: 'messageBlocks/upsertManyBlocks', payload: [], meta: { closureTopicIds: ['', 42] } }]
   ])('unknown ownership (%s) globally invalidates', (_label, action) => {
     resetAllClosureStateForTests()
@@ -129,20 +132,20 @@ describe('closureInvalidationMiddleware topic scoping (Task A)', () => {
     expect(fpA).toBe(refetchedFp)
   })
 
-  it.each([['messageBlocks/setMessageBlocksLoading', 'loading'], ['messageBlocks/setMessageBlocksError', 'boom']])(
-    'loading/error marker %s never invalidates',
-    (type, payload) => {
-      resetAllClosureStateForTests()
-      const fpA = seedFresh('topicA')
-      const fpB = seedFresh('topicB')
+  it.each([
+    ['messageBlocks/setMessageBlocksLoading', 'loading'],
+    ['messageBlocks/setMessageBlocksError', 'boom']
+  ])('loading/error marker %s never invalidates', (type, payload) => {
+    resetAllClosureStateForTests()
+    const fpA = seedFresh('topicA')
+    const fpB = seedFresh('topicB')
 
-      runMiddleware({ type, payload })
-      runMiddleware(withClosureTopics({ type, payload }, 'topicA'))
+    runMiddleware({ type, payload })
+    runMiddleware(withClosureTopics({ type, payload }, 'topicA'))
 
-      expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
-      expect(getFreshValidatedClosure('topicB', 'u1', fpB)).not.toBeNull()
-    }
-  )
+    expect(getFreshValidatedClosure('topicA', 'u1', fpA)).not.toBeNull()
+    expect(getFreshValidatedClosure('topicB', 'u1', fpB)).not.toBeNull()
+  })
 
   it('ownership metadata merges with (never replaces) existing meta such as fromSync', () => {
     const action = withClosureTopics(

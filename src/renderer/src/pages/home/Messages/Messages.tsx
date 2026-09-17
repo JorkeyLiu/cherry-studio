@@ -1124,7 +1124,9 @@ const Messages = ({
               await consumeFileCleanupResult(cleanup)
 
               // Redux AFTER successful SQLite persistence
-              dispatch(withClosureTopics(updateOneBlock({ id: msgBlockId, changes: { content: updatedRaw } }), topic.id))
+              dispatch(
+                withClosureTopics(updateOneBlock({ id: msgBlockId, changes: { content: updatedRaw } }), topic.id)
+              )
 
               window.toast.success(t('code_block.edit.save.success'))
             } catch (error) {

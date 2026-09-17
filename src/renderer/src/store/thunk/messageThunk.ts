@@ -92,9 +92,9 @@ import { t } from 'i18next'
 import { throttle } from 'lodash'
 import { LRUCache } from 'lru-cache'
 
+import { withClosureTopics } from '../closureOwnership'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
-import { withClosureTopics } from '../closureOwnership'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
 import { replaceSegmentsForTopic } from '../topicSegment'
@@ -2468,18 +2468,18 @@ export const setupChannelStream = (
     topicId,
     barrier: channelBarrier,
     executionState: channelExecutionState,
-      throttledBlockUpdate: (
-        id: string,
-        blockUpdate: any,
-        _attemptId?: string,
-        barrier?: WriteBarrier,
-        shouldMirror?: () => boolean
-      ) =>
-        throttledBlockUpdate(id, blockUpdate, {
-          barrier: barrier ?? channelBarrier,
-          shouldMirrorToRedux: shouldMirror ?? channelIsLoaded,
-          topicId
-        }),
+    throttledBlockUpdate: (
+      id: string,
+      blockUpdate: any,
+      _attemptId?: string,
+      barrier?: WriteBarrier,
+      shouldMirror?: () => boolean
+    ) =>
+      throttledBlockUpdate(id, blockUpdate, {
+        barrier: barrier ?? channelBarrier,
+        shouldMirrorToRedux: shouldMirror ?? channelIsLoaded,
+        topicId
+      }),
     flushThrottledBlockUpdate,
     cancelThrottledBlockUpdate
   })
