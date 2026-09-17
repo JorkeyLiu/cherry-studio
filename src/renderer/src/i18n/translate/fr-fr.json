@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "Supprimer les clés en double",
       "remove_invalid_keys": "Supprimer les clés invalides",
+      "require_api_key": {
+        "label": "[to be translated]:Require API key",
+        "tip": "[to be translated]:Turn off for local servers that accept requests without a key. Applies to any connection type."
+      },
       "search": "Rechercher une plateforme de modèles...",
       "search_placeholder": "Rechercher un ID ou un nom de modèle",
       "title": "Services de modèles",

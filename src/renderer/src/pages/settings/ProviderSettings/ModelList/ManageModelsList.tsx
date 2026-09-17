@@ -2,11 +2,8 @@ import ExpandableText from '@renderer/components/ExpandableText'
 import ModelIdWithTags from '@renderer/components/ModelIdWithTags'
 import CustomTag from '@renderer/components/Tags/CustomTag'
 import { DynamicVirtualList } from '@renderer/components/VirtualList'
-import { getModelLogoById } from '@renderer/config/models'
 import FileItem from '@renderer/pages/files/FileItem'
-import NewApiBatchAddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/NewApiBatchAddModelPopup'
 import type { Model, Provider } from '@renderer/types'
-import { isNewApiProvider } from '@renderer/utils/provider'
 import { Button, Flex, Tooltip } from 'antd'
 import { Avatar } from 'antd'
 import { ChevronRight, Minus, Plus } from 'lucide-react'
@@ -14,7 +11,7 @@ import React, { memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import { isModelInProvider, isValidNewApiModel } from './utils'
+import { isModelInProvider } from './utils'
 
 // 列表项类型定义
 interface GroupRowData {
@@ -96,22 +93,8 @@ const ManageModelsList: React.FC<ManageModelsListProps> = ({
           // 移除整组
           models.filter((model) => isModelInProvider(provider, model.id)).forEach(onRemoveModel)
         } else {
-          // 添加整组
-          const wouldAddModels = models.filter((model) => !isModelInProvider(provider, model.id))
-
-          if (isNewApiProvider(provider)) {
-            if (wouldAddModels.every(isValidNewApiModel)) {
-              wouldAddModels.forEach(onAddModel)
-            } else {
-              void NewApiBatchAddModelPopup.show({
-                title: t('settings.models.add.batch_add_models'),
-                batchModels: wouldAddModels,
-                provider
-              })
-            }
-          } else {
-            wouldAddModels.forEach(onAddModel)
-          }
+          // 添加整组：通用流程，适用于所有已批准协议
+          models.filter((model) => !isModelInProvider(provider, model.id)).forEach(onAddModel)
         }
       }
 
@@ -210,7 +193,9 @@ const ModelListItem: React.FC<ModelListItemProps> = memo(
             boxShadow: 'none'
           }}
           fileInfo={{
-            icon: <Avatar src={getModelLogoById(model.id)}>{model?.name?.[0]?.toUpperCase()}</Avatar>,
+            // Generic model avatar: deterministic initial, no curated model
+            // icon catalog.
+            icon: <Avatar>{model?.name?.[0]?.toUpperCase()}</Avatar>,
             name: <ModelIdWithTags model={model} showIdentifier={showIdentifier} />,
             extra: model.description && <ExpandableText text={model.description} />,
             ext: '.model',

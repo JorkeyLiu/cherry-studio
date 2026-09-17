@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "Удалить дубликаты ключей",
       "remove_invalid_keys": "Удалить недействительные ключи",
+      "require_api_key": {
+        "label": "[to be translated]:Require API key",
+        "tip": "[to be translated]:Turn off for local servers that accept requests without a key. Applies to any connection type."
+      },
       "search": "Поиск поставщиков...",
       "search_placeholder": "Поиск по ID или имени модели",
       "title": "Провайдеры моделей",

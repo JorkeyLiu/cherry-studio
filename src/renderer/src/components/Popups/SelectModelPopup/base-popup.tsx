@@ -2,7 +2,6 @@ import { PushpinOutlined } from '@ant-design/icons'
 import ModelTagsWithLabel from '@renderer/components/ModelTagsWithLabel'
 import { TopView } from '@renderer/components/TopView'
 import { DynamicVirtualList, type DynamicVirtualListRef } from '@renderer/components/VirtualList'
-import { getModelLogo } from '@renderer/config/models'
 import { usePinnedModels } from '@renderer/hooks/usePinnedModels'
 import { getModelUniqId } from '@renderer/services/ModelService'
 import { getProviderById } from '@renderer/services/ProviderService'
@@ -152,9 +151,8 @@ const SelectModelPopupView: React.FC<Props> = ({
           </TagsContainer>
         ),
         icon: (
-          <Avatar src={getModelLogo(model)} size={24}>
-            {first(model.name) || 'M'}
-          </Avatar>
+          // Generic model avatar, no curated model icon catalog.
+          <Avatar size={24}>{first(model.name) || 'M'}</Avatar>
         ),
         model,
         isPinned,

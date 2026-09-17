@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "移除重复密钥",
       "remove_invalid_keys": "删除无效密钥",
+      "require_api_key": {
+        "label": "需要 API 密钥",
+        "tip": "对于无需密钥即可请求的本地服务可将其关闭。适用于任何连接类型。"
+      },
       "search": "搜索模型平台...",
       "search_placeholder": "搜索模型 ID 或名称",
       "title": "模型服务",

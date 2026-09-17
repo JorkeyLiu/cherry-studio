@@ -11,7 +11,6 @@ import { useAllProviders, useProviders } from '@renderer/hooks/useProvider'
 import { useTimer } from '@renderer/hooks/useTimer'
 import ImageStorage from '@renderer/services/ImageStorage'
 import type { Provider, ProviderType } from '@renderer/types'
-import { isSystemProvider } from '@renderer/types'
 import { getFancyProviderName, matchKeywordsInModel, matchKeywordsInProvider, uuid } from '@renderer/utils'
 import { isAnthropicSupportedProvider } from '@renderer/utils/provider'
 import type { MenuProps } from 'antd'
@@ -279,21 +278,16 @@ const ProviderList: FC<ProviderListProps> = () => {
       }
     }
 
+    // Custom-connection product: every provider is an ordinary connection.
+    // All entries are editable/deletable regardless of any legacy `isSystem`
+    // flag left by pre-221 persisted state.
     const menus = [editMenu, noteMenu, deleteMenu]
 
     if (providers.filter((p) => p.id === provider.id).length > 1) {
       return menus
     }
 
-    if (isSystemProvider(provider)) {
-      return [noteMenu]
-    } else if (provider.isSystem) {
-      // 这里是处理数据中存在新版本删掉的系统提供商的情况
-      // 未来期望能重构一下，不要依赖isSystem字段
-      return [noteMenu, deleteMenu]
-    } else {
-      return menus
-    }
+    return menus
   }
 
   const filteredProviders = providers.filter((provider) => {

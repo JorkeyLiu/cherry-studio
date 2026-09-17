@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "移除重複金鑰",
       "remove_invalid_keys": "刪除無效金鑰",
+      "require_api_key": {
+        "label": "[to be translated]:Require API key",
+        "tip": "[to be translated]:Turn off for local servers that accept requests without a key. Applies to any connection type."
+      },
       "search": "搜尋模型平臺...",
       "search_placeholder": "搜尋模型 ID 或名稱",
       "title": "模型提供者",

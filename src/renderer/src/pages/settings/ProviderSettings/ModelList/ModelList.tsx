@@ -2,18 +2,14 @@ import CollapsibleSearchBar from '@renderer/components/CollapsibleSearchBar'
 import { LoadingIcon, StreamlineGoodHealthAndWellBeing } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
 import CustomTag from '@renderer/components/Tags/CustomTag'
-import { PROVIDER_URLS } from '@renderer/config/providers'
 import { useProvider } from '@renderer/hooks/useProvider'
-import { getProviderLabel } from '@renderer/i18n/label'
-import { SettingHelpLink, SettingHelpText, SettingHelpTextRow, SettingSubtitle } from '@renderer/pages/settings'
+import { SettingSubtitle } from '@renderer/pages/settings'
 import EditModelPopup from '@renderer/pages/settings/ProviderSettings/EditModelPopup/EditModelPopup'
 import AddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/AddModelPopup'
 import ManageModelsPopup from '@renderer/pages/settings/ProviderSettings/ModelList/ManageModelsPopup'
-import NewApiAddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/NewApiAddModelPopup'
 import type { Model } from '@renderer/types'
 import { filterModelsByKeywords } from '@renderer/utils'
 import { getDuplicateModelNames } from '@renderer/utils/model'
-import { isNewApiProvider } from '@renderer/utils/provider'
 import { Button, Flex, Space, Spin, Tooltip } from 'antd'
 import { groupBy, isEmpty, sortBy, toPairs } from 'lodash'
 import { Plus, RefreshCw } from 'lucide-react'
@@ -51,10 +47,6 @@ const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
 
   // 稳定的编辑模型回调，避免内联函数导致子组件 memo 失效
   const handleEditModel = useCallback((model: Model) => EditModelPopup.show({ provider, model }), [provider])
-
-  const providerConfig = PROVIDER_URLS[provider.id]
-  const docsWebsite = providerConfig?.websites?.docs
-  const modelsWebsite = providerConfig?.websites?.models
 
   const [searchText, _setSearchText] = useState('')
   const [displayedModelGroups, setDisplayedModelGroups] = useState<ModelGroups | null>(() => {
@@ -97,11 +89,9 @@ const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
   }, [provider.id])
 
   const onAddModel = useCallback(() => {
-    if (isNewApiProvider(provider)) {
-      void NewApiAddModelPopup.show({ title: t('settings.models.add.add_model'), provider })
-    } else {
-      void AddModelPopup.show({ title: t('settings.models.add.add_model'), provider })
-    }
+    // Generic model add flow for all approved protocols. Unknown/manual
+    // models remain editable/requestable via the same popup.
+    void AddModelPopup.show({ title: t('settings.models.add.add_model'), provider })
   }, [provider, t])
 
   const isLoading = useMemo(() => displayedModelGroups === null, [displayedModelGroups])
@@ -173,26 +163,7 @@ const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
         )}
       </Spin>
       <Flex justify="space-between" align="center">
-        {docsWebsite || modelsWebsite ? (
-          <SettingHelpTextRow>
-            <SettingHelpText>{t('settings.provider.docs_check')} </SettingHelpText>
-            {docsWebsite && (
-              <SettingHelpLink target="_blank" href={docsWebsite}>
-                {getProviderLabel(provider.id) + ' '}
-                {t('common.docs')}
-              </SettingHelpLink>
-            )}
-            {docsWebsite && modelsWebsite && <SettingHelpText>{t('common.and')}</SettingHelpText>}
-            {modelsWebsite && (
-              <SettingHelpLink target="_blank" href={modelsWebsite}>
-                {t('common.models')}
-              </SettingHelpLink>
-            )}
-            <SettingHelpText>{t('settings.provider.docs_more_details')}</SettingHelpText>
-          </SettingHelpTextRow>
-        ) : (
-          <div style={{ height: 5 }} />
-        )}
+        <div style={{ height: 5 }} />
       </Flex>
     </>
   )

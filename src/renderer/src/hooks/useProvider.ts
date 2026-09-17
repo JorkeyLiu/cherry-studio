@@ -12,9 +12,7 @@ import {
   updateProviders
 } from '@renderer/store/llm'
 import type { Assistant, Model, Provider } from '@renderer/types'
-import { isSystemProvider } from '@renderer/types'
 import { withoutTrailingSlash } from '@renderer/utils/api'
-import { isNewApiProvider } from '@renderer/utils/provider'
 import { useCallback, useMemo } from 'react'
 
 import { useDefaultModel } from './useAssistant'
@@ -36,14 +34,6 @@ const selectEnabledProviders = createSelector(selectProviders, (providers) =>
   providers.map(normalizeProvider).filter((p) => p.enabled)
 )
 
-const selectSystemProviders = createSelector(selectProviders, (providers) =>
-  providers.filter((p) => isSystemProvider(p)).map(normalizeProvider)
-)
-
-const selectUserProviders = createSelector(selectProviders, (providers) =>
-  providers.filter((p) => !isSystemProvider(p)).map(normalizeProvider)
-)
-
 const selectAllProviders = createSelector(selectProviders, (providers) => providers.map(normalizeProvider))
 
 export function useProviders() {
@@ -57,14 +47,6 @@ export function useProviders() {
     updateProvider: (updates: Partial<Provider> & { id: string }) => dispatch(updateProvider(updates)),
     updateProviders: (providers: Provider[]) => dispatch(updateProviders(providers))
   }
-}
-
-export function useSystemProviders() {
-  return useAppSelector(selectSystemProviders)
-}
-
-export function useUserProviders() {
-  return useAppSelector(selectUserProviders)
 }
 
 export function useAllProviders() {
@@ -83,21 +65,14 @@ export function useProvider(id: string) {
 
   const handleAddModel = useCallback(
     (model: Model) => {
-      let processedModel = { ...model, supported_text_delta: !isNotSupportTextDeltaModel(model) }
-
-      if (isNewApiProvider(provider)) {
-        const endpointTypes = model.supported_endpoint_types
-        if (endpointTypes && endpointTypes.length > 0) {
-          processedModel = {
-            ...processedModel,
-            endpoint_type: endpointTypes.includes('image-generation') ? 'image-generation' : endpointTypes[0]
-          }
-        }
-      }
+      // Generic model add path for all approved protocols: unknown/manual
+      // model ids remain editable/requestable; only text-delta support is
+      // derived. No brand/retired-type endpoint_type handling here.
+      const processedModel = { ...model, supported_text_delta: !isNotSupportTextDeltaModel(model) }
 
       dispatch(addModel({ providerId: id, model: processedModel }))
     },
-    [dispatch, id, provider]
+    [dispatch, id]
   )
 
   return {

@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "Αφαίρεση Επαναλαμβανόμενων Κλειδιών",
       "remove_invalid_keys": "Διαγραφή Ακυρωμένων Κλειδιών",
+      "require_api_key": {
+        "label": "[to be translated]:Require API key",
+        "tip": "[to be translated]:Turn off for local servers that accept requests without a key. Applies to any connection type."
+      },
       "search": "Αναζήτηση πλατφόρμας μονάδων...",
       "search_placeholder": "Αναζήτηση ID ή ονόματος μονάδας",
       "title": "Υπηρεσία μονάδων",

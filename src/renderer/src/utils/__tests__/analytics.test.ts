@@ -8,30 +8,23 @@ vi.mock('@renderer/services/ProviderService', () => ({
   getProviderById: vi.fn()
 }))
 
-vi.mock('@renderer/types', async (importOriginal) => {
-  const actual = await importOriginal()
-  return {
-    ...(actual as object),
-    isSystemProvider: vi.fn()
-  }
-})
-
 import { getProviderById } from '@renderer/services/ProviderService'
-import { isSystemProvider } from '@renderer/types'
 
 describe('trackTokenUsage', () => {
   const mockTrackTokenUsage = vi.fn()
   const mockGetProviderById = vi.mocked(getProviderById)
-  const mockIsSystemProvider = vi.mocked(isSystemProvider)
 
   beforeEach(() => {
     vi.clearAllMocks()
     vi.stubGlobal('window', {
       api: { analytics: { trackTokenUsage: mockTrackTokenUsage } }
     })
-    // Default: system provider, data collection enabled
-    mockGetProviderById.mockReturnValue({ id: 'openai', isSystem: true } as Provider)
-    mockIsSystemProvider.mockReturnValue(true)
+    // Default: ordinary connection with a configured host.
+    mockGetProviderById.mockReturnValue({
+      id: 'openai',
+      name: 'OpenAI',
+      apiHost: 'https://api.openai.com'
+    } as Provider)
   })
 
   const createModel = (provider: string, id: string): Model => ({ provider, id }) as Model
@@ -46,7 +39,7 @@ describe('trackTokenUsage', () => {
     trackTokenUsage({ usage: createUsage(100, 50), model: createModel('openai', 'gpt-4') })
 
     expect(mockTrackTokenUsage).toHaveBeenCalledWith({
-      provider: 'openai',
+      provider: 'api.openai.com',
       model: 'gpt-4',
       input_tokens: 100,
       output_tokens: 50,
@@ -55,7 +48,11 @@ describe('trackTokenUsage', () => {
   })
 
   it('should track AI SDK format usage', () => {
-    mockGetProviderById.mockReturnValue({ id: 'anthropic', isSystem: true } as Provider)
+    mockGetProviderById.mockReturnValue({
+      id: 'anthropic',
+      name: 'Anthropic',
+      apiHost: 'https://api.anthropic.com'
+    } as Provider)
     const usage: LanguageModelUsage = {
       inputTokens: 200,
       outputTokens: 100,
@@ -67,7 +64,7 @@ describe('trackTokenUsage', () => {
     trackTokenUsage({ usage, model: createModel('anthropic', 'claude-3') })
 
     expect(mockTrackTokenUsage).toHaveBeenCalledWith({
-      provider: 'anthropic',
+      provider: 'api.anthropic.com',
       model: 'claude-3',
       input_tokens: 200,
       output_tokens: 100,
@@ -92,13 +89,16 @@ describe('trackTokenUsage', () => {
       expect(mockTrackTokenUsage).toHaveBeenCalledWith(expect.objectContaining({ provider: 'unknown' }))
     })
 
-    it('should return provider.id for system providers', () => {
-      mockGetProviderById.mockReturnValue({ id: 'anthropic', isSystem: true } as Provider)
-      mockIsSystemProvider.mockReturnValue(true)
+    it('should prefer apiHost hostname for every connection (no brand distinction)', () => {
+      mockGetProviderById.mockReturnValue({
+        id: 'anthropic',
+        name: 'Anthropic',
+        apiHost: 'https://api.anthropic.com'
+      } as Provider)
 
       trackTokenUsage({ usage: createUsage(100, 50), model: createModel('anthropic', 'claude') })
 
-      expect(mockTrackTokenUsage).toHaveBeenCalledWith(expect.objectContaining({ provider: 'anthropic' }))
+      expect(mockTrackTokenUsage).toHaveBeenCalledWith(expect.objectContaining({ provider: 'api.anthropic.com' }))
     })
 
     it('should extract hostname from apiHost for custom providers', () => {
@@ -106,7 +106,6 @@ describe('trackTokenUsage', () => {
         id: 'custom',
         apiHost: 'https://api.example.com/v1/chat'
       } as Provider)
-      mockIsSystemProvider.mockReturnValue(false)
 
       trackTokenUsage({ usage: createUsage(100, 50), model: createModel('custom', 'model') })
 
@@ -119,7 +118,6 @@ describe('trackTokenUsage', () => {
         name: 'My Provider',
         apiHost: 'invalid-url'
       } as Provider)
-      mockIsSystemProvider.mockReturnValue(false)
 
       trackTokenUsage({ usage: createUsage(100, 50), model: createModel('custom', 'model') })
 
@@ -131,7 +129,6 @@ describe('trackTokenUsage', () => {
         id: 'custom',
         name: 'Local Provider'
       } as Provider)
-      mockIsSystemProvider.mockReturnValue(false)
 
       trackTokenUsage({ usage: createUsage(100, 50), model: createModel('custom', 'model') })
 
@@ -140,7 +137,6 @@ describe('trackTokenUsage', () => {
 
     it('should fallback to id when no apiHost and no name', () => {
       mockGetProviderById.mockReturnValue({ id: 'custom-id' } as Provider)
-      mockIsSystemProvider.mockReturnValue(false)
 
       trackTokenUsage({ usage: createUsage(100, 50), model: createModel('custom-id', 'model') })
 

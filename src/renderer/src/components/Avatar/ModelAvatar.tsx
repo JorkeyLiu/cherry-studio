@@ -1,4 +1,3 @@
-import { getModelLogo } from '@renderer/config/models'
 import type { Model } from '@renderer/types'
 import type { AvatarProps } from 'antd'
 import { Avatar } from 'antd'
@@ -13,9 +12,10 @@ interface Props {
 }
 
 const ModelAvatar: FC<Props> = ({ model, size, props, className }) => {
+  // Custom-connection product: generic model avatar, no curated model icon
+  // catalog.
   return (
     <Avatar
-      src={getModelLogo(model)}
       style={{
         width: size,
         height: size,

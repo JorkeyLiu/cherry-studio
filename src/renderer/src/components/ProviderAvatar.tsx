@@ -1,5 +1,3 @@
-import { PoeLogo } from '@renderer/components/Icons'
-import { getProviderLogo } from '@renderer/config/providers'
 import type { Provider } from '@renderer/types'
 import { generateColorFromChar, getFirstCharacter, getForegroundColor } from '@renderer/utils'
 import { Avatar } from 'antd'
@@ -23,22 +21,6 @@ interface ProviderAvatarProps {
   style?: React.CSSProperties
 }
 
-const ProviderSvgLogo = styled.div`
-  width: 100%;
-  height: 100%;
-
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 0.5px solid var(--color-border);
-  border-radius: 100%;
-
-  & > svg {
-    width: 80%;
-    height: 80%;
-  }
-`
-
 const ProviderLogo = styled(Avatar)`
   width: 100%;
   height: 100%;
@@ -46,29 +28,21 @@ const ProviderLogo = styled(Avatar)`
 `
 
 export const ProviderAvatarPrimitive: React.FC<ProviderAvatarPrimitiveProps> = ({
-  providerId,
   providerName,
   logoSrc,
   size,
   className,
   style
 }) => {
-  if (providerId === 'poe') {
-    return (
-      <ProviderSvgLogo className={className} style={style}>
-        <PoeLogo fontSize={size} />
-      </ProviderSvgLogo>
-    )
-  }
-
   if (logoSrc) {
     return (
       <ProviderLogo draggable="false" shape="circle" src={logoSrc} className={className} style={style} size={size} />
     )
   }
 
-  const backgroundColor = generateColorFromChar(providerName)
-  const color = providerName ? getForegroundColor(backgroundColor) : 'white'
+  const displayName = providerName?.trim() ? providerName : ''
+  const backgroundColor = generateColorFromChar(displayName || 'P')
+  const color = displayName ? getForegroundColor(backgroundColor) : 'white'
 
   return (
     <ProviderLogo
@@ -80,7 +54,7 @@ export const ProviderAvatarPrimitive: React.FC<ProviderAvatarPrimitiveProps> = (
         color,
         ...style
       }}>
-      {getFirstCharacter(providerName)}
+      {getFirstCharacter(displayName) || 'P'}
     </ProviderLogo>
   )
 }
@@ -92,34 +66,12 @@ export const ProviderAvatar: React.FC<ProviderAvatarProps> = ({
   style,
   size
 }) => {
-  const systemLogoSrc = getProviderLogo(provider.id)
-  if (systemLogoSrc) {
-    return (
-      <ProviderAvatarPrimitive
-        size={size}
-        providerId={provider.id}
-        providerName={provider.name}
-        logoSrc={systemLogoSrc}
-        className={className}
-        style={style}
-      />
-    )
-  }
-
+  // Custom-connection avatar priority: user-uploaded custom image
+  // (`provider-${id}` key) -> deterministic generic avatar. No built-in
+  // brand logo catalog is consulted here.
   const customLogo = customLogos[provider.id]
-  if (customLogo) {
-    if (customLogo === 'poe') {
-      return (
-        <ProviderAvatarPrimitive
-          size={size}
-          providerId="poe"
-          providerName={provider.name}
-          className={className}
-          style={style}
-        />
-      )
-    }
 
+  if (customLogo) {
     return (
       <ProviderAvatarPrimitive
         providerId={provider.id}

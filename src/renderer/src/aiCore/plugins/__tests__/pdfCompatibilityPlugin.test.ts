@@ -95,18 +95,25 @@ describe('pdfCompatibilityPlugin', () => {
     vi.mocked(isGeminiModel).mockReturnValue(false)
   })
 
-  it('should pass through for OpenAI model routed via openai-response endpoint', async () => {
+  it('ignores model.endpoint_type=openai-response on a generic openai provider (legacy field only)', async () => {
     vi.mocked(isOpenAILLMModel).mockReturnValue(true)
     const provider = makeProvider('moonshot', 'openai')
     const model = makeModel({ endpoint_type: 'openai-response' as const })
+    mockExtractPdfText.mockResolvedValue('Extracted PDF content')
 
     const params = {
       prompt: [{ role: 'user' as const, content: [makeTextPart('Hello'), makePdfFilePart()] }]
     } as unknown as LanguageModelV3CallOptions
 
     const result = await runMiddleware(provider, params, model)
-    expect(result).toEqual(params)
-    expect(mockExtractPdfText).not.toHaveBeenCalled()
+    expect(mockExtractPdfText).toHaveBeenCalledWith('base64pdfdata')
+    expect(result.prompt[0]).toMatchObject({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Hello' },
+        { type: 'text', text: 'test.pdf\nExtracted PDF content' }
+      ]
+    })
   })
 
   it('should convert PDF for OpenAI model on generic openai provider without endpoint_type', async () => {
@@ -129,26 +136,35 @@ describe('pdfCompatibilityPlugin', () => {
     })
   })
 
-  it('should pass through for Claude model routed via Anthropic endpoint (endpoint_type=anthropic)', async () => {
+  it('ignores model.endpoint_type=anthropic on a generic openai provider (legacy field only)', async () => {
+    // endpoint_type is preserved data only and never routes PDF behavior:
+    // a Claude-named model on an OpenAI-compatible provider still converts.
     vi.mocked(isAnthropicModel).mockReturnValue(true)
-    const provider = makeProvider('my-aggregator', 'new-api')
+    const provider = makeProvider('my-aggregator', 'openai')
     const claudeModel = { ...makeModel(), id: 'claude-opus-4-7', endpoint_type: 'anthropic' as const }
+    mockExtractPdfText.mockResolvedValue('Extracted PDF content')
 
     const params = {
-      prompt: [{ role: 'user' as const, content: [makeTextPart('Hello'), makePdfFilePart()] }]
+      prompt: [{ role: 'user' as const, content: [makeTextPart('Hello'), makePdfFilePart('report.pdf')] }]
     } as unknown as LanguageModelV3CallOptions
 
     const result = await runMiddleware(provider, params, claudeModel)
-    expect(result).toEqual(params)
-    expect(mockExtractPdfText).not.toHaveBeenCalled()
+    expect(mockExtractPdfText).toHaveBeenCalledWith('base64pdfdata')
+    expect(result.prompt[0]).toMatchObject({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Hello' },
+        { type: 'text', text: 'report.pdf\nExtracted PDF content' }
+      ]
+    })
   })
 
   it('should convert PDF for Claude model routed via chat-completions endpoint (no endpoint_type)', async () => {
-    // An Anthropic-named model wired through an OpenAI-compatible aggregator (e.g. NewAPI
-    // without endpoint_type='anthropic') uses chat-completions, which does NOT accept the
+    // An Anthropic-named model wired through an OpenAI-compatible aggregator
+    // uses chat-completions, which does NOT accept the
     // 'file' part type. Native PDF must be downgraded to text in this case.
     vi.mocked(isAnthropicModel).mockReturnValue(true)
-    const provider = makeProvider('my-aggregator', 'new-api')
+    const provider = makeProvider('my-aggregator', 'openai')
     const claudeModel = { ...makeModel(), id: 'claude-opus-4-7' }
     mockExtractPdfText.mockResolvedValue('Extracted PDF content')
 
@@ -193,18 +209,25 @@ describe('pdfCompatibilityPlugin', () => {
     })
   })
 
-  it('should pass through for Gemini model routed via Gemini endpoint (endpoint_type=gemini)', async () => {
+  it('ignores model.endpoint_type=gemini on a generic openai provider (legacy field only)', async () => {
     vi.mocked(isGeminiModel).mockReturnValue(true)
-    const provider = makeProvider('my-aggregator', 'new-api')
+    const provider = makeProvider('my-aggregator', 'openai')
     const geminiModel = { ...makeModel(), id: 'gemini-3.1-pro-preview', endpoint_type: 'gemini' as const }
+    mockExtractPdfText.mockResolvedValue('Extracted PDF content')
 
     const params = {
-      prompt: [{ role: 'user' as const, content: [makeTextPart('Hello'), makePdfFilePart()] }]
+      prompt: [{ role: 'user' as const, content: [makeTextPart('Hello'), makePdfFilePart('report.pdf')] }]
     } as unknown as LanguageModelV3CallOptions
 
     const result = await runMiddleware(provider, params, geminiModel)
-    expect(result).toEqual(params)
-    expect(mockExtractPdfText).not.toHaveBeenCalled()
+    expect(mockExtractPdfText).toHaveBeenCalledWith('base64pdfdata')
+    expect(result.prompt[0]).toMatchObject({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Hello' },
+        { type: 'text', text: 'report.pdf\nExtracted PDF content' }
+      ]
+    })
   })
 
   it('should pass through for Gemini model on native Gemini provider', async () => {
@@ -271,7 +294,7 @@ describe('pdfCompatibilityPlugin', () => {
   })
 
   it('should convert PDF FilePart to TextPart for ollama provider', async () => {
-    const provider = makeProvider('ollama', 'ollama')
+    const provider = makeProvider('ollama', 'openai')
     mockExtractPdfText.mockResolvedValue('Extracted PDF content')
 
     const params = {
@@ -290,7 +313,7 @@ describe('pdfCompatibilityPlugin', () => {
   })
 
   it('should drop PDF part and warn when text extraction fails', async () => {
-    const provider = makeProvider('ollama', 'ollama')
+    const provider = makeProvider('ollama', 'openai')
     mockExtractPdfText.mockRejectedValue(new Error('parse failed'))
 
     const params = {
@@ -306,7 +329,7 @@ describe('pdfCompatibilityPlugin', () => {
   })
 
   it('should not convert non-PDF FileParts', async () => {
-    const provider = makeProvider('ollama', 'ollama')
+    const provider = makeProvider('ollama', 'openai')
 
     const imagePart = makeImageFilePart()
     const params = {
@@ -322,7 +345,7 @@ describe('pdfCompatibilityPlugin', () => {
   })
 
   it('should handle mixed content: text + PDF + image — only PDF converted', async () => {
-    const provider = makeProvider('ollama', 'ollama')
+    const provider = makeProvider('ollama', 'openai')
     mockExtractPdfText.mockResolvedValue('PDF text content')
 
     const imagePart = makeImageFilePart()
@@ -338,14 +361,14 @@ describe('pdfCompatibilityPlugin', () => {
   })
 
   it('should pass through when prompt is empty', async () => {
-    const provider = makeProvider('ollama', 'ollama')
+    const provider = makeProvider('ollama', 'openai')
     const params = { prompt: [] } as unknown as LanguageModelV3CallOptions
     const result = await runMiddleware(provider, params)
     expect(result).toEqual(params)
   })
 
   it('should pass through messages with string content (system messages)', async () => {
-    const provider = makeProvider('ollama', 'ollama')
+    const provider = makeProvider('ollama', 'openai')
     const params = {
       prompt: [{ role: 'system' as const, content: 'You are a helpful assistant' }]
     } as unknown as LanguageModelV3CallOptions

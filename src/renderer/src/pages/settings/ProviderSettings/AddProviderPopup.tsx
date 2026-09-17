@@ -1,9 +1,7 @@
 import { loggerService } from '@logger'
 import { Center, VStack } from '@renderer/components/Layout'
 import { ProviderAvatarPrimitive } from '@renderer/components/ProviderAvatar'
-import ProviderLogoPicker from '@renderer/components/ProviderLogoPicker'
 import { TopView } from '@renderer/components/TopView'
-import { PROVIDER_LOGO_MAP } from '@renderer/config/providers'
 import {
   CUSTOM_CREATABLE_PROTOCOLS,
   isCustomCreatableProtocol,
@@ -11,8 +9,8 @@ import {
 } from '@renderer/services/customProviderRegistry'
 import ImageStorage from '@renderer/services/ImageStorage'
 import type { Provider, ProviderType } from '@renderer/types'
-import { compressImage, generateColorFromChar, getForegroundColor } from '@renderer/utils'
-import { Divider, Dropdown, Form, Input, Modal, Popover, Select, Upload } from 'antd'
+import { compressImage, generateColorFromChar, getFirstCharacter, getForegroundColor } from '@renderer/utils'
+import { Divider, Dropdown, Form, Input, Modal, Select, Upload } from 'antd'
 import type { ItemType } from 'antd/es/menu/interface'
 import React, { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -30,7 +28,6 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   const [name, setName] = useState(provider?.name || '')
   const [type, setType] = useState<ProviderType>(provider?.type || 'openai')
   const [logo, setLogo] = useState<string | null>(null)
-  const [logoPickerOpen, setLogoPickerOpen] = useState(false)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const { t } = useTranslation()
   const uploadRef = useRef<HTMLDivElement>(null)
@@ -80,25 +77,6 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
 
   const buttonDisabled = name.trim().length === 0
 
-  // 处理内置头像的点击事件
-  const handleProviderLogoClick = async (providerId: string) => {
-    try {
-      const logoUrl = PROVIDER_LOGO_MAP[providerId]
-
-      if (provider?.id) {
-        await ImageStorage.set(`provider-${provider.id}`, logoUrl)
-        const savedLogo = await ImageStorage.get(`provider-${provider.id}`)
-        setLogo(savedLogo)
-      } else {
-        setLogo(logoUrl)
-      }
-
-      setLogoPickerOpen(false)
-    } catch (error: any) {
-      window.toast.error(error.message)
-    }
-  }
-
   const handleReset = async () => {
     try {
       setLogo(null)
@@ -113,8 +91,16 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
     }
   }
 
+  // Custom-connection avatar: user-uploaded image or generic initial.
+  // No curated brand-logo picker is offered here.
+  // Same safe color/initial semantics as ProviderAvatar: blank names fall
+  // back to 'P', and the first character is code-point safe (non-BMP/emoji).
+  const displayName = name?.trim() ? name : ''
+
   const getInitials = () => {
-    return name.charAt(0) || 'P'
+    // Same safe initial semantics as ProviderAvatar: code-point safe first
+    // character with 'P' fallback for empty/non-BMP names.
+    return getFirstCharacter(displayName) || 'P'
   }
 
   const items = [
@@ -169,14 +155,6 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
       }
     },
     {
-      key: 'builtin',
-      label: <MenuItem>{t('settings.general.avatar.builtin')}</MenuItem>,
-      onClick: () => {
-        setDropdownOpen(false)
-        setLogoPickerOpen(true)
-      }
-    },
-    {
       key: 'reset',
       label: <MenuItem>{t('settings.general.avatar.reset')}</MenuItem>,
       onClick: handleReset
@@ -184,8 +162,8 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   ] satisfies ItemType[]
 
   // for logo
-  const backgroundColor = generateColorFromChar(name)
-  const color = name ? getForegroundColor(backgroundColor) : 'white'
+  const backgroundColor = generateColorFromChar(displayName || 'P')
+  const color = displayName ? getForegroundColor(backgroundColor) : 'white'
 
   // Custom-connection product path: only the three approved protocols may be
   // created. Protocol labels come from i18n — no hardcoded user-visible text.
@@ -231,31 +209,16 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
             placement="bottom"
             onOpenChange={(visible) => {
               setDropdownOpen(visible)
-              if (visible) {
-                setLogoPickerOpen(false)
-              }
             }}>
-            <Popover
-              content={<ProviderLogoPicker onProviderClick={handleProviderLogoClick} />}
-              trigger="click"
-              open={logoPickerOpen}
-              onOpenChange={(visible) => {
-                setLogoPickerOpen(visible)
-                if (visible) {
-                  setDropdownOpen(false)
-                }
-              }}
-              placement="bottom">
-              {logo ? (
-                <ProviderLogo>
-                  <ProviderAvatarPrimitive providerId={logo} providerName={name} logoSrc={logo} size={60} />
-                </ProviderLogo>
-              ) : (
-                <ProviderInitialsLogo style={name ? { backgroundColor, color } : undefined}>
-                  {getInitials()}
-                </ProviderInitialsLogo>
-              )}
-            </Popover>
+            {logo ? (
+              <ProviderLogo>
+                <ProviderAvatarPrimitive providerId={logo} providerName={name} logoSrc={logo} size={60} />
+              </ProviderLogo>
+            ) : (
+              <ProviderInitialsLogo style={displayName ? { backgroundColor, color } : undefined}>
+                {getInitials()}
+              </ProviderInitialsLogo>
+            )}
           </Dropdown>
         </VStack>
       </Center>

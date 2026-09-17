@@ -8,7 +8,6 @@ import {
   WebSearchTag
 } from '@renderer/components/Tags/Model'
 import { WarnTooltip } from '@renderer/components/TooltipIcons'
-import { endpointTypeOptions } from '@renderer/config/endpointTypes'
 import {
   isEmbeddingModel,
   isFunctionCallingModel,
@@ -17,10 +16,8 @@ import {
   isVisionModel,
   isWebSearchModel
 } from '@renderer/config/models'
-import { useDynamicLabelWidth } from '@renderer/hooks/useDynamicLabelWidth'
 import type { Model, ModelCapability, ModelType, Provider } from '@renderer/types'
 import { getDefaultGroupName, getDifference, getUnion, uniqueObjectArray } from '@renderer/utils'
-import { isNewApiProvider } from '@renderer/utils/provider'
 import type { ModalProps } from 'antd'
 import { Button, Divider, Flex, Form, Input, InputNumber, message, Modal, Select, Switch, Tooltip } from 'antd'
 import { cloneDeep } from 'lodash'
@@ -37,7 +34,13 @@ interface ModelEditContentProps {
 }
 
 const symbols = ['$', '¥', '€', '£']
-const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, model, onUpdateModel, ...props }) => {
+const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({
+  provider: _provider,
+  model,
+  onUpdateModel,
+  ...props
+}) => {
+  void _provider
   const [form] = Form.useForm()
   const { t } = useTranslation()
   const [showMoreSettings, setShowMoreSettings] = useState(false)
@@ -47,8 +50,6 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
   const originalModelCapabilities = cloneDeep(model.capabilities || [])
   const [supportedTextDelta, setSupportedTextDelta] = useState(model.supported_text_delta)
   const [hasUserModified, setHasUserModified] = useState(false)
-
-  const labelWidth = useDynamicLabelWidth([t('settings.models.add.endpoint_type.label')])
 
   // 自动保存函数
   const autoSave = (overrides?: {
@@ -68,7 +69,9 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
       id: formValues.id || model.id,
       name: formValues.name || model.name,
       group: formValues.group || model.group,
-      endpoint_type: isNewApiProvider(provider) ? formValues.endpointType : model.endpoint_type,
+      // Legacy endpoint_type (retired NewAPI control) is preserved as-is;
+      // the generic edit flow does not expose it.
+      endpoint_type: model.endpoint_type,
       capabilities: overrides?.capabilities ?? modelCapabilities,
       supported_text_delta: overrides?.supported_text_delta ?? supportedTextDelta,
       pricing: {
@@ -87,7 +90,7 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
       id: values.id || model.id,
       name: values.name || model.name,
       group: values.group || model.group,
-      endpoint_type: isNewApiProvider(provider) ? values.endpointType : model.endpoint_type,
+      endpoint_type: model.endpoint_type,
       capabilities: modelCapabilities,
       supported_text_delta: supportedTextDelta,
       pricing: {
@@ -237,7 +240,7 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
     <Modal title={t('models.edit')} footer={null} transitionName="animation-move-down" centered {...props}>
       <Form
         form={form}
-        labelCol={{ flex: isNewApiProvider(provider) ? labelWidth : '110px' }}
+        labelCol={{ flex: '110px' }}
         labelAlign="left"
         colon={false}
         style={{ marginTop: 15 }}
@@ -245,7 +248,6 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
           id: model.id,
           name: model.name,
           group: model.group,
-          endpointType: model.endpoint_type,
           input_per_million_tokens: model.pricing?.input_per_million_tokens ?? 0,
           output_per_million_tokens: model.pricing?.output_per_million_tokens ?? 0,
           currencySymbol: symbols.includes(model.pricing?.currencySymbol || '$')
@@ -299,21 +301,6 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
           tooltip={t('settings.models.add.group_name.tooltip')}>
           <Input placeholder={t('settings.models.add.group_name.placeholder')} spellCheck={false} />
         </Form.Item>
-        {isNewApiProvider(provider) && (
-          <Form.Item
-            name="endpointType"
-            label={t('settings.models.add.endpoint_type.label')}
-            tooltip={t('settings.models.add.endpoint_type.tooltip')}
-            rules={[{ required: true, message: t('settings.models.add.endpoint_type.required') }]}>
-            <Select placeholder={t('settings.models.add.endpoint_type.placeholder')}>
-              {endpointTypeOptions.map((opt) => (
-                <Select.Option key={opt.value} value={opt.value}>
-                  {t(opt.label)}
-                </Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
-        )}
         <Form.Item style={{ marginBottom: 8, textAlign: 'center' }}>
           <Flex justify="space-between" align="center" style={{ position: 'relative' }}>
             <Button

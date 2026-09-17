@@ -1,5 +1,4 @@
 import { adaptProvider } from '@renderer/aiCore/provider/providerConfig'
-import OpenAIAlert from '@renderer/components/Alert/OpenAIAlert'
 import { showErrorDetailPopup } from '@renderer/components/ErrorDetailModal'
 import { LoadingIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
@@ -7,7 +6,6 @@ import { ApiKeyListPopup } from '@renderer/components/Popups/ApiKeyListPopup'
 import Selector from '@renderer/components/Selector'
 import { HelpTooltip } from '@renderer/components/TooltipIcons'
 import { isRerankModel } from '@renderer/config/models'
-import { PROVIDER_URLS } from '@renderer/config/providers'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { useAllProviders, useProvider, useProviders } from '@renderer/hooks/useProvider'
 import { useTimer } from '@renderer/hooks/useTimer'
@@ -15,9 +13,6 @@ import AnthropicSettings from '@renderer/pages/settings/ProviderSettings/Anthrop
 import { ModelList } from '@renderer/pages/settings/ProviderSettings/ModelList'
 import { checkApi } from '@renderer/services/ApiService'
 import { isProviderSupportAuth } from '@renderer/services/ProviderService'
-import { useAppDispatch } from '@renderer/store'
-import { updateWebSearchProvider } from '@renderer/store/websearch'
-import { isSystemProvider, isSystemProviderId, SystemProviderIds } from '@renderer/types'
 import type { ApiKeyConnectivity } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { formatApiHost, formatApiKeys, getFancyProviderName, validateApiHost } from '@renderer/utils'
@@ -26,62 +21,23 @@ import {
   isAnthropicProvider,
   isGeminiProvider,
   isOpenAICompatibleProvider,
-  isOpenAIProvider,
-  isSupportAnthropicPromptCacheProvider
+  isOpenAIProvider
 } from '@renderer/utils/provider'
 import { Button, Divider, Flex, Input, Select, Space, Switch, Tooltip } from 'antd'
-import Link from 'antd/es/typography/Link'
 import { debounce, isEmpty } from 'lodash'
-import { Bolt, Check, Settings2, SquareArrowOutUpRight, TriangleAlert } from 'lucide-react'
+import { Bolt, Check, Settings2, TriangleAlert } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import {
-  SettingContainer,
-  SettingHelpLink,
-  SettingHelpText,
-  SettingHelpTextRow,
-  SettingSubtitle,
-  SettingTitle
-} from '..'
+import { SettingContainer, SettingHelpText, SettingHelpTextRow, SettingSubtitle, SettingTitle } from '..'
 import ApiOptionsSettingsPopup from './ApiOptionsSettings/ApiOptionsSettingsPopup'
 import CustomHeaderPopup from './CustomHeaderPopup'
-import DMXAPISettings from './DMXAPISettings'
-import GPUStackSettings from './GPUStackSettings'
-import LMStudioSettings from './LMStudioSettings'
-import ProviderOAuth from './ProviderOAuth'
 import SelectProviderModelPopup from './SelectProviderModelPopup'
 
 interface Props {
   providerId: string
-}
-
-const ANTHROPIC_COMPATIBLE_PROVIDER_IDS = [
-  SystemProviderIds.deepseek,
-  SystemProviderIds.moonshot,
-  SystemProviderIds.zhipu,
-  SystemProviderIds.dashscope,
-  SystemProviderIds.modelscope,
-  SystemProviderIds.aihubmix,
-  SystemProviderIds.grok,
-  SystemProviderIds.longcat,
-  SystemProviderIds.minimax,
-  SystemProviderIds.silicon,
-  SystemProviderIds.qiniu,
-  SystemProviderIds.dmxapi,
-  SystemProviderIds.mimo,
-  SystemProviderIds.stepfun,
-  SystemProviderIds.openrouter,
-  SystemProviderIds.tokenflux,
-  SystemProviderIds.ollama
-] as const
-type AnthropicCompatibleProviderId = (typeof ANTHROPIC_COMPATIBLE_PROVIDER_IDS)[number]
-
-const ANTHROPIC_COMPATIBLE_PROVIDER_ID_SET = new Set<string>(ANTHROPIC_COMPATIBLE_PROVIDER_IDS)
-const isAnthropicCompatibleProviderId = (id: string): id is AnthropicCompatibleProviderId => {
-  return ANTHROPIC_COMPATIBLE_PROVIDER_ID_SET.has(id)
 }
 
 type HostField = 'apiHost' | 'anthropicApiHost'
@@ -96,16 +52,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
   const { t, i18n } = useTranslation()
   const { theme } = useTheme()
   const { setTimeoutTimer } = useTimer()
-  const dispatch = useAppDispatch()
-
-  const isDmxapi = provider.id === 'dmxapi'
-  const hideApiInput = false
-  const hideApiKeyInput = false
-
-  const providerConfig = PROVIDER_URLS[provider.id]
-  const officialWebsite = providerConfig?.websites?.official
-  const apiKeyWebsite = providerConfig?.websites?.apiKey
-  const configuredApiHost = providerConfig?.api?.url
 
   const fancyProviderName = getFancyProviderName(provider)
 
@@ -115,25 +61,17 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
     checking: false
   })
 
-  const updateWebSearchProviderKey = useCallback(
-    ({ apiKey }: { apiKey: string }) => {
-      provider.id === 'zhipu' && dispatch(updateWebSearchProvider({ id: 'zhipu', apiKey: apiKey.split(',')[0] }))
-    },
-    [dispatch, provider.id]
-  )
-
   // Store callbacks in ref to avoid recreating debounce function when dependencies change
-  const callbacks = { updateProvider, updateWebSearchProviderKey }
+  const callbacks = { updateProvider }
   const callbacksRef = useRef(callbacks)
   callbacksRef.current = callbacks
 
   const debouncedUpdateApiKey = useMemo(
     () =>
       debounce((value: string) => {
-        const { updateProvider, updateWebSearchProviderKey } = callbacksRef.current
+        const { updateProvider } = callbacksRef.current
         const formattedKey = formatApiKeys(value)
         updateProvider({ apiKey: formattedKey })
-        updateWebSearchProviderKey({ apiKey: formattedKey })
       }, 150),
     []
   )
@@ -284,15 +222,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
     }
   }
 
-  const onReset = useCallback(() => {
-    setApiHost(configuredApiHost)
-    updateProvider({ apiHost: configuredApiHost })
-  }, [configuredApiHost, updateProvider])
-
-  const isApiHostResettable = useMemo(() => {
-    return !isEmpty(configuredApiHost) && apiHost !== configuredApiHost
-  }, [configuredApiHost, apiHost])
-
   const hostPreview = () => {
     const formattedApiHost = adaptProvider({ provider: { ...provider, apiHost } }).apiHost
 
@@ -341,11 +270,12 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
     setAnthropicHost(provider.anthropicApiHost)
   }, [provider.anthropicApiHost])
 
+  // Custom-connection product: the Anthropic-compatible host is a
+  // per-connection stored option. Any OpenAI-family connection may configure
+  // it; no built-in brand id list is consulted.
   const canConfigureAnthropicHost = useMemo(() => {
-    return (
-      provider.type !== 'anthropic' && isSystemProviderId(provider.id) && isAnthropicCompatibleProviderId(provider.id)
-    )
-  }, [provider])
+    return provider.type === 'openai' || provider.type === 'openai-response'
+  }, [provider.type])
 
   const anthropicHostPreview = useMemo(() => {
     const rawHost = anthropicApiHost ?? provider.anthropicApiHost
@@ -385,21 +315,14 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
       <SettingTitle>
         <Flex align="center" gap={8}>
           <ProviderName>{fancyProviderName}</ProviderName>
-          {officialWebsite && (
-            <Link target="_blank" href={providerConfig.websites.official} style={{ display: 'flex' }}>
-              <Button type="text" size="small" icon={<SquareArrowOutUpRight size={14} />} />
-            </Link>
-          )}
-          {(!isSystemProvider(provider) || isSupportAnthropicPromptCacheProvider(provider)) && (
-            <Tooltip title={t('settings.provider.api.options.label')}>
-              <Button
-                type="text"
-                icon={<Bolt size={14} />}
-                size="small"
-                onClick={() => ApiOptionsSettingsPopup.show({ providerId: provider.id })}
-              />
-            </Tooltip>
-          )}
+          <Tooltip title={t('settings.provider.api.options.label')}>
+            <Button
+              type="text"
+              icon={<Bolt size={14} />}
+              size="small"
+              onClick={() => ApiOptionsSettingsPopup.show({ providerId: provider.id })}
+            />
+          </Tooltip>
         </Flex>
         <Switch
           value={provider.enabled}
@@ -413,10 +336,7 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
         />
       </SettingTitle>
       <Divider style={{ width: '100%', margin: '10px 0' }} />
-      {isProviderSupportAuth(provider) && <ProviderOAuth providerId={provider.id} />}
-      {provider.id === 'openai' && <OpenAIAlert />}
-      {isDmxapi && <DMXAPISettings providerId={provider.id} />}
-      {provider.id === 'anthropic' && (
+      {provider.type === 'anthropic' && (
         <>
           <SettingSubtitle style={{ marginTop: 5 }}>{t('settings.provider.anthropic.auth_method')}</SettingSubtitle>
           <Select
@@ -431,138 +351,133 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
           {provider.authType === 'oauth' && <AnthropicSettings />}
         </>
       )}
-      {!hideApiInput && !isAnthropicOAuth() && (
+      {!isAnthropicOAuth() && (
         <>
-          {!hideApiKeyInput && (
-            <>
-              <SettingSubtitle
-                style={{
-                  marginTop: 5,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between'
-                }}>
-                {t('settings.provider.api_key.label')}
-                <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
-                  <Button type="text" onClick={openApiKeyList} icon={<Settings2 size={16} />} />
+          <>
+            <SettingSubtitle
+              style={{
+                marginTop: 5,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between'
+              }}>
+              {t('settings.provider.api_key.label')}
+              <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
+                <Button type="text" onClick={openApiKeyList} icon={<Settings2 size={16} />} />
+              </Tooltip>
+            </SettingSubtitle>
+            <Space.Compact style={{ width: '100%', marginTop: 5 }}>
+              <Input.Password
+                value={localApiKey}
+                placeholder={t('settings.provider.api_key.label')}
+                onChange={(e) => setLocalApiKey(e.target.value)}
+                spellCheck={false}
+                autoFocus={provider.enabled && provider.apiKey === '' && !isProviderSupportAuth(provider)}
+                suffix={renderStatusIndicator()}
+              />
+              <Button
+                type={isApiKeyConnectable ? 'primary' : 'default'}
+                ghost={isApiKeyConnectable}
+                onClick={onCheckApi}
+                disabled={!apiHost || apiKeyConnectivity.checking}>
+                {apiKeyConnectivity.checking ? (
+                  <LoadingIcon />
+                ) : apiKeyConnectivity.status === 'success' ? (
+                  <Check size={16} className="lucide-custom" />
+                ) : (
+                  t('settings.provider.check')
+                )}
+              </Button>
+            </Space.Compact>
+            <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
+              <HStack>
+                <></>
+              </HStack>
+              <SettingHelpText>{t('settings.provider.api_key.tip')}</SettingHelpText>
+            </SettingHelpTextRow>
+          </>
+          <>
+            <SettingSubtitle style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div className="flex items-center gap-1">
+                <Tooltip title={hostSelectorTooltip} mouseEnterDelay={0.3}>
+                  <div>
+                    <Selector
+                      size={14}
+                      value={activeHostField}
+                      onChange={(value) => setActiveHostField(value)}
+                      options={hostSelectorOptions}
+                      style={{ paddingLeft: 1, fontWeight: 'bold' }}
+                      placement="bottomLeft"
+                    />
+                  </div>
                 </Tooltip>
-              </SettingSubtitle>
-              <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-                <Input.Password
-                  value={localApiKey}
-                  placeholder={t('settings.provider.api_key.label')}
-                  onChange={(e) => setLocalApiKey(e.target.value)}
-                  spellCheck={false}
-                  autoFocus={provider.enabled && provider.apiKey === '' && !isProviderSupportAuth(provider)}
-                  suffix={renderStatusIndicator()}
-                />
+                <HelpTooltip title={t('settings.provider.api.url.tip')}></HelpTooltip>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <Button
-                  type={isApiKeyConnectable ? 'primary' : 'default'}
-                  ghost={isApiKeyConnectable}
-                  onClick={onCheckApi}
-                  disabled={!apiHost || apiKeyConnectivity.checking}>
-                  {apiKeyConnectivity.checking ? (
-                    <LoadingIcon />
-                  ) : apiKeyConnectivity.status === 'success' ? (
-                    <Check size={16} className="lucide-custom" />
-                  ) : (
-                    t('settings.provider.check')
-                  )}
-                </Button>
-              </Space.Compact>
-              <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
-                <HStack>
-                  {apiKeyWebsite && !isDmxapi && (
-                    <SettingHelpLink target="_blank" href={apiKeyWebsite}>
-                      {t('settings.provider.get_api_key')}
-                    </SettingHelpLink>
-                  )}
-                </HStack>
-                <SettingHelpText>{t('settings.provider.api_key.tip')}</SettingHelpText>
-              </SettingHelpTextRow>
-            </>
-          )}
-          {!isDmxapi && (
-            <>
-              <SettingSubtitle style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div className="flex items-center gap-1">
-                  <Tooltip title={hostSelectorTooltip} mouseEnterDelay={0.3}>
-                    <div>
-                      <Selector
-                        size={14}
-                        value={activeHostField}
-                        onChange={(value) => setActiveHostField(value)}
-                        options={hostSelectorOptions}
-                        style={{ paddingLeft: 1, fontWeight: 'bold' }}
-                        placement="bottomLeft"
-                      />
-                    </div>
-                  </Tooltip>
-                  <HelpTooltip title={t('settings.provider.api.url.tip')}></HelpTooltip>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Button
-                    type="text"
-                    onClick={() => CustomHeaderPopup.show({ provider })}
-                    icon={<Settings2 size={16} />}
+                  type="text"
+                  onClick={() => CustomHeaderPopup.show({ provider })}
+                  icon={<Settings2 size={16} />}
+                />
+              </div>
+            </SettingSubtitle>
+            {activeHostField === 'apiHost' && (
+              <>
+                <Space.Compact style={{ width: '100%', marginTop: 5 }}>
+                  <Input
+                    value={apiHost}
+                    placeholder={t('settings.provider.api_host')}
+                    onChange={(e) => setApiHost(e.target.value)}
+                    onBlur={onUpdateApiHost}
                   />
-                </div>
-              </SettingSubtitle>
-              {activeHostField === 'apiHost' && (
-                <>
-                  <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-                    <Input
-                      value={apiHost}
-                      placeholder={t('settings.provider.api_host')}
-                      onChange={(e) => setApiHost(e.target.value)}
-                      onBlur={onUpdateApiHost}
-                    />
-                    {isApiHostResettable && (
-                      <Button danger onClick={onReset}>
-                        {t('settings.provider.api.url.reset')}
-                      </Button>
-                    )}
-                  </Space.Compact>
-                  <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
-                    <SettingHelpText
-                      style={{
-                        marginLeft: 6,
-                        marginRight: '1em',
-                        whiteSpace: 'break-spaces',
-                        wordBreak: 'break-all'
-                      }}>
-                      {t('settings.provider.api_host_preview', { url: hostPreview() })}
-                    </SettingHelpText>
-                  </SettingHelpTextRow>
-                </>
-              )}
+                </Space.Compact>
+                <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
+                  <SettingHelpText
+                    style={{
+                      marginLeft: 6,
+                      marginRight: '1em',
+                      whiteSpace: 'break-spaces',
+                      wordBreak: 'break-all'
+                    }}>
+                    {t('settings.provider.api_host_preview', { url: hostPreview() })}
+                  </SettingHelpText>
+                </SettingHelpTextRow>
+              </>
+            )}
 
-              {activeHostField === 'anthropicApiHost' && canConfigureAnthropicHost && (
-                <>
-                  <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-                    <Input
-                      value={anthropicApiHost ?? ''}
-                      placeholder={t('settings.provider.anthropic_api_host')}
-                      onChange={(e) => setAnthropicHost(e.target.value)}
-                      onBlur={onUpdateAnthropicHost}
-                    />
-                    {/* TODO: Add a reset button here. */}
-                  </Space.Compact>
-                  <SettingHelpTextRow style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
-                    <SettingHelpText style={{ marginLeft: 6, whiteSpace: 'break-spaces', wordBreak: 'break-all' }}>
-                      {t('settings.provider.anthropic_api_host_preview', {
-                        url: anthropicHostPreview || '—'
-                      })}
-                    </SettingHelpText>
-                  </SettingHelpTextRow>
-                </>
-              )}
-            </>
-          )}
+            {activeHostField === 'anthropicApiHost' && canConfigureAnthropicHost && (
+              <>
+                <Space.Compact style={{ width: '100%', marginTop: 5 }}>
+                  <Input
+                    value={anthropicApiHost ?? ''}
+                    placeholder={t('settings.provider.anthropic_api_host')}
+                    onChange={(e) => setAnthropicHost(e.target.value)}
+                    onBlur={onUpdateAnthropicHost}
+                  />
+                </Space.Compact>
+                <SettingHelpTextRow style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
+                  <SettingHelpText style={{ marginLeft: 6, whiteSpace: 'break-spaces', wordBreak: 'break-all' }}>
+                    {t('settings.provider.anthropic_api_host_preview', {
+                      url: anthropicHostPreview || '—'
+                    })}
+                  </SettingHelpText>
+                </SettingHelpTextRow>
+              </>
+            )}
+          </>
         </>
       )}
-      {provider.id === 'lmstudio' && <LMStudioSettings />}
-      {provider.id === 'gpustack' && <GPUStackSettings />}
+      <SettingSubtitle style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+        {t('settings.provider.require_api_key.label')}
+        <Switch
+          size="small"
+          checked={provider.apiOptions?.requiresApiKey !== false}
+          onChange={(checked) => updateProvider({ apiOptions: { ...provider.apiOptions, requiresApiKey: checked } })}
+        />
+      </SettingSubtitle>
+      <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
+        <SettingHelpText>{t('settings.provider.require_api_key.tip')}</SettingHelpText>
+      </SettingHelpTextRow>
       <ModelList providerId={provider.id} />
     </SettingContainer>
   )

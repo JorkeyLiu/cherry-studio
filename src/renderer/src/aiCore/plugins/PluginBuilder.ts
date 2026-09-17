@@ -69,9 +69,10 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
   // 这样反转后 extractReasoning 在外层，其 wrapStream（状态机）
   // 能处理 simulateStreaming 生成的模拟流中的未闭合 <think> 标签。
 
-  // 0.1 Reasoning extraction for OpenAI providers (approved protocols only)
+  // 0.1 Reasoning extraction for OpenAI providers (approved protocols only;
+  // endpoint_type is a preserved legacy field only and never routes here)
   const providerType = provider.type
-  if (providerType === 'openai' || providerType === 'openai-response' || model.endpoint_type === 'openai') {
+  if (providerType === 'openai' || providerType === 'openai-response') {
     const tagName = getReasoningTagName(model.id.toLowerCase())
     plugins.push(createReasoningExtractionPlugin({ tagName }))
   }

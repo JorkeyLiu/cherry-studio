@@ -1,6 +1,4 @@
-import { getProviderLabel } from '@renderer/i18n/label'
 import type { Model, Provider } from '@renderer/types'
-import { isSystemProvider } from '@renderer/types'
 
 /**
  * 判断一个字符串是否包含由另一个字符串表示的 keywords
@@ -60,14 +58,12 @@ export function matchKeywordsInModel(keywords: string | string[], model: Model, 
 }
 
 /**
- * 获取 Provider 的搜索字符串，它和 getFancyProviderName 不同
+ * 获取 Provider 的搜索字符串：仅使用存储的 id + name，不使用内置品牌标签。
  * @param provider Provider 对象
  * @returns 搜索字符串
  */
 function getProviderSearchString(provider: Provider) {
-  return isSystemProvider(provider)
-    ? `${getProviderLabel(provider.id)} ${provider.id} ${provider.name}`
-    : `${provider.id} ${provider.name}`
+  return `${provider.id} ${provider.name}`
 }
 
 /**

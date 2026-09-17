@@ -1,5 +1,5 @@
 import { getProviderById } from '@renderer/services/ProviderService'
-import { isSystemProvider, type Model, type Usage } from '@renderer/types'
+import type { Model, Usage } from '@renderer/types'
 import type { LanguageModelUsage } from 'ai'
 
 /** Token usage from streaming (OpenAI format) or non-streaming (AI SDK format) */
@@ -20,10 +20,10 @@ function isAiSdkUsage(usage: TokenUsage): usage is LanguageModelUsage {
 }
 
 /**
- * Get a trackable identifier for a provider
- * - System providers: use provider.id directly (e.g., 'openai', 'anthropic')
- * - Custom providers: extract hostname from apiHost (e.g., 'https://api.example.com/v1' -> 'api.example.com')
- * - Fallback: provider.name or provider.id or 'unknown'
+ * Get a trackable identifier for a provider.
+ * Custom-connection product: every provider is an ordinary connection, so
+ * prefer the configured apiHost hostname; fall back to stored name/id.
+ * No built-in brand distinction is used here.
  */
 function getProviderTrackId(id: string): string {
   const provider = getProviderById(id)
@@ -32,11 +32,7 @@ function getProviderTrackId(id: string): string {
     return 'unknown'
   }
 
-  if (isSystemProvider(provider)) {
-    return provider.id
-  }
-
-  // Custom provider: extract hostname from apiHost
+  // Custom connection: extract hostname from apiHost
   if (provider.apiHost) {
     try {
       return new URL(provider.apiHost).hostname

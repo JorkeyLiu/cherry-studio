@@ -1,4 +1,4 @@
-import type { Model, Provider, SystemProvider } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import { describe, expect, it } from 'vitest'
 
 import { includeKeywords, matchKeywordsInModel, matchKeywordsInProvider, matchKeywordsInString } from '../match'
@@ -14,7 +14,9 @@ describe('match', () => {
     isSystem: false
   } as const satisfies Provider
 
-  const sysProvider: SystemProvider = {
+  // Legacy persisted entries may still carry isSystem:true with a brand id,
+  // but search uses only the stored id/name.
+  const sysProvider: Provider = {
     ...provider,
     id: 'dashscope',
     name: 'doesnt matter',
@@ -76,11 +78,12 @@ describe('match', () => {
       expect(matchKeywordsInProvider('foo', provider)).toBe(false)
     })
 
-    it('should match i18n name, id, and name for system provider', () => {
+    it('should match stored id and name only (no brand labels)', () => {
       expect(matchKeywordsInProvider('dashscope', sysProvider)).toBe(true)
-      expect(matchKeywordsInProvider('Alibaba', sysProvider)).toBe(true)
       // system provider 现在也可以通过 name 字段匹配
       expect(matchKeywordsInProvider('doesnt matter', sysProvider)).toBe(true)
+      // Historical translated brand labels never match.
+      expect(matchKeywordsInProvider('Alibaba', sysProvider)).toBe(false)
     })
   })
 
@@ -103,12 +106,12 @@ describe('match', () => {
       expect(matchKeywordsInModel('foo', model, provider)).toBe(false)
     })
 
-    it('should match model name and i18n provider name for system provider', () => {
+    it('should match model name and stored provider name', () => {
       expect(matchKeywordsInModel('gpt-4.1 dashscope', model, sysProvider)).toBe(true)
       expect(matchKeywordsInModel('dashscope', model, sysProvider)).toBe(true)
       // system provider 现在也可以通过 name 字段检索
       expect(matchKeywordsInModel('doesnt matter', model, sysProvider)).toBe(true)
-      expect(matchKeywordsInModel('Alibaba', model, sysProvider)).toBe(true)
+      expect(matchKeywordsInModel('Alibaba', model, sysProvider)).toBe(false)
     })
 
     it('should match model by id when name is customized', () => {

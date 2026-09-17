@@ -1577,5 +1577,175 @@ describe('store migrations', () => {
       // No ImageStorage rows or unrelated slices are touched: nothing added, nothing renamed.
       expect(Object.keys(migrated).sort()).toEqual(Object.keys(state).sort())
     })
+
+    it('writes requiresApiKey:false for folded raw ollama while preserving other apiOptions', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            legacyEntry('ollama', 'ollama', {
+              apiHost: 'http://localhost:11434',
+              apiOptions: { isNotSupportStreamOptions: true }
+            }),
+            legacyEntry('new-api', 'new-api', {
+              apiHost: 'http://localhost:3000/v1',
+              apiOptions: { isNotSupportStreamOptions: true }
+            }),
+            legacyEntry('mistral', 'mistral', { apiHost: 'https://api.mistral.ai' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      expect(byId.ollama.type).toBe('openai')
+      expect(byId.ollama.apiOptions).toMatchObject({
+        isNotSupportStreamOptions: true,
+        requiresApiKey: false
+      })
+      // new-api/mistral folds keep apiOptions verbatim (no requiresApiKey injected).
+      expect(byId['new-api'].apiOptions).toEqual({ isNotSupportStreamOptions: true })
+      expect(byId.mistral.apiOptions).toBeUndefined()
+    })
+  })
+
+  describe('migration 223: local no-key backfill', () => {
+    const approved = (overrides: Record<string, unknown> = {}) => ({
+      id: 'custom-openai',
+      name: 'Custom OpenAI',
+      type: 'openai',
+      apiKey: '',
+      apiHost: 'https://proxy.example.com/v1',
+      models: [],
+      isSystem: false,
+      enabled: true,
+      ...overrides
+    })
+    const makeState223 = (state: Record<string, unknown>) => ({
+      llm: { providers: [], settings: {}, ...(state.llm as Record<string, unknown>) },
+      assistants: { defaultAssistant: {}, assistants: [], ...(state.assistants as Record<string, unknown>) },
+      _persist: { version: 222, rehydrated: false }
+    })
+
+    it('backfills only conservative local legacy entries', async () => {
+      const state = makeState223({
+        llm: {
+          providers: [
+            approved({ id: 'ollama', apiHost: 'http://localhost:11434/v1', apiKey: '' }),
+            approved({ id: 'lmstudio', apiHost: 'http://localhost:1234/v1', apiKey: '' }),
+            approved({ id: 'gpustack', apiHost: '', apiKey: '' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 223)
+
+      for (const p of migrated.llm.providers) {
+        expect(p.apiOptions).toMatchObject({ requiresApiKey: false })
+      }
+    })
+
+    it('leaves remote keyless custom endpoints requiring a key unless the user opts out', async () => {
+      const state = makeState223({
+        llm: {
+          providers: [
+            approved({ id: 'my-remote', apiHost: 'https://proxy.example.com/v1', apiKey: '' }),
+            approved({
+              id: 'ollama',
+              apiHost: 'https://remote.example.com/v1',
+              apiKey: ''
+            }),
+            approved({
+              id: 'lmstudio',
+              apiHost: 'http://localhost:1234/v1',
+              apiKey: 'k',
+              apiOptions: { requiresApiKey: true }
+            }),
+            approved({
+              id: 'gpustack',
+              apiHost: '',
+              apiKey: '',
+              apiOptions: { requiresApiKey: false }
+            })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 223)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p.apiOptions?.requiresApiKey]))
+      // Remote custom + remote-host legacy id + already-set entries stay untouched.
+      expect(byId['my-remote']).toBeUndefined()
+      expect(migrated.llm.providers.find((p: any) => p.id === 'ollama').apiOptions).toBeUndefined()
+      expect(byId['lmstudio']).toBe(true)
+      expect(byId['gpustack']).toBe(false)
+    })
+
+    it('rejects substring, suffix, query, and userinfo localhost lookalikes', async () => {
+      const state = makeState223({
+        llm: {
+          providers: [
+            approved({ id: 'ollama', apiHost: 'http://notlocalhost.example/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'https://localhost.evil.example.com/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://127.0.0.1.evil.com:11434/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'https://proxy.example.com/v1?next=localhost', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'https://proxy.example.com/?host=127.0.0.1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://user:localhost@proxy.example.com/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://localhost:token@proxy.example.com/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://proxy.example.com/localhost', apiKey: '' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 223)
+
+      for (const p of migrated.llm.providers) {
+        expect(p.apiOptions).toBeUndefined()
+      }
+    })
+
+    it('accepts valid local variants, ports, and scheme-less forms', async () => {
+      const state = makeState223({
+        llm: {
+          providers: [
+            approved({ id: 'ollama', apiHost: 'http://LOCALHOST:11434/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://127.0.0.1:8080', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://0.0.0.0:11434/v1', apiKey: '' }),
+            approved({ id: 'ollama', apiHost: 'http://[::1]:11434/v1', apiKey: '' }),
+            approved({ id: 'lmstudio', apiHost: 'localhost:1234', apiKey: '' }),
+            approved({ id: 'lmstudio', apiHost: '127.0.0.1:1234/v1', apiKey: '' }),
+            approved({ id: 'gpustack', apiHost: 'localhost', apiKey: '' }),
+            approved({ id: 'gpustack', apiHost: '  http://localhost:11434/v1  ', apiKey: '' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 223)
+
+      for (const p of migrated.llm.providers) {
+        expect(p.apiOptions).toMatchObject({ requiresApiKey: false })
+      }
+    })
+    it('preserves other apiOptions and historical snapshots', async () => {
+      const snapshotModel = { id: 'm1', name: 'm1', provider: 'ollama', group: 'ollama' }
+      const state = makeState223({
+        llm: {
+          providers: [
+            approved({
+              id: 'ollama',
+              apiHost: 'http://127.0.0.1:11434/v1',
+              apiKey: '',
+              apiOptions: { isNotSupportStreamOptions: true }
+            })
+          ]
+        },
+        assistants: {
+          defaultAssistant: {},
+          assistants: [{ id: 'a1', topics: [{ id: 't1', messages: [{ id: 'm1', model: snapshotModel }] }] }]
+        }
+      })
+      const migrated: any = await migrate(state as any, 223)
+
+      expect(migrated.llm.providers[0].apiOptions).toMatchObject({
+        isNotSupportStreamOptions: true,
+        requiresApiKey: false
+      })
+      expect(migrated.assistants.assistants[0].topics[0].messages[0].model).toEqual(snapshotModel)
+    })
   })
 })

@@ -1,7 +1,6 @@
 import { loggerService } from '@logger'
 import { Client } from '@notionhq/client'
 import i18n from '@renderer/i18n'
-import { getProviderLabel } from '@renderer/i18n/label'
 import { getMessageTitle } from '@renderer/services/MessagesService'
 import { addNote } from '@renderer/services/NotesService'
 import store from '@renderer/store'
@@ -183,6 +182,14 @@ export function getTitleFromString(str: string, length: number = 80): string {
 const getRoleText = (role: string, modelName?: string, providerId?: string): string => {
   const { showModelNameInMarkdown, showModelProviderInMarkdown } = store.getState().settings
 
+  // Custom-connection display: resolve the stored connection name, fall back
+  // to the provider id. Built-in brand labels are never used in exports.
+  const resolveProviderDisplayName = (id: string): string => {
+    const provider = store.getState().llm.providers.find((p) => p.id === id)
+    const name = provider?.name?.trim()
+    return name && provider ? provider.name : id
+  }
+
   if (role === 'user') {
     return '🧑‍💻 User'
   } else if (role === 'system') {
@@ -192,13 +199,13 @@ const getRoleText = (role: string, modelName?: string, providerId?: string): str
     if (showModelNameInMarkdown && modelName) {
       assistantText += `${modelName}`
       if (showModelProviderInMarkdown && providerId) {
-        const providerDisplayName = getProviderLabel(providerId) ?? providerId
+        const providerDisplayName = resolveProviderDisplayName(providerId)
         assistantText += ` | ${providerDisplayName}`
         return assistantText
       }
       return assistantText
     } else if (showModelProviderInMarkdown && providerId) {
-      const providerDisplayName = getProviderLabel(providerId) ?? providerId
+      const providerDisplayName = resolveProviderDisplayName(providerId)
       assistantText += `Assistant | ${providerDisplayName}`
       return assistantText
     }

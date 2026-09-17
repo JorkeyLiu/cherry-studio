@@ -1,11 +1,13 @@
 import type { ProviderType } from '@renderer/types'
 import { isSystemProvider, type Provider, type SystemProviderId, SystemProviderIds } from '@renderer/types'
-import { CLAUDE_SUPPORTED_PROVIDERS } from '@shared/config/providers'
 
+/**
+ * Custom-connection product: Claude/Agent-capable connections are determined
+ * only by protocol (`anthropic` type) and per-connection stored
+ * `anthropicApiHost`. No built-in brand id list is consulted.
+ */
 export const getClaudeSupportedProviders = (providers: Provider[]) => {
-  return providers.filter(
-    (p) => p.type === 'anthropic' || !!p.anthropicApiHost || CLAUDE_SUPPORTED_PROVIDERS.includes(p.id)
-  )
+  return providers.filter(isAnthropicSupportedProvider)
 }
 
 export const getAnthropicSupportedProviders = (providers: Provider[]) => {
@@ -175,11 +177,20 @@ export const NOT_SUPPORT_API_KEY_PROVIDERS: readonly SystemProviderId[] = [
 
 export const NOT_SUPPORT_API_KEY_PROVIDER_TYPES: readonly ProviderType[] = []
 
+/**
+ * Protocol-neutral per-connection API-key requirement.
+ * Returns `true` unless the connection explicitly opts out via
+ * `apiOptions.requiresApiKey === false`. Unset defaults to requiring a key.
+ * OAuth (`authType === 'oauth'`) is handled by callers as a no-key path
+ * where applicable; this helper reports only the explicit option.
+ */
+export function isApiKeyRequired(provider: Provider): boolean {
+  return provider.apiOptions?.requiresApiKey !== false
+}
+
 // https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration
+// Custom-connection product: prompt-cache support follows protocol and the
+// per-connection stored Anthropic host, never a built-in brand id list.
 export const isSupportAnthropicPromptCacheProvider = (provider: Provider) => {
-  return (
-    provider.type === 'anthropic' ||
-    provider.id === SystemProviderIds.aihubmix ||
-    provider.id === SystemProviderIds.openrouter
-  )
+  return provider.type === 'anthropic' || !!provider.anthropicApiHost
 }

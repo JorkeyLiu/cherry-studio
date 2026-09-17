@@ -3,23 +3,18 @@ import { LoadingIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
 import { TopView } from '@renderer/components/TopView'
 import {
-  groupQwenModels,
   isEmbeddingModel,
   isFunctionCallingModel,
   isReasoningModel,
   isRerankModel,
   isVisionModel,
-  isWebSearchModel,
-  SYSTEM_MODELS
+  isWebSearchModel
 } from '@renderer/config/models'
 import { useProvider } from '@renderer/hooks/useProvider'
-import NewApiAddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/NewApiAddModelPopup'
-import NewApiBatchAddModelPopup from '@renderer/pages/settings/ProviderSettings/ModelList/NewApiBatchAddModelPopup'
 import { fetchModels } from '@renderer/services/ApiService'
 import type { Model, Provider } from '@renderer/types'
 import { filterModelsByKeywords, getFancyProviderName } from '@renderer/utils'
 import { getDuplicateModelNames, isFreeModel } from '@renderer/utils/model'
-import { isNewApiProvider } from '@renderer/utils/provider'
 import { Button, Empty, Flex, Modal, Spin, Tabs, Tooltip } from 'antd'
 import Input from 'antd/es/input/Input'
 import { groupBy, isEmpty, uniqBy } from 'lodash'
@@ -30,7 +25,7 @@ import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import ManageModelsList from './ManageModelsList'
-import { isModelInProvider, isValidNewApiModel } from './utils'
+import { isModelInProvider } from './utils'
 
 const logger = loggerService.withContext('ManageModelsPopup')
 
@@ -73,10 +68,10 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
   const { t, i18n } = useTranslation()
   const searchInputRef = useRef<any>(null)
 
-  const allModels = useMemo(
-    () => uniqBy([...(SYSTEM_MODELS[provider.id] || []), ...listModels, ...models], 'id'),
-    [provider.id, listModels, models]
-  )
+  // Custom-connection product: Manage Models combines only user-stored
+  // models plus protocol listModels results. Built-in defaults are never
+  // merged; unknown/manual models remain editable/requestable.
+  const allModels = useMemo(() => uniqBy([...listModels, ...models], 'id'), [listModels, models])
   const duplicateModelNames = useMemo(() => getDuplicateModelNames(allModels), [allModels])
 
   const isLoading = useMemo(
@@ -109,19 +104,8 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
     [filterSearchText, actualFilterType, allModels]
   )
 
-  const modelGroups = useMemo(
-    () =>
-      provider.id === 'dashscope'
-        ? {
-            ...groupBy(
-              list.filter((model) => !model.id.startsWith('qwen')),
-              'group'
-            ),
-            ...groupQwenModels(list.filter((model) => model.id.startsWith('qwen')))
-          }
-        : groupBy(list, 'group'),
-    [list, provider.id]
-  )
+  // Generic grouping for all connections; no brand-specific paths.
+  const modelGroups = useMemo(() => groupBy(list, 'group'), [list])
 
   const onOk = useCallback(() => setOpen(false), [])
 
@@ -131,19 +115,12 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
 
   const onAddModel = useCallback(
     (model: Model) => {
+      // Generic add flow for all approved protocols.
       if (!isEmpty(model.name)) {
-        const hasSupportedEndpointTypes = model.supported_endpoint_types?.length
-
-        // NewAPI provider without supported_endpoint_types needs manual configuration
-        if (isNewApiProvider(provider) && !hasSupportedEndpointTypes) {
-          void NewApiAddModelPopup.show({ title: t('settings.models.add.add_model'), provider, model })
-          return
-        }
-
         addModel(model)
       }
     },
-    [addModel, provider, t]
+    [addModel]
   )
 
   const onRemoveModel = useCallback((model: Model) => removeModel(model), [removeModel])
@@ -159,22 +136,10 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
       content: t('settings.models.manage.add_listed.confirm'),
       centered: true,
       onOk: () => {
-        if (isNewApiProvider(provider)) {
-          if (wouldAddModel.every(isValidNewApiModel)) {
-            wouldAddModel.forEach(onAddModel)
-          } else {
-            void NewApiBatchAddModelPopup.show({
-              title: t('settings.models.add.batch_add_models'),
-              batchModels: wouldAddModel,
-              provider
-            })
-          }
-        } else {
-          wouldAddModel.forEach(onAddModel)
-        }
+        wouldAddModel.forEach(onAddModel)
       }
     })
-  }, [list, models, onAddModel, provider, t])
+  }, [list, onAddModel, provider, t])
 
   const loadModels = useCallback(async (provider: Provider) => {
     setLoadingModels(true)

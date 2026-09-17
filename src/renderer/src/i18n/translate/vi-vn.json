@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "Xóa các khóa trùng lặp",
       "remove_invalid_keys": "Xóa các khóa không hợp lệ",
+      "require_api_key": {
+        "label": "[to be translated]:Require API key",
+        "tip": "[to be translated]:Turn off for local servers that accept requests without a key. Applies to any connection type."
+      },
       "search": "Nhà cung cấp tìm kiếm...",
       "search_placeholder": "Tìm kiếm mã hoặc tên mô hình",
       "title": "Nhà cung cấp mô hình",

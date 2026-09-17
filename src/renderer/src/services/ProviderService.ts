@@ -29,14 +29,16 @@ export function getProviderByModel(model?: Model) {
   return provider
 }
 
+// History-only brand OAuth/charge helpers were retired with the
+// custom-connection product: every provider is an ordinary connection and
+// Anthropic OAuth (authType === 'oauth') needs no brand id list. Kept as
+// thin protocol checks so existing callers compile until removed.
 export function isProviderSupportAuth(provider: Provider) {
-  const supportProviders = ['302ai', 'silicon', 'aihubmix', 'ppio', 'tokenflux', 'aionly']
-  return supportProviders.includes(provider.id)
+  return provider.authType === 'oauth'
 }
 
-export function isProviderSupportCharge(provider: Provider) {
-  const supportProviders = ['302ai', 'silicon', 'aihubmix', 'ppio']
-  return supportProviders.includes(provider.id)
+export function isProviderSupportCharge(_provider: Provider) {
+  return false
 }
 
 export function getProviderById(id: string) {

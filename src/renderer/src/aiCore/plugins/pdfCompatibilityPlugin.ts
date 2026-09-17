@@ -7,8 +7,6 @@
 import type { LanguageModelV3FilePart, LanguageModelV3Message } from '@ai-sdk/provider'
 import { definePlugin } from '@cherrystudio/ai-core/core/plugins'
 import { loggerService } from '@logger'
-import { isAnthropicModel, isGeminiModel } from '@renderer/config/models'
-import { isOpenAILLMModel } from '@renderer/config/models/openai'
 import type { Model, Provider, ProviderType } from '@renderer/types'
 import { SystemProviderIds } from '@renderer/types'
 import { extractPdfText } from '@shared/utils/pdf'
@@ -37,25 +35,14 @@ function isPdfFilePart(part: ContentPart): part is LanguageModelV3FilePart & { m
   return part.type === 'file' && part.mediaType === 'application/pdf'
 }
 
-function supportsNativePdf(provider: Provider, model: Model): boolean {
+function supportsNativePdf(provider: Provider, _model: Model): boolean {
+  void _model
   if (PDF_FORCE_TEXT_EXTRACTION_PROVIDER_IDS.has(provider.id)) {
     return false
   }
 
-  // We assume here that the OpenAI model using the responses API,
-  // the Claude model using the messages API,
-  // and the Gemini model using the Gemini generateContent API natively support PDF input.
-  if (
-    (model.endpoint_type === 'openai-response' && isOpenAILLMModel(model)) ||
-    (model.endpoint_type === 'anthropic' && isAnthropicModel(model)) ||
-    (model.endpoint_type === 'gemini' && isGeminiModel(model))
-  ) {
-    return true
-  }
-  // Check provider type for other native providers (e.g., Vertex, Bedrock, Azure OpenAI).
-  // Native Anthropic and Gemini providers ('anthropic', 'gemini') are also covered here,
-  // so a Claude/Gemini model on its native provider still passes through even without an
-  // explicit endpoint_type annotation.
+  // endpoint_type is a preserved legacy field only and never routes PDF
+  // behavior. Native support follows the provider protocol only.
   if (PDF_NATIVE_PROVIDER_TYPES.has(provider.type)) {
     return true
   }

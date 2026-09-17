@@ -2,7 +2,6 @@ import { formatProviderApiHost } from '@main/aiCore/provider/providerConfig'
 import { CacheService } from '@main/services/CacheService'
 import { loggerService } from '@main/services/LoggerService'
 import { reduxService } from '@main/services/ReduxService'
-import { isSiliconAnthropicCompatibleModel } from '@shared/config/providers'
 import type { ApiModel, Model, Provider, ProviderType } from '@types'
 
 const logger = loggerService.withContext('ApiServerUtils')
@@ -300,23 +299,5 @@ export function validateProvider(provider: Provider): boolean {
       providerId: provider?.id
     })
     return false
-  }
-}
-
-const supportsAnthropicEndpoint = (m: Model): boolean =>
-  m.endpoint_type === 'anthropic' || m.supported_endpoint_types?.includes('anthropic') === true
-
-export const getProviderAnthropicModelChecker = (providerId: string): ((m: Model) => boolean) => {
-  switch (providerId) {
-    case 'new-api':
-      // Both are OpenAI-compatible aggregators that may expose Anthropic-protocol models.
-      // Auto-fetched models declare `supported_endpoint_types`; manually added or older
-      // entries fall back to the legacy `endpoint_type === 'anthropic'` flag.
-      return supportsAnthropicEndpoint
-    case 'silicon':
-      return (m: Model) => isSiliconAnthropicCompatibleModel(m.id)
-    default:
-      // allow all models when checker not configured (aihubmix, ollama, etc.)
-      return () => true
   }
 }

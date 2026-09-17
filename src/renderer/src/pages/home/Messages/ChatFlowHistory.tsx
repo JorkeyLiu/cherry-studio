@@ -3,7 +3,6 @@ import '@xyflow/react/dist/style.css'
 import { RobotOutlined, UserOutlined } from '@ant-design/icons'
 import EmojiAvatar from '@renderer/components/Avatar/EmojiAvatar'
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
-import { getModelLogo, getModelLogoById } from '@renderer/config/models/logo'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -84,18 +83,11 @@ const CustomNode: FC<{ data: any }> = ({ data }) => {
     gradientColor = 'rgba(var(--color-primary-rgb), 0.08)'
     title = `${data.model || t('chat.history.assistant_node')}`
 
-    // 模型头像
+    // 模型头像：通用回退，不使用手动维护的模型图标目录
     if (data.modelInfo) {
       avatar = <ModelAvatar model={data.modelInfo} size={32} />
     } else if (data.modelId) {
-      const modelLogo = getModelLogo(data.modelInfo) ?? getModelLogoById(data.modelId)
-      avatar = (
-        <Avatar
-          src={modelLogo}
-          icon={!modelLogo ? <RobotOutlined /> : undefined}
-          style={{ backgroundColor: 'var(--color-primary)' }}
-        />
-      )
+      avatar = <Avatar icon={<RobotOutlined />} style={{ backgroundColor: 'var(--color-primary)' }} />
     } else {
       avatar = <Avatar icon={<RobotOutlined />} style={{ backgroundColor: 'var(--color-primary)' }} />
     }

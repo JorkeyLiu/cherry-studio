@@ -1,7 +1,7 @@
 import { SettingOutlined } from '@ant-design/icons'
 import { showErrorDetailPopup } from '@renderer/components/ErrorDetailModal'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { getHttpMessageLabel, getProviderLabel } from '@renderer/i18n/label'
+import { getHttpMessageLabel } from '@renderer/i18n/label'
 import NavigationService from '@renderer/services/NavigationService'
 import { getProviderById } from '@renderer/services/ProviderService'
 import { useAppDispatch } from '@renderer/store'
@@ -71,10 +71,12 @@ const ErrorMessage: React.FC<{ block: ErrorMessageBlock }> = ({ block }) => {
   if (i18n.exists(i18nKey)) {
     const providerId = block.error && 'providerId' in block.error ? block.error?.providerId : undefined
     if (providerId && typeof providerId === 'string') {
+      // Custom-connection display: stored connection name with id fallback.
+      const providerName = getProviderById(providerId)?.name?.trim() || providerId
       return (
         <Trans
           i18nKey={i18nKey}
-          values={{ provider: getProviderLabel(providerId) }}
+          values={{ provider: providerName }}
           components={{
             provider: <ProviderLink providerId={providerId} />
           }}

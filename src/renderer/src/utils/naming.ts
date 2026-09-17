@@ -1,6 +1,4 @@
-import { getProviderLabel } from '@renderer/i18n/label'
 import type { Provider } from '@renderer/types'
-import { isSystemProvider } from '@renderer/types'
 
 /**
  * 从模型 ID 中提取默认组名。
@@ -99,12 +97,15 @@ export const getLowerBaseModelName = (id: string, delimiter: string = '/'): stri
 }
 
 /**
- * 获取模型服务商名称，根据是否内置服务商来决定要不要翻译
+ * Custom-connection display name: every provider is an ordinary user
+ * connection, so display uses the stored `name` with provider-id fallback.
+ * Built-in brand labels are history-only (migrations) and never used here.
  * @param provider 服务商
  * @returns 描述性的名字
  */
 export const getFancyProviderName = (provider: Provider) => {
-  return isSystemProvider(provider) ? getProviderLabel(provider.id) : provider.name
+  const name = provider.name?.trim()
+  return name ? provider.name : provider.id
 }
 
 /**

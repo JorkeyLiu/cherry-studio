@@ -1,4 +1,3 @@
-import { PROVIDER_URLS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import { type Provider, SystemProviderIds } from '@renderer/types'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -59,17 +58,21 @@ const createSystemProvider = (overrides: Omit<Partial<Provider>, 'type'> & { typ
   })
 
 describe('provider utils', () => {
-  it('configures StepFun as Anthropic-compatible with current official documentation links', () => {
-    expect(SYSTEM_PROVIDERS_CONFIG.stepfun.anthropicApiHost).toBe('https://api.stepfun.com')
-    expect(isAnthropicSupportedProvider(SYSTEM_PROVIDERS_CONFIG.stepfun as unknown as Provider)).toBe(true)
-    expect(getClaudeSupportedProviders([createSystemProvider({ id: SystemProviderIds.stepfun })])).toHaveLength(1)
-    expect(PROVIDER_URLS.stepfun.websites?.docs).toBe(
-      'https://platform.stepfun.com/docs/api-reference/chat/chat-completion-create'
-    )
-    expect(PROVIDER_URLS.stepfun.websites?.models).toBe('https://platform.stepfun.com/docs/guides/models/overview')
+  it('treats every connection as an ordinary connection (no built-in brand lists)', () => {
+    // Anthropic support follows protocol + stored host only: a plain
+    // openai-type entry without an Anthropic host is not Claude-capable,
+    // even when its id matches a historical brand.
+    expect(isAnthropicSupportedProvider(createSystemProvider({ id: SystemProviderIds.stepfun }))).toBe(false)
+    expect(getClaudeSupportedProviders([createSystemProvider({ id: SystemProviderIds.stepfun })])).toHaveLength(0)
+    // An explicit stored Anthropic host opts the same connection in.
+    expect(
+      isAnthropicSupportedProvider(
+        createSystemProvider({ id: SystemProviderIds.stepfun, anthropicApiHost: 'https://anthropic.local' })
+      )
+    ).toBe(true)
   })
 
-  it('filters Claude supported providers', () => {
+  it('filters Claude supported providers by protocol and stored host only', () => {
     const providers = [
       createProvider({ id: 'anthropic-official', type: 'anthropic' }),
       createProvider({ id: 'custom-host', anthropicApiHost: 'https://anthropic.local' }),
@@ -77,7 +80,8 @@ describe('provider utils', () => {
       createProvider({ id: 'other' })
     ]
 
-    expect(getClaudeSupportedProviders(providers)).toEqual(providers.slice(0, 3))
+    // Historical brand ids without an Anthropic protocol/host are excluded.
+    expect(getClaudeSupportedProviders(providers)).toEqual(providers.slice(0, 2))
   })
 
   it('filters Anthropic supported providers', () => {

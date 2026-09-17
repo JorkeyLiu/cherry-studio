@@ -349,7 +349,12 @@ export type Model = {
    */
   type?: ModelType[]
   pricing?: ModelPricing
+  /**
+   * Legacy per-model endpoint flags. Persisted for import/round-trip
+   * compatibility only; never consulted for routing, listing, or UI behavior.
+   */
   endpoint_type?: EndpointType
+  /** @see endpoint_type */
   supported_endpoint_types?: EndpointType[]
   supported_text_delta?: boolean
 }

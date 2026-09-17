@@ -5394,6 +5394,10 @@
       },
       "remove_duplicate_keys": "Remove Duplicate Keys",
       "remove_invalid_keys": "Remove Invalid Keys",
+      "require_api_key": {
+        "label": "Require API key",
+        "tip": "Turn off for local servers that accept requests without a key. Applies to any connection type."
+      },
       "search": "Search Providers...",
       "search_placeholder": "Search model id or name",
       "title": "Model Provider",

@@ -28,6 +28,13 @@ export function isActiveProviderType(type: string): type is ActiveProviderType {
 
 // undefined is treated as supported, enabled by default
 export type ProviderApiOptions = {
+  /**
+   * Protocol-neutral per-connection API-key requirement.
+   * When `false`, the connection may be used without an API key
+   * (e.g. local servers such as Ollama). When `true` or unset,
+   * an API key is required. Default behavior when unset is `true`.
+   */
+  requiresApiKey?: boolean
   /** Whether message content of array type is not supported */
   isNotSupportArrayContent?: boolean
   /** Whether the stream_options parameter is not supported */

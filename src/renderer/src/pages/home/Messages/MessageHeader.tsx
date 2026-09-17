@@ -2,7 +2,6 @@ import EmojiAvatar from '@renderer/components/Avatar/EmojiAvatar'
 import { HStack } from '@renderer/components/Layout'
 import UserPopup from '@renderer/components/Popups/UserPopup'
 import { APP_NAME, AppLogo, isLocalAi } from '@renderer/config/env'
-import { getModelLogoById } from '@renderer/config/models'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useChatContext } from '@renderer/hooks/useChatContext'
@@ -30,9 +29,10 @@ interface Props {
   isGroupContextMessage?: boolean
 }
 
-const getAvatarSource = (isLocalAi: boolean, modelId: string | undefined) => {
+const getAvatarSource = (isLocalAi: boolean, _modelId: string | undefined) => {
   if (isLocalAi) return AppLogo
-  return modelId ? getModelLogoById(modelId) : undefined
+  // Custom-connection product: no curated model icon catalog in message UI.
+  return undefined
 }
 
 const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGroupContextMessage }) => {

@@ -1,4 +1,4 @@
-import type { Provider, SystemProvider } from '@renderer/types'
+import type { Provider } from '@renderer/types'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -298,18 +298,29 @@ describe('naming', () => {
   })
 
   describe('getFancyProviderName', () => {
-    it('should get i18n name for system provider', () => {
-      const mockSystemProvider: SystemProvider = {
+    it('should return the stored connection name (no built-in brand labels)', () => {
+      const mockSystemProvider: Provider = {
         id: 'dashscope',
         type: 'openai',
-        name: 'whatever',
+        name: 'My Bailian Connection',
         apiHost: 'whatever',
         apiKey: 'whatever',
         models: [],
         isSystem: true
       }
-      // 默认 i18n 环境是 en-us
-      expect(getFancyProviderName(mockSystemProvider)).toBe('Alibaba Cloud')
+      expect(getFancyProviderName(mockSystemProvider)).toBe('My Bailian Connection')
+    })
+
+    it('should fall back to provider id when the stored name is blank', () => {
+      const mockProvider: Provider = {
+        id: 'conn-123',
+        type: 'openai',
+        name: '   ',
+        apiHost: 'whatever',
+        apiKey: 'whatever',
+        models: []
+      }
+      expect(getFancyProviderName(mockProvider)).toBe('conn-123')
     })
 
     it('should get name for custom provider', () => {

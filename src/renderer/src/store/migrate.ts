@@ -4246,6 +4246,10 @@ const migrateConfig = {
       //    (Ollama-native suffixes); mistral/new-api custom paths are never
       //    stripped. Empty/whitespace-only/root-only hosts normalize to '';
       //    credentials are never guessed.
+      //  - Folded raw `ollama` entries are local no-key servers: they opt out
+      //    of the API-key requirement via `apiOptions.requiresApiKey:false`
+      //    while every other apiOptions field is preserved verbatim.
+      //    `new-api`/`mistral` folds keep apiOptions verbatim.
       //  - Entries whose type is azure-openai/vertexai/vertex-anthropic/
       //    aws-bedrock/gateway or any other unknown non-approved non-foldable
       //    value are retired (removed from llm.providers).
@@ -4284,6 +4288,13 @@ const migrateConfig = {
             (provider as unknown as { apiHost?: unknown }).apiHost,
             rawType
           ) as string
+          if (rawType === 'ollama') {
+            const prevOptions = (provider as unknown as { apiOptions?: Record<string, unknown> }).apiOptions
+            folded.apiOptions = {
+              ...(typeof prevOptions === 'object' && prevOptions !== null ? prevOptions : {}),
+              requiresApiKey: false
+            } as unknown as Provider['apiOptions']
+          }
           nextProviders.push(folded)
           continue
         }
@@ -4357,6 +4368,80 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 222 error', error as Error)
+      return state
+    }
+  },
+  '223': (state: RootState) => {
+    try {
+      // No-key backfill for states already at 222 (pre-requiresApiKey):
+      //  - Only unmistakable legacy local no-key connections opt out via
+      //    `apiOptions.requiresApiKey:false`. Conservative exact criteria:
+      //    type is exactly `openai`, id is exactly one of
+      //    ollama/lmstudio/gpustack, authType is not oauth, apiKey is empty,
+      //    requiresApiKey is unset, and apiHost is empty or loopback-local
+      //    (localhost/127.0.0.1/0.0.0.0/::1). All other apiOptions fields are
+      //    preserved verbatim.
+      //  - Arbitrary remote OpenAI-compatible connections (including keyless
+      //    custom endpoints with remote hosts or non-legacy ids) are left
+      //    untouched and keep requiring a key unless the user opts out in
+      //    Provider settings. Historical message snapshots are untouched.
+      const LOCAL_LEGACY_NO_KEY_IDS = new Set(['ollama', 'lmstudio', 'gpustack'])
+      const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1'])
+      const isLocalHost = (host: unknown): boolean => {
+        if (typeof host !== 'string') return false
+        const trimmed = host.trim()
+        // An empty host is intentionally accepted as local (legacy default).
+        if (trimmed.length === 0) return true
+        const lower = trimmed.toLowerCase()
+        // Take the authority: after `://` when a scheme is present, else the
+        // whole value (scheme-less `localhost:11434[/v1]` forms). Cut any
+        // path/query/fragment so `?next=localhost` never matches.
+        const withoutScheme = lower.includes('://') ? lower.slice(lower.indexOf('://') + 3) : lower
+        const authority = withoutScheme.split(/[/?#]/, 1)[0] ?? ''
+        // Any userinfo (`user@host`) disqualifies: the visible host may be
+        // remote while `localhost` hides in credentials.
+        if (authority.length === 0 || authority.includes('@')) return false
+        let hostname: string
+        if (authority.startsWith('[')) {
+          // Bracketed IPv6 `[::1]` with optional `:port`; nothing else allowed.
+          const bracketEnd = authority.indexOf(']')
+          if (bracketEnd < 0) return false
+          hostname = authority.slice(1, bracketEnd)
+          const rest = authority.slice(bracketEnd + 1)
+          if (rest.length > 0 && !/^:\d+$/.test(rest)) return false
+        } else if (authority === '::1') {
+          hostname = authority
+        } else {
+          // Single `host:port` split only when no other colon is present, so
+          // bare IPv6 variants never partially match.
+          const lastColon = authority.lastIndexOf(':')
+          if (lastColon >= 0 && /^\d+$/.test(authority.slice(lastColon + 1) ?? '')) {
+            const before = authority.slice(0, lastColon)
+            hostname = before.includes(':') ? authority : before
+          } else {
+            hostname = authority
+          }
+        }
+        return LOCAL_HOSTNAMES.has(hostname)
+      }
+      const providers = Array.isArray(state.llm?.providers) ? state.llm.providers : []
+      for (const provider of providers) {
+        if (!provider || typeof (provider as { id?: unknown }).id !== 'string') continue
+        if ((provider as unknown as { type?: unknown }).type !== 'openai') continue
+        if (!LOCAL_LEGACY_NO_KEY_IDS.has(provider.id)) continue
+        if ((provider as unknown as { authType?: unknown }).authType === 'oauth') continue
+        if (provider.apiOptions?.requiresApiKey !== undefined) continue
+        if (typeof provider.apiKey === 'string' && provider.apiKey.trim().length > 0) continue
+        if (!isLocalHost((provider as unknown as { apiHost?: unknown }).apiHost)) continue
+        provider.apiOptions = {
+          ...provider.apiOptions,
+          requiresApiKey: false
+        }
+      }
+      logger.info('migrate 223 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 223 error', error as Error)
       return state
     }
   }

@@ -11,7 +11,7 @@ import i18n from '@renderer/i18n'
 import store from '@renderer/store'
 import { hubMCPServer } from '@renderer/store/mcp'
 import type { Assistant, MCPServer, MCPTool, Model, Provider } from '@renderer/types'
-import { type FetchChatCompletionParams, getEffectiveMcpMode, isSystemProvider } from '@renderer/types'
+import { type FetchChatCompletionParams, getEffectiveMcpMode } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { type Chunk, ChunkType } from '@renderer/types/chunk'
 import type { Message, ResponseError } from '@renderer/types/newMessage'
@@ -31,7 +31,6 @@ import {
 } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { assertProviderMatchesModel, createNoModelError, isNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
-import { NOT_SUPPORT_API_KEY_PROVIDER_TYPES, NOT_SUPPORT_API_KEY_PROVIDERS } from '@renderer/utils/provider'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { isEmpty, takeRight } from 'lodash'
 
@@ -848,11 +847,10 @@ export async function fetchGenerate({
 
 export function hasApiKey(provider: Provider | undefined) {
   if (!provider) return false
-  if (
-    (isSystemProvider(provider) && NOT_SUPPORT_API_KEY_PROVIDERS.includes(provider.id)) ||
-    NOT_SUPPORT_API_KEY_PROVIDER_TYPES.includes(provider.type)
-  )
-    return true
+  // Explicit per-connection option, not brand ids/types. OAuth remains a
+  // no-key path where applicable. Unset requiresApiKey defaults to true.
+  if (provider.authType === 'oauth') return true
+  if (provider.apiOptions?.requiresApiKey === false) return true
   return !isEmpty(provider.apiKey)
 }
 
@@ -929,11 +927,11 @@ export async function fetchModels(provider: Provider): Promise<Model[]> {
 }
 
 export function checkApiProvider(provider: Provider): void {
-  const isExcludedProvider =
-    (isSystemProvider(provider) && NOT_SUPPORT_API_KEY_PROVIDERS.includes(provider.id)) ||
-    NOT_SUPPORT_API_KEY_PROVIDER_TYPES.includes(provider.type)
+  // Explicit per-connection option, not brand ids/types. OAuth remains a
+  // no-key path where applicable. Unset requiresApiKey defaults to true.
+  const needsApiKey = provider.authType !== 'oauth' && provider.apiOptions?.requiresApiKey !== false
 
-  if (!isExcludedProvider) {
+  if (needsApiKey) {
     if (!provider.apiKey) {
       window.toast.error(i18n.t('message.error.enter.api.label'))
       throw new Error(i18n.t('message.error.enter.api.label'))
