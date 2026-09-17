@@ -3,6 +3,7 @@ import { isSystemProviderId } from '@renderer/types'
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
+import { resolveCapabilityWithOverride, resolveExternalToolCallSupport } from './modelMetadata'
 import { isDeepSeekHybridInferenceModel } from './reasoning'
 import { isTextToImageModel } from './vision'
 
@@ -77,6 +78,17 @@ export function isFunctionCallingModel(model?: Model): boolean {
 
   if (isUserSelectedModelType(model, 'function_calling') !== undefined) {
     return isUserSelectedModelType(model, 'function_calling')!
+  }
+
+  // Optional models.dev enrichment: validated external `tool_call` outranks
+  // the legacy name heuristic; unknown stays permissive (falls through below).
+  const externalToolCall = resolveCapabilityWithOverride(
+    model,
+    'function_calling',
+    resolveExternalToolCallSupport(model)
+  )
+  if (externalToolCall !== undefined) {
+    return externalToolCall
   }
 
   if (model.provider === 'stepfun' && STEPFUN_FUNCTION_CALLING_MODELS.has(modelId)) {

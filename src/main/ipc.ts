@@ -45,6 +45,7 @@ import FileService from './services/FileSystemService'
 import KnowledgeService from './services/KnowledgeService'
 import mcpService from './services/MCPService'
 import MemoryService from './services/memory/MemoryService'
+import { modelMetadataService, registerModelMetadataIpc } from './services/ModelMetadataService'
 import { openTraceWindow, setTraceWindowTitle } from './services/NodeTraceService'
 import NotificationService from './services/NotificationService'
 import * as NutstoreService from './services/NutstoreService'
@@ -879,6 +880,12 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // Sync — app-level operation log + HTTP relay (MVP)
   const { registerSyncIpc } = await import('./services/sync/syncIpc')
   registerSyncIpc()
+
+  // ModelMetadata — optional models.dev enrichment (never gates admission).
+  // getSnapshot returns last-known-good immediately and refreshes stale data
+  // in the background; failures never propagate to callers.
+  registerModelMetadataIpc(modelMetadataService)
+  void modelMetadataService.init()
 
   ipcMain.handle(IpcChannel.App_QuoteToMain, (_, text: string) => windowService.quoteToMainWindow(text))
 

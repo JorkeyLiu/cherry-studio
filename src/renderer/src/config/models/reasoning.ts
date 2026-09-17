@@ -9,6 +9,11 @@ import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
 import {
+  getExternalReasoningEffortOptions,
+  resolveCapabilityWithOverride,
+  resolveExternalReasoningSupport
+} from './modelMetadata'
+import {
   isGPT5FamilyModel,
   isGPT5ProModel,
   isGPT5SeriesModel,
@@ -306,7 +311,13 @@ export const getModelSupportedReasoningEffortOptions = (
   if (!model) return undefined
 
   const { idResult, nameResult } = withModelIdAndNameAsId(model, _getModelSupportedReasoningEffortOptions)
-  return idResult ?? nameResult
+  const legacy = idResult ?? nameResult
+  if (legacy) return legacy
+  // Optional models.dev enrichment, additive only: the legacy heuristic stays
+  // authoritative whenever it answers. External controls use the exact model
+  // id (never the name-as-id fallback), so unknown ids keep returning
+  // undefined exactly as before.
+  return getExternalReasoningEffortOptions(model)
 }
 
 function _isSupportedThinkingTokenModel(model: Model): boolean {
@@ -809,6 +820,13 @@ export function isReasoningModel(model?: Model): boolean {
 
   if (isUserSelectedModelType(model, 'reasoning') !== undefined) {
     return isUserSelectedModelType(model, 'reasoning')!
+  }
+
+  // Optional models.dev enrichment: validated external `reasoning` outranks
+  // the legacy name heuristic; unknown stays permissive (falls through below).
+  const externalReasoning = resolveCapabilityWithOverride(model, 'reasoning', resolveExternalReasoningSupport(model))
+  if (externalReasoning !== undefined) {
+    return externalReasoning
   }
 
   const modelId = getLowerBaseModelName(model.id)

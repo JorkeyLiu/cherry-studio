@@ -278,6 +278,10 @@ export enum IpcChannel {
   // Provider
   Provider_AddKey = 'provider:add-key',
 
+  // ModelMetadata — optional models.dev-backed enrichment (never gates admission).
+  ModelMetadata_GetSnapshot = 'model-metadata:get-snapshot',
+  ModelMetadata_Refresh = 'model-metadata:refresh',
+
   // Memory
   Memory_Add = 'memory:add',
   Memory_Search = 'memory:search',

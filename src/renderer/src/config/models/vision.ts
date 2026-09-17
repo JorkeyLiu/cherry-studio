@@ -3,6 +3,7 @@ import type { Model } from '@renderer/types'
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
+import { resolveCapabilityWithOverride, resolveExternalVisionSupport } from './modelMetadata'
 import { isFunctionCallingModel } from './tooluse'
 
 // Vision models
@@ -266,6 +267,13 @@ export function isVisionModel(model?: Model): boolean {
   // }
   if (isUserSelectedModelType(model, 'vision') !== undefined) {
     return isUserSelectedModelType(model, 'vision')!
+  }
+
+  // Optional models.dev enrichment: validated external metadata outranks the
+  // legacy name heuristic; unknown stays permissive (falls through below).
+  const externalVision = resolveCapabilityWithOverride(model, 'vision', resolveExternalVisionSupport(model))
+  if (externalVision !== undefined) {
+    return externalVision
   }
 
   const modelId = getLowerBaseModelName(model.id)

@@ -6,6 +6,7 @@ import { UNKNOWN } from '@renderer/config/translate'
 import { getStoreProviders } from '@renderer/hooks/useStore'
 import i18n from '@renderer/i18n'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
+import { setMetadataProviderResolver } from '@renderer/services/modelMetadata'
 import store from '@renderer/store'
 import { addAssistant } from '@renderer/store/assistants'
 import type {
@@ -286,3 +287,10 @@ export async function createAssistantFromAgent(agent: AssistantPreset) {
 
   return assistant
 }
+
+// Optional models.dev attribution needs the exact owning provider, but
+// `config/models` capability modules must stay free of the AssistantService /
+// store chain (collection-time TDZ). Registered here and resolved lazily at
+// predicate time; the boundary still enforces the exact `model.provider` id
+// match, so there is never a silent default-provider fallback.
+setMetadataProviderResolver((model) => getStoreProviders().find((p) => p.id === model?.provider) ?? null)

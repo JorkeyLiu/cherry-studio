@@ -108,11 +108,24 @@ function initWebTrace() {
   }
 }
 
+// Optional models.dev enrichment: loads the last-known-good snapshot into the
+// renderer memory-only registry. Fire-and-forget by design — Redux/app
+// readiness never depends on its success, and every consumer treats a missing
+// snapshot as unknown (never a rejection).
+function initModelMetadata() {
+  void import('./services/modelMetadata')
+    .then(({ initModelMetadataRegistry }) => initModelMetadataRegistry())
+    .catch((e) => {
+      bootstrapLogger.warn('[Bootstrap] ModelMetadata init failed; registry stays unknown', e as Error)
+    })
+}
+
 initKeyv()
 initAutoSync()
 initStoreSync()
 initTopicDeletionSubscription()
 initWebTrace()
+initModelMetadata()
 
 // S7.13: renderer.bootstrap — synchronous bootstrap completion, idempotent once.
 // Fail-closed diagnostic only; uses dynamic import to avoid cycle.

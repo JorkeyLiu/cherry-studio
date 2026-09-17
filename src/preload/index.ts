@@ -74,6 +74,7 @@ import type { FileChangeEvent, WebviewKeyEvent } from '@shared/config/types'
 import type { MCPServerLogEntry } from '@shared/config/types'
 import type { ExternalAppInfo } from '@shared/externalApp/types'
 import { IpcChannel } from '@shared/IpcChannel'
+import type { ModelMetadataRefreshResult, ModelMetadataSnapshot } from '@shared/modelMetadata'
 import type { Notification } from '@types'
 import type {
   AddMemoryOptions,
@@ -637,6 +638,13 @@ const api = {
   },
   analytics: {
     trackTokenUsage: (data: TokenUsageData) => ipcRenderer.invoke(IpcChannel.Analytics_TrackTokenUsage, data)
+  },
+  modelMetadata: {
+    // Optional models.dev enrichment snapshot (last-known-good). Null when
+    // nothing is cached yet — callers must treat null as unknown, never as
+    // a reason to reject a model. Main refreshes stale data in background.
+    getSnapshot: (): Promise<ModelMetadataSnapshot | null> => ipcRenderer.invoke(IpcChannel.ModelMetadata_GetSnapshot),
+    refresh: (): Promise<ModelMetadataRefreshResult> => ipcRenderer.invoke(IpcChannel.ModelMetadata_Refresh)
   },
   sync: {
     getConfig: () => ipcRenderer.invoke(IpcChannel.Sync_GetConfig),
