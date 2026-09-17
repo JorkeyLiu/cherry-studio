@@ -1,5 +1,6 @@
 import type {
   Model,
+  Provider,
   ReasoningEffortConfig,
   ReasoningEffortOption,
   ThinkingModelType,
@@ -11,7 +12,8 @@ import { isEmbeddingModel, isRerankModel } from './embedding'
 import {
   getExternalReasoningEffortOptions,
   resolveCapabilityWithOverride,
-  resolveExternalReasoningSupport
+  resolveExternalReasoningSupport,
+  strictProviderForModel
 } from './modelMetadata'
 import {
   isGPT5FamilyModel,
@@ -209,8 +211,9 @@ const _getThinkModelType = (model: Model): ThinkingModelType => {
   } else if (isSupportedThinkingTokenQwenModel(model)) {
     if (isQwenAlwaysThinkModel(model)) {
       thinkingModelType = 'qwen_thinking'
+    } else {
+      thinkingModelType = 'qwen'
     }
-    thinkingModelType = 'qwen'
   } else if (isSupportedThinkingTokenDoubaoModel(model)) {
     if (isDoubaoThinkingAutoModel(model)) {
       thinkingModelType = 'doubao'
@@ -305,19 +308,135 @@ const _getModelSupportedReasoningEffortOptions = (model: Model): ReasoningEffort
  * getModelSupportedReasoningEffortOptions({ id: 'custom-id', name: 'gpt-5.1', ... })
  * // Returns: ['default', 'none', 'low', 'medium', 'high']
  */
-export const getModelSupportedReasoningEffortOptions = (
-  model: Model | undefined | null
-): ReasoningEffortOption[] | undefined => {
+/**
+ * Single effective reasoning-options resolver.
+ *
+ * Priority: explicit user override (only when actually present) -> exact
+ * owning-provider + exact model-id models.dev metadata -> model/family
+ * heuristics (offline fallback) -> unknown.
+ *
+ * Precise external metadata overrides heuristic option lists; heuristics
+ * remain the offline fallback. `default` means no override; `none`, `auto`,
+ * and effort levels appear only when resolved and sendable in the active
+ * lane. Internal `xhigh` remains the normalized representation of upstream
+ * `max`. Toggle-only metadata is represented only to the extent the current
+ * lane can emit on/off; budget-only metadata is not modeled (fixed).
+ *
+ * The optional provider selects the active request lane for protocol
+ * filtering. When omitted, the exact owning provider is resolved internally;
+ * when the connection is unknown, no lane filtering applies (offline
+ * fallback). Never branches on provider brand ids — only on
+ * protocol/capability (`provider.type` + official-host check).
+ */
+export function getResolvedReasoningOptions(
+  model: Model | undefined | null,
+  provider?: Provider | null
+): ReasoningEffortOption[] | undefined {
   if (!model) return undefined
 
-  const { idResult, nameResult } = withModelIdAndNameAsId(model, _getModelSupportedReasoningEffortOptions)
-  const legacy = idResult ?? nameResult
-  if (legacy) return legacy
-  // Optional models.dev enrichment, additive only: the legacy heuristic stays
-  // authoritative whenever it answers. External controls use the exact model
-  // id (never the name-as-id fallback), so unknown ids keep returning
-  // undefined exactly as before.
-  return getExternalReasoningEffortOptions(model)
+  const override = isUserSelectedModelType(model, 'reasoning')
+  if (override === false) return undefined
+
+  const externalOptions = getExternalReasoningEffortOptions(model, provider ?? undefined)
+  const externalSupport = resolveExternalReasoningSupport(model, provider ?? undefined)
+
+  const heuristicOptions = (() => {
+    const { idResult, nameResult } = withModelIdAndNameAsId(model, _getModelSupportedReasoningEffortOptions)
+    return idResult ?? nameResult
+  })()
+
+  let base: ReasoningEffortOption[] | undefined
+  if (override === true) {
+    // User forces reasoning: prefer precise external controls, fall back to
+    // heuristic, degrade to fixed (`default` only) when neither knows controls.
+    base = externalOptions ?? heuristicOptions ?? ['default']
+  } else {
+    // No user override: external false overrules a legacy true; external
+    // true with controls overrides heuristic lists; otherwise heuristic.
+    if (externalSupport === false) return undefined
+    if (externalSupport === true && externalOptions) {
+      base = externalOptions
+    } else {
+      base = heuristicOptions
+      if (!base) {
+        // Reasoning-supported but no controllable parameters in any lane:
+        // fixed reasoning model (no false strength menu). Unknown models
+        // stay undefined (no gating, requests never blocked).
+        if (isReasoningModel(model)) return ['default']
+        return undefined
+      }
+    }
+  }
+
+  return filterReasoningOptionsByLane(base, model, provider ?? undefined)
+}
+
+function resolveReasoningLane(provider?: Provider | null): 'anthropic' | 'gemini' | 'openai' | 'generic' {
+  if (!provider) return 'generic'
+  if (provider.type === 'anthropic') return 'anthropic'
+  if (provider.type === 'gemini') return 'gemini'
+  if (provider.type === 'openai-response') return 'openai'
+  if (provider.type === 'openai') {
+    const host = (provider.apiHost ?? '').toLowerCase()
+    if (host.includes('api.openai.com')) return 'openai'
+    return 'generic'
+  }
+  return 'generic'
+}
+
+/**
+ * Protocol-specific option filtering. Every lane preserves `default` (no
+ * override) and only keeps controls it can explicitly emit — never invents
+ * budget-as-effort and never adds a token-budget input.
+ *
+ * Current lanes can all emit `none` (disable/off), `auto` (on/auto), and
+ * named effort levels via their protocol-standard shapes, except the Gemini
+ * native lane, which only emits thinking controls for Gemini-family or
+ * externally-known reasoning models. A Gemini-lane mismatch degrades to
+ * fixed (`default` only) so no false strength menu appears.
+ */
+function filterReasoningOptionsByLane(
+  base: ReasoningEffortOption[] | undefined,
+  model: Model,
+  provider?: Provider | null
+): ReasoningEffortOption[] | undefined {
+  if (!base) return undefined
+  if (provider === undefined) {
+    // No explicit connection: resolve the exact owning provider internally so
+    // UI/sync/request share one effective resolution. Unknown connections
+    // skip lane filtering (offline fallback preserves heuristic lists).
+    return filterReasoningOptionsByLane(base, model, strictProviderForModelSafe(model))
+  }
+  if (provider === null) return base
+  const lane = resolveReasoningLane(provider)
+  if (lane !== 'gemini') return base
+  const { idResult, nameResult } = withModelIdAndNameAsId(model, isSupportedThinkingTokenGeminiModel)
+  const isGeminiFamily = idResult || nameResult
+  const externalSupport = resolveExternalReasoningSupport(model, provider)
+  if (isGeminiFamily || externalSupport === true) return base
+  // Reasoning resolved for another protocol but served via the Gemini native
+  // lane: no explicit emit shape here, so expose no false controls.
+  return ['default']
+}
+
+function strictProviderForModelSafe(model: Model): Provider | null {
+  try {
+    return strictProviderForModel(model)
+  } catch {
+    return null
+  }
+}
+
+export const getModelSupportedReasoningEffortOptions = (
+  model: Model | undefined | null,
+  provider?: Provider | null
+): ReasoningEffortOption[] | undefined => {
+  if (!model) return undefined
+  // Single resolver keeps UI, normalization, gating, and request mapping on
+  // one priority + lane-filtered source. The provider arg is optional for
+  // backward compatibility; omitted means current-connection resolution.
+  if (provider === undefined) return getResolvedReasoningOptions(model)
+  return getResolvedReasoningOptions(model, provider)
 }
 
 function _isSupportedThinkingTokenModel(model: Model): boolean {
@@ -941,16 +1060,18 @@ export const findTokenLimit = (modelId: string): { min: number; max: number } | 
 /**
  * Determines if a model is a fixed reasoning model.
  *
- * A model is considered a fixed reasoning model if it meets all of the following criteria:
- * - It is a reasoning model
- * - It does NOT support thinking tokens
- * - It does NOT support reasoning effort
- *
- * @param model - The model to check
- * @returns `true` if the model is a fixed reasoning model, `false` otherwise
+ * A model is fixed reasoning when it is reasoning-supported but exposes no
+ * controllable parameters in the active lane: the single resolver returns
+ * `default` only (or nothing beyond `default`). Fixed models show no false
+ * strength menu. Unknown/non-reasoning models are never fixed.
  */
-export const isFixedReasoningModel = (model: Model) =>
-  isReasoningModel(model) && !isSupportedThinkingTokenModel(model) && !isSupportedReasoningEffortModel(model)
+export const isFixedReasoningModel = (model: Model | undefined | null, provider?: Provider | null): boolean => {
+  if (!model || !isReasoningModel(model)) return false
+  const options =
+    provider === undefined ? getResolvedReasoningOptions(model) : getResolvedReasoningOptions(model, provider)
+  if (!options) return true
+  return options.filter((option) => option !== 'default').length === 0
+}
 
 // https://platform.minimaxi.com/docs/guides/text-m2-function-call#openai-sdk
 // https://docs.z.ai/guides/capabilities/thinking-mode

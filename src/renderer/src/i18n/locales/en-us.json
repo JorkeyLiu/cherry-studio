@@ -937,8 +937,8 @@
         "minimal_description": "Minimal reasoning",
         "off": "Off",
         "off_description": "Disable reasoning",
-        "xhigh": "Extra High",
-        "xhigh_description": "Extra high level reasoning"
+        "xhigh": "Max",
+        "xhigh_description": "Max level reasoning"
       },
       "title": "Assistant Settings",
       "tool_use_mode": {

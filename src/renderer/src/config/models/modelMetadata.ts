@@ -106,11 +106,15 @@ export function getExternalReasoningControls(
 /**
  * External reasoning-effort options for effort-option construction.
  *
- * Additive only: returns undefined unless the entry is known-reasoning.
- * Known effort values map 1:1; upstream `max` maps to `xhigh` (the closest
- * local level); anything unrecognized is dropped. Reasoning-known without
- * published controls degrades to toggle semantics (`default` + `auto`).
- * `default` is always first, matching the legacy convention.
+ * Precise external metadata overrides heuristic option lists when the exact
+ * owning-provider + exact model-id entry is known-reasoning. Known effort
+ * values map 1:1; upstream `max` maps to `xhigh` (the closest local level,
+ * displayed as Max); anything unrecognized is dropped. Reasoning-known with
+ * toggle-only controls degrades to toggle semantics
+ * (`default` + `none` + `auto`) to the extent the active lane can emit
+ * on/off. Reasoning-known without any controls returns `default` only
+ * (fixed reasoning, no false menu). `default` is always first, matching the
+ * legacy convention. Budget-only controls are intentionally not modeled here.
  */
 export function getExternalReasoningEffortOptions(
   model: Model | undefined | null,
@@ -131,7 +135,7 @@ export function getExternalReasoningEffortOptions(
     if (option && !mapped.includes(option)) mapped.push(option)
   }
   if (mapped.length === 0) {
-    return entry.reasoningControls?.toggle ? ['default', 'auto'] : ['default']
+    return entry.reasoningControls?.toggle ? ['default', 'none', 'auto'] : ['default']
   }
   return ['default', ...mapped]
 }

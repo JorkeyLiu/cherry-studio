@@ -11,12 +11,10 @@ import {
 } from '@renderer/components/Icons/SVGIcon'
 import { QuickPanelReservedSymbol, useQuickPanel } from '@renderer/components/QuickPanel'
 import {
-  getThinkModelType,
-  isDoubaoThinkingAutoModel,
+  getModelSupportedReasoningEffortOptions,
   isFixedReasoningModel,
   isGPT5SeriesReasoningModel,
-  isOpenAIWebSearchModel,
-  MODEL_SUPPORTED_OPTIONS
+  isOpenAIWebSearchModel
 } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
@@ -39,30 +37,26 @@ const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactEle
   const { assistant, updateAssistantSettings } = useAssistant(assistantId)
 
   const currentReasoningEffort = useMemo(() => {
-    return assistant.settings?.reasoning_effort || 'none'
+    return assistant.settings?.reasoning_effort || 'default'
   }, [assistant.settings?.reasoning_effort])
 
-  // 确定当前模型支持的选项类型
-  const modelType = useMemo(() => getThinkModelType(model), [model])
-
+  // Single-resolver options: user override -> exact external -> heuristic,
+  // lane-filtered for the current connection. `default` means no override;
+  // `none`/`auto`/effort levels appear only when resolved and sendable.
   const isFixedReasoning = isFixedReasoningModel(model)
 
   // 获取当前模型支持的选项
   const supportedOptions: ThinkingOption[] = useMemo(() => {
-    if (modelType === 'doubao') {
-      if (isDoubaoThinkingAutoModel(model)) {
-        return ['none', 'auto', 'high']
-      }
-      return ['none', 'high']
-    }
-    return MODEL_SUPPORTED_OPTIONS[modelType]
-  }, [model, modelType])
+    return getModelSupportedReasoningEffortOptions(model) ?? ['default']
+  }, [model])
 
   const onThinkingChange = useCallback(
     (option: ThinkingOption) => {
-      const isEnabled = option !== 'none'
+      // `default` means no override (not enabled); only concrete on-levels
+      // enable think mode. Matches useAssistant normalization.
+      const thinkModeEnabled = option !== 'none' && option !== 'default'
 
-      if (!isEnabled) {
+      if (!thinkModeEnabled) {
         const modelKey = getModelReasoningEffortKey(model)
         updateAssistantSettings({
           reasoning_effort: option,

@@ -93,7 +93,11 @@ vi.mock('@renderer/config/models', async (importOriginal) => {
     isSupportedThinkingTokenModel: vi.fn(() => false),
     isMiniMaxReasoningModel: vi.fn(() => false),
     isSupportNoneReasoningEffortModel: vi.fn(() => false),
-    getModelSupportedReasoningEffortOptions: vi.fn(() => undefined),
+    getModelSupportedReasoningEffortOptions: vi.fn((model) => {
+      if (!model) return undefined
+      return actual.getModelSupportedReasoningEffortOptions(model)
+    }),
+    resolveExternalReasoningSupport: vi.fn(() => undefined),
     isGPT51SeriesModel: vi.fn(() => false),
     isGemini3ThinkingTokenModel: vi.fn(() => false),
     findTokenLimit: vi.fn(actual.findTokenLimit)
@@ -260,10 +264,8 @@ describe('reasoning utils', () => {
       expect(getReasoningEffort(makeAssistant('medium'), makeModel({ id: 'grok-3-mini' }))).toEqual({
         reasoningEffort: 'medium'
       })
-      // Unsupported selection falls back to the first supported value, never a vendor key.
-      expect(getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toEqual({
-        reasoningEffort: 'low'
-      })
+      // Unsupported selection returns {} (never guessed by supported[0], never an unrelated level).
+      expect(getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toEqual({})
     })
 
     it('should use generic reasoningEffort for Gemini thinking families (no extra_body)', async () => {

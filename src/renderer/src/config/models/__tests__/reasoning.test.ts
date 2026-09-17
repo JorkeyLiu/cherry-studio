@@ -2313,11 +2313,14 @@ describe('getModelSupportedReasoningEffortOptions', () => {
       ])
     })
 
-    it('should return undefined for always-thinking Qwen models', () => {
-      // These models always think and don't support thinking token control
-      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'qwen3-thinking' }))).toBeUndefined()
-      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'qwen3-vl-235b-thinking' }))).toBeUndefined()
-      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'qwen3.5-thinking' }))).toBeUndefined()
+    it('should return default-only (fixed reasoning) for always-thinking Qwen models', () => {
+      // These models always think and expose no controllable parameters:
+      // fixed reasoning, no false strength menu.
+      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'qwen3-thinking' }))).toEqual(['default'])
+      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'qwen3-vl-235b-thinking' }))).toEqual([
+        'default'
+      ])
+      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'qwen3.5-thinking' }))).toEqual(['default'])
     })
   })
 

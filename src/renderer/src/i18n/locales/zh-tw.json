@@ -937,8 +937,8 @@
         "minimal_description": "最少推理",
         "off": "關閉",
         "off_description": "禁用推理",
-        "xhigh": "極力思考",
-        "xhigh_description": "超高階推理"
+        "xhigh": "最大",
+        "xhigh_description": "最大強度推理"
       },
       "title": "助手設定",
       "tool_use_mode": {

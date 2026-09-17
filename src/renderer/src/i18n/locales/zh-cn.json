@@ -937,8 +937,8 @@
         "minimal_description": "最小程度的推理",
         "off": "关闭",
         "off_description": "禁用推理",
-        "xhigh": "穷究",
-        "xhigh_description": "超高强度推理"
+        "xhigh": "最大",
+        "xhigh_description": "最大强度推理"
       },
       "title": "助手设置",
       "tool_use_mode": {

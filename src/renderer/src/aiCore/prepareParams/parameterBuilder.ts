@@ -8,11 +8,7 @@ import type { WebSearchPluginConfig } from '@cherrystudio/ai-core/built-in/plugi
 import { extensionRegistry } from '@cherrystudio/ai-core/provider'
 import { loggerService } from '@logger'
 import { MAX_TOOL_CALLS, MIN_TOOL_CALLS } from '@renderer/config/constant'
-import {
-  isFixedReasoningModel,
-  isSupportedReasoningEffortModel,
-  isSupportedThinkingTokenModel
-} from '@renderer/config/models/reasoning'
+import { isFixedReasoningModel, isReasoningModel } from '@renderer/config/models/reasoning'
 import { isAnthropicModel, isGeminiModel } from '@renderer/config/models/utils'
 import { isGenerateImageModel, isPureGenerateImageModel } from '@renderer/config/models/vision'
 import { isOpenRouterBuiltInWebSearchModel, isWebSearchModel } from '@renderer/config/models/websearch'
@@ -111,11 +107,12 @@ export async function buildStreamTextParams(
 
   // 这三个变量透传出来，交给下面启用插件/中间件
   // 也可以在外部构建好再传入buildStreamTextParams
-  // FIXME: qwen3即使关闭思考仍然会导致enableReasoning的结果为true
+  // Single-resolver gating: reasoning capability (user override -> exact
+  // external -> heuristic) drives enablement; `default` still enables the
+  // path but each lane emits {} for no-override. Fixed reasoning always
+  // enables so lanes can attach required thinking metadata.
   const enableReasoning =
-    ((isSupportedThinkingTokenModel(model) || isSupportedReasoningEffortModel(model)) &&
-      assistant.settings?.reasoning_effort !== undefined) ||
-    isFixedReasoningModel(model)
+    (isReasoningModel(model) && assistant.settings?.reasoning_effort !== undefined) || isFixedReasoningModel(model)
 
   // 判断是否使用内置搜索
   // 条件：没有外部搜索提供商 && (用户开启了内置搜索 || 模型强制使用内置搜索)

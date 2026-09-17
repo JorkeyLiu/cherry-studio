@@ -16,6 +16,7 @@ const mockIsFixedReasoningModel = vi.fn()
 const mockIsGPT5SeriesReasoningModel = vi.fn()
 const mockIsOpenAIWebSearchModel = vi.fn()
 const mockIsDoubaoThinkingAutoModel = vi.fn()
+const mockGetModelSupportedReasoningEffortOptions = vi.fn()
 
 // Global toast mock
 const mockToastWarning = vi.fn()
@@ -39,12 +40,15 @@ vi.mock('@renderer/hooks/useAssistant', () => ({
 }))
 
 // Mock reasoning.ts utility functions
+// The component consumes the single resolver (user override -> exact
+// external -> heuristic, lane-filtered); tests drive it directly per case.
 vi.mock('@renderer/config/models', () => ({
   getThinkModelType: (...args: any[]) => mockGetThinkModelType(...args),
   isFixedReasoningModel: (...args: any[]) => mockIsFixedReasoningModel(...args),
   isGPT5SeriesReasoningModel: (...args: any[]) => mockIsGPT5SeriesReasoningModel(...args),
   isOpenAIWebSearchModel: (...args: any[]) => mockIsOpenAIWebSearchModel(...args),
   isDoubaoThinkingAutoModel: (...args: any[]) => mockIsDoubaoThinkingAutoModel(...args),
+  getModelSupportedReasoningEffortOptions: (...args: any[]) => mockGetModelSupportedReasoningEffortOptions(...args),
   MODEL_SUPPORTED_OPTIONS: {
     default: ['default', 'none', 'low', 'medium', 'high'],
     o: ['default', 'low', 'medium', 'high'],
@@ -58,6 +62,21 @@ vi.mock('@renderer/config/models', () => ({
     doubao_after_251015: ['default', 'minimal', 'low', 'medium', 'high']
   }
 }))
+
+// Single-resolver option lists keyed by the legacy modelType labels used
+// across this suite (plus the doubao auto toggle).
+const MODEL_TYPE_OPTIONS: Record<string, ThinkingOption[]> = {
+  default: ['default', 'none', 'low', 'medium', 'high'],
+  o: ['default', 'low', 'medium', 'high'],
+  gpt5: ['default', 'minimal', 'low', 'medium', 'high'],
+  gpt5pro: ['default', 'high'],
+  gpt5_2: ['default', 'none', 'low', 'medium', 'high', 'xhigh'],
+  gemini2_flash: ['default', 'none', 'low', 'medium', 'high', 'auto'],
+  gemini3_flash: ['default', 'minimal', 'low', 'medium', 'high'],
+  doubao: ['default', 'none', 'auto', 'high'],
+  doubao_no_auto: ['default', 'none', 'high'],
+  doubao_after_251015: ['default', 'minimal', 'low', 'medium', 'high']
+}
 
 // Mock icon components
 vi.mock('@renderer/components/Icons/SVGIcon', () => ({
@@ -299,6 +318,15 @@ const renderComponent = (
   mockIsOpenAIWebSearchModel.mockReturnValue(isOpenAIWebSearchModel)
   mockIsGPT5SeriesReasoningModel.mockReturnValue(isGPT5SeriesReasoningModel)
   mockIsDoubaoThinkingAutoModel.mockReturnValue(isDoubaoThinkingAutoModel)
+  // Single resolver drives the component's option list. The doubao auto
+  // toggle selects the matching list, mirroring the resolver's output.
+  const resolvedOptions =
+    modelType === 'doubao'
+      ? isDoubaoThinkingAutoModel
+        ? MODEL_TYPE_OPTIONS.doubao
+        : MODEL_TYPE_OPTIONS.doubao_no_auto
+      : (MODEL_TYPE_OPTIONS[modelType] ?? MODEL_TYPE_OPTIONS.default)
+  mockGetModelSupportedReasoningEffortOptions.mockReturnValue(resolvedOptions)
 
   // Setup global toast mock
   ;(global.window as any).toast = { warning: mockToastWarning }
@@ -325,6 +353,7 @@ describe('ThinkingButton', () => {
     mockIsGPT5SeriesReasoningModel.mockReturnValue(false)
     mockIsOpenAIWebSearchModel.mockReturnValue(false)
     mockIsDoubaoThinkingAutoModel.mockReturnValue(false)
+    mockGetModelSupportedReasoningEffortOptions.mockReturnValue(MODEL_TYPE_OPTIONS.gpt5)
 
     ;(global.window as any).toast = { warning: mockToastWarning }
   })
@@ -686,18 +715,19 @@ describe('ThinkingButton', () => {
   })
 
   describe('edge cases', () => {
-    it('should handle undefined reasoning level by falling back to none', () => {
+    it('should handle undefined reasoning level by falling back to default', () => {
       const assistantReturn = createUseAssistantReturn({
         assistant: createAssistant({ settings: { reasoning_effort: undefined } })
       })
 
       renderComponent({
-        useAssistantReturn: assistantReturn
+        useAssistantReturn: assistantReturn,
+        reasoningEffort: 'default'
       })
 
-      // When reasoning_effort is undefined, component uses 'none' as default
-      // Should show off-outline icon (for 'none' state)
-      expect(getIconByTestId('mdi-lightbulb-off-outline')).toBeInTheDocument()
+      // When reasoning_effort is undefined, component uses 'default' (no
+      // override). Should show question icon (for 'default' state)
+      expect(getIconByTestId('mdi-lightbulb-question')).toBeInTheDocument()
     })
 
     it('should handle unsupported model types', () => {
