@@ -119,7 +119,6 @@ vi.mock('@renderer/services/AssistantService', () => {
 import assistants from '../assistants'
 import backup from '../backup'
 import clipboard from '../clipboard'
-import copilot from '../copilot'
 import editMode from '../editMode'
 import inputToolsReducer from '../inputTools'
 import knowledge from '../knowledge'
@@ -169,7 +168,11 @@ const BLACKLIST = [
 // creates global side effects (storeSyncService, window.store, persistor).
 // This reproduces the exact appReducer + blacklist + version + migrate contract
 // at time of writing (v220). DRIFT RISK: keep in sync with that file manually.
+// NOTE (slice 3): copilot slice retired in 222; bench keeps a history-only
+// dummy reducer so the v220 wire shape stays intact without importing deleted code.
 // -----------------------------------------------------------------------------
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any
+const copilot = (state: Record<string, unknown> = {}, _action: any) => state
 const benchAppReducer = combineReducers({
   assistants,
   backup,

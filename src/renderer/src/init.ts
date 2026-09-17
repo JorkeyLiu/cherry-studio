@@ -2,6 +2,7 @@ import KeyvStorage from '@kangfenmao/keyv-storage'
 import { loggerService } from '@logger'
 
 import { applyMainWindowTitle } from './config/title'
+import { setExactProviderResolver } from './services/exactProviderResolver'
 import { scheduleScrollSnapshotStartupSweep } from './services/scrollSnapshotCache'
 import storeSyncService from './services/StoreSyncService'
 import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscription'
@@ -108,6 +109,20 @@ function initWebTrace() {
   }
 }
 
+// Optional models.dev attribution plus vision/websearch provider-dependent
+// predicates need the exact owning provider, but `config/models` modules
+// must stay free of the store/AssistantService chain (collection-time TDZ).
+// Registered here — after store construction, synchronous because capability
+// predicates are synchronous — with an exact `model.provider` id match and
+// no default fallback (no-silent-substitution contract). Never throws.
+function initExactProviderResolver() {
+  try {
+    setExactProviderResolver((model) => store.getState().llm.providers.find((p) => p.id === model?.provider) ?? null)
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] ExactProviderResolver init failed; capabilities stay unknown', e as Error)
+  }
+}
+
 // Optional models.dev enrichment: loads the last-known-good snapshot into the
 // renderer memory-only registry. Fire-and-forget by design — Redux/app
 // readiness never depends on its success, and every consumer treats a missing
@@ -125,6 +140,7 @@ initAutoSync()
 initStoreSync()
 initTopicDeletionSubscription()
 initWebTrace()
+initExactProviderResolver()
 initModelMetadata()
 
 // S7.13: renderer.bootstrap — synchronous bootstrap completion, idempotent once.

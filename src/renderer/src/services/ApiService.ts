@@ -940,7 +940,7 @@ export function checkApiProvider(provider: Provider): void {
     }
   }
 
-  if (!provider.apiHost && provider.type !== 'vertexai') {
+  if (!provider.apiHost) {
     window.toast.error(i18n.t('message.error.enter.api.host'))
     throw new Error(i18n.t('message.error.enter.api.host'))
   }

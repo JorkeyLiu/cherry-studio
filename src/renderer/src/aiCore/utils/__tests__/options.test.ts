@@ -189,7 +189,7 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://api.openai.com/v1',
         isSystem: true
-      } as Provider
+      } as unknown as Provider
 
       it('should build basic OpenAI options', () => {
         const result = buildProviderOptions(mockAssistant, mockModel, openaiProvider, {
@@ -255,7 +255,7 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://api.anthropic.com',
         isSystem: true
-      } as Provider
+      } as unknown as Provider
 
       const anthropicModel: Model = {
         id: 'claude-3-5-sonnet-20241022',
@@ -298,7 +298,7 @@ describe('options utils', () => {
         apiHost: 'https://generativelanguage.googleapis.com',
         isSystem: true,
         models: [{ id: 'gemini-2.0-flash-exp' }] as Model[]
-      } as Provider
+      } as unknown as Provider
 
       const googleModel: Model = {
         id: 'gemini-2.0-flash-exp',
@@ -342,16 +342,16 @@ describe('options utils', () => {
       })
     })
 
-    describe('xAI provider', () => {
+    describe('xAI provider (slice 3: brand id never selects; protocol does)', () => {
       const xaiProvider = {
         id: SystemProviderIds.grok,
         name: 'xAI',
-        type: 'new-api',
+        type: 'openai',
         apiKey: 'test-key',
         apiHost: 'https://api.x.ai/v1',
         isSystem: true,
         models: [] as Model[]
-      } as Provider
+      } as unknown as Provider
 
       const xaiModel: Model = {
         id: 'grok-2-latest',
@@ -359,30 +359,30 @@ describe('options utils', () => {
         provider: SystemProviderIds.grok
       } as Model
 
-      it('should build basic xAI options', () => {
+      it('should build generic OpenAI-compatible options instead of brand-keyed xai options', () => {
         const result = buildProviderOptions(mockAssistant, xaiModel, xaiProvider, {
           enableReasoning: false,
           enableWebSearch: false,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('xai')
-        expect(result.providerOptions.xai).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('xai')
+        expect(result.providerOptions['openai-compatible']).toBeDefined()
       })
 
-      it('should include reasoning parameters when enabled', () => {
+      it('should include generic reasoning parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, xaiModel, xaiProvider, {
           enableReasoning: true,
           enableWebSearch: false,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions.xai).toHaveProperty('reasoningEffort')
-        expect(result.providerOptions.xai.reasoningEffort).toBe('high')
+        expect(result.providerOptions['openai-compatible']).toHaveProperty('reasoningEffort')
       })
     })
 
-    describe('DeepSeek provider', () => {
+    describe('DeepSeek provider (slice 3: protocol selection)', () => {
       const deepseekProvider: Provider = {
         id: SystemProviderIds.deepseek,
         name: 'DeepSeek',
@@ -390,7 +390,7 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://api.deepseek.com',
         isSystem: true
-      } as Provider
+      } as unknown as Provider
 
       const deepseekModel: Model = {
         id: 'deepseek-chat',
@@ -398,18 +398,19 @@ describe('options utils', () => {
         provider: SystemProviderIds.deepseek
       } as Model
 
-      it('should build basic DeepSeek options', () => {
+      it('should build generic OpenAI-compatible options instead of brand-keyed deepseek options', () => {
         const result = buildProviderOptions(mockAssistant, deepseekModel, deepseekProvider, {
           enableReasoning: false,
           enableWebSearch: false,
           enableGenerateImage: false
         })
-        expect(result.providerOptions).toHaveProperty('deepseek')
-        expect(result.providerOptions.deepseek).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('deepseek')
+        expect(result.providerOptions['openai-compatible']).toBeDefined()
       })
     })
 
-    describe('OpenRouter provider', () => {
+    describe('OpenRouter provider (slice 3: protocol selection)', () => {
       const openrouterProvider: Provider = {
         id: SystemProviderIds.openrouter,
         name: 'OpenRouter',
@@ -417,7 +418,7 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://openrouter.ai/api/v1',
         isSystem: true
-      } as Provider
+      } as unknown as Provider
 
       const openrouterModel: Model = {
         id: 'openai/gpt-4',
@@ -425,29 +426,30 @@ describe('options utils', () => {
         provider: SystemProviderIds.openrouter
       } as Model
 
-      it('should build basic OpenRouter options', () => {
+      it('should build generic OpenAI-compatible options instead of brand-keyed openrouter options', () => {
         const result = buildProviderOptions(mockAssistant, openrouterModel, openrouterProvider, {
           enableReasoning: false,
           enableWebSearch: false,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('openrouter')
-        expect(result.providerOptions.openrouter).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('openrouter')
+        expect(result.providerOptions['openai-compatible']).toBeDefined()
       })
 
-      it('should include web search parameters when enabled', () => {
+      it('should include generic web search parameters when enabled', () => {
         const result = buildProviderOptions(mockAssistant, openrouterModel, openrouterProvider, {
           enableReasoning: false,
           enableWebSearch: true,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions.openrouter).toHaveProperty('enable_search')
+        expect(result.providerOptions['openai-compatible']).toHaveProperty('enable_search')
       })
     })
 
-    describe('Poe provider', () => {
+    describe('Poe provider (slice 3: protocol selection)', () => {
       const poeProvider: Provider = {
         id: SystemProviderIds.poe,
         name: 'Poe',
@@ -455,7 +457,7 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://api.poe.com/v1',
         isSystem: true
-      } as Provider
+      } as unknown as Provider
 
       const poeModel: Model = {
         id: 'openai/gpt-4',
@@ -463,7 +465,7 @@ describe('options utils', () => {
         provider: SystemProviderIds.poe
       } as Model
 
-      it('should deep merge Poe extra_body reasoning and web search parameters', async () => {
+      it('should deep merge generic extra_body reasoning and web search parameters', async () => {
         const { getReasoningEffort } = await import('../reasoning')
         const { getWebSearchParams } = await import('../websearch')
 
@@ -484,8 +486,9 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('poe')
-        expect(result.providerOptions.poe).toMatchObject({
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('poe')
+        expect(result.providerOptions['openai-compatible']).toMatchObject({
           extra_body: {
             reasoning_effort: 'medium',
             web_search: true
@@ -512,7 +515,7 @@ describe('options utils', () => {
             type: 'openai',
             apiKey: 'test-key',
             apiHost: 'https://api.openai.com/v1'
-          } as Provider,
+          } as unknown as Provider,
           {
             enableReasoning: false,
             enableWebSearch: false,
@@ -551,7 +554,7 @@ describe('options utils', () => {
             type: 'gemini',
             apiKey: 'test-key',
             apiHost: 'https://generativelanguage.googleapis.com'
-          } as Provider,
+          } as unknown as Provider,
           {
             enableReasoning: false,
             enableWebSearch: false,
@@ -595,7 +598,7 @@ describe('options utils', () => {
             type: 'gemini',
             apiKey: 'test-key',
             apiHost: 'https://generativelanguage.googleapis.com'
-          } as Provider,
+          } as unknown as Provider,
           {
             enableReasoning: false,
             enableWebSearch: false,
@@ -619,7 +622,7 @@ describe('options utils', () => {
         apiHost: 'https://generativelanguage.googleapis.com',
         isSystem: true,
         models: [] as Model[]
-      } as Provider
+      } as unknown as Provider
 
       const googleModel: Model = {
         id: 'gemini-2.0-flash-exp',
@@ -650,8 +653,8 @@ describe('options utils', () => {
       })
     })
 
-    describe('Vertex AI providers', () => {
-      it('should map google-vertex to google', () => {
+    describe('Vertex AI providers (slice 3: retired — resolve generic, never vertex keys)', () => {
+      it('should resolve a retired vertexai protocol entry to generic OpenAI-compatible options', () => {
         const vertexProvider = {
           id: 'google-vertex',
           name: 'Vertex AI',
@@ -659,7 +662,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://vertex-ai.googleapis.com',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const vertexModel: Model = {
           id: 'gemini-2.0-flash-exp',
@@ -673,10 +676,11 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('google')
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('google')
       })
 
-      it('should map google-vertex-anthropic to anthropic', () => {
+      it('should resolve a retired vertex-anthropic protocol entry to generic OpenAI-compatible options', () => {
         const vertexAnthropicProvider = {
           id: 'google-vertex-anthropic',
           name: 'Vertex AI Anthropic',
@@ -684,7 +688,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://vertex-ai.googleapis.com',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const vertexModel: Model = {
           id: 'claude-3-5-sonnet-20241022',
@@ -698,11 +702,12 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('anthropic')
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('anthropic')
       })
     })
 
-    describe('AWS Bedrock provider', () => {
+    describe('AWS Bedrock provider (slice 3: retired — resolves generic)', () => {
       const bedrockProvider = {
         id: 'bedrock',
         name: 'AWS Bedrock',
@@ -710,7 +715,7 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://bedrock.us-east-1.amazonaws.com',
         models: [] as Model[]
-      } as Provider
+      } as unknown as Provider
 
       const bedrockModel: Model = {
         id: 'anthropic.claude-sonnet-4-20250514-v1:0',
@@ -718,18 +723,19 @@ describe('options utils', () => {
         provider: 'bedrock'
       } as Model
 
-      it('should build basic Bedrock options', () => {
+      it('should build generic OpenAI-compatible options instead of brand-keyed bedrock options', () => {
         const result = buildProviderOptions(mockAssistant, bedrockModel, bedrockProvider, {
           enableReasoning: false,
           enableWebSearch: false,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('bedrock')
-        expect(result.providerOptions.bedrock).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('bedrock')
+        expect(result.providerOptions['openai-compatible']).toBeDefined()
       })
 
-      it('should include anthropicBeta when Anthropic headers are needed', async () => {
+      it('should not attach Bedrock anthropicBeta headers through the retired path', async () => {
         const { addAnthropicHeaders } = await import('../../prepareParams/header')
         vi.mocked(addAnthropicHeaders).mockReturnValue(['interleaved-thinking-2025-05-14', 'context-1m-2025-08-07'])
 
@@ -739,29 +745,26 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions.bedrock).toHaveProperty('anthropicBeta')
-        expect(result.providerOptions.bedrock.anthropicBeta).toEqual([
-          'interleaved-thinking-2025-05-14',
-          'context-1m-2025-08-07'
-        ])
+        expect(addAnthropicHeaders).not.toHaveBeenCalled()
+        expect(result.providerOptions).not.toHaveProperty('bedrock')
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
       })
 
-      it('should include reasoning parameters when enabled', () => {
+      it('should include generic reasoning parameters when enabled', async () => {
+        const { getReasoningEffort } = await import('../reasoning')
+        vi.mocked(getReasoningEffort).mockReturnValue({ reasoningEffort: 'medium' })
+
         const result = buildProviderOptions(mockAssistant, bedrockModel, bedrockProvider, {
           enableReasoning: true,
           enableWebSearch: false,
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions.bedrock).toHaveProperty('reasoningConfig')
-        expect(result.providerOptions.bedrock.reasoningConfig).toEqual({
-          type: 'enabled',
-          budgetTokens: 5000
-        })
+        expect(result.providerOptions['openai-compatible']).toHaveProperty('reasoningEffort')
       })
     })
 
-    describe('AI Gateway provider', () => {
+    describe('AI Gateway provider (slice 3: retired — model-id routing removed)', () => {
       const gatewayProvider: Provider = {
         id: SystemProviderIds.gateway,
         name: 'Vercel AI Gateway',
@@ -769,9 +772,9 @@ describe('options utils', () => {
         apiKey: 'test-key',
         apiHost: 'https://gateway.vercel.com',
         isSystem: true
-      } as Provider
+      } as unknown as Provider
 
-      it('should build OpenAI options for OpenAI models through gateway', () => {
+      it('should build generic options for OpenAI models through gateway (no model-id routing)', () => {
         const openaiModel: Model = {
           id: 'openai/gpt-4',
           name: 'GPT-4',
@@ -784,11 +787,11 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('openai')
-        expect(result.providerOptions.openai).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('openai')
       })
 
-      it('should build Anthropic options for Anthropic models through gateway', () => {
+      it('should build generic options for Anthropic models through gateway (no model-id routing)', () => {
         const anthropicModel: Model = {
           id: 'anthropic/claude-3-5-sonnet-20241022',
           name: 'Claude 3.5 Sonnet',
@@ -801,11 +804,11 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('anthropic')
-        expect(result.providerOptions.anthropic).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('anthropic')
       })
 
-      it('should build Google options for Gemini models through gateway', () => {
+      it('should build generic options for Gemini models through gateway (no model-id routing)', () => {
         const geminiModel: Model = {
           id: 'google/gemini-2.0-flash-exp',
           name: 'Gemini 2.0 Flash',
@@ -818,11 +821,11 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('google')
-        expect(result.providerOptions.google).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('google')
       })
 
-      it('should build xAI options for Grok models through gateway', () => {
+      it('should build generic options for Grok models through gateway (no model-id routing)', () => {
         const grokModel: Model = {
           id: 'xai/grok-2-latest',
           name: 'Grok 2',
@@ -835,11 +838,14 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions).toHaveProperty('xai')
-        expect(result.providerOptions.xai).toBeDefined()
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('xai')
       })
 
-      it('should include reasoning parameters for Anthropic models when enabled', () => {
+      it('should include generic reasoning parameters for Anthropic models when enabled', async () => {
+        const { getReasoningEffort } = await import('../reasoning')
+        vi.mocked(getReasoningEffort).mockReturnValue({ reasoningEffort: 'medium' })
+
         const anthropicModel: Model = {
           id: 'anthropic/claude-3-5-sonnet-20241022',
           name: 'Claude 3.5 Sonnet',
@@ -852,14 +858,10 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        expect(result.providerOptions.anthropic).toHaveProperty('thinking')
-        expect(result.providerOptions.anthropic.thinking).toEqual({
-          type: 'enabled',
-          budgetTokens: 5000
-        })
+        expect(result.providerOptions['openai-compatible']).toHaveProperty('reasoningEffort')
       })
 
-      it('should merge gateway routing options from custom parameters', async () => {
+      it('should nest gateway routing options under the generic bucket (no top-level gateway key)', async () => {
         const { getCustomParameters } = await import('../reasoning')
 
         vi.mocked(getCustomParameters).mockReturnValue({
@@ -881,17 +883,20 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        // Should have both anthropic provider options and gateway routing options
-        expect(result.providerOptions).toHaveProperty('anthropic')
-        expect(result.providerOptions).toHaveProperty('gateway')
-        expect(result.providerOptions.gateway).toEqual({
-          order: ['vertex', 'anthropic'],
-          only: ['vertex', 'anthropic']
+        // Brand/provider routing keys no longer become top-level buckets.
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('anthropic')
+        expect(result.providerOptions['openai-compatible']).toMatchObject({
+          gateway: {
+            order: ['vertex', 'anthropic'],
+            only: ['vertex', 'anthropic']
+          }
         })
       })
 
-      it('should combine provider-specific options with gateway routing options', async () => {
-        const { getCustomParameters } = await import('../reasoning')
+      it('should combine generic options with nested gateway routing options', async () => {
+        const { getCustomParameters, getReasoningEffort } = await import('../reasoning')
+        vi.mocked(getReasoningEffort).mockReturnValue({ reasoningEffort: 'medium' })
 
         vi.mocked(getCustomParameters).mockReturnValue({
           gateway: {
@@ -911,13 +916,12 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        // Should have OpenAI provider options with reasoning
-        expect(result.providerOptions.openai).toBeDefined()
-        expect(result.providerOptions.openai).toHaveProperty('reasoningEffort')
-
-        // Should also have gateway routing options
-        expect(result.providerOptions.gateway).toBeDefined()
-        expect(result.providerOptions.gateway.order).toEqual(['openai', 'anthropic'])
+        // Generic OpenAI-compatible options with reasoning, plus nested gateway routing.
+        expect(result.providerOptions['openai-compatible']).toBeDefined()
+        expect(result.providerOptions['openai-compatible']).toHaveProperty('reasoningEffort')
+        expect(result.providerOptions['openai-compatible'].gateway).toEqual({
+          order: ['openai', 'anthropic']
+        })
       })
 
       it('should build generic options for unknown model types through gateway', () => {
@@ -939,7 +943,7 @@ describe('options utils', () => {
     })
 
     describe('Proxy provider custom parameters mapping', () => {
-      it('should map aihubmix provider ID to actual AI SDK provider ID (Google)', async () => {
+      it('should nest aihubmix-scoped params under the protocol bucket for a gemini-protocol proxy (Google)', async () => {
         const { getCustomParameters } = await import('../reasoning')
 
         // Mock proxy provider (aihubmix) that uses Google SDK
@@ -950,7 +954,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://aihubmix.com',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const geminiModel: Model = {
           id: 'gemini-2.0-flash-exp',
@@ -972,16 +976,18 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        // Should map to 'google' AI SDK provider, not 'aihubmix'
+        // Protocol selects 'google'; the brand key no longer becomes a top-level bucket.
         expect(result.providerOptions).toHaveProperty('google')
         expect(result.providerOptions).not.toHaveProperty('aihubmix')
         expect(result.providerOptions.google).toMatchObject({
-          customOption1: 'value1',
-          customOption2: 'value2'
+          aihubmix: {
+            customOption1: 'value1',
+            customOption2: 'value2'
+          }
         })
       })
 
-      it('should map aihubmix provider ID to actual AI SDK provider ID (OpenAI)', async () => {
+      it('should nest aihubmix-scoped params under the protocol bucket for an openai-protocol proxy (OpenAI)', async () => {
         const { getCustomParameters } = await import('../reasoning')
 
         // Mock proxy provider (aihubmix) that uses OpenAI SDK
@@ -992,7 +998,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://aihubmix.com',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const openaiModel: Model = {
           id: 'gpt-4',
@@ -1013,11 +1019,13 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        // Should map to 'openai' AI SDK provider, not 'aihubmix'
+        // Protocol selects 'openai'; the brand key no longer becomes a top-level bucket.
         expect(result.providerOptions).toHaveProperty('openai')
         expect(result.providerOptions).not.toHaveProperty('aihubmix')
         expect(result.providerOptions.openai).toMatchObject({
-          customOpenAIOption: 'openai_value'
+          aihubmix: {
+            customOpenAIOption: 'openai_value'
+          }
         })
       })
 
@@ -1031,7 +1039,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://generativelanguage.googleapis.com',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const geminiModel: Model = {
           id: 'gemini-2.0-flash-exp',
@@ -1058,7 +1066,7 @@ describe('options utils', () => {
         })
       })
 
-      it('should map gateway provider custom parameters to actual AI SDK provider', async () => {
+      it('should map gateway provider custom parameters into the generic bucket', async () => {
         const { getCustomParameters } = await import('../reasoning')
 
         const gatewayProvider: Provider = {
@@ -1068,7 +1076,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://gateway.vercel.com',
           isSystem: true
-        } as Provider
+        } as unknown as Provider
 
         const anthropicModel: Model = {
           id: 'anthropic/claude-3-5-sonnet-20241022',
@@ -1082,7 +1090,7 @@ describe('options utils', () => {
             order: ['vertex', 'anthropic'],
             only: ['vertex']
           },
-          customParam: 'should_go_to_anthropic'
+          customParam: 'should_go_to_generic'
         })
 
         const result = buildProviderOptions(mockAssistant, anthropicModel, gatewayProvider, {
@@ -1091,15 +1099,15 @@ describe('options utils', () => {
           enableGenerateImage: false
         })
 
-        // Gateway routing options should be preserved
-        expect(result.providerOptions.gateway).toEqual({
-          order: ['vertex', 'anthropic'],
-          only: ['vertex']
-        })
-
-        // Custom parameters should go to the actual AI SDK provider (anthropic)
-        expect(result.providerOptions.anthropic).toMatchObject({
-          customParam: 'should_go_to_anthropic'
+        // Retired gateway protocol resolves generic; brand/model-id routing is gone.
+        expect(result.providerOptions).toHaveProperty('openai-compatible')
+        expect(result.providerOptions).not.toHaveProperty('anthropic')
+        expect(result.providerOptions['openai-compatible']).toMatchObject({
+          gateway: {
+            order: ['vertex', 'anthropic'],
+            only: ['vertex']
+          },
+          customParam: 'should_go_to_generic'
         })
       })
 
@@ -1113,7 +1121,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://api.openai.com/v1',
           isSystem: true
-        } as Provider
+        } as unknown as Provider
 
         // User provides both direct AI SDK provider params and custom params
         vi.mocked(getCustomParameters).mockReturnValue({
@@ -1142,7 +1150,7 @@ describe('options utils', () => {
         { providerId: 'newapi', providerName: 'NewAPI' },
         { providerId: 'aihubmix', providerName: 'AiHubMix' }
       ])(
-        'should route Gemini models to google providerOptions through $providerName',
+        'should route $providerName image params into the generic bucket by protocol, not google',
         async ({ providerId, providerName }) => {
           const { getCustomParameters } = await import('../reasoning')
           vi.mocked(getCustomParameters).mockReturnValue({
@@ -1154,8 +1162,10 @@ describe('options utils', () => {
             id: providerId,
             name: providerName,
             type: 'openai',
+            apiKey: 'test-key',
+            apiHost: 'https://proxy.example.com/v1',
             models: [] as Model[]
-          } as Provider
+          } as unknown as Provider
 
           const geminiModel: Model = {
             id: 'gemini-3.1-flash-image-preview',
@@ -1169,9 +1179,12 @@ describe('options utils', () => {
             enableGenerateImage: true
           })
 
-          expect(result.providerOptions).toHaveProperty('google')
+          // Slice 3: selection is protocol-only, so an `openai`-protocol proxy
+          // entry resolves generic even for gemini-named models.
+          expect(result.providerOptions).toHaveProperty('openai-compatible')
+          expect(result.providerOptions).not.toHaveProperty('google')
           expect(result.providerOptions).not.toHaveProperty(providerId)
-          expect(result.providerOptions.google).toMatchObject({
+          expect(result.providerOptions['openai-compatible']).toMatchObject({
             generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
             imageConfig: { aspectRatio: '3:4', imageSize: '4K' }
           })
@@ -1181,25 +1194,23 @@ describe('options utils', () => {
       // Note: For proxy providers like aihubmix/newapi, users should write AI SDK provider ID (google/anthropic)
       // instead of the Cherry Studio provider ID for custom parameters to work correctly
 
-      // model.endpoint_type takes priority over the short-name heuristic so the providerOptions key
-      // stays aligned with the SDK language-model class each proxy builds. Covers NewAPI's
-      // endpoint_type-driven routing.
+      // model.endpoint_type routing was retired with the brand builders: proxy
+      // entries now resolve by protocol only, so endpoint_type is ignored and
+      // every `openai`-protocol entry produces the generic bucket.
       it.each([
         {
           providerId: 'newapi',
           modelId: 'proxy/model',
-          endpointType: 'anthropic' as const,
-          expectedKey: 'anthropic'
+          endpointType: 'anthropic' as const
         },
         {
           providerId: 'newapi',
           modelId: 'proxy/model',
-          endpointType: 'openai' as const,
-          expectedKey: 'openai-compatible'
+          endpointType: 'openai' as const
         }
       ])(
-        'should honor model.endpoint_type=$endpointType for $providerId and produce providerOptions.$expectedKey',
-        async ({ providerId, modelId, endpointType, expectedKey }) => {
+        'should ignore model.endpoint_type=$endpointType for $providerId and produce providerOptions.openai-compatible',
+        async ({ providerId, modelId, endpointType }) => {
           const { getCustomParameters } = await import('../reasoning')
           vi.mocked(getCustomParameters).mockReturnValue({
             customEndpointParam: 'custom_value'
@@ -1209,8 +1220,10 @@ describe('options utils', () => {
             id: providerId,
             name: providerId,
             type: 'openai',
+            apiKey: 'test-key',
+            apiHost: 'https://proxy.example.com/v1',
             models: [] as Model[]
-          } as Provider
+          } as unknown as Provider
 
           const model: Model = {
             id: modelId,
@@ -1225,9 +1238,9 @@ describe('options utils', () => {
             enableGenerateImage: false
           })
 
-          expect(result.providerOptions).toHaveProperty(expectedKey)
+          expect(result.providerOptions).toHaveProperty('openai-compatible')
           expect(result.providerOptions).not.toHaveProperty(providerId)
-          expect(result.providerOptions[expectedKey]).toMatchObject({
+          expect(result.providerOptions['openai-compatible']).toMatchObject({
             customEndpointParam: 'custom_value'
           })
         }
@@ -1245,7 +1258,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://aihubmix.com',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const testModel: Model = {
           id: 'some-model',
@@ -1284,7 +1297,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://ark.cn-beijing.volces.com/api/v3',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const doubaoModel: Model = {
           id: 'doubao-seed-1.8-thinking',
@@ -1319,7 +1332,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://api.openai.com/v1',
           isSystem: true
-        } as Provider
+        } as unknown as Provider
 
         // User configures reasoning_effort for native OpenAI provider
         vi.mocked(getCustomParameters).mockReturnValue({
@@ -1348,7 +1361,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://ark.cn-beijing.volces.com/api/v3',
           models: [] as Model[]
-        } as Provider
+        } as unknown as Provider
 
         const doubaoModel: Model = {
           id: 'doubao-seed-1.8-thinking',
@@ -1383,7 +1396,7 @@ describe('options utils', () => {
           apiKey: 'test-key',
           apiHost: 'https://api.openai.com/v1',
           isSystem: true
-        } as Provider
+        } as unknown as Provider
 
         // User provides parameters for multiple providers
         // In real usage, anthropic/google params would be treated as regular params for openai provider

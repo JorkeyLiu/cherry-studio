@@ -1,5 +1,6 @@
-import { getProviderByModel } from '@renderer/services/AssistantService'
-import type { Model } from '@renderer/types'
+import type * as ExactProviderResolverModule from '@renderer/services/exactProviderResolver'
+import { resolveExactProvider } from '@renderer/services/exactProviderResolver'
+import type { Model, Provider } from '@renderer/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { isEmbeddingModel, isRerankModel } from '../embedding'
@@ -51,8 +52,9 @@ vi.mock('@renderer/hooks/useSettings', () => ({
   getStoreSetting: vi.fn()
 }))
 
-vi.mock('@renderer/services/AssistantService', () => ({
-  getProviderByModel: vi.fn()
+vi.mock('@renderer/services/exactProviderResolver', () => ({
+  resolveExactProvider: vi.fn(),
+  setExactProviderResolver: vi.fn()
 }))
 
 vi.mock('../embedding', () => ({
@@ -68,14 +70,14 @@ const createModel = (overrides: Partial<Model> = {}): Model => ({
   ...overrides
 })
 
-const providerMock = vi.mocked(getProviderByModel)
+const providerMock = vi.mocked(resolveExactProvider)
 const embeddingMock = vi.mocked(isEmbeddingModel)
 const rerankMock = vi.mocked(isRerankModel)
 
 describe('vision helpers', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    providerMock.mockReturnValue({ type: 'openai-response' } as any)
+    providerMock.mockReturnValue({ id: 'openai', type: 'openai-response' } as unknown as Provider)
     embeddingMock.mockReturnValue(false)
     rerankMock.mockReturnValue(false)
   })
@@ -90,19 +92,44 @@ describe('vision helpers', () => {
       expect(isGenerateImageModel(createModel({ id: 'gpt-image-1' }))).toBe(false)
 
       rerankMock.mockReturnValue(false)
-      providerMock.mockReturnValueOnce(undefined as any)
+      providerMock.mockReturnValueOnce(null)
       expect(isGenerateImageModel(createModel({ id: 'gpt-image-1' }))).toBe(false)
     })
 
     it('detects OpenAI and third-party generative image models', () => {
       expect(isGenerateImageModel(createModel({ id: 'gpt-4o-mini' }))).toBe(true)
 
-      providerMock.mockReturnValue({ type: 'custom' } as any)
+      providerMock.mockReturnValue({ id: 'openai', type: 'custom' } as unknown as Provider)
       expect(isGenerateImageModel(createModel({ id: 'gemini-2.5-flash-image' }))).toBe(true)
     })
 
     it('returns false when openai-response model is not on allow list', () => {
       expect(isGenerateImageModel(createModel({ id: 'gpt-4.2-experimental' }))).toBe(false)
+    })
+
+    it('uses exact provider only: mismatched provider id degrades to unknown', async () => {
+      // Bypass the mock to exercise the real exact-match boundary.
+      const actual = await vi.importActual<typeof ExactProviderResolverModule>(
+        '@renderer/services/exactProviderResolver'
+      )
+      providerMock.mockImplementation((model) => actual.resolveExactProvider(model))
+      try {
+        actual.setExactProviderResolver(() => ({ id: 'other', type: 'openai-response' }) as unknown as Provider)
+        // Resolver returns a different id than model.provider -> null -> false.
+        expect(isGenerateImageModel(createModel({ id: 'gpt-image-1', provider: 'openai' }))).toBe(false)
+        // Unregistered resolver -> null -> false.
+        actual.setExactProviderResolver(null)
+        expect(isGenerateImageModel(createModel({ id: 'gpt-image-1', provider: 'openai' }))).toBe(false)
+        // Throwing resolver -> null -> false, never throws.
+        actual.setExactProviderResolver(() => {
+          throw new Error('store down')
+        })
+        expect(isGenerateImageModel(createModel({ id: 'gpt-image-1', provider: 'openai' }))).toBe(false)
+      } finally {
+        actual.setExactProviderResolver(null)
+        providerMock.mockReset()
+        providerMock.mockReturnValue({ id: 'openai', type: 'openai-response' } as unknown as Provider)
+      }
     })
   })
 

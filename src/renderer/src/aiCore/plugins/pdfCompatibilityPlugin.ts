@@ -28,11 +28,7 @@ type ContentPart = Exclude<LanguageModelV3Message['content'], string>[number]
 const PDF_NATIVE_PROVIDER_TYPES = new Set<ProviderType>([
   'openai-response', // OpenAI Responses API
   'anthropic', // Anthropic API
-  'gemini', // Google Gemini API
-  'azure-openai', // Azure OpenAI
-  'vertexai', // Google Vertex AI
-  'aws-bedrock', // AWS Bedrock
-  'vertex-anthropic' // Vertex AI with Anthropic models
+  'gemini' // Google Gemini API
 ])
 
 const PDF_FORCE_TEXT_EXTRACTION_PROVIDER_IDS = new Set<string>([SystemProviderIds.qiniu])

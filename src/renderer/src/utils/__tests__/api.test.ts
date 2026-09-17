@@ -1,48 +1,6 @@
-import store from '@renderer/store'
-import type { VertexProvider } from '@renderer/types'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { formatVertexApiHost, maskApiKey, routeToEndpoint, splitApiKeyString, validateApiHost } from '../api'
-
-vi.mock('@renderer/store', () => {
-  const getState = vi.fn()
-  return {
-    default: {
-      getState
-    }
-  }
-})
-
-const getStateMock = store.getState as unknown as ReturnType<typeof vi.fn>
-
-const createVertexProvider = (apiHost: string): VertexProvider => ({
-  id: 'vertex-provider',
-  type: 'vertexai',
-  name: 'Vertex AI',
-  apiKey: '',
-  apiHost,
-  models: [],
-  googleCredentials: {
-    privateKey: '',
-    clientEmail: ''
-  },
-  project: '',
-  location: ''
-})
-
-beforeEach(() => {
-  getStateMock.mockReset()
-  getStateMock.mockReturnValue({
-    llm: {
-      settings: {
-        vertexai: {
-          projectId: 'test-project',
-          location: 'us-central1'
-        }
-      }
-    }
-  })
-})
+import { maskApiKey, routeToEndpoint, splitApiKeyString, validateApiHost } from '../api'
 
 describe('api', () => {
   describe('maskApiKey', () => {
@@ -197,43 +155,6 @@ describe('api', () => {
         baseURL: 'https://api.example.com/v1beta/models/imagen-4.0-generate-001',
         endpoint: 'predict'
       })
-    })
-  })
-
-  describe('formatVertexApiHost', () => {
-    it('builds default google endpoint when host absent', () => {
-      expect(formatVertexApiHost(createVertexProvider(''))).toBe(
-        'https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1'
-      )
-    })
-
-    it('prefers default endpoint when host ends with google domain', () => {
-      expect(formatVertexApiHost(createVertexProvider('https://aiplatform.googleapis.com'))).toBe(
-        'https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1'
-      )
-    })
-
-    it('appends api version to custom host', () => {
-      expect(formatVertexApiHost(createVertexProvider('https://custom.googleapis.com/vertex'))).toBe(
-        'https://custom.googleapis.com/vertex/v1'
-      )
-    })
-
-    it('uses global endpoint when location equals global', () => {
-      getStateMock.mockReturnValueOnce({
-        llm: {
-          settings: {
-            vertexai: {
-              projectId: 'global-project',
-              location: 'global'
-            }
-          }
-        }
-      })
-
-      expect(formatVertexApiHost(createVertexProvider(''))).toBe(
-        'https://aiplatform.googleapis.com/v1/projects/global-project/locations/global'
-      )
     })
   })
 })

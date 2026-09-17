@@ -10,7 +10,8 @@ import { useTranslation } from 'react-i18next'
 const createInitialKnowledgeBase = (): KnowledgeBase => ({
   id: nanoid(),
   name: '',
-  model: null as any, // model is required, but will be set by user interaction
+  // Explicitly unconfigured until the user picks an embedding model.
+  model: undefined,
   items: [],
   created_at: Date.now(),
   updated_at: Date.now(),

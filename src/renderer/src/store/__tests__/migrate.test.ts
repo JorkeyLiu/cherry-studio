@@ -1226,4 +1226,356 @@ describe('store migrations', () => {
       expect(migrated.llm.defaultModel).toBeUndefined()
     })
   })
+
+  describe('migration 222: active-protocol consolidation', () => {
+    const approved = (overrides: Record<string, unknown> = {}) => ({
+      id: 'custom-openai',
+      name: 'Custom OpenAI',
+      type: 'openai',
+      apiKey: 'k',
+      apiHost: 'https://proxy.example.com/v1',
+      models: [],
+      isSystem: false,
+      enabled: true,
+      ...overrides
+    })
+    const legacyEntry = (id: string, type: string, overrides: Record<string, unknown> = {}) => ({
+      id,
+      name: id,
+      type,
+      apiKey: `${id}-key`,
+      apiHost: 'https://legacy.example.com',
+      models: [{ id: `${id}-model`, name: `${id}-model`, provider: id, group: id }],
+      isSystem: true,
+      enabled: true,
+      ...overrides
+    })
+    const refTo = (provider: string, id = `model-of-${provider}`) => ({
+      id,
+      name: id,
+      provider,
+      group: provider
+    })
+
+    const makeState = (state: Record<string, unknown>) => ({
+      llm: {
+        providers: [],
+        settings: {},
+        ...(state.llm as Record<string, unknown>)
+      },
+      assistants: {
+        defaultAssistant: {},
+        assistants: [],
+        ...(state.assistants as Record<string, unknown>)
+      },
+      ...(state.memory ? { memory: state.memory } : {}),
+      ...(state.agents ? { agents: state.agents } : {}),
+      ...(state.websearch ? { websearch: state.websearch } : {}),
+      ...(state.knowledge ? { knowledge: state.knowledge } : {}),
+      ...(state.mcp ? { mcp: state.mcp } : {}),
+      ...(state.settings ? { settings: state.settings } : {}),
+      ...(state.copilot ? { copilot: state.copilot } : {}),
+      _persist: { version: 221, rehydrated: false }
+    })
+
+    it('folds ollama/new-api/mistral to openai preserving ids, config, models, and refs', async () => {
+      const ollamaModels = [refTo('ollama', 'llama3.1')]
+      const newApiModels = [refTo('new-api', 'gpt-4')]
+      const mistralModels = [refTo('mistral', 'mistral-large')]
+      const state = makeState({
+        llm: {
+          providers: [
+            legacyEntry('ollama', 'ollama', { apiHost: 'http://localhost:11434', models: ollamaModels }),
+            legacyEntry('new-api', 'new-api', {
+              apiHost: 'http://localhost:3000/v1',
+              apiVersion: '2024-01-01',
+              extra_headers: { 'X-Custom': '1' },
+              notes: 'keep me',
+              models: newApiModels
+            }),
+            legacyEntry('mistral', 'mistral', {
+              apiHost: 'https://api.mistral.ai',
+              apiKey: 'mistral-key',
+              models: mistralModels
+            })
+          ],
+          defaultModel: refTo('ollama', 'llama3.1'),
+          quickModel: refTo('mistral', 'mistral-large')
+        },
+        assistants: {
+          defaultAssistant: { model: refTo('new-api', 'gpt-4') },
+          assistants: [{ id: 'a1', model: refTo('ollama', 'llama3.1') }]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      expect(migrated.llm.providers).toHaveLength(3)
+      for (const p of migrated.llm.providers) {
+        expect(p.type).toBe('openai')
+        expect(p.isSystem).toBe(false)
+      }
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      // Full config preserved; ids stable so every model.provider ref stays valid.
+      expect(byId.ollama.apiKey).toBe('ollama-key')
+      expect(byId.ollama.models).toEqual(ollamaModels)
+      expect(byId['new-api'].apiVersion).toBe('2024-01-01')
+      expect(byId['new-api'].extra_headers).toEqual({ 'X-Custom': '1' })
+      expect(byId['new-api'].notes).toBe('keep me')
+      expect(byId['new-api'].models).toEqual(newApiModels)
+      expect(byId.mistral.apiKey).toBe('mistral-key')
+      expect(byId.mistral.models).toEqual(mistralModels)
+      // Folded ids are not removed, so live refs are untouched (never cleared, never repointed).
+      expect(migrated.llm.defaultModel).toEqual(refTo('ollama', 'llama3.1'))
+      expect(migrated.llm.quickModel).toEqual(refTo('mistral', 'mistral-large'))
+      expect(migrated.assistants.defaultAssistant.model).toEqual(refTo('new-api', 'gpt-4'))
+      expect(migrated.assistants.assistants[0].model).toEqual(refTo('ollama', 'llama3.1'))
+    })
+
+    it('normalizes bare Ollama hosts to OpenAI-compatible /v1 idempotently', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            legacyEntry('ollama-bare', 'ollama', { apiHost: 'http://localhost:11434' }),
+            legacyEntry('ollama-slash', 'ollama', { apiHost: 'http://localhost:11434/' }),
+            legacyEntry('ollama-versioned', 'ollama', { apiHost: 'http://localhost:11434/v1' }),
+            legacyEntry('ollama-path', 'ollama', { apiHost: 'https://proxy.example.com/openai' }),
+            legacyEntry('ollama-sharp', 'ollama', { apiHost: 'https://proxy.example.com#' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      expect(byId['ollama-bare'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-slash'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-versioned'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-path'].apiHost).toBe('https://proxy.example.com/openai/v1')
+      expect(byId['ollama-sharp'].apiHost).toBe('https://proxy.example.com')
+    })
+
+    it('strips Ollama-native /api|/chat suffixes only for folded ollama entries', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            legacyEntry('ollama-api', 'ollama', { apiHost: 'http://localhost:11434/api' }),
+            legacyEntry('ollama-api-slash', 'ollama', { apiHost: 'http://localhost:11434/api/' }),
+            legacyEntry('ollama-chat', 'ollama', { apiHost: 'http://localhost:11434/chat' }),
+            legacyEntry('ollama-versioned-slash', 'ollama', { apiHost: 'http://localhost:11434/v1/' }),
+            legacyEntry('ollama-versioned-api', 'ollama', { apiHost: 'http://localhost:11434/v1/api' }),
+            // Same suffixes on mistral/new-api custom paths are intentional and
+            // must be preserved (generic /v1 append only, no stripping).
+            legacyEntry('mistral-api', 'mistral', { apiHost: 'https://proxy.example.com/api' }),
+            legacyEntry('new-api-chat', 'new-api', { apiHost: 'https://proxy.example.com/chat' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      expect(byId['ollama-api'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-api-slash'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-chat'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-versioned-slash'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['ollama-versioned-api'].apiHost).toBe('http://localhost:11434/v1')
+      expect(byId['mistral-api'].apiHost).toBe('https://proxy.example.com/api/v1')
+      expect(byId['new-api-chat'].apiHost).toBe('https://proxy.example.com/chat/v1')
+    })
+
+    it('normalizes empty/whitespace/root hosts to empty and keeps versioned query hosts intact', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            legacyEntry('ollama-blank', 'ollama', { apiHost: '   ' }),
+            legacyEntry('ollama-root', 'ollama', { apiHost: '/' }),
+            legacyEntry('ollama-empty', 'ollama', { apiHost: '' }),
+            legacyEntry('ollama-query-version', 'ollama', { apiHost: 'http://localhost:11434/v1?token=abc' }),
+            legacyEntry('ollama-schemeless', 'ollama', { apiHost: 'localhost:11434' }),
+            legacyEntry('new-api-blank', 'new-api', { apiHost: '  ' })
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      const byId = Object.fromEntries(migrated.llm.providers.map((p: any) => [p.id, p]))
+      expect(byId['ollama-blank'].apiHost).toBe('')
+      expect(byId['ollama-root'].apiHost).toBe('')
+      expect(byId['ollama-empty'].apiHost).toBe('')
+      // Version detected in the URL pathname: no /v1 appended, query preserved.
+      expect(byId['ollama-query-version'].apiHost).toBe('http://localhost:11434/v1?token=abc')
+      // Scheme-less but otherwise usable hosts still get the generic append.
+      expect(byId['ollama-schemeless'].apiHost).toBe('localhost:11434/v1')
+      expect(byId['new-api-blank'].apiHost).toBe('')
+    })
+
+    it('removes every retired and unknown type while keeping approved protocols verbatim', async () => {
+      const state = makeState({
+        llm: {
+          providers: [
+            approved({ id: 'keep-openai', type: 'openai' }),
+            approved({ id: 'keep-response', type: 'openai-response' }),
+            approved({ id: 'keep-anthropic', type: 'anthropic' }),
+            approved({ id: 'keep-gemini', type: 'gemini' }),
+            legacyEntry('azure-openai', 'azure-openai'),
+            legacyEntry('vertexai', 'vertexai'),
+            legacyEntry('vertex-claude', 'vertex-anthropic'),
+            legacyEntry('aws-bedrock', 'aws-bedrock'),
+            legacyEntry('gateway', 'gateway'),
+            legacyEntry('mystery', 'some-future-protocol')
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      expect(migrated.llm.providers.map((p: any) => p.id).sort()).toEqual([
+        'keep-anthropic',
+        'keep-gemini',
+        'keep-openai',
+        'keep-response'
+      ])
+      // Approved entries pass through with every field verbatim.
+      expect(migrated.llm.providers.find((p: any) => p.id === 'keep-openai')).toMatchObject({
+        type: 'openai',
+        isSystem: false,
+        apiKey: 'k',
+        apiHost: 'https://proxy.example.com/v1'
+      })
+    })
+
+    it('clears every live reference family to removed providers to undefined without repointing', async () => {
+      const azureModel = refTo('azure-openai', 'my-deploy')
+      const vertexModel = refTo('vertexai', 'gemini-2.5-pro')
+      const bedrockModel = refTo('aws-bedrock', 'claude-sonnet')
+      const gatewayModel = refTo('gateway', 'openai/gpt-4')
+      const keptModel = refTo('keep-openai', 'kept-1')
+      const state = makeState({
+        llm: {
+          providers: [
+            approved({ id: 'keep-openai', type: 'openai' }),
+            legacyEntry('azure-openai', 'azure-openai'),
+            legacyEntry('vertexai', 'vertexai'),
+            legacyEntry('aws-bedrock', 'aws-bedrock'),
+            legacyEntry('gateway', 'gateway')
+          ],
+          defaultModel: azureModel,
+          topicNamingModel: vertexModel,
+          quickModel: keptModel,
+          translateModel: bedrockModel
+        },
+        assistants: {
+          defaultAssistant: { model: gatewayModel, defaultModel: keptModel },
+          assistants: [
+            { id: 'a1', model: azureModel, defaultModel: vertexModel },
+            { id: 'a2', model: keptModel, settings: { reasoning_effort: 'high' } }
+          ],
+          presets: [
+            { id: 'p1', model: bedrockModel, defaultModel: gatewayModel },
+            { id: 'p2', model: keptModel }
+          ]
+        },
+        agents: {
+          agents: [{ id: 'ag1', model: azureModel, defaultModel: keptModel }]
+        },
+        memory: {
+          memoryConfig: { llmModel: vertexModel, embeddingModel: keptModel }
+        },
+        websearch: {
+          compressionConfig: { method: 'rag', embeddingModel: bedrockModel, rerankModel: keptModel }
+        },
+        knowledge: {
+          bases: [
+            { id: 'b1', model: gatewayModel, rerankModel: keptModel },
+            { id: 'b2', model: keptModel }
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      // Removed-provider slots become explicitly unconfigured.
+      expect(migrated.llm.defaultModel).toBeUndefined()
+      expect(migrated.llm.topicNamingModel).toBeUndefined()
+      expect(migrated.llm.translateModel).toBeUndefined()
+      expect(migrated.assistants.defaultAssistant.model).toBeUndefined()
+      expect(migrated.assistants.assistants[0].model).toBeUndefined()
+      expect(migrated.assistants.assistants[0].defaultModel).toBeUndefined()
+      expect(migrated.assistants.presets[0].model).toBeUndefined()
+      expect(migrated.assistants.presets[0].defaultModel).toBeUndefined()
+      expect(migrated.agents.agents[0].model).toBeUndefined()
+      expect(migrated.memory.memoryConfig.llmModel).toBeUndefined()
+      expect(migrated.websearch.compressionConfig.embeddingModel).toBeUndefined()
+      expect(migrated.knowledge.bases[0].model).toBeUndefined()
+      // Kept-provider slots are never substituted or defaulted.
+      expect(migrated.llm.quickModel).toEqual(keptModel)
+      expect(migrated.assistants.defaultAssistant.defaultModel).toEqual(keptModel)
+      expect(migrated.assistants.assistants[1].model).toEqual(keptModel)
+      expect(migrated.assistants.presets[1].model).toEqual(keptModel)
+      expect(migrated.agents.agents[0].defaultModel).toEqual(keptModel)
+      expect(migrated.memory.memoryConfig.embeddingModel).toEqual(keptModel)
+      expect(migrated.websearch.compressionConfig.rerankModel).toEqual(keptModel)
+      expect(migrated.knowledge.bases[0].rerankModel).toEqual(keptModel)
+      expect(migrated.knowledge.bases[1].model).toEqual(keptModel)
+      // Reasoning-effort configuration is historical data, never a live ref: preserved.
+      expect(migrated.assistants.assistants[1].settings.reasoning_effort).toBe('high')
+    })
+
+    it('preserves historical snapshot-like fields while clearing live refs', async () => {
+      const azureModel = refTo('azure-openai', 'my-deploy')
+      const state = makeState({
+        llm: {
+          providers: [approved({ id: 'keep-openai' }), legacyEntry('azure-openai', 'azure-openai')],
+          defaultModel: azureModel
+        },
+        assistants: {
+          defaultAssistant: {},
+          assistants: [
+            {
+              id: 'a1',
+              model: azureModel,
+              // Historical per-topic anchor map and message snapshots are data, not live refs.
+              settings: { contextWindowAnchor: { 'topic-1': { kind: 'active', groupKey: 'msg-1' } } },
+              topics: [{ id: 'topic-1', messages: [{ id: 'msg-1', model: azureModel }] }]
+            }
+          ]
+        }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      expect(migrated.llm.defaultModel).toBeUndefined()
+      expect(migrated.assistants.assistants[0].model).toBeUndefined()
+      expect(migrated.assistants.assistants[0].settings.contextWindowAnchor).toEqual({
+        'topic-1': { kind: 'active', groupKey: 'msg-1' }
+      })
+      expect(migrated.assistants.assistants[0].topics[0].messages[0].model).toEqual(azureModel)
+    })
+
+    it('deletes vertex/bedrock settings and the persisted copilot slice, leaving other settings intact', async () => {
+      const state = makeState({
+        llm: {
+          providers: [approved({ id: 'keep-openai' })],
+          settings: {
+            ollama: { keepAliveTime: 5 },
+            vertexai: { projectId: 'p', location: 'l' },
+            awsBedrock: { region: 'us-east-1' }
+          }
+        },
+        settings: { theme: 'dark' },
+        copilot: { defaultHeaders: { Authorization: 'Bearer stale' } }
+      })
+      const migrated: any = await migrate(state as any, 222)
+
+      expect(migrated.llm.settings).toEqual({ ollama: { keepAliveTime: 5 } })
+      expect(migrated.settings).toEqual({ theme: 'dark' })
+      expect('copilot' in migrated).toBe(false)
+    })
+
+    it('leaves a fresh empty state unchanged and performs no storage side effects', async () => {
+      const state = makeState({ llm: { providers: [], settings: {} } })
+      const migrated: any = await migrate(state as any, 222)
+
+      expect(migrated.llm.providers).toEqual([])
+      expect(migrated.llm.settings).toEqual({})
+      expect('copilot' in migrated).toBe(false)
+      // No ImageStorage rows or unrelated slices are touched: nothing added, nothing renamed.
+      expect(Object.keys(migrated).sort()).toEqual(Object.keys(state).sort())
+    })
+  })
 })

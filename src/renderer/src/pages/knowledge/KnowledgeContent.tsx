@@ -151,7 +151,7 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
             </div>
             <Tooltip title={providerName} placement="bottom">
               <div className="tag-column">
-                <Tag style={{ borderRadius: 20, margin: 0 }}>{base.model.name}</Tag>
+                <Tag style={{ borderRadius: 20, margin: 0 }}>{base.model?.name ?? t('knowledge.not_set')}</Tag>
               </div>
             </Tooltip>
             {base.rerankModel && <Tag style={{ borderRadius: 20, margin: 0 }}>{base.rerankModel.name}</Tag>}

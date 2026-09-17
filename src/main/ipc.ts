@@ -36,7 +36,6 @@ import { registerChatDbIpc } from './services/chatDb/ipc'
 import { registerChatImportIpc } from './services/chatDbImport'
 import { registerCherryImportControlIpc } from './services/chatDbImport/importControlIpc'
 import { ConfigKeys, configManager } from './services/ConfigManager'
-import CopilotService from './services/CopilotService'
 import DxtService from './services/DxtService'
 import { ExportService } from './services/ExportService'
 import { externalAppsService } from './services/ExternalAppsService'
@@ -73,7 +72,6 @@ import {
 } from './services/SpanCacheService'
 import storeSyncService from './services/StoreSyncService'
 import { themeService } from './services/ThemeService'
-import VertexAIService from './services/VertexAIService'
 import { setOpenLinkExternal } from './services/WebviewService'
 import { windowService } from './services/WindowService'
 import { calculateDirectorySize, getResourcePath } from './utils'
@@ -96,7 +94,6 @@ const logger = loggerService.withContext('IPC')
 const backupManager = new BackupManager()
 const exportService = new ExportService()
 const obsidianVaultService = new ObsidianVaultService()
-const vertexAIService = VertexAIService.getInstance()
 const memoryService = MemoryService.getInstance()
 const dxtService = new DxtService()
 
@@ -737,19 +734,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
     mainWindow.webContents.send(IpcChannel.Windows_MaximizedChanged, false)
   })
 
-  // VertexAI
-  ipcMain.handle(IpcChannel.VertexAI_GetAuthHeaders, async (_, params) => {
-    return vertexAIService.getAuthHeaders(params)
-  })
-
-  ipcMain.handle(IpcChannel.VertexAI_GetAccessToken, async (_, params) => {
-    return vertexAIService.getAccessToken(params)
-  })
-
-  ipcMain.handle(IpcChannel.VertexAI_ClearAuthCache, async (_, projectId: string, clientEmail?: string) => {
-    vertexAIService.clearAuthCache(projectId, clientEmail)
-  })
-
   // aes
   ipcMain.handle(IpcChannel.Aes_Encrypt, (_, text: string, secretKey: string, iv: string) =>
     encrypt(text, secretKey, iv)
@@ -808,14 +792,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.App_GetBinaryPath, (_, name: string) => getBinaryPath(name))
   ipcMain.handle(IpcChannel.App_InstallUvBinary, () => runInstallScript('install-uv.js'))
   ipcMain.handle(IpcChannel.App_InstallBunBinary, () => runInstallScript('install-bun.js'))
-
-  //copilot
-  ipcMain.handle(IpcChannel.Copilot_GetAuthMessage, CopilotService.getAuthMessage.bind(CopilotService))
-  ipcMain.handle(IpcChannel.Copilot_GetCopilotToken, CopilotService.getCopilotToken.bind(CopilotService))
-  ipcMain.handle(IpcChannel.Copilot_SaveCopilotToken, CopilotService.saveCopilotToken.bind(CopilotService))
-  ipcMain.handle(IpcChannel.Copilot_GetToken, CopilotService.getToken.bind(CopilotService))
-  ipcMain.handle(IpcChannel.Copilot_Logout, CopilotService.logout.bind(CopilotService))
-  ipcMain.handle(IpcChannel.Copilot_GetUser, CopilotService.getUser.bind(CopilotService))
 
   // Obsidian service
   ipcMain.handle(IpcChannel.Obsidian_GetVaults, () => {

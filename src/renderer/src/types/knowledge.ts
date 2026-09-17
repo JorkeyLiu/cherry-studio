@@ -82,7 +82,11 @@ export type KnowledgeGeneralItem = KnowledgeItem & {
 export interface KnowledgeBase {
   id: string
   name: string
-  model: Model
+  // Optional: migration 222 clears the embedding model ref to undefined when
+  // its owning provider is retired (never repointed). Consumers must treat a
+  // missing model as explicitly unconfigured and fail before any provider/API
+  // access — never silently substitute another model.
+  model?: Model
   dimensions?: number
   description?: string
   items: KnowledgeItem[]

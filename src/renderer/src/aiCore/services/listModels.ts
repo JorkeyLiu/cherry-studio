@@ -1,6 +1,9 @@
 /**
- * ModelListService - Unified model listing service
- * Uses Strategy Registry pattern for provider-specific model fetching
+ * ModelListService - Protocol-based model listing (slice 3).
+ * Active selection is protocol-driven only: Gemini and generic
+ * OpenAI-compatible. Anthropic has no supported generic listing and uses
+ * explicit manual model addition (unsupported). No brand-id fetcher selection
+ * in the active path.
  */
 
 import {
@@ -10,34 +13,12 @@ import {
   zodSchema
 } from '@ai-sdk/provider-utils'
 import { loggerService } from '@logger'
-import { COPILOT_DEFAULT_HEADERS } from '@renderer/aiCore/provider/constants'
-import store from '@renderer/store'
-import type { EndpointType, Model, Provider } from '@renderer/types'
-import { SystemProviderIds } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import { formatApiHost, getDefaultGroupName, withoutTrailingSlash } from '@renderer/utils'
-import { isGeminiProvider, isOllamaProvider, isVertexProvider } from '@renderer/utils/provider'
 import { defaultAppHeaders } from '@shared/utils'
 import * as z from 'zod'
 
-import {
-  createVertexModelListRequest,
-  DEFAULT_VERTEX_MODEL_PUBLISHERS,
-  getVertexModelId,
-  getVertexModelPublisher,
-  isSupportedVertexPublisherModel
-} from './listModels/vertex'
-import {
-  AIHubMixModelsResponseSchema,
-  GeminiModelsResponseSchema,
-  GitHubModelsResponseSchema,
-  NewApiModelsResponseSchema,
-  OllamaTagsResponseSchema,
-  OpenAIModelsResponseSchema,
-  OVMSConfigResponseSchema,
-  TogetherModelsResponseSchema,
-  VercelGatewayModelsResponseSchema,
-  VertexPublisherModelsResponseSchema
-} from './schemas'
+import { GeminiModelsResponseSchema, OpenAIModelsResponseSchema } from './schemas'
 
 const logger = loggerService.withContext('ModelListService')
 
@@ -149,38 +130,10 @@ function dedup<T>(items: T[], getId: (item: T) => string | undefined): T[] {
   })
 }
 
-function pickPreferredString(values: Array<unknown>): string | undefined {
-  for (const value of values) {
-    if (typeof value === 'string') {
-      const trimmed = value.trim()
-      if (trimmed.length > 0) {
-        return trimmed
-      }
-    }
-  }
-  return undefined
-}
-
-// === Fetchers ===
-
-const ollamaFetcher: ModelFetcher = {
-  match: (p) => isOllamaProvider(p),
-  fetch: async (provider, signal) => {
-    const baseUrl = withoutTrailingSlash(provider.apiHost)
-      .replace(/\/v1$/, '')
-      .replace(/\/api$/, '')
-    const response = await getFromApi({
-      url: `${baseUrl}/api/tags`,
-      headers: defaultHeaders(provider),
-      responseSchema: OllamaTagsResponseSchema,
-      abortSignal: signal
-    })
-    return dedup(response.models, (m) => m.name).map((m) => toModel(m.name, provider, { owned_by: 'ollama' }))
-  }
-}
+// === Fetchers (protocol-based only) ===
 
 const geminiFetcher: ModelFetcher = {
-  match: (p) => isGeminiProvider(p),
+  match: (p) => p.type === 'gemini',
   fetch: async (provider, signal) => {
     let baseUrl = withoutTrailingSlash(provider.apiHost)
     baseUrl = baseUrl.replace(/\/v1(beta)?$/, '')
@@ -198,293 +151,9 @@ const geminiFetcher: ModelFetcher = {
   }
 }
 
-const vertexFetcher: ModelFetcher = {
-  match: (p) => isVertexProvider(p),
-  fetch: async (provider, signal) => {
-    const request = await createVertexModelListRequest(provider)
-
-    if (!request) {
-      return []
-    }
-
-    const publisherModelGroups = await Promise.all(
-      DEFAULT_VERTEX_MODEL_PUBLISHERS.map(async (publisher) => {
-        try {
-          const publisherModels: z.infer<typeof VertexPublisherModelsResponseSchema>['publisherModels'] = []
-          let pageToken: string | undefined
-
-          do {
-            const searchParams = new URLSearchParams({
-              pageSize: '100',
-              listAllVersions: 'true'
-            })
-
-            if (pageToken) {
-              searchParams.set('pageToken', pageToken)
-            }
-
-            const response = await getFromApi({
-              url: `${request.baseUrl}/v1beta1/publishers/${publisher}/models?${searchParams.toString()}`,
-              headers: request.headers,
-              responseSchema: VertexPublisherModelsResponseSchema,
-              abortSignal: signal
-            })
-
-            publisherModels.push(...response.publisherModels)
-            pageToken = response.nextPageToken
-          } while (pageToken)
-
-          return publisherModels
-        } catch (error) {
-          logger.warn('Skipping Vertex publisher model listing after request failure', {
-            providerId: provider.id,
-            publisher,
-            error: error instanceof Error ? error.message : String(error)
-          })
-          return []
-        }
-      })
-    )
-
-    const publisherModels = publisherModelGroups.flat()
-
-    const listedModels = dedup(publisherModels, (model) => model.name).map((model) => {
-      const id = getVertexModelId(model.name)
-      const ownedBy = getVertexModelPublisher(model.name)
-
-      return toModel(id, provider, {
-        name: pickPreferredString([model.displayName, id]) || id,
-        description: model.description,
-        owned_by: ownedBy
-      })
-    })
-
-    const filteredModels = listedModels.filter((model) => isSupportedVertexPublisherModel(model.id))
-
-    if (filteredModels.length !== listedModels.length) {
-      logger.info('Filtered unsupported Vertex publisher models from model list', {
-        providerId: provider.id,
-        filteredCount: listedModels.length - filteredModels.length,
-        returnedCount: filteredModels.length
-      })
-    }
-
-    return filteredModels
-  }
-}
-
-const githubFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.github,
-  fetch: async (provider, signal) => {
-    const [catalogResponse, v1Response] = await Promise.all([
-      getFromApi({
-        url: 'https://models.github.ai/catalog/models',
-        headers: defaultHeaders(provider),
-        responseSchema: GitHubModelsResponseSchema,
-        abortSignal: signal
-      }),
-      getFromApi({
-        url: 'https://models.github.ai/v1/models',
-        headers: defaultHeaders(provider),
-        responseSchema: OpenAIModelsResponseSchema,
-        abortSignal: signal
-      }).catch(() => ({ data: [] as { id: string; owned_by?: string }[] }))
-    ])
-    const catalogModels = catalogResponse.map((m) =>
-      toModel(m.id, provider, {
-        name: m.name || m.id,
-        description: pickPreferredString([m.summary, m.description]),
-        owned_by: m.publisher
-      })
-    )
-    const v1Models = v1Response.data.map((m) => toModel(m.id, provider, { owned_by: m.owned_by }))
-    return dedup([...catalogModels, ...v1Models], (m) => m.id)
-  }
-}
-
-const copilotFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.copilot,
-  fetch: async (provider, signal) => {
-    const headers = {
-      ...COPILOT_DEFAULT_HEADERS,
-      ...store.getState().copilot.defaultHeaders,
-      ...provider.extra_headers
-    }
-    const { token } = await window.api.copilot.getToken(headers)
-    const response = await getFromApi({
-      url: `${withoutTrailingSlash(provider.apiHost)}/models`,
-      headers: {
-        ...headers,
-        Authorization: `Bearer ${token}`
-      },
-      responseSchema: OpenAIModelsResponseSchema,
-      abortSignal: signal
-    })
-
-    const filtered = response.data.filter((m) => {
-      const modelId = m.id.toLowerCase()
-      const policyState = (m as { policy?: { state?: string } }).policy?.state
-      return (
-        policyState !== 'disabled' &&
-        !/^accounts\/[^/]+\/routers\//.test(modelId) &&
-        !/^(tts|whisper|speech)/.test(modelId.split('/').pop() || '')
-      )
-    })
-
-    return dedup(filtered, (m) => m.id).map((m) => toModel(m.id, provider, { owned_by: m.owned_by }))
-  }
-}
-
-const ovmsFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.ovms,
-  fetch: async (provider, signal) => {
-    const baseUrl = formatApiHost(withoutTrailingSlash(provider.apiHost).replace(/\/v1$/, ''), true, 'v1')
-    const response = await getFromApi({
-      url: `${baseUrl}/config`,
-      headers: defaultHeaders(provider),
-      responseSchema: OVMSConfigResponseSchema,
-      abortSignal: signal
-    })
-    const entries = Object.entries(response).filter(([, info]) =>
-      info?.model_version_status?.some((v) => v?.state === 'AVAILABLE')
-    )
-    return dedup(entries, ([name]) => name).map(([name]) => toModel(name, provider, { owned_by: 'ovms' }))
-  }
-}
-
-const togetherFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.together,
-  fetch: async (provider, signal) => {
-    const baseUrl = formatApiHost(provider.apiHost)
-    const response = await getFromApi({
-      url: `${baseUrl}/models`,
-      headers: defaultHeaders(provider),
-      responseSchema: TogetherModelsResponseSchema,
-      abortSignal: signal
-    })
-    return dedup(response, (m) => m.id).map((m) =>
-      toModel(m.id, provider, {
-        name: m.display_name || m.id,
-        description: m.description,
-        owned_by: m.organization
-      })
-    )
-  }
-}
-
-const newApiFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds['new-api'] || p.type === 'new-api',
-  fetch: async (provider, signal) => {
-    const baseUrl = formatApiHost(provider.apiHost)
-    const response = await getFromApi({
-      url: `${baseUrl}/models`,
-      headers: defaultHeaders(provider),
-      responseSchema: NewApiModelsResponseSchema,
-      abortSignal: signal
-    })
-    return dedup(response.data, (m) => m.id).map((m) =>
-      toModel(m.id, provider, {
-        owned_by: m.owned_by,
-        supported_endpoint_types: m.supported_endpoint_types as EndpointType[] | undefined
-      })
-    )
-  }
-}
-
-const openRouterFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.openrouter,
-  fetch: async (provider, signal) => {
-    const [modelsResponse, embedModelsResponse] = await Promise.all([
-      getFromApi({
-        url: 'https://openrouter.ai/api/v1/models',
-        headers: defaultHeaders(provider),
-        responseSchema: OpenAIModelsResponseSchema,
-        abortSignal: signal
-      }),
-      getFromApi({
-        url: 'https://openrouter.ai/api/v1/embeddings/models',
-        headers: defaultHeaders(provider),
-        responseSchema: OpenAIModelsResponseSchema,
-        abortSignal: signal
-      }).catch(() => ({ data: [] }))
-    ])
-    const all = [...modelsResponse.data, ...embedModelsResponse.data]
-    return dedup(all, (m) => m.id).map((m) => toModel(m.id, provider, { owned_by: m.owned_by }))
-  }
-}
-
-const ppioFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.ppio,
-  fetch: async (provider, signal) => {
-    const baseUrl = formatApiHost(provider.apiHost)
-    const [chat, embed, reranker] = await Promise.all([
-      getFromApi({
-        url: `${baseUrl}/models`,
-        headers: defaultHeaders(provider),
-        responseSchema: OpenAIModelsResponseSchema,
-        abortSignal: signal
-      }),
-      getFromApi({
-        url: `${baseUrl}/models?model_type=embedding`,
-        headers: defaultHeaders(provider),
-        responseSchema: OpenAIModelsResponseSchema,
-        abortSignal: signal
-      }).catch(() => ({ data: [] })),
-      getFromApi({
-        url: `${baseUrl}/models?model_type=reranker`,
-        headers: defaultHeaders(provider),
-        responseSchema: OpenAIModelsResponseSchema,
-        abortSignal: signal
-      }).catch(() => ({ data: [] }))
-    ])
-    const all = [...chat.data, ...embed.data, ...reranker.data]
-    return dedup(all, (m) => m.id).map((m) => toModel(m.id, provider, { owned_by: m.owned_by }))
-  }
-}
-
-const aiHubMixFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.aihubmix,
-  fetch: async (provider, signal) => {
-    const response = await getFromApi({
-      url: `https://aihubmix.com/api/v1/models`,
-      headers: defaultHeaders(provider),
-      responseSchema: AIHubMixModelsResponseSchema,
-      abortSignal: signal
-    })
-    return dedup(response.data, (m) => m.model_id).map((m) =>
-      toModel(m.model_id, provider, {
-        name: m.model_name || m.model_id,
-        description: m.desc
-      })
-    )
-  }
-}
-
-const gatewayFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.gateway,
-  fetch: async (provider, signal) => {
-    const response = await getFromApi({
-      url: `https://ai-gateway.vercel.sh/v3/ai/config`,
-      headers: {
-        ...defaultHeaders(provider),
-        'ai-gateway-protocol-version': '0.0.1'
-      },
-      responseSchema: VercelGatewayModelsResponseSchema,
-      abortSignal: signal
-    })
-    return dedup(response.models, (m) => m.id).map((m) =>
-      toModel(m.id, provider, {
-        name: m.name || m.id,
-        description: m.description,
-        owned_by: m.specification?.provider
-      })
-    )
-  }
-}
-
-/** Default fallback: OpenAI-compatible /models endpoint */
+/** Default fallback: OpenAI-compatible /models endpoint (protocol-based). */
 const openAICompatibleFetcher: ModelFetcher = {
-  match: () => true,
+  match: (p) => p.type === 'openai' || p.type === 'openai-response',
   fetch: async (provider, signal) => {
     const baseUrl = formatApiHost(provider.apiHost)
     const response = await getFromApi({
@@ -497,30 +166,14 @@ const openAICompatibleFetcher: ModelFetcher = {
   }
 }
 
-// === Registry (order matters: first match wins) ===
+// === Registry (order matters: first match wins; protocol-based only) ===
 
-const fetchers: ModelFetcher[] = [
-  aiHubMixFetcher,
-  ollamaFetcher,
-  geminiFetcher,
-  vertexFetcher,
-  githubFetcher,
-  copilotFetcher,
-  ovmsFetcher,
-  togetherFetcher,
-  newApiFetcher,
-  openRouterFetcher,
-  ppioFetcher,
-  gatewayFetcher,
-  openAICompatibleFetcher // always-match fallback, must be last
-]
+const fetchers: ModelFetcher[] = [geminiFetcher, openAICompatibleFetcher]
 
-// === Unsupported providers (skip before registry lookup) ===
-
-const UNSUPPORTED_PROVIDERS = new Set<string>([SystemProviderIds['aws-bedrock'], SystemProviderIds.anthropic])
+// === Unsupported protocols (explicit manual model addition) ===
 
 function isUnsupported(provider: Provider): boolean {
-  return UNSUPPORTED_PROVIDERS.has(provider.id) || provider.type === 'vertex-anthropic'
+  return provider.type === 'anthropic'
 }
 
 // === Public API ===
@@ -532,7 +185,14 @@ export async function listModels(provider: Provider, abortSignal?: AbortSignal):
       return []
     }
 
-    const fetcher = fetchers.find((f) => f.match(provider))!
+    const fetcher = fetchers.find((f) => f.match(provider))
+    if (!fetcher) {
+      logger.warn('No protocol fetcher for provider type', {
+        providerId: provider.id,
+        providerType: (provider as { type: string }).type
+      })
+      return []
+    }
     return await fetcher.fetch(provider, abortSignal)
   } catch (error) {
     logger.error('Error listing models:', error as Error, { providerId: provider.id })

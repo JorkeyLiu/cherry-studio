@@ -16,10 +16,6 @@ import { getModelSupportedReasoningEffortOptions, isReasoningModel } from '../re
 import { isFunctionCallingModel } from '../tooluse'
 import { isVisionModel } from '../vision'
 
-vi.mock('@renderer/services/AssistantService', () => ({
-  getProviderByModel: vi.fn()
-}))
-
 // Isolate the predicate chain from the real Redux store: reasoning/vision
 // import settings/store hooks that would otherwise pull the full store (same
 // pattern as the existing vision tests). Legacy embedding/rerank detection

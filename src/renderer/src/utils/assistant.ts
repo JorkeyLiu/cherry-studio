@@ -1,4 +1,4 @@
-import { isFunctionCallingModel } from '@renderer/config/models'
+import { isFunctionCallingModel } from '@renderer/config/models/tooluse'
 import type { Assistant } from '@renderer/types'
 
 export const isToolUseModeFunction = (assistant: Assistant) => {

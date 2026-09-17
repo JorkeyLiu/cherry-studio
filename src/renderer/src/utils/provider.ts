@@ -1,11 +1,6 @@
-import type { AzureOpenAIProvider, ProviderType } from '@renderer/types'
+import type { ProviderType } from '@renderer/types'
 import { isSystemProvider, type Provider, type SystemProviderId, SystemProviderIds } from '@renderer/types'
-import { isAzureOpenAIProvider } from '@shared/aiCore/provider/utils'
 import { CLAUDE_SUPPORTED_PROVIDERS } from '@shared/config/providers'
-
-export const isAzureResponsesEndpoint = (provider: AzureOpenAIProvider) => {
-  return provider.apiVersion === 'preview' || provider.apiVersion === 'v1'
-}
 
 export const getClaudeSupportedProviders = (providers: Provider[]) => {
   return providers.filter(
@@ -81,12 +76,7 @@ export const isSupportEnableThinkingProvider = (provider: Provider) => {
   )
 }
 
-const SUPPORT_SERVICE_TIER_PROVIDERS = [
-  SystemProviderIds.openai,
-  SystemProviderIds['azure-openai'],
-  SystemProviderIds.groq
-  // TODO: 等待上游支持aws-bedrock
-]
+const SUPPORT_SERVICE_TIER_PROVIDERS = [SystemProviderIds.openai, SystemProviderIds.groq]
 
 /**
  * 判断提供商是否支持 service_tier 设置
@@ -94,7 +84,6 @@ const SUPPORT_SERVICE_TIER_PROVIDERS = [
 export const isSupportServiceTierProvider = (provider: Provider) => {
   return (
     provider.apiOptions?.isSupportServiceTier === true ||
-    provider.type === 'azure-openai' ||
     (isSystemProvider(provider) && SUPPORT_SERVICE_TIER_PROVIDERS.some((pid) => pid === provider.id))
   )
 }
@@ -114,36 +103,33 @@ export const isSupportVerbosityProvider = (provider: Provider) => {
   )
 }
 
-const SUPPORT_URL_CONTEXT_PROVIDER_TYPES = [
-  'gemini',
-  'vertexai',
-  'anthropic',
-  'azure-openai',
-  'new-api'
-] as const satisfies ProviderType[]
+const SUPPORT_URL_CONTEXT_PROVIDER_TYPES = ['gemini', 'anthropic'] as const satisfies ProviderType[]
 
 export const isSupportUrlContextProvider = (provider: Provider) => {
   return SUPPORT_URL_CONTEXT_PROVIDER_TYPES.some((type) => type === provider.type)
 }
 
-const SUPPORT_GEMINI_NATIVE_WEB_SEARCH_PROVIDERS = ['gemini', 'vertexai'] as const satisfies SystemProviderId[]
+const SUPPORT_GEMINI_NATIVE_WEB_SEARCH_PROVIDERS = ['gemini'] as const satisfies SystemProviderId[]
 
 /** 判断是否是使用 Gemini 原生搜索工具的 provider. 目前假设只有官方 API 使用原生工具 */
 export const isGeminiWebSearchProvider = (provider: Provider) => {
   return SUPPORT_GEMINI_NATIVE_WEB_SEARCH_PROVIDERS.some((id) => id === provider.id)
 }
 
+// History-only legacy protocol checks (retired in slice 3). Active request
+// config must not use these; they exist only so migration history and old
+// tests remain importable without making retired values active.
 export const isNewApiProvider = (provider: Provider) => {
-  return ['new-api', 'aionly'].includes(provider.id) || provider.type === 'new-api'
+  return ['new-api', 'aionly'].includes(provider.id) || (provider as unknown as { type: string }).type === 'new-api'
 }
 
 /**
- * 判断是否为 OpenAI 兼容的提供商
- * @param {Provider} provider 提供商对象
- * @returns {boolean} 是否为 OpenAI 兼容提供商
+ * Active OpenAI-compatible check: generic `openai` protocol only.
+ * `openai-response` (Responses API) has its own branch; `anthropic`/`gemini`
+ * are separate protocols.
  */
 export function isOpenAICompatibleProvider(provider: Provider): boolean {
-  return ['openai', 'new-api', 'mistral'].includes(provider.type)
+  return provider.type === 'openai'
 }
 
 export function isOpenAIProvider(provider: Provider): boolean {
@@ -151,10 +137,12 @@ export function isOpenAIProvider(provider: Provider): boolean {
 }
 
 export function isAwsBedrockProvider(provider: Provider): boolean {
-  return provider.type === 'aws-bedrock'
+  return (provider as unknown as { type: string }).type === 'aws-bedrock'
 }
 
-// Re-export from shared, for backward compatibility
+// Re-export approved protocol helpers from shared, plus legacy history-only
+// helpers (isAzure/isOllama/isVertex/isPerplexity) for migration/test
+// compatibility. Active request config must not use the legacy ones.
 export {
   isAnthropicProvider,
   isAzureOpenAIProvider,
@@ -165,7 +153,7 @@ export {
 } from '@shared/aiCore/provider/utils'
 
 export function isAIGatewayProvider(provider: Provider): boolean {
-  return provider.type === 'gateway'
+  return (provider as unknown as { type: string }).type === 'gateway'
 }
 
 const NOT_SUPPORT_API_VERSION_PROVIDERS = ['github', 'copilot', 'perplexity'] as const satisfies SystemProviderId[]
@@ -185,15 +173,13 @@ export const NOT_SUPPORT_API_KEY_PROVIDERS: readonly SystemProviderId[] = [
   'copilot'
 ]
 
-export const NOT_SUPPORT_API_KEY_PROVIDER_TYPES: readonly ProviderType[] = ['vertexai', 'aws-bedrock']
+export const NOT_SUPPORT_API_KEY_PROVIDER_TYPES: readonly ProviderType[] = []
 
 // https://platform.claude.com/docs/en/build-with-claude/prompt-caching#1-hour-cache-duration
 export const isSupportAnthropicPromptCacheProvider = (provider: Provider) => {
   return (
     provider.type === 'anthropic' ||
-    isNewApiProvider(provider) ||
     provider.id === SystemProviderIds.aihubmix ||
-    provider.id === SystemProviderIds.openrouter ||
-    isAzureOpenAIProvider(provider)
+    provider.id === SystemProviderIds.openrouter
   )
 }

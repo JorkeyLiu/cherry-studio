@@ -29,7 +29,9 @@ function classifyProviderConfigCategory(provider: Provider): string {
   if (provider.id === SystemProviderIds.copilot) {
     return 'copilot'
   }
-  if (provider.id === SystemProviderIds.anthropic && provider.authType === 'oauth') {
+  // Protocol-gated: any entry speaking the Anthropic protocol in oauth mode
+  // (official or custom id) is Anthropic OAuth. Never gate on brand/provider.id.
+  if (provider.type === 'anthropic' && provider.authType === 'oauth') {
     return 'anthropic-oauth'
   }
   return 'other'
@@ -141,7 +143,9 @@ export default class AiProvider {
 
     // 注意：模型对象将由 createExecutor 内部处理，不再需要预先创建
 
-    if (this.actualProvider.id === SystemProviderIds.anthropic && this.actualProvider.authType === 'oauth') {
+    // Protocol-gated like providerToAiSdkConfig: custom-id Anthropic entries
+    // in oauth mode take the same Claude Code system-message path.
+    if (this.actualProvider.type === 'anthropic' && this.actualProvider.authType === 'oauth') {
       // 类型守卫：确保 system 是 string、Array 或 undefined
       const system = params.system
       let systemParam: string | Array<any> | undefined

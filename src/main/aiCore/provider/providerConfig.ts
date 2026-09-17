@@ -1,17 +1,6 @@
-import {
-  formatOllamaApiHost,
-  isAnthropicProvider,
-  isAzureOpenAIProvider,
-  isGeminiProvider,
-  isOllamaProvider,
-  isPerplexityProvider,
-  isVertexProvider
-} from '@shared/aiCore/provider/utils'
+import { isAnthropicProvider, isGeminiProvider } from '@shared/aiCore/provider/utils'
 import { formatApiHost, isWithTrailingSharp } from '@shared/utils'
 import type { Provider } from '@types'
-import { SystemProviderIds } from '@types'
-
-import { formatVertexApiHost } from './utils/api'
 
 type HostFormatter = {
   match: (provider: Provider) => boolean
@@ -19,8 +8,10 @@ type HostFormatter = {
 }
 
 /**
- * Format and normalize the API host URL for a provider.
- * Handles provider-specific URL formatting rules (e.g., appending version paths, Azure formatting).
+ * Format and normalize the API host URL for a provider (slice 3).
+ * Approved protocols only: Anthropic (dual-field sync) and Gemini (v1beta);
+ * all other approved OpenAI-compatible entries use the generic formatter.
+ * No brand-id or retired-protocol formatters in the active path.
  *
  * @param provider - The provider whose API host is to be formatted.
  * @returns A new provider instance with the formatted API host.
@@ -44,15 +35,7 @@ export async function formatProviderApiHost(provider: Provider): Promise<Provide
   }
 
   const formatters: HostFormatter[] = [
-    {
-      match: (p) => p.id === SystemProviderIds.copilot || p.id === SystemProviderIds.github,
-      format: (p) => formatApiHost(p.apiHost, false)
-    },
-    { match: isPerplexityProvider, format: (p) => formatApiHost(p.apiHost, false) },
-    { match: isOllamaProvider, format: (p) => formatOllamaApiHost(p.apiHost) },
-    { match: isGeminiProvider, format: (p, av) => formatApiHost(p.apiHost, av, 'v1beta') },
-    { match: isAzureOpenAIProvider, format: (p) => formatApiHost(p.apiHost, false) },
-    { match: isVertexProvider, format: (p) => formatVertexApiHost(p.apiHost) }
+    { match: isGeminiProvider, format: (p, av) => formatApiHost(p.apiHost, av, 'v1beta') }
   ]
 
   const formatter = formatters.find((f) => f.match(provider))

@@ -6,7 +6,6 @@ import { UNKNOWN } from '@renderer/config/translate'
 import { getStoreProviders } from '@renderer/hooks/useStore'
 import i18n from '@renderer/i18n'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
-import { setMetadataProviderResolver } from '@renderer/services/modelMetadata'
 import store from '@renderer/store'
 import { addAssistant } from '@renderer/store/assistants'
 import type {
@@ -21,6 +20,8 @@ import type {
 } from '@renderer/types'
 import { v4 as uuid } from 'uuid'
 
+import { DEFAULT_ASSISTANT_SETTINGS } from './assistantDefaults'
+
 const logger = loggerService.withContext('AssistantService')
 
 /**
@@ -29,33 +30,11 @@ const logger = loggerService.withContext('AssistantService')
  * **Important**: This defines the DEFAULT VALUES for assistant settings, NOT the current settings
  * of the default assistant. To get the actual settings of the default assistant, use `getDefaultAssistantSettings()`.
  *
- * Provides sensible defaults for all assistant settings with a focus on minimal parameter usage:
- * - **Temperature disabled**: Use provider defaults by default
- * - **MaxTokens disabled**: Use provider defaults by default
- * - **TopP disabled**: Use provider defaults by default
- * - **Streaming enabled**: Provides real-time response for better UX
- * - **Standard context count**: Balanced memory usage and conversation length
+ * Single source of truth lives in the cycle-free `./assistantDefaults`
+ * (parameterBuilder reads defaults from there without importing the
+ * store/AssistantService chain); re-exported here for existing consumers.
  */
-export const DEFAULT_ASSISTANT_SETTINGS = {
-  maxTokens: DEFAULT_MAX_TOKENS,
-  enableMaxTokens: false,
-  temperature: DEFAULT_TEMPERATURE,
-  enableTemperature: false,
-  topP: 1,
-  enableTopP: false,
-  contextCount: DEFAULT_CONTEXTCOUNT,
-  streamOutput: true,
-  defaultModel: undefined,
-  customParameters: [],
-  reasoning_effort: 'default',
-  reasoning_effort_cache: undefined,
-  qwenThinkMode: undefined,
-  // It would gracefully fallback to prompt if not supported by model.
-  toolUseMode: 'function',
-  maxToolCalls: 20,
-  enableMaxToolCalls: true,
-  contextWindowAnchor: {}
-} as const satisfies AssistantSettings
+export { DEFAULT_ASSISTANT_SETTINGS } from './assistantDefaults'
 
 /**
  * Creates a temporary default assistant instance.
@@ -287,10 +266,3 @@ export async function createAssistantFromAgent(agent: AssistantPreset) {
 
   return assistant
 }
-
-// Optional models.dev attribution needs the exact owning provider, but
-// `config/models` capability modules must stay free of the AssistantService /
-// store chain (collection-time TDZ). Registered here and resolved lazily at
-// predicate time; the boundary still enforces the exact `model.provider` id
-// match, so there is never a silent default-provider fallback.
-setMetadataProviderResolver((model) => getStoreProviders().find((p) => p.id === model?.provider) ?? null)

@@ -4,22 +4,27 @@ import * as z from 'zod'
 
 import type { OpenAIVerbosity } from './aiCoreTypes'
 
-export const ProviderTypeSchema = z.enum([
+export const ProviderTypeSchema = z.enum(['openai', 'openai-response', 'anthropic', 'gemini'])
+
+export type ProviderType = z.infer<typeof ProviderTypeSchema>
+
+/**
+ * Approved active provider protocols (slice 3 contract).
+ * `openai` is generic OpenAI-compatible, `openai-response` is the OpenAI
+ * Responses-API variant, plus `anthropic` and `gemini`.
+ */
+export const ACTIVE_PROVIDER_TYPES = [
   'openai',
   'openai-response',
   'anthropic',
-  'gemini',
-  'azure-openai',
-  'vertexai',
-  'mistral',
-  'aws-bedrock',
-  'vertex-anthropic',
-  'new-api',
-  'gateway',
-  'ollama'
-])
+  'gemini'
+] as const satisfies readonly ProviderType[]
 
-export type ProviderType = z.infer<typeof ProviderTypeSchema>
+export type ActiveProviderType = (typeof ACTIVE_PROVIDER_TYPES)[number]
+
+export function isActiveProviderType(type: string): type is ActiveProviderType {
+  return (ACTIVE_PROVIDER_TYPES as readonly string[]).includes(type)
+}
 
 // undefined is treated as supported, enabled by default
 export type ProviderApiOptions = {
@@ -87,17 +92,6 @@ export type AnthropicCacheControlSettings = {
 
 export function isServiceTier(tier: string | null | undefined): tier is ServiceTier {
   return isGroqServiceTier(tier) || isOpenAIServiceTier(tier)
-}
-
-export const AwsBedrockAuthTypes = {
-  iam: 'iam',
-  apiKey: 'apiKey'
-} as const
-
-export type AwsBedrockAuthType = keyof typeof AwsBedrockAuthTypes
-
-export function isAwsBedrockAuthType(type: string): type is AwsBedrockAuthType {
-  return Object.hasOwn(AwsBedrockAuthTypes, type)
 }
 
 export type Provider = {
@@ -280,20 +274,6 @@ export type SystemProvider = Provider & {
   id: SystemProviderId
   isSystem: true
   apiOptions?: never
-}
-
-export type VertexProvider = Provider & {
-  googleCredentials: {
-    privateKey: string
-    clientEmail: string
-  }
-  project: string
-  location: string
-}
-
-export type AzureOpenAIProvider = Provider & {
-  type: 'azure-openai'
-  apiVersion: string
 }
 
 /**

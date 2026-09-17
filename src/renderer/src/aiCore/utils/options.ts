@@ -1,4 +1,3 @@
-import type { BedrockProviderOptions } from '@ai-sdk/amazon-bedrock'
 import { type AnthropicProviderOptions } from '@ai-sdk/anthropic'
 import type { GoogleGenerativeAIProviderOptions } from '@ai-sdk/google'
 import type { OpenAIResponsesProviderOptions } from '@ai-sdk/openai'
@@ -6,9 +5,6 @@ import type { XaiResponsesProviderOptions } from '@ai-sdk/xai'
 import { loggerService } from '@logger'
 import {
   getModelSupportedVerbosity,
-  isAnthropicModel,
-  isGeminiModel,
-  isGrokModel,
   isOpenAIModel,
   isQwenMTModel,
   isReasoningModel,
@@ -32,26 +28,21 @@ import {
   type OpenAIServiceTier,
   OpenAIServiceTiers,
   type Provider,
-  type ServiceTier,
-  SystemProviderIds
+  type ServiceTier
 } from '@renderer/types'
 import { type AiSdkParam, isAiSdkParam, type OpenAIVerbosity } from '@renderer/types/aiCoreTypes'
 import { isSupportServiceTierProvider, isSupportVerbosityProvider } from '@renderer/utils/provider'
 import type { JSONValue } from 'ai'
 import { t } from 'i18next'
 import { merge } from 'lodash'
-import type { OllamaProviderOptions } from 'ollama-ai-provider-v2'
 
-import { addAnthropicHeaders } from '../prepareParams/header'
 import { getAiSdkProviderId } from '../provider/factory'
 import type { ProviderCapabilities } from '../types'
 import { buildGeminiGenerateImageParams } from './image'
 import {
   getAnthropicReasoningParams,
-  getBedrockReasoningParams,
   getCustomParameters,
   getGeminiReasoningParams,
-  getOllamaReasoningParams,
   getOpenAIReasoningParams,
   getReasoningEffort,
   getXAIReasoningParams
@@ -168,38 +159,25 @@ export function buildProviderOptions(
   const serviceTier = getServiceTier(model, actualProvider)
   const textVerbosity = getVerbosity(model)
 
-  // 根据 provider ID 构建特定选项
+  // Build options by AI SDK provider ID. Only approved-protocol buckets are
+  // reachable: the factory resolves retired protocols (azure/bedrock/vertex/
+  // ollama/gateway/newapi/aihubmix) to generic OpenAI-compatible, so no
+  // retired type/brand branch exists here.
   switch (rawProviderId) {
     case 'openai':
     case 'openai-chat':
-    case 'azure':
-    case 'azure-responses':
     case 'huggingface':
       providerSpecificOptions = buildOpenAIProviderOptions(assistant, model, capabilities, serviceTier, textVerbosity)
       break
     case 'anthropic':
-    case 'azure-anthropic':
-    case 'google-vertex-anthropic':
       providerSpecificOptions = buildAnthropicProviderOptions(assistant, model, capabilities)
       break
     case 'google':
-    case 'google-vertex':
       providerSpecificOptions = buildGeminiProviderOptions(assistant, model, capabilities)
       break
     case 'xai':
     case 'xai-responses':
       providerSpecificOptions = buildXAIProviderOptions(assistant, model, capabilities)
-      break
-    case 'bedrock':
-      providerSpecificOptions = buildBedrockProviderOptions(assistant, model, capabilities)
-      break
-    case SystemProviderIds.ollama:
-      providerSpecificOptions = buildOllamaProviderOptions(assistant, model, capabilities)
-      break
-    case 'newapi':
-    case 'aihubmix':
-    case SystemProviderIds.gateway:
-      providerSpecificOptions = buildAIGatewayOptions(assistant, model, capabilities, serviceTier, textVerbosity)
       break
     case 'deepseek':
     case 'openrouter':
@@ -248,16 +226,13 @@ export function buildProviderOptions(
    * Merge custom parameters into providerSpecificOptions.
    * Simple logic:
    * 1. If key is in actualAiSdkProviderIds → merge directly (user knows the actual AI SDK provider ID)
-   * 2. If key == rawProviderId:
-   *    - If it's gateway/ollama → preserve (they need their own config for routing/options)
-   *    - Otherwise → map to primary (this is a proxy provider like aihubmix)
-   * 3. Otherwise → treat as regular parameter, merge to primary provider
+   * 2. Otherwise → nest under the primary provider bucket. Brand/routing keys
+   *    (e.g. `gateway`) never become top-level buckets.
    *
    * Example:
-   * - User writes `aihubmix: { opt: 'val' }` → mapped to `google: { opt: 'val' }` (case 2, proxy)
-   * - User writes `gateway: { order: [...] }` → stays as `gateway: { order: [...] }` (case 2, routing config)
    * - User writes `google: { opt: 'val' }` → stays as `google: { opt: 'val' }` (case 1)
-   * - User writes `customKey: 'val'` → merged to `google: { customKey: 'val' }` (case 3)
+   * - User writes `gateway: { order: [...] }` → nested as `openai-compatible: { gateway: ... }` (case 2)
+   * - User writes `customKey: 'val'` → merged to `google: { customKey: 'val' }` (case 2)
    */
   for (const key of Object.keys(providerParams)) {
     if (actualAiSdkProviderIds.includes(key)) {
@@ -269,30 +244,8 @@ export function buildProviderOptions(
           ...providerParams[key]
         }
       }
-    } else if (key === rawProviderId && !actualAiSdkProviderIds.includes(rawProviderId)) {
-      // Case 2: Key is the current provider (not in actualAiSdkProviderIds, so it's a proxy or special provider)
-      // Gateway is special: it needs routing config preserved
-      if (key === SystemProviderIds.gateway) {
-        // Preserve gateway config for routing
-        providerSpecificOptions = {
-          ...providerSpecificOptions,
-          [key]: {
-            ...providerSpecificOptions[key],
-            ...providerParams[key]
-          }
-        }
-      } else {
-        // Proxy provider (aihubmix, etc.) - map to actual AI SDK provider
-        providerSpecificOptions = {
-          ...providerSpecificOptions,
-          [primaryAiSdkProviderId]: {
-            ...providerSpecificOptions[primaryAiSdkProviderId],
-            ...providerParams[key]
-          }
-        }
-      }
     } else {
-      // Case 3: Regular parameter - merge to primary provider
+      // Case 2: Regular parameter - nest under the primary provider bucket
       providerSpecificOptions = {
         ...providerSpecificOptions,
         [primaryAiSdkProviderId]: {
@@ -475,53 +428,6 @@ function buildXAIProviderOptions(
 }
 
 /**
- * Build Bedrock providerOptions
- */
-function buildBedrockProviderOptions(
-  assistant: Assistant,
-  model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
-): Record<string, BedrockProviderOptions> {
-  const { enableReasoning } = capabilities
-  let providerOptions: BedrockProviderOptions = {}
-
-  if (enableReasoning) {
-    const reasoningParams = getBedrockReasoningParams(assistant, model)
-    providerOptions = {
-      ...providerOptions,
-      ...reasoningParams
-    }
-  }
-
-  const betaHeaders = addAnthropicHeaders(assistant, model)
-  if (betaHeaders.length > 0) {
-    providerOptions.anthropicBeta = betaHeaders
-  }
-
-  return {
-    bedrock: providerOptions
-  }
-}
-
-function buildOllamaProviderOptions(
-  assistant: Assistant,
-  model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
-): Record<string, OllamaProviderOptions> {
-  const { enableReasoning } = capabilities
-  let options = {}
-
-  if (enableReasoning) {
-    options = {
-      ...options,
-      ...getOllamaReasoningParams(assistant, model)
-    }
-  }
-
-  return { ollama: options }
-}
-
-/**
  * 构建通用的 providerOptions（用于其他 provider）
  */
 function buildGenericProviderOptions(
@@ -564,56 +470,5 @@ function buildGenericProviderOptions(
 
   return {
     [providerId]: providerOptions
-  }
-}
-
-function buildAIGatewayOptions(
-  assistant: Assistant,
-  model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>,
-  serviceTier: OpenAIServiceTier,
-  textVerbosity?: OpenAIVerbosity
-): Record<
-  string,
-  | OpenAIResponsesProviderOptions
-  | AnthropicProviderOptions
-  | GoogleGenerativeAIProviderOptions
-  | Record<string, unknown>
-> {
-  // Proxy providers (NewAPI, aihubmix) may annotate model.endpoint_type to force a specific protocol.
-  // Keys here must stay aligned with the language-model class each SDK layer builds, otherwise
-  // AI SDK drops the custom provider options. See:
-  //   - src/renderer/src/aiCore/provider/custom/newapi-provider.ts (createChatModel)
-  //
-  //   endpoint_type      | SDK language-model class           | AI SDK providerOptions key
-  //   -------------------+------------------------------------+---------------------------
-  //   'anthropic'        | AnthropicMessagesLanguageModel     | anthropic
-  //   'gemini'           | GoogleGenerativeAILanguageModel    | google
-  //   'openai-response'  | OpenAIResponsesLanguageModel       | openai
-  //   'openai'           | OpenAICompatibleChatLanguageModel  | openai-compatible
-  //   'image-generation' | OpenAICompatibleChatLanguageModel  | openai-compatible
-  switch (model.endpoint_type) {
-    case 'anthropic':
-      return buildAnthropicProviderOptions(assistant, model, capabilities)
-    case 'gemini':
-      return buildGeminiProviderOptions(assistant, model, capabilities)
-    case 'openai-response':
-      return buildOpenAIProviderOptions(assistant, model, capabilities, serviceTier, textVerbosity)
-    case 'openai':
-    case 'image-generation':
-      return buildGenericProviderOptions('openai-compatible', assistant, model, capabilities)
-  }
-
-  // Fallback: model-name heuristic (covers Vercel Gateway, AiHubMix, and untagged models)
-  if (isAnthropicModel(model)) {
-    return buildAnthropicProviderOptions(assistant, model, capabilities)
-  } else if (isOpenAIModel(model)) {
-    return buildOpenAIProviderOptions(assistant, model, capabilities, serviceTier, textVerbosity)
-  } else if (isGeminiModel(model)) {
-    return buildGeminiProviderOptions(assistant, model, capabilities)
-  } else if (isGrokModel(model)) {
-    return buildXAIProviderOptions(assistant, model, capabilities)
-  } else {
-    return buildGenericProviderOptions('openai-compatible', assistant, model, capabilities)
   }
 }

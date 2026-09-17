@@ -18,19 +18,19 @@ import { loggerService } from '@logger'
 import { nanoid } from '@reduxjs/toolkit'
 import {
   DEFAULT_CONTEXTCOUNT,
+  DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_OPTIONS_INCLUDE_USAGE,
   DEFAULT_TEMPERATURE,
   isMac
 } from '@renderer/config/constant'
-import { isFunctionCallingModel, isNotSupportTextDeltaModel, qwenModel, SYSTEM_MODELS } from '@renderer/config/models'
+import { qwenModel, SYSTEM_MODELS } from '@renderer/config/models/default'
+import { isEmbeddingModel, isRerankModel } from '@renderer/config/models/embedding'
+import { resolveCapabilityWithOverride, resolveExternalToolCallSupport } from '@renderer/config/models/modelMetadata'
 import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER } from '@renderer/config/ocr'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
 import { SYSTEM_PROVIDERS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
-import { getModel } from '@renderer/hooks/useModel'
 import i18n from '@renderer/i18n'
-import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
-import { isPreservedCompatibleProtocol } from '@renderer/services/customProviderRegistry'
 import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,
@@ -43,7 +43,7 @@ import type {
   WebSearchProvider
 } from '@renderer/types'
 import { isBuiltinMCPServer, isSystemProvider, SystemProviderIds } from '@renderer/types'
-import { getDefaultGroupName, getLeadingEmoji, uuid } from '@renderer/utils'
+import { getDefaultGroupName, getLeadingEmoji, getLowerBaseModelName } from '@renderer/utils/naming'
 import {
   isSupportArrayContentProvider,
   isSupportDeveloperRoleProvider,
@@ -53,6 +53,7 @@ import { API_SERVER_DEFAULTS } from '@shared/config/constant'
 import { defaultByPassRules, UpgradeChannel } from '@shared/config/constant'
 import { isEmpty, isEqual } from 'lodash'
 import { createMigrate } from 'redux-persist'
+import { v4 as uuidv4 } from 'uuid'
 
 import type { RootState } from '.'
 import { DEFAULT_TOOL_ORDER } from './inputTools'
@@ -63,6 +64,288 @@ import { initialState as settingsInitialState } from './settings'
 import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
+
+// Local uuid (mirrors @renderer/utils `uuid`). The utils barrel is not
+// imported here so this module stays free of the store-linked import chain.
+const uuid = () => uuidv4()
+
+// ---------------------------------------------------------------------------
+// History-only legacy provider strings (migrations 1-221 replay).
+// Active ProviderType is narrowed to openai/openai-response/anthropic/gemini;
+// these literals must never become active schema values. They exist only so
+// old persisted backups remain replayable.
+// ---------------------------------------------------------------------------
+type LegacyProviderRecord = Omit<Provider, 'type'> & { type: string }
+
+function asLegacy(provider: Provider): LegacyProviderRecord {
+  return provider as unknown as LegacyProviderRecord
+}
+
+function legacyTypeOf(provider: { type: string }): string {
+  return (provider as { type: string }).type
+}
+
+// Migration-local snapshot of the default assistant settings (mirrors
+// AssistantService.DEFAULT_ASSISTANT_SETTINGS). Defined locally so this
+// module never imports the store-linked AssistantService (which imports the
+// store back and breaks Vitest SSR collection). Historical migrations only
+// need the stable shape: ensure a settings object exists and default
+// toolUseMode to 'function'.
+// ---------------------------------------------------------------------------
+const MIGRATION_DEFAULT_ASSISTANT_SETTINGS = {
+  maxTokens: DEFAULT_MAX_TOKENS,
+  enableMaxTokens: false,
+  temperature: DEFAULT_TEMPERATURE,
+  enableTemperature: false,
+  topP: 1,
+  enableTopP: false,
+  contextCount: DEFAULT_CONTEXTCOUNT,
+  streamOutput: true,
+  defaultModel: undefined,
+  customParameters: [],
+  reasoning_effort: 'default',
+  reasoning_effort_cache: undefined,
+  qwenThinkMode: undefined,
+  toolUseMode: 'function',
+  maxToolCalls: 20,
+  enableMaxToolCalls: true,
+  contextWindowAnchor: {}
+} as const
+
+// Migration-local preserved-protocol check (mirrors
+// customProviderRegistry.PRESERVED_COMPATIBLE_TYPES). Local so this module
+// stays free of the service-layer import chain.
+const PRESERVED_COMPATIBLE_PROTOCOLS: readonly string[] = [
+  'openai',
+  'openai-response',
+  'anthropic',
+  'gemini',
+  'ollama',
+  'new-api'
+]
+
+function isPreservedCompatibleProtocol(type: string): boolean {
+  return PRESERVED_COMPATIBLE_PROTOCOLS.includes(type)
+}
+
+// Migration-local model lookup over the migrating state's own providers.
+// Replaces the store-linked getModel hook (which reads the live global store
+// and pulls the store cycle into this module). Semantics match: match by id,
+// and by provider id when given.
+function findModelInState(providers: Provider[], id?: string, providerId?: string): Model | undefined {
+  const allModels = providers.flatMap((p) => p.models ?? [])
+  return allModels.find((m) => {
+    if (providerId) {
+      return m.id === id && m.provider === providerId
+    }
+    return m.id === id
+  })
+}
+
+// Migration-local OpenAI-compatible host normalizer. Pure equivalent of the
+// tested shared formatApiHost(host) default behavior: trim, drop one trailing
+// slash, append `/v1` idempotently unless the host already carries a version
+// segment (e.g. /v1, /v2beta), ends with the `#` no-version marker (marker
+// stripped), or is empty. Empty/whitespace-only/root-only normalize to ''.
+// Custom paths are preserved (only the version suffix is considered).
+// Implemented locally so this module never imports the shared
+// barrel (which created the SSR collection cycle).
+function withoutTrailingSlashLocal(url: string): string {
+  return url.replace(/\/$/, '')
+}
+
+function withoutTrailingSharpLocal<T extends string>(url: T): T {
+  return url.replace(/#$/, '') as T
+}
+
+function hasApiVersionLocal(host: string): boolean {
+  const VERSION_REGEX = /\/v\d+(?:alpha|beta)?(?:\/|$)/i
+  try {
+    const url = new URL(host)
+    return VERSION_REGEX.test(url.pathname)
+  } catch {
+    return VERSION_REGEX.test(host)
+  }
+}
+
+// Legacy Ollama-native suffixes (mirrors the retired formatOllamaApiHost
+// strip set, case-sensitive like the original). Applied ONLY to folded
+// `ollama` entries: pre-consolidation Ollama hosts spoke the Ollama-native
+// protocol whose base was bare or carried `/api`/`/chat`, and folding to
+// OpenAI-compatible needs the bare base + `/v1`. Intentional custom paths on
+// mistral/new-api entries are never stripped.
+function withoutLegacyOllamaSuffixLocal(url: string): string {
+  return url.replace(/\/(api|chat)$/, '')
+}
+
+function formatFoldedApiHostLocal(host: unknown, rawType?: string): unknown {
+  if (typeof host !== 'string') return host
+  const trimmed = host.trim()
+  if (trimmed.length === 0) return ''
+  let normalized = withoutTrailingSlashLocal(trimmed)
+  if (rawType === 'ollama') {
+    normalized = withoutLegacyOllamaSuffixLocal(normalized)
+  }
+  if (normalized.length === 0) return ''
+  const shouldAppend = !(normalized.endsWith('#') || hasApiVersionLocal(normalized))
+  if (shouldAppend) {
+    return `${normalized}/v1`
+  }
+  return withoutTrailingSharpLocal(normalized)
+}
+
+// ---------------------------------------------------------------------------
+// Frozen model predicates for historical migrations (121/124/185).
+// The live predicates in config/models/* resolve the owning provider through
+// AssistantService (live store) for vision/websearch branches, which pulls
+// the store -> assistants -> i18n SSR cycle into this module and breaks
+// Vitest collection. Historical migrations replay ancient persisted states,
+// so they use these frozen store-free snapshots instead of the evolving live
+// logic. Snapshots mirror the live name-heuristic core exactly:
+//  - embedding/rerank guards via the cycle-free embedding leaf,
+//  - user capability overrides and external models.dev metadata via the
+//    cycle-free modelMetadata leaf,
+//  - dedicated-image-model guard via a frozen copy of the vision list
+//    (dedicated image models never take the function-calling path).
+// Deliberate delta: the DeepSeek hybrid-inference provider carve-out
+// (reasoning.ts, itself store-linked) is omitted — hybrid models postdate the
+// states these migrations replay, and the name heuristic already classifies
+// them as function-calling.
+// ---------------------------------------------------------------------------
+const MIGRATION_FUNCTION_CALLING_MODELS = [
+  'gpt-4o',
+  'gpt-4o-mini',
+  'gpt-4',
+  'gpt-4.5',
+  'gpt-oss(?:-[\\w-]+)',
+  'gpt-5(?:-[0-9-]+)?',
+  'o(1|3|4)(?:-[\\w-]+)?',
+  'claude',
+  'qwen',
+  'qwen3',
+  'hunyuan',
+  'deepseek',
+  'glm-4(?:-[\\w-]+)?',
+  'glm-4.5(?:-[\\w-]+)?',
+  'glm-4.7(?:-[\\w-]+)?',
+  'glm-5(?:-[\\w-]+)?',
+  'learnlm(?:-[\\w-]+)?',
+  'gemini(?:-[\\w-]+)?',
+  'gemma-?4(?:[-.\\w]+)?',
+  'grok-3(?:-[\\w-]+)?',
+  'grok-4(?:-[\\w-]+)?',
+  'grok-build(?:-[\\w-]+)?',
+  'doubao-seed-1[.-][68](?:-[\\w-]+)?',
+  'doubao-seed-2[.-]0(?:-[\\w-]+)?',
+  'doubao-seed-code(?:-[\\w-]+)?',
+  'kimi-k2(?:-[\\w-]+)?',
+  'ling-\\w+(?:-[\\w-]+)?',
+  'ring-\\w+(?:-[\\w-]+)?',
+  'minimax-m[23](?:\\.\\d+)?(?:-[\\w-]+)?',
+  'mimo-v2\\.5(?:-pro)?(?!-)',
+  'mimo-v2-flash',
+  'mimo-v2-pro',
+  'mimo-v2-omni',
+  'glm-5v-turbo'
+] as const
+
+const MIGRATION_FUNCTION_CALLING_EXCLUDED_MODELS = [
+  'aqa(?:-[\\w-]+)?',
+  'imagen(?:-[\\w-]+)?',
+  'o1-mini',
+  'o1-preview',
+  'AIDC-AI/Marco-o1',
+  'gemini-1(?:\\.[\\w-]+)?',
+  'qwen-mt(?:-[\\w-]+)?',
+  'gpt-5-chat(?:-[\\w-]+)?',
+  'glm-4\\.5v',
+  'gemini-2.5-flash-image(?:-[\\w-]+)?',
+  'gemini-2.0-flash-preview-image-generation',
+  'gemini-3(?:\\.\\d+)?-pro-image(?:-[\\w-]+)?',
+  'deepseek-v3.2-speciale',
+  'deepseek-r1(?:[-:][\\w.-]+)?'
+] as const
+
+const MIGRATION_FUNCTION_CALLING_REGEX = new RegExp(
+  `\\b(?!(?:${MIGRATION_FUNCTION_CALLING_EXCLUDED_MODELS.join('|')})\\b)(?:${MIGRATION_FUNCTION_CALLING_MODELS.join('|')})\\b`,
+  'i'
+)
+
+const MIGRATION_STEPFUN_FUNCTION_CALLING_MODELS = new Set(['step-3.7-flash'])
+
+// Frozen copy of the vision dedicated-image-model list (store-free guard).
+const MIGRATION_DEDICATED_IMAGE_MODELS = [
+  'dall-e(?:-[\\w-]+)?',
+  'gpt-image(?:-[\\w-]+)?',
+  'grok-2-image(?:-[\\w-]+)?',
+  'imagen(?:-[\\w-]+)?',
+  'flux(?:-[\\w-]+)?',
+  'stable-?diffusion(?:-[\\w-]+)?',
+  'stabilityai(?:-[\\w-]+)?',
+  'sd-[\\w-]+',
+  'sdxl(?:-[\\w-]+)?',
+  'cogview(?:-[\\w-]+)?',
+  'qwen-image(?:-[\\w-]+)?',
+  'janus(?:-[\\w-]+)?',
+  'midjourney(?:-[\\w-]+)?',
+  'mj-[\\w-]+',
+  'z-image(?:-[\\w-]+)?',
+  'longcat-image(?:-[\\w-]+)?',
+  'hunyuanimage(?:-[\\w-]+)?',
+  'seedream(?:-[\\w-]+)?',
+  'kandinsky(?:-[\\w-]+)?'
+] as const
+
+const MIGRATION_DEDICATED_IMAGE_MODEL_REGEX = new RegExp(MIGRATION_DEDICATED_IMAGE_MODELS.join('|'), 'i')
+
+function isMigrationDedicatedImageModel(model: Model): boolean {
+  if (!model) return false
+  return MIGRATION_DEDICATED_IMAGE_MODEL_REGEX.test(getLowerBaseModelName(model.id))
+}
+
+function isMigrationFunctionCallingModel(model?: Model): boolean {
+  if (!model || isEmbeddingModel(model) || isRerankModel(model) || isMigrationDedicatedImageModel(model)) {
+    return false
+  }
+
+  const modelId = getLowerBaseModelName(model.id)
+
+  // User capability override (mirrors isUserSelectedModelType 'function_calling').
+  const override = model.capabilities?.find((t) => t.type === 'function_calling')
+  if (override && override.isUserSelected !== undefined) {
+    return override.isUserSelected
+  }
+
+  // External models.dev enrichment outranks the name heuristic.
+  const externalToolCall = resolveCapabilityWithOverride(
+    model,
+    'function_calling',
+    resolveExternalToolCallSupport(model)
+  )
+  if (externalToolCall !== undefined) {
+    return externalToolCall
+  }
+
+  if (model.provider === 'stepfun' && MIGRATION_STEPFUN_FUNCTION_CALLING_MODELS.has(modelId)) {
+    return true
+  }
+
+  if (model.provider === 'doubao' || modelId.includes('doubao')) {
+    return MIGRATION_FUNCTION_CALLING_REGEX.test(modelId) || MIGRATION_FUNCTION_CALLING_REGEX.test(model.name)
+  }
+
+  return MIGRATION_FUNCTION_CALLING_REGEX.test(modelId)
+}
+
+const MIGRATION_NOT_SUPPORT_TEXT_DELTA_MODEL_REGEX = new RegExp('qwen-mt-(?:turbo|plus)')
+
+function isMigrationNotSupportTextDeltaModel(model: Model): boolean {
+  const modelId = getLowerBaseModelName(model.id)
+  return MIGRATION_NOT_SUPPORT_TEXT_DELTA_MODEL_REGEX.test(modelId)
+}
+
+// add provider to state (history helper — catalog entries may carry legacy
+// types; they are pushed verbatim for replay, never validated as active).
 
 // MinApp functions removed - kept as no-ops for migration compatibility
 function removeMiniAppIconsFromState(_state: RootState) {
@@ -82,12 +365,11 @@ function addShortcuts(_state: RootState, _ids: string[], _position: string) {
   // no-op: shortcuts module slimmed
 }
 
-// add provider to state
 function addProvider(state: RootState, id: string) {
   if (!state.llm.providers.find((p) => p.id === id)) {
-    const _provider = SYSTEM_PROVIDERS.find((p) => p.id === id)
+    const _provider = (SYSTEM_PROVIDERS as unknown as LegacyProviderRecord[]).find((p) => p.id === id)
     if (_provider) {
-      state.llm.providers.push(_provider)
+      state.llm.providers.push(_provider as unknown as Provider)
     }
   }
 }
@@ -97,9 +379,9 @@ function addProvider(state: RootState, id: string) {
 // providers; unconfigured entries stay absent and configured compatible
 // entries are converted to ordinary user providers by migration 221).
 function fixMissingProvider(state: RootState) {
-  SYSTEM_PROVIDERS.forEach((p) => {
+  ;(SYSTEM_PROVIDERS as unknown as LegacyProviderRecord[]).forEach((p) => {
     if (!state.llm.providers.find((provider) => provider.id === p.id)) {
-      state.llm.providers.push(p)
+      state.llm.providers.push(p as unknown as Provider)
     }
   })
 }
@@ -127,7 +409,7 @@ function stripUndefinedDeep(value: unknown): unknown {
 // Entries with no stock counterpart can never be proven untouched, so they
 // are preserved as well. Safe over-preservation beats data loss.
 function isUntouchedStockProvider(provider: Provider): boolean {
-  const stock = (SYSTEM_PROVIDERS_CONFIG as Record<string, Provider | undefined>)[provider.id]
+  const stock = (SYSTEM_PROVIDERS_CONFIG as unknown as Record<string, LegacyProviderRecord | undefined>)[provider.id]
   if (!stock) return false
   return isEqual(stripUndefinedDeep(provider), stripUndefinedDeep(stock))
 }
@@ -846,7 +1128,7 @@ const migrateConfig = {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'qwenlm') {
           // @ts-ignore eslint-disable-next-line
-          provider.type = 'qwenlm'
+          asLegacy(provider).type = 'qwenlm'
         }
       })
 
@@ -905,7 +1187,7 @@ const migrateConfig = {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'qwenlm') {
           // @ts-ignore eslint-disable-next-line
-          provider.type = 'qwenlm'
+          asLegacy(provider).type = 'qwenlm'
         }
       })
       return state
@@ -917,7 +1199,7 @@ const migrateConfig = {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'azure-openai') {
-          provider.type = 'azure-openai'
+          asLegacy(provider).type = 'azure-openai'
         }
       })
       state.settings.translateModelPrompt = TRANSLATE_PROMPT
@@ -1366,9 +1648,8 @@ const migrateConfig = {
   '98': (state: RootState) => {
     try {
       state.llm.providers.forEach((provider) => {
-        if (provider.type === 'openai' && provider.id !== 'openai') {
-          // @ts-ignore eslint-disable-next-line
-          provider.type = 'openai-compatible'
+        if (legacyTypeOf(provider) === 'openai' && provider.id !== 'openai') {
+          asLegacy(provider).type = 'openai-compatible'
         }
       })
       return state
@@ -1411,9 +1692,8 @@ const migrateConfig = {
   '100': (state: RootState) => {
     try {
       state.llm.providers.forEach((provider) => {
-        // @ts-ignore eslint-disable-next-line
-        if (['openai-compatible', 'openai'].includes(provider.type)) {
-          provider.type = 'openai'
+        if (['openai-compatible', 'openai'].includes(legacyTypeOf(provider))) {
+          asLegacy(provider).type = 'openai'
         }
         if (provider.id === 'openai') {
           provider.type = 'openai-response'
@@ -1656,8 +1936,8 @@ const migrateConfig = {
   '113': (state: RootState) => {
     try {
       addProvider(state, 'vertexai')
-      if (!state.llm.settings.vertexai) {
-        state.llm.settings.vertexai = llmInitialState.settings.vertexai
+      if (!(state.llm.settings as any).vertexai) {
+        ;(state.llm.settings as any).vertexai = (llmInitialState.settings as any).vertexai
       }
       updateProvider(state, 'gemini', {
         isVertex: false
@@ -1790,7 +2070,7 @@ const migrateConfig = {
 
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'mistral') {
-          provider.type = 'mistral'
+          asLegacy(provider).type = 'mistral'
         }
       })
 
@@ -1851,7 +2131,7 @@ const migrateConfig = {
 
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'azure-openai') {
-          provider.type = 'azure-openai'
+          asLegacy(provider).type = 'azure-openai'
         }
       })
 
@@ -1889,7 +2169,7 @@ const migrateConfig = {
       }
 
       for (const assistant of state.assistants.assistants) {
-        if (assistant.settings?.toolUseMode === 'prompt' && isFunctionCallingModel(assistant.model)) {
+        if (assistant.settings?.toolUseMode === 'prompt' && isMigrationFunctionCallingModel(assistant.model)) {
           assistant.settings.toolUseMode = 'function'
         }
       }
@@ -1950,7 +2230,7 @@ const migrateConfig = {
       const updateModelTextDelta = (model?: Model) => {
         if (model) {
           model.supported_text_delta = true
-          if (isNotSupportTextDeltaModel(model)) {
+          if (isMigrationNotSupportTextDeltaModel(model)) {
             model.supported_text_delta = false
           }
         }
@@ -1977,9 +2257,9 @@ const migrateConfig = {
 
       addProvider(state, 'aws-bedrock')
 
-      // 初始化 awsBedrock 设置
-      if (!state.llm.settings.awsBedrock) {
-        state.llm.settings.awsBedrock = llmInitialState.settings.awsBedrock
+      // 初始化 awsBedrock 设置 (history-only: retired in 222)
+      if (!(state.llm.settings as any).awsBedrock) {
+        ;(state.llm.settings as any).awsBedrock = (llmInitialState.settings as any).awsBedrock
       }
 
       return state
@@ -2179,7 +2459,8 @@ const migrateConfig = {
   '135': (state: RootState) => {
     try {
       if (!state.assistants.defaultAssistant.settings) {
-        state.assistants.defaultAssistant.settings = DEFAULT_ASSISTANT_SETTINGS
+        state.assistants.defaultAssistant.settings =
+          MIGRATION_DEFAULT_ASSISTANT_SETTINGS as unknown as typeof state.assistants.defaultAssistant.settings
       } else if (!state.assistants.defaultAssistant.settings.toolUseMode) {
         state.assistants.defaultAssistant.settings.toolUseMode = 'prompt'
       }
@@ -2605,19 +2886,19 @@ const migrateConfig = {
   },
   '171': (state: RootState) => {
     try {
-      // Ensure aws-bedrock provider exists
+      // Ensure aws-bedrock provider exists (history-only: retired in 222)
       addProvider(state, 'aws-bedrock')
 
       // Ensure awsBedrock settings exist and have all required fields
-      if (!state.llm.settings.awsBedrock) {
-        state.llm.settings.awsBedrock = llmInitialState.settings.awsBedrock
+      if (!(state.llm.settings as any).awsBedrock) {
+        ;(state.llm.settings as any).awsBedrock = (llmInitialState.settings as any).awsBedrock
       } else {
         // For users who have awsBedrock but missing new fields (authType and apiKey)
-        if (!state.llm.settings.awsBedrock.authType) {
-          state.llm.settings.awsBedrock.authType = 'iam'
+        if (!(state.llm.settings as any).awsBedrock.authType) {
+          ;(state.llm.settings as any).awsBedrock.authType = 'iam'
         }
-        if (state.llm.settings.awsBedrock.apiKey === undefined) {
-          state.llm.settings.awsBedrock.apiKey = ''
+        if ((state.llm.settings as any).awsBedrock.apiKey === undefined) {
+          ;(state.llm.settings as any).awsBedrock.apiKey = ''
         }
       }
       return state
@@ -2652,9 +2933,9 @@ const migrateConfig = {
       // Migrate assistants presets
       state.assistants.presets.forEach((preset) => {
         if (!preset.settings) {
-          preset.settings = DEFAULT_ASSISTANT_SETTINGS
+          preset.settings = MIGRATION_DEFAULT_ASSISTANT_SETTINGS as unknown as typeof preset.settings
         } else if (!preset.settings.toolUseMode) {
-          preset.settings.toolUseMode = DEFAULT_ASSISTANT_SETTINGS.toolUseMode
+          preset.settings.toolUseMode = MIGRATION_DEFAULT_ASSISTANT_SETTINGS.toolUseMode
         }
       })
 
@@ -2669,8 +2950,8 @@ const migrateConfig = {
       }
       // Migrate llm providers
       state.llm.providers.forEach((provider) => {
-        if (provider.id === SystemProviderIds['new-api'] && provider.type !== 'new-api') {
-          provider.type = 'new-api'
+        if (provider.id === SystemProviderIds['new-api'] && legacyTypeOf(provider) !== 'new-api') {
+          asLegacy(provider).type = 'new-api'
         }
 
         switch (provider.id) {
@@ -2847,9 +3128,8 @@ const migrateConfig = {
             model.provider = SystemProviderIds.gateway
           }
         })
-        // @ts-ignore
-        if (provider.type === 'ai-gateway') {
-          provider.type = 'gateway'
+        if (legacyTypeOf(provider) === 'ai-gateway') {
+          asLegacy(provider).type = 'gateway'
         }
       })
       logger.info('migrate 181 success')
@@ -2924,7 +3204,7 @@ const migrateConfig = {
       // Reset toolUseMode to function for assistants
       state.assistants.assistants.forEach((assistant) => {
         if (assistant.settings?.toolUseMode === 'prompt') {
-          if (assistant.model && isFunctionCallingModel(assistant.model)) {
+          if (assistant.model && isMigrationFunctionCallingModel(assistant.model)) {
             assistant.settings.toolUseMode = 'function'
           }
         }
@@ -2951,7 +3231,7 @@ const migrateConfig = {
       }
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds.ollama) {
-          provider.type = 'ollama'
+          asLegacy(provider).type = 'ollama'
         }
       })
       logger.info('migrate 186 success')
@@ -3001,13 +3281,18 @@ const migrateConfig = {
       const memoryEmbeddingApiClient = state?.memory?.memoryConfig?.embedderApiClient
 
       if (memoryLlmApiClient) {
-        state.memory.memoryConfig.llmModel = getModel(memoryLlmApiClient.model, memoryLlmApiClient.provider)
+        state.memory.memoryConfig.llmModel = findModelInState(
+          state.llm?.providers ?? [],
+          memoryLlmApiClient.model,
+          memoryLlmApiClient.provider
+        )
         // @ts-ignore
         delete state.memory.memoryConfig.llmApiClient
       }
 
       if (memoryEmbeddingApiClient) {
-        state.memory.memoryConfig.embeddingModel = getModel(
+        state.memory.memoryConfig.embeddingModel = findModelInState(
+          state.llm?.providers ?? [],
           memoryEmbeddingApiClient.model,
           memoryEmbeddingApiClient.provider
         )
@@ -3025,7 +3310,7 @@ const migrateConfig = {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds.ollama) {
-          provider.type = 'ollama'
+          asLegacy(provider).type = 'ollama'
         }
       })
       logger.info('migrate 190 success')
@@ -3164,7 +3449,7 @@ const migrateConfig = {
   '200': (state: RootState) => {
     try {
       state.llm.providers.forEach((provider) => {
-        if (provider.type === 'ollama') {
+        if (legacyTypeOf(provider) === 'ollama') {
           provider.anthropicApiHost = provider.apiHost || 'http://localhost:11434'
         }
       })
@@ -3942,6 +4227,136 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 221 error', error as Error)
+      return state
+    }
+  },
+  '222': (state: RootState) => {
+    try {
+      // Active-protocol consolidation (slice 3):
+      //  - Approved ProviderType values are openai/openai-response/anthropic/
+      //    gemini only. Legacy `ollama`/`new-api`/`mistral` entries speak the
+      //    OpenAI-compatible protocol and are folded to `type:'openai'`,
+      //    preserving id/name/apiKey/apiHost/models/enabled/custom fields and
+      //    all model.provider refs (ids are stable, so refs stay valid).
+      //    Before the rewrite only protocol-required host differences are
+      //    normalized with the migration-local OpenAI-compatible host helper
+      //    (e.g. bare Ollama `http://localhost:11434` -> `.../v1`,
+      //    idempotent when a version is already present). Folded `ollama`
+      //    hosts additionally shed one trailing `/api` or `/chat` first
+      //    (Ollama-native suffixes); mistral/new-api custom paths are never
+      //    stripped. Empty/whitespace-only/root-only hosts normalize to '';
+      //    credentials are never guessed.
+      //  - Entries whose type is azure-openai/vertexai/vertex-anthropic/
+      //    aws-bedrock/gateway or any other unknown non-approved non-foldable
+      //    value are retired (removed from llm.providers).
+      //  - Every live model reference to a removed provider is cleared to
+      //    undefined (never repointed): llm slots, assistants/presets/legacy
+      //    agents, memory, websearch compression, knowledge bases. Historical
+      //    message/block snapshots and reasoning-effort map keys are untouched.
+      //  - llm.settings.vertexai/awsBedrock and the persisted copilot slice
+      //    are deleted. ImageStorage rows are untouched.
+      const APPROVED = new Set(['openai', 'openai-response', 'anthropic', 'gemini'])
+      const FOLDABLE = new Set(['ollama', 'new-api', 'mistral'])
+
+      const normalizeFoldedHost = (apiHost: unknown, rawType: string): unknown =>
+        formatFoldedApiHostLocal(apiHost, rawType)
+
+      const providers = Array.isArray(state.llm?.providers) ? state.llm.providers : []
+      const nextProviders: Provider[] = []
+      const removedIds = new Set<string>()
+
+      for (const provider of providers) {
+        if (!provider || typeof (provider as { id?: unknown }).id !== 'string') continue
+        const rawType = legacyTypeOf(provider as unknown as { type: string })
+        if (APPROVED.has(rawType)) {
+          nextProviders.push(provider)
+          continue
+        }
+        if (FOLDABLE.has(rawType)) {
+          const folded = {
+            ...(provider as unknown as Record<string, unknown>),
+            type: 'openai',
+            isSystem: false
+          } as unknown as Provider
+          // Normalize only the protocol-required base (adds /v1 when missing;
+          // ollama-native /api|/chat suffixes shed first, custom paths kept).
+          folded.apiHost = normalizeFoldedHost(
+            (provider as unknown as { apiHost?: unknown }).apiHost,
+            rawType
+          ) as string
+          nextProviders.push(folded)
+          continue
+        }
+        // Retired: azure-openai/vertexai/vertex-anthropic/aws-bedrock/gateway
+        // or any other unknown non-approved non-foldable value.
+        removedIds.add(provider.id)
+      }
+
+      state.llm.providers = nextProviders
+
+      if (removedIds.size > 0) {
+        const clearIfRemoved = (model?: Model): Model | undefined => {
+          if (model && typeof model.provider === 'string' && removedIds.has(model.provider)) {
+            return undefined
+          }
+          return model
+        }
+
+        if (state.llm) {
+          state.llm.defaultModel = clearIfRemoved(state.llm.defaultModel)
+          state.llm.topicNamingModel = clearIfRemoved(state.llm.topicNamingModel)
+          state.llm.quickModel = clearIfRemoved(state.llm.quickModel)
+          state.llm.translateModel = clearIfRemoved(state.llm.translateModel)
+        }
+
+        if (state.assistants?.defaultAssistant) {
+          state.assistants.defaultAssistant.model = clearIfRemoved(state.assistants.defaultAssistant.model)
+          state.assistants.defaultAssistant.defaultModel = clearIfRemoved(
+            state.assistants.defaultAssistant.defaultModel
+          )
+        }
+        state.assistants?.assistants?.forEach((assistant) => {
+          assistant.model = clearIfRemoved(assistant.model)
+          assistant.defaultModel = clearIfRemoved(assistant.defaultModel)
+        })
+        state.assistants?.presets?.forEach((preset) => {
+          // @ts-ignore AssistantPreset does not carry model fields on the runtime type
+          preset.model = clearIfRemoved(preset.model)
+          // @ts-ignore AssistantPreset does not carry model fields on the runtime type
+          preset.defaultModel = clearIfRemoved(preset.defaultModel)
+        })
+        // @ts-ignore legacy agents slice may exist in old persisted state
+        state.agents?.agents?.forEach((agent: any) => {
+          agent.model = clearIfRemoved(agent.model)
+          agent.defaultModel = clearIfRemoved(agent.defaultModel)
+        })
+
+        if (state.memory?.memoryConfig) {
+          state.memory.memoryConfig.llmModel = clearIfRemoved(state.memory.memoryConfig.llmModel)
+          state.memory.memoryConfig.embeddingModel = clearIfRemoved(state.memory.memoryConfig.embeddingModel)
+        }
+        if (state.websearch?.compressionConfig) {
+          state.websearch.compressionConfig.embeddingModel = clearIfRemoved(
+            state.websearch.compressionConfig.embeddingModel
+          )
+          state.websearch.compressionConfig.rerankModel = clearIfRemoved(state.websearch.compressionConfig.rerankModel)
+        }
+        state.knowledge?.bases?.forEach((base) => {
+          ;(base as any).model = clearIfRemoved(base.model)
+          base.rerankModel = clearIfRemoved(base.rerankModel)
+        })
+      }
+
+      if (state.llm?.settings) {
+        delete (state.llm.settings as any).vertexai
+        delete (state.llm.settings as any).awsBedrock
+      }
+      delete (state as any).copilot
+
+      logger.info('migrate 222 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 222 error', error as Error)
       return state
     }
   }

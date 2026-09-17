@@ -17,23 +17,17 @@ import { checkApi } from '@renderer/services/ApiService'
 import { isProviderSupportAuth } from '@renderer/services/ProviderService'
 import { useAppDispatch } from '@renderer/store'
 import { updateWebSearchProvider } from '@renderer/store/websearch'
-import type { SystemProviderId } from '@renderer/types'
 import { isSystemProvider, isSystemProviderId, SystemProviderIds } from '@renderer/types'
 import type { ApiKeyConnectivity } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { formatApiHost, formatApiKeys, getFancyProviderName, validateApiHost } from '@renderer/utils'
 import { serializeHealthCheckError } from '@renderer/utils/error'
 import {
-  isAIGatewayProvider,
   isAnthropicProvider,
-  isAzureOpenAIProvider,
   isGeminiProvider,
-  isNewApiProvider,
-  isOllamaProvider,
   isOpenAICompatibleProvider,
   isOpenAIProvider,
-  isSupportAnthropicPromptCacheProvider,
-  isVertexProvider
+  isSupportAnthropicPromptCacheProvider
 } from '@renderer/utils/provider'
 import { Button, Divider, Flex, Input, Select, Space, Switch, Tooltip } from 'antd'
 import Link from 'antd/es/typography/Link'
@@ -53,15 +47,12 @@ import {
   SettingTitle
 } from '..'
 import ApiOptionsSettingsPopup from './ApiOptionsSettings/ApiOptionsSettingsPopup'
-import AwsBedrockSettings from './AwsBedrockSettings'
 import CustomHeaderPopup from './CustomHeaderPopup'
 import DMXAPISettings from './DMXAPISettings'
-import GithubCopilotSettings from './GithubCopilotSettings'
 import GPUStackSettings from './GPUStackSettings'
 import LMStudioSettings from './LMStudioSettings'
 import ProviderOAuth from './ProviderOAuth'
 import SelectProviderModelPopup from './SelectProviderModelPopup'
-import VertexAISettings from './VertexAISettings'
 
 interface Props {
   providerId: string
@@ -101,19 +92,15 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
   const { updateProviders } = useProviders()
   const [apiHost, setApiHost] = useState(provider.apiHost)
   const [anthropicApiHost, setAnthropicHost] = useState<string | undefined>(provider.anthropicApiHost)
-  const [apiVersion, setApiVersion] = useState(provider.apiVersion)
   const [activeHostField, setActiveHostField] = useState<HostField>('apiHost')
   const { t, i18n } = useTranslation()
   const { theme } = useTheme()
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
 
-  const isAzureOpenAI = isAzureOpenAIProvider(provider)
   const isDmxapi = provider.id === 'dmxapi'
-  const noAPIInputProviders = ['aws-bedrock'] as const satisfies SystemProviderId[]
-  const hideApiInput = noAPIInputProviders.some((id) => id === provider.id)
-  const noAPIKeyInputProviders = ['copilot', 'vertexai'] as const satisfies SystemProviderId[]
-  const hideApiKeyInput = noAPIKeyInputProviders.some((id) => id === provider.id)
+  const hideApiInput = false
+  const hideApiKeyInput = false
 
   const providerConfig = PROVIDER_URLS[provider.id]
   const officialWebsite = providerConfig?.websites?.official
@@ -207,14 +194,8 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
       window.toast.error(t('settings.provider.api_host_no_valid'))
       return
     }
-    if (isVertexProvider(provider) || apiHost.trim()) {
-      // For new-api provider, keep apiHost and anthropicApiHost in sync
-      if (isNewApiProvider(provider)) {
-        updateProvider({ apiHost, anthropicApiHost: apiHost })
-        setAnthropicHost(apiHost)
-      } else {
-        updateProvider({ apiHost })
-      }
+    if (apiHost.trim()) {
+      updateProvider({ apiHost })
     } else {
       setApiHost(provider.apiHost)
     }
@@ -231,7 +212,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
       setAnthropicHost(undefined)
     }
   }
-  const onUpdateApiVersion = () => updateProvider({ apiVersion })
 
   const openApiKeyList = async () => {
     if (localApiKey !== provider.apiKey) {
@@ -316,20 +296,8 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
   const hostPreview = () => {
     const formattedApiHost = adaptProvider({ provider: { ...provider, apiHost } }).apiHost
 
-    if (isOllamaProvider(provider)) {
-      return formattedApiHost + '/chat'
-    }
-
     if (isOpenAICompatibleProvider(provider)) {
       return formattedApiHost + '/chat/completions'
-    }
-
-    if (isAzureOpenAIProvider(provider)) {
-      const apiVersion = provider.apiVersion || ''
-      const path = !['preview', 'v1'].includes(apiVersion)
-        ? `/v1/chat/completions?apiVersion=v1`
-        : `/v1/responses?apiVersion=v1`
-      return formattedApiHost + path
     }
 
     if (isAnthropicProvider(provider)) {
@@ -341,12 +309,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
     }
     if (isOpenAIProvider(provider)) {
       return formattedApiHost + '/responses'
-    }
-    if (isVertexProvider(provider)) {
-      return formattedApiHost + '/publishers/google'
-    }
-    if (isAIGatewayProvider(provider)) {
-      return formattedApiHost + '/language-model'
     }
     return formattedApiHost
   }
@@ -372,9 +334,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
   }
 
   useEffect(() => {
-    if (provider.id === 'copilot') {
-      return
-    }
     setApiHost(provider.apiHost)
   }, [provider.apiHost, provider.id])
 
@@ -383,9 +342,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
   }, [provider.anthropicApiHost])
 
   const canConfigureAnthropicHost = useMemo(() => {
-    if (isNewApiProvider(provider)) {
-      return true
-    }
     return (
       provider.type !== 'anthropic' && isSystemProviderId(provider.id) && isAnthropicCompatibleProviderId(provider.id)
     )
@@ -422,7 +378,7 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
       ? t('settings.provider.anthropic_api_host_tooltip')
       : t('settings.provider.api_host_tooltip')
 
-  const isAnthropicOAuth = () => provider.id === 'anthropic' && provider.authType === 'oauth'
+  const isAnthropicOAuth = () => provider.type === 'anthropic' && provider.authType === 'oauth'
 
   return (
     <SettingContainer theme={theme} style={{ background: 'var(--color-background)' }}>
@@ -487,11 +443,9 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
                   justifyContent: 'space-between'
                 }}>
                 {t('settings.provider.api_key.label')}
-                {provider.id !== 'copilot' && (
-                  <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
-                    <Button type="text" onClick={openApiKeyList} icon={<Settings2 size={16} />} />
-                  </Tooltip>
-                )}
+                <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
+                  <Button type="text" onClick={openApiKeyList} icon={<Settings2 size={16} />} />
+                </Tooltip>
               </SettingSubtitle>
               <Space.Compact style={{ width: '100%', marginTop: 5 }}>
                 <Input.Password
@@ -500,7 +454,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
                   onChange={(e) => setLocalApiKey(e.target.value)}
                   spellCheck={false}
                   autoFocus={provider.enabled && provider.apiKey === '' && !isProviderSupportAuth(provider)}
-                  disabled={provider.id === 'copilot'}
                   suffix={renderStatusIndicator()}
                 />
                 <Button
@@ -570,11 +523,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
                       </Button>
                     )}
                   </Space.Compact>
-                  {isVertexProvider(provider) && (
-                    <SettingHelpTextRow>
-                      <SettingHelpText>{t('settings.provider.vertex_ai.api_host_help')}</SettingHelpText>
-                    </SettingHelpTextRow>
-                  )}
                   <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
                     <SettingHelpText
                       style={{
@@ -613,29 +561,8 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
           )}
         </>
       )}
-      {isAzureOpenAI && (
-        <>
-          <SettingSubtitle>{t('settings.provider.api_version')}</SettingSubtitle>
-          <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-            <Input
-              value={apiVersion}
-              placeholder="2024-xx-xx-preview"
-              onChange={(e) => setApiVersion(e.target.value)}
-              onBlur={onUpdateApiVersion}
-            />
-          </Space.Compact>
-          <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
-            <SettingHelpText style={{ minWidth: 'fit-content' }}>
-              {t('settings.provider.azure.apiversion.tip')}
-            </SettingHelpText>
-          </SettingHelpTextRow>
-        </>
-      )}
       {provider.id === 'lmstudio' && <LMStudioSettings />}
       {provider.id === 'gpustack' && <GPUStackSettings />}
-      {provider.id === 'copilot' && <GithubCopilotSettings providerId={provider.id} />}
-      {provider.id === 'aws-bedrock' && <AwsBedrockSettings />}
-      {provider.id === 'vertexai' && <VertexAISettings />}
       <ModelList providerId={provider.id} />
     </SettingContainer>
   )

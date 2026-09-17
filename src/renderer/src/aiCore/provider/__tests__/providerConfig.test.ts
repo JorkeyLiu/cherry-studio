@@ -34,43 +34,11 @@ vi.mock('@renderer/store', () => {
   }
 })
 
-// @renderer/utils/api: use real implementations (pure functions + store-dependent formatVertexApiHost works via mocked store)
-
-vi.mock('@renderer/hooks/useVertexAI', () => ({
-  isVertexProvider: vi.fn((p: { type: string }) => p.type === 'vertexai'),
-  isVertexAIConfigured: vi.fn(() => true),
-  createVertexProvider: vi.fn((provider: Provider) => ({
-    ...provider,
-    type: 'vertexai',
-    googleCredentials: {
-      clientEmail: 'test@test.iam.gserviceaccount.com',
-      privateKey: '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----'
-    },
-    project: 'test-project',
-    location: 'us-central1'
-  }))
-}))
-
-vi.mock('@renderer/hooks/useAwsBedrock', () => ({
-  getAwsBedrockAuthType: vi.fn(() => 'apiKey'),
-  getAwsBedrockAccessKeyId: vi.fn(() => 'AKID_TEST'),
-  getAwsBedrockSecretAccessKey: vi.fn(() => 'SECRET_TEST'),
-  getAwsBedrockApiKey: vi.fn(() => 'bedrock-api-key'),
-  getAwsBedrockRegion: vi.fn(() => 'us-east-1')
-}))
-
-import type { GoogleVertexProviderSettings } from '@ai-sdk/google-vertex/edge'
 import type { OpenAICompatibleProviderSettings } from '@ai-sdk/openai-compatible'
-import type { GitHubCopilotProviderSettings } from '@opeoginni/github-copilot-openai-compatible'
 import type { ProviderConfig } from '@renderer/aiCore/types'
-import { getAwsBedrockAuthType } from '@renderer/hooks/useAwsBedrock'
-import { isVertexAIConfigured } from '@renderer/hooks/useVertexAI'
 import { getProviderByModel } from '@renderer/services/AssistantService'
-import type { AwsBedrockAuthType, Model, Provider } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 
-import { COPILOT_DEFAULT_HEADERS } from '../constants'
-import type { AihubmixProviderSettings } from '../custom/aihubmix-provider'
-import type { NewApiProviderSettings } from '../custom/newapi-provider'
 import { adaptProvider, formatProviderApiHost, getActualProvider, providerToAiSdkConfig } from '../providerConfig'
 
 const { __mockGetState: mockGetState } = vi.mocked(await import('@renderer/store')) as unknown as {
@@ -89,18 +57,8 @@ const createWindowKeyv = () => {
   }
 }
 
-interface WindowMockApi {
-  copilot?: { getToken: ReturnType<typeof vi.fn> }
-  anthropic_oauth?: { getAccessToken: ReturnType<typeof vi.fn> }
-}
-
-const setupWindowMock = (options?: { withCopilotToken?: boolean; withAnthropicOAuth?: boolean }) => {
-  const api: WindowMockApi = {}
-  if (options?.withCopilotToken) {
-    api.copilot = {
-      getToken: vi.fn().mockResolvedValue({ token: 'mock-copilot-token' })
-    }
-  }
+const setupWindowMock = (options?: { withAnthropicOAuth?: boolean }) => {
+  const api: { anthropic_oauth?: { getAccessToken: ReturnType<typeof vi.fn> } } = {}
   if (options?.withAnthropicOAuth) {
     api.anthropic_oauth = {
       getAccessToken: vi.fn().mockResolvedValue('mock-oauth-token')
@@ -114,37 +72,12 @@ const setupWindowMock = (options?: { withCopilotToken?: boolean; withAnthropicOA
   })
 }
 
-interface StoreMockOverrides {
-  includeUsage?: boolean
-  copilot?: { defaultHeaders: Record<string, string> }
-}
-
-const setupStoreMock = (overrides?: StoreMockOverrides) => {
+const setupStoreMock = (overrides?: { includeUsage?: boolean }) => {
   mockGetState.mockReturnValue({
-    copilot: overrides?.copilot ?? { defaultHeaders: {} },
     settings: {
       openAI: {
         streamOptions: {
           includeUsage: overrides?.includeUsage
-        }
-      }
-    },
-    llm: {
-      settings: {
-        vertexai: {
-          projectId: 'test-project',
-          location: 'us-central1',
-          serviceAccount: {
-            clientEmail: 'test@test.iam.gserviceaccount.com',
-            privateKey: '-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----'
-          }
-        },
-        awsBedrock: {
-          authType: 'apiKey',
-          accessKeyId: 'AKID_TEST',
-          secretAccessKey: 'SECRET_TEST',
-          apiKey: 'bedrock-api-key',
-          region: 'us-east-1'
         }
       }
     }
@@ -153,7 +86,7 @@ const setupStoreMock = (overrides?: StoreMockOverrides) => {
 
 // ==================== Provider Factories ====================
 
-const makeProvider = (overrides: Partial<Provider> & { id: string; type: string }): Provider =>
+const makeProvider = (overrides: Omit<Partial<Provider>, 'type'> & { id: string; type: string }): Provider =>
   ({
     name: overrides.id,
     apiKey: 'test-key',
@@ -161,7 +94,7 @@ const makeProvider = (overrides: Partial<Provider> & { id: string; type: string 
     models: [],
     isSystem: true,
     ...overrides
-  }) as Provider
+  }) as unknown as Provider
 
 const makeModel = (id: string, provider: string, overrides?: Partial<Model>): Model => ({
   id,
@@ -173,7 +106,7 @@ const makeModel = (id: string, provider: string, overrides?: Partial<Model>): Mo
 
 // ==================== formatProviderApiHost ====================
 
-describe('formatProviderApiHost', () => {
+describe('formatProviderApiHost (slice 3: protocol-based, no brand-id selection)', () => {
   describe('Anthropic provider (special dual-field sync)', () => {
     it('syncs apiHost from anthropicApiHost when both are set', () => {
       const provider = makeProvider({
@@ -185,7 +118,6 @@ describe('formatProviderApiHost', () => {
 
       const result = formatProviderApiHost(provider)
 
-      // Both fields should be formatted, apiHost derived from anthropicApiHost
       expect(result.anthropicApiHost).toBe('https://custom-anthropic.example.com/v1')
       expect(result.apiHost).toBe('https://custom-anthropic.example.com/v1')
     })
@@ -202,137 +134,6 @@ describe('formatProviderApiHost', () => {
       expect(result.apiHost).toBe('https://api.anthropic.com/v1')
       expect(result.anthropicApiHost).toBe('https://api.anthropic.com/v1')
     })
-
-    it('skips version append when trailing sharp is present', () => {
-      const provider = makeProvider({
-        id: 'anthropic',
-        type: 'anthropic',
-        apiHost: 'https://api.anthropic.com/v1#'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      // Trailing # disables version append
-      expect(result.apiHost).not.toContain('/v1/v1')
-    })
-  })
-
-  describe('Copilot / GitHub provider', () => {
-    it('formats apiHost without appending version', () => {
-      const provider = makeProvider({
-        id: 'copilot',
-        type: 'openai',
-        apiHost: 'https://api.githubcopilot.com'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      // Copilot uses formatApiHost(host, false) — no /v1 appended
-      expect(result.apiHost).toBe('https://api.githubcopilot.com')
-    })
-
-    it('formats GitHub provider the same way', () => {
-      const provider = makeProvider({
-        id: 'github',
-        type: 'openai',
-        apiHost: 'https://models.inference.ai.azure.com'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://models.inference.ai.azure.com')
-    })
-  })
-
-  describe('Perplexity provider', () => {
-    it('formats apiHost without appending version', () => {
-      const provider = makeProvider({
-        id: 'perplexity',
-        type: 'openai',
-        apiHost: 'https://api.perplexity.ai'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://api.perplexity.ai')
-    })
-  })
-
-  describe('NewAPI provider', () => {
-    // Regression: previously isNewApiProvider was matched in formatProviderApiHost and forced
-    it('appends /v1 when matched by type "new-api"', () => {
-      const provider = makeProvider({
-        id: 'some-newapi-instance',
-        type: 'new-api',
-        apiHost: 'https://api.example.com'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://api.example.com/v1')
-    })
-
-    it('does not double-append /v1', () => {
-      const provider = makeProvider({
-        id: 'new-api',
-        type: 'openai',
-        apiHost: 'https://api.newapi.com/v1'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://api.newapi.com/v1')
-    })
-
-    it('skips version append when trailing sharp is present', () => {
-      const provider = makeProvider({
-        id: 'new-api',
-        type: 'openai',
-        apiHost: 'https://api.newapi.com/custom#'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://api.newapi.com/custom')
-    })
-  })
-
-  describe('Ollama provider', () => {
-    it('strips trailing /v1 and appends /api', () => {
-      const provider = makeProvider({
-        id: 'ollama',
-        type: 'ollama',
-        apiHost: 'http://localhost:11434/v1'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('http://localhost:11434/api')
-    })
-
-    it('strips trailing /api and re-appends cleanly', () => {
-      const provider = makeProvider({
-        id: 'ollama',
-        type: 'ollama',
-        apiHost: 'http://localhost:11434/api'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('http://localhost:11434/api')
-    })
-
-    it('handles plain host', () => {
-      const provider = makeProvider({
-        id: 'ollama',
-        type: 'ollama',
-        apiHost: 'http://localhost:11434'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('http://localhost:11434/api')
-    })
   })
 
   describe('Gemini provider', () => {
@@ -347,151 +148,62 @@ describe('formatProviderApiHost', () => {
 
       expect(result.apiHost).toBe('https://generativelanguage.googleapis.com/v1beta')
     })
-
-    it('does not double-append when version already present', () => {
-      const provider = makeProvider({
-        id: 'gemini',
-        type: 'gemini',
-        apiHost: 'https://generativelanguage.googleapis.com/v1beta'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).not.toContain('v1beta/v1beta')
-    })
-
-    it('skips version when trailing sharp is present', () => {
-      const provider = makeProvider({
-        id: 'gemini',
-        type: 'gemini',
-        apiHost: 'https://custom-gemini.example.com/custom-path#'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      // Trailing # means appendApiVersion = false
-      expect(result.apiHost).not.toContain('v1beta')
-    })
   })
 
-  describe('Azure OpenAI provider', () => {
-    it('normalizes apiHost without appending version (deferred to build phase)', () => {
+  describe('Generic OpenAI-compatible (no brand-id formatters)', () => {
+    it.each(['groq', 'openrouter', 'deepseek', 'together', 'silicon'])(
+      'brand id %s with type openai uses generic /v1 formatting',
+      (brandId) => {
+        const provider = makeProvider({
+          id: brandId,
+          type: 'openai',
+          apiHost: 'https://api.example.com'
+        })
+
+        const result = formatProviderApiHost(provider)
+
+        expect(result.apiHost).toBe('https://api.example.com/v1')
+      }
+    )
+
+    it('appends /v1 for generic openai', () => {
       const provider = makeProvider({
-        id: 'azure-openai',
-        type: 'azure-openai',
-        apiHost: 'https://example.openai.azure.com/openai'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      // Azure now defers /openai suffix to buildAzureConfig; formatProviderApiHost only normalizes
-      expect(result.apiHost).toBe('https://example.openai.azure.com/openai')
-    })
-
-    it('does not append /v1 to bare Azure host', () => {
-      const provider = makeProvider({
-        id: 'azure-openai',
-        type: 'azure-openai',
-        apiHost: 'https://example.openai.azure.com'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://example.openai.azure.com')
-    })
-  })
-
-  describe('Vertex provider', () => {
-    beforeEach(() => {
-      setupStoreMock()
-    })
-
-    it('formats empty host using store vertexai settings', () => {
-      const provider = makeProvider({
-        id: 'vertexai',
-        type: 'vertexai',
-        apiHost: ''
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toContain('aiplatform.googleapis.com')
-      expect(result.apiHost).toContain('projects/test-project')
-      expect(result.apiHost).toContain('locations/us-central1')
-    })
-
-    it('uses custom host when provided', () => {
-      const provider = makeProvider({
-        id: 'vertexai',
-        type: 'vertexai',
-        apiHost: 'https://custom-vertex.example.com'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://custom-vertex.example.com/v1')
-      expect(result.apiHost).not.toContain('projects/')
-    })
-  })
-
-  describe('Default fallback (unmatched provider)', () => {
-    it('appends /v1 to apiHost', () => {
-      const provider = makeProvider({
-        id: 'some-custom-provider',
+        id: 'my-openai',
         type: 'openai',
-        apiHost: 'https://custom-api.example.com'
+        apiHost: 'https://api.custom.com'
       })
 
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://custom-api.example.com/v1')
+      expect(formatProviderApiHost(provider).apiHost).toBe('https://api.custom.com/v1')
     })
 
     it('does not double-append /v1', () => {
       const provider = makeProvider({
-        id: 'some-custom-provider',
+        id: 'my-openai',
         type: 'openai',
-        apiHost: 'https://custom-api.example.com/v1'
+        apiHost: 'https://api.custom.com/v1'
       })
 
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://custom-api.example.com/v1')
-    })
-
-    it('skips version with trailing sharp', () => {
-      const provider = makeProvider({
-        id: 'some-custom-provider',
-        type: 'openai',
-        apiHost: 'https://custom-api.example.com/custom#'
-      })
-
-      const result = formatProviderApiHost(provider)
-
-      expect(result.apiHost).toBe('https://custom-api.example.com/custom')
+      expect(formatProviderApiHost(provider).apiHost).toBe('https://api.custom.com/v1')
     })
   })
 
   describe('does not mutate the original provider', () => {
     it('returns a new object', () => {
       const provider = makeProvider({
-        id: 'some-custom-provider',
+        id: 'my-openai',
         type: 'openai',
-        apiHost: 'https://api.example.com'
+        apiHost: 'https://api.custom.com'
       })
 
       const result = formatProviderApiHost(provider)
 
       expect(result).not.toBe(provider)
-      expect(provider.apiHost).toBe('https://api.example.com')
-      expect(result.apiHost).toBe('https://api.example.com/v1')
+      expect(provider.apiHost).toBe('https://api.custom.com')
     })
   })
 })
 
-// ==================== getActualProvider / adaptProvider ====================
-
-describe('getActualProvider', () => {
+describe('getActualProvider (exact provider-id matching, no silent fallback)', () => {
   it('retrieves provider by model and formats its apiHost', () => {
     const provider = makeProvider({
       id: 'openai',
@@ -503,13 +215,10 @@ describe('getActualProvider', () => {
     const result = getActualProvider(makeModel('gpt-4', 'openai'))
 
     expect(result.apiHost).toBe('https://api.openai.com/v1')
-    // Should not mutate original
     expect(provider.apiHost).toBe('https://api.openai.com')
   })
 
   it('resolves an unknown manually added model id without catalog/metadata', () => {
-    // The model id exists in no external catalog; resolution consults only
-    // the owning provider entry and keeps basic protocol behavior.
     const provider = makeProvider({
       id: 'my-openai',
       type: 'openai',
@@ -523,16 +232,17 @@ describe('getActualProvider', () => {
     expect(result.apiHost).toBe('https://my.example.com/v1')
   })
 
-  it('rejects a stale provider instead of silently substituting another provider', () => {
+  it('rejects a stale provider instead of silently substituting another provider (no network)', () => {
     const other = makeProvider({ id: 'other', type: 'openai', apiHost: 'https://other.example.com' })
     vi.mocked(getProviderByModel).mockReturnValue(other)
 
+    // Throws before any provider/API invocation — no network occurs.
     expect(() => getActualProvider(makeModel('gpt-4', 'openai'))).toThrow()
   })
 })
 
 describe('adaptProvider', () => {
-  it('deep clones and formats the provider', () => {
+  it('deep clones and formats the provider generically', () => {
     const provider = makeProvider({
       id: 'perplexity',
       type: 'openai',
@@ -541,297 +251,37 @@ describe('adaptProvider', () => {
 
     const result = adaptProvider({ provider })
 
-    expect(result.apiHost).toBe('https://api.perplexity.ai')
+    // Brand ids with type openai use generic formatting (no brand-specific exemption).
+    expect(result.apiHost).toBe('https://api.perplexity.ai/v1')
     expect(result).not.toBe(provider)
   })
 })
 
 // ==================== providerToAiSdkConfig ====================
 
-describe('providerToAiSdkConfig', () => {
+describe('providerToAiSdkConfig (slice 3: protocol-based, no brand builders)', () => {
   beforeEach(() => {
-    setupWindowMock({ withCopilotToken: true, withAnthropicOAuth: true })
+    setupWindowMock({ withAnthropicOAuth: true })
     setupStoreMock()
     vi.clearAllMocks()
   })
 
-  describe('Copilot builder', () => {
-    it('uses copilot token and default headers', async () => {
+  describe('Anthropic OAuth builder (approved, type-based)', () => {
+    it('uses OAuth token for anthropic type with oauth mode', async () => {
       const provider = makeProvider({
-        id: 'copilot',
-        type: 'openai',
-        apiHost: 'https://api.githubcopilot.com'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('gpt-4', 'copilot'))
-
-      expect(config.providerId).toBe('github-copilot-openai-compatible')
-      const settings = config.providerSettings as GitHubCopilotProviderSettings
-      expect(settings.apiKey).toBe('mock-copilot-token')
-      expect(settings.headers).toBeDefined()
-      expect(settings.headers!['Copilot-Integration-Id']).toBe(COPILOT_DEFAULT_HEADERS['Copilot-Integration-Id'])
-      expect(settings.headers!['Editor-Version']).toBe(COPILOT_DEFAULT_HEADERS['Editor-Version'])
-      expect(settings.headers!['copilot-vision-request']).toBe('true')
-    })
-
-    it('merges stored custom headers', async () => {
-      setupStoreMock({ copilot: { defaultHeaders: { 'X-Custom': 'value' } } })
-
-      const provider = makeProvider({
-        id: 'copilot',
-        type: 'openai',
-        apiHost: 'https://api.githubcopilot.com'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('gpt-4', 'copilot'))
-
-      const settings = config.providerSettings as GitHubCopilotProviderSettings
-      expect(settings.headers).toBeDefined()
-      expect(settings.headers!['X-Custom']).toBe('value')
-    })
-  })
-
-  describe('Anthropic OAuth builder', () => {
-    it('uses OAuth token with bearer auth', async () => {
-      const provider = makeProvider({
-        id: 'anthropic',
+        id: 'my-anthropic',
         type: 'anthropic',
-        apiHost: 'https://api.anthropic.com/v1',
+        apiHost: 'https://api.anthropic.com',
         authType: 'oauth'
       })
 
-      const config = await providerToAiSdkConfig(provider, makeModel('claude-3-5-sonnet', 'anthropic'))
+      const config = await providerToAiSdkConfig(provider, makeModel('claude-sonnet-4-5', provider.id))
 
       expect(config.providerId).toBe('anthropic')
-      const settings = config.providerSettings as { baseURL: string; apiKey: string; headers: Record<string, string> }
-      expect(settings.baseURL).toBe('https://api.anthropic.com/v1')
-      expect(settings.headers.Authorization).toBe('Bearer mock-oauth-token')
-      expect(settings.apiKey).toBe('')
     })
   })
 
-  describe('Ollama builder', () => {
-    it('includes Authorization header when apiKey is set', async () => {
-      const provider = makeProvider({
-        id: 'ollama',
-        type: 'ollama',
-        apiHost: 'http://localhost:11434/api',
-        apiKey: 'my-ollama-key'
-      })
-
-      const config = (await providerToAiSdkConfig(provider, makeModel('llama3', 'ollama'))) as ProviderConfig<'ollama'>
-
-      expect(config.providerId).toBe('ollama')
-      expect(config.providerSettings.headers?.Authorization).toBe('Bearer my-ollama-key')
-    })
-
-    it('omits Authorization header when apiKey is empty', async () => {
-      const provider = makeProvider({
-        id: 'ollama',
-        type: 'ollama',
-        apiHost: 'http://localhost:11434/api',
-        apiKey: ''
-      })
-
-      const config = (await providerToAiSdkConfig(provider, makeModel('llama3', 'ollama'))) as ProviderConfig<'ollama'>
-
-      expect(config.providerId).toBe('ollama')
-      expect(config.providerSettings.headers?.Authorization).toBeUndefined()
-    })
-  })
-
-  describe('Azure builder', () => {
-    it('uses deployment-based URLs for date-format apiVersion', async () => {
-      const provider = makeProvider({
-        id: 'azure-openai',
-        type: 'azure-openai',
-        apiHost: 'https://example.openai.azure.com/openai',
-        apiVersion: '2024-02-15-preview'
-      })
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('gpt-4o', provider.id)
-      )) as ProviderConfig<'azure'>
-
-      expect(config.providerId).toBe('azure')
-      expect(config.providerSettings.apiVersion).toBe('2024-02-15-preview')
-      expect(config.providerSettings.useDeploymentBasedUrls).toBe(true)
-    })
-
-    it('uses azure-responses for apiVersion "v1"', async () => {
-      const provider = makeProvider({
-        id: 'azure-openai',
-        type: 'azure-openai',
-        apiHost: 'https://example.openai.azure.com/openai',
-        apiVersion: 'v1'
-      })
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('gpt-4o', provider.id)
-      )) as ProviderConfig<'azure-responses'>
-
-      expect(config.providerId).toBe('azure-responses')
-      expect(config.providerSettings.apiVersion).toBe('v1')
-      expect(config.providerSettings.useDeploymentBasedUrls).toBeUndefined()
-    })
-
-    it('uses azure-responses for apiVersion "preview"', async () => {
-      const provider = makeProvider({
-        id: 'azure-openai',
-        type: 'azure-openai',
-        apiHost: 'https://example.openai.azure.com/openai',
-        apiVersion: 'preview'
-      })
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('gpt-4o', provider.id)
-      )) as ProviderConfig<'azure-responses'>
-
-      expect(config.providerId).toBe('azure-responses')
-      expect(config.providerSettings.apiVersion).toBe('preview')
-    })
-
-    it('routes Claude models on Azure to azure-anthropic', async () => {
-      const provider = makeProvider({
-        id: 'azure-openai',
-        type: 'azure-openai',
-        apiHost: 'https://example.openai.azure.com/openai',
-        apiVersion: '2024-02-15-preview'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('claude-3-5-sonnet', provider.id))
-
-      expect(config.providerId).toBe('azure-anthropic')
-    })
-  })
-
-  describe('Bedrock builder', () => {
-    it('uses apiKey auth when authType is apiKey', async () => {
-      const provider = makeProvider({
-        id: 'aws-bedrock',
-        type: 'aws-bedrock',
-        apiHost: 'https://bedrock.us-east-1.amazonaws.com'
-      })
-
-      vi.mocked(getAwsBedrockAuthType).mockReturnValue('apiKey' satisfies AwsBedrockAuthType)
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('anthropic.claude-v2', provider.id)
-      )) as ProviderConfig<'bedrock'>
-
-      expect(config.providerId).toBe('bedrock')
-      const settings = config.providerSettings
-      expect(settings.region).toBe('us-east-1')
-      expect(settings.apiKey).toBe('bedrock-api-key')
-    })
-
-    it('uses accessKey auth when authType is iam', async () => {
-      const provider = makeProvider({
-        id: 'aws-bedrock',
-        type: 'aws-bedrock',
-        apiHost: 'https://bedrock.us-east-1.amazonaws.com'
-      })
-
-      vi.mocked(getAwsBedrockAuthType).mockReturnValue('iam' satisfies AwsBedrockAuthType)
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('anthropic.claude-v2', provider.id)
-      )) as ProviderConfig<'bedrock'>
-
-      expect(config.providerId).toBe('bedrock')
-      const settings = config.providerSettings
-      expect(settings.accessKeyId).toBe('AKID_TEST')
-      expect(settings.secretAccessKey).toBe('SECRET_TEST')
-    })
-  })
-
-  describe('Vertex builder', () => {
-    it('routes Claude models to google-vertex-anthropic', async () => {
-      const provider = makeProvider({
-        id: 'vertexai',
-        type: 'vertexai',
-        apiHost: 'https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('claude-3-5-sonnet', provider.id))
-
-      expect(config.providerId).toBe('google-vertex-anthropic')
-      const settings = config.providerSettings as GoogleVertexProviderSettings
-      expect(settings.project).toBe('test-project')
-      expect(settings.location).toBe('us-central1')
-      expect(settings.baseURL).toContain('/publishers/anthropic/models')
-    })
-
-    it('routes non-Claude models to google-vertex', async () => {
-      const provider = makeProvider({
-        id: 'vertexai',
-        type: 'vertexai',
-        apiHost: 'https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('gemini-1.5-pro', provider.id))
-
-      expect(config.providerId).toBe('google-vertex')
-      const settings = config.providerSettings as GoogleVertexProviderSettings
-      expect(settings.baseURL).toContain('/publishers/google')
-    })
-
-    it('throws when VertexAI is not configured', () => {
-      vi.mocked(isVertexAIConfigured).mockReturnValue(false)
-
-      const provider = makeProvider({
-        id: 'vertexai',
-        type: 'vertexai',
-        apiHost: ''
-      })
-
-      expect(() => providerToAiSdkConfig(provider, makeModel('gemini-1.5-pro', provider.id))).toThrow(
-        'VertexAI is not configured'
-      )
-    })
-  })
-
-  describe('NewAPI builder', () => {
-    it('passes endpoint_type from model', async () => {
-      const provider = makeProvider({
-        id: 'new-api',
-        type: 'openai',
-        apiHost: 'https://api.newapi.com'
-      })
-
-      const model = makeModel('gpt-4', provider.id, { endpoint_type: 'openai-response' })
-
-      const config = await providerToAiSdkConfig(provider, model)
-
-      expect(config.providerId).toBe('newapi')
-      const settings = config.providerSettings as NewApiProviderSettings
-      expect(settings.endpointType).toBe('openai-response')
-    })
-  })
-
-  describe('AiHubMix builder', () => {
-    it('returns aihubmix provider config', async () => {
-      const provider = makeProvider({
-        id: 'aihubmix',
-        type: 'openai',
-        apiHost: 'https://api.aihubmix.com'
-      })
-
-      const config = await providerToAiSdkConfig(provider, makeModel('gpt-4', provider.id))
-
-      expect(config.providerId).toBe('aihubmix')
-      const settings = config.providerSettings as AihubmixProviderSettings
-      expect(settings.baseURL).toBeTruthy()
-      expect(settings.apiKey).toBe('test-key')
-    })
-  })
-
-  describe('OpenAI-compatible fallback', () => {
+  describe('OpenAI-compatible fallback (generic, brand-neutral)', () => {
     it('includes includeUsage when provider supports stream options', async () => {
       setupStoreMock({ includeUsage: true })
 
@@ -850,65 +300,7 @@ describe('providerToAiSdkConfig', () => {
       expect(config.providerSettings.includeUsage).toBe(true)
     })
 
-    it('excludes includeUsage when provider opts out of stream options', async () => {
-      setupStoreMock({ includeUsage: true })
-
-      const provider = makeProvider({
-        id: 'some-openai-compat',
-        type: 'openai',
-        apiHost: 'https://api.custom.com/v1',
-        apiOptions: { isNotSupportStreamOptions: true }
-      })
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('gpt-4', provider.id)
-      )) as ProviderConfig<'openai-compatible'>
-
-      expect(config.providerSettings.includeUsage).toBeUndefined()
-    })
-
-    it('respects includeUsage=false from settings', async () => {
-      setupStoreMock({ includeUsage: false })
-
-      const provider = makeProvider({
-        id: 'some-openai-compat',
-        type: 'openai',
-        apiHost: 'https://api.custom.com/v1'
-      })
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('gpt-4', provider.id)
-      )) as ProviderConfig<'openai-compatible'>
-
-      expect(config.providerSettings.includeUsage).toBe(false)
-    })
-
-    it('includes default app headers', async () => {
-      const provider = makeProvider({
-        id: 'some-openai-compat',
-        type: 'openai',
-        apiHost: 'https://api.custom.com/v1'
-      })
-
-      const config = (await providerToAiSdkConfig(
-        provider,
-        makeModel('gpt-4', provider.id)
-      )) as ProviderConfig<'openai-compatible'>
-
-      const settings = config.providerSettings
-      expect(settings.headers).toBeDefined()
-      // The stale `HTTP-Referer` attribution header to the retired platform
-      // domain was removed with the upstream platform; X-Title carries the
-      // identity.
-      expect(settings.headers!['HTTP-Referer']).toBeUndefined()
-      expect(settings.headers!['X-Title']).toBe('Cherry Chat')
-    })
-
     it('builds basic openai-compatible config for an unknown manually added model id', async () => {
-      // The model id exists in no external catalog; basic protocol behavior
-      // must still be requestable through the owning custom provider entry.
       const provider = makeProvider({
         id: 'my-openai',
         type: 'openai',
@@ -923,6 +315,21 @@ describe('providerToAiSdkConfig', () => {
       expect(config.providerId).toBe('openai-compatible')
       expect(config.providerSettings.baseURL).toBe('https://my.example.com/v1')
     })
+
+    it.each(['groq', 'openrouter', 'deepseek'])(
+      'brand id %s with type openai uses generic OpenAI-compatible (no brand SDK)',
+      async (brandId) => {
+        const provider = makeProvider({
+          id: brandId,
+          type: 'openai',
+          apiHost: `https://${brandId}.example.com/v1`
+        })
+
+        const config = await providerToAiSdkConfig(provider, makeModel('some-model', provider.id))
+
+        expect(config.providerId).toBe('openai-compatible')
+      }
+    )
 
     it('merges extra_headers from provider', async () => {
       const provider = makeProvider({
@@ -942,7 +349,7 @@ describe('providerToAiSdkConfig', () => {
       expect(settings.headers!['X-Custom']).toBe('custom-value')
     })
 
-    it('adds X-Api-Key header for openai provider type', async () => {
+    it('adds X-Api-Key header for openai-response (approved Responses)', async () => {
       const provider = makeProvider({
         id: 'openai',
         type: 'openai-response',

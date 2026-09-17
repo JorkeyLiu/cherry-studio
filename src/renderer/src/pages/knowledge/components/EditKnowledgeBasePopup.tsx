@@ -70,9 +70,14 @@ const PopupContainer: React.FC<PopupContainerProps> = ({ base: _base, resolve })
           <Flex vertical align="self-start">
             <span>{t('knowledge.migrate.confirm.content')}</span>
             <span>{t('knowledge.embedding_model')}:</span>
-            <span style={{ paddingLeft: '1em' }}>{`${t('knowledge.migrate.source_model')}: ${base.model.name}`}</span>
             <span
-              style={{ paddingLeft: '1em' }}>{`${t('knowledge.migrate.target_model')}: ${newBase.model.name}`}</span>
+              style={{
+                paddingLeft: '1em'
+              }}>{`${t('knowledge.migrate.source_model')}: ${base.model?.name ?? t('knowledge.not_set')}`}</span>
+            <span
+              style={{
+                paddingLeft: '1em'
+              }}>{`${t('knowledge.migrate.target_model')}: ${newBase.model?.name ?? t('knowledge.not_set')}`}</span>
             <span>{t('knowledge.dimensions')}:</span>
             <span
               style={{ paddingLeft: '1em' }}>{`${t('knowledge.migrate.source_dimensions')}: ${base.dimensions}`}</span>

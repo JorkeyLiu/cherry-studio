@@ -7,6 +7,8 @@ import {
   parseModelMetadataSnapshot
 } from '@shared/modelMetadata'
 
+import { resolveExactProvider, setExactProviderResolver } from './exactProviderResolver'
+
 const logger = loggerService.withContext('ModelMetadata')
 
 /** Official OpenAI API base: the only OpenAI-compatible host that maps to `openai`. */
@@ -21,20 +23,30 @@ let initPromise: Promise<ModelMetadataSnapshot | null> | null = null
  * `config/models` capability modules must stay pure and lightweight: they
  * never import AssistantService or the store/data-source chain (that edge
  * created a deterministic collection-time TDZ through
- * store/assistants → SqliteMessageDataSource). Production registers the exact
- * store lookup once (AssistantService module scope); tests register fakes.
+ * store/assistants → SqliteMessageDataSource). The exact store lookup is
+ * registered once from the renderer boot seam (init.ts); tests register
+ * fakes.
  *
  * Attribution still requires an exact `model.provider` id match: the result
  * is verified at this boundary, so even a sloppy resolver cannot cause
  * cross-provider attribution, and there is never a silent default-provider
- * fallback.
+ * fallback. Backed by the shared exact-provider registry so vision/websearch
+ * predicates and metadata attribution share one contract.
  */
 export type MetadataProviderResolver = (model: Model | undefined | null) => Provider | null | undefined
 
-let providerResolver: MetadataProviderResolver | null = null
-
 export function setMetadataProviderResolver(resolver: MetadataProviderResolver | null): void {
-  providerResolver = resolver
+  if (!resolver) {
+    setExactProviderResolver(null)
+    return
+  }
+  setExactProviderResolver((model) => {
+    try {
+      return resolver(model) ?? null
+    } catch {
+      return null
+    }
+  })
 }
 
 /**
@@ -48,13 +60,7 @@ export function resolveProviderForMetadata(
   explicit?: Provider | null
 ): Provider | null {
   if (explicit !== undefined) return explicit
-  if (!model || typeof model.provider !== 'string' || model.provider.length === 0) return null
-  try {
-    const provider = providerResolver?.(model)
-    return provider && provider.id === model.provider ? provider : null
-  } catch {
-    return null
-  }
+  return resolveExactProvider(model)
 }
 
 /**

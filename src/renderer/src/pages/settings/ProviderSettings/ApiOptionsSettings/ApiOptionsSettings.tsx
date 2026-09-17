@@ -108,7 +108,7 @@ const ApiOptionsSettings = ({ providerId }: Props) => {
       }
     ]
 
-    if (provider.type === 'openai' || provider.type === 'openai-response' || provider.type === 'azure-openai') {
+    if (provider.type === 'openai' || provider.type === 'openai-response') {
       items.push(...openAIOptions)
     }
 

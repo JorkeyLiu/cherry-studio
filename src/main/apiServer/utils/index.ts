@@ -29,8 +29,10 @@ export async function getAvailableProviders(): Promise<Provider[]> {
       return []
     }
 
-    // Support OpenAI-compatible and Anthropic-compatible providers for API server
-    const supportedTypes: ProviderType[] = ['openai', 'anthropic', 'ollama', 'new-api']
+    // API server executes only approved protocols it can serve (slice 3):
+    // generic OpenAI-compatible, OpenAI Responses, Anthropic, Gemini.
+    // Retired/unknown types are never silently reinterpreted.
+    const supportedTypes: ProviderType[] = ['openai', 'openai-response', 'anthropic', 'gemini']
     const supportedProviders = providers.filter((p: Provider) => p.enabled && supportedTypes.includes(p.type))
 
     // Format provider apiHost according to their type
@@ -277,8 +279,13 @@ export function validateProvider(provider: Provider): boolean {
       return false
     }
 
-    // Support OpenAI and Anthropic type providers
-    if (provider.type !== 'openai' && provider.type !== 'anthropic') {
+    // API server executes only approved protocols (slice 3).
+    if (
+      provider.type !== 'openai' &&
+      provider.type !== 'openai-response' &&
+      provider.type !== 'anthropic' &&
+      provider.type !== 'gemini'
+    ) {
       logger.debug('Provider type not supported', {
         providerId: provider.id,
         providerType: provider.type

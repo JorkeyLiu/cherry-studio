@@ -38,7 +38,6 @@ import assistants from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
 import { getClosureTopicIds } from './closureOwnership'
-import copilot from './copilot'
 import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
@@ -81,7 +80,6 @@ const appReducer = combineReducers({
   websearch,
   mcp,
   memory,
-  copilot,
   tabs,
   preprocess,
   messages: newMessagesReducer,
@@ -406,7 +404,7 @@ const persistedReducer = persistReducer(
   {
     key: 'cherry-studio',
     storage,
-    version: 221,
+    version: 222,
     blacklist: [
       'runtime',
       'messages',

@@ -1,27 +1,7 @@
-import type { Model, Provider } from '@renderer/types'
+import type { Provider } from '@renderer/types'
 import { describe, expect, it, vi } from 'vitest'
 
 import { getAiSdkProviderId } from '../factory'
-
-// Mock the external dependencies
-vi.mock('@cherrystudio/ai-core', () => ({
-  registerMultipleProviders: vi.fn(() => 4), // Mock successful registration of 4 providers
-  getProviderMapping: vi.fn((id: string) => {
-    // Mock dynamic mappings
-    const mappings: Record<string, string> = {
-      openrouter: 'openrouter',
-      'google-vertex': 'google-vertex',
-      vertexai: 'google-vertex',
-      bedrock: 'bedrock',
-      'aws-bedrock': 'bedrock',
-      zhipu: 'zhipu'
-    }
-    return mappings[id]
-  }),
-  AiCore: {
-    isSupported: vi.fn(() => true)
-  }
-}))
 
 vi.mock('@renderer/services/AssistantService', () => ({
   getProviderByModel: vi.fn(),
@@ -58,96 +38,58 @@ vi.mock('@logger', () => ({
   }
 }))
 
-function createTestProvider(id: string, type: string): Provider {
+function createTestProvider(id: string, type: string, apiHost = 'https://api.example.com'): Provider {
   return {
     id,
     type,
     name: `Test ${id}`,
     apiKey: 'test-key',
-    apiHost: 'test-host'
-  } as Provider
+    apiHost,
+    models: []
+  } as unknown as Provider
 }
 
-function createAzureProvider(id: string, apiVersion?: string, model?: string): Provider {
-  return {
-    id,
-    type: 'azure-openai',
-    name: `Azure Test ${id}`,
-    apiKey: 'azure-test-key',
-    apiHost: 'azure-test-host',
-    apiVersion,
-    models: [{ id: model || 'gpt-4' } as Model]
-  }
-}
-
-describe('Integrated Provider Registry', () => {
-  describe('Provider ID Resolution', () => {
-    it('should resolve openrouter provider correctly', () => {
-      const provider = createTestProvider('openrouter', 'openrouter')
-      const result = getAiSdkProviderId(provider)
-      expect(result).toBe('openrouter')
+describe('Integrated Provider Registry (slice 3: protocol-based, no brand-id selection)', () => {
+  describe('Approved protocol mapping', () => {
+    it('maps openai-response to approved OpenAI Responses', () => {
+      const provider = createTestProvider('openai', 'openai-response', 'https://api.openai.com/v1')
+      expect(getAiSdkProviderId(provider)).toBe('openai')
     })
 
-    it('should resolve google-vertex provider correctly', () => {
-      const provider = createTestProvider('google-vertex', 'vertexai')
-      const result = getAiSdkProviderId(provider)
-      expect(result).toBe('google-vertex')
+    it('maps openai official host to openai-chat', () => {
+      const provider = createTestProvider('my-openai', 'openai', 'https://api.openai.com/v1')
+      expect(getAiSdkProviderId(provider)).toBe('openai-chat')
     })
 
-    it('should resolve bedrock provider correctly', () => {
-      const provider = createTestProvider('bedrock', 'aws-bedrock')
-      const result = getAiSdkProviderId(provider)
-      expect(result).toBe('bedrock')
+    it('maps anthropic type to Anthropic', () => {
+      const provider = createTestProvider('my-anthropic', 'anthropic')
+      expect(getAiSdkProviderId(provider)).toBe('anthropic')
     })
 
-    it('should resolve zhipu provider correctly', () => {
-      const provider = createTestProvider('zhipu', 'zhipu')
-      const result = getAiSdkProviderId(provider)
-      expect(result).toBe('zhipu')
-    })
-
-    it('should resolve provider type mapping correctly', () => {
-      const provider = createTestProvider('vertex-test', 'vertexai')
-      const result = getAiSdkProviderId(provider)
-      expect(result).toBe('google-vertex')
-    })
-
-    it('should handle static provider mappings', () => {
-      const geminiProvider = createTestProvider('gemini', 'gemini')
-      const result = getAiSdkProviderId(geminiProvider)
-      expect(result).toBe('google')
-    })
-
-    it('should fallback to provider.id for unknown providers', () => {
-      const unknownProvider = createTestProvider('unknown-provider', 'unknown-type')
-      const result = getAiSdkProviderId(unknownProvider)
-      expect(result).toBe('unknown-provider')
-    })
-
-    it('should handle Azure OpenAI providers correctly', () => {
-      const azureProvider = createAzureProvider('azure-test', '2024-02-15', 'gpt-4o')
-      const result = getAiSdkProviderId(azureProvider)
-      expect(result).toBe('azure')
-    })
-
-    it('should handle Azure OpenAI providers response endpoint correctly', () => {
-      const azureProvider = createAzureProvider('azure-test', 'v1', 'gpt-4o')
-      const result = getAiSdkProviderId(azureProvider)
-      expect(result).toBe('azure-responses')
-    })
-
-    it('should handle Azure provider Claude Models', () => {
-      const provider = createTestProvider('azure-anthropic', 'anthropic')
-      const result = getAiSdkProviderId(provider)
-      expect(result).toBe('azure-anthropic')
+    it('maps gemini type to Google', () => {
+      const provider = createTestProvider('my-gemini', 'gemini')
+      expect(getAiSdkProviderId(provider)).toBe('google')
     })
   })
 
-  describe('Backward Compatibility', () => {
-    it('should maintain compatibility with existing providers', () => {
-      const grokProvider = createTestProvider('grok', 'grok')
-      const result = getAiSdkProviderId(grokProvider)
-      expect(result).toBe('xai-responses')
+  describe('No brand-id selection', () => {
+    it.each(['groq', 'openrouter', 'deepseek', 'together', 'silicon'])(
+      'brand id %s with type openai uses generic OpenAI-compatible',
+      (brandId) => {
+        const provider = createTestProvider(brandId, 'openai', `https://${brandId}.example.com/v1`)
+        expect(getAiSdkProviderId(provider)).toBe('openai-compatible')
+      }
+    )
+
+    it('unknown model ids remain requestable via generic OpenAI-compatible (factory does not reject)', () => {
+      const provider = createTestProvider('my-openai', 'openai', 'https://my.example.com/v1')
+      // Factory resolution succeeds; unknown model id handling is in providerConfig (generic fallback).
+      expect(getAiSdkProviderId(provider)).toBe('openai-compatible')
+    })
+
+    it('falls back to generic OpenAI-compatible for unknown types (no silent brand fallback)', () => {
+      const provider = createTestProvider('unknown-provider', 'unknown-type' as any)
+      expect(getAiSdkProviderId(provider)).toBe('openai-compatible')
     })
   })
 })

@@ -1,5 +1,5 @@
 import type { LanguageModelV3CallOptions } from '@ai-sdk/provider'
-import type { Model, Provider, ProviderType } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('i18next', () => ({
@@ -39,8 +39,16 @@ import { isOpenAILLMModel } from '@renderer/config/models/openai'
 
 import { createPdfCompatibilityPlugin } from '../pdfCompatibilityPlugin'
 
-function makeProvider(id: string, type: ProviderType): Provider {
-  return { id, name: id, type, apiKey: 'test', apiHost: 'https://test.com', isSystem: false, models: [] } as Provider
+function makeProvider(id: string, type: string): Provider {
+  return {
+    id,
+    name: id,
+    type,
+    apiKey: 'test',
+    apiHost: 'https://test.com',
+    isSystem: false,
+    models: []
+  } as unknown as Provider
 }
 
 function makeModel(overrides: Partial<Model> = {}): Model {

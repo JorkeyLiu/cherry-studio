@@ -110,12 +110,12 @@ describe('normalizeEditedProviderType — legacy edit preservation', () => {
   })
 
   it('preserves the original type for retained legacy entries regardless of popup interaction', () => {
-    expect(normalizeEditedProviderType('azure-openai', 'openai')).toBe('azure-openai')
-    expect(normalizeEditedProviderType('vertexai', 'gemini')).toBe('vertexai')
-    expect(normalizeEditedProviderType('aws-bedrock', 'anthropic')).toBe('aws-bedrock')
+    expect(normalizeEditedProviderType('azure-openai' as any, 'openai' as any)).toBe('azure-openai')
+    expect(normalizeEditedProviderType('vertexai' as any, 'gemini' as any)).toBe('vertexai')
+    expect(normalizeEditedProviderType('aws-bedrock' as any, 'anthropic' as any)).toBe('aws-bedrock')
     // OpenAI-compatible variants that are preserved but not creatable also stay put.
     expect(normalizeEditedProviderType('openai-response', 'openai')).toBe('openai-response')
-    expect(normalizeEditedProviderType('ollama', 'openai')).toBe('ollama')
-    expect(normalizeEditedProviderType('new-api', 'gemini')).toBe('new-api')
+    expect(normalizeEditedProviderType('ollama' as any, 'openai' as any)).toBe('ollama')
+    expect(normalizeEditedProviderType('new-api' as any, 'gemini' as any)).toBe('new-api')
   })
 })

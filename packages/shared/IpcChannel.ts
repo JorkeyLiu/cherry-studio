@@ -94,14 +94,6 @@ export enum IpcChannel {
   // Python
   Python_Execute = 'python:execute',
 
-  //copilot
-  Copilot_GetAuthMessage = 'copilot:get-auth-message',
-  Copilot_GetCopilotToken = 'copilot:get-copilot-token',
-  Copilot_SaveCopilotToken = 'copilot:save-copilot-token',
-  Copilot_GetToken = 'copilot:get-token',
-  Copilot_Logout = 'copilot:logout',
-  Copilot_GetUser = 'copilot:get-user',
-
   // obsidian
   Obsidian_GetVaults = 'obsidian:get-vaults',
   Obsidian_GetFiles = 'obsidian:get-files',
@@ -120,11 +112,6 @@ export enum IpcChannel {
   Gemini_RetrieveFile = 'gemini:retrieve-file',
   Gemini_ListFiles = 'gemini:list-files',
   Gemini_DeleteFile = 'gemini:delete-file',
-
-  // VertexAI
-  VertexAI_GetAuthHeaders = 'vertexai:get-auth-headers',
-  VertexAI_GetAccessToken = 'vertexai:get-access-token',
-  VertexAI_ClearAuthCache = 'vertexai:clear-auth-cache',
 
   Windows_ResetMinimumSize = 'window:reset-minimum-size',
   Windows_SetMinimumSize = 'window:set-minimum-size',

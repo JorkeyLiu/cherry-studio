@@ -1,6 +1,4 @@
-import store from '@renderer/store'
-import type { VertexProvider } from '@renderer/types'
-import { formatApiHost, withoutTrailingSlash } from '@shared/utils'
+import { withoutTrailingSlash } from '@shared/utils'
 import { trim } from 'lodash'
 
 // Re-export from shared, for backward compatibility
@@ -15,19 +13,6 @@ export {
 
 // Re-export from shared, for backward compatibility
 export { formatAzureOpenAIApiHost, formatOllamaApiHost } from '@shared/aiCore/provider/utils'
-
-// NOTE: Since #13194, it depends on the store state in renderer, so it cannot be moved to shared now.
-export function formatVertexApiHost(provider: VertexProvider): string {
-  const { apiHost } = provider
-  const { projectId: project, location } = store.getState().llm.settings.vertexai
-  const trimmedHost = withoutTrailingSlash(trim(apiHost))
-  if (!trimmedHost || trimmedHost.endsWith('aiplatform.googleapis.com')) {
-    const host =
-      location === 'global' ? 'https://aiplatform.googleapis.com' : `https://${location}-aiplatform.googleapis.com`
-    return `${formatApiHost(host)}/projects/${project}/locations/${location}`
-  }
-  return formatApiHost(trimmedHost)
-}
 
 // 目前对话界面只支持这些端点
 export const SUPPORTED_IMAGE_ENDPOINT_LIST = ['images/generations', 'images/edits', 'predict'] as const

@@ -10,7 +10,7 @@ import {
 import { getEnableDeveloperMode } from '@renderer/hooks/useSettings'
 import type { Assistant, Model, Provider } from '@renderer/types'
 import { SystemProviderIds } from '@renderer/types'
-import { isOllamaProvider, isSupportEnableThinkingProvider } from '@renderer/utils/provider'
+import { isSupportEnableThinkingProvider } from '@renderer/utils/provider'
 
 import type { AiSdkMiddlewareConfig } from '../types/middlewareConfig'
 import { getReasoningTagName } from '../utils/reasoning'
@@ -69,9 +69,9 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
   // 这样反转后 extractReasoning 在外层，其 wrapStream（状态机）
   // 能处理 simulateStreaming 生成的模拟流中的未闭合 <think> 标签。
 
-  // 0.1 Reasoning extraction for OpenAI/Azure providers
+  // 0.1 Reasoning extraction for OpenAI providers (approved protocols only)
   const providerType = provider.type
-  if (providerType === 'openai' || providerType === 'azure-openai' || model.endpoint_type === 'openai') {
+  if (providerType === 'openai' || providerType === 'openai-response' || model.endpoint_type === 'openai') {
     const tagName = getReasoningTagName(model.id.toLowerCase())
     plugins.push(createReasoningExtractionPlugin({ tagName }))
   }
@@ -100,9 +100,11 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
     plugins.push(createNoThinkPlugin())
   }
 
-  // 0.5 Qwen thinking control for providers without enable_thinking support
+  // 0.5 Qwen thinking control for providers without enable_thinking support.
+  // No retired-protocol helper participates here: folded legacy entries are
+  // ordinary `openai`-protocol providers and route through
+  // isSupportEnableThinkingProvider like everything else.
   if (
-    !isOllamaProvider(provider) &&
     isSupportedThinkingTokenQwenModel(model) &&
     !isQwen35to39Model(model) &&
     !isSupportEnableThinkingProvider(provider)

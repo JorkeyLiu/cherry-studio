@@ -60,13 +60,20 @@ import XirangProviderLogo from '@renderer/assets/images/providers/xirang.png'
 import ZaiAppLogo from '@renderer/assets/images/providers/zai.svg'
 import ZeroOneProviderLogo from '@renderer/assets/images/providers/zero-one.png'
 import ZhipuProviderLogo from '@renderer/assets/images/providers/zhipu.png'
-import type { AtLeast, SystemProvider, SystemProviderId } from '@renderer/types'
+import type { AtLeast, Provider, SystemProvider, SystemProviderId } from '@renderer/types'
 import { OpenAIServiceTiers } from '@renderer/types'
 
 import { TOKENFLUX_HOST } from './constant'
-import { SYSTEM_MODELS } from './models'
+import { SYSTEM_MODELS } from './models/default'
 
-export const SYSTEM_PROVIDERS_CONFIG: Record<SystemProviderId, SystemProvider> = {
+// History-only catalog entry shape (slice 3): the built-in catalog still
+// carries retired protocol strings (ollama/new-api/azure/vertex/...) for
+// migration 1-221 replay. Active ProviderType stays narrowed; this legacy
+// shape must never be used for new creation or active request selection.
+export type LegacyCatalogProvider = Omit<SystemProvider, 'type'> & { type: string }
+export type LegacyProviderEntry = Omit<Provider, 'type'> & { type: string }
+
+export const SYSTEM_PROVIDERS_CONFIG: Record<SystemProviderId, LegacyCatalogProvider> = {
   silicon: {
     id: 'silicon',
     name: 'Silicon',
@@ -719,7 +726,7 @@ export const SYSTEM_PROVIDERS_CONFIG: Record<SystemProviderId, SystemProvider> =
 
 export const INITIAL_STATE_EXCLUDED_PROVIDER_IDS = ['cephalon', 'tokenflux'] as const satisfies SystemProviderId[]
 
-export const SYSTEM_PROVIDERS: SystemProvider[] = Object.values(SYSTEM_PROVIDERS_CONFIG)
+export const SYSTEM_PROVIDERS: LegacyCatalogProvider[] = Object.values(SYSTEM_PROVIDERS_CONFIG)
 
 export const PROVIDER_LOGO_MAP: AtLeast<SystemProviderId, string> = {
   ph8: Ph8ProviderLogo,

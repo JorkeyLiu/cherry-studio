@@ -5,7 +5,6 @@ import { selectMemoryConfig } from '@renderer/store/memory'
 import type {
   AddMemoryOptions,
   AssistantMessage,
-  KnowledgeBase,
   MemoryHistoryItem,
   MemoryListOptions,
   MemorySearchOptions,
@@ -210,7 +209,9 @@ class MemoryService {
       const memoryConfig = selectMemoryConfig(store.getState())
       const embeddingModel = memoryConfig.embeddingModel
 
-      // Get knowledge base params for memory
+      // Get knowledge base params for memory. A missing embedding model is
+      // explicitly unconfigured: getKnowledgeBaseParams fails before any
+      // provider/API access instead of throwing a TypeError.
       const { embedApiClient: embeddingApiClient } = getKnowledgeBaseParams({
         id: 'memory',
         name: 'Memory',
@@ -220,7 +221,7 @@ class MemoryService {
         created_at: now(),
         updated_at: now(),
         version: 1
-      } as KnowledgeBase)
+      })
 
       return window.api.memory.setConfig({
         ...memoryConfig,

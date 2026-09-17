@@ -8,13 +8,12 @@ import { REFERENCE_PROMPT } from '@renderer/config/prompts'
 import { addSpan, endSpan } from '@renderer/services/SpanManagerService'
 import store from '@renderer/store'
 import type { Assistant } from '@renderer/types'
-import {
-  type FileMetadata,
-  type KnowledgeBase,
-  type KnowledgeBaseParams,
-  type KnowledgeReference,
-  type KnowledgeSearchResult,
-  SystemProviderIds
+import type {
+  FileMetadata,
+  KnowledgeBase,
+  KnowledgeBaseParams,
+  KnowledgeReference,
+  KnowledgeSearchResult
 } from '@renderer/types'
 import type { Chunk } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
@@ -22,9 +21,10 @@ import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage
 import { routeToEndpoint } from '@renderer/utils'
 import type { ExtractResults } from '@renderer/utils/extract'
 import { createCitationBlock } from '@renderer/utils/messageUtils/create'
-import { isAzureOpenAIProvider, isGeminiProvider } from '@renderer/utils/provider'
+import { isGeminiProvider } from '@renderer/utils/provider'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import type { ModelMessage, UserModelMessage } from 'ai'
+import { t } from 'i18next'
 import { isEmpty } from 'lodash'
 
 import { getProviderByModel } from './AssistantService'
@@ -36,6 +36,12 @@ import { estimateTextTokens } from './TokenService'
 const logger = loggerService.withContext('RendererKnowledgeService')
 
 export const getKnowledgeBaseParams = (base: KnowledgeBase): KnowledgeBaseParams => {
+  if (!base.model) {
+    // Explicitly unconfigured embedding model (e.g. migration 222 cleared the
+    // ref when its provider was retired): fail with the house-style localized
+    // error before constructing AiProvider, never a TypeError on undefined.
+    throw new Error(t('knowledge.embedding_model_required'))
+  }
   const rerankProvider = getProviderByModel(base.rerankModel)
   if (!rerankProvider) {
     // Unconfigured rerank model/provider: fail explicitly before any provider/API access.
@@ -62,11 +68,6 @@ export const getKnowledgeBaseParams = (base: KnowledgeBase): KnowledgeBaseParams
   const rerankHost = rerankAiProvider.getBaseURL()
   if (isGeminiProvider(actualProvider)) {
     baseURL = baseURL + '/openai'
-  } else if (isAzureOpenAIProvider(actualProvider)) {
-    baseURL = baseURL + '/v1'
-  } else if (actualProvider.id === SystemProviderIds.ollama) {
-    // LangChain生态不需要/api结尾的URL
-    baseURL = baseURL.replace(/\/api$/, '')
   }
 
   logger.info(`Knowledge base ${base.name} using baseURL: ${baseURL}`)
@@ -152,6 +153,11 @@ export const searchKnowledgeBase = async (
   parentSpanId?: string,
   modelName?: string
 ): Promise<Array<KnowledgeSearchResult & { file: FileMetadata | null }>> => {
+  if (!base.model) {
+    // Same explicit-unconfigured failure as getKnowledgeBaseParams, before any
+    // model/provider access below.
+    throw new Error(t('knowledge.embedding_model_required'))
+  }
   // Truncate query based on embedding model's max_context to prevent embedding errors
   const maxContext = getEmbeddingMaxContext(base.model.id)
   if (maxContext) {

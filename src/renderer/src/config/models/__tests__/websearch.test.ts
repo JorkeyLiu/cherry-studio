@@ -1,16 +1,12 @@
+import type * as ExactProviderResolverModule from '@renderer/services/exactProviderResolver'
+import { resolveExactProvider } from '@renderer/services/exactProviderResolver'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const providerMock = vi.mocked(getProviderByModel)
+const providerMock = vi.mocked(resolveExactProvider)
 
-vi.mock('@renderer/services/AssistantService', () => ({
-  getProviderByModel: vi.fn(),
-  getAssistantSettings: vi.fn(),
-  getDefaultAssistant: vi.fn().mockReturnValue({
-    id: 'default',
-    name: 'Default Assistant',
-    prompt: '',
-    settings: {}
-  })
+vi.mock('@renderer/services/exactProviderResolver', () => ({
+  resolveExactProvider: vi.fn(),
+  setExactProviderResolver: vi.fn()
 }))
 
 const isEmbeddingModel = vi.hoisted(() => vi.fn())
@@ -80,7 +76,6 @@ vi.mock('@renderer/hooks/useSettings', () => ({
   getStoreSetting: vi.fn()
 }))
 
-import { getProviderByModel } from '@renderer/services/AssistantService'
 import type { Model, Provider } from '@renderer/types'
 import { SystemProviderIds } from '@renderer/types'
 
@@ -162,8 +157,32 @@ describe('websearch helpers', () => {
     })
 
     it('returns false when provider lookup fails', () => {
-      providerMock.mockReturnValueOnce(undefined as any)
+      providerMock.mockReturnValueOnce(null)
       expect(isWebSearchModel(createModel())).toBe(false)
+    })
+
+    it('uses exact provider only: mismatch, unregistered, and throw degrade to unknown', async () => {
+      const actual = await vi.importActual<typeof ExactProviderResolverModule>(
+        '@renderer/services/exactProviderResolver'
+      )
+      providerMock.mockImplementation((model) => actual.resolveExactProvider(model))
+      try {
+        actual.setExactProviderResolver(() => ({ id: 'other', type: 'openai' }) as unknown as Provider)
+        // Sloppy resolver result (different id) is rejected -> unknown -> false.
+        expect(isWebSearchModel(createModel({ id: 'sonar-pro', provider: 'perplexity' }))).toBe(false)
+        expect(isMandatoryWebSearchModel(createModel({ id: 'sonar-pro', provider: 'perplexity' }))).toBe(false)
+        actual.setExactProviderResolver(null)
+        expect(isWebSearchModel(createModel({ id: 'sonar-pro', provider: 'perplexity' }))).toBe(false)
+        actual.setExactProviderResolver(() => {
+          throw new Error('store down')
+        })
+        expect(isWebSearchModel(createModel({ id: 'sonar-pro', provider: 'perplexity' }))).toBe(false)
+        expect(isOpenRouterBuiltInWebSearchModel(createModel({ id: 'sonar-pro', provider: 'perplexity' }))).toBe(false)
+      } finally {
+        actual.setExactProviderResolver(null)
+        providerMock.mockReset()
+        providerMock.mockReturnValue(createProvider())
+      }
     })
 
     it('handles Anthropic providers on unsupported platforms', () => {
@@ -201,15 +220,18 @@ describe('websearch helpers', () => {
       expect(isWebSearchModel(openaiSearch)).toBe(true)
     })
 
-    it('supports OpenAI-compatible or new API providers for Gemini/OpenAI models', () => {
+    it('supports OpenAI-compatible or folded new-api providers for Gemini/OpenAI models', () => {
       const model = createModel({ id: 'gemini-2.5-flash-lite-latest' })
       providerMock.mockReturnValueOnce(createProvider({ id: 'custom' }))
       providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
       expect(isWebSearchModel(model)).toBe(true)
 
       resetMocks()
-      providerMock.mockReturnValueOnce(createProvider({ id: 'custom' }))
-      providerMocks.isNewApiProvider.mockReturnValueOnce(true)
+      // Slice 3: folded new-api entries are generic `openai` protocol, so the
+      // retired isNewApiProvider branch is gone — coverage routes through the
+      // OpenAI-compatible branch instead of the retired helper.
+      providerMock.mockReturnValueOnce(createProvider({ id: 'new-api', type: 'openai' }))
+      providerMocks.isOpenAICompatibleProvider.mockReturnValueOnce(true)
       expect(isWebSearchModel(createModel({ id: 'gpt-4o-search-preview' }))).toBe(true)
     })
 

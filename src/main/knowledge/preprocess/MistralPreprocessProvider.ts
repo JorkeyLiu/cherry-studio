@@ -27,7 +27,7 @@ export default class MistralPreprocessProvider extends BasePreprocessProvider {
     const clientManager = MistralClientManager.getInstance()
     const aiProvider: Provider = {
       id: provider.id,
-      type: 'mistral',
+      type: 'openai',
       name: provider.name,
       apiKey: provider.apiKey!,
       apiHost: provider.apiHost!,

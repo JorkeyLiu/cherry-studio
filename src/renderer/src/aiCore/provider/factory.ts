@@ -1,7 +1,6 @@
 import { extensionRegistry } from '@cherrystudio/ai-core/provider'
 import { loggerService } from '@logger'
-import { type Provider, SystemProviderIds } from '@renderer/types'
-import { isAzureOpenAIProvider, isAzureResponsesEndpoint } from '@renderer/utils/provider'
+import { type Provider } from '@renderer/types'
 
 import { type AppProviderId, appProviderIds } from '../types'
 import { extensions } from './extensions'
@@ -15,40 +14,45 @@ for (const extension of extensions) {
 }
 
 /**
- * 获取 AI SDK Provider ID
+ * Protocol-based AI SDK provider resolution (slice 3).
  *
- * 使用运行时类型安全的 appProviderIds 统一解析
- * 特殊处理 Azure 端点检测和 OpenAI API 域名检测
+ * Never selects by brand/provider.id: `groq`/`openrouter`/`deepseek` and any
+ * other custom id with `type:'openai'` resolve as generic OpenAI-compatible
+ * endpoints. Only the official OpenAI host uses the official OpenAI SDK
+ * variant; everything else is protocol/type driven.
  *
- * @param provider - Provider 配置对象
- * @returns AI SDK 标准 provider ID
+ * - `openai-response` → approved OpenAI Responses (`openai`)
+ * - `openai` + official `api.openai.com` host → `openai-chat`
+ * - `openai` otherwise → `openai-compatible` (generic, preserves custom
+ *   base URL/headers/API key/models; unknown manually mapped model ids
+ *   remain requestable)
+ * - `anthropic` → `anthropic`
+ * - `gemini` → `google`
  */
 export function getAiSdkProviderId(provider: Provider): AppProviderId {
-  // 1. 特殊处理：Azure 的 responses 端点检测（必须在别名解析之前）
-  if (isAzureOpenAIProvider(provider)) {
-    return isAzureResponsesEndpoint(provider) ? appProviderIds['azure-responses'] : appProviderIds.azure
+  if (provider.type === 'openai-response') {
+    return appProviderIds['openai']
   }
 
-  if (provider.id === SystemProviderIds.grok) {
-    return appProviderIds['xai-responses']
+  if (provider.type === 'anthropic') {
+    return appProviderIds['anthropic']
   }
 
-  if (provider.id in appProviderIds) {
-    return appProviderIds[provider.id]
+  if (provider.type === 'gemini') {
+    return appProviderIds['google']
   }
 
-  if (provider.type !== 'openai' && provider.type in appProviderIds) {
-    return appProviderIds[provider.type]
+  if (provider.type === 'openai') {
+    if (provider.apiHost.includes('api.openai.com')) {
+      return appProviderIds['openai-chat']
+    }
+    return appProviderIds['openai-compatible']
   }
 
-  if (provider.apiHost.includes('api.openai.com')) {
-    return appProviderIds['openai-chat']
-  }
-
-  logger.warn('Provider ID not found in registered extensions, using as-is', {
+  logger.warn('Unknown provider type, using generic OpenAI-compatible', {
     providerId: provider.id,
-    providerType: provider.type,
+    providerType: (provider as { type: string }).type,
     registeredIds: Object.keys(appProviderIds)
   })
-  return provider.id
+  return appProviderIds['openai-compatible']
 }

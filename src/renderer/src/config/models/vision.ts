@@ -1,4 +1,4 @@
-import { getProviderByModel } from '@renderer/services/AssistantService'
+import { resolveExactProvider } from '@renderer/services/exactProviderResolver'
 import type { Model } from '@renderer/types'
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
@@ -204,7 +204,7 @@ export function isGenerateImageModel(model?: Model): boolean {
     return false
   }
 
-  const provider = getProviderByModel(model)
+  const provider = resolveExactProvider(model)
 
   if (!provider) {
     return false

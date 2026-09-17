@@ -5,7 +5,7 @@
 
 import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import { loggerService } from '@logger'
-import { isVisionModel } from '@renderer/config/models'
+import { isVisionModel } from '@renderer/config/models/vision'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { resolveOverlayBlock } from '@renderer/services/requestBlockOverlay'
 import store from '@renderer/store'

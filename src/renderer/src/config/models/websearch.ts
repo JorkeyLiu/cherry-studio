@@ -1,20 +1,12 @@
-import { getProviderByModel } from '@renderer/services/AssistantService'
+import { resolveExactProvider } from '@renderer/services/exactProviderResolver'
 import type { Model } from '@renderer/types'
 import { SystemProviderIds } from '@renderer/types'
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
-import {
-  isAzureOpenAIProvider,
-  isGeminiProvider,
-  isNewApiProvider,
-  isOpenAICompatibleProvider,
-  isOpenAIProvider,
-  isVertexProvider
-} from '@renderer/utils/provider'
+import { isGeminiProvider, isOpenAICompatibleProvider, isOpenAIProvider } from '@renderer/utils/provider'
 
 export { GEMINI_FLASH_MODEL_REGEX } from './utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
-import { isClaude4SeriesModel } from './reasoning'
 import { isAnthropicModel } from './utils'
 import { isTextToImageModel } from './vision'
 
@@ -45,7 +37,7 @@ export function isWebSearchModel(model?: Model): boolean {
     return isUserSelectedModelType(model, 'web_search')!
   }
 
-  const provider = getProviderByModel(model)
+  const provider = resolveExactProvider(model)
 
   if (!provider) {
     return false
@@ -53,17 +45,12 @@ export function isWebSearchModel(model?: Model): boolean {
 
   const modelId = getLowerBaseModelName(model.id, '/')
 
-  // bedrock不支持, azure支持
-  if (isAnthropicModel(model) && !(provider.id === SystemProviderIds['aws-bedrock'])) {
-    if (isVertexProvider(provider)) {
-      return isClaude4SeriesModel(model)
-    }
+  if (isAnthropicModel(model)) {
     return CLAUDE_SUPPORTED_WEBSEARCH_REGEX.test(modelId)
   }
 
   // TODO: 当其他供应商采用Response端点时，这个地方逻辑需要改进
-  // azure现在也支持了websearch
-  if (isOpenAIProvider(provider) || isAzureOpenAIProvider(provider)) {
+  if (isOpenAIProvider(provider)) {
     if (isOpenAIWebSearchModel(model)) {
       return true
     }
@@ -93,13 +80,13 @@ export function isWebSearchModel(model?: Model): boolean {
     return false
   }
 
-  if (isOpenAICompatibleProvider(provider) || isNewApiProvider(provider)) {
+  if (isOpenAICompatibleProvider(provider)) {
     if (GEMINI_SEARCH_REGEX.test(modelId) || isOpenAIWebSearchModel(model)) {
       return true
     }
   }
 
-  if (isGeminiProvider(provider) || isVertexProvider(provider)) {
+  if (isGeminiProvider(provider)) {
     return GEMINI_SEARCH_REGEX.test(modelId)
   }
 
@@ -129,7 +116,7 @@ export function isMandatoryWebSearchModel(model?: Model): boolean {
     return false
   }
 
-  const provider = getProviderByModel(model)
+  const provider = resolveExactProvider(model)
 
   if (!provider) {
     return false
@@ -149,7 +136,7 @@ export function isOpenRouterBuiltInWebSearchModel(model: Model): boolean {
     return false
   }
 
-  const provider = getProviderByModel(model)
+  const provider = resolveExactProvider(model)
 
   if (!provider) {
     return false

@@ -7,31 +7,24 @@ import { combineHeaders } from '@ai-sdk/provider-utils'
 import type { WebSearchPluginConfig } from '@cherrystudio/ai-core/built-in/plugins'
 import { extensionRegistry } from '@cherrystudio/ai-core/provider'
 import { loggerService } from '@logger'
-import type { AppProviderId } from '@renderer/aiCore/types'
 import { MAX_TOOL_CALLS, MIN_TOOL_CALLS } from '@renderer/config/constant'
 import {
-  isAnthropicModel,
   isFixedReasoningModel,
-  isGeminiModel,
-  isGenerateImageModel,
-  isGrokModel,
-  isOpenAIModel,
-  isOpenRouterBuiltInWebSearchModel,
-  isPureGenerateImageModel,
   isSupportedReasoningEffortModel,
-  isSupportedThinkingTokenModel,
-  isWebSearchModel
-} from '@renderer/config/models'
+  isSupportedThinkingTokenModel
+} from '@renderer/config/models/reasoning'
+import { isAnthropicModel, isGeminiModel } from '@renderer/config/models/utils'
+import { isGenerateImageModel, isPureGenerateImageModel } from '@renderer/config/models/vision'
+import { isOpenRouterBuiltInWebSearchModel, isWebSearchModel } from '@renderer/config/models/websearch'
 import { getHubModeSystemPrompt } from '@renderer/config/prompts-code-mode'
-import { DEFAULT_ASSISTANT_SETTINGS, getDefaultModel } from '@renderer/services/AssistantService'
+import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/assistantDefaults'
 import store from '@renderer/store'
 import type { CherryWebSearchConfig } from '@renderer/store/websearch'
-import type { Model } from '@renderer/types'
-import { type Assistant, getEffectiveMcpMode, type MCPTool, type Provider, SystemProviderIds } from '@renderer/types'
+import { type Assistant, getEffectiveMcpMode, type MCPTool, type Provider } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { IdleTimeoutController, type IdleTimeoutHandle } from '@renderer/utils/IdleTimeoutController'
 import { replacePromptVariables } from '@renderer/utils/prompt'
-import { isAIGatewayProvider, isAwsBedrockProvider, isSupportUrlContextProvider } from '@renderer/utils/provider'
+import { isSupportUrlContextProvider } from '@renderer/utils/provider'
 import { DEFAULT_TIMEOUT } from '@shared/config/constant'
 import type { ModelMessage } from 'ai'
 import { stepCountIs } from 'ai'
@@ -67,23 +60,6 @@ export function getEffectiveMaxToolCalls(settings?: { maxToolCalls?: number; ena
   }
 
   return validateMaxToolCalls(settings?.maxToolCalls)
-}
-
-function mapVertexAIGatewayModelToProviderId(model: Model): AppProviderId | undefined {
-  if (isAnthropicModel(model)) {
-    return 'anthropic'
-  }
-  if (isGeminiModel(model)) {
-    return 'google'
-  }
-  if (isGrokModel(model)) {
-    return 'xai'
-  }
-  if (isOpenAIModel(model)) {
-    return 'openai'
-  }
-  logger.warn(`Unknown model type for AI Gateway: ${model.id}. Web search will not be enabled.`)
-  return undefined
 }
 
 /**
@@ -125,7 +101,7 @@ export async function buildStreamTextParams(
   }
   const finalSignal = AbortSignal.any(signals)
 
-  const model = assistant.model || getDefaultModel()
+  const model = assistant.model || store.getState().llm.defaultModel
   if (!model) {
     // Unconfigured model slot: fail explicitly before any provider/API
     // invocation.
@@ -179,21 +155,19 @@ export async function buildStreamTextParams(
   // - webSearchPlugin: 根据 provider 的 toolFactories.webSearch 自动注入
   // - urlContextPlugin: 根据 provider 的 toolFactories.urlContext 自动注入
   // parameterBuilder 只构建 config，传给 plugin
+  // Built-in web search resolves through the registered AI SDK provider id.
+  // Retired gateway/vertex model-id routing is gone: unknown protocols fall
+  // back to generic OpenAI-compatible, which carries no built-in search.
   let webSearchPluginConfig: WebSearchPluginConfig | undefined = undefined
   if (enableWebSearch) {
     if (extensionRegistry.has(aiSdkProviderId)) {
       webSearchPluginConfig = buildProviderBuiltinWebSearchConfig(aiSdkProviderId, webSearchConfig, model)
-    } else if (isAIGatewayProvider(provider) || SystemProviderIds.gateway === provider.id) {
-      const gatewayProviderId = mapVertexAIGatewayModelToProviderId(model)
-      if (gatewayProviderId) {
-        webSearchPluginConfig = buildProviderBuiltinWebSearchConfig(gatewayProviderId, webSearchConfig, model)
-      }
     }
   }
 
   let headers = inputHeaders
 
-  if (isAnthropicModel(model) && !isAwsBedrockProvider(provider)) {
+  if (isAnthropicModel(model)) {
     const betaHeaders = addAnthropicHeaders(assistant, model)
     // Only add the anthropic-beta header if there are actual beta headers to include
     if (betaHeaders.length > 0) {

@@ -1,5 +1,5 @@
 import { PROVIDER_URLS, SYSTEM_PROVIDERS_CONFIG } from '@renderer/config/providers'
-import { type AzureOpenAIProvider, type Provider, SystemProviderIds } from '@renderer/types'
+import { type Provider, SystemProviderIds } from '@renderer/types'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
@@ -40,17 +40,18 @@ vi.mock('@renderer/services/AssistantService', () => ({
   })
 }))
 
-const createProvider = (overrides: Partial<Provider> = {}): Provider => ({
-  id: 'custom',
-  type: 'openai',
-  name: 'Custom Provider',
-  apiKey: 'key',
-  apiHost: 'https://api.example.com',
-  models: [],
-  ...overrides
-})
+const createProvider = (overrides: Omit<Partial<Provider>, 'type'> & { type?: string } = {}): Provider =>
+  ({
+    id: 'custom',
+    type: 'openai',
+    name: 'Custom Provider',
+    apiKey: 'key',
+    apiHost: 'https://api.example.com',
+    models: [],
+    ...overrides
+  }) as unknown as Provider
 
-const createSystemProvider = (overrides: Partial<Provider> = {}): Provider =>
+const createSystemProvider = (overrides: Omit<Partial<Provider>, 'type'> & { type?: string } = {}): Provider =>
   createProvider({
     id: SystemProviderIds.openai,
     isSystem: true,
@@ -60,7 +61,7 @@ const createSystemProvider = (overrides: Partial<Provider> = {}): Provider =>
 describe('provider utils', () => {
   it('configures StepFun as Anthropic-compatible with current official documentation links', () => {
     expect(SYSTEM_PROVIDERS_CONFIG.stepfun.anthropicApiHost).toBe('https://api.stepfun.com')
-    expect(isAnthropicSupportedProvider(SYSTEM_PROVIDERS_CONFIG.stepfun)).toBe(true)
+    expect(isAnthropicSupportedProvider(SYSTEM_PROVIDERS_CONFIG.stepfun as unknown as Provider)).toBe(true)
     expect(getClaudeSupportedProviders([createSystemProvider({ id: SystemProviderIds.stepfun })])).toHaveLength(1)
     expect(PROVIDER_URLS.stepfun.websites?.docs).toBe(
       'https://platform.stepfun.com/docs/api-reference/chat/chat-completion-create'
@@ -171,10 +172,10 @@ describe('provider utils', () => {
     expect(isSupportUrlContextProvider(createProvider())).toBe(false)
   })
 
-  it('identifies Gemini web search providers', () => {
+  it('identifies Gemini web search providers (slice 3: gemini only, vertex retired)', () => {
     expect(isGeminiWebSearchProvider(createSystemProvider({ id: SystemProviderIds.gemini, type: 'gemini' }))).toBe(true)
     expect(isGeminiWebSearchProvider(createSystemProvider({ id: SystemProviderIds.vertexai, type: 'vertexai' }))).toBe(
-      true
+      false
     )
     expect(isGeminiWebSearchProvider(createSystemProvider())).toBe(false)
   })
@@ -190,18 +191,19 @@ describe('provider utils', () => {
     expect(isPerplexityProvider(createProvider())).toBe(false)
   })
 
-  it('recognizes OpenAI compatible providers', () => {
+  it('recognizes OpenAI compatible providers (slice 3: generic openai only)', () => {
     expect(isOpenAICompatibleProvider(createProvider({ type: 'openai' }))).toBe(true)
-    expect(isOpenAICompatibleProvider(createProvider({ type: 'new-api' }))).toBe(true)
-    expect(isOpenAICompatibleProvider(createProvider({ type: 'mistral' }))).toBe(true)
+    // Retired foldable types no longer count as active compatible (folded to openai by 222).
+    expect(isOpenAICompatibleProvider(createProvider({ type: 'new-api' }))).toBe(false)
+    expect(isOpenAICompatibleProvider(createProvider({ type: 'mistral' }))).toBe(false)
     expect(isOpenAICompatibleProvider(createProvider({ type: 'anthropic' }))).toBe(false)
   })
 
-  it('narrows Azure OpenAI providers', () => {
+  it('narrows Azure OpenAI providers (history-only legacy check)', () => {
     const azureProvider = {
       ...createProvider({ type: 'azure-openai' }),
       apiVersion: '2024-06-01'
-    } as AzureOpenAIProvider
+    } as unknown as Provider
     expect(isAzureOpenAIProvider(azureProvider)).toBe(true)
     expect(isAzureOpenAIProvider(createProvider())).toBe(false)
   })
@@ -220,5 +222,40 @@ describe('provider utils', () => {
     expect(isSupportAPIVersionProvider(createSystemProvider({ id: SystemProviderIds.github }))).toBe(false)
     expect(isSupportAPIVersionProvider(createProvider())).toBe(true)
     expect(isSupportAPIVersionProvider(createProvider({ apiOptions: { isNotSupportAPIVersion: false } }))).toBe(false)
+  })
+
+  describe('ProviderType schema (slice 3: active protocols only)', () => {
+    it('accepts exactly the four approved protocols', async () => {
+      const { ACTIVE_PROVIDER_TYPES, isActiveProviderType, ProviderTypeSchema } = await import(
+        '@renderer/types/provider'
+      )
+
+      expect([...ACTIVE_PROVIDER_TYPES].sort()).toEqual(['anthropic', 'gemini', 'openai', 'openai-response'])
+      for (const type of ['openai', 'openai-response', 'anthropic', 'gemini']) {
+        expect(ProviderTypeSchema.safeParse(type).success).toBe(true)
+        expect(isActiveProviderType(type)).toBe(true)
+      }
+    })
+
+    it('rejects every retired foldable and removed protocol', async () => {
+      const { isActiveProviderType, ProviderTypeSchema } = await import('@renderer/types/provider')
+
+      for (const type of [
+        'ollama',
+        'new-api',
+        'mistral',
+        'azure-openai',
+        'vertexai',
+        'vertex-anthropic',
+        'aws-bedrock',
+        'gateway',
+        'copilot',
+        'some-future-protocol',
+        ''
+      ]) {
+        expect(ProviderTypeSchema.safeParse(type).success).toBe(false)
+        expect(isActiveProviderType(type)).toBe(false)
+      }
+    })
   })
 })

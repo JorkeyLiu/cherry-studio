@@ -386,14 +386,6 @@ const api = {
     retrieve: (provider: Provider, fileId: string): Promise<FileUploadResponse> =>
       ipcRenderer.invoke(IpcChannel.FileService_Retrieve, provider, fileId)
   },
-  vertexAI: {
-    getAuthHeaders: (params: { projectId: string; serviceAccount?: { privateKey: string; clientEmail: string } }) =>
-      ipcRenderer.invoke(IpcChannel.VertexAI_GetAuthHeaders, params),
-    getAccessToken: (params: { projectId: string; serviceAccount?: { privateKey: string; clientEmail: string } }) =>
-      ipcRenderer.invoke(IpcChannel.VertexAI_GetAccessToken, params),
-    clearAuthCache: (projectId: string, clientEmail?: string) =>
-      ipcRenderer.invoke(IpcChannel.VertexAI_ClearAuthCache, projectId, clientEmail)
-  },
   config: {
     set: (key: string, value: any, isNotify: boolean = false) =>
       ipcRenderer.invoke(IpcChannel.Config_Set, key, value, isNotify),
@@ -459,16 +451,6 @@ const api = {
       }
       return shell.openExternal(url, options)
     }
-  },
-  copilot: {
-    getAuthMessage: (headers?: Record<string, string>) =>
-      ipcRenderer.invoke(IpcChannel.Copilot_GetAuthMessage, headers),
-    getCopilotToken: (device_code: string, headers?: Record<string, string>) =>
-      ipcRenderer.invoke(IpcChannel.Copilot_GetCopilotToken, device_code, headers),
-    saveCopilotToken: (access_token: string) => ipcRenderer.invoke(IpcChannel.Copilot_SaveCopilotToken, access_token),
-    getToken: (headers?: Record<string, string>) => ipcRenderer.invoke(IpcChannel.Copilot_GetToken, headers),
-    logout: () => ipcRenderer.invoke(IpcChannel.Copilot_Logout),
-    getUser: (token: string) => ipcRenderer.invoke(IpcChannel.Copilot_GetUser, token)
   },
   // Binary related APIs
   isBinaryExist: (name: string) => ipcRenderer.invoke(IpcChannel.App_IsBinaryExist, name),
