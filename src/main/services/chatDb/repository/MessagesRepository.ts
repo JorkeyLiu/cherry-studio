@@ -235,6 +235,26 @@ export class MessagesRepository {
   }
 
   /**
+   * Bounded group-scoped read: all assistant messages in a topic carrying
+   * the given non-empty askId, in authority order.
+   *
+   * Clipboard-group helper: resolves one user/orphan assistant group without
+   * materializing the topic. Uses only topic_id + ask_id + role predicates
+   * over the existing authority ordering (sort_order ASC, id ASC). Empty
+   * askId returns [] (assistant-without-askId forms no clipboard group).
+   */
+  listAssistantsByAskId(topicId: string, askId: string): MessageData[] {
+    if (askId.length === 0) return []
+    return this.db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.topicId, topicId), eq(messages.askId, askId), eq(messages.role, 'assistant')))
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .all()
+      .map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /**
    * Bounded authority read: messages strictly before a (sort_order,id) tuple.
    *
    * Window-scan helper: tuple predicate `(sort_order,id) < (so,id)` over the

@@ -1,11 +1,12 @@
 /**
- * ClipboardService copy/cut — authority-complete under windowed loading.
+ * ClipboardService copy/cut — group-scoped authority read under windowed loading.
  *
  * A selected answer/message group may straddle the loaded projection. Copy
  * and cut must publish the complete authority group (ordered messages and
- * blocks from the caller-local whole-topic snapshot, never Redux), ordered by
- * authority topic order, with `positionIndex` populated from authority order
- * (wire shape unchanged — no clipboard format migration).
+ * blocks from the group-scoped Main read, never Redux, never a whole-topic
+ * snapshot), ordered by authority topic order, with `positionIndex` populated
+ * from Main authority order (wire shape unchanged — no clipboard format
+ * migration).
  *
  * Segments use the authority-enriched catalog (`listSegments`): a segment is
  * snapshotted only when ALL its authority message IDs are selected.
@@ -23,6 +24,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
+    fetchClipboardGroups: vi.fn(),
     fetchWholeTopicSnapshot: vi.fn(),
     listSegments: vi.fn(),
     selectLoadedMessagesForTopic: vi.fn(),
@@ -46,6 +48,7 @@ vi.mock('@logger', () => ({
 
 vi.mock('@renderer/services/db', () => ({
   dbService: {
+    fetchClipboardGroups: mocks.fetchClipboardGroups,
     fetchWholeTopicSnapshot: mocks.fetchWholeTopicSnapshot,
     listSegments: mocks.listSegments
   }
@@ -113,25 +116,13 @@ const a1 = makeMsg('a1', 'assistant', { askId: 'u1', blocks: ['ba1'] })
 const a2 = makeMsg('a2', 'assistant', { askId: 'u1', blocks: ['ba2'] })
 const u2 = makeMsg('u2', 'user', { blocks: ['bu2'] })
 const s1 = makeMsg('s1', 'system', { blocks: ['bs1'] })
-const t1 = makeMsg('t1', 'tool', { blocks: ['bt1'] })
 
-const authorityMessages = [u1, a1, a2, u2, s1, t1]
-const authorityBlocks = [
-  makeBlock('bu1', 'u1'),
-  makeBlock('ba1', 'a1'),
-  makeBlock('ba2', 'a2'),
-  makeBlock('bu2', 'u2'),
-  makeBlock('bs1', 's1'),
-  makeBlock('bt1', 't1')
-]
-
-const snapshotMeta = {
-  completeness: 'whole-topic' as const,
-  topicId: 'topic-1',
-  firstMessageId: 'u1',
-  lastMessageId: 't1',
-  returnedCount: 6
-}
+const groupU1Messages = [u1, a1, a2]
+const groupU1Blocks = [makeBlock('bu1', 'u1'), makeBlock('ba1', 'a1'), makeBlock('ba2', 'a2')]
+const groupU2Messages = [u2]
+const groupU2Blocks = [makeBlock('bu2', 'u2')]
+const groupS1Messages = [s1]
+const groupS1Blocks = [makeBlock('bs1', 's1')]
 
 const segFullWire = {
   id: 'seg-full',
@@ -161,6 +152,20 @@ const segPartWire = {
   messageCount: 2
 }
 
+const segCrossWire = {
+  id: 'seg-cross',
+  topicId: 'topic-1',
+  name: 'Cross',
+  messageIds: ['u1', 'u2'],
+  color: 'blue',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+  sortOrder: 2,
+  firstMessageId: 'u1',
+  lastMessageId: 'u2',
+  messageCount: 2
+}
+
 interface StoreState {
   messages: { entities: Record<string, Message>; messageIdsByTopic: Record<string, string[]> }
   messageBlocks: { entities: Record<string, MessageBlock> }
@@ -177,22 +182,57 @@ function baseStoreState(): StoreState {
       messageIdsByTopic: { 'topic-1': ['a2', 'u2'] }
     },
     messageBlocks: {
-      entities: Object.fromEntries(authorityBlocks.filter((b) => ['ba2', 'bu2'].includes(b.id)).map((b) => [b.id, b]))
+      entities: Object.fromEntries(
+        [...groupU1Blocks, ...groupU2Blocks].filter((b) => ['ba2', 'bu2'].includes(b.id)).map((b) => [b.id, b])
+      )
+    }
+  }
+}
+
+function clipboardResponseFor(groupIds: string[]) {
+  const messages: Message[] = []
+  const blocks: MessageBlock[] = []
+  const groups: Array<{ groupId: string; messageIds: string[]; positionIndex: number }> = []
+  if (groupIds.includes('u1')) {
+    messages.push(...groupU1Messages)
+    blocks.push(...groupU1Blocks)
+    groups.push({ groupId: 'u1', messageIds: ['u1', 'a1', 'a2'], positionIndex: 0 })
+  }
+  if (groupIds.includes('u2')) {
+    messages.push(...groupU2Messages)
+    blocks.push(...groupU2Blocks)
+    groups.push({ groupId: 'u2', messageIds: ['u2'], positionIndex: 3 })
+  }
+  if (groupIds.includes('s1')) {
+    messages.push(...groupS1Messages)
+    blocks.push(...groupS1Blocks)
+    groups.push({ groupId: 's1', messageIds: ['s1'], positionIndex: 4 })
+  }
+  return {
+    messages,
+    blocks,
+    groups,
+    clipboard: {
+      completeness: 'clipboard-groups' as const,
+      topicId: 'topic-1',
+      requestedCount: groupIds.length,
+      returnedCount: groups.length,
+      returnedMessageCount: messages.length,
+      firstMessageId: messages.length > 0 ? messages[0].id : null,
+      lastMessageId: messages.length > 0 ? messages[messages.length - 1].id : null
     }
   }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe('ClipboardService copy/cut authority-complete (straddling group)', () => {
+describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     storeState = baseStoreState()
-    mocks.fetchWholeTopicSnapshot.mockResolvedValue({
-      messages: authorityMessages,
-      blocks: authorityBlocks,
-      snapshot: snapshotMeta
-    })
+    mocks.fetchClipboardGroups.mockImplementation(async (req: { topicId: string; groupIds: string[] }) =>
+      clipboardResponseFor(req.groupIds)
+    )
     mocks.listSegments.mockResolvedValue([segFullWire, segPartWire])
     mocks.selectLoadedMessagesForTopic.mockImplementation((_state: unknown, topicId: string) => {
       const ids = storeState.messages.messageIdsByTopic[topicId] ?? []
@@ -200,7 +240,7 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     })
   })
 
-  it('copy includes outside-loaded siblings + snapshot blocks in authority order while Redux is untouched', async () => {
+  it('copy includes outside-loaded siblings + authority blocks while Redux is untouched', async () => {
     const { copyMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
     const blocksBefore = { ...storeState.messageBlocks.entities }
@@ -208,8 +248,9 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     const count = await copyMessages(dispatch, 'topic-1', ['u1'])
 
     expect(count).toBe(3)
-    expect(mocks.fetchWholeTopicSnapshot).toHaveBeenCalledExactlyOnceWith('topic-1')
-    // Never reads the loaded projection for group/block resolution.
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['u1'] })
+    // Production path never touches the whole-topic snapshot or loaded projection.
+    expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(dispatch).toHaveBeenCalledTimes(1)
     const action = dispatch.mock.calls[0][0]
@@ -222,7 +263,7 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     const item = action.payload.items[0]
     expect(item.originalAskId).toBe('u1')
     expect(item.messages.map((m) => m.id)).toEqual(['u1', 'a1', 'a2'])
-    // Blocks from the snapshot map in per-message order — bu1/ba1 were absent from Redux.
+    // Blocks from the group-scoped response in per-message order — bu1/ba1 were absent from Redux.
     expect(item.blocks.map((b) => b.id)).toEqual(['bu1', 'ba1', 'ba2'])
     // Authority order position, wire shape unchanged.
     expect(item.positionIndex).toBe(0)
@@ -250,6 +291,8 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     const count = await copyMessages(dispatch, 'topic-1', ['u2', 'u1'])
 
     expect(count).toBe(4)
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['u2', 'u1'] })
+    expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     const items = dispatch.mock.calls[0][0].payload.items
     expect(items.map((i) => i.originalAskId)).toEqual(['u1', 'u2'])
     expect(items.map((i) => i.positionIndex)).toEqual([0, 3])
@@ -269,6 +312,8 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     const count = await cutMessages(dispatch, 'topic-1', ['u1'])
 
     expect(count).toBe(3)
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['u1'] })
+    expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     expect(dispatch).toHaveBeenCalledTimes(1)
     const payload = dispatch.mock.calls[0][0].payload
     expect(dispatch.mock.calls[0][0].type).toBe('clipboard/setClipboard')
@@ -281,12 +326,13 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     expect(storeState.messages.messageIdsByTopic['topic-1']).toEqual(['a2', 'u2'])
   })
 
-  it('canonical grouping: system keys own ID, ignored tool role forms no group', async () => {
+  it('canonical grouping: system keys own ID, ignored tool role resolves to nothing', async () => {
     const { copyMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
     const count = await copyMessages(dispatch, 'topic-1', ['s1', 't1'])
 
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['s1', 't1'] })
     expect(count).toBe(1)
     const items = dispatch.mock.calls[0][0].payload.items
     expect(items).toHaveLength(1)
@@ -295,8 +341,45 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     expect(items[0].positionIndex).toBe(4)
   })
 
-  it('failure atomicity: snapshot failure publishes nothing', async () => {
-    mocks.fetchWholeTopicSnapshot.mockRejectedValue(new Error('NOT_FOUND'))
+  it('cross-segment: only fully-selected segments are snapshotted', async () => {
+    mocks.listSegments.mockResolvedValue([segFullWire, segCrossWire])
+    const { copyMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn()
+
+    await copyMessages(dispatch, 'topic-1', ['u1'])
+    expect(dispatch.mock.calls[0][0].payload.segmentSnapshots.map((s) => s.originalSegmentId)).toEqual(['seg-full'])
+
+    dispatch.mockClear()
+    await copyMessages(dispatch, 'topic-1', ['u1', 'u2'])
+    expect(dispatch.mock.calls[0][0].payload.segmentSnapshots.map((s) => s.originalSegmentId).sort()).toEqual([
+      'seg-cross',
+      'seg-full'
+    ])
+  })
+
+  it('no-block group copies messages with empty blocks', async () => {
+    mocks.fetchClipboardGroups.mockResolvedValueOnce({
+      messages: [makeMsg('ub', 'user', { blocks: [] })],
+      blocks: [],
+      groups: [{ groupId: 'ub', messageIds: ['ub'], positionIndex: 0 }],
+      clipboard: {
+        completeness: 'clipboard-groups',
+        topicId: 'topic-1',
+        requestedCount: 1,
+        returnedCount: 1,
+        returnedMessageCount: 1,
+        firstMessageId: 'ub',
+        lastMessageId: 'ub'
+      }
+    })
+    const { copyMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn()
+    expect(await copyMessages(dispatch, 'topic-1', ['ub'])).toBe(1)
+    expect(dispatch.mock.calls[0][0].payload.items[0].blocks).toEqual([])
+  })
+
+  it('failure atomicity: clipboard-groups failure publishes nothing', async () => {
+    mocks.fetchClipboardGroups.mockRejectedValue(new Error('NOT_FOUND'))
     const { copyMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
@@ -316,15 +399,73 @@ describe('ClipboardService copy/cut authority-complete (straddling group)', () =
     expect(mocks.setClipboard).not.toHaveBeenCalled()
   })
 
-  it('empty or unresolvable selection performs no authority reads and publishes nothing', async () => {
+  it('empty selection performs no authority reads and publishes nothing', async () => {
     const { copyMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
     expect(await copyMessages(dispatch, 'topic-1', [])).toBe(0)
+    expect(mocks.fetchClipboardGroups).not.toHaveBeenCalled()
     expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
+  })
 
-    expect(await copyMessages(dispatch, 'topic-1', ['missing-group'])).toBe(0)
+  it('single message with multiple blocks keeps authority block order/completeness in ClipboardItem', async () => {
+    const msg = makeMsg('um', 'user', { blocks: ['mb1', 'mb2', 'mb3'] })
+    const authorityBlocks = [makeBlock('mb1', 'um'), makeBlock('mb2', 'um'), makeBlock('mb3', 'um')]
+    mocks.fetchClipboardGroups.mockResolvedValueOnce({
+      messages: [msg],
+      blocks: authorityBlocks,
+      groups: [{ groupId: 'um', messageIds: ['um'], positionIndex: 7 }],
+      clipboard: {
+        completeness: 'clipboard-groups',
+        topicId: 'topic-1',
+        requestedCount: 1,
+        returnedCount: 1,
+        returnedMessageCount: 1,
+        firstMessageId: 'um',
+        lastMessageId: 'um'
+      }
+    })
+    const { copyMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn()
+
+    const count = await copyMessages(dispatch, 'topic-1', ['um'])
+
+    expect(count).toBe(1)
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['um'] })
+    expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
+    const item = dispatch.mock.calls[0][0].payload.items[0]
+    expect(item.originalAskId).toBe('um')
+    expect(item.messages.map((m) => m.id)).toEqual(['um'])
+    // Authoritative block order/completeness preserved (no re-sort, no drop).
+    expect(item.blocks.map((b) => b.id)).toEqual(['mb1', 'mb2', 'mb3'])
+    expect(item.positionIndex).toBe(7)
+  })
+
+  it('missing/illegal/cross-topic groups resolve to nothing and publish nothing', async () => {
+    mocks.fetchClipboardGroups.mockResolvedValue({
+      messages: [],
+      blocks: [],
+      groups: [],
+      clipboard: {
+        completeness: 'clipboard-groups',
+        topicId: 'topic-1',
+        requestedCount: 2,
+        returnedCount: 0,
+        returnedMessageCount: 0,
+        firstMessageId: null,
+        lastMessageId: null
+      }
+    })
+    const { copyMessages } = await import('../ClipboardService')
+    const dispatch = vi.fn()
+
+    expect(await copyMessages(dispatch, 'topic-1', ['missing-group', 't1'])).toBe(0)
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
+      topicId: 'topic-1',
+      groupIds: ['missing-group', 't1']
+    })
+    expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalled()
   })
 })

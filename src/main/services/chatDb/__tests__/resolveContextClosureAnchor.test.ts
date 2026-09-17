@@ -80,7 +80,7 @@ function seedTurns(agg: ChatDbAggregateService, topicId: string, ids: string[]) 
   }
 }
 
-describe('ChatDbAggregateService — resolve-context-closure anchor detail (metadata-only establish)', () => {
+describe('ChatDbAggregateService — resolve-context-closure anchor detail (metadata-only, all intents)', () => {
   let tmpDir: string
   let sqlite: Database.Database
   let db: BetterSQLite3Database<typeof schema>
@@ -133,21 +133,250 @@ describe('ChatDbAggregateService — resolve-context-closure anchor detail (meta
     }
   })
 
-  it('anchor detail is rejected for non-establish intents', () => {
+  it('anchor detail is accepted for every intent (no illegal-combination rejection)', () => {
     const topicId = `t-${uid()}`
     seedTurns(agg, topicId, ['u1'])
-    for (const intent of ['reanchor-default', 'move', 'inherit'] as const) {
-      const req: Record<string, unknown> = { topicId, intent, detail: 'anchor' }
-      if (intent === 'reanchor-default') req.contextCount = 1
-      if (intent === 'move') req.groupKey = 'u1'
-      if (intent === 'inherit') {
-        req.sourceTopicId = topicId
-        req.contextCount = 1
-      }
+    const srcId = `t-${uid()}`
+    seedTurns(agg, srcId, ['s1'])
+    const cases: Array<Record<string, unknown>> = [
+      { topicId, intent: 'establish', contextCount: 1, detail: 'anchor' },
+      { topicId, intent: 'reanchor-default', contextCount: 1, detail: 'anchor' },
+      { topicId, intent: 'move', groupKey: 'u1', detail: 'anchor' },
+      { topicId, intent: 'move', messageId: 'u1', detail: 'anchor' },
+      { topicId, intent: 'inherit', sourceTopicId: srcId, contextCount: 1, detail: 'anchor' }
+    ]
+    for (const req of cases) {
       const res = agg.resolveContextClosure(req as any)
-      expect(res.ok).toBe(false)
-      expect(failCode(res)).toBe(ERR_VALIDATION)
+      expect(res.ok).toBe(true)
+      expect(() => validateChatDbResult('chatdb:resolve-context-closure', res)).not.toThrow()
+      const v = okValue(res) as unknown as Record<string, unknown>
+      expect(Object.keys(v).sort()).toEqual(['changed', 'resolvedAnchorGroupKey'])
     }
+  })
+
+  it('anchor move/inherit/reanchor-default perform no full-topic read and no blocks query', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3'])
+    const srcId = `t-${uid()}`
+    seedTurns(agg, srcId, ['s1', 's2', 's3', 's4'])
+    const listSpy = vi.spyOn(MessagesRepository.prototype, 'listByTopic').mockImplementation(() => {
+      throw new Error('listByTopic must not be called in anchor mode')
+    })
+    const blocksSpy = vi.spyOn(BlocksRepository.prototype, 'listByMessages').mockImplementation(() => {
+      throw new Error('blocks must not be queried in anchor mode')
+    })
+    try {
+      const requests: Array<Record<string, unknown>> = [
+        { topicId, intent: 'reanchor-default', contextCount: 1, detail: 'anchor' },
+        { topicId, intent: 'move', messageId: 'u2', detail: 'anchor' },
+        { topicId, intent: 'move', groupKey: 'u2', detail: 'anchor' },
+        {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 's3',
+          contextCount: 99,
+          detail: 'anchor'
+        },
+        {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 'ghost',
+          contextCount: 1,
+          detail: 'anchor'
+        }
+      ]
+      for (const req of requests) {
+        const res = agg.resolveContextClosure(req as any)
+        expect(res.ok).toBe(true)
+        const v = okValue(res) as unknown as Record<string, unknown>
+        expect(Object.keys(v).sort()).toEqual(['changed', 'resolvedAnchorGroupKey'])
+        expect('messages' in v).toBe(false)
+        expect('blocks' in v).toBe(false)
+        expect('closure' in v).toBe(false)
+        expect(() => validateChatDbResult('chatdb:resolve-context-closure', res)).not.toThrow()
+      }
+      expect(listSpy).not.toHaveBeenCalled()
+      expect(blocksSpy).not.toHaveBeenCalled()
+    } finally {
+      listSpy.mockRestore()
+      blocksSpy.mockRestore()
+    }
+  })
+
+  it('anchor parity with closure mode for reanchor-default / move / inherit', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3'])
+    const srcId = `t-${uid()}`
+    seedTurns(agg, srcId, ['s1', 's2', 's3', 's4'])
+    const cases: Array<{ anchorReq: Record<string, unknown>; closureReq: Record<string, unknown> }> = [
+      {
+        anchorReq: { topicId, intent: 'reanchor-default', contextCount: 1, detail: 'anchor' },
+        closureReq: { topicId, intent: 'reanchor-default', contextCount: 1 }
+      },
+      {
+        anchorReq: { topicId, intent: 'reanchor-default', contextCount: null, detail: 'anchor' },
+        closureReq: { topicId, intent: 'reanchor-default', contextCount: null }
+      },
+      {
+        anchorReq: { topicId, intent: 'move', messageId: 'u2', detail: 'anchor' },
+        closureReq: { topicId, intent: 'move', messageId: 'u2' }
+      },
+      {
+        anchorReq: { topicId, intent: 'move', messageId: 'a-u2', detail: 'anchor' },
+        closureReq: { topicId, intent: 'move', messageId: 'a-u2' }
+      },
+      {
+        anchorReq: { topicId, intent: 'move', groupKey: 'u1', detail: 'anchor' },
+        closureReq: { topicId, intent: 'move', groupKey: 'u1' }
+      },
+      {
+        anchorReq: {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 's3',
+          contextCount: 99,
+          detail: 'anchor'
+        },
+        closureReq: {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 's3',
+          contextCount: 99
+        }
+      },
+      {
+        anchorReq: {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 's1',
+          contextCount: 99,
+          detail: 'anchor'
+        },
+        closureReq: {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 's1',
+          contextCount: 99
+        }
+      },
+      {
+        anchorReq: {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 'ghost',
+          contextCount: 1,
+          detail: 'anchor'
+        },
+        closureReq: {
+          topicId,
+          intent: 'inherit',
+          sourceTopicId: srcId,
+          sourceAnchorGroupKey: 'ghost',
+          contextCount: 1
+        }
+      }
+    ]
+    for (const { anchorReq, closureReq } of cases) {
+      const closure = okValue(agg.resolveContextClosure({ ...(closureReq as any) })) as {
+        resolvedAnchorGroupKey: string | null
+        changed: boolean
+      }
+      const anchor = okValue(agg.resolveContextClosure({ ...(anchorReq as any) })) as {
+        resolvedAnchorGroupKey: string | null
+        changed: boolean
+      }
+      expect({ req: anchorReq, anchor }, `mismatch for ${JSON.stringify(anchorReq)}`).toEqual({
+        req: anchorReq,
+        anchor: { resolvedAnchorGroupKey: closure.resolvedAnchorGroupKey, changed: closure.changed }
+      })
+    }
+  })
+
+  it('anchor move/inherit preserve stale and error semantics (NOT_FOUND / validation)', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1'])
+    // Missing message target is NOT_FOUND.
+    const missing = agg.resolveContextClosure({ topicId, intent: 'move', messageId: 'nope', detail: 'anchor' })
+    expect(missing.ok).toBe(false)
+    expect(failCode(missing)).toBe(ERR_NOT_FOUND)
+    // Ghost groupKey is NOT_FOUND.
+    const ghost = agg.resolveContextClosure({ topicId, intent: 'move', groupKey: 'ghost', detail: 'anchor' })
+    expect(ghost.ok).toBe(false)
+    expect(failCode(ghost)).toBe(ERR_NOT_FOUND)
+    // Ignored roles reject as validation.
+    agg.appendMessage(topicId, makeMsg(topicId, 'tool-1', 'tool') as any, [])
+    const ignored = agg.resolveContextClosure({ topicId, intent: 'move', messageId: 'tool-1', detail: 'anchor' })
+    expect(ignored.ok).toBe(false)
+    expect(failCode(ignored)).toBe(ERR_VALIDATION)
+    // Missing source topic is NOT_FOUND; missing target topic is NOT_FOUND.
+    const missingSource = agg.resolveContextClosure({
+      topicId,
+      intent: 'inherit',
+      sourceTopicId: 'nope',
+      contextCount: 1,
+      detail: 'anchor'
+    })
+    expect(missingSource.ok).toBe(false)
+    expect(failCode(missingSource)).toBe(ERR_NOT_FOUND)
+    const missingTarget = agg.resolveContextClosure({
+      topicId: 'nope',
+      intent: 'inherit',
+      sourceTopicId: topicId,
+      contextCount: 1,
+      detail: 'anchor'
+    })
+    expect(missingTarget.ok).toBe(false)
+    expect(failCode(missingTarget)).toBe(ERR_NOT_FOUND)
+    // Stale semantics: changed mirrors (resolved !== current).
+    const same = okValue(
+      agg.resolveContextClosure({
+        topicId,
+        intent: 'move',
+        messageId: 'u1',
+        currentAnchorGroupKey: 'u1',
+        detail: 'anchor'
+      })
+    ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+    expect(same.resolvedAnchorGroupKey).toBe('u1')
+    expect(same.changed).toBe(false)
+    const stale = okValue(
+      agg.resolveContextClosure({
+        topicId,
+        intent: 'reanchor-default',
+        contextCount: 1,
+        currentAnchorGroupKey: 'ghost',
+        detail: 'anchor'
+      })
+    ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+    expect(stale.resolvedAnchorGroupKey).toBe('u1')
+    expect(stale.changed).toBe(true)
+  })
+
+  it('anchor move groupKey resolves an assistant own-id to its askId turn key', () => {
+    const topicId = `t-${uid()}`
+    agg.appendMessage(topicId, makeMsg(topicId, 's1', 'system') as any, [makeBlock('s1') as any])
+    agg.appendMessage(topicId, makeMsg(topicId, 'u1', 'user') as any, [makeBlock('u1') as any])
+    agg.appendMessage(topicId, makeMsg(topicId, 'orphan', 'assistant', 'ghost-user') as any, [
+      makeBlock('orphan') as any
+    ])
+    const closure = okValue(agg.resolveContextClosure({ topicId, intent: 'move', groupKey: 'orphan' })) as {
+      resolvedAnchorGroupKey: string | null
+    }
+    const anchor = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'move', groupKey: 'orphan', detail: 'anchor' })
+    ) as {
+      resolvedAnchorGroupKey: string | null
+      changed: boolean
+    }
+    expect(closure.resolvedAnchorGroupKey).toBe('ghost-user')
+    expect(anchor.resolvedAnchorGroupKey).toBe(closure.resolvedAnchorGroupKey)
   })
 
   it('missing topic is NOT_FOUND in anchor mode; empty topic resolves null', () => {
@@ -261,5 +490,118 @@ describe('ChatDbAggregateService — resolve-context-closure anchor detail (meta
     expect(closure.resolvedAnchorGroupKey).toBeNull()
     expect(anchor.resolvedAnchorGroupKey).toBeNull()
     expect(anchor.changed).toBe(closure.changed)
+  })
+
+  it('establish normalizes a non-canonical assistant own-id to its askId turn key (anchor/closure parity)', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2'])
+    // a-u1 is an assistant own-id whose canonical turn key is its askId u1.
+    // Closure first (full read allowed); spies guard the anchor call only.
+    const closure = okValue(
+      agg.resolveContextClosure({ topicId, intent: 'establish', contextCount: 1, currentAnchorGroupKey: 'a-u1' })
+    ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+    expect(closure.resolvedAnchorGroupKey).toBe('u1')
+    expect(closure.changed).toBe(true)
+    const listSpy = vi.spyOn(MessagesRepository.prototype, 'listByTopic').mockImplementation(() => {
+      throw new Error('listByTopic must not be called in anchor mode')
+    })
+    const blocksSpy = vi.spyOn(BlocksRepository.prototype, 'listByMessages').mockImplementation(() => {
+      throw new Error('blocks must not be queried in anchor mode')
+    })
+    try {
+      const anchor = okValue(
+        agg.resolveContextClosure({
+          topicId,
+          intent: 'establish',
+          contextCount: 1,
+          currentAnchorGroupKey: 'a-u1',
+          detail: 'anchor'
+        })
+      ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+      expect(anchor.resolvedAnchorGroupKey).toBe('u1')
+      expect(anchor.changed).toBe(true)
+      expect(anchor.resolvedAnchorGroupKey).toBe(closure.resolvedAnchorGroupKey)
+      expect(anchor.changed).toBe(closure.changed)
+      expect(listSpy).not.toHaveBeenCalled()
+      expect(blocksSpy).not.toHaveBeenCalled()
+      expect(() =>
+        validateChatDbResult('chatdb:resolve-context-closure', { ok: true, value: anchor } as any)
+      ).not.toThrow()
+    } finally {
+      listSpy.mockRestore()
+      blocksSpy.mockRestore()
+    }
+  })
+
+  it('inherit clamps a source index beyond the target turn count to the target last turn (anchor/closure parity, no full read)', () => {
+    const targetId = `t-${uid()}`
+    seedTurns(agg, targetId, ['u1', 'u2'])
+    const sourceId = `t-${uid()}`
+    seedTurns(agg, sourceId, ['s1', 's2', 's3', 's4'])
+    // Source s4 is index 3; target has 2 turns so index 3 clamps to last turn u2.
+    const closure = okValue(
+      agg.resolveContextClosure({
+        topicId: targetId,
+        intent: 'inherit',
+        sourceTopicId: sourceId,
+        sourceAnchorGroupKey: 's4',
+        contextCount: 1
+      })
+    ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+    expect(closure.resolvedAnchorGroupKey).toBe('u2')
+    // Stale-current closure baseline before spies (closure needs the full read).
+    const closureStale = okValue(
+      agg.resolveContextClosure({
+        topicId: targetId,
+        intent: 'inherit',
+        sourceTopicId: sourceId,
+        sourceAnchorGroupKey: 's4',
+        contextCount: 1,
+        currentAnchorGroupKey: 'u1'
+      })
+    ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+    expect(closureStale.resolvedAnchorGroupKey).toBe('u2')
+    expect(closureStale.changed).toBe(true)
+    const listSpy = vi.spyOn(MessagesRepository.prototype, 'listByTopic').mockImplementation(() => {
+      throw new Error('listByTopic must not be called in anchor mode')
+    })
+    const blocksSpy = vi.spyOn(BlocksRepository.prototype, 'listByMessages').mockImplementation(() => {
+      throw new Error('blocks must not be queried in anchor mode')
+    })
+    try {
+      const anchor = okValue(
+        agg.resolveContextClosure({
+          topicId: targetId,
+          intent: 'inherit',
+          sourceTopicId: sourceId,
+          sourceAnchorGroupKey: 's4',
+          contextCount: 1,
+          detail: 'anchor'
+        })
+      ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+      expect(anchor.resolvedAnchorGroupKey).toBe('u2')
+      expect(anchor.resolvedAnchorGroupKey).toBe(closure.resolvedAnchorGroupKey)
+      expect(anchor.changed).toBe(closure.changed)
+      // Stale-current variant keeps the clamped key with changed:true.
+      const anchorStale = okValue(
+        agg.resolveContextClosure({
+          topicId: targetId,
+          intent: 'inherit',
+          sourceTopicId: sourceId,
+          sourceAnchorGroupKey: 's4',
+          contextCount: 1,
+          currentAnchorGroupKey: 'u1',
+          detail: 'anchor'
+        })
+      ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+      expect(anchorStale.resolvedAnchorGroupKey).toBe('u2')
+      expect(anchorStale.changed).toBe(true)
+      expect(anchorStale.changed).toBe(closureStale.changed)
+      expect(listSpy).not.toHaveBeenCalled()
+      expect(blocksSpy).not.toHaveBeenCalled()
+    } finally {
+      listSpy.mockRestore()
+      blocksSpy.mockRestore()
+    }
   })
 })

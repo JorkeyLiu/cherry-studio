@@ -200,16 +200,17 @@ const MessageMenubar: FC<Props> = (props) => {
 
   // Context-window anchor control for the single stable anchor-to-end model
   // (docs/context-window.md §8). Clicking a message anchor is an explicit
-  // move resolved by `chatdb:resolve-context-closure` in Main against full
-  // ordered turns — no `selectLoadedMessagesForTopic` / `buildContextTurns`
+  // move resolved by metadata-only `chatdb:resolve-context-closure`
+  // (`detail: 'anchor'`) point/bounded reads in Main — no full-topic closure
+  // materialization, no `selectLoadedMessagesForTopic` / `buildContextTurns`
   // authority decisions and no loaded-turn inference. The first `move`
   // (`messageId`) response is the authority determination: a different key
   // persists directly, while an echo of the still-current persisted key means
   // the currently anchored turn was clicked and re-anchors to the authority
   // default via a second `reanchor-default` call. Main never persists
   // settings; only a non-stale returned anchor is persisted (key removed on
-  // empty). Transport failures preserve current settings. Resolver
-  // messages/blocks are caller-local and never enter normal Redux.
+  // empty). Transport failures preserve current settings. Metadata-only
+  // anchor responses carry no messages/blocks and never enter normal Redux.
   const assistantSettings = getAssistantSettings(assistant)
   const handleSetContextAnchor = useCallback(async () => {
     const assistantId = assistant.id
@@ -256,7 +257,8 @@ const MessageMenubar: FC<Props> = (props) => {
         topicId,
         intent: 'move',
         messageId: clickedMessageId,
-        currentAnchorGroupKey: preKey
+        currentAnchorGroupKey: preKey,
+        detail: 'anchor'
       })
       moveResolved = response.resolvedAnchorGroupKey
     } catch {
@@ -278,7 +280,8 @@ const MessageMenubar: FC<Props> = (props) => {
         topicId,
         intent: 'reanchor-default',
         contextCount: currentContextCount,
-        currentAnchorGroupKey: baseline
+        currentAnchorGroupKey: baseline,
+        detail: 'anchor'
       })
       defaultResolved = response.resolvedAnchorGroupKey
     } catch {

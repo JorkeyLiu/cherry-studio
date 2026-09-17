@@ -369,7 +369,8 @@ describe('MessageMenubar context-anchor button', () => {
       topicId: 'topic-1',
       intent: 'move',
       messageId: 'u3',
-      currentAnchorGroupKey: 'u1'
+      currentAnchorGroupKey: 'u1',
+      detail: 'anchor'
     })
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
       contextWindowAnchor: {
@@ -395,13 +396,15 @@ describe('MessageMenubar context-anchor button', () => {
       topicId: 'topic-1',
       intent: 'move',
       messageId: 'u3',
-      currentAnchorGroupKey: 'u3'
+      currentAnchorGroupKey: 'u3',
+      detail: 'anchor'
     })
     expect(mocks.resolveContextClosure).toHaveBeenNthCalledWith(2, {
       topicId: 'topic-1',
       intent: 'reanchor-default',
       contextCount: 2,
-      currentAnchorGroupKey: 'u3'
+      currentAnchorGroupKey: 'u3',
+      detail: 'anchor'
     })
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
       contextWindowAnchor: {
@@ -539,7 +542,33 @@ describe('MessageMenubar context-anchor button', () => {
       topicId: 'topic-1',
       intent: 'move',
       messageId: 'u9',
-      currentAnchorGroupKey: 'u1'
+      currentAnchorGroupKey: 'u1',
+      detail: 'anchor'
+    })
+    expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
+      contextWindowAnchor: {
+        'topic-1': { kind: 'active', groupKey: 'u3' }
+      }
+    })
+    expectNoLoadedTurnAuthority()
+  })
+
+  it('persists a metadata-only anchor response with no messages/blocks/closure', async () => {
+    const message = makeUserMessage('u3')
+    const assistant = makeAssistant({ kind: 'active', groupKey: 'u1' })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce({ resolvedAnchorGroupKey: 'u3', changed: true } as any)
+    renderMenubar(message, assistant, 'u3')
+
+    fireEvent.click(screen.getByTestId('context-anchor-btn'))
+    await vi.waitFor(() => expect(updateAssistantSettingsMock).toHaveBeenCalledTimes(1))
+
+    expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
+      topicId: 'topic-1',
+      intent: 'move',
+      messageId: 'u3',
+      currentAnchorGroupKey: 'u1',
+      detail: 'anchor'
     })
     expect(updateAssistantSettingsMock).toHaveBeenCalledWith({
       contextWindowAnchor: {

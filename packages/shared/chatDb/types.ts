@@ -448,7 +448,7 @@ export type ResolveContextClosureIntent = 'establish' | 'reanchor-default' | 'mo
  *
  * `detail` selects the response shape (backward-compatible, default
  * `'closure'`): `'closure'` returns the full same-snapshot closure;
- * `'anchor'` (allowed only for `intent: 'establish'`) returns a
+ * `'anchor'` (allowed for every intent) returns a
  * metadata-only anchor response with no messages/blocks/closure materialization.
  */
 export type ResolveContextClosureDetail = 'closure' | 'anchor'
@@ -499,7 +499,7 @@ export interface ResolveContextClosureResponse {
 }
 
 /**
- * Metadata-only anchor response for `detail: 'anchor'` establish reads.
+ * Metadata-only anchor response for `detail: 'anchor'` reads.
  * Contains only the resolved anchor + changed flag; no messages, blocks,
  * or closure metadata are materialized, hydrated, or serialized.
  */
@@ -512,6 +512,71 @@ export interface ResolveContextClosureAnchorResponse {
 
 /** Discriminated result for `chatdb:resolve-context-closure` (closure default, anchor metadata-only). */
 export type ResolveContextClosureResult = ResolveContextClosureResponse | ResolveContextClosureAnchorResponse
+
+// ---------------------------------------------------------------------------
+// Clipboard-groups DTOs (group-scoped authority read for copy/cut)
+// ---------------------------------------------------------------------------
+
+/**
+ * @see IpcChannel.ChatDb_FetchClipboardGroups — additive group-scoped READ for copy/cut.
+ *
+ * `groupIds` are stable clipboard group keys in the canonical
+ * `getMessageGroups` sense (the same values the edit-mode UI passes as
+ * `selectedGroupIds`): a user message id keys its user + same-askId
+ * assistant group, a non-empty askId keys its assistant group (orphan
+ * when no user carries that id), a system message id keys its singleton
+ * group. Any other role (tool/generic/assistant-without-askId message id,
+ * unknown id, or an id from another topic) forms no selectable clipboard
+ * group and is filtered (skipped) — never guessed by the renderer.
+ *
+ * One Main SQLite transaction resolves every requested key with bounded
+ * topicId + id/askId reads in authority order (sort_order ASC, id ASC),
+ * returns only the selected groups' complete messages/blocks, and orders
+ * groups by their first message's authority position. Missing topic fails
+ * closed (NOT_FOUND); zero resolved groups succeeds with empty arrays so
+ * the caller publishes nothing (no partial clipboard).
+ */
+export interface FetchClipboardGroupsRequest {
+  topicId: string
+  /** Stable clipboard group keys (same values as UI `selectedGroupIds`). */
+  groupIds: string[]
+}
+
+/** One resolved clipboard group in authority order. */
+export interface FetchClipboardGroupsGroup {
+  /** Echo of the requested stable group key. */
+  groupId: string
+  /** Complete ordered member message IDs (sort_order ASC, id ASC). */
+  messageIds: string[]
+  /** Authority position of the group's first message (its `sort_order`). */
+  positionIndex: number
+}
+
+/** Typed clipboard-groups metadata — distinct from every other completeness. */
+export interface FetchClipboardGroupsMeta {
+  /** Completeness is always 'clipboard-groups'. */
+  completeness: 'clipboard-groups'
+  /** Topic that was read. */
+  topicId: string
+  /** Deduped non-empty requested group count. */
+  requestedCount: number
+  /** Number of resolved groups (groups length). */
+  returnedCount: number
+  /** Number of returned messages (messages length). */
+  returnedMessageCount: number
+  /** First returned message ID, or null when no groups resolved. */
+  firstMessageId: string | null
+  /** Last returned message ID, or null when no groups resolved. */
+  lastMessageId: string | null
+}
+
+/** @see IpcChannel.ChatDb_FetchClipboardGroups */
+export interface FetchClipboardGroupsResponse {
+  messages: JsonObject[]
+  blocks: JsonObject[]
+  groups: FetchClipboardGroupsGroup[]
+  clipboard: FetchClipboardGroupsMeta
+}
 
 // ---------------------------------------------------------------------------
 // Whole-topic snapshot DTOs (one-shot topic exports / knowledge)
@@ -1390,6 +1455,11 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:fetch-whole-topic-snapshot': {
     request: FetchWholeTopicSnapshotRequest
     response: FetchWholeTopicSnapshotResponse
+  }
+  // Group-scoped clipboard READ (copy/cut; selected groups only, never whole-topic)
+  'chatdb:fetch-clipboard-groups': {
+    request: FetchClipboardGroupsRequest
+    response: FetchClipboardGroupsResponse
   }
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   'chatdb:fetch-topic-naming-context': {

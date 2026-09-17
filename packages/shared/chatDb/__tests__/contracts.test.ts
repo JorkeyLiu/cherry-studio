@@ -78,6 +78,8 @@ describe('chatDbContracts', () => {
     'chatdb:resolve-context-closure',
     // One-shot whole-topic snapshot READ (topic exports / knowledge)
     'chatdb:fetch-whole-topic-snapshot',
+    // Group-scoped clipboard READ (copy/cut; selected groups only)
+    'chatdb:fetch-clipboard-groups',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
     'chatdb:fetch-topic-activity'
@@ -3390,6 +3392,108 @@ describe('fetch-whole-topic-snapshot contract (one-shot exports/knowledge)', () 
   })
 })
 
+describe('fetch-clipboard-groups contract (group-scoped copy/cut)', () => {
+  it('fetch-clipboard-groups: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-groups', { topicId: 't1', groupIds: ['u1'] })
+    ).not.toThrow()
+  })
+
+  it('fetch-clipboard-groups: rejects empty/missing/duplicate groupIds', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-groups', { topicId: 't1', groupIds: [] } as any)
+    ).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:fetch-clipboard-groups', { topicId: 't1' } as any)).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-groups', { topicId: 't1', groupIds: ['u1', 'u1'] } as any)
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-groups', { topicId: '', groupIds: ['u1'] } as any)
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbRequest('chatdb:fetch-clipboard-groups', { topicId: 't1', groupIds: ['u1'], extra: 1 } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('fetch-clipboard-groups: accepts valid non-empty and empty results', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-groups', {
+        ok: true,
+        value: {
+          messages: [{ id: 'u1' }, { id: 'a1' }],
+          blocks: [{ id: 'b1', messageId: 'u1' }],
+          groups: [{ groupId: 'u1', messageIds: ['u1', 'a1'], positionIndex: 0 }],
+          clipboard: {
+            completeness: 'clipboard-groups',
+            topicId: 't1',
+            requestedCount: 1,
+            returnedCount: 1,
+            returnedMessageCount: 2,
+            firstMessageId: 'u1',
+            lastMessageId: 'a1'
+          }
+        }
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-groups', {
+        ok: true,
+        value: {
+          messages: [],
+          blocks: [],
+          groups: [],
+          clipboard: {
+            completeness: 'clipboard-groups',
+            topicId: 't1',
+            requestedCount: 2,
+            returnedCount: 0,
+            returnedMessageCount: 0,
+            firstMessageId: null,
+            lastMessageId: null
+          }
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('fetch-clipboard-groups: rejects count/bound mismatches and unknown keys', () => {
+    const base = {
+      messages: [{ id: 'u1' }],
+      blocks: [],
+      groups: [{ groupId: 'u1', messageIds: ['u1'], positionIndex: 0 }],
+      clipboard: {
+        completeness: 'clipboard-groups',
+        topicId: 't1',
+        requestedCount: 1,
+        returnedCount: 1,
+        returnedMessageCount: 1,
+        firstMessageId: 'u1',
+        lastMessageId: 'u1'
+      }
+    }
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-groups', {
+        ok: true,
+        value: { ...base, clipboard: { ...base.clipboard, returnedCount: 0 } } as any
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-groups', {
+        ok: true,
+        value: { ...base, clipboard: { ...base.clipboard, completeness: 'whole-topic' } } as any
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:fetch-clipboard-groups', {
+        ok: true,
+        value: { ...base, extra: 1 } as any
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
 // ===========================================================================
 // Coverage consistency: every command must have both request and result validation
 // ===========================================================================
@@ -3461,6 +3565,8 @@ describe('coverage consistency', () => {
     'chatdb:resolve-context-closure',
     // One-shot whole-topic snapshot READ
     'chatdb:fetch-whole-topic-snapshot',
+    // Group-scoped clipboard READ (copy/cut; selected groups only)
+    'chatdb:fetch-clipboard-groups',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
     'chatdb:fetch-topic-activity'

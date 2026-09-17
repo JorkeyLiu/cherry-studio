@@ -48,6 +48,8 @@ import type {
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
+  FetchClipboardGroupsRequest,
+  FetchClipboardGroupsResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesRequest,
@@ -142,6 +144,7 @@ export interface ChatDbApi {
   fetchWholeTopicSnapshot?(
     request: FetchWholeTopicSnapshotRequest
   ): Promise<ChatDbResult<FetchWholeTopicSnapshotResponse>>
+  fetchClipboardGroups?(request: FetchClipboardGroupsRequest): Promise<ChatDbResult<FetchClipboardGroupsResponse>>
   fetchTopicNamingContext?(
     request: FetchTopicNamingContextRequest
   ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
@@ -1060,7 +1063,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * dispatches nothing — the caller persists only `resolvedAnchorGroupKey`
    * with stale guards (removing the key on null). Missing topic/target throws
    * ChatDbResultError (NOT_FOUND); transport rejection propagates unchanged.
-   * With `detail: 'anchor'` (establish only) Main returns the metadata-only
+   * With `detail: 'anchor'` (every intent) Main returns the metadata-only
    * anchor response with no messages/blocks/closure hydration.
    */
   async resolveContextClosure(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResult> {
@@ -1110,6 +1113,33 @@ export class SqliteMessageDataSource implements MessageDataSource {
       blocks: result.blocks as unknown as MessageBlock[],
       snapshot: result.snapshot
     }
+  }
+
+  // ============ Clipboard-groups READ (group-scoped copy/cut, read-only) ============
+  /**
+   * Fetch the group-scoped clipboard payload for stable group keys.
+   *
+   * One Main SQLite transaction resolves every requested clipboard group key
+   * (same values as UI `selectedGroupIds`) with bounded topicId + id/askId
+   * reads in authority order — never a whole-topic snapshot. Returns only
+   * the selected groups' complete messages/blocks plus per-group authority
+   * positions. Missing topic throws ChatDbResultError (NOT_FOUND); zero
+   * resolved groups succeeds with empty arrays (caller publishes nothing).
+   * No mutation, no timestamp dispatch, no fallback. Structured failure
+   * throws ChatDbResultError; transport rejection propagates unchanged.
+   */
+  async fetchClipboardGroups(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse> {
+    if (!this.api.fetchClipboardGroups) {
+      throw new Error('ChatDb API unavailable: clipboard-groups read not exposed')
+    }
+    const wireRequest = cloneForWire(request as unknown as JsonObject) as unknown as FetchClipboardGroupsRequest
+    const result = unwrap(await this.api.fetchClipboardGroups(wireRequest))
+    return {
+      messages: result.messages as unknown as FetchClipboardGroupsResponse['messages'],
+      blocks: result.blocks as unknown as FetchClipboardGroupsResponse['blocks'],
+      groups: result.groups,
+      clipboard: result.clipboard
+    } as unknown as FetchClipboardGroupsResponse
   }
 
   // ============ Bounded naming/activity reads (naming + rate-limit, read-only) ============

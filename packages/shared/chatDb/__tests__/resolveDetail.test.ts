@@ -3,11 +3,36 @@ import { describe, expect, it } from 'vitest'
 import { validateChatDbRequest, validateChatDbResult, ValidationError } from '../index'
 
 describe('chatdb:resolve-context-closure detail (anchor split)', () => {
-  it('accepts detail anchor for establish and defaults to closure when absent', () => {
+  it('accepts detail anchor for every intent and defaults to closure when absent', () => {
     expect(() =>
       validateChatDbRequest('chatdb:resolve-context-closure', {
         topicId: 't1',
         intent: 'establish',
+        contextCount: 2,
+        detail: 'anchor'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:resolve-context-closure', {
+        topicId: 't1',
+        intent: 'reanchor-default',
+        contextCount: 2,
+        detail: 'anchor'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:resolve-context-closure', {
+        topicId: 't1',
+        intent: 'move',
+        groupKey: 'u1',
+        detail: 'anchor'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:resolve-context-closure', {
+        topicId: 't1',
+        intent: 'inherit',
+        sourceTopicId: 's1',
         contextCount: 2,
         detail: 'anchor'
       })
@@ -21,23 +46,7 @@ describe('chatdb:resolve-context-closure detail (anchor split)', () => {
     ).not.toThrow()
   })
 
-  it('rejects detail anchor for non-establish intents and unknown detail values', () => {
-    expect(() =>
-      validateChatDbRequest('chatdb:resolve-context-closure', {
-        topicId: 't1',
-        intent: 'reanchor-default',
-        contextCount: 1,
-        detail: 'anchor'
-      })
-    ).toThrow(ValidationError)
-    expect(() =>
-      validateChatDbRequest('chatdb:resolve-context-closure', {
-        topicId: 't1',
-        intent: 'move',
-        groupKey: 'u1',
-        detail: 'anchor'
-      })
-    ).toThrow(ValidationError)
+  it('rejects unknown detail values', () => {
     expect(() =>
       validateChatDbRequest('chatdb:resolve-context-closure', {
         topicId: 't1',

@@ -28,6 +28,8 @@ import type {
   EmptyTrashTopicsResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
+  FetchClipboardGroupsRequest,
+  FetchClipboardGroupsResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
@@ -110,6 +112,7 @@ import {
 export type FetchMessagesResult = { messages: JsonObject[]; blocks: JsonObject[] }
 export type FetchMessagesWindowResult = FetchMessagesWindowResponse
 export type FetchAnswerGroupResult = FetchAnswerGroupResponse
+export type FetchClipboardGroupsResult = FetchClipboardGroupsResponse
 export type FetchContextClosureResult = FetchContextClosureResponse
 export type FetchWholeTopicSnapshotResult = FetchWholeTopicSnapshotResponse
 export type FetchTopicNamingContextResult = FetchTopicNamingContextResponse
@@ -1331,6 +1334,10 @@ export class ChatDbAggregateService {
    *
    * Existing empty target succeeds with null anchor and zero counts; missing
    * topic is NOT_FOUND. Default index: null => 0, else max(0,total-max(1,floor(N))).
+   *
+   * With `detail: 'anchor'` (every intent) Main returns the metadata-only
+   * anchor response via point lookups + bounded scans: no listByTopic, no
+   * blocks, no messages/blocks/closure construction.
    */
   resolveContextClosure(request: ResolveContextClosureRequest): ChatDbResult<ResolveContextClosureResult> {
     return wrapResult(() => {
@@ -1340,13 +1347,10 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        // Metadata-only anchor establishment (detail:'anchor', establish only):
-        // explicit authority read with point lookups + bounded tuple scans.
+        // Metadata-only anchor reads (detail:'anchor', every intent):
+        // explicit authority reads with point lookups + bounded tuple scans.
         // Never calls listByTopic, never touches blocks, never builds wire closure.
         if (request.detail === 'anchor') {
-          if (request.intent !== 'establish') {
-            throw new ChatDbValidationError(`detail 'anchor' is allowed only for intent 'establish'`)
-          }
           const currentKey: string | null =
             typeof request.currentAnchorGroupKey === 'string' ? request.currentAnchorGroupKey : null
           const buildTurnKeys = (rows: MessageData[]): string[] => {
@@ -1373,72 +1377,237 @@ export class ChatDbAggregateService {
             }
             return keys
           }
-          // Empty-message fast path (no turn can exist).
-          const firstRow = repos.messages.getFirstByTopic(request.topicId)
-          if (!firstRow) {
-            return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+          type AnchorTurn = { key: string; messages: MessageData[] }
+          const buildAnchorTurns = (rows: MessageData[]): AnchorTurn[] => {
+            const turns: AnchorTurn[] = []
+            let cur: string | null = null
+            for (const msg of rows) {
+              const role = msg.role
+              const askId = (msg as unknown as { askId: string | null }).askId
+              if (role === 'system') {
+                cur = msg.id
+                turns.push({ key: cur, messages: [msg] })
+              } else if (role === 'user') {
+                cur = msg.id
+                turns.push({ key: cur, messages: [msg] })
+              } else if (role === 'assistant') {
+                if (askId && askId === cur) {
+                  turns[turns.length - 1].messages.push(msg)
+                } else {
+                  cur = askId ? askId : msg.id
+                  turns.push({ key: cur, messages: [msg] })
+                }
+              } else {
+                continue
+              }
+            }
+            return turns
           }
-          // Preserve a valid existing anchor regardless of contextCount.
-          if (currentKey !== null) {
-            const inTopic = repos.messages.getInTopic(currentKey, request.topicId)
-            if (inTopic.found && inTopic.data.role === 'user') {
-              return { resolvedAnchorGroupKey: currentKey, changed: false }
-            }
-            if (repos.messages.hasAssistantWithAskId(request.topicId, currentKey)) {
-              return { resolvedAnchorGroupKey: currentKey, changed: false }
-            }
-            if (inTopic.found && (inTopic.data.role === 'assistant' || inTopic.data.role === 'system')) {
-              return { resolvedAnchorGroupKey: currentKey, changed: false }
-            }
+          const resolveAnchorIndexOf = (turns: AnchorTurn[], groupKey: string): number => {
+            let idx = turns.findIndex((t) => t.messages.some((m) => m.role === 'user' && m.id === groupKey))
+            if (idx !== -1) return idx
+            idx = turns.findIndex((t) =>
+              t.messages.some(
+                (m) => m.role === 'assistant' && (m as unknown as { askId: string | null }).askId === groupKey
+              )
+            )
+            if (idx !== -1) return idx
+            idx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
+            return idx
           }
-          const contextCount = request.contextCount ?? null
-          // Null => first authority turn (bounded head scan skipping ignored roles).
-          if (contextCount === null || contextCount === undefined) {
-            const HEAD_CHUNK = 64
-            let acc: MessageData[] = [firstRow]
+          // Authority default position via bounded scans only:
+          // null => first turn (head scan); finite N => max(0,total-max(1,floor(N)))
+          // via tail expansion. Never listByTopic, never blocks.
+          const resolveDefaultAnchor = (
+            topicId: string,
+            contextCount: number | null | undefined,
+            cur: string | null
+          ): { resolvedAnchorGroupKey: string | null; changed: boolean } => {
+            const first = repos.messages.getFirstByTopic(topicId)
+            if (!first) {
+              return { resolvedAnchorGroupKey: null, changed: cur !== null }
+            }
+            if (contextCount === null || contextCount === undefined) {
+              const HEAD_CHUNK = 64
+              let acc: MessageData[] = [first]
+              for (;;) {
+                const keys = buildTurnKeys(acc)
+                if (keys.length > 0) {
+                  return { resolvedAnchorGroupKey: keys[0], changed: keys[0] !== cur }
+                }
+                const tail = acc[acc.length - 1]
+                const page = repos.messages.listAfter(topicId, tail.sortOrder, tail.id, HEAD_CHUNK)
+                if (page.length === 0) {
+                  return { resolvedAnchorGroupKey: null, changed: cur !== null }
+                }
+                acc = [...acc, ...page]
+              }
+            }
+            const n = Math.max(1, Math.floor(contextCount))
+            const TAIL_CHUNK = 128
+            let acc: MessageData[] = repos.messages.getLatestByTopic(topicId, TAIL_CHUNK)
+            if (acc.length === 0) {
+              return { resolvedAnchorGroupKey: null, changed: cur !== null }
+            }
+            let reachedStart = acc.length < TAIL_CHUNK
             for (;;) {
               const keys = buildTurnKeys(acc)
-              if (keys.length > 0) {
-                return { resolvedAnchorGroupKey: keys[0], changed: keys[0] !== currentKey }
+              if (keys.length >= n) {
+                const resolved = keys[keys.length - n]
+                return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
               }
-              const tail = acc[acc.length - 1]
-              const page = repos.messages.listAfter(request.topicId, tail.sortOrder, tail.id, HEAD_CHUNK)
+              if (reachedStart) {
+                if (keys.length === 0) {
+                  return { resolvedAnchorGroupKey: null, changed: cur !== null }
+                }
+                const resolved = keys[Math.max(0, keys.length - n)]
+                return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
+              }
+              const head = acc[0]
+              const page = repos.messages.listBefore(topicId, head.sortOrder, head.id, TAIL_CHUNK)
               if (page.length === 0) {
-                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+                reachedStart = true
+                continue
+              }
+              if (page.length < TAIL_CHUNK) reachedStart = true
+              acc = [...page, ...acc]
+            }
+          }
+          if (request.intent === 'establish') {
+            // Empty-message fast path (no turn can exist).
+            const firstRow = repos.messages.getFirstByTopic(request.topicId)
+            if (!firstRow) {
+              return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+            }
+            // Preserve a valid existing anchor regardless of contextCount.
+            // Canonical 3-step match parity with the closure path: a user id
+            // or an askId with assistants is already canonical; an assistant
+            // own-id with a non-empty askId normalizes to that askId turn key
+            // (changed:true); solo assistants / system stay own-id.
+            if (currentKey !== null) {
+              const inTopic = repos.messages.getInTopic(currentKey, request.topicId)
+              if (inTopic.found && inTopic.data.role === 'user') {
+                return { resolvedAnchorGroupKey: currentKey, changed: false }
+              }
+              if (repos.messages.hasAssistantWithAskId(request.topicId, currentKey)) {
+                return { resolvedAnchorGroupKey: currentKey, changed: false }
+              }
+              if (inTopic.found && inTopic.data.role === 'assistant') {
+                const askId = (inTopic.data as unknown as { askId: string | null }).askId
+                if (askId) {
+                  return { resolvedAnchorGroupKey: askId, changed: askId !== currentKey }
+                }
+                return { resolvedAnchorGroupKey: currentKey, changed: false }
+              }
+              if (inTopic.found && inTopic.data.role === 'system') {
+                return { resolvedAnchorGroupKey: currentKey, changed: false }
+              }
+            }
+            return resolveDefaultAnchor(request.topicId, request.contextCount ?? null, currentKey)
+          }
+          if (request.intent === 'reanchor-default') {
+            return resolveDefaultAnchor(request.topicId, request.contextCount ?? null, currentKey)
+          }
+          if (request.intent === 'move') {
+            // Point lookups only: no listByTopic, no blocks. Same authority
+            // turn-key derivation as the closure path (assistant askId-or-own;
+            // groupKey canonical 3-step match with own-id askId resolution).
+            if (typeof request.messageId === 'string') {
+              const target = repos.messages.getInTopic(request.messageId, request.topicId)
+              if (!target.found) {
+                throw new ChatDbNotFoundError(
+                  `Message ${request.messageId} does not belong to topic ${request.topicId}`
+                )
+              }
+              const role = target.data.role
+              if (role !== 'user' && role !== 'assistant' && role !== 'system') {
+                throw new ChatDbValidationError(
+                  `Message ${request.messageId} has an ignored role and cannot anchor a context turn`
+                )
+              }
+              const resolved =
+                role === 'assistant' ? (target.data.askId ? target.data.askId : target.data.id) : target.data.id
+              return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+            }
+            if (typeof request.groupKey === 'string') {
+              const g = request.groupKey
+              const inTopic = repos.messages.getInTopic(g, request.topicId)
+              if (inTopic.found && inTopic.data.role === 'user') {
+                return { resolvedAnchorGroupKey: g, changed: g !== currentKey }
+              }
+              if (repos.messages.hasAssistantWithAskId(request.topicId, g)) {
+                return { resolvedAnchorGroupKey: g, changed: g !== currentKey }
+              }
+              if (inTopic.found && (inTopic.data.role === 'assistant' || inTopic.data.role === 'system')) {
+                const resolved =
+                  inTopic.data.role === 'assistant'
+                    ? inTopic.data.askId
+                      ? inTopic.data.askId
+                      : inTopic.data.id
+                    : inTopic.data.id
+                return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+              }
+              throw new ChatDbNotFoundError(`Anchor groupKey ${g} does not belong to topic ${request.topicId}`)
+            }
+            throw new ChatDbValidationError('move requires messageId or groupKey')
+          }
+          // inherit: valid source index maps to the target by index with clamp
+          // to the last target turn; invalid source falls back to the target
+          // default. Bounded forward scans only — no listByTopic, no blocks.
+          // A pathological single turn may expand across chunks, but the topic
+          // is never materialized wholesale via listByTopic.
+          if (typeof request.sourceTopicId !== 'string' || request.sourceTopicId.length === 0) {
+            throw new ChatDbValidationError('inherit requires sourceTopicId')
+          }
+          const sourceId = request.sourceTopicId
+          const sourceTopic = repos.topics.getById(sourceId)
+          if (!sourceTopic.found) {
+            throw new ChatDbNotFoundError(`Topic ${sourceId} does not exist`)
+          }
+          const sourceKey = typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
+          const findSourceIndex = (srcTopicId: string, key: string): number => {
+            const HEAD_CHUNK = 64
+            const first = repos.messages.getFirstByTopic(srcTopicId)
+            if (!first) return -1
+            let acc: MessageData[] = [first]
+            for (;;) {
+              const turns = buildAnchorTurns(acc)
+              const idx = resolveAnchorIndexOf(turns, key)
+              if (idx !== -1) return idx
+              const tail = acc[acc.length - 1]
+              const page = repos.messages.listAfter(srcTopicId, tail.sortOrder, tail.id, HEAD_CHUNK)
+              if (page.length === 0) return -1
+              acc = [...acc, ...page]
+            }
+          }
+          const findTargetKeyAtIndex = (dstTopicId: string, targetIdx: number): string | null => {
+            const HEAD_CHUNK = 64
+            const first = repos.messages.getFirstByTopic(dstTopicId)
+            if (!first) return null
+            let acc: MessageData[] = [first]
+            for (;;) {
+              const turns = buildAnchorTurns(acc)
+              // Turn keys are fixed at turn start; a trailing turn may gain
+              // messages from the next chunk but its key and index are stable.
+              if (turns.length > targetIdx) return turns[targetIdx].key
+              const tail = acc[acc.length - 1]
+              const page = repos.messages.listAfter(dstTopicId, tail.sortOrder, tail.id, HEAD_CHUNK)
+              if (page.length === 0) {
+                if (turns.length === 0) return null
+                return turns[turns.length - 1].key
               }
               acc = [...acc, ...page]
             }
           }
-          // Finite N => max(0, total-N) turn via bounded tail expansion.
-          const n = Math.max(1, Math.floor(contextCount))
-          const TAIL_CHUNK = 128
-          let acc: MessageData[] = repos.messages.getLatestByTopic(request.topicId, TAIL_CHUNK)
-          if (acc.length === 0) {
-            return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+          const sourceIdx = sourceKey !== null ? findSourceIndex(sourceId, sourceKey) : -1
+          if (sourceIdx !== -1) {
+            const targetKey = findTargetKeyAtIndex(request.topicId, sourceIdx)
+            if (targetKey === null) {
+              return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+            }
+            return { resolvedAnchorGroupKey: targetKey, changed: targetKey !== currentKey }
           }
-          let reachedStart = acc.length < TAIL_CHUNK
-          for (;;) {
-            const keys = buildTurnKeys(acc)
-            if (keys.length >= n) {
-              const resolved = keys[keys.length - n]
-              return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
-            }
-            if (reachedStart) {
-              if (keys.length === 0) {
-                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
-              }
-              const resolved = keys[Math.max(0, keys.length - n)]
-              return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
-            }
-            const head = acc[0]
-            const page = repos.messages.listBefore(request.topicId, head.sortOrder, head.id, TAIL_CHUNK)
-            if (page.length === 0) {
-              reachedStart = true
-              continue
-            }
-            if (page.length < TAIL_CHUNK) reachedStart = true
-            acc = [...page, ...acc]
-          }
+          return resolveDefaultAnchor(request.topicId, request.contextCount ?? null, currentKey)
         }
         type AuthorityTurn = { key: string; messages: MessageData[] }
         const buildTurns = (rows: MessageData[]): AuthorityTurn[] => {
@@ -1656,6 +1825,119 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchWholeTopicSnapshot(${request.topicId})`)
+  }
+
+  /**
+   * Group-scoped clipboard READ for copy/cut (selected groups only).
+   *
+   * One authoritative SQLite transaction resolves every requested stable
+   * clipboard group key with bounded topicId + id/askId reads in authority
+   * order (sort_order ASC, id ASC) — never listByTopic, never a whole-topic
+   * snapshot. Canonical `getMessageGroups` equivalence:
+   * - user id keys its user row + all same-topic assistants with askId equal
+   *   to that id (authority order);
+   * - otherwise a non-empty askId with same-topic assistants keys the orphan
+   *   assistant group (authority order);
+   * - otherwise a system row id keys its singleton group.
+   * Any other key (unknown id, tool/generic/assistant-without-askId message
+   * id, or an id from another topic) forms no selectable clipboard group and
+   * is filtered (skipped). Missing topic is NOT_FOUND; zero resolved groups
+   * succeeds with empty arrays so the caller publishes nothing. Blocks come
+   * from listByMessages over exactly the selected message IDs, and groups
+   * return in authority order with positionIndex = first message sort_order
+   * (paste sorts by positionIndex, so document order is preserved).
+   */
+  fetchClipboardGroups(request: FetchClipboardGroupsRequest): ChatDbResult<FetchClipboardGroupsResponse> {
+    return wrapResult(
+      () => {
+        return this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const topic = repos.topics.getById(request.topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+          }
+          const seen = new Set<string>()
+          const requested: string[] = []
+          for (const gid of request.groupIds ?? []) {
+            if (typeof gid !== 'string' || gid.length === 0) {
+              throw new ChatDbValidationError('groupIds must be a non-empty array of stable group keys')
+            }
+            if (seen.has(gid)) {
+              throw new ChatDbValidationError('Duplicate groupId in the clipboard-groups request')
+            }
+            seen.add(gid)
+            requested.push(gid)
+          }
+          if (requested.length === 0) {
+            throw new ChatDbValidationError('groupIds must be a non-empty array of stable group keys')
+          }
+          type ResolvedGroup = { groupId: string; rows: MessageData[] }
+          const resolved: ResolvedGroup[] = []
+          for (const gid of requested) {
+            // Step 1: user row keys its group (user + same-askId assistants).
+            const inTopic = repos.messages.getInTopic(gid, request.topicId)
+            if (inTopic.found && inTopic.data.role === 'user') {
+              const assistants = repos.messages.listAssistantsByAskId(request.topicId, gid)
+              resolved.push({ groupId: gid, rows: [inTopic.data, ...assistants] })
+              continue
+            }
+            // Step 2: non-empty askId with same-topic assistants keys the
+            // (possibly orphan) assistant group.
+            const assistants = repos.messages.listAssistantsByAskId(request.topicId, gid)
+            if (assistants.length > 0) {
+              resolved.push({ groupId: gid, rows: assistants })
+              continue
+            }
+            // Step 3: system row keys its singleton group.
+            if (inTopic.found && inTopic.data.role === 'system') {
+              resolved.push({ groupId: gid, rows: [inTopic.data] })
+              continue
+            }
+            // Anything else forms no selectable clipboard group: skip (missing,
+            // cross-topic, tool/generic/assistant-without-askId message id).
+          }
+          // Authority order across groups by first-row (sort_order, id).
+          resolved.sort((a, b) => {
+            const ar = a.rows[0]
+            const br = b.rows[0]
+            if (ar.sortOrder !== br.sortOrder) return ar.sortOrder - br.sortOrder
+            return ar.id < br.id ? -1 : ar.id > br.id ? 1 : 0
+          })
+          const orderedRows = resolved.flatMap((g) => g.rows)
+          const orderedIds = orderedRows.map((r) => r.id)
+          const blockMap = repos.blocks.listByMessages(orderedIds)
+          const allBlocks: MessageBlockData[] = []
+          for (const id of orderedIds) {
+            allBlocks.push(...(blockMap.get(id) ?? []))
+          }
+          const wireMessages = messagesToWire(orderedRows)
+          const wireBlocks = blocksToWire(allBlocks)
+          const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+          const groups = resolved.map((g) => ({
+            groupId: g.groupId,
+            messageIds: g.rows.map((r) => r.id),
+            positionIndex: g.rows[0].sortOrder
+          }))
+          const firstMessageId = orderedRows.length > 0 ? orderedRows[0].id : null
+          const lastMessageId = orderedRows.length > 0 ? orderedRows[orderedRows.length - 1].id : null
+          return {
+            messages: messagesWithBlocks,
+            blocks: wireBlocks,
+            groups,
+            clipboard: {
+              completeness: 'clipboard-groups' as const,
+              topicId: request.topicId,
+              requestedCount: requested.length,
+              returnedCount: groups.length,
+              returnedMessageCount: orderedRows.length,
+              firstMessageId,
+              lastMessageId
+            }
+          }
+        })
+      },
+      `fetchClipboardGroups(${request.topicId}, ${request.groupIds?.length ?? 0} groups)`
+    )
   }
 
   /**

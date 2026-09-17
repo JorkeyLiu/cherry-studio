@@ -1017,13 +1017,14 @@ const Messages = ({
               logger.error('autoRenameTopic failed', error as Error)
             )
             // Branch inheritance (docs/context-window.md §9) via the authority
-            // resolver: one `chatdb:resolve-context-closure` (intent `inherit`)
-            // call maps the parent's persisted anchor by index into the new
-            // branch with clamp, falling back to the target default when the
-            // source anchor is invalid. No loaded messageIds group lists. Main
-            // never persists settings; only the non-stale returned anchor is
-            // persisted (empty branch stays anchorless). Resolver
-            // messages/blocks are caller-local and never enter normal Redux.
+            // resolver: one metadata-only `chatdb:resolve-context-closure`
+            // (intent `inherit`, `detail: 'anchor'`) call maps the parent's
+            // persisted anchor by index into the new branch with clamp,
+            // falling back to the target default when the source anchor is
+            // invalid. No loaded messageIds group lists. Main never persists
+            // settings; only the non-stale returned anchor is persisted
+            // (empty branch stays anchorless). Metadata-only anchor responses
+            // carry no messages/blocks and never enter normal Redux.
             void (async () => {
               try {
                 const latestAssistant = (() => {
@@ -1045,7 +1046,8 @@ const Messages = ({
                   sourceTopicId: topic.id,
                   sourceAnchorGroupKey: sourceKey,
                   contextCount: latestSettings.contextCount ?? null,
-                  currentAnchorGroupKey: null
+                  currentAnchorGroupKey: null,
+                  detail: 'anchor'
                 })
                 const resolved = response.resolvedAnchorGroupKey
                 if (resolved === null || resolved === undefined) {

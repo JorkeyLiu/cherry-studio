@@ -41,6 +41,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
+  FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
@@ -396,6 +397,11 @@ export function registerChatDbIpc(): () => void {
   // 1e. fetch-whole-topic-snapshot (one-shot whole-topic snapshot for exports/knowledge)
   handleCommand(IpcChannel.ChatDb_FetchWholeTopicSnapshot, (agg, req: FetchWholeTopicSnapshotRequest) => {
     return agg.fetchWholeTopicSnapshot(req)
+  })
+
+  // 1e2. fetch-clipboard-groups (group-scoped copy/cut; selected groups only, never whole-topic)
+  handleCommand(IpcChannel.ChatDb_FetchClipboardGroups, (agg, req: FetchClipboardGroupsRequest) => {
+    return agg.fetchClipboardGroups(req)
   })
 
   // 1f. fetch-topic-naming-context (bounded naming authority; never whole-topic)

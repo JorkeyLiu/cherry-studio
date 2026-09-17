@@ -29,6 +29,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
+  FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
@@ -2777,12 +2778,6 @@ const resolveContextClosureContract: ChatDbContract = {
         "[chatdb:resolve-context-closure] Expected detail one of 'closure'|'anchor'"
       )
     }
-    if (req.detail === 'anchor' && req.intent !== 'establish') {
-      throw new ValidationError(
-        'request.detail',
-        "[chatdb:resolve-context-closure] detail 'anchor' is allowed only for intent 'establish'"
-      )
-    }
     validateOptionalAnchorKey(req.currentAnchorGroupKey, 'request.currentAnchorGroupKey')
     validateOptionalContextCount(req.contextCount, 'request.contextCount')
     const hasMessageId = req.messageId !== undefined
@@ -3203,6 +3198,245 @@ const fetchWholeTopicSnapshotContract: ChatDbContract = {
           throw new ValidationError(
             'result.value.snapshot.lastMessageId',
             '[chatdb:fetch-whole-topic-snapshot] lastMessageId must match last message id'
+          )
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard-groups READ — group-scoped copy/cut (selected groups only)
+// ---------------------------------------------------------------------------
+
+const FETCH_CLIPBOARD_GROUPS_VALUE_KEYS = new Set(['messages', 'blocks', 'groups', 'clipboard'])
+const FETCH_CLIPBOARD_GROUPS_GROUP_KEYS = new Set(['groupId', 'messageIds', 'positionIndex'])
+const FETCH_CLIPBOARD_GROUPS_META_KEYS = new Set([
+  'completeness',
+  'topicId',
+  'requestedCount',
+  'returnedCount',
+  'returnedMessageCount',
+  'firstMessageId',
+  'lastMessageId'
+])
+const FETCH_CLIPBOARD_GROUPS_CHANNEL = 'chatdb:fetch-clipboard-groups'
+
+const fetchClipboardGroupsContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'groupIds'),
+  validate(value: unknown): void {
+    validateRequest(value, fetchClipboardGroupsContract.allowedKeys)
+    const req = value as FetchClipboardGroupsRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    if (!Array.isArray(req.groupIds) || req.groupIds.length === 0) {
+      throw new ValidationError(
+        'request.groupIds',
+        `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] groupIds must be a non-empty array of stable group keys`
+      )
+    }
+    const seen = new Set<string>()
+    for (let i = 0; i < req.groupIds.length; i++) {
+      const id = req.groupIds[i]
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new ValidationError(`request.groupIds[${i}]`, 'Expected a non-empty string')
+      }
+      if (seen.has(id)) {
+        throw new ValidationError(
+          `request.groupIds[${i}]`,
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Duplicate groupId at index ${i}`
+        )
+      }
+      seen.add(id)
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, FETCH_CLIPBOARD_GROUPS_CHANNEL, { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected object with messages, blocks, groups, clipboard`
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Success value must be a plain object`
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!FETCH_CLIPBOARD_GROUPS_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+      if (!Array.isArray(v.groups)) {
+        throw new ValidationError('result.value.groups', `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected array of groups`)
+      }
+      const groups = v.groups as unknown[]
+      const seenGroupIds = new Set<string>()
+      const seenMessageIds = new Set<string>()
+      for (let gi = 0; gi < groups.length; gi++) {
+        const gpath = `result.value.groups[${gi}]`
+        const group = groups[gi] as Record<string, unknown>
+        if (group === null || typeof group !== 'object' || Array.isArray(group)) {
+          throw new ValidationError(gpath, `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected group object`)
+        }
+        for (const key of Object.keys(group)) {
+          if (!FETCH_CLIPBOARD_GROUPS_GROUP_KEYS.has(key)) {
+            throw new ValidationError(
+              `${gpath}.${key}`,
+              `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Unknown key in group: "${key}"`
+            )
+          }
+        }
+        validateNonEmptyString(group.groupId, `${gpath}.groupId`)
+        if (!Array.isArray(group.messageIds) || (group.messageIds as unknown[]).length === 0) {
+          throw new ValidationError(
+            `${gpath}.messageIds`,
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] messageIds must not be empty`
+          )
+        }
+        const mids = group.messageIds as unknown[]
+        for (let mi = 0; mi < mids.length; mi++) {
+          const mid = mids[mi]
+          if (typeof mid !== 'string' || mid.length === 0) {
+            throw new ValidationError(`${gpath}.messageIds[${mi}]`, 'Expected a non-empty string')
+          }
+          if (seenMessageIds.has(mid)) {
+            throw new ValidationError(
+              `${gpath}.messageIds[${mi}]`,
+              `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Duplicate messageId across groups`
+            )
+          }
+          seenMessageIds.add(mid)
+        }
+        if (
+          typeof group.positionIndex !== 'number' ||
+          !Number.isFinite(group.positionIndex) ||
+          !Number.isInteger(group.positionIndex) ||
+          group.positionIndex < 0
+        ) {
+          throw new ValidationError(
+            `${gpath}.positionIndex`,
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected non-negative integer positionIndex`
+          )
+        }
+        const gid = group.groupId as string
+        if (seenGroupIds.has(gid)) {
+          throw new ValidationError(
+            `${gpath}.groupId`,
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Duplicate groupId at index ${gi}`
+          )
+        }
+        seenGroupIds.add(gid)
+      }
+      if (v.clipboard === null || typeof v.clipboard !== 'object' || Array.isArray(v.clipboard)) {
+        throw new ValidationError(
+          'result.value.clipboard',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected clipboard object`
+        )
+      }
+      const cProto = Object.getPrototypeOf(v.clipboard)
+      if (cProto !== Object.prototype && cProto !== null) {
+        throw new ValidationError(
+          'result.value.clipboard',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Success clipboard must be a plain object`
+        )
+      }
+      const c = v.clipboard as Record<string, unknown>
+      for (const key of Object.keys(c)) {
+        if (!FETCH_CLIPBOARD_GROUPS_META_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.clipboard.${key}`,
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Unknown key in clipboard: "${key}"`
+          )
+        }
+      }
+      if (c.completeness !== 'clipboard-groups') {
+        throw new ValidationError(
+          'result.value.clipboard.completeness',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected completeness "clipboard-groups"`
+        )
+      }
+      validateNonEmptyString(c.topicId, 'result.value.clipboard.topicId')
+      for (const k of ['requestedCount', 'returnedCount', 'returnedMessageCount'] as const) {
+        if (typeof c[k] !== 'number' || !Number.isFinite(c[k]) || !Number.isInteger(c[k]) || c[k] < 0) {
+          throw new ValidationError(
+            `result.value.clipboard.${k}`,
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Expected non-negative integer ${k}`
+          )
+        }
+      }
+      if (c.firstMessageId !== null) {
+        validateNonEmptyString(c.firstMessageId, 'result.value.clipboard.firstMessageId')
+      }
+      if (c.lastMessageId !== null) {
+        validateNonEmptyString(c.lastMessageId, 'result.value.clipboard.lastMessageId')
+      }
+      const msgs = v.messages as unknown[]
+      if ((c.returnedMessageCount as number) !== msgs.length) {
+        throw new ValidationError(
+          'result.value.clipboard.returnedMessageCount',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] returnedMessageCount must equal messages length`
+        )
+      }
+      if ((c.returnedCount as number) !== groups.length) {
+        throw new ValidationError(
+          'result.value.clipboard.returnedCount',
+          `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] returnedCount must equal groups length`
+        )
+      }
+      if (groups.length === 0) {
+        if (msgs.length !== 0 || c.firstMessageId !== null || c.lastMessageId !== null) {
+          throw new ValidationError(
+            'result.value.clipboard',
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Empty groups must have no messages and null bounds`
+          )
+        }
+      } else {
+        if (msgs.length === 0 || c.firstMessageId === null || c.lastMessageId === null) {
+          throw new ValidationError(
+            'result.value.clipboard',
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Non-empty groups must have messages and first/lastMessageId`
+          )
+        }
+        const firstId = (msgs[0] as Record<string, unknown>).id
+        const lastId = (msgs[msgs.length - 1] as Record<string, unknown>).id
+        if (c.firstMessageId !== firstId) {
+          throw new ValidationError(
+            'result.value.clipboard.firstMessageId',
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] firstMessageId must match first message id`
+          )
+        }
+        if (c.lastMessageId !== lastId) {
+          throw new ValidationError(
+            'result.value.clipboard.lastMessageId',
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] lastMessageId must match last message id`
+          )
+        }
+        // Every grouped message ID must be present exactly once in messages.
+        const wireIds = new Set((msgs as Array<Record<string, unknown>>).map((m) => m.id as string))
+        for (const mid of seenMessageIds) {
+          if (!wireIds.has(mid)) {
+            throw new ValidationError(
+              'result.value.messages',
+              `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] Group message ${mid} missing from messages`
+            )
+          }
+        }
+        if (wireIds.size !== seenMessageIds.size) {
+          throw new ValidationError(
+            'result.value.messages',
+            `[${FETCH_CLIPBOARD_GROUPS_CHANNEL}] messages must contain exactly the grouped message IDs`
           )
         }
       }
@@ -3714,6 +3948,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:resolve-context-closure': resolveContextClosureContract,
   // One-shot whole-topic snapshot READ (topic exports / knowledge)
   'chatdb:fetch-whole-topic-snapshot': fetchWholeTopicSnapshotContract,
+  // Group-scoped clipboard READ (copy/cut; selected groups only)
+  'chatdb:fetch-clipboard-groups': fetchClipboardGroupsContract,
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   'chatdb:fetch-topic-naming-context': fetchTopicNamingContextContract,
   'chatdb:fetch-topic-activity': fetchTopicActivityContract,

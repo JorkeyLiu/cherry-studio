@@ -17,6 +17,7 @@ import type {
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
+  FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
   FetchMessagesRequest,
   FetchMessagesWindowRequest,
@@ -667,6 +668,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_ResolveContextClosure, request),
     fetchWholeTopicSnapshot: (request: FetchWholeTopicSnapshotRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchWholeTopicSnapshot, request),
+    fetchClipboardGroups: (request: FetchClipboardGroupsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_FetchClipboardGroups, request),
     fetchTopicNamingContext: (request: FetchTopicNamingContextRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchTopicNamingContext, request),
     fetchTopicActivity: (request: FetchTopicActivityRequest) =>

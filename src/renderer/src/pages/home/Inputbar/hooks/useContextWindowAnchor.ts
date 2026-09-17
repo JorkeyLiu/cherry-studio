@@ -9,13 +9,15 @@ import { useCallback } from 'react'
  * TokenCount re-anchor interaction.
  *
  * Authority path: clicking TokenCount is an explicit re-anchor (CW-4) resolved
- * by one `chatdb:resolve-context-closure` (intent `reanchor-default`) call in
- * Main against full ordered turns. No `buildContextTurns`, no loaded-viewport
- * authority decisions. Main never persists settings; this hook persists only
- * the non-stale returned anchor (removing the key on empty). Transport
- * failures and NOT_FOUND preserve current settings.
+ * by one metadata-only `chatdb:resolve-context-closure` (intent
+ * `reanchor-default`, `detail: 'anchor'`) call in Main via point/bounded
+ * reads with no full-topic closure materialization. No `buildContextTurns`,
+ * no loaded-viewport authority decisions. Main never persists settings; this
+ * hook persists only the non-stale returned anchor (removing the key on
+ * empty). Transport failures and NOT_FOUND preserve current settings.
  *
- * Resolver messages/blocks are caller-local and never enter normal Redux.
+ * Metadata-only anchor responses carry no messages/blocks and never enter
+ * normal Redux.
  * There is deliberately NO effect here (and none in the Inputbar) that
  * synchronizes anchors to message loading or message-list changes. Changing
  * `contextCount` alone never moves an existing anchor; re-anchoring happens
@@ -45,7 +47,8 @@ export function useContextWindowAnchor(
         topicId,
         intent: 'reanchor-default',
         contextCount,
-        currentAnchorGroupKey: preKey
+        currentAnchorGroupKey: preKey,
+        detail: 'anchor'
       })
       resolved = response.resolvedAnchorGroupKey
     } catch {

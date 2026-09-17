@@ -410,6 +410,9 @@ export enum IpcChannel {
   // One-shot whole-topic snapshot for topic exports / knowledge (short-lived, no Redux residency)
   ChatDb_FetchWholeTopicSnapshot = 'chatdb:fetch-whole-topic-snapshot',
 
+  // Group-scoped clipboard READ for copy/cut (selected groups only, never whole-topic)
+  ChatDb_FetchClipboardGroups = 'chatdb:fetch-clipboard-groups',
+
   // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
   ChatDb_FetchTopicNamingContext = 'chatdb:fetch-topic-naming-context',
   ChatDb_FetchTopicActivity = 'chatdb:fetch-topic-activity',

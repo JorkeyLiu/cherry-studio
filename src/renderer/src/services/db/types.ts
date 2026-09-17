@@ -2,6 +2,8 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
+  FetchClipboardGroupsRequest,
+  FetchClipboardGroupsResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
@@ -277,7 +279,7 @@ export interface MessageDataSource {
    * the same-snapshot closure. Caller-local only (never normal Redux); the
    * caller persists resolvedAnchorGroupKey with stale guards (remove on null).
    * Missing topic/target → ChatDbResultError (NOT_FOUND); ignored move roles → validation.
-   * `detail: 'anchor'` (establish only) returns the metadata-only anchor response.
+   * `detail: 'anchor'` (every intent) returns the metadata-only anchor response.
    */
   resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResult>
 
@@ -293,6 +295,15 @@ export interface MessageDataSource {
     blocks: MessageBlock[]
     snapshot: FetchWholeTopicSnapshotResponse['snapshot']
   }>
+
+  /**
+   * Group-scoped clipboard READ for copy/cut.
+   * Resolves stable clipboard group keys (same values as UI `selectedGroupIds`)
+   * to complete messages/blocks plus per-group authority positions in one Main
+   * transaction — never a whole-topic snapshot. Missing topic throws
+   * ChatDbResultError (NOT_FOUND); zero resolved groups succeeds empty.
+   */
+  fetchClipboardGroups?(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse>
 
   /**
    * Bounded naming-context READ for automatic/manual naming.

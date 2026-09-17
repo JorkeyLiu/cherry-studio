@@ -102,12 +102,32 @@ describe('useContextWindowAnchor', () => {
       topicId: TOPIC_ID,
       intent: 'reanchor-default',
       contextCount: 2,
-      currentAnchorGroupKey: 'u1'
+      currentAnchorGroupKey: 'u1',
+      detail: 'anchor'
     })
     await waitFor(() => expect(updateAssistantSettings).toHaveBeenCalledTimes(1))
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       contextWindowAnchor: expect.objectContaining({ [TOPIC_ID]: { kind: 'active', groupKey: 'u2' } })
     })
+  })
+
+  it('persists a metadata-only anchor response with no messages/blocks/closure', async () => {
+    const assistant = assistantWith({
+      contextCount: 2,
+      contextWindowAnchor: { [TOPIC_ID]: { kind: 'active', groupKey: 'u1' } }
+    })
+    mocks.getStateAssistants = [assistant]
+    mocks.resolveContextClosure.mockResolvedValueOnce({ resolvedAnchorGroupKey: 'u2', changed: true } as any)
+    const { result } = renderHook(() => useContextWindowAnchor(assistant, TOPIC_ID, [], updateAssistantSettings))
+    await result.current.onReanchor()
+    expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
+      topicId: TOPIC_ID,
+      intent: 'reanchor-default',
+      contextCount: 2,
+      currentAnchorGroupKey: 'u1',
+      detail: 'anchor'
+    })
+    await waitFor(() => expect(updateAssistantSettings).toHaveBeenCalledTimes(1))
   })
 
   it('does not dispatch when the resolver echoes the current anchor', async () => {

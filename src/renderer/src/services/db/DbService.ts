@@ -3,6 +3,8 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
   DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
+  FetchClipboardGroupsRequest,
+  FetchClipboardGroupsResponse,
   FetchContextClosureRequest,
   FetchContextClosureResponse,
   FetchMessagesWindowRequest,
@@ -95,6 +97,10 @@ class DbService implements MessageDataSource {
   }> {
     if (!this.ordinarySource.fetchWholeTopicSnapshot) throw new Error('fetchWholeTopicSnapshot unavailable')
     return this.ordinarySource.fetchWholeTopicSnapshot(topicId)
+  }
+  fetchClipboardGroups(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse> {
+    if (!this.ordinarySource.fetchClipboardGroups) throw new Error('fetchClipboardGroups unavailable')
+    return this.ordinarySource.fetchClipboardGroups(request)
   }
   fetchTopicNamingContext(topicId: string): Promise<{
     topic: FetchTopicNamingContextResponse['topic']

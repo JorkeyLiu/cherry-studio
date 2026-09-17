@@ -1,5 +1,4 @@
 import { loggerService } from '@logger'
-import { getMessageGroups } from '@renderer/hooks/useMessageGroup'
 import { dbService } from '@renderer/services/db'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
@@ -22,7 +21,6 @@ import { MessageBlockType } from '@renderer/types/newMessage'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
-import { loadWholeTopicSnapshot } from '@renderer/utils/topicSnapshot'
 import type { InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -75,16 +73,17 @@ function findAnchorAfterPosition(messages: Message[], positionIndex: number, exc
 /**
  * Authority-complete clipboard payload for copy/cut under windowed loading.
  *
- * Resolves the selected stable group IDs against a caller-local whole-topic
- * snapshot (never published to Redux) using the canonical grouping semantics
- * (`getMessageGroups`: user keys own ID, assistants join by askId with an
- * orphan-askId fallback group, system keys own ID; any other role forms no
- * selectable group). Ordering and `positionIndex` come from authority topic
- * order, blocks come from the snapshot-local block map (so outside-loaded
- * members are complete), and segment inclusion comes from the
- * authority-enriched segment catalog (a segment is included only when ALL its
- * authority message IDs are selected — completeness is never inferred from
- * loaded positions).
+ * Resolves the selected stable group IDs (`selectedGroupIds`, the same values
+ * the edit-mode UI passes as group `askId`s) in one Main group-scoped
+ * authority read (`chatdb:fetch-clipboard-groups`, never published to Redux)
+ * with the canonical grouping semantics (user keys own ID, assistants join by
+ * askId with an orphan-askId fallback group, system keys own ID; any other
+ * role forms no selectable group). Ordering and `positionIndex` come from
+ * Main authority order (first-message `sort_order`), blocks come from the
+ * response-local block set (so outside-loaded members are complete), and
+ * segment inclusion comes from the authority-enriched segment catalog (a
+ * segment is included only when ALL its authority message IDs are selected —
+ * completeness is never inferred from loaded positions).
  *
  * Returns null when no selected group resolves or any authority read fails —
  * callers publish nothing on null (no partial clipboard).
@@ -100,74 +99,77 @@ async function buildAuthorityClipboardPayload(
     return null
   }
 
-  // Caller-local whole-topic snapshot; never relies on or mutates Redux.
-  let snapshot: Awaited<ReturnType<typeof loadWholeTopicSnapshot>>
+  // Group-scoped authority read; never relies on or mutates Redux, never
+  // fetches the whole topic. A selected ID absent from authority (deletion
+  // race, unknown id, non-clipboard role, cross-topic id) is filtered by
+  // Main and resolves to nothing here.
+  let clipboard: Awaited<ReturnType<typeof dbService.fetchClipboardGroups>>
   try {
-    snapshot = await loadWholeTopicSnapshot(topicId)
+    clipboard = await dbService.fetchClipboardGroups({ topicId, groupIds: rootIds })
   } catch (error) {
-    logger.error('[buildAuthorityClipboardPayload] Failed to load whole-topic snapshot', error as Error)
+    logger.error('[buildAuthorityClipboardPayload] Failed to fetch clipboard groups', error as Error)
     return null
   }
 
-  const authorityMessages = snapshot.messages
-  if (authorityMessages.length === 0) {
+  if (clipboard.groups.length === 0 || clipboard.messages.length === 0) {
+    for (const gid of rootIds) {
+      if (!clipboard.groups.some((g) => g.groupId === gid)) {
+        logger.warn(`[buildAuthorityClipboardPayload] Selected group ${gid} absent from authority; skipping`)
+      }
+    }
     return null
   }
 
-  // Canonical grouping over authority order; a selected ID absent from the
-  // authority snapshot (e.g. a deletion race) resolves to nothing.
-  const groupById = new Map(getMessageGroups(authorityMessages).map((g) => [g.askId, g]))
-  const matched: Array<{ askId: string; messages: Message[] }> = []
-  for (const gid of rootIds) {
-    const group = groupById.get(gid)
-    if (group) {
-      matched.push(group)
+  const messageById = new Map((clipboard.messages as unknown as Message[]).map((m) => [m.id, m]))
+  const blocksByMessageId = new Map<string, MessageBlock[]>()
+  for (const block of clipboard.blocks as unknown as MessageBlock[]) {
+    const arr = blocksByMessageId.get(block.messageId)
+    if (arr) {
+      arr.push(block)
     } else {
-      logger.warn(`[buildAuthorityClipboardPayload] Selected group ${gid} absent from authority snapshot; skipping`)
+      blocksByMessageId.set(block.messageId, [block])
     }
   }
-  if (matched.length === 0) {
-    return null
-  }
-
-  // Clipboard ordering by authority topic order (first-message authority
-  // index), never by loaded projection positions.
-  const indexById = new Map<string, number>()
-  authorityMessages.forEach((m, idx) => indexById.set(m.id, idx))
-  matched.sort((a, b) => (indexById.get(a.messages[0].id) ?? 0) - (indexById.get(b.messages[0].id) ?? 0))
 
   const items: ClipboardItem[] = []
   const allSelectedMessageIds: string[] = []
 
-  for (const group of matched) {
-    const clonedMessages: Message[] = structuredClone(group.messages)
+  // Main already returns groups in authority order; keep that order (paste
+  // sorts by positionIndex, so document order is preserved regardless).
+  for (const group of clipboard.groups) {
+    const groupMessages: Message[] = []
+    for (const mid of group.messageIds) {
+      const msg = messageById.get(mid)
+      if (msg) {
+        groupMessages.push(msg)
+      } else {
+        logger.warn(`[buildAuthorityClipboardPayload] Message ${mid} of group ${group.groupId} absent; skipping`)
+      }
+    }
+    if (groupMessages.length === 0) {
+      continue
+    }
+    const clonedMessages: Message[] = structuredClone(groupMessages)
     const clonedBlocks: MessageBlock[] = []
-
-    for (const msg of group.messages) {
+    for (const msg of groupMessages) {
       allSelectedMessageIds.push(msg.id)
-      // Snapshot-local blocks in per-message order; never Redux entities.
-      for (const blockId of msg.blocks || []) {
-        const block = snapshot.blocksById.get(blockId)
-        if (block) {
-          clonedBlocks.push(structuredClone(block))
-        } else {
-          logger.warn(
-            `[buildAuthorityClipboardPayload] Block ${blockId} of message ${msg.id} absent from snapshot; skipping`
-          )
-        }
+      for (const block of blocksByMessageId.get(msg.id) ?? []) {
+        clonedBlocks.push(structuredClone(block))
       }
     }
 
     // Authority order/group position; the persisted wire shape is unchanged
     // (no clipboard format migration).
-    const positionIndex = indexById.get(group.messages[0].id) ?? 0
-
     items.push({
-      originalAskId: group.askId,
+      originalAskId: group.groupId,
       messages: clonedMessages,
       blocks: clonedBlocks,
-      positionIndex
+      positionIndex: group.positionIndex
     })
+  }
+
+  if (items.length === 0) {
+    return null
   }
 
   // Authority-enriched segment catalog membership (caller-local read, never
