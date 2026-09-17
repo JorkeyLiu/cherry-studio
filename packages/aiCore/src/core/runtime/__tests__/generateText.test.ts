@@ -270,46 +270,54 @@ describe('RuntimeExecutor.generateText', () => {
       expect(googleProvider.languageModel).toHaveBeenCalledWith('gemini-2.0-flash-exp')
     })
 
-    it('should work with xAI provider', async () => {
-      const xaiModel = createMockLanguageModel({
-        provider: 'xai',
-        modelId: 'grok-2-latest'
+    it('should work with generic OpenAI-compatible provider (retired brands route generic)', async () => {
+      const genericModel = createMockLanguageModel({
+        provider: 'openai-compatible',
+        modelId: 'brand-chat-model'
       })
 
-      const xaiProvider = createMockProviderV3({
-        provider: 'xai',
-        languageModel: vi.fn(() => xaiModel)
+      const genericProvider = createMockProviderV3({
+        provider: 'openai-compatible',
+        languageModel: vi.fn(() => genericModel)
       })
 
-      const xaiExecutor = RuntimeExecutor.create('xai', xaiProvider, mockProviderConfigs.xai)
+      const genericExecutor = RuntimeExecutor.create(
+        'openai-compatible',
+        genericProvider,
+        mockProviderConfigs['openai-compatible']
+      )
 
-      await xaiExecutor.generateText({
-        model: 'grok-2-latest',
+      await genericExecutor.generateText({
+        model: 'brand-chat-model',
         messages: testMessages.simple
       })
 
-      expect(xaiProvider.languageModel).toHaveBeenCalledWith('grok-2-latest')
+      expect(genericProvider.languageModel).toHaveBeenCalledWith('brand-chat-model')
     })
 
-    it('should work with DeepSeek provider', async () => {
-      const deepseekModel = createMockLanguageModel({
-        provider: 'deepseek',
-        modelId: 'deepseek-chat'
+    it('should request unknown model ids through generic OpenAI-compatible', async () => {
+      const unknownModel = createMockLanguageModel({
+        provider: 'openai-compatible',
+        modelId: 'my-renamed-unknown-1'
       })
 
-      const deepseekProvider = createMockProviderV3({
-        provider: 'deepseek',
-        languageModel: vi.fn(() => deepseekModel)
+      const unknownProvider = createMockProviderV3({
+        provider: 'openai-compatible',
+        languageModel: vi.fn(() => unknownModel)
       })
 
-      const deepseekExecutor = RuntimeExecutor.create('deepseek', deepseekProvider, mockProviderConfigs.deepseek)
+      const unknownExecutor = RuntimeExecutor.create(
+        'openai-compatible',
+        unknownProvider,
+        mockProviderConfigs['openai-compatible']
+      )
 
-      await deepseekExecutor.generateText({
-        model: 'deepseek-chat',
+      await unknownExecutor.generateText({
+        model: 'my-renamed-unknown-1',
         messages: testMessages.simple
       })
 
-      expect(deepseekProvider.languageModel).toHaveBeenCalledWith('deepseek-chat')
+      expect(unknownProvider.languageModel).toHaveBeenCalledWith('my-renamed-unknown-1')
     })
   })
 

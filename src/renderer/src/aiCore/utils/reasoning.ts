@@ -1,8 +1,6 @@
-import type { BedrockProviderOptions } from '@ai-sdk/amazon-bedrock'
 import type { AnthropicProviderOptions } from '@ai-sdk/anthropic'
 import type { GoogleGenerativeAIProviderOptions } from '@ai-sdk/google'
 import type { OpenAIResponsesProviderOptions } from '@ai-sdk/openai'
-import type { XaiResponsesProviderOptions } from '@ai-sdk/xai'
 import type OpenAI from '@cherrystudio/openai'
 import { loggerService } from '@logger'
 import { DEFAULT_MAX_TOKENS } from '@renderer/config/constant'
@@ -22,14 +20,12 @@ import {
   isMiniMaxReasoningModel,
   isOpenAIDeepResearchModel,
   isOpenAIModel,
-  isOpenAIOpenWeightModel,
   isOpenAIReasoningModel,
   isQwen35to39Model,
   isQwenAlwaysThinkModel,
   isQwenReasoningModel,
   isReasoningModel,
   isSupportAdaptiveThinkingClaudeModel,
-  isSupportedReasoningEffortGrokModel,
   isSupportedReasoningEffortModel,
   isSupportedReasoningEffortOpenAIModel,
   isSupportedThinkingTokenClaudeModel,
@@ -51,7 +47,6 @@ import type { OpenAIReasoningEffort, OpenAIReasoningSummary } from '@renderer/ty
 import { getLowerBaseModelName } from '@renderer/utils'
 import { isSupportEnableThinkingProvider } from '@renderer/utils/provider'
 import { toInteger } from 'lodash'
-import type { OllamaProviderOptions } from 'ollama-ai-provider-v2'
 
 const logger = loggerService.withContext('reasoning')
 
@@ -942,141 +937,6 @@ export function getGeminiReasoningParams(
       }
     }
   }
-}
-
-/**
- * Get XAI-specific reasoning parameters
- * This function should only be called for XAI provider models
- * @param assistant - The assistant configuration
- * @param model - The model being used
- * @returns XAI-specific reasoning parameters
- */
-export function getXAIReasoningParams(
-  assistant: Assistant,
-  model: Model
-): Pick<XaiResponsesProviderOptions, 'reasoningEffort'> {
-  const isGrok43 =
-    getLowerBaseModelName(model.id).includes('grok-4.3') && !getLowerBaseModelName(model.id).includes('non-reasoning')
-
-  if (!isSupportedReasoningEffortGrokModel(model) && !isGrok43) {
-    return {}
-  }
-
-  const { reasoning_effort: reasoningEffort } = getAssistantSettings(assistant)
-  if (!reasoningEffort || reasoningEffort === 'default') return {}
-
-  if (isGrok43) {
-    switch (reasoningEffort) {
-      case 'none':
-      case 'low':
-      case 'medium':
-      case 'high':
-        return { reasoningEffort }
-      default:
-        return {}
-    }
-  }
-
-  // Legacy grok models (grok-3-mini, openrouter/grok-4-fast): constrained effort mapping
-  switch (reasoningEffort) {
-    case 'auto':
-    case 'minimal':
-    case 'medium':
-      return { reasoningEffort: 'low' }
-    case 'low':
-    case 'high':
-      return { reasoningEffort }
-    case 'xhigh':
-      return { reasoningEffort: 'high' }
-    default:
-      return {}
-  }
-}
-
-/**
- * Get Bedrock reasoning parameters
- */
-export function getBedrockReasoningParams(
-  assistant: Assistant,
-  model: Model
-): Pick<BedrockProviderOptions, 'reasoningConfig'> {
-  if (!isReasoningModel(model)) {
-    return {}
-  }
-
-  const reasoningEffort = assistant?.settings?.reasoning_effort
-
-  if (reasoningEffort === undefined || reasoningEffort === 'default') {
-    return {}
-  }
-
-  if (reasoningEffort === 'none') {
-    return {
-      reasoningConfig: {
-        type: 'disabled'
-      }
-    }
-  }
-
-  // Only apply thinking budget for Claude reasoning models
-  if (!isSupportedThinkingTokenClaudeModel(model)) {
-    return {}
-  }
-
-  // Claude 4.6 / Opus 4.7+ use adaptive thinking + maxReasoningEffort.
-  // Bedrock's maxReasoningEffort enum doesn't yet include 'xhigh', so Opus 4.7+ xhigh
-  // falls back to 'max' here (matches the 4.6 mapping).
-  if (isClaude46SeriesModel(model) || isSupportAdaptiveThinkingClaudeModel(model)) {
-    const effortMap = {
-      auto: undefined,
-      minimal: 'low',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'max'
-    } as const satisfies Record<
-      Exclude<ReasoningEffortOption, 'none' | 'default'>,
-      NonNullable<BedrockProviderOptions['reasoningConfig']>['maxReasoningEffort']
-    >
-    const maxReasoningEffort = effortMap[reasoningEffort]
-    return maxReasoningEffort
-      ? { reasoningConfig: { type: 'adaptive', maxReasoningEffort } }
-      : { reasoningConfig: { type: 'adaptive' } }
-  }
-
-  // Other Claude models use enabled + budgetTokens
-  const { maxTokens } = getAssistantSettings(assistant)
-  const budgetTokens = getThinkingBudget(maxTokens, reasoningEffort, model.id)
-  return {
-    reasoningConfig: {
-      type: 'enabled',
-      budgetTokens: budgetTokens
-    }
-  }
-}
-
-/**
- * Get Ollama reasoning parameters
- * Handles the `think` parameter for Ollama models
- *
- * - GPT-OSS models: accept 'low' | 'medium' | 'high' string values
- * - Other models: boolean only (true/false)
- */
-export function getOllamaReasoningParams(assistant: Assistant, model: Model): Pick<OllamaProviderOptions, 'think'> {
-  const reasoningEffort = assistant.settings?.reasoning_effort
-
-  if (isOpenAIOpenWeightModel(model)) {
-    // gpt-oss models accept 'low' | 'medium' | 'high' string values
-    if (reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high') {
-      return { think: reasoningEffort }
-    } else if (reasoningEffort === 'none') {
-      return { think: false }
-    }
-    return { think: true }
-  }
-
-  // Other models: boolean only. undefined defaults to true (user enabled reasoning)
-  return { think: reasoningEffort !== 'none' }
 }
 
 /**

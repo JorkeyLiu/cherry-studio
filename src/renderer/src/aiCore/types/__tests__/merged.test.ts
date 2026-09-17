@@ -1,112 +1,131 @@
 /**
  * Type Tests for Merged Provider Types
  *
- * These tests validate that the auto-extraction and merging of provider types works correctly.
- * They use type-level assertions to ensure compile-time type safety.
+ * Active execution retains ONLY the approved core adapters: official OpenAI
+ * (chat + responses variants), generic OpenAI-compatible, Anthropic, and
+ * Google/Gemini. Retired brand adapters must stay absent — brand ids never
+ * select an SDK and must not be reintroduced for type compatibility.
  */
 
-import { describe, expectTypeOf, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import type { AppProviderId, AppProviderSettingsMap } from '../merged'
-import { appProviderIds } from '../merged'
+import { appProviderIds, getAllProviderIds, isRegisteredProviderId } from '../merged'
+
+const APPROVED_IDS = [
+  'openai',
+  'openai-chat',
+  'openai-compatible',
+  'openai-response',
+  'anthropic',
+  'claude',
+  'google',
+  'gemini',
+  'google-ai',
+  'google-gemini'
+] as const
+
+const RETIRED_IDS = [
+  'azure',
+  'azure-openai',
+  'azure-responses',
+  'azure-anthropic',
+  'deepseek',
+  'xai',
+  'grok',
+  'xai-responses',
+  'openrouter',
+  'tokenflux',
+  'google-vertex',
+  'vertexai',
+  'google-vertex-anthropic',
+  'vertexai-anthropic',
+  'github-copilot-openai-compatible',
+  'copilot',
+  'github-copilot',
+  'bedrock',
+  'aws-bedrock',
+  'perplexity',
+  'mistral',
+  'huggingface',
+  'hf',
+  'hugging-face',
+  'gateway',
+  'ai-gateway',
+  'cerebras',
+  'groq',
+  'ollama',
+  'aihubmix',
+  'newapi',
+  'new-api',
+  'togetherai',
+  'voyage',
+  'voyageai'
+] as const
 
 describe('Unified Provider Types', () => {
   describe('appProviderIds literal access', () => {
-    it('should return canonical IDs with literal types', () => {
+    it('should resolve approved aliases and variants', () => {
       // 别名 → 基础名
-      expectTypeOf(appProviderIds.vertexai).toEqualTypeOf<'google-vertex'>()
+      expectTypeOf(appProviderIds.claude).toEqualTypeOf<'anthropic'>()
       // 变体 → 自身（自反映射）
       expectTypeOf(appProviderIds['openai-chat']).toEqualTypeOf<'openai-chat'>()
     })
   })
 
-  describe('AppProviderId - All Providers', () => {
-    it('should include all core extension names', () => {
+  describe('AppProviderId - Approved adapters', () => {
+    it('should include all approved core extension names', () => {
       type Check1 = 'openai' extends AppProviderId ? true : false
       type Check2 = 'anthropic' extends AppProviderId ? true : false
       type Check3 = 'google' extends AppProviderId ? true : false
-      type Check4 = 'azure' extends AppProviderId ? true : false
-      type Check5 = 'deepseek' extends AppProviderId ? true : false
-      type Check6 = 'xai' extends AppProviderId ? true : false
+      type Check4 = 'openai-compatible' extends AppProviderId ? true : false
 
       expectTypeOf<Check1>().toEqualTypeOf<true>()
       expectTypeOf<Check2>().toEqualTypeOf<true>()
       expectTypeOf<Check3>().toEqualTypeOf<true>()
       expectTypeOf<Check4>().toEqualTypeOf<true>()
-      expectTypeOf<Check5>().toEqualTypeOf<true>()
-      expectTypeOf<Check6>().toEqualTypeOf<true>()
     })
 
-    it('should include all project extension names', () => {
-      type Check1 = 'google-vertex' extends AppProviderId ? true : false
-      type Check2 = 'bedrock' extends AppProviderId ? true : false
-      type Check3 = 'github-copilot-openai-compatible' extends AppProviderId ? true : false
-      type Check4 = 'perplexity' extends AppProviderId ? true : false
-      type Check5 = 'mistral' extends AppProviderId ? true : false
-      type Check6 = 'huggingface' extends AppProviderId ? true : false
-      type Check7 = 'gateway' extends AppProviderId ? true : false
-      type Check8 = 'cerebras' extends AppProviderId ? true : false
-      type Check9 = 'ollama' extends AppProviderId ? true : false
+    it('should include approved aliases', () => {
+      type Check1 = 'claude' extends AppProviderId ? true : false
+      type Check2 = 'gemini' extends AppProviderId ? true : false
+      type Check3 = 'openai-response' extends AppProviderId ? true : false
 
       expectTypeOf<Check1>().toEqualTypeOf<true>()
       expectTypeOf<Check2>().toEqualTypeOf<true>()
       expectTypeOf<Check3>().toEqualTypeOf<true>()
-      expectTypeOf<Check4>().toEqualTypeOf<true>()
-      expectTypeOf<Check5>().toEqualTypeOf<true>()
-      expectTypeOf<Check6>().toEqualTypeOf<true>()
-      expectTypeOf<Check7>().toEqualTypeOf<true>()
-      expectTypeOf<Check8>().toEqualTypeOf<true>()
-      expectTypeOf<Check9>().toEqualTypeOf<true>()
     })
 
-    it('should include all aliases (core + project)', () => {
-      // Core aliases
-      type Check2 = 'claude' extends AppProviderId ? true : false
+    // NOTE: AppProviderId is intentionally open (`KnownId | (string & {})`) so
+    // that brand gateways and manually added entries stay requestable through
+    // generic OpenAI-compatible. Retired-adapter absence is therefore asserted
+    // at runtime below (isRegisteredProviderId / getAllProviderIds), not at
+    // the type level.
+  })
 
-      // Project aliases
-      type Check3 = 'vertexai' extends AppProviderId ? true : false
-      type Check4 = 'aws-bedrock' extends AppProviderId ? true : false
-      type Check5 = 'copilot' extends AppProviderId ? true : false
-      type Check6 = 'github-copilot' extends AppProviderId ? true : false
-      type Check7 = 'hf' extends AppProviderId ? true : false
-      type Check8 = 'hugging-face' extends AppProviderId ? true : false
-      type Check9 = 'ai-gateway' extends AppProviderId ? true : false
+  describe('Registered registry (runtime)', () => {
+    it('should register approved IDs', () => {
+      for (const id of APPROVED_IDS) {
+        expect(isRegisteredProviderId(id)).toBe(true)
+      }
+      const all = getAllProviderIds()
+      for (const id of APPROVED_IDS) {
+        expect(all).toContain(id)
+      }
+    })
 
-      expectTypeOf<Check2>().toEqualTypeOf<true>()
-      expectTypeOf<Check3>().toEqualTypeOf<true>()
-      expectTypeOf<Check4>().toEqualTypeOf<true>()
-      expectTypeOf<Check5>().toEqualTypeOf<true>()
-      expectTypeOf<Check6>().toEqualTypeOf<true>()
-      expectTypeOf<Check7>().toEqualTypeOf<true>()
-      expectTypeOf<Check8>().toEqualTypeOf<true>()
-      expectTypeOf<Check9>().toEqualTypeOf<true>()
+    it('should not register retired adapters', () => {
+      for (const id of RETIRED_IDS) {
+        expect(isRegisteredProviderId(id)).toBe(false)
+      }
+      const all = getAllProviderIds()
+      for (const id of RETIRED_IDS) {
+        expect(all).not.toContain(id)
+      }
     })
   })
 
   describe('AppProviderId', () => {
-    it('should merge core and project IDs', () => {
-      // Core providers
-      type Check1 = 'openai' extends AppProviderId ? true : false
-      type Check2 = 'anthropic' extends AppProviderId ? true : false
-      type Check3 = 'google' extends AppProviderId ? true : false
-      type Check4 = 'azure' extends AppProviderId ? true : false
-      type Check5 = 'xai' extends AppProviderId ? true : false
-
-      // Project providers
-      type Check6 = 'google-vertex' extends AppProviderId ? true : false
-      type Check7 = 'bedrock' extends AppProviderId ? true : false
-      type Check8 = 'ollama' extends AppProviderId ? true : false
-
-      expectTypeOf<Check1>().toEqualTypeOf<true>()
-      expectTypeOf<Check2>().toEqualTypeOf<true>()
-      expectTypeOf<Check3>().toEqualTypeOf<true>()
-      expectTypeOf<Check4>().toEqualTypeOf<true>()
-      expectTypeOf<Check5>().toEqualTypeOf<true>()
-      expectTypeOf<Check6>().toEqualTypeOf<true>()
-      expectTypeOf<Check7>().toEqualTypeOf<true>()
-      expectTypeOf<Check8>().toEqualTypeOf<true>()
-    })
-
     it('should accept string for dynamic providers', () => {
       type Check = string extends AppProviderId ? true : false
       expectTypeOf<Check>().toEqualTypeOf<true>()
@@ -114,7 +133,7 @@ describe('Unified Provider Types', () => {
   })
 
   describe('AppProviderSettingsMap', () => {
-    it('should map core provider IDs to their settings', () => {
+    it('should map approved provider IDs to their settings', () => {
       // OpenAI settings should have OpenAI-specific fields
       type OpenAISettings = AppProviderSettingsMap['openai']
       type HasBaseURL = 'baseURL' extends keyof OpenAISettings ? true : false
@@ -124,33 +143,18 @@ describe('Unified Provider Types', () => {
       expectTypeOf<HasApiKey>().toEqualTypeOf<true>()
     })
 
-    it('should map project provider IDs to their settings', () => {
-      // Project providers should have settings
-      type VertexSettings = AppProviderSettingsMap['google-vertex']
-      type BedrockSettings = AppProviderSettingsMap['bedrock']
-      type OllamaSettings = AppProviderSettingsMap['ollama']
-
-      // These should not be never
-      type VertexNotNever = [VertexSettings] extends [never] ? false : true
-      type BedrockNotNever = [BedrockSettings] extends [never] ? false : true
-      type OllamaNotNever = [OllamaSettings] extends [never] ? false : true
-
-      expectTypeOf<VertexNotNever>().toEqualTypeOf<true>()
-      expectTypeOf<BedrockNotNever>().toEqualTypeOf<true>()
-      expectTypeOf<OllamaNotNever>().toEqualTypeOf<true>()
-    })
-
     it('should map aliases to same settings as main ID', () => {
-      type OpenRouterByName = AppProviderSettingsMap['openrouter']
-      type OpenRouterByAlias = AppProviderSettingsMap['tokenflux']
+      // Anthropic alias should share settings
+      type AnthropicByName = AppProviderSettingsMap['anthropic']
+      type AnthropicByAlias = AppProviderSettingsMap['claude']
 
-      expectTypeOf<OpenRouterByName>().toEqualTypeOf<OpenRouterByAlias>()
+      expectTypeOf<AnthropicByName>().toEqualTypeOf<AnthropicByAlias>()
 
-      // Vertex AI aliases should have the same settings
-      type VertexByName = AppProviderSettingsMap['google-vertex']
-      type VertexByAlias = AppProviderSettingsMap['vertexai']
+      // Google aliases should share settings
+      type GoogleByName = AppProviderSettingsMap['google']
+      type GoogleByAlias = AppProviderSettingsMap['gemini']
 
-      expectTypeOf<VertexByName>().toEqualTypeOf<VertexByAlias>()
+      expectTypeOf<GoogleByName>().toEqualTypeOf<GoogleByAlias>()
     })
   })
 })

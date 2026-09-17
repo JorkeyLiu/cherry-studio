@@ -186,20 +186,15 @@ describe('Type Utilities', () => {
       expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('google')
     })
 
-    it('should include azure provider', () => {
-      expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('azure')
+    it('should include openai-compatible provider', () => {
+      expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('openai-compatible')
     })
 
-    it('should include xai provider', () => {
-      expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('xai')
-    })
-
-    it('should include deepseek provider', () => {
-      expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('deepseek')
-    })
-
-    it('should include openrouter provider', () => {
-      expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('openrouter')
+    it('should not include retired specialized providers', () => {
+      expectTypeOf<CoreProviderSettingsMap>().not.toHaveProperty('azure')
+      expectTypeOf<CoreProviderSettingsMap>().not.toHaveProperty('xai')
+      expectTypeOf<CoreProviderSettingsMap>().not.toHaveProperty('deepseek')
+      expectTypeOf<CoreProviderSettingsMap>().not.toHaveProperty('openrouter')
     })
 
     it('should include aliases like claude', () => {
@@ -210,8 +205,9 @@ describe('Type Utilities', () => {
       expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('openai-chat')
     })
 
-    it('should include variants like azure-responses', () => {
-      expectTypeOf<CoreProviderSettingsMap>().toHaveProperty('azure-responses')
+    it('should not include retired variants like azure-responses', () => {
+      expectTypeOf<CoreProviderSettingsMap>().not.toHaveProperty('azure-responses')
+      expectTypeOf<CoreProviderSettingsMap>().not.toHaveProperty('xai-responses')
     })
   })
 })

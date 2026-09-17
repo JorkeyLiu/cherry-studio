@@ -1,7 +1,6 @@
 import { type AnthropicProviderOptions } from '@ai-sdk/anthropic'
 import type { GoogleGenerativeAIProviderOptions } from '@ai-sdk/google'
 import type { OpenAIResponsesProviderOptions } from '@ai-sdk/openai'
-import type { XaiResponsesProviderOptions } from '@ai-sdk/xai'
 import { loggerService } from '@logger'
 import {
   getModelSupportedVerbosity,
@@ -44,8 +43,7 @@ import {
   getCustomParameters,
   getGeminiReasoningParams,
   getOpenAIReasoningParams,
-  getReasoningEffort,
-  getXAIReasoningParams
+  getReasoningEffort
 } from './reasoning'
 import { getWebSearchParams } from './websearch'
 
@@ -160,13 +158,12 @@ export function buildProviderOptions(
   const textVerbosity = getVerbosity(model)
 
   // Build options by AI SDK provider ID. Only approved-protocol buckets are
-  // reachable: the factory resolves retired protocols (azure/bedrock/vertex/
-  // ollama/gateway/newapi/aihubmix) to generic OpenAI-compatible, so no
-  // retired type/brand branch exists here.
+  // reachable: the factory resolves every other protocol/type (including all
+  // retired brand adapters and unknown types) to generic OpenAI-compatible,
+  // so no retired brand branch exists here.
   switch (rawProviderId) {
     case 'openai':
     case 'openai-chat':
-    case 'huggingface':
       providerSpecificOptions = buildOpenAIProviderOptions(assistant, model, capabilities, serviceTier, textVerbosity)
       break
     case 'anthropic':
@@ -175,12 +172,6 @@ export function buildProviderOptions(
     case 'google':
       providerSpecificOptions = buildGeminiProviderOptions(assistant, model, capabilities)
       break
-    case 'xai':
-    case 'xai-responses':
-      providerSpecificOptions = buildXAIProviderOptions(assistant, model, capabilities)
-      break
-    case 'deepseek':
-    case 'openrouter':
     case 'openai-compatible':
     default:
       // 对于其他 provider，使用通用的构建逻辑
@@ -399,29 +390,6 @@ function buildGeminiProviderOptions(
 
   return {
     google: {
-      ...providerOptions
-    }
-  }
-}
-
-function buildXAIProviderOptions(
-  assistant: Assistant,
-  model: Model,
-  capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
-): Record<string, XaiResponsesProviderOptions> {
-  const { enableReasoning } = capabilities
-  let providerOptions: Record<string, any> = {}
-
-  if (enableReasoning) {
-    const reasoningParams = getXAIReasoningParams(assistant, model)
-    providerOptions = {
-      ...providerOptions,
-      ...reasoningParams
-    }
-  }
-
-  return {
-    xai: {
       ...providerOptions
     }
   }

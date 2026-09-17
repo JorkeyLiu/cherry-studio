@@ -16,19 +16,7 @@ vi.mock('@cherrystudio/ai-core/provider', async (importOriginal) => {
     ...actual,
     baseProviderIdSchema: {
       safeParse: vi.fn((id) => {
-        const baseProviders = [
-          'openai',
-          'openai-chat',
-          'azure',
-          'azure-responses',
-          'huggingface',
-          'anthropic',
-          'google',
-          'xai',
-          'deepseek',
-          'openrouter',
-          'openai-compatible'
-        ]
+        const baseProviders = ['openai', 'openai-chat', 'anthropic', 'google', 'openai-compatible']
         if (baseProviders.includes(id)) {
           return { success: true, data: id }
         }
@@ -36,20 +24,7 @@ vi.mock('@cherrystudio/ai-core/provider', async (importOriginal) => {
       })
     },
     customProviderIdSchema: {
-      safeParse: vi.fn((id) => {
-        const customProviders = [
-          'google-vertex',
-          'google-vertex-anthropic',
-          'bedrock',
-          'gateway',
-          'aihubmix',
-          'newapi',
-          'ollama',
-          'poe'
-        ]
-        if (customProviders.includes(id)) {
-          return { success: true, data: id }
-        }
+      safeParse: vi.fn(() => {
         return { success: false, error: new Error('Invalid provider') }
       })
     }
@@ -116,10 +91,6 @@ vi.mock('../reasoning', () => ({
   })),
   getGeminiReasoningParams: vi.fn(() => ({
     thinkingConfig: { include_thoughts: true }
-  })),
-  getXAIReasoningParams: vi.fn(() => ({ reasoningEffort: 'high' })),
-  getBedrockReasoningParams: vi.fn(() => ({
-    reasoningConfig: { type: 'enabled', budgetTokens: 5000 }
   })),
   getReasoningEffort: vi.fn(() => ({ reasoningEffort: 'medium' })),
   getCustomParameters: vi.fn(() => ({})),

@@ -112,32 +112,6 @@ export const mockProviderConfigs = {
     baseURL: 'https://generativelanguage.googleapis.com/v1'
   },
 
-  xai: {
-    apiKey: 'xai-test-key-123456789',
-    baseURL: 'https://api.x.ai/v1'
-  },
-
-  azure: {
-    apiKey: 'test-azure-key-123456789',
-    resourceName: 'test-resource',
-    deployment: 'test-deployment'
-  },
-
-  deepseek: {
-    apiKey: 'sk-test-deepseek-key-123456789',
-    baseURL: 'https://api.deepseek.com/v1'
-  },
-
-  openrouter: {
-    apiKey: 'sk-or-test-key-123456789',
-    baseURL: 'https://openrouter.ai/api/v1'
-  },
-
-  huggingface: {
-    apiKey: 'hf_test_key_123456789',
-    baseURL: 'https://api-inference.huggingface.co'
-  },
-
   'openai-compatible': {
     apiKey: 'test-compatible-key-123456789',
     baseURL: 'https://api.example.com/v1',
@@ -171,15 +145,9 @@ export const mockProviderInstances = {
     imageModel: createMockImageModel({ provider: 'google', modelId: 'imagen-3.0-generate-001' })
   },
 
-  xai: {
-    name: 'xai-mock',
-    languageModel: createMockLanguageModel({ provider: 'xai', modelId: 'grok-2-latest' }),
-    imageModel: createMockImageModel({ provider: 'xai', modelId: 'grok-2-image-latest' })
-  },
-
-  deepseek: {
-    name: 'deepseek-mock',
-    languageModel: createMockLanguageModel({ provider: 'deepseek', modelId: 'deepseek-chat' })
+  'openai-compatible': {
+    name: 'openai-compatible-mock',
+    languageModel: createMockLanguageModel({ provider: 'openai-compatible', modelId: 'generic-chat-model' })
   }
 }
 

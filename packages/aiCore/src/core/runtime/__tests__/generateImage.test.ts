@@ -463,24 +463,26 @@ describe('RuntimeExecutor.generateImage', () => {
       expect(googleProvider.imageModel).toHaveBeenCalledWith('imagen-3.0-generate-002')
     })
 
-    it('should support xAI Grok image models', async () => {
-      const xaiImageModel = createMockImageModel({
-        provider: 'xai',
-        modelId: 'grok-2-image'
+    it('should support generic OpenAI-compatible image models (retired brands route generic)', async () => {
+      const genericImageModel = createMockImageModel({
+        provider: 'openai-compatible',
+        modelId: 'brand-image-model'
       })
 
-      const xaiProvider = createMockProviderV3({
-        provider: 'xai',
-        imageModel: vi.fn(() => xaiImageModel)
+      const genericProvider = createMockProviderV3({
+        provider: 'openai-compatible',
+        imageModel: vi.fn(() => genericImageModel)
       })
 
-      const xaiExecutor = RuntimeExecutor.create('xai', xaiProvider, {
-        apiKey: 'xai-key'
+      const genericExecutor = RuntimeExecutor.create('openai-compatible', genericProvider, {
+        apiKey: 'generic-key',
+        baseURL: 'https://api.example.com/v1',
+        name: 'generic-brand'
       })
 
-      await xaiExecutor.generateImage({ model: 'grok-2-image', prompt: 'A futuristic robot' })
+      await genericExecutor.generateImage({ model: 'brand-image-model', prompt: 'A futuristic robot' })
 
-      expect(xaiProvider.imageModel).toHaveBeenCalledWith('grok-2-image')
+      expect(genericProvider.imageModel).toHaveBeenCalledWith('brand-image-model')
     })
   })
 

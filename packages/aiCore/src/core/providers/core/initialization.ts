@@ -6,10 +6,6 @@
 
 import type { AnthropicProvider, AnthropicProviderSettings } from '@ai-sdk/anthropic'
 import { createAnthropic } from '@ai-sdk/anthropic'
-import type { AzureOpenAIProvider, AzureOpenAIProviderSettings } from '@ai-sdk/azure'
-import { createAzure } from '@ai-sdk/azure'
-import type { DeepSeekProviderSettings } from '@ai-sdk/deepseek'
-import { createDeepSeek } from '@ai-sdk/deepseek'
 import type { GoogleGenerativeAIProvider, GoogleGenerativeAIProviderSettings } from '@ai-sdk/google'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import type { OpenAIProvider, OpenAIProviderSettings } from '@ai-sdk/openai'
@@ -17,19 +13,8 @@ import { createOpenAI } from '@ai-sdk/openai'
 import type { OpenAICompatibleProviderSettings } from '@ai-sdk/openai-compatible'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { ProviderV3 } from '@ai-sdk/provider'
-import type { XaiProvider, XaiProviderSettings } from '@ai-sdk/xai'
-import { createXai } from '@ai-sdk/xai'
-import type { OpenRouterProviderSettings } from '@openrouter/ai-sdk-provider'
-import { createOpenRouter } from '@openrouter/ai-sdk-provider'
-import { customProvider } from 'ai'
 
-import type { OpenRouterSearchConfig } from '../../plugins/built-in/webSearchPlugin'
-import type {
-  ExtensionConfigToIdResolutionMap,
-  ExtractExtensionIds,
-  ProviderVariant,
-  UnionToIntersection
-} from '../types'
+import type { ExtensionConfigToIdResolutionMap, ExtractExtensionIds, UnionToIntersection } from '../types'
 import { extensionRegistry } from './ExtensionRegistry'
 import type { ProviderExtensionConfig } from './ProviderExtension'
 import { ProviderExtension } from './ProviderExtension'
@@ -52,76 +37,6 @@ const AnthropicExtension = ProviderExtension.create({
       })
   }
 } as const satisfies ProviderExtensionConfig<AnthropicProviderSettings, AnthropicProvider, 'anthropic'>)
-
-/**
- * Azure Extension
- */
-const AzureExtension = ProviderExtension.create({
-  name: 'azure',
-  aliases: ['azure-openai'] as const,
-  supportsImageGeneration: true,
-  create: (settings) => {
-    const provider = createAzure(settings)
-    // Default to chat mode (AI SDK defaults to responses API)
-    return customProvider({
-      fallbackProvider: {
-        ...provider,
-        languageModel: (modelId: string) => provider.chat(modelId)
-      }
-    })
-  },
-  toolFactories: {
-    webSearch:
-      (provider: AzureOpenAIProvider) =>
-      (config: NonNullable<Parameters<AzureOpenAIProvider['tools']['webSearchPreview']>[0]>) => ({
-        tools: { webSearch: provider.tools.webSearchPreview(config) }
-      })
-  },
-  variants: [
-    {
-      suffix: 'responses',
-      name: 'Azure OpenAI Responses',
-      // AI SDK defaults to responses API, so createAzure(settings) without
-      // the chat override (used in base `create`) gives us Responses API behavior.
-      transform: (_provider, settings) => createAzure(settings),
-      toolFactories: {
-        webSearch:
-          (provider: AzureOpenAIProvider) =>
-          (config: NonNullable<Parameters<AzureOpenAIProvider['tools']['webSearchPreview']>[0]>) => ({
-            tools: { webSearch: provider.tools.webSearchPreview(config) }
-          })
-      }
-    },
-    // Azure 上的 Claude 模型走 Anthropic SDK
-    // https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry
-    {
-      suffix: 'anthropic',
-      name: 'Azure Anthropic',
-      transform: (_provider, settings) =>
-        createAnthropic({
-          baseURL: (settings?.baseURL ?? '') + '/anthropic/v1',
-          apiKey: settings?.apiKey ?? '',
-          headers: settings?.headers
-        }),
-      toolFactories: {
-        webSearch:
-          (provider) => (config: NonNullable<Parameters<AnthropicProvider['tools']['webSearch_20260209']>[0]>) => ({
-            tools: { webSearch: provider.tools.webSearch_20260209(config) }
-          }),
-        urlContext:
-          (provider) => (config: NonNullable<Parameters<AnthropicProvider['tools']['webFetch_20260209']>[0]>) => ({
-            tools: { urlContext: provider.tools.webFetch_20260209(config) }
-          })
-      }
-    } satisfies ProviderVariant<AzureOpenAIProviderSettings, AzureOpenAIProvider, AnthropicProvider>
-  ] as const
-} as const satisfies ProviderExtensionConfig<AzureOpenAIProviderSettings, AzureOpenAIProvider, 'azure'>)
-
-const DeepSeekExtension = ProviderExtension.create({
-  name: 'deepseek',
-  supportsImageGeneration: false,
-  create: createDeepSeek
-} as const satisfies ProviderExtensionConfig<DeepSeekProviderSettings, ProviderV3, 'deepseek'>)
 
 const GoogleExtension = ProviderExtension.create({
   name: 'google',
@@ -181,59 +96,14 @@ const OpenAIExtension = ProviderExtension.create({
   ] as const
 } as const satisfies ProviderExtensionConfig<OpenAIProviderSettings, OpenAIProvider, 'openai'>)
 
-const OpenRouterExtension = ProviderExtension.create({
-  name: 'openrouter',
-  // TODO: 实现注册后修改拓展配置
-  aliases: ['tokenflux'] as const,
-  supportsImageGeneration: true,
-  create: createOpenRouter,
-  toolFactories: {
-    webSearch: () => (config: OpenRouterSearchConfig) => ({
-      providerOptions: { openrouter: config }
-    })
-  }
-} as const satisfies ProviderExtensionConfig<OpenRouterProviderSettings, ProviderV3, 'openrouter'>)
-
-const XaiExtension = ProviderExtension.create({
-  name: 'xai',
-  aliases: ['grok'] as const,
-  supportsImageGeneration: true,
-  create: createXai,
-  variants: [
-    {
-      suffix: 'responses',
-      name: 'xAI Responses',
-      resolveModel: (provider: XaiProvider, modelId: string) => provider.responses(modelId),
-      toolFactories: {
-        webSearch:
-          (provider: XaiProvider) =>
-          (config: {
-            webSearch?: Parameters<XaiProvider['tools']['webSearch']>[0]
-            xSearch?: Parameters<XaiProvider['tools']['xSearch']>[0]
-          }) => ({
-            tools: {
-              webSearch: provider.tools.webSearch(config?.webSearch ?? {}),
-              xSearch: provider.tools.xSearch(config?.xSearch ?? {})
-            }
-          })
-      }
-    }
-  ] as const
-} as const satisfies ProviderExtensionConfig<XaiProviderSettings, XaiProvider, 'xai'>)
-
 /**
  * 核心 provider extensions 列表
+ *
+ * Active execution retains ONLY the approved protocols: official OpenAI
+ * (chat + responses variants), generic OpenAI-compatible, Anthropic, and
+ * Google/Gemini. Brand ids never select an SDK — see renderer factory.
  */
-export const coreExtensions = [
-  OpenAIExtension,
-  AnthropicExtension,
-  AzureExtension,
-  GoogleExtension,
-  XaiExtension,
-  DeepSeekExtension,
-  OpenRouterExtension,
-  OpenAICompatibleExtension
-] as const
+export const coreExtensions = [OpenAIExtension, AnthropicExtension, GoogleExtension, OpenAICompatibleExtension] as const
 
 /**
  * 核心 Provider IDs 类型

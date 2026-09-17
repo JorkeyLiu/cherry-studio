@@ -40,7 +40,7 @@ export class RuntimeExecutor<
     // 创建插件客户端
     this.pluginEngine = new PluginEngine(config.providerId, config.plugins || [])
 
-    // Some v3 providers (e.g., @openrouter/ai-sdk-provider) expose textEmbeddingModel
+    // Some v3 providers expose textEmbeddingModel
     // but not embeddingModel. Patch for AI SDK registry compatibility.
     const provider = config.provider
     if (!provider.embeddingModel && provider.textEmbeddingModel) {

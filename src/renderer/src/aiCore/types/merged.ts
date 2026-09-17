@@ -15,12 +15,17 @@ import type {
 } from '@cherrystudio/ai-core/provider'
 import { coreExtensions } from '@cherrystudio/ai-core/provider'
 
-import { extensions } from '../provider/extensions'
-
 /**
- * All provider extensions merged into one array
+ * All provider extensions merged into one array.
+ *
+ * Only the approved core adapters are registered: official OpenAI
+ * (chat + responses variants), generic OpenAI-compatible, Anthropic, and
+ * Google/Gemini. Retired brand adapters (vertex, bedrock, copilot, gateway,
+ * ollama, aihubmix, newapi, voyage, togetherai, groq, mistral, perplexity,
+ * huggingface, cerebras) resolve through generic OpenAI-compatible by
+ * protocol/type and must not be reintroduced here for type compatibility.
  */
-const allExtensions = [...coreExtensions, ...extensions] as const
+const allExtensions = [...coreExtensions] as const
 
 type AllExtensionConfigs = (typeof allExtensions)[number]['config']
 

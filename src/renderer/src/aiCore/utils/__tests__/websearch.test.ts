@@ -269,87 +269,15 @@ describe('websearch utils', () => {
       })
     })
 
-    describe('xai provider', () => {
-      it('should return xai-responses search options with enableImageUnderstanding when no excludeDomains', () => {
-        const result = buildProviderBuiltinWebSearchConfig('xai', defaultWebSearchConfig)
+    describe('retired specialized providers (resolve generic: no brand-keyed search config)', () => {
+      it.each(['xai', 'xai-responses', 'openrouter', 'azure-responses'] as const)(
+        'should return empty object for retired provider %s',
+        (providerId) => {
+          const result = buildProviderBuiltinWebSearchConfig(providerId, defaultWebSearchConfig)
 
-        expect(result).toEqual({
-          'xai-responses': {
-            webSearch: { enableImageUnderstanding: true },
-            xSearch: { enableImageUnderstanding: true }
-          }
-        })
-      })
-
-      it('should include excludedDomains when excludeDomains provided', () => {
-        const config: CherryWebSearchConfig = {
-          searchWithTime: true,
-          maxResults: 40,
-          excludeDomains: ['site1.com', 'site2.com']
+          expect(result).toEqual({})
         }
-
-        const result = buildProviderBuiltinWebSearchConfig('xai', config)
-
-        expect(result).toEqual({
-          'xai-responses': {
-            webSearch: {
-              enableImageUnderstanding: true,
-              excludedDomains: ['site1.com', 'site2.com']
-            },
-            xSearch: { enableImageUnderstanding: true }
-          }
-        })
-      })
-
-      it('should limit excluded domains to 5', () => {
-        const config: CherryWebSearchConfig = {
-          searchWithTime: true,
-          maxResults: 40,
-          excludeDomains: ['site1.com', 'site2.com', 'site3.com', 'site4.com', 'site5.com', 'site6.com', 'site7.com']
-        }
-
-        const result = buildProviderBuiltinWebSearchConfig('xai', config)
-
-        expect(result?.['xai-responses']?.webSearch?.excludedDomains).toHaveLength(5)
-      })
-    })
-
-    describe('openrouter provider', () => {
-      it('should return openrouter plugins config', () => {
-        const result = buildProviderBuiltinWebSearchConfig('openrouter', defaultWebSearchConfig)
-
-        expect(result).toEqual({
-          openrouter: {
-            plugins: [
-              {
-                id: 'web',
-                max_results: 50
-              }
-            ]
-          }
-        })
-      })
-
-      it('should respect custom maxResults', () => {
-        const config: CherryWebSearchConfig = {
-          searchWithTime: true,
-          maxResults: 75,
-          excludeDomains: []
-        }
-
-        const result = buildProviderBuiltinWebSearchConfig('openrouter', config)
-
-        expect(result).toEqual({
-          openrouter: {
-            plugins: [
-              {
-                id: 'web',
-                max_results: 75
-              }
-            ]
-          }
-        })
-      })
+      )
     })
 
     describe('unsupported provider', () => {

@@ -1,17 +1,9 @@
-import { extensionRegistry } from '@cherrystudio/ai-core/provider'
 import { loggerService } from '@logger'
 import { type Provider } from '@renderer/types'
 
 import { type AppProviderId, appProviderIds } from '../types'
-import { extensions } from './extensions'
 
 const logger = loggerService.withContext('ProviderFactory')
-
-for (const extension of extensions) {
-  if (!extensionRegistry.has(extension.config.name)) {
-    extensionRegistry.register(extension)
-  }
-}
 
 /**
  * Protocol-based AI SDK provider resolution (slice 3).

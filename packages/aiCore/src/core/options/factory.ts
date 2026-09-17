@@ -28,11 +28,11 @@ function deepMergeObjects<T extends PlainObject>(target: T, source: PlainObject)
  *
  * @example
  * mergeProviderOptions(
- *   { openrouter: { reasoning: { enabled: true, effort: 'low' }, user: 'user-123' } },
- *   { openrouter: { reasoning: { effort: 'high', max_tokens: 500 }, models: ['gpt-4'] } }
+ *   { 'openai-compatible': { reasoning: { enabled: true, effort: 'low' }, user: 'user-123' } },
+ *   { 'openai-compatible': { reasoning: { effort: 'high', max_tokens: 500 }, models: ['gpt-4'] } }
  * )
  * // Result: {
- * //   openrouter: {
+ * //   'openai-compatible': {
  * //     reasoning: { enabled: true, effort: 'high', max_tokens: 500 },
  * //     user: 'user-123',
  * //     models: ['gpt-4']

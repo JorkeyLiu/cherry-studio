@@ -28,7 +28,6 @@ import { ProviderCreationError } from './utils'
  * // 批量注册
  * extensionRegistry.registerAll([
  *   OpenAIExtension,
- *   AzureExtension,
  *   AnthropicExtension
  * ])
  *
@@ -200,8 +199,7 @@ export class ExtensionRegistry {
    * @example
    * ```typescript
    * resolveProviderIdWithMode('openai', 'chat')        // → 'openai-chat'
-   * resolveProviderIdWithMode('azure', 'responses')    // → 'azure-responses'
-   * resolveProviderIdWithMode('gemini', 'chat')        // → null (google 没有 chat 变体)
+   * resolveProviderIdWithMode('google', 'chat')        // → null (google 没有 chat 变体)
    * resolveProviderIdWithMode('openai')                // → 'openai' (没有 mode)
    * ```
    */
@@ -244,7 +242,6 @@ export class ExtensionRegistry {
    * @example
    * ```typescript
    * parseProviderId('openai-chat')        // → { baseId: 'openai', mode: 'chat', isVariant: true }
-   * parseProviderId('azure-responses')    // → { baseId: 'azure', mode: 'responses', isVariant: true }
    * parseProviderId('openai')             // → { baseId: 'openai', isVariant: false }
    * parseProviderId('oai')                // → { baseId: 'openai', isVariant: false } (别名)
    * parseProviderId('unknown')            // → null
@@ -293,7 +290,6 @@ export class ExtensionRegistry {
    * @example
    * ```typescript
    * isVariant('openai-chat')      // → true
-   * isVariant('azure-responses')  // → true
    * isVariant('openai')           // → false
    * isVariant('unknown')          // → false
    * ```
@@ -316,7 +312,6 @@ export class ExtensionRegistry {
    * @example
    * ```typescript
    * getBaseProviderId('openai-chat')      // → 'openai' (变体)
-   * getBaseProviderId('azure-responses')  // → 'azure' (变体)
    * getBaseProviderId('openai')           // → 'openai' (基础ID)
    * getBaseProviderId('oai')              // → 'openai' (别名)
    * getBaseProviderId('unknown')          // → null
@@ -336,7 +331,6 @@ export class ExtensionRegistry {
    * @example
    * ```typescript
    * getVariantMode('openai-chat')      // → 'chat'
-   * getVariantMode('azure-responses')  // → 'responses'
    * getVariantMode('openai')           // → null (不是变体)
    * getVariantMode('unknown')          // → null
    * ```
@@ -372,9 +366,7 @@ export class ExtensionRegistry {
    * @example
    * ```typescript
    * getVariants('openai')   // → ['openai-chat']
-   * getVariants('azure')    // → ['azure-responses']
-   * getVariants('google')   // → ['google-chat']
-   * getVariants('xai')      // → [] (没有变体)
+   * getVariants('google')   // → [] (没有变体)
    * getVariants('unknown')  // → [] (未注册)
    * ```
    */
