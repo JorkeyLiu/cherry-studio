@@ -1,3 +1,4 @@
+import { useProviderModelsDevLogo } from '@renderer/services/providerLogo'
 import type { Provider } from '@renderer/types'
 import { generateColorFromChar, getFirstCharacter, getForegroundColor } from '@renderer/utils'
 import { Avatar } from 'antd'
@@ -16,6 +17,8 @@ interface ProviderAvatarPrimitiveProps {
 interface ProviderAvatarProps {
   provider: Provider
   customLogos?: Record<string, string>
+  /** Test seam: explicit models.dev logo override (null = no logo). */
+  modelsDevLogoSrc?: string | null
   size?: number
   className?: string
   style?: React.CSSProperties
@@ -62,21 +65,25 @@ export const ProviderAvatarPrimitive: React.FC<ProviderAvatarPrimitiveProps> = (
 export const ProviderAvatar: React.FC<ProviderAvatarProps> = ({
   provider,
   customLogos = {},
+  modelsDevLogoSrc,
   className,
   style,
   size
 }) => {
-  // Custom-connection avatar priority: user-uploaded custom image
-  // (`provider-${id}` key) -> deterministic generic avatar. No built-in
-  // brand logo catalog is consulted here.
+  // Avatar priority: user-uploaded custom image (`provider-${id}` key) >
+  // exact cached models.dev logo (exact source attribution only) >
+  // deterministic generic avatar. No brand catalog is consulted here.
   const customLogo = customLogos[provider.id]
+  const hookLogo = useProviderModelsDevLogo(customLogo ? null : provider)
+  const modelsDevLogo = modelsDevLogoSrc !== undefined ? modelsDevLogoSrc : hookLogo
+  const logoSrc = customLogo ?? modelsDevLogo ?? undefined
 
-  if (customLogo) {
+  if (logoSrc) {
     return (
       <ProviderAvatarPrimitive
         providerId={provider.id}
         providerName={provider.name}
-        logoSrc={customLogo}
+        logoSrc={logoSrc}
         size={size}
         className={className}
         style={style}

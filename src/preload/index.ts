@@ -75,6 +75,7 @@ import type { MCPServerLogEntry } from '@shared/config/types'
 import type { ExternalAppInfo } from '@shared/externalApp/types'
 import { IpcChannel } from '@shared/IpcChannel'
 import type { ModelMetadataRefreshResult, ModelMetadataSnapshot } from '@shared/modelMetadata'
+import type { ProviderLogoResult } from '@shared/providerLogo'
 import type { Notification } from '@types'
 import type {
   AddMemoryOptions,
@@ -627,6 +628,17 @@ const api = {
     // a reason to reject a model. Main refreshes stale data in background.
     getSnapshot: (): Promise<ModelMetadataSnapshot | null> => ipcRenderer.invoke(IpcChannel.ModelMetadata_GetSnapshot),
     refresh: (): Promise<ModelMetadataRefreshResult> => ipcRenderer.invoke(IpcChannel.ModelMetadata_Refresh)
+  },
+  providerLogo: {
+    // Optional models.dev provider-logo enhancement. Null/empty when the
+    // connection has no exact models.dev source or the logo is unavailable —
+    // callers must fall back to the deterministic initial, never block.
+    // The renderer never fetches models.dev directly; Main owns fetching,
+    // SVG validation, and caching.
+    getLogo: (source: string): Promise<ProviderLogoResult | null> =>
+      ipcRenderer.invoke(IpcChannel.ProviderLogo_GetLogo, source),
+    getLogos: (sources: string[]): Promise<Record<string, string>> =>
+      ipcRenderer.invoke(IpcChannel.ProviderLogo_GetLogos, sources)
   },
   sync: {
     getConfig: () => ipcRenderer.invoke(IpcChannel.Sync_GetConfig),

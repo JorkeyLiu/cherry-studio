@@ -51,6 +51,7 @@ import * as NutstoreService from './services/NutstoreService'
 import ObsidianVaultService from './services/ObsidianVaultService'
 import { ocrService } from './services/ocr/OcrService'
 import powerMonitorService from './services/PowerMonitorService'
+import { providerLogoService, registerProviderLogoIpc } from './services/ProviderLogoService'
 import { proxyManager } from './services/ProxyManager'
 import { pythonService } from './services/PythonService'
 import { FileServiceManager } from './services/remotefile/FileServiceManager'
@@ -862,6 +863,18 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   // in the background; failures never propagate to callers.
   registerModelMetadataIpc(modelMetadataService)
   void modelMetadataService.init()
+
+  // ProviderLogo — optional models.dev logo enhancement (never gates admission).
+  // Exact metadata sources are the admission gate: only sources present in the
+  // last-known-good metadata snapshot may be fetched; HTTP status is never
+  // trusted because models.dev serves a default SVG for unknown ids.
+  providerLogoService.setKnownSourcesGetter(() => {
+    const snapshot = modelMetadataService.getSnapshot()
+    if (!snapshot) return null
+    return Object.keys(snapshot.providers ?? {})
+  })
+  registerProviderLogoIpc(providerLogoService)
+  void providerLogoService.ensureLoaded()
 
   ipcMain.handle(IpcChannel.App_QuoteToMain, (_, text: string) => windowService.quoteToMainWindow(text))
 

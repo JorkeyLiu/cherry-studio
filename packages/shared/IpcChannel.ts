@@ -269,6 +269,10 @@ export enum IpcChannel {
   ModelMetadata_GetSnapshot = 'model-metadata:get-snapshot',
   ModelMetadata_Refresh = 'model-metadata:refresh',
 
+  // ProviderLogo — optional models.dev logo enhancement (never gates admission).
+  ProviderLogo_GetLogo = 'provider-logo:get-logo',
+  ProviderLogo_GetLogos = 'provider-logo:get-logos',
+
   // Memory
   Memory_Add = 'memory:add',
   Memory_Search = 'memory:search',
