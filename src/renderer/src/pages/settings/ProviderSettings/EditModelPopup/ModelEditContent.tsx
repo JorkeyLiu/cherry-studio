@@ -27,6 +27,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import ModelMetadataReference from './ModelMetadataReference'
+
 interface ModelEditContentProps {
   provider: Provider
   model: Model
@@ -34,13 +36,7 @@ interface ModelEditContentProps {
 }
 
 const symbols = ['$', '¥', '€', '£']
-const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({
-  provider: _provider,
-  model,
-  onUpdateModel,
-  ...props
-}) => {
-  void _provider
+const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, model, onUpdateModel, ...props }) => {
   const [form] = Form.useForm()
   const { t } = useTranslation()
   const [showMoreSettings, setShowMoreSettings] = useState(false)
@@ -108,6 +104,17 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({
     ...symbols.map((symbol) => ({ label: symbol, value: symbol })),
     { label: t('models.price.custom'), value: 'custom' }
   ]
+
+  // Explicit models.dev reference adoption: copies only the two fields
+  // representable by Model.pricing into the form/save flow. Never persists
+  // external metadata itself; saved user pricing stays authoritative.
+  const handleUseReferencePricing = (inputPerMillion: number, outputPerMillion: number) => {
+    form.setFieldsValue({
+      input_per_million_tokens: inputPerMillion,
+      output_per_million_tokens: outputPerMillion
+    })
+    autoSave()
+  }
 
   const defaultTypes: ModelType[] = useMemo(
     () => [
@@ -317,6 +324,7 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({
             </Button>
           </Flex>
         </Form.Item>
+        <ModelMetadataReference model={model} provider={provider} onUseReferencePricing={handleUseReferencePricing} />
         {showMoreSettings && (
           <div style={{ marginBottom: 8 }}>
             <Divider style={{ margin: '16px 0 16px 0' }} />
