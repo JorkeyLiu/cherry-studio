@@ -1,8 +1,8 @@
+import { setMetadataProviderResolver, setModelMetadataSnapshotForTests } from '@renderer/services/modelMetadata'
 import type { Model, Provider } from '@renderer/types'
 import type { ModelMetadataSnapshot } from '@shared/modelMetadata'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setMetadataProviderResolver, setModelMetadataSnapshotForTests } from '@renderer/services/modelMetadata'
 import {
   getModelSupportedReasoningEffortOptions,
   getResolvedReasoningOptions,

@@ -22,7 +22,6 @@ import {
   isOpenAIModel,
   isQwenReasoningModel,
   isReasoningModel,
-  resolveExternalReasoningSupport,
   isSupportAdaptiveThinkingClaudeModel,
   isSupportedReasoningEffortModel,
   isSupportedReasoningEffortOpenAIModel,
@@ -34,7 +33,8 @@ import {
   isSupportedThinkingTokenMiMoModel,
   isSupportedThinkingTokenModel,
   isSupportedThinkingTokenZhipuModel,
-  isSupportNoneReasoningEffortModel
+  isSupportNoneReasoningEffortModel,
+  resolveExternalReasoningSupport
 } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import { getAssistantSettings, getProviderByModel } from '@renderer/services/AssistantService'
