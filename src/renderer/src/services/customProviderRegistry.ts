@@ -32,6 +32,65 @@ export const CUSTOM_CREATABLE_PROTOCOLS = ['openai', 'anthropic', 'gemini'] as c
 export type CustomCreatableProtocol = (typeof CUSTOM_CREATABLE_PROTOCOLS)[number]
 
 /**
+ * Endpoint modes under the OpenAI-compatible protocol.
+ * `openai` is Chat Completions, `openai-response` is Responses.
+ * Runtime paths remain separate; this only groups the creation/edit UI.
+ */
+export const OPENAI_COMPATIBLE_ENDPOINT_MODES = ['openai', 'openai-response'] as const satisfies readonly ProviderType[]
+
+export type OpenAICompatibleEndpointMode = (typeof OPENAI_COMPATIBLE_ENDPOINT_MODES)[number]
+
+export function isOpenAICompatibleEndpointType(type: string): type is OpenAICompatibleEndpointMode {
+  return (OPENAI_COMPATIBLE_ENDPOINT_MODES as readonly string[]).includes(type)
+}
+
+/**
+ * Top-level protocol shown in the Add/Edit dialog for a stored type.
+ * Both OpenAI-compatible endpoint modes collapse to the `openai` protocol.
+ */
+export function getCreatableProtocolForProviderType(type: ProviderType): CustomCreatableProtocol | ProviderType {
+  if (isOpenAICompatibleEndpointType(type)) {
+    return 'openai'
+  }
+  return type
+}
+
+/**
+ * Endpoint mode for a stored type. Defaults to Chat Completions (`openai`)
+ * when the type is not an OpenAI-compatible endpoint mode.
+ */
+export function getEndpointModeForProviderType(type: ProviderType | undefined): OpenAICompatibleEndpointMode {
+  if (type !== undefined && isOpenAICompatibleEndpointType(type)) {
+    return type
+  }
+  return 'openai'
+}
+
+/**
+ * Maps the dialog protocol + endpoint-mode selection to a stored provider type.
+ * Only the OpenAI-compatible protocol consults the endpoint mode; all other
+ * protocols map 1:1 and runtime paths stay separate.
+ */
+export function resolveProviderTypeForProtocol(
+  protocol: CustomCreatableProtocol | ProviderType,
+  endpointMode: OpenAICompatibleEndpointMode
+): ProviderType {
+  if (protocol === 'openai') {
+    return endpointMode
+  }
+  return protocol as ProviderType
+}
+
+/**
+ * Whether a stored type is editable in the Add/Edit dialog.
+ * Approved protocols plus the Responses endpoint mode are editable;
+ * retained legacy types (ollama, new-api, azure-*, ...) stay read-only.
+ */
+export function isEditableCustomProviderType(type: string): boolean {
+  return isCustomCreatableProtocol(type) || type === 'openai-response'
+}
+
+/**
  * Provider types treated as OpenAI/Anthropic/Gemini-compatible for migration
  * preservation. `ollama` and `new-api` speak the OpenAI-compatible protocol
  * (and were previously offered for new connections), so existing entries are
@@ -76,11 +135,14 @@ export function resolveCustomProviderForModel(model: Model | undefined, provider
  * Normalizes the protocol type resulting from an add/edit dialog interaction.
  *
  * New creation only offers the approved protocols, so an edited result is
- * accepted as-is when the original type is itself creatable. A retained
- * legacy entry (unsupported protocol) keeps its original type regardless of
- * popup interaction — the dialog must never blank or rewrite it. The UI
- * additionally renders the protocol field read-only for such entries.
+ * accepted as-is when the original type is itself editable. That includes
+ * the Responses endpoint mode (`openai-response`), which is edited through
+ * the OpenAI-compatible protocol and may switch to/from Chat Completions
+ * (`openai`). A retained legacy entry (unsupported protocol) keeps its
+ * original type regardless of popup interaction — the dialog must never
+ * blank or rewrite it. The UI additionally renders the protocol field
+ * read-only for such entries.
  */
 export function normalizeEditedProviderType(originalType: ProviderType, editedType: ProviderType): ProviderType {
-  return isCustomCreatableProtocol(originalType) ? editedType : originalType
+  return isEditableCustomProviderType(originalType) ? editedType : originalType
 }

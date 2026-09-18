@@ -5190,6 +5190,9 @@
     },
     "provider": {
       "add": {
+        "endpoint_chat_completions": "Chat Completions",
+        "endpoint_mode": "Endpoint Mode",
+        "endpoint_responses": "Responses",
         "name": {
           "label": "Provider Name",
           "placeholder": "Example: OpenAI"

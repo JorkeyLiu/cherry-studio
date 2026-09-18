@@ -5190,6 +5190,9 @@
     },
     "provider": {
       "add": {
+        "endpoint_chat_completions": "Chat Completions",
+        "endpoint_mode": "介面模式",
+        "endpoint_responses": "Responses",
         "name": {
           "label": "提供者名稱",
           "placeholder": "例如：OpenAI"

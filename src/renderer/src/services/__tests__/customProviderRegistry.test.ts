@@ -14,11 +14,16 @@ vi.mock('@renderer/i18n', () => ({
 
 import {
   CUSTOM_CREATABLE_PROTOCOLS,
+  getCreatableProtocolForProviderType,
+  getEndpointModeForProviderType,
   isCustomCreatableProtocol,
+  isEditableCustomProviderType,
+  isOpenAICompatibleEndpointType,
   isPreservedCompatibleProtocol,
   normalizeEditedProviderType,
-  resolveCustomProviderForModel
+  resolveProviderTypeForProtocol
 } from '../customProviderRegistry'
+import { resolveCustomProviderForModel } from '../customProviderRegistry'
 
 const makeProvider = (overrides: Partial<Provider> & { id: string; type: string }): Provider =>
   ({
@@ -113,9 +118,83 @@ describe('normalizeEditedProviderType — legacy edit preservation', () => {
     expect(normalizeEditedProviderType('azure-openai' as any, 'openai' as any)).toBe('azure-openai')
     expect(normalizeEditedProviderType('vertexai' as any, 'gemini' as any)).toBe('vertexai')
     expect(normalizeEditedProviderType('aws-bedrock' as any, 'anthropic' as any)).toBe('aws-bedrock')
-    // OpenAI-compatible variants that are preserved but not creatable also stay put.
-    expect(normalizeEditedProviderType('openai-response', 'openai')).toBe('openai-response')
+    // OpenAI-compatible variants that are preserved but not endpoint modes stay put.
     expect(normalizeEditedProviderType('ollama' as any, 'openai' as any)).toBe('ollama')
     expect(normalizeEditedProviderType('new-api' as any, 'gemini' as any)).toBe('new-api')
+  })
+
+  it('supports switching between OpenAI-compatible endpoint modes in either direction', () => {
+    expect(normalizeEditedProviderType('openai', 'openai-response')).toBe('openai-response')
+    expect(normalizeEditedProviderType('openai-response', 'openai')).toBe('openai')
+  })
+
+  it('treats the Responses endpoint mode as editable to other approved protocols', () => {
+    expect(normalizeEditedProviderType('openai-response', 'anthropic')).toBe('anthropic')
+    expect(normalizeEditedProviderType('openai-response', 'gemini')).toBe('gemini')
+  })
+})
+
+describe('OpenAI-compatible endpoint mode — creation/edit mapping', () => {
+  it('keeps the top-level creatable protocols as openai/anthropic/gemini', () => {
+    expect([...CUSTOM_CREATABLE_PROTOCOLS]).toEqual(['openai', 'anthropic', 'gemini'])
+    expect(isCustomCreatableProtocol('openai-response')).toBe(false)
+  })
+
+  it('groups both endpoint modes under the openai protocol', () => {
+    expect(isOpenAICompatibleEndpointType('openai')).toBe(true)
+    expect(isOpenAICompatibleEndpointType('openai-response')).toBe(true)
+    expect(isOpenAICompatibleEndpointType('anthropic')).toBe(false)
+    expect(getCreatableProtocolForProviderType('openai')).toBe('openai')
+    expect(getCreatableProtocolForProviderType('openai-response')).toBe('openai')
+    expect(getCreatableProtocolForProviderType('anthropic')).toBe('anthropic')
+    expect(getCreatableProtocolForProviderType('gemini')).toBe('gemini')
+  })
+
+  it('defaults creation to Chat Completions (openai)', () => {
+    expect(getEndpointModeForProviderType(undefined)).toBe('openai')
+    expect(resolveProviderTypeForProtocol('openai', 'openai')).toBe('openai')
+  })
+
+  it('maps selecting Responses to the openai-response provider type', () => {
+    expect(getEndpointModeForProviderType('openai-response')).toBe('openai-response')
+    expect(resolveProviderTypeForProtocol('openai', 'openai-response')).toBe('openai-response')
+  })
+
+  it('ignores the endpoint mode for non-OpenAI protocols', () => {
+    expect(resolveProviderTypeForProtocol('anthropic', 'openai-response')).toBe('anthropic')
+    expect(resolveProviderTypeForProtocol('gemini', 'openai')).toBe('gemini')
+  })
+
+  it('treats openai-response as editable while legacy variants stay read-only', () => {
+    expect(isEditableCustomProviderType('openai')).toBe(true)
+    expect(isEditableCustomProviderType('openai-response')).toBe(true)
+    expect(isEditableCustomProviderType('anthropic')).toBe(true)
+    expect(isEditableCustomProviderType('ollama')).toBe(false)
+    expect(isEditableCustomProviderType('new-api')).toBe(false)
+    expect(isEditableCustomProviderType('azure-openai')).toBe(false)
+  })
+
+  it('preserves non-mode fields when applying an endpoint-mode edit', () => {
+    const original = makeProvider({
+      id: 'conn-1',
+      type: 'openai',
+      apiHost: 'https://api.example.com/v1',
+      apiKey: 'sk-original',
+      anthropicApiHost: 'https://claude.example.com'
+    })
+    const sentinelModels = [{ id: 'm1' }, { id: 'm2' }]
+    const withModels = { ...original, models: sentinelModels as any, apiOptions: { requiresApiKey: true } as any }
+    const editedType = normalizeEditedProviderType(
+      withModels.type,
+      resolveProviderTypeForProtocol('openai', 'openai-response')
+    )
+    const merged = { ...withModels, name: 'renamed', type: editedType }
+    expect(merged.type).toBe('openai-response')
+    expect(merged.id).toBe('conn-1')
+    expect(merged.apiHost).toBe('https://api.example.com/v1')
+    expect(merged.apiKey).toBe('sk-original')
+    expect(merged.anthropicApiHost).toBe('https://claude.example.com')
+    expect(merged.models).toBe(sentinelModels)
+    expect(merged.apiOptions).toEqual({ requiresApiKey: true })
   })
 })

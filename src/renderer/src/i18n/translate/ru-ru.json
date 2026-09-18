@@ -5190,6 +5190,9 @@
     },
     "provider": {
       "add": {
+        "endpoint_chat_completions": "[to be translated]:Chat Completions",
+        "endpoint_mode": "[to be translated]:Endpoint Mode",
+        "endpoint_responses": "[to be translated]:Responses",
         "name": {
           "label": "Имя провайдера",
           "placeholder": "Пример: OpenAI"

@@ -4,8 +4,12 @@ import { ProviderAvatarPrimitive } from '@renderer/components/ProviderAvatar'
 import { TopView } from '@renderer/components/TopView'
 import {
   CUSTOM_CREATABLE_PROTOCOLS,
-  isCustomCreatableProtocol,
-  normalizeEditedProviderType
+  getCreatableProtocolForProviderType,
+  getEndpointModeForProviderType,
+  isEditableCustomProviderType,
+  normalizeEditedProviderType,
+  type OpenAICompatibleEndpointMode,
+  resolveProviderTypeForProtocol
 } from '@renderer/services/customProviderRegistry'
 import ImageStorage from '@renderer/services/ImageStorage'
 import type { Provider, ProviderType } from '@renderer/types'
@@ -23,10 +27,22 @@ interface Props {
   resolve: (result: { name: string; type: ProviderType; logo?: string; logoFile?: File }) => void
 }
 
-const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
+export const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   const [open, setOpen] = useState(true)
   const [name, setName] = useState(provider?.name || '')
-  const [type, setType] = useState<ProviderType>(provider?.type || 'openai')
+  // Top-level protocol selection. Both OpenAI-compatible endpoint modes
+  // (`openai` Chat Completions, `openai-response` Responses) are created and
+  // edited through the `openai` protocol; the endpoint mode below decides
+  // which stored type is produced. Runtime paths remain separate.
+  const [protocol, setProtocol] = useState<ProviderType>(() => {
+    if (provider?.type) {
+      return getCreatableProtocolForProviderType(provider.type)
+    }
+    return 'openai'
+  })
+  const [endpointMode, setEndpointMode] = useState<OpenAICompatibleEndpointMode>(() =>
+    getEndpointModeForProviderType(provider?.type)
+  )
   const [logo, setLogo] = useState<string | null>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const { t } = useTranslation()
@@ -48,6 +64,8 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
     }
   }, [provider])
 
+  const resolvedType = resolveProviderTypeForProtocol(protocol, endpointMode)
+
   const onOk = async () => {
     setOpen(false)
 
@@ -56,7 +74,9 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
       name: name.trim(),
       // A retained legacy entry keeps its unsupported protocol regardless of
       // popup interaction; new creation only offers approved protocols.
-      type: normalizeEditedProviderType(provider?.type ?? type, type),
+      // Both OpenAI-compatible endpoint modes resolve through the `openai`
+      // protocol and may switch between each other when editing.
+      type: normalizeEditedProviderType(provider?.type ?? resolvedType, resolvedType),
       logo: logo || undefined
     }
     resolve(result)
@@ -70,7 +90,7 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   const onClose = () => {
     resolve({
       name: name.trim(),
-      type: normalizeEditedProviderType(provider?.type ?? type, type),
+      type: normalizeEditedProviderType(provider?.type ?? resolvedType, resolvedType),
       logo: logo || undefined
     })
   }
@@ -171,7 +191,10 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   // not offered here. When editing a retained legacy entry, the protocol
   // field is read-only and keeps showing its stored type id so the value is
   // never blanked; the resolve path additionally preserves it.
-  const legacyType = provider && !isCustomCreatableProtocol(provider.type) ? provider.type : undefined
+  // The Responses endpoint mode (`openai-response`) is not a top-level
+  // protocol: it is created/edited through the OpenAI-compatible protocol
+  // with an explicit endpoint mode, so it is never treated as legacy.
+  const legacyType = provider && !isEditableCustomProviderType(provider.type) ? provider.type : undefined
   const editingLegacyType = legacyType !== undefined
   const protocolOptions = CUSTOM_CREATABLE_PROTOCOLS.map((protocol) => ({
     label:
@@ -184,6 +207,11 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
   }))
   const typeOptions =
     legacyType !== undefined ? [...protocolOptions, { label: legacyType, value: legacyType }] : protocolOptions
+  const endpointModeOptions: { label: string; value: OpenAICompatibleEndpointMode }[] = [
+    { label: t('settings.provider.add.endpoint_chat_completions'), value: 'openai' },
+    { label: t('settings.provider.add.endpoint_responses'), value: 'openai-response' }
+  ]
+  const showEndpointMode = protocol === 'openai' && !editingLegacyType
 
   return (
     <Modal
@@ -237,14 +265,23 @@ const PopupContainer: React.FC<Props> = ({ provider, resolve }) => {
             maxLength={32}
           />
         </Form.Item>
-        <Form.Item label={t('settings.provider.add.type')} style={{ marginBottom: 0 }}>
+        <Form.Item label={t('settings.provider.add.type')} style={{ marginBottom: showEndpointMode ? 8 : 0 }}>
           <Select
-            value={type}
+            value={protocol}
             disabled={editingLegacyType}
-            onChange={(value: ProviderType) => setType(value)}
+            onChange={(value: ProviderType) => setProtocol(value)}
             options={typeOptions}
           />
         </Form.Item>
+        {showEndpointMode && (
+          <Form.Item label={t('settings.provider.add.endpoint_mode')} style={{ marginBottom: 0 }}>
+            <Select
+              value={endpointMode}
+              onChange={(value: OpenAICompatibleEndpointMode) => setEndpointMode(value)}
+              options={endpointModeOptions}
+            />
+          </Form.Item>
+        )}
       </Form>
     </Modal>
   )
