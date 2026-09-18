@@ -187,6 +187,27 @@ export function computeContextInfo(
  * getFreshValidatedClosure; this helper does not revalidate counts, it
  * projects them.
  */
+
+/**
+ * Minimal shared projection boundary used by Chat and order-sensitive tests.
+ *
+ * Pure selection only: a fresh authoritative closure projects full-topic
+ * counts/metadata, otherwise the bounded fallback derives from loaded
+ * viewport messages. No timing, no diagnostics, no side effects — Chat wraps
+ * this with phase-timing only. Extracted so the TokenCount re-anchor
+ * committed-render regression constrains the exact product semantics.
+ */
+export function resolveSharedContextInfo(
+  topicMessages: Message[],
+  assistant: Assistant | undefined,
+  topicId: string,
+  freshClosure: FetchContextClosureResponse | null
+): ContextInfo {
+  return freshClosure
+    ? deriveContextInfoFromClosure(freshClosure)
+    : computeContextInfo(topicMessages, assistant, topicId)
+}
+
 export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
   // Filter pipeline on authoritative closure messages (anchor-to-end)
   const expandedMessages = closure.messages as unknown as Message[]

@@ -16,7 +16,7 @@ import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
-import { computeContextInfo, deriveContextInfoFromClosure } from '@renderer/services/contextInfoService'
+import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
@@ -126,9 +126,7 @@ const Chat: FC<Props> = (props) => {
     const active = currentPhaseCorrelation()
     const startedAt = active ? performance.now() : 0
     // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; otherwise bounded fallback
-    const result = freshClosure
-      ? deriveContextInfoFromClosure(freshClosure as any)
-      : computeContextInfo(topicMessages, assistant, props.activeTopic.id)
+    const result = resolveSharedContextInfo(topicMessages, assistant, props.activeTopic.id, freshClosure as any)
     if (active && topicMessages.length > 0) {
       recordPhaseDurationForCorrelation(
         active.correlationId,
