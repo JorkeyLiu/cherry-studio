@@ -5,7 +5,7 @@
 
 import type { ReasoningPart } from '@ai-sdk/provider-utils'
 import { loggerService } from '@logger'
-import { isVisionModel } from '@renderer/config/models/vision'
+import { isGenerateImageModel, isImageEnhancementModel } from '@renderer/config/models/vision'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
 import { resolveOverlayBlock } from '@renderer/services/requestBlockOverlay'
 import store from '@renderer/store'
@@ -35,8 +35,8 @@ import type {
   UserModelMessage
 } from 'ai'
 import dayjs from 'dayjs'
-import i18n from 'i18next'
 
+import { attachmentEncodeUnsupportedError, attachmentFailedError, attachmentImageUrlError } from './attachmentErrors'
 import { convertFileBlockToFilePart, convertFileBlockToTextPart } from './fileProcessor'
 
 const logger = loggerService.withContext('messageConverter')
@@ -122,30 +122,29 @@ async function convertImageBlockToImagePart(imageBlocks: ImageMessageBlock[]): P
       try {
         const ext = imageBlock.file.ext.startsWith('.') ? imageBlock.file.ext : `.${imageBlock.file.ext}`
         const image = await window.api.file.base64Image(imageBlock.file.id + ext)
+        if (!image?.base64 || !image?.mime || !image.mime.startsWith('image/')) {
+          throw new Error(`unreliable image payload (mime "${image?.mime}")`)
+        }
         parts.push({
           type: 'image',
           image: image.base64,
           mediaType: image.mime
         })
       } catch (error) {
-        logger.error('Failed to load image file, image will be excluded from message:', {
-          fileId: imageBlock.file.id,
-          fileName: imageBlock.file.origin_name,
-          error: error as Error
-        })
+        const reason = error instanceof Error ? error.message : String(error)
+        throw attachmentFailedError(imageBlock.file.origin_name, 'image', reason)
       }
     } else if (imageBlock.url) {
       const url = imageBlock.url
       const parseResult = parseDataUrl(url)
       if (parseResult?.isBase64) {
         const { mediaType, data } = parseResult
+        if (!data) {
+          throw attachmentImageUrlError('empty base64 payload')
+        }
         parts.push({ type: 'image', image: data, ...(mediaType ? { mediaType } : {}) })
       } else if (url.startsWith('data:')) {
-        // Malformed data URL or non-base64 data URL
-        logger.error('Malformed or non-base64 data URL detected, image will be excluded:', {
-          urlPrefix: url.slice(0, 50) + '...'
-        })
-        continue
+        throw attachmentImageUrlError('malformed or non-base64 data URL')
       } else {
         // For remote URLs we keep payload minimal to match existing expectations.
         parts.push({ type: 'image', image: url })
@@ -162,7 +161,7 @@ async function convertMessageToUserModelMessage(
   content: string,
   fileBlocks: FileMessageBlock[],
   imageBlocks: ImageMessageBlock[],
-  isVisionModel = false,
+  _isVisionModel = false,
   model?: Model
 ): Promise<UserModelMessage | (UserModelMessage | SystemModelMessage)[]> {
   const parts: Array<TextPart | FilePart | ImagePart> = []
@@ -170,16 +169,16 @@ async function convertMessageToUserModelMessage(
     parts.push({ type: 'text', text: content })
   }
 
-  // 处理图片（仅在支持视觉的模型中）
-  if (isVisionModel) {
-    parts.push(...(await convertImageBlockToImagePart(imageBlocks)))
-  }
-  // 处理文件
+  // Unit B: ordinary chat is user-intent driven. Images are always encoded when
+  // the endpoint/SDK can carry them; model vision metadata never gates sending.
+  // Read/encode failures abort via convertImageBlockToImagePart (never omitted).
+  parts.push(...(await convertImageBlockToImagePart(imageBlocks)))
+  // 处理文件（原子性：任何附件失败中止请求，绝不省略后发纯文本）
   for (const fileBlock of fileBlocks) {
     const file = fileBlock.file
     let processed = false
 
-    // 优先尝试原生文件支持（PDF、图片等）
+    // 优先尝试原生文件支持（PDF、图片/音频/视频等）
     if (model) {
       const filePart = await convertFileBlockToFilePart(fileBlock, model)
       if (filePart) {
@@ -202,15 +201,14 @@ async function convertMessageToUserModelMessage(
       }
     }
 
-    // 如果原生处理失败，回退到文本提取
+    // 如果原生处理不适用，回退到文本提取；两者皆无则明确失败
     if (!processed) {
       const textPart = await convertFileBlockToTextPart(fileBlock)
       if (textPart) {
         parts.push(textPart)
         logger.debug(`File ${file.origin_name} processed as text content`)
       } else {
-        logger.warn(`File ${file.origin_name} could not be processed in any format`)
-        window.toast.error(i18n.t('message.error.file.process_failed', { name: file.origin_name }))
+        throw attachmentEncodeUnsupportedError(file.origin_name, file.type ?? 'unknown type')
       }
     }
   }
@@ -312,7 +310,7 @@ async function convertMessageToAssistantModelMessage(
   }
 
   for (const fileBlock of fileBlocks) {
-    // 优先尝试原生文件支持（PDF等）
+    // 优先尝试原生文件支持（PDF等）；失败时中止而非静默省略
     if (model) {
       const filePart = await convertFileBlockToFilePart(fileBlock, model)
       if (filePart) {
@@ -321,10 +319,13 @@ async function convertMessageToAssistantModelMessage(
       }
     }
 
-    // 回退到文本处理
+    // 回退到文本处理；两者皆无则明确失败
     const textPart = await convertFileBlockToTextPart(fileBlock)
     if (textPart) {
       parts.push(textPart)
+    } else {
+      const file = fileBlock.file
+      throw attachmentEncodeUnsupportedError(file.origin_name, file.type ?? 'unknown type')
     }
   }
 
@@ -343,28 +344,10 @@ async function convertMessageToAssistantModelMessage(
 /**
  * Converts an array of messages to SDK-compatible model messages.
  *
- * This function processes messages and transforms them into the format required by the SDK.
- * It handles special cases for vision models and image enhancement models.
- *
- * @param messages - Array of messages to convert.
- * @param model - The model configuration that determines conversion behavior
- *
- * @returns A promise that resolves to an array of SDK-compatible model messages
- *
- * @remarks
- * For image enhancement models:
- * - Collapses the conversation into [system?, user(image)] format
- * - Searches backwards through all messages to find the most recent assistant message with images
- * - Preserves all system messages (including ones generated from file uploads like 'fileid://...')
- * - Extracts the last user message content and merges images from the previous assistant message
- * - Returns only the collapsed messages: system messages (if any) followed by a single user message
- * - If no user message is found, returns only system messages
- * - Typical pattern: [system?, user, assistant(image), user] -> [system?, user(image)]
- *
- * For other models:
- * - Returns all converted messages in order without special image handling
- *
- * The function automatically detects vision model capabilities and adjusts conversion accordingly.
+ * Unit B: every ordinary-chat message carries its own images (no vision
+ * metadata gate). History image merging is preserved ONLY for the dedicated
+ * image-editing path (enhancement / generate-image models), never as a
+ * vision authorization.
  */
 export async function convertMessagesToSdkMessages(
   messages: Message[],
@@ -372,21 +355,16 @@ export async function convertMessagesToSdkMessages(
   overlay?: BlockOverlay
 ): Promise<ModelMessage[]> {
   const sdkMessages: ModelMessage[] = []
-  const isVision = isVisionModel(model)
-
+  // `isVisionModel` is kept only as a legacy call signature slot; sending no
+  // longer depends on it. Pass `true` so per-message conversion always encodes
+  // images when the endpoint/SDK can carry them.
   for (const message of messages) {
-    const sdkMessage = await convertMessageToSdkParam(message, isVision, model, overlay)
+    const sdkMessage = await convertMessageToSdkParam(message, true, model, overlay)
     sdkMessages.push(...(Array.isArray(sdkMessage) ? sdkMessage : [sdkMessage]))
   }
-  // Special handling for vison models
-  // These models support multi-turn conversations but need images from previous assistant messages
-  // to be merged into the current user message for editing/enhancement operations.
-  //
-  // Key behaviors:
-  // 1. Preserve all conversation history for context
-  // 2. Find images from the previous assistant message and merge them into the last user message
-  // 3. This allows users to switch from LLM conversations and use that context for image generation
-  if (isVision) {
+  // History image merge stays scoped to the dedicated image-editing path.
+  const needsHistoryImageMerge = isImageEnhancementModel(model) || isGenerateImageModel(model)
+  if (needsHistoryImageMerge) {
     // Find the last user SDK message index
     const lastUserSdkIndex = (() => {
       for (let i = sdkMessages.length - 1; i >= 0; i--) {

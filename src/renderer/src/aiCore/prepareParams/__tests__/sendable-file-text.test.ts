@@ -280,21 +280,19 @@ describe('convertFileBlockToTextPart', () => {
     expect(result).toEqual({ type: 'text', text: 'contract.docx\nextracted office text' })
   })
 
-  it('falls back to null on text file read failure without toasting', async () => {
+  it('aborts with a displayable error on text file read failure (Unit B atomicity, no silent null)', async () => {
     readMock.mockRejectedValue(new Error('read failed'))
     const block = createFileBlock(createFile({ type: FILE_TYPE.TEXT }))
 
-    await expect(convertFileBlockToTextPart(block)).resolves.toBeNull()
+    await expect(convertFileBlockToTextPart(block)).rejects.toThrow(/Failed to extract text from attachment/)
     expect(toastErrorMock).not.toHaveBeenCalled()
   })
 
-  it('falls back to null and toasts on document extraction failure', async () => {
+  it('aborts with filename/type/reason on document extraction failure (Unit B atomicity)', async () => {
     readMock.mockRejectedValue(new Error('extraction failed'))
     const block = createFileBlock(createFile({ type: FILE_TYPE.DOCUMENT, ext: '.pdf', origin_name: 'scan.pdf' }))
 
-    await expect(convertFileBlockToTextPart(block)).resolves.toBeNull()
-    expect(toastErrorMock).toHaveBeenCalledTimes(1)
-    expect(toastErrorMock).toHaveBeenCalledWith('message.error.file.text_extraction_failed')
+    await expect(convertFileBlockToTextPart(block)).rejects.toThrow(/scan\.pdf.*document.*extraction failed/)
   })
 
   it('returns null for unsupported file types without reading', async () => {
@@ -516,13 +514,12 @@ describe('estimator ↔ send path read dedupe (shared boundary)', () => {
     expect(readMock).toHaveBeenCalledTimes(1)
   })
 
-  it('failure keeps converter toast semantics and allows the send path to retry', async () => {
+  it('failure aborts with a displayable error and allows the send path to retry (Unit B atomicity)', async () => {
     readMock.mockRejectedValueOnce(new Error('extraction failed')).mockResolvedValueOnce('second try')
     const file = createFile({ id: 'tst', ext: '.docx', origin_name: 'contract.docx', type: FILE_TYPE.DOCUMENT })
     const block = createFileBlock(file)
 
-    await expect(convertFileBlockToTextPart(block)).resolves.toBeNull()
-    expect(toastErrorMock).toHaveBeenCalledTimes(1)
+    await expect(convertFileBlockToTextPart(block)).rejects.toThrow(/contract\.docx.*extraction failed/)
 
     // Rejected entry was dropped — the retry re-reads instead of replaying the failure.
     await expect(convertFileBlockToTextPart(block)).resolves.toEqual({

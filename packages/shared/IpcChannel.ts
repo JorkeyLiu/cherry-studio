@@ -185,6 +185,7 @@ export enum IpcChannel {
   File_BatchUploadMarkdown = 'file:batchUploadMarkdown',
   File_ShowInFolder = 'file:showInFolder',
   File_Exists = 'file:exists',
+  File_OpenMediaAttachment = 'file:open-media-attachment',
 
   // PDF
   Pdf_ExtractText = 'pdf:extractText',
@@ -268,6 +269,7 @@ export enum IpcChannel {
   // ModelMetadata — optional models.dev-backed enrichment (never gates admission).
   ModelMetadata_GetSnapshot = 'model-metadata:get-snapshot',
   ModelMetadata_Refresh = 'model-metadata:refresh',
+  ModelMetadata_GetStatus = 'model-metadata:get-status',
 
   // ProviderLogo — optional models.dev logo enhancement (never gates admission).
   ProviderLogo_GetLogo = 'provider-logo:get-logo',

@@ -1,4 +1,5 @@
 import { PushpinOutlined } from '@ant-design/icons'
+import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import ModelTagsWithLabel from '@renderer/components/ModelTagsWithLabel'
 import { TopView } from '@renderer/components/TopView'
 import { DynamicVirtualList, type DynamicVirtualListRef } from '@renderer/components/VirtualList'
@@ -8,9 +9,10 @@ import { getProviderById } from '@renderer/services/ProviderService'
 import type { Model, Provider } from '@renderer/types'
 import { objectEntries } from '@renderer/types'
 import { classNames, filterModelsByKeywords, getFancyProviderName } from '@renderer/utils'
-import { getDuplicateModelNames, getModelTags } from '@renderer/utils/model'
-import { Avatar, Divider, Empty, Modal, Tooltip } from 'antd'
-import { first, sortBy } from 'lodash'
+import { getInputModalityAvailabilityFromProviders } from '@renderer/utils/inputModalities'
+import { getDuplicateModelNames } from '@renderer/utils/model'
+import { Divider, Empty, Modal, Tooltip } from 'antd'
+import { sortBy } from 'lodash'
 import { Plus, Settings2 } from 'lucide-react'
 import React, {
   startTransition,
@@ -99,10 +101,9 @@ const SelectModelPopupView: React.FC<Props> = ({
     })
   }, [providers, prioritizedProviderIds])
 
-  // 计算要显示的可用标签列表
+  // 紧凑筛选只提供五个精确输入模态（unknown 永不出现；搜索入口保留在工具栏/面板）
   const availableTags = useMemo(() => {
-    const models = sortedProviders.flatMap((provider) => provider.models)
-    return objectEntries(getModelTags(models))
+    return objectEntries(getInputModalityAvailabilityFromProviders(sortedProviders))
       .filter(([, state]) => state)
       .map(([tag]) => tag)
   }, [sortedProviders])
@@ -147,13 +148,10 @@ const SelectModelPopupView: React.FC<Props> = ({
         ),
         tags: (
           <TagsContainer>
-            <ModelTagsWithLabel model={model} size={11} showLabel={true} />
+            <ModelTagsWithLabel model={model} provider={provider} size={11} />
           </TagsContainer>
         ),
-        icon: (
-          // Generic model avatar, no curated model icon catalog.
-          <Avatar size={24}>{first(model.name) || 'M'}</Avatar>
-        ),
+        icon: <ModelAvatar model={model} provider={provider} size={24} />,
         model,
         isPinned,
         isSelected: modelId === currentModelId
@@ -166,11 +164,11 @@ const SelectModelPopupView: React.FC<Props> = ({
   const { listItems, modelItems } = useMemo(() => {
     const items: FlatListItem[] = []
     const pinnedModelIds = new Set(pinnedModels)
-    const finalModelFilter = (model: Model) => !showTagFilter || tagFilter(model)
+    const finalModelFilter = (model: Model, provider?: Provider) => !showTagFilter || tagFilter(model, provider)
     const duplicateNamesByProvider = new Map<string, Set<string>>(
       sortedProviders.map((provider) => [
         provider.id,
-        getDuplicateModelNames(searchFilter(provider).filter(finalModelFilter))
+        getDuplicateModelNames(searchFilter(provider).filter((m) => finalModelFilter(m, provider)))
       ])
     )
 
@@ -179,7 +177,7 @@ const SelectModelPopupView: React.FC<Props> = ({
       const pinnedItems = sortedProviders.flatMap((provider) =>
         provider.models
           .filter((item) => pinnedModelIds.has(getModelUniqId(item)))
-          .filter(finalModelFilter)
+          .filter((item) => finalModelFilter(item, provider))
           .map((item) =>
             createModelItem(item, provider, true, duplicateNamesByProvider.get(provider.id)?.has(item.name) ?? false)
           )
@@ -202,7 +200,7 @@ const SelectModelPopupView: React.FC<Props> = ({
     sortedProviders.forEach((provider) => {
       const filteredModels = searchFilter(provider)
         .filter((item) => !showPinnedModels || searchText.length > 0 || !pinnedModelIds.has(getModelUniqId(item)))
-        .filter(finalModelFilter)
+        .filter((item) => finalModelFilter(item, provider))
 
       if (filteredModels.length === 0) return
 

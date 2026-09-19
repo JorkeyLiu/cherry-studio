@@ -1,17 +1,9 @@
-import { getExternalModelEntry } from '@renderer/config/models/modelMetadata'
-import type { Model, Provider } from '@renderer/types'
 import { MODEL_METADATA_SOURCE, type NormalizedModelMetadata } from '@shared/modelMetadata'
-import { Button, Divider, Flex } from 'antd'
+import { Divider, Flex } from 'antd'
 import type { FC } from 'react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
-
-interface ModelMetadataReferenceProps {
-  model: Model
-  provider?: Provider | null
-  onUseReferencePricing?: (inputPerMillion: number, outputPerMillion: number) => void
-}
 
 function isDisplayNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
@@ -31,29 +23,81 @@ export function formatLimitTokens(value: number): string {
   return value.toLocaleString('en-US')
 }
 
+/**
+ * Reasoning effort display from actually published effort values only.
+ *
+ * Only the raw models.dev `effort` array is shown (e.g. low, high, max via
+ * join(', ')). Toggle/budget are never shown and Supported wording is never
+ * used. Empty/missing effort is unknown, so the row hides: it never renders
+ * a Not supported placeholder and never triggers section visibility alone.
+ */
+export function formatReasoningControls(controls: NormalizedModelMetadata['reasoningControls']): {
+  text: string
+  known: boolean
+} {
+  const effort = Array.isArray(controls?.effort)
+    ? controls.effort.map((v) => String(v).trim()).filter((v) => v.length > 0)
+    : []
+  if (effort.length > 0) return { text: effort.join(', '), known: true }
+  return { text: '', known: false }
+}
+
+/**
+ * Whether the entry carries any concrete Model Data row (pricing, context
+ * limit, dates, tier note). Reasoning effort alone never counts: features
+ * already show in the icon group above. Exported so the Edit Model
+ * empty-state can detect "all three groups empty".
+ */
+export function hasConcreteModelData(entry: NormalizedModelMetadata | undefined | null): boolean {
+  if (!entry || typeof entry !== 'object') return false
+  const pricing = entry.pricing
+  if (pricing && typeof pricing === 'object') {
+    for (const value of [
+      pricing.input,
+      pricing.output,
+      pricing.cacheRead,
+      pricing.cacheWrite,
+      pricing.reasoning,
+      pricing.inputAudio,
+      pricing.outputAudio,
+      pricing.contextOver200k
+    ]) {
+      if (typeof value === 'number' && Number.isFinite(value)) return true
+    }
+    if (pricing.hasTiers === true) return true
+  }
+  if (entry.limits && typeof entry.limits === 'object') {
+    if (typeof entry.limits.context === 'number' && Number.isFinite(entry.limits.context)) return true
+  }
+  if (typeof entry.releaseDate === 'string' && entry.releaseDate.trim().length > 0) return true
+  if (typeof entry.knowledgeCutoff === 'string' && entry.knowledgeCutoff.trim().length > 0) return true
+  return false
+}
+
 interface ReferenceRow {
   key: string
   label: string
   value: string
   testId: string
+  /** Whether the row carries a known value. */
+  known: boolean
+  /** Concrete rows (pricing/limits/dates/tier note) gate section visibility. */
+  concrete: boolean
 }
 
 /**
- * Read-only models.dev reference section for the model edit UI.
+ * Read-only models.dev model-data section for the model edit UI.
  *
- * Exact owning-provider + exact model-id match only (via
- * getExternalModelEntry). Never writes, never auto-applies: the only
- * mutation path is the explicit `onUseReferencePricing` callback, which
- * carries only the two fields representable by `Model.pricing`.
- * Missing/partial/malformed metadata hides rows (or the whole section)
- * without blocking model editing.
+ * Takes the already reactively computed `entry` from ModelEditContent (which
+ * subscribes to the registry status): this component never looks the entry up
+ * itself, so async snapshot resolution always flows into the open popup for
+ * both capability icons and model data together. Never writes, never applies,
+ * never edits: it only displays published metadata. Capability icons live in
+ * ModelCapabilityGroups; this section keeps pricing, context limit, dates,
+ * tier note, and effort-only reasoning controls.
  */
-const ModelMetadataReference: FC<ModelMetadataReferenceProps> = ({ model, provider, onUseReferencePricing }) => {
+const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = ({ entry }) => {
   const { t } = useTranslation()
-  const entry: NormalizedModelMetadata | undefined = useMemo(
-    () => getExternalModelEntry(model, provider),
-    [model, provider]
-  )
 
   const rows = useMemo<ReferenceRow[]>(() => {
     if (!entry || typeof entry !== 'object') return []
@@ -109,16 +153,20 @@ const ModelMetadataReference: FC<ModelMetadataReferenceProps> = ({ model, provid
             key: `pricing.${item.key}`,
             label: t(item.labelKey),
             value: `${formatReferencePrice(item.value)} ${unit}`,
-            testId: item.testId
+            testId: item.testId,
+            known: true,
+            concrete: true
           })
         }
       }
       if (pricing.hasTiers === true) {
         out.push({
           key: 'pricing.hasTiers',
-          label: t('models.reference.status'),
+          label: t('models.reference.tiered_pricing'),
           value: t('models.reference.tiered_pricing_note'),
-          testId: 'ref-price-tiers'
+          testId: 'ref-price-tiers',
+          known: true,
+          concrete: true
         })
       }
     }
@@ -129,49 +177,21 @@ const ModelMetadataReference: FC<ModelMetadataReferenceProps> = ({ model, provid
           key: 'limits.context',
           label: t('models.reference.context_limit'),
           value: formatLimitTokens(limits.context),
-          testId: 'ref-limit-context'
-        })
-      }
-      if (isDisplayNumber(limits.input)) {
-        out.push({
-          key: 'limits.input',
-          label: t('models.reference.input_limit'),
-          value: formatLimitTokens(limits.input),
-          testId: 'ref-limit-input'
-        })
-      }
-      if (isDisplayNumber(limits.output)) {
-        out.push({
-          key: 'limits.output',
-          label: t('models.reference.output_limit'),
-          value: formatLimitTokens(limits.output),
-          testId: 'ref-limit-output'
+          testId: 'ref-limit-context',
+          known: true,
+          concrete: true
         })
       }
     }
 
-    if (isDisplayText(entry.family)) {
-      out.push({
-        key: 'family',
-        label: t('models.reference.family'),
-        value: entry.family.trim(),
-        testId: 'ref-family'
-      })
-    }
-    if (isDisplayText(entry.status)) {
-      out.push({
-        key: 'status',
-        label: t('models.reference.status'),
-        value: entry.status.trim(),
-        testId: 'ref-status'
-      })
-    }
     if (isDisplayText(entry.releaseDate)) {
       out.push({
         key: 'releaseDate',
         label: t('models.reference.release_date'),
         value: entry.releaseDate.trim(),
-        testId: 'ref-release-date'
+        testId: 'ref-release-date',
+        known: true,
+        concrete: true
       })
     }
     if (isDisplayText(entry.knowledgeCutoff)) {
@@ -179,21 +199,36 @@ const ModelMetadataReference: FC<ModelMetadataReferenceProps> = ({ model, provid
         key: 'knowledgeCutoff',
         label: t('models.reference.knowledge_cutoff'),
         value: entry.knowledgeCutoff.trim(),
-        testId: 'ref-knowledge-cutoff'
+        testId: 'ref-knowledge-cutoff',
+        known: true,
+        concrete: true
       })
     }
+
+    // Reasoning effort renders only when the source publishes effort values;
+    // otherwise the row hides entirely (no Not supported placeholder).
+    const effortFormatted = formatReasoningControls(entry.reasoningControls)
+    if (effortFormatted.known) {
+      out.push({
+        key: 'reasoningControls',
+        label: t('models.reference.reasoning_controls'),
+        value: effortFormatted.text,
+        testId: 'ref-reasoning-controls',
+        known: true,
+        concrete: false
+      })
+    }
+
     return out
   }, [entry, t])
 
-  const adoptable =
-    entry?.pricing &&
-    typeof entry.pricing === 'object' &&
-    isDisplayNumber(entry.pricing.input) &&
-    isDisplayNumber(entry.pricing.output)
-      ? { input: entry.pricing.input, output: entry.pricing.output }
-      : undefined
-
-  if (!entry || rows.length === 0) return null
+  // The section shows only when concrete model data exists (pricing, context
+  // limit, dates, tier note). The effort-only row never triggers visibility
+  // alone, so a features-only or effort-only entry stays hidden because
+  // features already show in the icon group above.
+  const hasConcreteValue = rows.some((row) => row.known && row.concrete)
+  if (!entry || !hasConcreteValue) return null
+  const visibleRows = rows.filter((row) => row.known)
 
   return (
     <ReferenceWrap data-testid="models-dev-reference">
@@ -202,18 +237,9 @@ const ModelMetadataReference: FC<ModelMetadataReferenceProps> = ({ model, provid
         <ReferenceTitle>
           {t('models.reference.title')} <SourceTag data-testid="ref-source">{MODEL_METADATA_SOURCE}</SourceTag>
         </ReferenceTitle>
-        {adoptable && (
-          <Button
-            size="small"
-            data-testid="use-reference-pricing"
-            onClick={() => onUseReferencePricing?.(adoptable.input, adoptable.output)}>
-            {t('models.reference.use_pricing')}
-          </Button>
-        )}
       </Flex>
-      <ReferenceNote>{t('models.reference.description')}</ReferenceNote>
       <Rows>
-        {rows.map((row) => (
+        {visibleRows.map((row) => (
           <Flex key={row.key} justify="space-between" align="baseline" gap={12}>
             <RowLabel>{row.label}</RowLabel>
             <RowValue data-testid={row.testId}>{row.value}</RowValue>
@@ -246,16 +272,11 @@ const SourceTag = styled.span`
   white-space: nowrap;
 `
 
-const ReferenceNote = styled.div`
-  font-size: 12px;
-  color: var(--color-text-3);
-  margin: 6px 0 10px 0;
-`
-
 const Rows = styled.div`
   display: flex;
   flex-direction: column;
   gap: 6px;
+  margin-top: 10px;
 `
 
 const RowLabel = styled.span`

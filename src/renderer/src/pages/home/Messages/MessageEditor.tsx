@@ -2,14 +2,10 @@ import { loggerService } from '@logger'
 import { ActionIconButton } from '@renderer/components/Buttons'
 import CustomTag from '@renderer/components/Tags/CustomTag'
 import TranslateButton from '@renderer/components/TranslateButton'
-import { isGenerateImageModel, isVisionModel } from '@renderer/config/models'
-import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useSettings } from '@renderer/hooks/useSettings'
 import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
 import FileManager from '@renderer/services/FileManager'
 import PasteService from '@renderer/services/PasteService'
-import { useAppSelector } from '@renderer/store'
-import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import type { FileMetadata } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -17,7 +13,7 @@ import { classNames } from '@renderer/utils'
 import { getFilesFromDropEvent, isSendMessageKeyPressed } from '@renderer/utils/input'
 import { createMainTextBlock } from '@renderer/utils/messageUtils/create'
 import { findAllBlocks, isAssistantInterruptedThinkingOnlyMessage } from '@renderer/utils/messageUtils/find'
-import { documentExts, imageExts, textExts } from '@shared/config/constant'
+import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import { Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import TextArea from 'antd/es/input/TextArea'
@@ -76,7 +72,7 @@ const getInitialEditableBlocks = (message: Message) => {
   return allBlocks
 }
 
-const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onCancel }) => {
+const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) => {
   const [editedBlocks, setEditedBlocks] = useState<MessageBlock[]>(() => getInitialEditableBlocks(message))
   const [files, setFiles] = useState<FileMetadata[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
@@ -91,17 +87,10 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
   const isMountedRef = useRef(true)
   const isCancelledRef = useRef(false)
   const releaseEditorOwnedAttachmentsRef = useRef<() => void>(() => {})
-  const { assistant } = useAssistant(message.assistantId)
-  const model = assistant.model || assistant.defaultModel
   const { pasteLongTextAsFile, pasteLongTextThreshold, fontSize, sendMessageShortcut, enableSpellCheck } = useSettings()
   const { t } = useTranslation()
   const textareaRef = useRef<TextAreaRef>(null)
   const isUserMessage = message.role === 'user'
-  // Bounded loaded projection for related-message lookup (fail-open local).
-  // The `?? []` fallback is memoized so capability memos keep a stable
-  // identity while non-resident (`undefined` stays at the API boundary).
-  const loadedTopicMessages = useAppSelector((state) => selectLoadedMessagesForTopic(state, topicId))
-  const topicMessages = useMemo(() => (loadedTopicMessages ?? []) as Message[], [loadedTopicMessages])
 
   const noopQuickPanel = useMemo<ToolQuickPanelApi>(
     () => ({
@@ -111,49 +100,14 @@ const MessageBlockEditor: FC<Props> = ({ message, topicId, onSave, onResend, onC
     []
   )
 
-  const couldAddImageFile = useMemo(() => {
-    const relatedAssistantMessages = topicMessages.filter((m) => m.askId === message.id && m.role === 'assistant')
-    if (relatedAssistantMessages.length === 0) {
-      // 无关联消息时fallback到助手模型
-      return isVisionModel(model)
-    }
-    return relatedAssistantMessages.every((m) => {
-      if (m.model) {
-        return isVisionModel(m.model) || isGenerateImageModel(m.model)
-      } else {
-        // 若消息关联不存在的模型，视为其支持视觉
-        return true
-      }
-    })
-  }, [message.id, model, topicMessages])
-
-  const couldAddTextFile = useMemo(() => {
-    const relatedAssistantMessages = topicMessages.filter((m) => m.askId === message.id && m.role === 'assistant')
-    if (relatedAssistantMessages.length === 0) {
-      // 无关联消息时fallback到助手模型
-      return isVisionModel(model) || (!isVisionModel(model) && !isGenerateImageModel(model))
-    }
-    return relatedAssistantMessages.every((m) => {
-      if (m.model) {
-        return isVisionModel(m.model) || (!isVisionModel(m.model) && !isGenerateImageModel(m.model))
-      } else {
-        // 若消息关联不存在的模型，视为其支持文本
-        return true
-      }
-    })
-  }, [message.id, model, topicMessages])
+  // Unit B: edit attachments are never gated by vision metadata. All ordinary
+  // attachment kinds stay selectable; endpoint/adapter encodability is decided
+  // at send time with explicit failures.
+  const couldAddImageFile = useMemo(() => true, [])
 
   const extensions = useMemo(() => {
-    if (couldAddImageFile && couldAddTextFile) {
-      return [...imageExts, ...documentExts, ...textExts]
-    } else if (couldAddImageFile) {
-      return [...imageExts]
-    } else if (couldAddTextFile) {
-      return [...documentExts, ...textExts]
-    } else {
-      return []
-    }
-  }, [couldAddImageFile, couldAddTextFile])
+    return [...imageExts, ...audioExts, ...videoExts, ...documentExts, ...textExts]
+  }, [])
 
   useEffect(() => {
     const timer = setTimeout(() => {

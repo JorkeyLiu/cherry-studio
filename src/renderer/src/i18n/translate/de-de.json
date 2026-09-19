@@ -2288,8 +2288,12 @@
       }
     },
     "attachments": {
+      "media_player_label": "[to be translated]:Media player: {{name}}",
+      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
+      "open_with_default_app": "[to be translated]:Open with default app",
       "pasted_image": "Bild aus Zwischenablage",
       "pasted_text": "Datei aus Zwischenablage",
+      "remove_attachment": "[to be translated]:Remove attachment",
       "unavailable": "[to be translated]:Attachment unavailable"
     },
     "backup": {
@@ -2331,9 +2335,18 @@
     },
     "empty_url": "Bild konnte nicht heruntergeladen werden. Möglicherweise enthält der Prompt sensible Inhalte oder verbotene Wörter",
     "error": {
+      "attachment": {
+        "attach_failed": "[to be translated]:Failed to attach \"{{name}}\" ({{type}}): {{reason}}",
+        "encode_unsupported": "[to be translated]:Failed to attach \"{{name}}\" ({{type}}): the current endpoint cannot encode this format",
+        "image_url_failed": "[to be translated]:Failed to attach image (url): {{reason}}",
+        "text_extraction_failed": "[to be translated]:Failed to extract text from attachment \"{{name}}\" ({{type}}): {{reason}}"
+      },
       "chunk_overlap_too_large": "Segmentüberlappung darf nicht größer als Segmentgröße sein",
       "copy": "Kopieren fehlgeschlagen",
       "dimension_too_large": "Inhaltsgröße zu groß",
+      "endpoint": {
+        "web_search_unsupported": "[to be translated]:Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
+      },
       "enter": {
         "api": {
           "host": "Bitte geben Sie Ihre API-Adresse ein",
@@ -2670,6 +2683,19 @@
   "models": {
     "add_parameter": "Parameter hinzufügen",
     "all": "Alle",
+    "capabilities": {
+      "feature_reasoning": "[to be translated]:Reasoning",
+      "feature_structured_output": "[to be translated]:Structured Output",
+      "feature_temperature": "[to be translated]:Temperature",
+      "feature_tool_call": "[to be translated]:Tool Call",
+      "features": "[to be translated]:Model Features",
+      "input_modalities": "[to be translated]:Input Modalities",
+      "modality_audio": "[to be translated]:Audio",
+      "modality_image": "[to be translated]:Image",
+      "modality_pdf": "[to be translated]:PDF",
+      "modality_text": "[to be translated]:Text",
+      "modality_video": "[to be translated]:Video"
+    },
     "custom_parameters": "Benutzerdefinierte Parameter",
     "dimensions": "{{dimensions}}-dimensional",
     "edit": "Modell bearbeiten",
@@ -2711,22 +2737,27 @@
       "cache_write": "[to be translated]:Cache write",
       "context_limit": "[to be translated]:Context limit",
       "context_over_200k": "[to be translated]:Context over 200k",
-      "description": "[to be translated]:Read-only reference values. Your saved pricing stays authoritative.",
-      "family": "[to be translated]:Family",
       "input": "[to be translated]:Input",
       "input_audio": "[to be translated]:Input audio",
-      "input_limit": "[to be translated]:Input limit",
       "knowledge_cutoff": "[to be translated]:Knowledge cutoff",
+      "loading": "[to be translated]:Fetching model metadata…",
+      "no_data": "[to be translated]:No model metadata available",
       "output": "[to be translated]:Output",
       "output_audio": "[to be translated]:Output audio",
-      "output_limit": "[to be translated]:Output limit",
       "per_million_tokens": "[to be translated]:/ M tokens",
       "reasoning": "[to be translated]:Reasoning",
+      "reasoning_controls": "[to be translated]:Reasoning controls",
+      "reasoning_support": "[to be translated]:Reasoning support",
       "release_date": "[to be translated]:Release date",
-      "status": "[to be translated]:Status",
+      "structured_output": "[to be translated]:Structured output",
+      "supported": "[to be translated]:Supported",
+      "temperature": "[to be translated]:Temperature",
+      "tiered_pricing": "[to be translated]:Tiered pricing",
       "tiered_pricing_note": "[to be translated]:Tiered pricing applies upstream",
       "title": "[to be translated]:Reference",
-      "use_pricing": "[to be translated]:Use reference pricing"
+      "tool_call": "[to be translated]:Tool calling",
+      "unavailable": "[to be translated]:Unable to fetch model metadata",
+      "unsupported": "[to be translated]:Not supported"
     },
     "rerank_model": "Rerank-Modell",
     "rerank_model_not_support_provider": "Rerank-Modell unterstützt derzeit diesen Anbieter nicht ({{provider}})",

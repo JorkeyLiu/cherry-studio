@@ -1,92 +1,78 @@
 import {
-  isEmbeddingModel,
-  isFunctionCallingModel,
-  isReasoningModel,
-  isRerankModel,
-  isVisionModel,
-  isWebSearchModel
-} from '@renderer/config/models'
-import i18n from '@renderer/i18n'
-import type { Model } from '@renderer/types'
-import { isFreeModel } from '@renderer/utils/model'
+  COMPACT_ICON_SIZE,
+  COMPACT_SLOT_SIZE,
+  MODALITY_ICONS,
+  MODALITY_LABEL_KEYS
+} from '@renderer/components/modelMetadataDisplay'
+import type { Model, Provider } from '@renderer/types'
+import { getSupportedInputModalities } from '@renderer/utils/inputModalities'
 import type { FC } from 'react'
-import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
-
-import {
-  EmbeddingTag,
-  FreeTag,
-  ReasoningTag,
-  RerankerTag,
-  ToolsCallingTag,
-  VisionTag,
-  WebSearchTag
-} from './Tags/Model'
 
 interface ModelTagsProps {
   model: Model
-  showFree?: boolean
-  showReasoning?: boolean
-  showToolsCalling?: boolean
+  /**
+   * Exact owning provider when the caller already has it (provider lists,
+   * manage lists, mention panels). When omitted, attribution falls back to
+   * `strictProviderForModel` (exact match only, never name guessing); no
+   * exact entry match renders zero tags.
+   */
+  provider?: Provider | null
   size?: number
-  showLabel?: boolean
   showTooltip?: boolean
   style?: React.CSSProperties
 }
 
-const ModelTagsWithLabel: FC<ModelTagsProps> = ({
-  model,
-  showFree = true,
-  showReasoning = true,
-  showToolsCalling = true,
-  size = 12,
-  showLabel = true,
-  showTooltip = true,
-  style
-}) => {
-  const [shouldShowLabel, setShouldShowLabel] = useState(false)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const resizeObserver = useRef<ResizeObserver | null>(null)
+/**
+ * Compact model capability tags: precise models.dev `modalities.input`
+ * only. Renders one neutral outline box per explicitly supported
+ * Text/Image/Audio/Video/PDF value; unknown entries and unsupported values
+ * render nothing, and Model Features / Free are never shown here. All
+ * consumers (provider ModelList, ManageModelsList, SelectModelPopup,
+ * @mention) share this component, so they stay consistent automatically.
+ *
+ * Visual contract: no CustomTag, no pill, no filled background, no text,
+ * no per-modality color. Each icon lives in a fixed 20px transparent
+ * square (4px radius, 1px neutral border) with a 14px neutral lucide glyph.
+ * Hover brightens border/icon slightly but stays transparent and neutral.
+ * Every slot carries a single native `title` plus a matching `aria-label`;
+ * the svg is aria-hidden.
+ */
+const ModelTagsWithLabel: FC<ModelTagsProps> = ({ model, provider, showTooltip = true, style }) => {
+  const { t } = useTranslation()
 
-  const maxWidth = useMemo(() => (i18n.language.startsWith('zh') ? 300 : 350), [])
+  const modalities = useMemo(
+    () => getSupportedInputModalities(model, provider),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- model identity is the unit; provider id pins attribution
+    [model?.id, model?.provider, provider?.id]
+  )
 
-  useLayoutEffect(() => {
-    const currentElement = containerRef.current
-    if (!showLabel || !currentElement) return
+  const labels = useMemo(
+    () => ({
+      text: t(MODALITY_LABEL_KEYS.text),
+      image: t(MODALITY_LABEL_KEYS.image),
+      audio: t(MODALITY_LABEL_KEYS.audio),
+      video: t(MODALITY_LABEL_KEYS.video),
+      pdf: t(MODALITY_LABEL_KEYS.pdf)
+    }),
+    [t]
+  )
 
-    setShouldShowLabel(currentElement.offsetWidth >= maxWidth)
-
-    if (currentElement) {
-      resizeObserver.current = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const { width } = entry.contentRect
-          setShouldShowLabel(width >= maxWidth)
-        }
-      })
-      resizeObserver.current.observe(currentElement)
-    }
-    return () => {
-      if (resizeObserver.current && currentElement) {
-        resizeObserver.current.unobserve(currentElement)
-        resizeObserver.current.disconnect()
-        resizeObserver.current = null
-      }
-    }
-  }, [maxWidth, showLabel])
+  void showTooltip
 
   return (
-    <Container ref={containerRef} style={style}>
-      {isVisionModel(model) && <VisionTag size={size} showTooltip={showTooltip} showLabel={shouldShowLabel} />}
-      {isWebSearchModel(model) && <WebSearchTag size={size} showTooltip={showTooltip} showLabel={shouldShowLabel} />}
-      {showReasoning && isReasoningModel(model) && (
-        <ReasoningTag size={size} showTooltip={showTooltip} showLabel={shouldShowLabel} />
-      )}
-      {showToolsCalling && isFunctionCallingModel(model) && (
-        <ToolsCallingTag size={size} showTooltip={showTooltip} showLabel={shouldShowLabel} />
-      )}
-      {isEmbeddingModel(model) && <EmbeddingTag size={size} />}
-      {showFree && isFreeModel(model) && <FreeTag size={size} />}
-      {isRerankModel(model) && <RerankerTag size={size} />}
+    <Container style={style}>
+      {modalities.map((modality) => {
+        const Icon = MODALITY_ICONS[modality]
+        const label = labels[modality]
+        return (
+          <IconSlot key={modality} data-testid={`modality-tag-${modality}`} title={label} aria-label={label}>
+            <Icon size={COMPACT_ICON_SIZE} strokeWidth={2} aria-hidden />
+          </IconSlot>
+        )
+      })}
     </Container>
   )
 }
@@ -97,9 +83,23 @@ const Container = styled.div`
   align-items: center;
   gap: 4px;
   flex-wrap: nowrap;
-  overflow-x: scroll;
-  &::-webkit-scrollbar {
-    display: none;
+  overflow: hidden;
+`
+
+const IconSlot = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: ${COMPACT_SLOT_SIZE}px;
+  height: ${COMPACT_SLOT_SIZE}px;
+  flex: none;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-2);
+  &:hover {
+    color: var(--color-text-1);
+    border-color: var(--color-text-3);
   }
 `
 

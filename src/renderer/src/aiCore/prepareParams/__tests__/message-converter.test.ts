@@ -206,21 +206,42 @@ describe('messageConverter', () => {
       })
     })
 
-    it('skips malformed data URLs without comma separator', async () => {
+    it('fails explicitly on malformed data URLs instead of silently omitting (Unit B atomicity)', async () => {
       const model = createModel()
       const message = createMessage('user')
       message.__mockContent = 'Malformed data url'
       message.__mockImageBlocks = [createImageBlock(message.id, { url: 'data:image/pngAAABBB' })]
 
-      const result = await convertMessageToSdkParam(message, true, model)
+      await expect(convertMessageToSdkParam(message, true, model)).rejects.toThrow(/Failed to attach image/)
+    })
+
+    it('sends images for non-vision-metadata models (Unit B: no vision gate)', async () => {
+      const model = createModel({ id: 'plain-chat-model', name: 'Plain Chat' })
+      const message = createMessage('user')
+      message.__mockContent = 'Look at this'
+      message.__mockImageBlocks = [createImageBlock(message.id, { url: 'https://example.com/cat.png' })]
+
+      // isVisionModel=false legacy slot must not suppress images anymore.
+      const result = await convertMessageToSdkParam(message, false, model)
 
       expect(result).toEqual({
         role: 'user',
         content: [
-          { type: 'text', text: 'Malformed data url' }
-          // Malformed data URL is excluded from the content
+          { type: 'text', text: 'Look at this' },
+          { type: 'image', image: 'https://example.com/cat.png' }
         ]
       })
+    })
+
+    it('aborts when file blocks cannot be encoded instead of sending text-only (Unit B atomicity)', async () => {
+      const model = createModel({ id: 'plain-chat-model', name: 'Plain Chat' })
+      const message = createMessage('user')
+      message.__mockContent = 'Read this'
+      message.__mockFileBlocks = [createFileBlock(message.id)]
+      convertFileBlockToFilePartMock.mockResolvedValueOnce(null)
+      convertFileBlockToTextPartMock.mockResolvedValueOnce(null)
+
+      await expect(convertMessageToSdkParam(message, false, model)).rejects.toThrow(/Failed to attach/)
     })
 
     it('handles multiple large base64 images without stack overflow', async () => {
@@ -665,6 +686,38 @@ describe('messageConverter', () => {
         {
           role: 'user',
           content: [{ type: 'image', image: 'https://example.com/preview.png' }]
+        }
+      ])
+    })
+
+    it('does not merge history images for ordinary chat models (Unit B: merge is image-editing only)', async () => {
+      // gpt-4o-mini is in the mocked vision set but NOT an enhancement model:
+      // each message keeps its own images, no history merge.
+      const model = createModel()
+      const initialUser = createMessage('user')
+      initialUser.__mockContent = 'Start editing'
+
+      const assistant = createMessage('assistant')
+      assistant.__mockContent = 'Here is the current preview'
+      assistant.__mockImageBlocks = [createImageBlock(assistant.id, { url: 'https://example.com/preview.png' })]
+
+      const finalUser = createMessage('user')
+      finalUser.__mockContent = 'Describe it'
+
+      const result = await convertMessagesToSdkMessages([initialUser, assistant, finalUser], model)
+
+      expect(result).toEqual([
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Start editing' }]
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Here is the current preview' }]
+        },
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Describe it' }]
         }
       ])
     })

@@ -1,4 +1,5 @@
 import {
+  CloseOutlined,
   FileExcelFilled,
   FileImageFilled,
   FileMarkdownFilled,
@@ -13,12 +14,14 @@ import {
   LinkOutlined
 } from '@ant-design/icons'
 import ConfirmDialog from '@renderer/components/ConfirmDialog'
+import MediaAttachmentPreview from '@renderer/components/MediaAttachmentPreview'
 import CustomTag from '@renderer/components/Tags/CustomTag'
 import { useAttachment } from '@renderer/hooks/useAttachment'
 import FileManager from '@renderer/services/FileManager'
 import type { FileMetadata } from '@renderer/types'
 import { formatFileSize } from '@renderer/utils'
-import { Flex, Image, Tooltip } from 'antd'
+import { buildMediaOpenRequest, getMediaKind, toMediaFileUrl } from '@renderer/utils/mediaAttachment'
+import { Button, Flex, Image, Tooltip } from 'antd'
 import { isEmpty } from 'lodash'
 import type { FC, MouseEvent } from 'react'
 import { useState } from 'react'
@@ -137,6 +140,40 @@ export const FileNameRender: FC<{ file: FileMetadata }> = ({ file }) => {
   )
 }
 
+/**
+ * Pre-send audio/video draft row. The main preview is the in-app HTML5
+ * player inside `MediaAttachmentPreview`; opening with the system default
+ * app is an explicit secondary action through the narrow media IPC. The
+ * whole card never jumps out, and a missing source never builds a `file://`
+ * URL or reaches IPC.
+ */
+const MediaDraftItem: FC<{ file: FileMetadata; onRemove: () => void }> = ({ file, onRemove }) => {
+  const { t } = useTranslation()
+  const { openWithDefaultApp } = useAttachment()
+  const src = toMediaFileUrl(FileManager.getSafePath(file))
+  const request = buildMediaOpenRequest(file, 'external')
+  const removeLabel = t('message.attachments.remove_attachment')
+
+  return (
+    <MediaDraftContainer data-testid="draft-media-item">
+      <MediaAttachmentPreview
+        file={file}
+        src={src}
+        icon={getFileIcon(file.ext)}
+        onOpenWithDefaultApp={() => {
+          if (request) {
+            void openWithDefaultApp(request)
+          }
+        }}
+        defaultAppDisabled={!request}
+      />
+      <MediaRemoveButton type="text" size="small" onClick={onRemove} title={removeLabel} aria-label={removeLabel}>
+        <CloseOutlined />
+      </MediaRemoveButton>
+    </MediaDraftContainer>
+  )
+}
+
 const AttachmentPreview: FC<Props> = ({ files, setFiles, onAttachmentContextMenu }) => {
   const { t } = useTranslation()
   const [contextMenu, setContextMenu] = useState<{
@@ -197,19 +234,31 @@ const AttachmentPreview: FC<Props> = ({ files, setFiles, onAttachmentContextMenu
   return (
     <>
       <ContentContainer>
-        {files.map((file) => (
-          <CustomTag
-            key={file.id}
-            icon={getFileIcon(file.ext)}
-            color="#37a5aa"
-            closable
-            onClose={() => setFiles(files.filter((f) => f.id !== file.id))}
-            onContextMenu={(event) => {
-              void handleContextMenu(file, event)
-            }}>
-            <FileNameRender file={file} />
-          </CustomTag>
-        ))}
+        {files.map((file) => {
+          const kind = getMediaKind(file)
+          if (kind === 'audio' || kind === 'video') {
+            return (
+              <MediaDraftItem
+                key={file.id}
+                file={file}
+                onRemove={() => setFiles(files.filter((f) => f.id !== file.id))}
+              />
+            )
+          }
+          return (
+            <CustomTag
+              key={file.id}
+              icon={getFileIcon(file.ext)}
+              color="#37a5aa"
+              closable
+              onClose={() => setFiles(files.filter((f) => f.id !== file.id))}
+              onContextMenu={(event) => {
+                void handleContextMenu(file, event)
+              }}>
+              <FileNameRender file={file} />
+            </CustomTag>
+          )
+        })}
       </ContentContainer>
 
       {contextMenu && (
@@ -231,6 +280,18 @@ const ContentContainer = styled.div`
   display: flex;
   flex-wrap: wrap;
   gap: 4px 4px;
+`
+
+const MediaDraftContainer = styled.div`
+  position: relative;
+  display: flex;
+  padding-right: 28px;
+`
+
+const MediaRemoveButton = styled(Button)`
+  position: absolute;
+  top: 4px;
+  right: 2px;
 `
 
 const FileName = styled.span`

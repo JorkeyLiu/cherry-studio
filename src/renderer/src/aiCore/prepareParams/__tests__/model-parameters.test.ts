@@ -92,12 +92,12 @@ const createModel = (overrides: Partial<Model> = {}): Model => ({
 })
 
 describe('modelParameters', () => {
-  describe('getTemperature', () => {
-    it('returns undefined when reasoning effort is enabled for Claude models', () => {
-      const assistant = createAssistant({ reasoning_effort: 'medium', enableTemperature: true })
+  describe('getTemperature (Unit B: user-intent driven, no model-name suppression)', () => {
+    it('returns temperature for Claude reasoning models even when reasoning effort is set', () => {
+      const assistant = createAssistant({ reasoning_effort: 'medium', enableTemperature: true, temperature: 0.7 })
       const model = createModel({ id: 'claude-opus-4', name: 'Claude Opus 4', provider: 'anthropic', group: 'claude' })
 
-      expect(getTemperature(assistant, model)).toBeUndefined()
+      expect(getTemperature(assistant, model)).toBe(0.7)
     })
 
     it('returns temperature when reasoning effort is default for Claude models', () => {
@@ -114,14 +114,14 @@ describe('modelParameters', () => {
       expect(getTemperature(assistant, model)).toBe(0.5)
     })
 
-    it('returns undefined for models without temperature/topP support', () => {
-      const assistant = createAssistant({ enableTemperature: true })
+    it('returns temperature for Qwen MT models when enabled (upstream decides)', () => {
+      const assistant = createAssistant({ enableTemperature: true, temperature: 0.7 })
       const model = createModel({ id: 'qwen-mt-large', name: 'Qwen MT', provider: 'qwen', group: 'qwen' })
 
-      expect(getTemperature(assistant, model)).toBeUndefined()
+      expect(getTemperature(assistant, model)).toBe(0.7)
     })
 
-    it('returns undefined for Claude 4.5 reasoning models when only TopP is enabled', () => {
+    it('returns undefined when temperature is disabled even for Claude 4.5 models', () => {
       const assistant = createAssistant({ enableTopP: true, enableTemperature: false })
       const model = createModel({
         id: 'claude-sonnet-4.5',
@@ -147,14 +147,14 @@ describe('modelParameters', () => {
       expect(getTemperature(assistant, model)).toBeUndefined()
     })
 
-    it('clamps temperature to max 1.0 for Zhipu models', () => {
+    it('does not clamp temperature by model name (upstream decides)', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 2.0 })
       const model = createModel({ id: 'glm-4-plus', name: 'GLM-4 Plus', provider: 'zhipu', group: 'zhipu' })
 
-      expect(getTemperature(assistant, model)).toBe(1.0)
+      expect(getTemperature(assistant, model)).toBe(2.0)
     })
 
-    it('clamps temperature to max 1.0 for Anthropic models', () => {
+    it('does not clamp temperature for Anthropic models', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 1.5 })
       const model = createModel({
         id: 'claude-sonnet-3.5',
@@ -163,10 +163,10 @@ describe('modelParameters', () => {
         group: 'claude'
       })
 
-      expect(getTemperature(assistant, model)).toBe(1.0)
+      expect(getTemperature(assistant, model)).toBe(1.5)
     })
 
-    it('clamps temperature to max 1.0 for Moonshot models', () => {
+    it('does not clamp temperature for Moonshot models', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 2.0 })
       const model = createModel({
         id: 'moonshot-v1-8k',
@@ -175,7 +175,7 @@ describe('modelParameters', () => {
         group: 'moonshot'
       })
 
-      expect(getTemperature(assistant, model)).toBe(1.0)
+      expect(getTemperature(assistant, model)).toBe(2.0)
     })
 
     it('does not clamp temperature for OpenAI models', () => {
@@ -185,7 +185,7 @@ describe('modelParameters', () => {
       expect(getTemperature(assistant, model)).toBe(2.0)
     })
 
-    it('does not clamp temperature when it is already within limits', () => {
+    it('returns temperature within limits as-is', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 0.8 })
       const model = createModel({ id: 'glm-4-plus', name: 'GLM-4 Plus', provider: 'zhipu', group: 'zhipu' })
 
@@ -195,57 +195,67 @@ describe('modelParameters', () => {
     it.each([
       { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', group: 'Claude 4.7' },
       { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', group: 'Claude 4.8' }
-    ])('always returns undefined for $name (rejects sampling parameters)', ({ id, name, group }) => {
-      const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
-      const model = createModel({
-        id,
-        name,
-        provider: 'anthropic',
-        group
-      })
+    ])(
+      'sends temperature for $name when enabled (upstream rejection surfaces via error chain)',
+      ({ id, name, group }) => {
+        const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
+        const model = createModel({
+          id,
+          name,
+          provider: 'anthropic',
+          group
+        })
 
-      expect(getTemperature(assistant, model)).toBeUndefined()
-    })
+        expect(getTemperature(assistant, model)).toBe(0.5)
+      }
+    )
 
-    it('returns undefined for Gemini 3.x models', () => {
+    it('sends temperature for Gemini 3.x models when enabled', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
       const model = createModel({ id: 'gemini-3.5-flash', provider: 'gemini', group: 'Google' })
 
-      expect(getTemperature(assistant, model)).toBeUndefined()
+      expect(getTemperature(assistant, model)).toBe(0.5)
     })
 
-    it('returns undefined for Gemini 3.x aliases', () => {
+    it('sends temperature for Gemini 3.x aliases when enabled', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
       const model = createModel({ id: 'gemini-flash-latest', provider: 'gemini', group: 'Google' })
 
-      expect(getTemperature(assistant, model)).toBeUndefined()
+      expect(getTemperature(assistant, model)).toBe(0.5)
     })
 
-    it('returns undefined for Gemini 3.x model ids on non-Gemini providers', () => {
+    it('sends temperature for Gemini 3.x model ids on non-Gemini providers when enabled', () => {
       const assistant = createAssistant({ enableTemperature: true, temperature: 0.5 })
       const model = createModel({ id: 'gemini-3.5-flash', provider: 'openai', group: 'Google' })
+
+      expect(getTemperature(assistant, model)).toBe(0.5)
+    })
+
+    it('returns undefined for non-finite temperature values', () => {
+      const assistant = createAssistant({ enableTemperature: true, temperature: Number.NaN })
+      const model = createModel({ id: 'gpt-4o', provider: 'openai', group: 'openai' })
 
       expect(getTemperature(assistant, model)).toBeUndefined()
     })
   })
 
-  describe('getTopP', () => {
-    it('returns undefined when reasoning effort is enabled for Claude models', () => {
-      const assistant = createAssistant({ reasoning_effort: 'high' })
+  describe('getTopP (Unit B: user-intent driven, no model-name suppression)', () => {
+    it('returns topP for Claude models even when reasoning effort is set', () => {
+      const assistant = createAssistant({ reasoning_effort: 'high', enableTopP: true, topP: 0.9 })
       const model = createModel({ id: 'claude-opus-4', provider: 'anthropic', group: 'claude' })
 
-      expect(getTopP(assistant, model)).toBeUndefined()
+      expect(getTopP(assistant, model)).toBe(0.9)
     })
 
-    it('returns undefined for models without TopP support', () => {
-      const assistant = createAssistant({ enableTopP: true })
+    it('returns topP for Qwen MT models when enabled (upstream decides)', () => {
+      const assistant = createAssistant({ enableTopP: true, topP: 0.9 })
       const model = createModel({ id: 'qwen-mt-small', name: 'Qwen MT', provider: 'qwen', group: 'qwen' })
 
-      expect(getTopP(assistant, model)).toBeUndefined()
+      expect(getTopP(assistant, model)).toBe(0.9)
     })
 
-    it('returns undefined for Claude 4.5 reasoning models when temperature is enabled', () => {
-      const assistant = createAssistant({ enableTemperature: true })
+    it('returns topP for Claude 4.5 models even when temperature is enabled (no mutual-exclusion rewrite)', () => {
+      const assistant = createAssistant({ enableTemperature: true, enableTopP: true, topP: 0.9 })
       const model = createModel({
         id: 'claude-opus-4.5',
         name: 'Claude Opus 4.5',
@@ -253,7 +263,7 @@ describe('modelParameters', () => {
         group: 'claude'
       })
 
-      expect(getTopP(assistant, model)).toBeUndefined()
+      expect(getTopP(assistant, model)).toBe(0.9)
     })
 
     it('returns configured TopP when enabled', () => {
@@ -273,7 +283,7 @@ describe('modelParameters', () => {
     it.each([
       { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', group: 'Claude 4.7' },
       { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', group: 'Claude 4.8' }
-    ])('always returns undefined for $name (rejects sampling parameters)', ({ id, name, group }) => {
+    ])('sends topP for $name when enabled (upstream rejection surfaces via error chain)', ({ id, name, group }) => {
       const assistant = createAssistant({ enableTopP: true, topP: 0.95 })
       const model = createModel({
         id,
@@ -282,46 +292,53 @@ describe('modelParameters', () => {
         group
       })
 
-      expect(getTopP(assistant, model)).toBeUndefined()
-    })
-
-    it('clamps topP to [0.95, 1] for Claude reasoning models with reasoning effort', () => {
-      const assistant = createAssistant({ enableTopP: true, topP: 0.5, reasoning_effort: 'high' })
-      const model = createModel({ id: 'claude-sonnet-4.5', provider: 'anthropic', group: 'claude' })
-
       expect(getTopP(assistant, model)).toBe(0.95)
     })
 
-    it('does not clamp topP when reasoning effort is default for Claude models', () => {
+    it('does not clamp topP for Claude reasoning models (sends user value)', () => {
+      const assistant = createAssistant({ enableTopP: true, topP: 0.5, reasoning_effort: 'high' })
+      const model = createModel({ id: 'claude-sonnet-4.5', provider: 'anthropic', group: 'claude' })
+
+      expect(getTopP(assistant, model)).toBe(0.5)
+    })
+
+    it('returns topP for default reasoning effort on Claude models', () => {
       const assistant = createAssistant({ enableTopP: true, topP: 0.5, reasoning_effort: 'default' })
       const model = createModel({ id: 'claude-opus-4', provider: 'anthropic', group: 'claude' })
 
       expect(getTopP(assistant, model)).toBe(0.5)
     })
 
-    it('does not clamp topP when reasoning effort is none for Claude models', () => {
+    it('returns topP for none reasoning effort on Claude models', () => {
       const assistant = createAssistant({ enableTopP: true, topP: 0.5, reasoning_effort: 'none' })
       const model = createModel({ id: 'claude-opus-4', provider: 'anthropic', group: 'claude' })
 
       expect(getTopP(assistant, model)).toBe(0.5)
     })
 
-    it('keeps topP unchanged when already in [0.95, 1] range for Claude reasoning models', () => {
+    it('keeps topP unchanged for Claude reasoning models', () => {
       const assistant = createAssistant({ enableTopP: true, topP: 0.97, reasoning_effort: 'medium' })
       const model = createModel({ id: 'claude-sonnet-4', provider: 'anthropic', group: 'claude' })
 
       expect(getTopP(assistant, model)).toBe(0.97)
     })
 
-    it('returns undefined for Gemini 3.x models', () => {
+    it('sends topP for Gemini 3.x models when enabled', () => {
       const assistant = createAssistant({ enableTopP: true, topP: 0.95 })
       const model = createModel({ id: 'gemini-pro-latest', provider: 'gemini', group: 'Google' })
+
+      expect(getTopP(assistant, model)).toBe(0.95)
+    })
+
+    it('returns undefined for non-finite topP values', () => {
+      const assistant = createAssistant({ enableTopP: true, topP: Number.POSITIVE_INFINITY })
+      const model = createModel({ id: 'gpt-4o', provider: 'openai', group: 'openai' })
 
       expect(getTopP(assistant, model)).toBeUndefined()
     })
   })
 
-  describe('filterStandardParams', () => {
+  describe('filterStandardParams (Unit B: no model-name dropping)', () => {
     const opus47PlusModels = [
       createModel({
         id: 'claude-opus-4-7',
@@ -343,9 +360,12 @@ describe('modelParameters', () => {
       group: 'claude'
     })
 
-    it('drops topK for Claude Opus 4.7+', () => {
+    it('keeps topK for Claude Opus 4.7+ (upstream decides)', () => {
       for (const model of opus47PlusModels) {
-        expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, model)).toEqual({ frequencyPenalty: 0.1 })
+        expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, model)).toEqual({
+          topK: 40,
+          frequencyPenalty: 0.1
+        })
       }
     })
 
@@ -368,16 +388,22 @@ describe('modelParameters', () => {
       }
     })
 
-    it('drops topK for Gemini 3.x models', () => {
+    it('keeps topK for Gemini 3.x models (upstream decides)', () => {
       const gemini35 = createModel({ id: 'gemini-3.5-flash', provider: 'gemini', group: 'Google' })
 
-      expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, gemini35)).toEqual({ frequencyPenalty: 0.1 })
+      expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, gemini35)).toEqual({
+        topK: 40,
+        frequencyPenalty: 0.1
+      })
     })
 
-    it('drops topK for Gemini 3.x model ids on non-Gemini providers', () => {
+    it('keeps topK for Gemini 3.x model ids on non-Gemini providers', () => {
       const proxyGemini = createModel({ id: 'gemini-3.5-flash', provider: 'openai', group: 'Google' })
 
-      expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, proxyGemini)).toEqual({ frequencyPenalty: 0.1 })
+      expect(filterStandardParams({ topK: 40, frequencyPenalty: 0.1 }, proxyGemini)).toEqual({
+        topK: 40,
+        frequencyPenalty: 0.1
+      })
     })
   })
 

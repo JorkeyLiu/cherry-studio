@@ -10,12 +10,7 @@ import {
   MdiLightbulbQuestion
 } from '@renderer/components/Icons/SVGIcon'
 import { QuickPanelReservedSymbol, useQuickPanel } from '@renderer/components/QuickPanel'
-import {
-  getModelSupportedReasoningEffortOptions,
-  isFixedReasoningModel,
-  isGPT5SeriesReasoningModel,
-  isOpenAIWebSearchModel
-} from '@renderer/config/models'
+import { getModelSupportedReasoningEffortOptions, isFixedReasoningModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
 import type { Model, ThinkingOption } from '@renderer/types'
@@ -53,7 +48,8 @@ const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactEle
   const onThinkingChange = useCallback(
     (option: ThinkingOption) => {
       // `default` means no override (not enabled); only concrete on-levels
-      // enable think mode. Matches useAssistant normalization.
+      // enable think mode. Matches useAssistant normalization. Unit B: no
+      // model-name veto on the user's explicit level.
       const thinkModeEnabled = option !== 'none' && option !== 'default'
 
       if (!thinkModeEnabled) {
@@ -68,15 +64,6 @@ const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactEle
         })
         return
       }
-      if (
-        isOpenAIWebSearchModel(model) &&
-        isGPT5SeriesReasoningModel(model) &&
-        assistant.enableWebSearch &&
-        option === 'minimal'
-      ) {
-        window.toast.warning(t('chat.web_search.warning.openai'))
-        return
-      }
       const modelKey = getModelReasoningEffortKey(model)
       updateAssistantSettings({
         reasoning_effort: option,
@@ -87,7 +74,7 @@ const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactEle
         qwenThinkMode: true
       })
     },
-    [updateAssistantSettings, assistant.enableWebSearch, assistant.settings?.reasoning_effort_by_model, model, t]
+    [updateAssistantSettings, assistant.settings?.reasoning_effort_by_model, model]
   )
 
   const reasoningEffortOptionLabelMap = {

@@ -6,18 +6,9 @@
 import { loggerService } from '@logger'
 import {
   isClaude46SeriesModel,
-  isClaudeModelRejectsTemperature,
-  isClaudeModelRejectsTopK,
-  isClaudeModelRejectsTopP,
-  isClaudeReasoningModel,
-  isGemini3Model,
-  isMaxTemperatureOneModel,
   isSupportAdaptiveThinkingClaudeModel,
   isSupportedFlexServiceTier,
-  isSupportedThinkingTokenClaudeModel,
-  isSupportTemperatureModel,
-  isSupportTopPModel,
-  isTemperatureTopPMutuallyExclusiveModel
+  isSupportedThinkingTokenClaudeModel
 } from '@renderer/config/models'
 import {
   DEFAULT_ASSISTANT_SETTINGS,
@@ -33,142 +24,61 @@ import { getThinkingBudget } from '../utils/reasoning'
 const logger = loggerService.withContext('modelParameters')
 
 /**
- * Retrieves the temperature parameter, adapting it based on assistant.settings and model capabilities.
- * - Disabled for Gemini 3.x models.
- * - Disabled when enableTemperature is off.
- * - Disabled unconditionally for Claude Opus 4.7+ (rejects sampling params with HTTP 400).
- * - Disabled for Claude reasoning models when reasoning effort is set (excluding 'default' and 'none').
- * - Disabled for models that do not support temperature.
- * - Clamped to 1 for models with max temperature of 1.
- * Otherwise, returns the temperature value.
+ * Retrieves the temperature parameter.
+ *
+ * Unit B (user-intent lazy execution): the user toggle drives sending. Only
+ * generic type/finite-value guards remain here; no model-name or capability
+ * metadata suppression/rewrite. Upstream rejection surfaces through the
+ * existing APICallError chain.
  */
-export function getTemperature(assistant: Assistant, model: Model): number | undefined {
-  if (isGemini3Model(model)) {
-    logger.info(`Gemini 3.x model ${model.id} uses default sampling settings, disabling temperature`)
-    return undefined
-  }
-
+export function getTemperature(assistant: Assistant, _model: Model): number | undefined {
   const enableTemperature = assistant.settings?.enableTemperature ?? DEFAULT_ASSISTANT_SETTINGS.enableTemperature
   if (!enableTemperature) {
     return undefined
   }
 
-  // Claude Opus 4.7+ rejects sampling params (temperature/top_p/top_k) with HTTP 400
-  // regardless of reasoning settings. See Vercel AI SDK PR #14529.
-  if (isClaudeModelRejectsTemperature(model)) {
-    logger.info(`Model ${model.id} rejects sampling parameters, disabling temperature`)
+  const temperature = assistant.settings?.temperature ?? DEFAULT_ASSISTANT_SETTINGS.temperature
+  if (typeof temperature !== 'number' || !Number.isFinite(temperature)) {
+    logger.info('Invalid temperature value, disabling temperature')
     return undefined
-  }
-
-  // Thinking isn't compatible with temperature or top_k modifications as well as forced tool use.
-  // See: https://platform.claude.com/docs/en/build-with-claude/extended-thinking#feature-compatibility
-  if (
-    isClaudeReasoningModel(model) &&
-    assistant.settings?.reasoning_effort &&
-    assistant.settings.reasoning_effort !== 'default' &&
-    assistant.settings.reasoning_effort !== 'none'
-  ) {
-    logger.info(`Model ${model.id} does not support reasoning with temperature, disabling temperature`)
-    return undefined
-  }
-
-  if (!isSupportTemperatureModel(model, assistant)) {
-    logger.info(`Model ${model.id} does not support temperature, disabling temperature`)
-    return undefined
-  }
-
-  let temperature = assistant.settings?.temperature ?? DEFAULT_ASSISTANT_SETTINGS.temperature
-
-  if (isMaxTemperatureOneModel(model) && temperature > 1) {
-    logger.info(`Model ${model.id} has max temperature of 1, clamping temperature from ${temperature} to 1`)
-    temperature = 1
-  }
-
-  if (isTemperatureTopPMutuallyExclusiveModel(model) && assistant.settings?.enableTopP) {
-    logger.info(`Model ${model.id} only accepts one of temperature and topP, both enabled; keeping temperature`)
   }
 
   return temperature
 }
 
 /**
- * Retrieves the TopP parameter, adapting it based on assistant.settings and model capabilities.
- * - Disabled for Gemini 3.x models.
- * - Disabled when enableTopP is off.
- * - Disabled unconditionally for Claude Opus 4.7+ (rejects sampling params with HTTP 400).
- * - Disabled for models that do not support TopP.
- * - Disabled for mutually exclusive models when temperature is enabled.
- * - Clamped to [0.95, 1] for Claude reasoning models with reasoning effort set (excluding 'default' and 'none').
- * Otherwise, returns the TopP value.
+ * Retrieves the TopP parameter.
+ *
+ * Unit B: same contract as temperature — user toggle drives sending, only
+ * generic type/finite-value guards remain. No silent model-based suppression,
+ * clamping, or mutual-exclusion rewrites.
  */
-export function getTopP(assistant: Assistant, model: Model): number | undefined {
-  if (isGemini3Model(model)) {
-    logger.info(`Gemini 3.x model ${model.id} uses default sampling settings, disabling topP`)
-    return undefined
-  }
-
+export function getTopP(assistant: Assistant, _model: Model): number | undefined {
   const enableTopP = assistant.settings?.enableTopP ?? DEFAULT_ASSISTANT_SETTINGS.enableTopP
   if (!enableTopP) {
     return undefined
   }
 
-  // Claude Opus 4.7+ rejects sampling params unconditionally (see getTemperature).
-  if (isClaudeModelRejectsTopP(model)) {
-    logger.info(`Model ${model.id} rejects sampling parameters, disabling topP`)
+  const topP = assistant.settings?.topP ?? DEFAULT_ASSISTANT_SETTINGS.topP
+  if (typeof topP !== 'number' || !Number.isFinite(topP)) {
+    logger.info('Invalid topP value, disabling topP')
     return undefined
-  }
-
-  if (!isSupportTopPModel(model, assistant)) {
-    logger.info(`Model ${model.id} does not support topP, disabling topP.`)
-    return undefined
-  }
-
-  if (isTemperatureTopPMutuallyExclusiveModel(model) && assistant.settings?.enableTemperature) {
-    logger.info(`Model ${model.id} only accepts one of temperature and topP, disabling topP.`)
-    return undefined
-  }
-
-  let topP = assistant.settings?.topP ?? DEFAULT_ASSISTANT_SETTINGS.topP
-
-  // When thinking is enabled, the topP should be between 0.95 and 1
-  // See: https://platform.claude.com/docs/en/build-with-claude/extended-thinking#feature-compatibility
-  // NOTE: It depends on the behavior that extended thinking defaults to off, so we clamp the topP value also when reasoning is not 'default'
-  if (
-    isClaudeReasoningModel(model) &&
-    assistant.settings?.reasoning_effort &&
-    assistant.settings.reasoning_effort !== 'default' &&
-    assistant.settings.reasoning_effort !== 'none'
-  ) {
-    const clampedTopP = Math.max(0.95, Math.min(topP, 1))
-    if (clampedTopP !== topP) {
-      logger.info(`Claude Model ${model.id} has reasoning enabled, clamping topP from ${topP} to ${clampedTopP}`)
-    }
-    topP = clampedTopP
   }
 
   return topP
 }
 
 /**
- * Filters AI SDK standard parameters extracted from custom parameters, removing any
- * the model rejects. Currently strips `topK` for Gemini 3.x models and Claude Opus 4.7+
- * since both reject or discourage sampling params.
+ * Filters AI SDK standard parameters extracted from custom parameters.
+ *
+ * Unit B: no model-name based dropping (e.g. topK). Custom standard params
+ * are forwarded as-is; upstream rejection surfaces through the existing error
+ * chain. Only the reference itself is preserved for structural compatibility.
  */
 export function filterStandardParams(
   standardParams: Partial<Record<AiSdkParam, any>>,
-  model: Model
+  _model: Model
 ): Partial<Record<AiSdkParam, any>> {
-  if (isGemini3Model(model) && 'topK' in standardParams) {
-    const { topK, ...rest } = standardParams
-    logger.info(`Gemini 3.x model ${model.id} uses default sampling settings, dropping topK=${topK} from custom params`)
-    return rest
-  }
-
-  if (isClaudeModelRejectsTopK(model) && 'topK' in standardParams) {
-    const { topK, ...rest } = standardParams
-    logger.info(`Model ${model.id} rejects sampling parameters, dropping topK=${topK} from custom params`)
-    return rest
-  }
   return standardParams
 }
 

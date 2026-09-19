@@ -1,10 +1,14 @@
 import { loggerService } from '@logger'
 import type { Model, Provider } from '@renderer/types'
 import {
+  asSafeMetadataFailureReason,
   isSafeMetadataKey,
+  type ModelMetadataRefreshReason,
   type ModelMetadataSnapshot,
+  type ModelMetadataStatus,
   type NormalizedModelMetadata,
-  parseModelMetadataSnapshot
+  parseModelMetadataSnapshot,
+  parseModelMetadataStatus
 } from '@shared/modelMetadata'
 
 import { resolveExactProvider, setExactProviderResolver } from './exactProviderResolver'
@@ -16,6 +20,60 @@ export const OPENAI_OFFICIAL_API_URL = 'https://api.openai.com/v1'
 
 let snapshot: ModelMetadataSnapshot | null = null
 let initPromise: Promise<ModelMetadataSnapshot | null> | null = null
+
+/**
+ * Reactive registry status for `useSyncExternalStore` subscribers (e.g. an
+ * open Edit Model popup re-rendering when the async init completes).
+ *
+ * The status reference is stable: `getModelMetadataStatusSnapshot` returns
+ * the same object until the next transition, so subscribers never spin.
+ * Every init/refresh terminal path replaces the reference and notifies.
+ */
+let statusRef: ModelMetadataStatus = { kind: 'loading', snapshot: null }
+const statusListeners = new Set<() => void>()
+
+function setStatus(next: ModelMetadataStatus): void {
+  statusRef = next
+  for (const listener of [...statusListeners]) {
+    try {
+      listener()
+    } catch {
+      // A throwing subscriber must never break the remaining notifications.
+    }
+  }
+}
+
+function setStatusFromSnapshot(next: ModelMetadataSnapshot | null, failureReason?: ModelMetadataRefreshReason): void {
+  if (next) {
+    snapshot = next
+    setStatus({ kind: 'ready', snapshot: next })
+    return
+  }
+  const reason = asSafeMetadataFailureReason(failureReason)
+  if (reason) {
+    setStatus({ kind: 'unavailable', snapshot: null, reason })
+  } else {
+    setStatus({ kind: 'loading', snapshot: null })
+  }
+}
+
+/** Subscribe to registry status transitions. Returns an unsubscribe fn. */
+export function subscribeModelMetadataStatus(listener: () => void): () => void {
+  statusListeners.add(listener)
+  return () => {
+    statusListeners.delete(listener)
+  }
+}
+
+/** Stable status reference for `useSyncExternalStore`. Never a fresh object. */
+export function getModelMetadataStatusSnapshot(): ModelMetadataStatus {
+  return statusRef
+}
+
+/** Current registry status (same stable reference as the subscriber read). */
+export function getModelMetadataStatus(): ModelMetadataStatus {
+  return statusRef
+}
 
 /**
  * Runtime provider resolver for external attribution (dependency-injected).
@@ -161,14 +219,52 @@ export function resolveModelMetadata(
  * and never blocks readiness: failures (missing preload surface, IPC errors,
  * malformed snapshots) leave the registry empty, which every consumer treats
  * as unknown. The snapshot is stored in memory only — never in Redux.
+ *
+ * Status transitions (all notified to `useSyncExternalStore` subscribers, so
+ * an open Edit Model popup re-renders when the async round completes):
+ * - Main-reported `ready`/`unavailable` are adopted as-is (single source of
+ *   truth; reasons stay sanitized).
+ * - Main-reported `loading` stays loading: the Main round is still running.
+ *   A null snapshot read in that window is not a completed failure.
+ * - Compat path (no `getStatus` surface): a parsed snapshot is ready; a
+ *   malformed payload is a completed validation failure (unavailable); a
+ *   null read may mean Main is still fetching, so it stays loading.
+ * - IPC throws with no snapshot are completed failures (unavailable).
+ * - An existing snapshot is never demoted: refresh failures stay ready.
  */
 export function initModelMetadataRegistry(): Promise<ModelMetadataSnapshot | null> {
   if (initPromise) return initPromise
+  if (!snapshot) {
+    setStatus({ kind: 'loading', snapshot: null })
+  }
   initPromise = (async () => {
     try {
       const surface = window.api?.modelMetadata
       if (!surface || typeof surface.getSnapshot !== 'function') {
-        return null
+        if (!snapshot) setStatus({ kind: 'loading', snapshot: null })
+        return snapshot
+      }
+      // Prefer the reactive Main status when the surface exposes it; the
+      // shared parser keeps the IPC boundary defensive.
+      let mainInFlight = false
+      if (typeof surface.getStatus === 'function') {
+        try {
+          const reported: unknown = await surface.getStatus()
+          const parsedStatus = parseModelMetadataStatus(reported)
+          if (parsedStatus) {
+            if (parsedStatus.snapshot) {
+              setStatusFromSnapshot(parsedStatus.snapshot)
+              return snapshot
+            }
+            if (parsedStatus.kind === 'unavailable' && !snapshot) {
+              setStatus(parsedStatus)
+              return null
+            }
+            mainInFlight = parsedStatus.kind === 'loading'
+          }
+        } catch {
+          // Fall through to the compatible snapshot read below.
+        }
       }
       const received: unknown = await surface.getSnapshot()
       // The snapshot crosses IPC: validate with the shared schema. Malformed
@@ -176,13 +272,26 @@ export function initModelMetadataRegistry(): Promise<ModelMetadataSnapshot | nul
       // predicates. Stored in memory only — never in Redux.
       const parsed = parseModelMetadataSnapshot(received)
       if (parsed) {
-        snapshot = parsed
+        setStatusFromSnapshot(parsed)
         return snapshot
+      }
+      if (snapshot) return snapshot
+      if (received !== null && received !== undefined) {
+        setStatus({ kind: 'unavailable', snapshot: null, reason: 'schema-mismatch' })
+        return null
+      }
+      // Null reads may mean Main is still fetching in the background: stay
+      // loading when Main says so, otherwise the round completed empty.
+      if (mainInFlight) {
+        setStatus({ kind: 'loading', snapshot: null })
+      } else {
+        setStatus({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
       }
       return null
     } catch (error) {
       logger.warn('model metadata init failed; registry stays unknown', error as Error)
-      return null
+      if (!snapshot) setStatus({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+      return snapshot
     }
   })()
   return initPromise
@@ -207,6 +316,9 @@ export async function refreshModelMetadataRegistry(): Promise<ModelMetadataSnaps
     return await initModelMetadataRegistry()
   } catch (error) {
     logger.warn('model metadata refresh failed; keeping current snapshot', error as Error)
+    // A failed refresh never demotes an existing snapshot: ready persists.
+    // Without any snapshot the completed failure is unavailable.
+    if (!snapshot) setStatus({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
     return snapshot
   }
 }
@@ -215,4 +327,12 @@ export async function refreshModelMetadataRegistry(): Promise<ModelMetadataSnaps
 export function setModelMetadataSnapshotForTests(next: ModelMetadataSnapshot | null): void {
   snapshot = next
   initPromise = null
+  setStatusFromSnapshot(next)
+}
+
+/** Test-only seam: install an explicit status without IPC. */
+export function setModelMetadataStatusForTests(next: ModelMetadataStatus): void {
+  snapshot = next.snapshot
+  initPromise = null
+  setStatus(next.kind === 'ready' && !next.snapshot ? { kind: 'loading', snapshot: null } : next)
 }

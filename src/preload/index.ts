@@ -74,7 +74,8 @@ import type { FileChangeEvent, WebviewKeyEvent } from '@shared/config/types'
 import type { MCPServerLogEntry } from '@shared/config/types'
 import type { ExternalAppInfo } from '@shared/externalApp/types'
 import { IpcChannel } from '@shared/IpcChannel'
-import type { ModelMetadataRefreshResult, ModelMetadataSnapshot } from '@shared/modelMetadata'
+import type { MediaAttachmentOpenRequest } from '@shared/mediaAttachment'
+import type { ModelMetadataRefreshResult, ModelMetadataSnapshot, ModelMetadataStatus } from '@shared/modelMetadata'
 import type { ProviderLogoResult } from '@shared/providerLogo'
 import type { Notification } from '@types'
 import type {
@@ -309,7 +310,9 @@ const api = {
       return () => ipcRenderer.off('file-change', listener)
     },
     showInFolder: (path: string): Promise<void> => ipcRenderer.invoke(IpcChannel.File_ShowInFolder, path),
-    exists: (storedFileName: string): Promise<boolean> => ipcRenderer.invoke(IpcChannel.File_Exists, storedFileName)
+    exists: (storedFileName: string): Promise<boolean> => ipcRenderer.invoke(IpcChannel.File_Exists, storedFileName),
+    openMediaAttachment: (request: MediaAttachmentOpenRequest): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.File_OpenMediaAttachment, request)
   },
   fs: {
     read: (pathOrUrl: string, encoding?: BufferEncoding) => ipcRenderer.invoke(IpcChannel.Fs_Read, pathOrUrl, encoding),
@@ -627,7 +630,11 @@ const api = {
     // nothing is cached yet — callers must treat null as unknown, never as
     // a reason to reject a model. Main refreshes stale data in background.
     getSnapshot: (): Promise<ModelMetadataSnapshot | null> => ipcRenderer.invoke(IpcChannel.ModelMetadata_GetSnapshot),
-    refresh: (): Promise<ModelMetadataRefreshResult> => ipcRenderer.invoke(IpcChannel.ModelMetadata_Refresh)
+    refresh: (): Promise<ModelMetadataRefreshResult> => ipcRenderer.invoke(IpcChannel.ModelMetadata_Refresh),
+    // Reactive registry status: loading (no snapshot, in progress), ready
+    // (snapshot available; refresh failures stay ready), unavailable (no
+    // snapshot, completed failure with a sanitized reason).
+    getStatus: (): Promise<ModelMetadataStatus> => ipcRenderer.invoke(IpcChannel.ModelMetadata_GetStatus)
   },
   providerLogo: {
     // Optional models.dev provider-logo enhancement. Null/empty when the

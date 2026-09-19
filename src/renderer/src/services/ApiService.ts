@@ -5,7 +5,7 @@ import { loggerService } from '@logger'
 import { buildStreamTextParams } from '@renderer/aiCore/prepareParams'
 import type { AiSdkMiddlewareConfig } from '@renderer/aiCore/types/middlewareConfig'
 import { buildProviderOptions } from '@renderer/aiCore/utils/options'
-import { isDedicatedImageGenerationModel, isEmbeddingModel, isFunctionCallingModel } from '@renderer/config/models'
+import { isDedicatedImageGenerationModel, isEmbeddingModel } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import i18n from '@renderer/i18n'
 import store from '@renderer/store'
@@ -18,7 +18,6 @@ import type { Message, ResponseError } from '@renderer/types/newMessage'
 import { removeSpecialCharactersForTopicName, uuid } from '@renderer/utils'
 import { abortCompletion, readyToAbort } from '@renderer/utils/abortController'
 import { trackTokenUsage } from '@renderer/utils/analytics'
-import { isToolUseModeFunction } from '@renderer/utils/assistant'
 import { isPromptToolUse, isSupportedToolUse } from '@renderer/utils/assistant'
 import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
 import { getErrorMessage, isAbortError } from '@renderer/utils/error'
@@ -308,9 +307,10 @@ export async function fetchChatCompletion({
     requestOptions
   })
 
-  // Safely fallback to prompt tool use when function calling is not supported by model.
-  const usePromptToolUse =
-    isPromptToolUse(assistant) || (isToolUseModeFunction(assistant) && !isFunctionCallingModel(assistant.model))
+  // Unit B: prompt tool use applies only on explicit user selection. Native
+  // `function` mode is never downgraded because of model function-calling
+  // metadata; protocol encode failures surface via the APICallError chain.
+  const usePromptToolUse = isPromptToolUse(assistant)
 
   const mcpMode = getEffectiveMcpMode(assistant)
   const middlewareConfig: AiSdkMiddlewareConfig = {

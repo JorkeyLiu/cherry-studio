@@ -59,8 +59,23 @@ vi.mock('@renderer/utils/model', () => ({
   isFreeModel: () => false
 }))
 
+vi.mock('@renderer/utils/inputModalities', () => ({
+  getInputModalityAvailabilityFromProviders: () => ({})
+}))
+
 vi.mock('@renderer/components/ModelTagsWithLabel', () => ({
   default: () => null
+}))
+
+vi.mock('@renderer/components/Avatar/ModelAvatar', () => ({
+  default: ({ model, provider, size }: { model?: { id?: string }; provider?: { id?: string }; size?: number }) => (
+    <div
+      data-testid={`model-avatar-${model?.id ?? 'unknown'}`}
+      data-model-id={model?.id ?? ''}
+      data-provider-id={provider?.id ?? ''}
+      data-size={String(size ?? '')}
+    />
+  )
 }))
 
 vi.mock('@renderer/components/TopView', () => ({
@@ -221,6 +236,29 @@ describe('SelectModelPopupView "Add Model" action', () => {
 
       expect(resolve).toHaveBeenCalledWith(model('gpt-4o'))
       expect(mocks.navigate).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('model avatar (visual unification)', () => {
+    const providers = [provider('openai', 'OpenAI', [model('gpt-4o'), model('gpt-4o-mini')])]
+
+    it('renders ModelAvatar with the exact model and owning provider at size 24', () => {
+      renderPopup(providers)
+      const avatar = screen.getByTestId('model-avatar-gpt-4o')
+      expect(avatar).toBeInTheDocument()
+      expect(avatar.getAttribute('data-model-id')).toBe('gpt-4o')
+      expect(avatar.getAttribute('data-provider-id')).toBe('openai')
+      expect(avatar.getAttribute('data-size')).toBe('24')
+    })
+
+    it('passes distinct owning providers per model row', () => {
+      const multi = [
+        provider('openai', 'OpenAI', [model('gpt-4o')]),
+        provider('anthropic', 'Anthropic', [model('claude')])
+      ]
+      renderPopup(multi)
+      expect(screen.getByTestId('model-avatar-gpt-4o').getAttribute('data-provider-id')).toBe('openai')
+      expect(screen.getByTestId('model-avatar-claude').getAttribute('data-provider-id')).toBe('anthropic')
     })
   })
 })

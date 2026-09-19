@@ -6,7 +6,7 @@ import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
-import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
+import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useContextClosure } from '@renderer/hooks/useContextClosure'
 import { useLoadedTopicMessages, useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
@@ -208,10 +208,12 @@ const Chat: FC<Props> = (props) => {
       filter: modelFilter
     })
     if (selectedModel) {
-      const enabledWebSearch = isWebSearchModel(selectedModel)
+      // Unit B: preserve the user's web-search toggle across model switches.
+      // Availability follows the current provider's search adapter at request
+      // time, never model metadata.
       updateAssistant({
         model: selectedModel,
-        enableWebSearch: enabledWebSearch && assistant.enableWebSearch
+        enableWebSearch: assistant.enableWebSearch
       })
     }
   })

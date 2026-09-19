@@ -10,10 +10,13 @@ import {
   MODEL_METADATA_FETCH_TIMEOUT_MS,
   MODEL_METADATA_MAX_BYTES,
   MODEL_METADATA_REFRESH_INTERVAL_MS,
+  type ModelMetadataRefreshReason,
   type ModelMetadataRefreshResult,
   type ModelMetadataSnapshot,
+  type ModelMetadataStatus,
   normalizeModelMetadataPayload,
-  parseModelMetadataCache
+  parseModelMetadataCache,
+  toModelMetadataStatus
 } from '@shared/modelMetadata'
 import { ipcMain } from 'electron'
 
@@ -55,6 +58,7 @@ export class ModelMetadataService {
   private snapshot: ModelMetadataSnapshot | null = null
   private diskLoaded = false
   private inFlight: Promise<ModelMetadataRefreshResult> | null = null
+  private lastFailureReason: ModelMetadataRefreshReason | undefined = undefined
   private readonly deps: Required<Omit<ModelMetadataServiceDeps, 'cacheFilePath'>> & { cacheFilePath?: string }
 
   constructor(deps: ModelMetadataServiceDeps = {}) {
@@ -75,6 +79,23 @@ export class ModelMetadataService {
   /** Synchronous in-memory read. Null when no last-known-good is loaded yet. */
   getSnapshot(): ModelMetadataSnapshot | null {
     return this.snapshot
+  }
+
+  /**
+   * Reactive registry status for the models.dev enrichment surface.
+   *
+   * - `loading`: no snapshot yet and a disk read/fetch is still in progress
+   *   (including before the first load completes).
+   * - `ready`: a snapshot is available; a failed refresh stays ready.
+   * - `unavailable`: no snapshot and the last read/fetch round completed
+   *   with a sanitized failure reason. Never exposes raw responses or paths.
+   */
+  getStatus(): ModelMetadataStatus {
+    return toModelMetadataStatus({
+      snapshot: this.snapshot,
+      inFlight: this.inFlight !== null || !this.diskLoaded,
+      failureReason: this.lastFailureReason
+    })
   }
 
   /**
@@ -178,6 +199,9 @@ export class ModelMetadataService {
     } else {
       logger.warn(`model metadata refresh failed: ${reason}`)
     }
+    if (reason && reason !== 'fresh-cache' && reason !== 'not-modified') {
+      this.lastFailureReason = reason
+    }
     return { ok: false, reason }
   }
 
@@ -206,6 +230,7 @@ export class ModelMetadataService {
       // timestamp so the 24h staleness check does not refetch in a loop.
       if (this.snapshot) {
         this.snapshot = { ...this.snapshot, fetchedAt }
+        this.lastFailureReason = undefined
         await this.persistBestEffort()
         return { ok: true, fetchedAt, notModified: true }
       }
@@ -255,6 +280,7 @@ export class ModelMetadataService {
     }
 
     this.snapshot = snapshot
+    this.lastFailureReason = undefined
     await this.persistBestEffort()
     logger.info('model metadata refreshed', { providers: Object.keys(snapshot.providers).length })
     return { ok: true, fetchedAt }
@@ -283,10 +309,12 @@ export const modelMetadataService = new ModelMetadataService()
 /**
  * Main house-style IPC registration (called from central src/main/ipc.ts).
  * `getSnapshot` returns last-known-good immediately and refreshes stale data
- * in the background; `refresh` forces a manual refresh. Both resolve sanitized
+ * in the background; `refresh` forces a manual refresh; `getStatus` returns
+ * the reactive loading/ready/unavailable status. All resolve sanitized
  * payloads only — never raw responses or filesystem paths.
  */
 export function registerModelMetadataIpc(service: ModelMetadataService = modelMetadataService): void {
   ipcMain.handle(IpcChannel.ModelMetadata_GetSnapshot, () => service.getSnapshotWithStaleRefresh())
   ipcMain.handle(IpcChannel.ModelMetadata_Refresh, () => service.refresh({ force: true }))
+  ipcMain.handle(IpcChannel.ModelMetadata_GetStatus, () => service.getStatus())
 }

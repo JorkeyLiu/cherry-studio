@@ -11,7 +11,7 @@ const MentionModelsQuickPanelManager = ({ context }: ManagerProps) => {
   const {
     quickPanel,
     quickPanelController,
-    state: { mentionedModels, files, couldMentionNotVisionModel },
+    state: { mentionedModels, files },
     actions: { setMentionedModels, onTextChange }
   } = context
 
@@ -21,7 +21,6 @@ const MentionModelsQuickPanelManager = ({ context }: ManagerProps) => {
       quickPanelController,
       mentionedModels: mentionedModels,
       setMentionedModels: setMentionedModels,
-      couldMentionNotVisionModel,
       files: files,
       setText: onTextChange as React.Dispatch<React.SetStateAction<string>>
     },

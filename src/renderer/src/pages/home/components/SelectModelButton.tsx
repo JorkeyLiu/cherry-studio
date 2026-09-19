@@ -1,7 +1,7 @@
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import { isLocalAi } from '@renderer/config/env'
-import { isEmbeddingModel, isRerankModel, isWebSearchModel } from '@renderer/config/models'
+import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useAllProviders } from '@renderer/hooks/useProvider'
 import { getProviderName } from '@renderer/services/ProviderService'
@@ -37,10 +37,11 @@ const SelectModelButton: FC<Props> = ({ assistant }) => {
       // 避免更新数据造成关闭弹框的卡顿
       clearTimeout(timerRef.current)
       timerRef.current = setTimeout(() => {
-        const enabledWebSearch = isWebSearchModel(selectedModel)
+        // Unit B: preserve the user's web-search toggle; adapter decides at
+        // request time, never model metadata.
         updateAssistant({
           model: selectedModel,
-          enableWebSearch: enabledWebSearch && assistant.enableWebSearch
+          enableWebSearch: assistant.enableWebSearch
         })
       }, 200)
     }
@@ -57,11 +58,14 @@ const SelectModelButton: FC<Props> = ({ assistant }) => {
   }
 
   const providerName = getProviderName(model)
+  // Avatar consistency (F4): the owning provider is already resolved above,
+  // so pass it explicitly instead of letting the avatar re-resolve.
+  const owningProvider = model ? (allProviders.find((p) => p.id === model.provider) ?? null) : null
 
   return (
     <DropdownButton size="small" type="text" onClick={onSelectModel}>
       <ButtonContent>
-        <ModelAvatar model={model} size={20} />
+        <ModelAvatar model={model} provider={owningProvider} size={20} />
         <ModelName>
           {model ? model.name : t('button.select_model')} {providerName ? ' | ' + providerName : ''}
         </ModelName>

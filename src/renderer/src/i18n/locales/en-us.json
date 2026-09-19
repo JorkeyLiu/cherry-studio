@@ -2288,8 +2288,12 @@
       }
     },
     "attachments": {
+      "media_player_label": "Media player: {{name}}",
+      "media_unsupported_format": "The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
+      "open_with_default_app": "Open with default app",
       "pasted_image": "Pasted Image",
       "pasted_text": "Pasted Text",
+      "remove_attachment": "Remove attachment",
       "unavailable": "Attachment unavailable"
     },
     "backup": {
@@ -2331,9 +2335,18 @@
     },
     "empty_url": "Failed to download image, possibly due to prompt containing sensitive content or prohibited words",
     "error": {
+      "attachment": {
+        "attach_failed": "Failed to attach \"{{name}}\" ({{type}}): {{reason}}",
+        "encode_unsupported": "Failed to attach \"{{name}}\" ({{type}}): the current endpoint cannot encode this format",
+        "image_url_failed": "Failed to attach image (url): {{reason}}",
+        "text_extraction_failed": "Failed to extract text from attachment \"{{name}}\" ({{type}}): {{reason}}"
+      },
       "chunk_overlap_too_large": "Chunk overlap cannot be greater than chunk size",
       "copy": "Copy failed",
       "dimension_too_large": "Content size is too large",
+      "endpoint": {
+        "web_search_unsupported": "Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
+      },
       "enter": {
         "api": {
           "host": "Please enter your API host first",
@@ -2670,6 +2683,19 @@
   "models": {
     "add_parameter": "Add Parameter",
     "all": "All",
+    "capabilities": {
+      "feature_reasoning": "Reasoning",
+      "feature_structured_output": "Structured Output",
+      "feature_temperature": "Temperature",
+      "feature_tool_call": "Tool Call",
+      "features": "Model Features",
+      "input_modalities": "Input Modalities",
+      "modality_audio": "Audio",
+      "modality_image": "Image",
+      "modality_pdf": "PDF",
+      "modality_text": "Text",
+      "modality_video": "Video"
+    },
     "custom_parameters": "Custom Parameters",
     "dimensions": "Dimensions {{dimensions}}",
     "edit": "Edit Model",
@@ -2711,22 +2737,27 @@
       "cache_write": "Cache write",
       "context_limit": "Context limit",
       "context_over_200k": "Context over 200k",
-      "description": "Read-only reference values. Your saved pricing stays authoritative.",
-      "family": "Family",
       "input": "Input",
       "input_audio": "Input audio",
-      "input_limit": "Input limit",
       "knowledge_cutoff": "Knowledge cutoff",
+      "loading": "Fetching model metadata…",
+      "no_data": "No model metadata available",
       "output": "Output",
       "output_audio": "Output audio",
-      "output_limit": "Output limit",
       "per_million_tokens": "/ M tokens",
       "reasoning": "Reasoning",
+      "reasoning_controls": "Reasoning controls",
+      "reasoning_support": "Reasoning support",
       "release_date": "Release date",
-      "status": "Status",
+      "structured_output": "Structured output",
+      "supported": "Supported",
+      "temperature": "Temperature",
+      "tiered_pricing": "Tiered pricing",
       "tiered_pricing_note": "Tiered pricing applies upstream",
-      "title": "Reference",
-      "use_pricing": "Use reference pricing"
+      "title": "Model Data",
+      "tool_call": "Tool calling",
+      "unavailable": "Unable to fetch model metadata",
+      "unsupported": "Not supported"
     },
     "rerank_model": "Reranker",
     "rerank_model_not_support_provider": "Currently, the reranker model does not support this provider ({{provider}})",

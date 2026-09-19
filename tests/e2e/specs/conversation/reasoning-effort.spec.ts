@@ -15,8 +15,10 @@
  *     rendered Thinking control state)
  *   - send via the mock provider and assert the captured outbound request
  *     shape (model + messages + reasoning_effort)
- *   - one deterministic normalization case: switching to the non-reasoning
- *     mock-model normalizes the active effort to an explicit off state
+ *   - Unit B lazy execution: switching to the plain mock-model preserves the
+ *     explicit user level (never auto-corrects to `none`/`default`) and the
+ *     follow-up request still carries `reasoning_effort` when the generic
+ *     endpoint can encode it (upstream decides).
  *
  * LOCK-001: disposable profile. LOCK-002: mock endpoint only, no live APIs.
  */
@@ -164,7 +166,7 @@ test.describe('Reasoning effort flow', () => {
     await waitForAppReady(mainWindow)
   })
 
-  test('real Thinking menu select + mock send asserts store/UI and request shape, switch normalizes', async ({
+  test('real Thinking menu select + mock send asserts store/UI and request shape, switch preserves', async ({
     mainWindow
   }) => {
     const page = mainWindow
@@ -247,7 +249,7 @@ test.describe('Reasoning effort flow', () => {
       expect(parsed?.reasoning_effort).toBe('high')
     })
 
-    await test.step('model switch to non-reasoning normalizes effort deterministically', async () => {
+    await test.step('model switch to plain mock-model preserves the explicit level', async () => {
       await page.evaluate(() => {
         const store = (window as any).store
         const assistant = store.getState().assistants.assistants[0]
@@ -259,17 +261,40 @@ test.describe('Reasoning effort flow', () => {
           }
         })
       })
-      // Production normalization moves a non-reasoning model to explicit off.
+      // Unit B: user intent is never auto-corrected by model metadata.
       await page.waitForFunction(
         () => {
           const s = (window as any).store?.getState()
-          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'none'
+          const assistant = s?.assistants?.assistants?.[0]
+          return assistant?.model?.id === 'mock-model' && assistant?.settings?.reasoning_effort === 'high'
         },
         undefined,
         { timeout: 15000 }
       )
-      const normalized = await getAssistantState(page)
-      expect(normalized.effort).toBe('none')
+      const preserved = await getAssistantState(page)
+      expect(preserved.effort).toBe('high')
+    })
+
+    await test.step('preserved level still sends on the encodable endpoint', async () => {
+      clearRequestLog()
+      const before = getRequestSequence()
+      const state = await getAssistantState(page)
+      const prevAssistantCount = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        let count = 0
+        for (const id of msgIds) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        return count
+      }, state.topicId)
+      await uiSendMessage(page, 'E2E preserved reasoning still sends')
+      await waitForAssistantResponseComplete(page, state.topicId, prevAssistantCount)
+      const request = findProductRequestAfter(before)
+      expect(request).not.toBeNull()
+      const parsed = request!.parsed as any
+      expect(parsed?.model).toBe('mock-model')
+      expect(parsed?.reasoning_effort).toBe('high')
     })
   })
 })

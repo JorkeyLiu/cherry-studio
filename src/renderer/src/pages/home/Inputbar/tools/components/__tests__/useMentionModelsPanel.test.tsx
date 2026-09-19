@@ -34,8 +34,7 @@ vi.mock('@renderer/components/QuickPanel', () => ({
 
 vi.mock('@renderer/config/models', () => ({
   isEmbeddingModel: () => false,
-  isRerankModel: () => false,
-  isVisionModel: () => false
+  isRerankModel: () => false
 }))
 
 vi.mock('@renderer/databases', () => ({
@@ -60,6 +59,17 @@ vi.mock('@renderer/utils', () => ({
 
 vi.mock('@renderer/components/ModelTagsWithLabel', () => ({
   default: () => null
+}))
+
+vi.mock('@renderer/components/Avatar/ModelAvatar', () => ({
+  default: ({ model, provider, size }: any) => (
+    <div
+      data-testid={`model-avatar-${model?.id ?? 'unknown'}`}
+      data-model-id={model?.id ?? ''}
+      data-provider-id={provider?.id ?? ''}
+      data-size={String(size ?? '')}
+    />
+  )
 }))
 
 if (!window.matchMedia) {
@@ -102,7 +112,6 @@ function makeParams() {
     },
     mentionedModels: [] as ReturnType<typeof model>[],
     setMentionedModels: mocks.setMentionedModels,
-    couldMentionNotVisionModel: true,
     files: [],
     setText: vi.fn()
   }
@@ -184,5 +193,25 @@ describe('useMentionModelsPanel temporary selector', () => {
     })
     // The panel toggles the temporary mention list — not assistant state.
     expect(mocks.setMentionedModels).toHaveBeenCalled()
+  })
+
+  it('renders ModelAvatar icons with the exact model and owning provider at size 20', () => {
+    mocks.providers.providers = [provider('openai', [model('gpt-4o')])]
+    const params = makeParams()
+    const { result } = renderHook(() => useMentionModelsPanel(params as never))
+    act(() => {
+      result.current.openQuickPanel({ type: 'button' })
+    })
+
+    const list = mocks.open.mock.calls[0][0].list as Array<{
+      filterText?: string
+      icon?: { props?: { model?: { id?: string }; provider?: { id?: string }; size?: number } }
+    }>
+    const modelItem = list.find((item) => typeof item.filterText === 'string' && item.filterText.includes('gpt-4o'))
+    expect(modelItem).toBeTruthy()
+    // Business filtering is unchanged: non-embedding/non-rerank models still list.
+    expect(modelItem?.icon?.props?.model?.id).toBe('gpt-4o')
+    expect(modelItem?.icon?.props?.provider?.id).toBe('openai')
+    expect(modelItem?.icon?.props?.size).toBe(20)
   })
 })

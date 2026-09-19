@@ -2288,8 +2288,12 @@
       }
     },
     "attachments": {
+      "media_player_label": "媒體播放器：{{name}}",
+      "media_unsupported_format": "{{format}} 格式無法在應用內播放，但仍可傳送並使用預設應用程式開啟",
+      "open_with_default_app": "使用預設應用程式開啟",
       "pasted_image": "剪貼簿圖片",
       "pasted_text": "剪貼簿檔案",
+      "remove_attachment": "移除附件",
       "unavailable": "附件不可用"
     },
     "backup": {
@@ -2331,9 +2335,18 @@
     },
     "empty_url": "無法下載圖片，可能是提示詞包含敏感內容或違禁詞彙",
     "error": {
+      "attachment": {
+        "attach_failed": "無法附加「{{name}}」（{{type}}）：{{reason}}",
+        "encode_unsupported": "無法附加「{{name}}」（{{type}}）：目前端點無法編碼此格式",
+        "image_url_failed": "附加圖片（連結）失敗：{{reason}}",
+        "text_extraction_failed": "無法從附件「{{name}}」（{{type}}）中擷取文字：{{reason}}"
+      },
       "chunk_overlap_too_large": "分段重疊不能大於分段大小",
       "copy": "複製失敗",
       "dimension_too_large": "內容尺寸過大",
+      "endpoint": {
+        "web_search_unsupported": "網路搜尋無法在 {{endpoint}} 端點上編碼：目前提供者沒有顯式搜尋介面卡"
+      },
       "enter": {
         "api": {
           "host": "請先輸入您的 API 主機位址",
@@ -2670,6 +2683,19 @@
   "models": {
     "add_parameter": "新增參數",
     "all": "全部",
+    "capabilities": {
+      "feature_reasoning": "推理",
+      "feature_structured_output": "結構化輸出",
+      "feature_temperature": "溫度",
+      "feature_tool_call": "工具呼叫",
+      "features": "模型特性",
+      "input_modalities": "輸入模態",
+      "modality_audio": "音訊",
+      "modality_image": "圖像",
+      "modality_pdf": "PDF",
+      "modality_text": "文字",
+      "modality_video": "影片"
+    },
     "custom_parameters": "自訂參數",
     "dimensions": "{{dimensions}} 維",
     "edit": "編輯模型",
@@ -2711,22 +2737,27 @@
       "cache_write": "快取寫入",
       "context_limit": "上下文長度",
       "context_over_200k": "超 200k 上下文",
-      "description": "唯讀參考值。您儲存的價格保持權威。",
-      "family": "系列",
       "input": "輸入",
       "input_audio": "音訊輸入",
-      "input_limit": "輸入上限",
       "knowledge_cutoff": "知識截止",
+      "loading": "正在取得模型元資料…",
+      "no_data": "暫無模型元資料",
       "output": "輸出",
       "output_audio": "音訊輸出",
-      "output_limit": "輸出上限",
       "per_million_tokens": "/ 百萬 Token",
       "reasoning": "推理",
+      "reasoning_controls": "推理控制",
+      "reasoning_support": "推理支援",
       "release_date": "發佈日期",
-      "status": "狀態",
+      "structured_output": "結構化輸出",
+      "supported": "支援",
+      "temperature": "溫度控制",
+      "tiered_pricing": "分層定價",
       "tiered_pricing_note": "上游存在階梯價格",
-      "title": "參考",
-      "use_pricing": "使用參考價格"
+      "title": "模型資料",
+      "tool_call": "工具呼叫",
+      "unavailable": "無法取得模型元資料",
+      "unsupported": "不支援"
     },
     "rerank_model": "重排模型",
     "rerank_model_not_support_provider": "目前，重新排序模型不支援此提供者（{{provider}}）",

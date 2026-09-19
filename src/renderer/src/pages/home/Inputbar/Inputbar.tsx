@@ -1,13 +1,5 @@
 import { loggerService } from '@logger'
-import {
-  isAutoEnableImageGenerationModel,
-  isGenerateImageModel,
-  isGenerateImageModels,
-  isMandatoryWebSearchModel,
-  isVisionModel,
-  isVisionModels,
-  isWebSearchModel
-} from '@renderer/config/models'
+import { isAutoEnableImageGenerationModel, isGenerateImageModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useInputText } from '@renderer/hooks/useInputText'
 import { useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
@@ -43,7 +35,7 @@ import {
 } from '@renderer/types'
 import type { MessageInputBaseParams } from '@renderer/types/newMessage'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
-import { documentExts, imageExts, textExts } from '@shared/config/constant'
+import { audioExts, documentExts, imageExts, textExts, videoExts } from '@shared/config/constant'
 import type { FC } from 'react'
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -192,48 +184,19 @@ const InputbarInner: FC<InputbarInnerProps> = ({
 
   const dispatch = useAppDispatch()
   const { runSend } = useSendInFlightGuard()
-  const isVisionAssistant = useMemo(() => isVisionModel(model), [model])
-  const isGenerateImageAssistant = useMemo(() => isGenerateImageModel(model), [model])
   const { setTimeoutTimer } = useTimer()
   // isEditMode removed: inputbar should remain visible in edit mode
 
-  const isVisionSupported = useMemo(
-    () =>
-      (mentionedModels.length > 0 && isVisionModels(mentionedModels)) ||
-      (mentionedModels.length === 0 && isVisionAssistant),
-    [mentionedModels, isVisionAssistant]
-  )
+  // Unit B: ordinary chat is user-intent driven. Attachment selection (images,
+  // audio, video, documents, text) is never gated by vision metadata; the
+  // endpoint/adapter matrix decides encodability at send time with explicit
+  // failures.
 
-  const isGenerateImageSupported = useMemo(
-    () =>
-      (mentionedModels.length > 0 && isGenerateImageModels(mentionedModels)) ||
-      (mentionedModels.length === 0 && isGenerateImageAssistant),
-    [mentionedModels, isGenerateImageAssistant]
-  )
-
-  const canAddImageFile = useMemo(() => {
-    return isVisionSupported || isGenerateImageSupported
-  }, [isGenerateImageSupported, isVisionSupported])
-
-  const canAddTextFile = useMemo(() => {
-    return isVisionSupported || (!isVisionSupported && !isGenerateImageSupported)
-  }, [isGenerateImageSupported, isVisionSupported])
+  const canAddImageFile = useMemo(() => true, [])
 
   const supportedExts = useMemo(() => {
-    if (canAddImageFile && canAddTextFile) {
-      return [...imageExts, ...documentExts, ...textExts]
-    }
-
-    if (canAddImageFile) {
-      return [...imageExts]
-    }
-
-    if (canAddTextFile) {
-      return [...documentExts, ...textExts]
-    }
-
-    return []
-  }, [canAddImageFile, canAddTextFile])
+    return [...imageExts, ...audioExts, ...videoExts, ...documentExts, ...textExts]
+  }, [])
 
   useEffect(() => {
     setCouldAddImageFile(canAddImageFile)
@@ -439,16 +402,11 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   }, [assistant.knowledge_bases, setSelectedKnowledgeBases])
 
   useEffect(() => {
-    // Disable web search if model doesn't support it
-    if (!isWebSearchModel(model) && assistant.enableWebSearch) {
-      updateAssistant({ ...assistant, enableWebSearch: false })
-    }
-
-    // Clear web search provider if disabled or model has mandatory search
-    if (
-      assistant.webSearchProviderId &&
-      (!WebSearchService.isWebSearchEnabled(assistant.webSearchProviderId) || isMandatoryWebSearchModel(model))
-    ) {
+    // Unit B: no model-name web-search auto-close. Built-in search availability
+    // follows the current provider's explicit search adapter at request time
+    // (missing adapter fails explicitly there); the user's toggle is preserved.
+    // Clear web search provider if disabled
+    if (assistant.webSearchProviderId && !WebSearchService.isWebSearchEnabled(assistant.webSearchProviderId)) {
       updateAssistant({ ...assistant, webSearchProviderId: undefined })
     }
 

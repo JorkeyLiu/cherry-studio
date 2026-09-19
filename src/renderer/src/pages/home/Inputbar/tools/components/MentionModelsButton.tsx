@@ -15,7 +15,6 @@ interface Props {
   quickPanelController: ToolQuickPanelController
   mentionedModels: Model[]
   setMentionedModels: React.Dispatch<React.SetStateAction<Model[]>>
-  couldMentionNotVisionModel: boolean
   files: FileMetadata[]
   setText: React.Dispatch<React.SetStateAction<string>>
 }
@@ -25,7 +24,6 @@ const MentionModelsButton: FC<Props> = ({
   quickPanelController,
   mentionedModels,
   setMentionedModels,
-  couldMentionNotVisionModel,
   files,
   setText
 }) => {
@@ -37,7 +35,6 @@ const MentionModelsButton: FC<Props> = ({
       quickPanelController,
       mentionedModels,
       setMentionedModels,
-      couldMentionNotVisionModel,
       files,
       setText
     },

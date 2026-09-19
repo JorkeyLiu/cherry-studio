@@ -5,10 +5,17 @@ import { Avatar } from 'antd'
 import React from 'react'
 import styled from 'styled-components'
 
+import { ModelsDevLogoMark } from './Avatar/ModelsDevLogoMark'
+
+/** Logo origin: custom uploads stay full-color `<img>`; models.dev renders as a theme mask. */
+export type ProviderLogoKind = 'custom' | 'models-dev'
+
 interface ProviderAvatarPrimitiveProps {
   providerId: string
   providerName: string
   logoSrc?: string
+  /** Defaults to `custom` to preserve the full-color `<img>` path for existing callers. */
+  logoKind?: ProviderLogoKind
   size?: number
   className?: string
   style?: React.CSSProperties
@@ -33,21 +40,15 @@ const ProviderLogo = styled(Avatar)`
 export const ProviderAvatarPrimitive: React.FC<ProviderAvatarPrimitiveProps> = ({
   providerName,
   logoSrc,
+  logoKind = 'custom',
   size,
   className,
   style
 }) => {
-  if (logoSrc) {
-    return (
-      <ProviderLogo draggable="false" shape="circle" src={logoSrc} className={className} style={style} size={size} />
-    )
-  }
-
   const displayName = providerName?.trim() ? providerName : ''
   const backgroundColor = generateColorFromChar(displayName || 'P')
   const color = displayName ? getForegroundColor(backgroundColor) : 'white'
-
-  return (
+  const fallback = (
     <ProviderLogo
       size={size}
       shape="circle"
@@ -60,6 +61,28 @@ export const ProviderAvatarPrimitive: React.FC<ProviderAvatarPrimitiveProps> = (
       {getFirstCharacter(displayName) || 'P'}
     </ProviderLogo>
   )
+
+  if (logoSrc) {
+    // models.dev remote logos (safe-cache data URLs) render as a monochrome
+    // theme mask on transparency; custom uploads keep their original colors.
+    if (logoKind === 'models-dev') {
+      return (
+        <ModelsDevLogoMark
+          src={logoSrc}
+          size={size ?? 32}
+          fallback={fallback}
+          className={className}
+          style={style}
+          label={displayName || 'provider logo'}
+        />
+      )
+    }
+    return (
+      <ProviderLogo draggable="false" shape="circle" src={logoSrc} className={className} style={style} size={size} />
+    )
+  }
+
+  return fallback
 }
 
 export const ProviderAvatar: React.FC<ProviderAvatarProps> = ({
@@ -77,6 +100,7 @@ export const ProviderAvatar: React.FC<ProviderAvatarProps> = ({
   const hookLogo = useProviderModelsDevLogo(customLogo ? null : provider)
   const modelsDevLogo = modelsDevLogoSrc !== undefined ? modelsDevLogoSrc : hookLogo
   const logoSrc = customLogo ?? modelsDevLogo ?? undefined
+  const logoKind: ProviderLogoKind = customLogo ? 'custom' : 'models-dev'
 
   if (logoSrc) {
     return (
@@ -84,6 +108,7 @@ export const ProviderAvatar: React.FC<ProviderAvatarProps> = ({
         providerId={provider.id}
         providerName={provider.name}
         logoSrc={logoSrc}
+        logoKind={logoKind}
         size={size}
         className={className}
         style={style}

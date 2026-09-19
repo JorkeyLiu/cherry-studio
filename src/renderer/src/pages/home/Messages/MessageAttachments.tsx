@@ -1,13 +1,17 @@
 import { PaperClipOutlined } from '@ant-design/icons'
+import MediaAttachmentPreview from '@renderer/components/MediaAttachmentPreview'
 import { useAttachment } from '@renderer/hooks/useAttachment'
 import FileManager from '@renderer/services/FileManager'
 import type { FileMessageBlock } from '@renderer/types/newMessage'
 import { parseFileTypes } from '@renderer/utils'
 import { isBlockAttachmentUnavailable } from '@renderer/utils/attachmentAvailability'
+import { buildMediaOpenRequest, getMediaKind, toMediaFileUrl } from '@renderer/utils/mediaAttachment'
 import { Tooltip, Upload } from 'antd'
 import { t } from 'i18next'
 import type { FC } from 'react'
 import styled from 'styled-components'
+
+import { getFileIcon } from '../Inputbar/AttachmentPreview'
 
 interface Props {
   block: FileMessageBlock
@@ -26,7 +30,7 @@ const StyledUpload = styled(Upload)`
 `
 
 const MessageAttachments: FC<Props> = ({ block }) => {
-  const { preview } = useAttachment()
+  const { preview, openWithDefaultApp } = useAttachment()
 
   if (!block.file) {
     return null
@@ -53,6 +57,31 @@ const MessageAttachments: FC<Props> = ({ block }) => {
             <UnavailableStatus>{unavailableText}</UnavailableStatus>
           </UnavailableItem>
         </Tooltip>
+      </Container>
+    )
+  }
+
+  // Ordinary audio/video file attachments preview in-app with a native
+  // HTML5 player; the system default app is an explicit secondary action
+  // through the narrow media IPC. Unplayable formats and missing sources
+  // render the generic media card without a `file://` URL or IPC.
+  const mediaKind = getMediaKind(block.file)
+  if (mediaKind === 'audio' || mediaKind === 'video') {
+    const src = toMediaFileUrl(FileManager.getSafePath(block.file))
+    const request = buildMediaOpenRequest(block.file, 'stored')
+    return (
+      <Container style={{ marginTop: 2, marginBottom: 8 }} className="message-attachments">
+        <MediaAttachmentPreview
+          file={block.file}
+          src={src}
+          icon={getFileIcon(block.file.ext)}
+          onOpenWithDefaultApp={() => {
+            if (request) {
+              void openWithDefaultApp(request)
+            }
+          }}
+          defaultAppDisabled={!request}
+        />
       </Container>
     )
   }

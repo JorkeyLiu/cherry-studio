@@ -4,27 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useModelTagFilter } from '../filters'
 
-const mocks = vi.hoisted(() => ({
-  isVisionModel: vi.fn(),
-  isEmbeddingModel: vi.fn(),
-  isReasoningModel: vi.fn(),
-  isFunctionCallingModel: vi.fn(),
-  isWebSearchModel: vi.fn(),
-  isRerankModel: vi.fn(),
-  isFreeModel: vi.fn()
-}))
+const mocks = vi.hoisted(() => ({ supportsInputModality: vi.fn() }))
 
-vi.mock('@renderer/config/models', () => ({
-  isEmbeddingModel: mocks.isEmbeddingModel,
-  isFunctionCallingModel: mocks.isFunctionCallingModel,
-  isReasoningModel: mocks.isReasoningModel,
-  isRerankModel: mocks.isRerankModel,
-  isVisionModel: mocks.isVisionModel,
-  isWebSearchModel: mocks.isWebSearchModel
-}))
-
-vi.mock('@renderer/utils/model', () => ({
-  isFreeModel: mocks.isFreeModel
+vi.mock('@renderer/utils/inputModalities', () => ({
+  supportsInputModality: mocks.supportsInputModality
 }))
 
 function createModel(overrides: Partial<Model> = {}): Model {
@@ -37,86 +20,89 @@ function createModel(overrides: Partial<Model> = {}): Model {
   }
 }
 
-describe('useModelTagFilter', () => {
+describe('useModelTagFilter (five input modalities)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.supportsInputModality.mockReturnValue(false)
   })
 
-  it('should have all tags unselected initially', () => {
+  it('should have all modalities unselected initially', () => {
     const { result } = renderHook(() => useModelTagFilter())
 
     expect(result.current.tagSelection).toEqual({
-      vision: false,
-      embedding: false,
-      reasoning: false,
-      function_calling: false,
-      web_search: false,
-      rerank: false,
-      free: false
+      text: false,
+      image: false,
+      audio: false,
+      video: false,
+      pdf: false
     })
     expect(result.current.selectedTags).toEqual([])
   })
 
-  it('should toggle a tag state', () => {
+  it('should toggle a modality state', () => {
     const { result } = renderHook(() => useModelTagFilter())
 
-    act(() => result.current.toggleTag('vision'))
-    expect(result.current.tagSelection.vision).toBe(true)
-    expect(result.current.selectedTags).toEqual(['vision'])
+    act(() => result.current.toggleTag('image'))
+    expect(result.current.tagSelection.image).toBe(true)
+    expect(result.current.selectedTags).toEqual(['image'])
 
-    act(() => result.current.toggleTag('vision'))
-    expect(result.current.tagSelection.vision).toBe(false)
+    act(() => result.current.toggleTag('image'))
+    expect(result.current.tagSelection.image).toBe(false)
     expect(result.current.selectedTags).toEqual([])
   })
 
-  it('should reset all tags to false', () => {
+  it('should reset all modalities to false', () => {
     const { result } = renderHook(() => useModelTagFilter())
 
-    act(() => result.current.toggleTag('vision'))
-    act(() => result.current.toggleTag('embedding'))
-    expect(result.current.selectedTags.sort()).toEqual(['embedding', 'vision'])
+    act(() => result.current.toggleTag('text'))
+    act(() => result.current.toggleTag('pdf'))
+    expect(result.current.selectedTags.sort()).toEqual(['pdf', 'text'])
 
     act(() => result.current.resetTags())
     expect(result.current.selectedTags).toEqual([])
     expect(Object.values(result.current.tagSelection).every((v) => v === false)).toBe(true)
   })
 
-  it('tagFilter returns true when no tags selected', () => {
+  it('tagFilter returns true when no modalities selected', () => {
     const { result } = renderHook(() => useModelTagFilter())
     const model = createModel()
     const passed = result.current.tagFilter(model)
     expect(passed).toBe(true)
-    expect(mocks.isVisionModel).not.toHaveBeenCalled()
+    expect(mocks.supportsInputModality).not.toHaveBeenCalled()
   })
 
-  it('tagFilter uses single selected tag predicate', () => {
+  it('tagFilter uses single selected modality predicate with provider', () => {
     const { result } = renderHook(() => useModelTagFilter())
     const model = createModel()
+    const provider = { id: 'openai' } as never
 
-    mocks.isVisionModel.mockReturnValueOnce(true)
-    act(() => result.current.toggleTag('vision'))
+    mocks.supportsInputModality.mockReturnValueOnce(true)
+    act(() => result.current.toggleTag('audio'))
 
-    const ok = result.current.tagFilter(model)
+    const ok = result.current.tagFilter(model, provider)
     expect(ok).toBe(true)
-    expect(mocks.isVisionModel).toHaveBeenCalledTimes(1)
-    expect(mocks.isVisionModel).toHaveBeenCalledWith(model)
+    expect(mocks.supportsInputModality).toHaveBeenCalledTimes(1)
+    expect(mocks.supportsInputModality).toHaveBeenCalledWith(model, 'audio', provider)
   })
 
-  it('tagFilter requires all selected tags to match (AND logic)', () => {
+  it('tagFilter requires all selected modalities to match (AND logic)', () => {
     const { result } = renderHook(() => useModelTagFilter())
     const model = createModel()
 
-    act(() => result.current.toggleTag('vision'))
-    act(() => result.current.toggleTag('embedding'))
+    act(() => result.current.toggleTag('text'))
+    act(() => result.current.toggleTag('image'))
 
-    // 第一次：vision=true, embedding=false => 应为 false
-    mocks.isVisionModel.mockReturnValueOnce(true)
-    mocks.isEmbeddingModel.mockReturnValueOnce(false)
+    mocks.supportsInputModality.mockReturnValueOnce(true).mockReturnValueOnce(false)
     expect(result.current.tagFilter(model)).toBe(false)
 
-    // 第二次：vision=true, embedding=true => 应为 true
-    mocks.isVisionModel.mockReturnValueOnce(true)
-    mocks.isEmbeddingModel.mockReturnValueOnce(true)
+    mocks.supportsInputModality.mockReturnValueOnce(true).mockReturnValueOnce(true)
     expect(result.current.tagFilter(model)).toBe(true)
+  })
+
+  it('tagFilter excludes unknown entries (predicate false)', () => {
+    const { result } = renderHook(() => useModelTagFilter())
+    mocks.supportsInputModality.mockReturnValue(false)
+    act(() => result.current.toggleTag('video'))
+    expect(result.current.tagFilter(createModel())).toBe(false)
   })
 })

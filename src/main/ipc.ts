@@ -608,6 +608,7 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.File_BatchUploadMarkdown, fileManager.batchUploadMarkdownFiles.bind(fileManager))
   ipcMain.handle(IpcChannel.File_ShowInFolder, fileManager.showInFolder.bind(fileManager))
   ipcMain.handle(IpcChannel.File_Exists, fileManager.fileExists.bind(fileManager))
+  ipcMain.handle(IpcChannel.File_OpenMediaAttachment, fileManager.openMediaAttachment.bind(fileManager))
 
   // pdf
   ipcMain.handle(IpcChannel.Pdf_ExtractText, (_, data: Uint8Array | ArrayBuffer | string) => extractPdfText(data))

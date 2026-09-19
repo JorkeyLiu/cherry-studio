@@ -8,10 +8,9 @@ import type { WebSearchPluginConfig } from '@cherrystudio/ai-core/built-in/plugi
 import { extensionRegistry } from '@cherrystudio/ai-core/provider'
 import { loggerService } from '@logger'
 import { MAX_TOOL_CALLS, MIN_TOOL_CALLS } from '@renderer/config/constant'
-import { isFixedReasoningModel, isReasoningModel } from '@renderer/config/models/reasoning'
+import { isFixedReasoningModel } from '@renderer/config/models/reasoning'
 import { isAnthropicModel, isGeminiModel } from '@renderer/config/models/utils'
 import { isGenerateImageModel, isPureGenerateImageModel } from '@renderer/config/models/vision'
-import { isOpenRouterBuiltInWebSearchModel, isWebSearchModel } from '@renderer/config/models/websearch'
 import { getHubModeSystemPrompt } from '@renderer/config/prompts-code-mode'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/assistantDefaults'
 import store from '@renderer/store'
@@ -30,6 +29,7 @@ import type { ProviderCapabilities } from '../types'
 import { setupToolsConfig } from '../utils/mcp'
 import { buildProviderOptions } from '../utils/options'
 import { buildProviderBuiltinWebSearchConfig } from '../utils/websearch'
+import { webSearchEndpointError } from './attachmentErrors'
 import { addAnthropicHeaders } from './header'
 import { filterStandardParams, getMaxTokens, getTemperature, getTopP } from './modelParameters'
 
@@ -105,27 +105,23 @@ export async function buildStreamTextParams(
   }
   const aiSdkProviderId = getAiSdkProviderId(provider)
 
-  // 这三个变量透传出来，交给下面启用插件/中间件
-  // 也可以在外部构建好再传入buildStreamTextParams
-  // Single-resolver gating: reasoning capability (user override -> exact
-  // external -> heuristic) drives enablement; `default` still enables the
-  // path but each lane emits {} for no-override. Fixed reasoning always
-  // enables so lanes can attach required thinking metadata.
-  const enableReasoning =
-    (isReasoningModel(model) && assistant.settings?.reasoning_effort !== undefined) || isFixedReasoningModel(model)
+  // Unit B: user-intent lazy execution. Reasoning is enabled whenever the user
+  // has an explicit setting (`default` still means no override; lanes emit {}
+  // for it). Fixed-reasoning protocol facts still enable the path. No model
+  // name/metadata veto.
+  const enableReasoning = assistant.settings?.reasoning_effort !== undefined || isFixedReasoningModel(model)
 
-  // 判断是否使用内置搜索
-  // 条件：没有外部搜索提供商 && (用户开启了内置搜索 || 模型强制使用内置搜索)
-  // Built-in is claimed only when a safe standard emitter exists:
-  // isWebSearchModel/isOpenRouterBuiltInWebSearchModel are already gated so
-  // generic OpenAI-compatible is true only for the web_search_options family.
-  // The raw `sonar` substring fallback is intentionally gone: it bypassed
-  // capability gating and forced built-in on generic connections that cannot
-  // emit safe params. External RAG (webSearchProviderId) stays distinct.
+  // Unit B: built-in web search is gated by the current provider's explicit
+  // search adapter only (openai/openai-chat/anthropic/google toolFactories),
+  // never by model names/metadata. Generic OpenAI-compatible has no search
+  // adapter and never claims built-in search (no fabricated fields). External
+  // RAG (webSearchProviderId) stays distinct. Ordinary-chat path only.
   const hasExternalSearch = !!options.webSearchProviderId
-  const enableWebSearch =
-    !hasExternalSearch &&
-    ((assistant.enableWebSearch && isWebSearchModel(model)) || isOpenRouterBuiltInWebSearchModel(model))
+  const hasBuiltinSearchAdapter = ['openai', 'openai-chat', 'anthropic', 'google'].includes(aiSdkProviderId)
+  const enableWebSearch = !hasExternalSearch && !!assistant.enableWebSearch && hasBuiltinSearchAdapter
+  if (!hasExternalSearch && assistant.enableWebSearch && !hasBuiltinSearchAdapter) {
+    throw webSearchEndpointError(aiSdkProviderId)
+  }
 
   // Validate provider and model support to prevent stale state from triggering urlContext
   const enableUrlContext = !!(

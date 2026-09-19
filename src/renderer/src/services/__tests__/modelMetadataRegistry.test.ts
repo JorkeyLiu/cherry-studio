@@ -8,14 +8,19 @@ vi.mock('@logger', () => ({
 import type { ModelMetadataSnapshot } from '@shared/modelMetadata'
 
 import {
+  getModelMetadataStatus,
+  getModelMetadataStatusSnapshot,
   initModelMetadataRegistry,
   lookupModelMetadata,
   normalizeApiUrl,
+  refreshModelMetadataRegistry,
   resolveMetadataSource,
   resolveModelMetadata,
   resolveProviderForMetadata,
   setMetadataProviderResolver,
-  setModelMetadataSnapshotForTests
+  setModelMetadataSnapshotForTests,
+  setModelMetadataStatusForTests,
+  subscribeModelMetadataStatus
 } from '../modelMetadata'
 
 const SNAPSHOT: ModelMetadataSnapshot = {
@@ -248,6 +253,131 @@ describe('resolveProviderForMetadata — injected accessor, exact match only', (
       expect(resolveProviderForMetadata(makeModel('m', 'a'))).toBeNull()
     } finally {
       setMetadataProviderResolver(null)
+    }
+  })
+})
+
+describe('modelMetadata status subscription — stable useSyncExternalStore source', () => {
+  it('starts loading with a stable reference and notifies on transitions', () => {
+    setModelMetadataSnapshotForTests(null)
+    const first = getModelMetadataStatusSnapshot()
+    expect(first).toEqual({ kind: 'loading', snapshot: null })
+
+    const seen: string[] = []
+    const unsubscribe = subscribeModelMetadataStatus(() => {
+      seen.push(getModelMetadataStatusSnapshot().kind)
+    })
+    try {
+      // installing a snapshot transitions to ready with one notification
+      setModelMetadataSnapshotForTests(SNAPSHOT)
+      expect(seen).toEqual(['ready'])
+      // the reference is stable until the next transition (no fresh objects)
+      expect(getModelMetadataStatusSnapshot()).toBe(getModelMetadataStatus())
+      const readyRef = getModelMetadataStatusSnapshot()
+      expect(getModelMetadataStatusSnapshot()).toBe(readyRef)
+      // clearing back transitions to loading with one notification
+      setModelMetadataSnapshotForTests(null)
+      expect(seen).toEqual(['ready', 'loading'])
+    } finally {
+      unsubscribe()
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('stops notifying after unsubscribe', () => {
+    setModelMetadataSnapshotForTests(null)
+    const listener = vi.fn()
+    const unsubscribe = subscribeModelMetadataStatus(listener)
+    unsubscribe()
+    setModelMetadataSnapshotForTests(SNAPSHOT)
+    expect(listener).not.toHaveBeenCalled()
+    setModelMetadataSnapshotForTests(null)
+  })
+
+  it('adopts a Main-reported unavailable status with its sanitized reason', async () => {
+    const getSnapshot = vi.fn().mockResolvedValue(null)
+    const getStatus = vi.fn().mockResolvedValue({ kind: 'unavailable', snapshot: null, reason: 'timeout' })
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot, getStatus } }
+    try {
+      setModelMetadataSnapshotForTests(null)
+      await expect(initModelMetadataRegistry()).resolves.toBeNull()
+      expect(getModelMetadataStatus()).toEqual({ kind: 'unavailable', snapshot: null, reason: 'timeout' })
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('stays loading (never unavailable) while Main reports a round in flight', async () => {
+    const getSnapshot = vi.fn().mockResolvedValue(null)
+    const getStatus = vi.fn().mockResolvedValue({ kind: 'loading', snapshot: null })
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot, getStatus } }
+    try {
+      setModelMetadataSnapshotForTests(null)
+      await expect(initModelMetadataRegistry()).resolves.toBeNull()
+      expect(getModelMetadataStatus()).toEqual({ kind: 'loading', snapshot: null })
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('marks completed IPC failures unavailable with a sanitized reason', async () => {
+    // compat surface (no getStatus): a throwing read is a completed failure
+    const failing = vi.fn().mockRejectedValue(new Error('ipc down'))
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot: failing } }
+    try {
+      setModelMetadataSnapshotForTests(null)
+      await expect(initModelMetadataRegistry()).resolves.toBeNull()
+      expect(getModelMetadataStatus()).toEqual({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('keeps an existing snapshot ready across a failed refresh', async () => {
+    const refresh = vi.fn().mockRejectedValue(new Error('ipc down'))
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { refresh } }
+    try {
+      setModelMetadataSnapshotForTests(SNAPSHOT)
+      await expect(refreshModelMetadataRegistry()).resolves.toEqual(SNAPSHOT)
+      expect(getModelMetadataStatus().kind).toBe('ready')
+      expect(getModelMetadataStatus().snapshot).toEqual(SNAPSHOT)
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('notifies subscribers when the async init round completes', async () => {
+    const getSnapshot = vi.fn().mockResolvedValue(SNAPSHOT)
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot } }
+    try {
+      setModelMetadataSnapshotForTests(null)
+      const kinds: string[] = []
+      const unsubscribe = subscribeModelMetadataStatus(() => {
+        kinds.push(getModelMetadataStatusSnapshot().kind)
+      })
+      try {
+        expect(getModelMetadataStatus().kind).toBe('loading')
+        await expect(initModelMetadataRegistry()).resolves.toEqual(SNAPSHOT)
+        expect(kinds[kinds.length - 1]).toBe('ready')
+      } finally {
+        unsubscribe()
+      }
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('exposes an explicit test-only status seam', () => {
+    setModelMetadataStatusForTests({ kind: 'unavailable', snapshot: null, reason: 'http-error' })
+    try {
+      expect(getModelMetadataStatus()).toEqual({ kind: 'unavailable', snapshot: null, reason: 'http-error' })
+    } finally {
+      setModelMetadataSnapshotForTests(null)
     }
   })
 })

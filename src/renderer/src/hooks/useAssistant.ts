@@ -26,7 +26,7 @@ import {
   updateTopics
 } from '@renderer/store/assistants'
 import { setDefaultModel, setQuickModel, setTranslateModel } from '@renderer/store/llm'
-import type { Assistant, AssistantSettings, Model, ThinkingOption, Topic } from '@renderer/types'
+import type { Assistant, AssistantSettings, Model, Topic } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
 import { uuid } from '@renderer/utils'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
@@ -126,7 +126,12 @@ export function useAssistant(id: string) {
     [assistant?.id, dispatch]
   )
 
-  // 当model变化时，同步reasoning effort为模型支持的合法值
+  // Unit B: user-intent lazy execution. Model switches never coerce the active
+  // reasoning effort to `none`/`default` because of reasoning metadata, and a
+  // concrete user level is never rejected for not appearing in a model-name
+  // derived list. Per-model memory restore on switch is preserved; fixed
+  // reasoning (`default` only, no controllable params) keeps its protocol fact
+  // without touching the active value.
   useEffect(() => {
     // Model may be explicitly unconfigured (undefined). Skip the model-driven
     // reasoning-effort sync — nothing to sync without a model.
@@ -143,10 +148,6 @@ export function useAssistant(id: string) {
         reasoningEffortByModel[previousModelKey] = currentReasoningEffort
       }
 
-      // Single-resolver normalization: the same priority + lane-filtered
-      // options drive UI, gating, and requests. Never guess `supported[0]`
-      // and never change to an unrelated level: mismatches fall back to
-      // `default` (no override), which every lane emits as {}.
       const supportedOptions = getModelSupportedReasoningEffortOptions(model)
       const isControllable = !!supportedOptions && supportedOptions.filter((option) => option !== 'default').length > 0
       if (isControllable && supportedOptions) {
@@ -163,29 +164,18 @@ export function useAssistant(id: string) {
               qwenThinkMode: modelCachedOption !== 'none' && modelCachedOption !== 'default'
             })
           }
-        } else if (isModelChanged || !currentReasoningEffort || !supportedOptions.includes(currentReasoningEffort)) {
-          const cache = settings.reasoning_effort_cache
-          // Mismatch: restore per-model memory, then last-used cache, else
-          // `default` (no override). No `supported[0]` guessing.
-          const fallbackOption: ThinkingOption = cache && supportedOptions.includes(cache) ? cache : 'default'
-
-          if (currentModelKey) {
-            reasoningEffortByModel[currentModelKey] = fallbackOption
-          }
-
-          updateAssistantSettings({
-            reasoning_effort: fallbackOption,
-            reasoning_effort_by_model: reasoningEffortByModel,
-            reasoning_effort_cache: fallbackOption,
-            qwenThinkMode: fallbackOption !== 'none' && fallbackOption !== 'default'
-          })
-        } else {
+        } else if (currentReasoningEffort) {
+          // Keep the explicit user level even when it is absent from the
+          // model-derived list (endpoint/adapter decides encodability at
+          // request time). Only record per-model memory/cache bookkeeping.
           if (
             currentModelKey &&
-            currentReasoningEffort &&
-            reasoningEffortByModel[currentModelKey] !== currentReasoningEffort
+            (reasoningEffortByModel[currentModelKey] !== currentReasoningEffort ||
+              settings.reasoning_effort_cache !== currentReasoningEffort)
           ) {
-            reasoningEffortByModel[currentModelKey] = currentReasoningEffort
+            if (currentModelKey) {
+              reasoningEffortByModel[currentModelKey] = currentReasoningEffort
+            }
             updateAssistantSettings({
               reasoning_effort_by_model: reasoningEffortByModel,
               reasoning_effort_cache: currentReasoningEffort,
@@ -195,19 +185,8 @@ export function useAssistant(id: string) {
         }
       } else if (isReasoningModel(model)) {
         // Fixed reasoning (resolved `default` only): no strength menu. Keep
-        // the active value at `default` (no override) while preserving
-        // per-model memory for controllable models.
-        if (currentReasoningEffort !== 'default') {
-          if (currentModelKey && currentReasoningEffort) {
-            reasoningEffortByModel[currentModelKey] = currentReasoningEffort
-          }
-          updateAssistantSettings({
-            reasoning_effort: 'default',
-            reasoning_effort_by_model: reasoningEffortByModel,
-            reasoning_effort_cache: currentReasoningEffort ?? settings.reasoning_effort_cache,
-            qwenThinkMode: false
-          })
-        } else if (
+        // the active value untouched while preserving per-model memory.
+        if (
           currentModelKey &&
           currentReasoningEffort &&
           reasoningEffortByModel[currentModelKey] !== currentReasoningEffort
@@ -219,20 +198,19 @@ export function useAssistant(id: string) {
           })
         }
       } else {
-        // 切换到非思考模型时保留当前模型缓存，active值设为none以表达显式关闭
-        const shouldUpdate =
-          currentReasoningEffort !== 'none' ||
-          (isModelChanged &&
-            previousModelKey &&
-            settings.reasoning_effort_by_model?.[previousModelKey] !== currentReasoningEffort) ||
-          settings.reasoning_effort_cache !== currentReasoningEffort
-
-        if (shouldUpdate) {
+        // Non-reasoning metadata models: preserve the user's active level
+        // (never coerce to `none`). Only keep per-model memory consistent.
+        if (
+          isModelChanged &&
+          currentModelKey &&
+          currentReasoningEffort &&
+          reasoningEffortByModel[currentModelKey] !== currentReasoningEffort
+        ) {
+          reasoningEffortByModel[currentModelKey] = currentReasoningEffort
           updateAssistantSettings({
-            reasoning_effort: 'none',
             reasoning_effort_by_model: reasoningEffortByModel,
             reasoning_effort_cache: currentReasoningEffort,
-            qwenThinkMode: false
+            qwenThinkMode: currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
           })
         }
       }

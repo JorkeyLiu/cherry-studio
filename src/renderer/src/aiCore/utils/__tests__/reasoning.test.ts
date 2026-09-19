@@ -153,13 +153,13 @@ describe('reasoning utils', () => {
         settings: { reasoning_effort }
       }) as Assistant
 
-    it('should return empty object for non-reasoning model', async () => {
+    it('sends the explicit user level for non-reasoning-metadata models (Unit B: no model veto)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(false)
       const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
       vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      expect(getReasoningEffort(makeAssistant('high'), makeModel())).toEqual({})
+      expect(getReasoningEffort(makeAssistant('high'), makeModel())).toEqual({ reasoningEffort: 'high' })
     })
 
     it('should return {} when reasoning effort is unset or default', async () => {
@@ -264,8 +264,10 @@ describe('reasoning utils', () => {
       expect(getReasoningEffort(makeAssistant('medium'), makeModel({ id: 'grok-3-mini' }))).toEqual({
         reasoningEffort: 'medium'
       })
-      // Unsupported selection returns {} (never guessed by supported[0], never an unrelated level).
-      expect(getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toEqual({})
+      // Unsupported selection throws with the explicit level (never supported[0], never an unrelated level).
+      expect(() => getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toThrow(
+        /xhigh.*cannot be encoded/
+      )
     })
 
     it('should use generic reasoningEffort for Gemini thinking families (no extra_body)', async () => {
@@ -286,7 +288,7 @@ describe('reasoning utils', () => {
       expect(result).not.toHaveProperty('extra_body')
     })
 
-    it('should keep unknown models requestable (empty params, never throws when provider exists)', async () => {
+    it('forwards the explicit user level for unknown models (Unit B: never silently drops, never throws when provider exists)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
@@ -306,7 +308,9 @@ describe('reasoning utils', () => {
       const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
       vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      expect(getReasoningEffort(makeAssistant('high'), makeModel({ id: 'some-unknown-model-xyz' }))).toEqual({})
+      expect(getReasoningEffort(makeAssistant('high'), makeModel({ id: 'some-unknown-model-xyz' }))).toEqual({
+        reasoningEffort: 'high'
+      })
     })
 
     it('should never emit vendor private keys from the generic path', async () => {
@@ -336,11 +340,14 @@ describe('reasoning utils', () => {
       vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
       const result: any = getReasoningEffort(
-        makeAssistant('high'),
+        makeAssistant('medium'),
         makeModel({ id: 'o3-deep-research', provider: 'custom-a' })
       )
       expect(result).toEqual({ reasoningEffort: 'medium' })
       expect(result).not.toHaveProperty('reasoning_effort')
+      expect(() =>
+        getReasoningEffort(makeAssistant('high'), makeModel({ id: 'o3-deep-research', provider: 'custom-a' }))
+      ).toThrow(/only encodes "medium"/)
     })
 
     it('should emit camelCase reasoningEffort for DeepSeek V4+ models (never snake_case)', async () => {
@@ -494,7 +501,7 @@ describe('reasoning utils', () => {
       })
     })
 
-    it('should force medium effort for deep research models', async () => {
+    it('should keep medium effort for deep research models and throw for other explicit levels', async () => {
       const { isReasoningModel, isOpenAIModel, isOpenAIDeepResearchModel, isSupportedReasoningEffortOpenAIModel } =
         await import('@renderer/config/models')
       const { getStoreSetting } = await import('@renderer/hooks/useSettings')
@@ -511,7 +518,20 @@ describe('reasoning utils', () => {
         provider: 'openai'
       } as Model
 
-      const assistant: Assistant = {
+      const mediumAssistant: Assistant = {
+        id: 'test',
+        name: 'Test',
+        settings: {
+          reasoning_effort: 'medium'
+        }
+      } as Assistant
+
+      expect(getOpenAIReasoningParams(mediumAssistant, model)).toEqual({
+        reasoningEffort: 'medium',
+        reasoningSummary: 'off'
+      })
+
+      const highAssistant: Assistant = {
         id: 'test',
         name: 'Test',
         settings: {
@@ -519,11 +539,7 @@ describe('reasoning utils', () => {
         }
       } as Assistant
 
-      const result = getOpenAIReasoningParams(assistant, model)
-      expect(result).toEqual({
-        reasoningEffort: 'medium',
-        reasoningSummary: 'off'
-      })
+      expect(() => getOpenAIReasoningParams(highAssistant, model)).toThrow(/deep-research.*only encodes "medium"/)
     })
   })
 
@@ -944,7 +960,7 @@ describe('reasoning utils', () => {
       expect(result).toEqual({})
     })
 
-    it('should return empty when isReasoningModel is true but not a Gemini thinking model', () => {
+    it('encodes the explicit user level on the Gemini lane even for non-Gemini-family names (Unit B: no model veto)', () => {
       vi.mocked(mockModels.isReasoningModel).mockReturnValue(true)
       vi.mocked(mockModels.isSupportedThinkingTokenGeminiModel).mockReturnValue(false)
 
@@ -961,7 +977,7 @@ describe('reasoning utils', () => {
       } as Assistant
 
       const result = getGeminiReasoningParams(assistant, model)
-      expect(result).toEqual({})
+      expect(result).toEqual({ thinkingConfig: { includeThoughts: true } })
     })
 
     it('should return empty when reasoning effort is not set', () => {
@@ -1593,18 +1609,119 @@ describe('reasoning utils', () => {
       // result = Math.max(1024, 8192) = 8192
       expect(result).toBe(8192)
     })
+  })
 
+  describe('Unit B: user-intent reasoning is never swallowed by model names', () => {
+    it('OpenAI lane forwards an explicit level for unknown model names', async () => {
+      const { isSupportedReasoningEffortOpenAIModel } = await import('@renderer/config/models')
+      vi.mocked(isSupportedReasoningEffortOpenAIModel).mockReturnValue(false)
+
+      const model = { id: 'custom-chat-model', name: 'Custom', provider: 'openai' } as Model
+      const assistant = { id: 't', name: 'T', settings: { reasoning_effort: 'high' } } as Assistant
+      expect(getOpenAIReasoningParams(assistant, model)).toEqual({ reasoningEffort: 'high' })
+    })
+
+    it('Anthropic lane encodes an explicit level for non-Claude models via the generic shape', async () => {
+      const { isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
+      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
+      const { getAssistantSettings } = await import('@renderer/services/AssistantService')
+      vi.mocked(getAssistantSettings).mockReturnValue({ maxTokens: 8192 } as any)
+
+      const model = { id: 'custom-chat-model', name: 'Custom', provider: 'anthropic' } as Model
+      const assistant = { id: 't', name: 'T', settings: { reasoning_effort: 'high' } } as Assistant
+      const result = getAnthropicReasoningParams(assistant, model)
+      expect(result.thinking).toEqual({ type: 'enabled', budgetTokens: expect.any(Number) })
+      expect(result.sendReasoning).toBe(true)
+    })
+  })
+
+  describe('getThinkingBudget tail', () => {
     it('should use full token limit when maxTokens is undefined and reasoning effort is high', async () => {
       const { findTokenLimit } = await import('@renderer/config/models')
       vi.mocked(findTokenLimit).mockReturnValue({ min: 1024, max: 32768 })
 
       const result = getThinkingBudget(undefined, 'high', 'claude-3-7-sonnet')
-      // When maxTokens is undefined, budget is not constrained by maxTokens
-      // EFFORT_RATIO['high'] = 0.8
-      // budget = Math.floor((32768 - 1024) * 0.8 + 1024)
-      // = Math.floor(31744 * 0.8 + 1024) = Math.floor(25395.2 + 1024) = 26419
-      // result = Math.max(1024, 26419) = 26419
       expect(result).toBe(26419)
+    })
+  })
+
+  describe('explicit levels are never silently dropped or replaced', () => {
+    const makeModel = (overrides: Partial<Model> = {}): Model =>
+      ({ id: 'm', name: 'M', provider: 'custom-a', ...overrides }) as Model
+    const makeAssistant = (reasoning_effort?: any): Assistant =>
+      ({ id: 't', name: 'T', settings: { reasoning_effort } }) as Assistant
+
+    it('generic deep-research lane only encodes medium', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
+
+      expect(getReasoningEffort(makeAssistant('medium'), makeModel({ id: 'o3-deep-research' }))).toEqual({
+        reasoningEffort: 'medium'
+      })
+      expect(() => getReasoningEffort(makeAssistant('high'), makeModel({ id: 'o3-deep-research' }))).toThrow(
+        /deep-research.*only encodes "medium"/
+      )
+    })
+
+    it('generic Grok 4 Fast lane only encodes auto', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(true)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
+
+      expect(getReasoningEffort(makeAssistant('auto'), makeModel({ id: 'grok-4-fast' }))).toEqual({
+        reasoning: { enabled: true }
+      })
+      expect(() => getReasoningEffort(makeAssistant('high'), makeModel({ id: 'grok-4-fast' }))).toThrow(
+        /Grok 4 Fast.*only encodes "auto"/
+      )
+    })
+
+    it('generic none without an encodable lane shape throws', async () => {
+      const models = await import('@renderer/config/models')
+      vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
+      vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
+      vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(false)
+      vi.mocked(models.isQwenReasoningModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenHunyuanModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedReasoningEffortModel).mockReturnValue(false)
+      vi.mocked(models.isSupportNoneReasoningEffortModel).mockReturnValue(false)
+      vi.mocked(models.isSupportedThinkingTokenModel).mockReturnValue(false)
+      vi.mocked(models.resolveExternalReasoningSupport).mockReturnValue(undefined)
+      const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
+      vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
+
+      expect(() => getReasoningEffort(makeAssistant('none'), makeModel({ id: 'unknown-plain-model' }))).toThrow(
+        /no generic disable shape/
+      )
+    })
+
+    it('OpenAI lane auto throws instead of mapping to medium', async () => {
+      const { isOpenAIDeepResearchModel } = await import('@renderer/config/models')
+      vi.mocked(isOpenAIDeepResearchModel).mockReturnValue(false)
+      const model = { id: 'gpt-5', name: 'GPT-5', provider: 'openai' } as Model
+      expect(() => getOpenAIReasoningParams(makeAssistant('auto'), model)).toThrow(/no auto effort level/)
+    })
+
+    it('Anthropic lane minimal throws instead of omitting effort', async () => {
+      const { isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
+      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
+      const model = { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', provider: 'anthropic' } as Model
+      expect(() => getAnthropicReasoningParams(makeAssistant('minimal'), model)).toThrow(/no minimal level/)
+    })
+
+    it('Gemini hosted Gemma lane only encodes minimal/high', async () => {
+      const mockModels: any = await import('@renderer/config/models')
+      vi.mocked(mockModels.isHostedGemma4ThinkingModel).mockReturnValue(true)
+      const model = { id: 'gemma-4-31b-it', name: 'Gemma 4', provider: 'gemini' } as Model
+      expect(getGeminiReasoningParams(makeAssistant('minimal'), model)).toEqual({
+        thinkingConfig: { includeThoughts: false, thinkingLevel: 'minimal' }
+      })
+      expect(() => getGeminiReasoningParams(makeAssistant('low'), model)).toThrow(/only encodes "minimal"\/"high"/)
     })
   })
 })

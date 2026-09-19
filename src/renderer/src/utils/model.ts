@@ -1,20 +1,17 @@
-import {
-  isEmbeddingModel,
-  isFunctionCallingModel,
-  isReasoningModel,
-  isRerankModel,
-  isVisionModel,
-  isWebSearchModel
-} from '@renderer/config/models'
 import type { AdaptedApiModel, ApiModel, Model, ModelTag } from '@renderer/types'
-import { objectKeys } from '@renderer/types'
 
 /**
- * 获取模型标签的状态
- * @param models - 模型列表
- * @returns 包含各个标签布尔值的对象，表示是否存在具有该标签的模型
+ * Legacy display-tag availability (compat shim, unit A).
+ *
+ * The compact display/filter layer no longer uses vision / reasoning /
+ * tool / embedding / rerank / free tags: it shows only the five precise
+ * models.dev input modalities (see `@renderer/utils/inputModalities`).
+ * This function is retained solely so the persisted `ModelTag`/`ModelType`
+ * keys keep their shape (no deletion, no migration): it always reports all
+ * false and no display caller should depend on it. New code must use
+ * `getInputModalityAvailability` / `getInputModalityAvailabilityFromProviders`.
  */
-export const getModelTags = (models: Model[]): Record<ModelTag, boolean> => {
+export const getModelTags = (_models: Model[]): Record<ModelTag, boolean> => {
   const result: Record<ModelTag, boolean> = {
     vision: false,
     embedding: false,
@@ -24,43 +21,7 @@ export const getModelTags = (models: Model[]): Record<ModelTag, boolean> => {
     rerank: false,
     free: false
   }
-  const total = objectKeys(result).length
-  let satisfied = 0
-
-  for (const model of models) {
-    // 如果所有标签都已满足，提前退出
-    if (satisfied === total) break
-
-    if (!result.vision && isVisionModel(model)) {
-      satisfied += 1
-      result.vision = true
-    }
-    if (!result.embedding && isEmbeddingModel(model)) {
-      satisfied += 1
-      result.embedding = true
-    }
-    if (!result.reasoning && isReasoningModel(model)) {
-      satisfied += 1
-      result.reasoning = true
-    }
-    if (!result.function_calling && isFunctionCallingModel(model)) {
-      satisfied += 1
-      result.function_calling = true
-    }
-    if (!result.web_search && isWebSearchModel(model)) {
-      satisfied += 1
-      result.web_search = true
-    }
-    if (!result.rerank && isRerankModel(model)) {
-      satisfied += 1
-      result.rerank = true
-    }
-    if (!result.free && isFreeModel(model)) {
-      satisfied += 1
-      result.free = true
-    }
-  }
-
+  void _models
   return result
 }
 

@@ -2,7 +2,6 @@ import type { AnthropicProviderOptions } from '@ai-sdk/anthropic'
 import type { GoogleGenerativeAIProviderOptions } from '@ai-sdk/google'
 import type { OpenAIResponsesProviderOptions } from '@ai-sdk/openai'
 import type OpenAI from '@cherrystudio/openai'
-import { loggerService } from '@logger'
 import { DEFAULT_MAX_TOKENS } from '@renderer/config/constant'
 import {
   findTokenLimit,
@@ -21,7 +20,6 @@ import {
   isOpenAIDeepResearchModel,
   isOpenAIModel,
   isQwenReasoningModel,
-  isReasoningModel,
   isSupportAdaptiveThinkingClaudeModel,
   isSupportedReasoningEffortModel,
   isSupportedReasoningEffortOpenAIModel,
@@ -43,7 +41,9 @@ import { EFFORT_RATIO } from '@renderer/types'
 import type { OpenAIReasoningEffort, OpenAIReasoningSummary } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
 
-const logger = loggerService.withContext('reasoning')
+function reasoningNotEncodable(model: Model, reasoningEffort: string, detail: string): Error {
+  return new Error(`Reasoning effort "${reasoningEffort}" cannot be encoded for model "${model.id}": ${detail}`)
+}
 
 type ReasoningEffortOptionalParams = {
   thinking?: { type: 'disabled' | 'enabled' | 'auto'; budget_tokens?: number }
@@ -57,6 +57,10 @@ type ReasoningEffortOptionalParams = {
 }
 
 // The function is only for generic provider. May extract some logics to independent provider
+// Unit B: user-intent lazy execution. No isReasoningModel gate here: `default`
+// still means no override; any concrete user level is encoded with the generic
+// protocol shapes the adapter supports. Unknown families fall back to generic
+// shapes instead of silently dropping the user's choice.
 export function getReasoningEffort(assistant: Assistant, model: Model): ReasoningEffortOptionalParams {
   const provider = getProviderByModel(model)
   if (!provider) {
@@ -65,16 +69,20 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     throw new Error('Model provider is not configured')
   }
   const modelId = getLowerBaseModelName(model.id)
+  const reasoningEffort = assistant?.settings?.reasoning_effort
 
-  if (!isReasoningModel(model)) {
+  // No model-capability veto: user intent drives emission. `default`/unset
+  // means no override.
+  // reasoningEffort is not set, no extra reasoning setting
+  // Generally, for every model which supports reasoning control, the reasoning effort won't be undefined.
+  // It's for some reasoning models that don't support reasoning control, such as deepseek reasoner.
+  if (!reasoningEffort || reasoningEffort === 'default') {
     return {}
   }
 
-  // MiniMax models: always enable thinking to ensure <think> tags in response
-  // This must be before the reasoningEffort check because MiniMax needs thinking
-  // to be explicitly enabled regardless of the user's reasoning effort setting
+  // MiniMax toggle-only lane: explicit off disables, any concrete on-level
+  // enables. `default` already returned above so no override is emitted.
   if (isMiniMaxReasoningModel(model)) {
-    const reasoningEffort = assistant?.settings?.reasoning_effort
     if (reasoningEffort === 'none') {
       return { thinking: { type: 'disabled' } }
     }
@@ -82,19 +90,17 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   }
 
   if (isOpenAIDeepResearchModel(model)) {
-    // Generic emits AI-SDK-supported camelCase only; snake_case is overwritten
-    // to undefined by the openai-compatible provider.
-    return {
-      reasoningEffort: 'medium'
+    // Deep-research lane exposes only `medium` (MODEL_SUPPORTED_REASONING_EFFORT
+    // .openai_deep_research). Any other explicit level cannot be encoded here:
+    // throw instead of silently replacing it with `medium`.
+    if (reasoningEffort === 'medium') {
+      // Generic emits AI-SDK-supported camelCase only; snake_case is overwritten
+      // to undefined by the openai-compatible provider.
+      return {
+        reasoningEffort: 'medium'
+      }
     }
-  }
-  const reasoningEffort = assistant?.settings?.reasoning_effort
-
-  // reasoningEffort is not set, no extra reasoning setting
-  // Generally, for every model which supports reasoning control, the reasoning effort won't be undefined.
-  // It's for some reasoning models that don't support reasoning control, such as deepseek reasoner.
-  if (!reasoningEffort || reasoningEffort === 'default') {
-    return {}
+    throw reasoningNotEncodable(model, reasoningEffort, 'the deep-research lane only encodes "medium"')
   }
 
   // Handle 'none' reasoningEffort. It's explicitly off.
@@ -144,8 +150,7 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
       return { thinking: { type: 'disabled' } }
     }
 
-    logger.warn(`Model ${model.id} doesn't match any disable reasoning behavior. Fallback to empty reasoning param.`)
-    return {}
+    throw reasoningNotEncodable(model, reasoningEffort, 'no generic disable shape applies to this lane')
   }
 
   // Positive effort path. Debranded: model family/name heuristics and
@@ -171,9 +176,12 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   }
 
   // Grok 4 Fast toggle-only: the lane emits only on/off. `auto` is the
-  // resolved on-level; effort levels are not sendable here (guarded above).
+  // resolved on-level; any other explicit effort level cannot be encoded
+  // here and throws instead of silently dropping.
   if (isGrok4FastReasoningModel(model)) {
-    if (reasoningEffort !== 'auto') return {}
+    if (reasoningEffort !== 'auto') {
+      throw reasoningNotEncodable(model, reasoningEffort, 'the Grok 4 Fast lane only encodes "auto"')
+    }
     return {
       reasoning: {
         enabled: true
@@ -182,10 +190,12 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   }
 
   // DeepSeek V4+ models support reasoningEffort: "high" | "max" alongside thinking control
-  // UI uses "xhigh" (displayed as Max) which maps to API's "max".
-  // Generic emits AI-SDK-supported camelCase only. Only resolved levels emit.
+  // UI uses "xhigh" (displayed as Max) which maps to API's "max" (protocol-required mapping).
+  // Generic emits AI-SDK-supported camelCase only. Unencodable levels throw.
   if (isDeepSeekV4PlusModel(model)) {
-    if (reasoningEffort !== 'high' && reasoningEffort !== 'xhigh') return {}
+    if (reasoningEffort !== 'high' && reasoningEffort !== 'xhigh') {
+      throw reasoningNotEncodable(model, reasoningEffort, 'the DeepSeek V4+ lane only encodes "high"/"xhigh" (max)')
+    }
     return {
       thinking: { type: 'enabled' as const },
       reasoningEffort: reasoningEffort === 'xhigh' ? ('max' as OpenAIReasoningEffort) : 'high'
@@ -221,7 +231,8 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   }
 
   // Grok models/Perplexity models/OpenAI models, use reasoningEffort.
-  // Closed level set: unlisted selections emit {} (never supported[0]).
+  // Closed level set: unlisted selections throw (never supported[0], never
+  // silently mapped to an unrelated level).
   if (isSupportedReasoningEffortModel(model)) {
     const supportedOptions = getModelSupportedReasoningEffortOptions(model)?.filter((option) => option !== 'default')
     if (supportedOptions?.includes(reasoningEffort)) {
@@ -229,13 +240,19 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
         reasoningEffort
       }
     }
-    return {}
+    throw reasoningNotEncodable(
+      model,
+      reasoningEffort,
+      `supported levels here are ${(supportedOptions ?? []).join('/') || 'unknown'}`
+    )
   }
 
   // Mistral Small models use reasoningEffort with 'none' | 'high'.
-  // `none` is handled above; only resolved `high` emits here.
+  // `none` is handled above; only `high` encodes here, others throw.
   if (modelId.includes('mistral-small-2603')) {
-    if (reasoningEffort !== 'high') return {}
+    if (reasoningEffort !== 'high') {
+      throw reasoningNotEncodable(model, reasoningEffort, 'the Mistral Small lane only encodes "high"')
+    }
     return { reasoningEffort: 'high' }
   }
 
@@ -273,8 +290,9 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     if (reasoningEffort === 'auto' && isDoubaoThinkingAutoModel(model)) {
       return { thinking: { type: 'auto' } }
     }
-    // 其他情况不带 thinking 字段
-    return {}
+    // Other explicit levels cannot be encoded on this Doubao lane: throw
+    // instead of silently omitting the user's choice.
+    throw reasoningNotEncodable(model, reasoningEffort, 'the current Doubao lane cannot encode this level')
   }
   if (isSupportedThinkingTokenZhipuModel(model)) {
     return { thinking: { type: 'enabled' } }
@@ -291,8 +309,6 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
   // lane's explicit on-shape); named effort levels map to generic
   // `reasoningEffort`. Budget-only external resolves to fixed (`default`
   // only) and never reaches an emit here. No budget-as-effort invention.
-  // Truly unknown models (no external reasoning, no heuristic family)
-  // return {} so basic requests are never blocked.
   if (resolveExternalReasoningSupport(model) === true) {
     if (reasoningEffort === 'auto') {
       return { thinking: { type: 'enabled' as const } }
@@ -300,35 +316,44 @@ export function getReasoningEffort(assistant: Assistant, model: Model): Reasonin
     return { reasoningEffort }
   }
 
-  // Default case: no special thinking settings
-  return {}
+  // Unit B fallback: the adapter speaks the generic protocol, so an explicit
+  // user level is never silently dropped because the model name is unknown.
+  // `none` disables, `auto` enables, named levels use the generic effort shape.
+  if (reasoningEffort === 'auto') {
+    return { thinking: { type: 'enabled' as const } }
+  }
+  return { reasoningEffort }
 }
 
 /**
  * Get OpenAI reasoning parameters
  * Extracted from OpenAIResponseAPIClient and OpenAIAPIClient logic
  * For official OpenAI provider only
+ *
+ * Unit B: no model-capability veto. `default` means no override; any concrete
+ * user level is forwarded so the adapter/upstream decides (never silently
+ * dropped because a model name is unknown).
  */
 export function getOpenAIReasoningParams(
   assistant: Assistant,
   model: Model
 ): Pick<OpenAIResponsesProviderOptions, 'reasoningEffort' | 'reasoningSummary'> {
-  if (!isReasoningModel(model)) {
-    return {}
-  }
-
   let reasoningEffort = assistant?.settings?.reasoning_effort
 
   if (!reasoningEffort || reasoningEffort === 'default') {
     return {}
   }
 
-  // Deep-research models expose only `medium` on this lane; `auto`
-  // (toggle-on) maps to the lane's explicit default on-level. These are the
-  // lane's protocol-supported shapes, not a silent level change: UI offers
-  // only sendable controls via the single resolver.
-  if (isOpenAIDeepResearchModel(model) || reasoningEffort === 'auto') {
+  // Deep-research lane exposes only `medium`. Any other explicit level
+  // (including `auto` toggle-on) cannot be encoded here and throws instead
+  // of silently replacing the user's choice with `medium`.
+  if (isOpenAIDeepResearchModel(model)) {
+    if (reasoningEffort !== 'medium') {
+      throw reasoningNotEncodable(model, reasoningEffort, 'the OpenAI deep-research lane only encodes "medium"')
+    }
     reasoningEffort = 'medium'
+  } else if (reasoningEffort === 'auto') {
+    throw reasoningNotEncodable(model, reasoningEffort, 'the OpenAI lane has no auto effort level')
   }
 
   // 非OpenAI模型，但是Provider类型是responses/azure openai的情况
@@ -349,7 +374,7 @@ export function getOpenAIReasoningParams(
     reasoningSummary = summaryText
   }
 
-  // OpenAI 推理参数
+  // OpenAI 推理参数（协议可编码即发送；未知模型名不 veto 用户选择）
   if (isSupportedReasoningEffortOpenAIModel(model)) {
     return {
       reasoningEffort,
@@ -357,7 +382,11 @@ export function getOpenAIReasoningParams(
     }
   }
 
-  return {}
+  // Unit B fallback: forward the explicit user level on the OpenAI lane so
+  // upstream decides (existing APICallError chain surfaces rejection).
+  return {
+    reasoningEffort
+  }
 }
 
 // Conservative fallback token limit for models not in THINKING_TOKEN_MAP.
@@ -403,6 +432,11 @@ function getFallbackBudgetTokens(reasoningEffort: string | undefined): number {
  * Get Anthropic reasoning parameters.
  * Extracted from AnthropicAPIClient logic.
  *
+ * Unit B: no model-capability veto. `default` means no override, `none`
+ * disables, and any concrete user level is encoded with the lane's
+ * protocol shapes (Claude families keep their native shapes; other models on
+ * the Claude-compatible endpoint use the generic enabled shape).
+ *
  * Returns different parameter shapes depending on the model:
  * - **Claude Opus 4.7+**: `{ thinking: { type: 'adaptive', display: 'summarized' }, effort?: 'low' | 'medium' | 'high' | 'xhigh' }`
  *   Uses the new adaptive thinking API with effort-based control.
@@ -423,10 +457,6 @@ export function getAnthropicReasoningParams(
   effort?: AnthropicProviderOptions['effort']
   sendReasoning?: AnthropicProviderOptions['sendReasoning']
 } {
-  if (!isReasoningModel(model)) {
-    return {}
-  }
-
   const reasoningEffort = assistant?.settings?.reasoning_effort
 
   if (!reasoningEffort || reasoningEffort === 'default') {
@@ -443,12 +473,15 @@ export function getAnthropicReasoningParams(
 
   // Claude reasoning parameters
   if (isSupportedThinkingTokenClaudeModel(model)) {
+    // `minimal` is not a native Claude effort level and cannot be encoded
+    // here: throw instead of silently falling back to API defaults.
+    // `auto` is the lane's explicit on-shape (adaptive without effort).
+    if (reasoningEffort === 'minimal') {
+      throw reasoningNotEncodable(model, reasoningEffort, 'Claude adaptive thinking has no minimal level')
+    }
     // Claude Opus 4.7+: adaptive thinking + native 'xhigh' effort.
     // Also requires thinking.display: 'summarized' — API defaults to 'omitted'
     // (no reasoning text in response), which would break Cherry's thinking UI.
-    // `minimal`/`auto` are not native Claude effort levels: adaptive is
-    // emitted without effort so callers fall back to API defaults (never a
-    // silent map to `low`).
     if (isSupportAdaptiveThinkingClaudeModel(model)) {
       const effort47Map = {
         default: undefined,
@@ -465,8 +498,7 @@ export function getAnthropicReasoningParams(
     }
 
     // Claude 4.6 uses adaptive thinking + effort parameters.
-    // `minimal` is not a native Claude effort level: adaptive is emitted
-    // without effort (API default), never silently mapped to `low`.
+    // `xhigh` displays as Max and maps to max (protocol-required mapping).
     if (isClaude46SeriesModel(model)) {
       // Claude 4.6 supports: low, medium, high, max
       // (xhigh displays as Max and maps to max).
@@ -557,56 +589,58 @@ function mapToGeminiThinkingLevel(reasoningEffort: ReasoningEffortOption): Googl
  * 从 GeminiAPIClient 中提取的逻辑
  * 注意：Gemini/GCP 端点所使用的 thinkingBudget 等参数应该按照驼峰命名法传递
  * 而在 Google 官方提供的 OpenAI 兼容端点中则使用蛇形命名法 thinking_budget
+ *
+ * Unit B: no model-capability veto. `default` means no override; concrete user
+ * levels are encoded with the lane's protocol shapes (unknown model names are
+ * never a reason to drop them).
  */
 export function getGeminiReasoningParams(
   assistant: Assistant,
   model: Model
 ): Pick<GoogleGenerativeAIProviderOptions, 'thinkingConfig'> {
-  if (!isReasoningModel(model)) {
-    return {}
-  }
-
   const reasoningEffort = assistant?.settings?.reasoning_effort
 
   if (!reasoningEffort || reasoningEffort === 'default') {
     return {}
   }
 
-  // Capability-driven: the Gemini native lane requires a Gemini-family
-  // heuristic or exact external reasoning metadata; otherwise no explicit
-  // emit shape exists here (protocol filtering mirrors the resolver).
-  // Within the lane, every requested level maps through the protocol's
-  // thinking-level/budget shapes — absence of explicit effort metadata
-  // never invalidates these controls.
-  const isGeminiFamily = isSupportedThinkingTokenGeminiModel(model)
-  const hasExternalReasoning = resolveExternalReasoningSupport(model) === true
-  if (!isGeminiFamily && !hasExternalReasoning) {
-    return {}
-  }
-
+  // Unit B: the Gemini native lane speaks thinkingConfig; an explicit user
+  // level is encoded with the protocol shapes below (Gemini 3 level path when
+  // applicable, otherwise the budget path). Model-name mismatch never drops it.
   let thinkingLevel: GoogleThinkingLevel | null = null
   const includeThoughts = reasoningEffort !== 'none'
 
   if (isHostedGemma4ThinkingModel(model)) {
-    // Hosted Gemma 4 does not expose a distinct hard-off mode on the Gemini API.
-    // We only surface minimal/high in the UI and collapse legacy or unexpected
-    // `none` inputs to `minimal` for compatibility.
-    const isHighThinking = reasoningEffort === 'high' || reasoningEffort === 'xhigh'
-    thinkingLevel = isHighThinking ? 'high' : 'minimal'
-
-    return {
-      thinkingConfig: {
-        includeThoughts: isHighThinking,
-        thinkingLevel
+    // Hosted Gemma 4 only encodes `minimal`/`high` (`xhigh` maps to `high`
+    // as the protocol-required max representation). Any other explicit level
+    // cannot be encoded here and throws instead of collapsing.
+    if (reasoningEffort === 'high' || reasoningEffort === 'xhigh') {
+      return {
+        thinkingConfig: {
+          includeThoughts: true,
+          thinkingLevel: 'high'
+        }
       }
     }
+    if (reasoningEffort === 'minimal') {
+      return {
+        thinkingConfig: {
+          includeThoughts: false,
+          thinkingLevel: 'minimal'
+        }
+      }
+    }
+    throw reasoningNotEncodable(model, reasoningEffort, 'the hosted Gemma 4 lane only encodes "minimal"/"high"')
   }
 
   // https://ai.google.dev/gemini-api/docs/gemini-3?thinking=high#new_api_features_in_gemini_3
   if (isGemini3ThinkingTokenModel(model)) {
     thinkingLevel = mapToGeminiThinkingLevel(reasoningEffort)
+    // Gemini 3 Pro has no `minimal` level: throw instead of silently
+    // replacing it with `low`. `xhigh` -> `high` above is the retained
+    // protocol-required max mapping.
     if (thinkingLevel === 'minimal' && getLowerBaseModelName(model.id).includes('pro')) {
-      thinkingLevel = 'low'
+      throw reasoningNotEncodable(model, reasoningEffort, 'Gemini 3 Pro has no minimal thinking level')
     }
   }
 

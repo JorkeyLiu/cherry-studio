@@ -2,19 +2,12 @@ import { loggerService } from '@logger'
 import { LoadingIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
 import { TopView } from '@renderer/components/TopView'
-import {
-  isEmbeddingModel,
-  isFunctionCallingModel,
-  isReasoningModel,
-  isRerankModel,
-  isVisionModel,
-  isWebSearchModel
-} from '@renderer/config/models'
 import { useProvider } from '@renderer/hooks/useProvider'
 import { fetchModels } from '@renderer/services/ApiService'
 import type { Model, Provider } from '@renderer/types'
 import { filterModelsByKeywords, getFancyProviderName } from '@renderer/utils'
-import { getDuplicateModelNames, isFreeModel } from '@renderer/utils/model'
+import { INPUT_MODALITIES, type InputModality, supportsInputModality } from '@renderer/utils/inputModalities'
+import { getDuplicateModelNames } from '@renderer/utils/model'
 import { Button, Empty, Flex, Modal, Spin, Tabs, Tooltip } from 'antd'
 import Input from 'antd/es/input/Input'
 import { groupBy, isEmpty, uniqBy } from 'lodash'
@@ -28,6 +21,21 @@ import ManageModelsList from './ManageModelsList'
 import { isModelInProvider } from './utils'
 
 const logger = loggerService.withContext('ManageModelsPopup')
+
+// 管理页签只提供五个精确输入模态，由 INPUT_MODALITIES 单一真相映射。
+// 旧能力键（reasoning/vision/free/embedding/function_calling/rerank/
+// websearch）为兼容保留、落入 default（全部）；Embedding/Reranker 的业务槽位
+// 执行筛选不在此处。
+const INPUT_MODALITY_TABS: ReadonlySet<InputModality> = new Set(INPUT_MODALITIES)
+
+/** Static label keys for the five modality tabs; iteration order comes from INPUT_MODALITIES. */
+const MODALITY_TAB_LABEL_KEYS: Record<InputModality, string> = {
+  text: 'models.capabilities.modality_text',
+  image: 'models.capabilities.modality_image',
+  audio: 'models.capabilities.modality_audio',
+  video: 'models.capabilities.modality_video',
+  pdf: 'models.capabilities.modality_pdf'
+}
 
 interface ShowParams {
   providerId: string
@@ -79,29 +87,17 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
     [loadingModels, isFilterTypePending, isSearchPending]
   )
 
+  // 管理页签只提供五个精确输入模态（unknown 永不出现）。
   const list = useMemo(
     () =>
       filterModelsByKeywords(filterSearchText, allModels).filter((model) => {
-        switch (actualFilterType) {
-          case 'reasoning':
-            return isReasoningModel(model)
-          case 'vision':
-            return isVisionModel(model)
-          case 'websearch':
-            return isWebSearchModel(model)
-          case 'free':
-            return isFreeModel(model)
-          case 'embedding':
-            return isEmbeddingModel(model)
-          case 'function_calling':
-            return isFunctionCallingModel(model)
-          case 'rerank':
-            return isRerankModel(model)
-          default:
-            return true
+        if ((INPUT_MODALITY_TABS as ReadonlySet<string>).has(actualFilterType)) {
+          return supportsInputModality(model, actualFilterType as InputModality, provider)
         }
+        return true
       }),
-    [filterSearchText, actualFilterType, allModels]
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- provider identity pins attribution; full object would over-trigger
+    [filterSearchText, actualFilterType, allModels, provider?.id]
   )
 
   // Generic grouping for all connections; no brand-specific paths.
@@ -260,13 +256,10 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
           activeKey={optimisticFilterType}
           items={[
             { label: t('models.all'), key: 'all' },
-            { label: t('models.type.reasoning'), key: 'reasoning' },
-            { label: t('models.type.vision'), key: 'vision' },
-            { label: t('models.type.websearch'), key: 'websearch' },
-            { label: t('models.type.free'), key: 'free' },
-            { label: t('models.type.embedding'), key: 'embedding' },
-            { label: t('models.type.rerank'), key: 'rerank' },
-            { label: t('models.type.function_calling'), key: 'function_calling' }
+            ...INPUT_MODALITIES.map((modality) => ({
+              label: t(MODALITY_TAB_LABEL_KEYS[modality]),
+              key: modality
+            }))
           ]}
           onChange={(key) => {
             setOptimisticFilterTypeFn(key)

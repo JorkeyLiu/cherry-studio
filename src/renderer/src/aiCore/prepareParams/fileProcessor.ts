@@ -11,10 +11,16 @@ import { FILE_TYPE } from '@renderer/types'
 import type { FileMessageBlock } from '@renderer/types/newMessage'
 import { findFileBlocks } from '@renderer/utils/messageUtils/find'
 import type { FilePart, TextPart } from 'ai'
-import i18n from 'i18next'
 
 import { getAiSdkProviderId } from '../provider/factory'
-import { getFileSizeLimit, supportsImageInput, supportsLargeFileUpload } from './modelCapabilities'
+import { attachmentFailedError, attachmentTextExtractionError, isAttachmentError } from './attachmentErrors'
+import {
+  getFileSizeLimit,
+  resolveAudioMime,
+  resolveVideoMime,
+  supportsImageInput,
+  supportsLargeFileUpload
+} from './modelCapabilities'
 import { getSendableFileText, isPdfFile } from './sendableFileText'
 
 const logger = loggerService.withContext('fileProcessor')
@@ -51,7 +57,12 @@ export async function extractFileContent(message: Message): Promise<string> {
  * 将文件块转换为文本部分
  *
  * 文本构造统一走 getSendableFileText（prepareSendableFileText 的共享缓存入口），
- * 确保发送内容与本地估算内容一致，且同一文件身份只读取/解析一次
+ * 确保发送内容与本地估算内容一致，且同一文件身份只读取/解析一次。
+ *
+ * Unit B atomicity: text extraction failure aborts the request with a
+ * displayable English technical error (no locale writes). Returning null means
+ * "not text-extractable, caller may try another encoding"; throwing means the
+ * attachment failed and the request must stop (never silently send text-only).
  */
 export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): Promise<TextPart | null> {
   const file = fileBlock.file
@@ -63,12 +74,8 @@ export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): P
       return { type: 'text', text }
     }
   } catch (error) {
-    if (file.type === FILE_TYPE.DOCUMENT) {
-      logger.warn(`Failed to extract text from document ${file.origin_name}:`, error as Error)
-      window.toast.error(i18n.t('message.error.file.text_extraction_failed', { name: file.origin_name }))
-    } else {
-      logger.warn('Failed to read text file:', error as Error)
-    }
+    const reason = error instanceof Error ? error.message : String(error)
+    throw attachmentTextExtractionError(file.origin_name, file.type ?? 'unknown type', reason)
   }
 
   return null
@@ -76,39 +83,89 @@ export async function convertFileBlockToTextPart(fileBlock: FileMessageBlock): P
 
 /**
  * 处理Gemini大文件上传
+ *
+ * Successful existing/new uploads always produce a sendable FilePart backed
+ * by the Files API URI (`fileData.fileUri` on the Google provider: FilePart
+ * with `data` as URL). Failures throw with the concrete root cause so the
+ * caller aborts instead of silently downgrading.
  */
-export async function handleGeminiFileUpload(file: FileMetadata, model: Model): Promise<FilePart | null> {
+export function geminiRemoteFileToFilePart(
+  remoteFile: { uri?: string; mimeType?: string; name?: string },
+  fallbackName: string,
+  fallbackMime = 'application/pdf'
+): FilePart | null {
+  const uri = remoteFile.uri
+  if (!uri) {
+    return null
+  }
+  let data: URL
   try {
-    const provider = getProviderByModel(model)
-    if (!provider) {
-      // Unconfigured model/provider: fail explicitly before any provider/API access.
-      return null
-    }
+    data = new URL(uri)
+  } catch {
+    return null
+  }
+  return {
+    type: 'file',
+    data,
+    mediaType: remoteFile.mimeType || fallbackMime,
+    filename: fallbackName
+  }
+}
 
+export async function handleGeminiFileUpload(file: FileMetadata, model: Model): Promise<FilePart | null> {
+  const provider = getProviderByModel(model)
+  if (!provider) {
+    // Unconfigured model/provider: fail explicitly before any provider/API access.
+    throw attachmentFailedError(file.origin_name, file.type ?? 'unknown type', 'model provider is not configured')
+  }
+
+  const fail = (reason: string): Error => attachmentFailedError(file.origin_name, file.type ?? 'unknown type', reason)
+
+  try {
     // 检查文件是否已经上传过
     const fileMetadata = await window.api.fileService.retrieve(provider, file.id)
 
     if (fileMetadata.status === 'success' && fileMetadata.originalFile?.file) {
-      const remoteFile = fileMetadata.originalFile.file as any // 临时类型断言，因为File类型定义可能不完整
-      // 注意：AI SDK的FilePart格式和Gemini原生格式不同，这里需要适配
-      // 暂时返回null让它回退到文本处理，或者需要扩展FilePart支持uri
-      logger.info(`File ${file.origin_name} already uploaded to Gemini with URI: ${remoteFile.uri || 'unknown'}`)
-      return null
+      const remoteFile = fileMetadata.originalFile.file as unknown as {
+        uri?: string
+        mimeType?: string
+        name?: string
+      }
+      const part = geminiRemoteFileToFilePart(remoteFile, file.origin_name)
+      if (part) {
+        logger.info(`File ${file.origin_name} already uploaded to Gemini with URI: ${remoteFile.uri}`)
+        return part
+      }
+      throw fail(`existing Gemini upload for "${file.origin_name}" has no usable file URI (status success without uri)`)
     }
+    if (fileMetadata.status === 'processing') {
+      throw fail(`existing Gemini upload for "${file.origin_name}" is still processing`)
+    }
+    // Non-success retrieve (failed/unknown/missing) falls through to upload;
+    // the upload error below carries the root cause.
 
     // 如果文件未上传，执行上传
     const uploadResult = await window.api.fileService.upload(provider, file)
-    if (uploadResult.originalFile?.file) {
-      const remoteFile = uploadResult.originalFile.file as any // 临时类型断言
-      logger.info(`File ${file.origin_name} uploaded to Gemini with URI: ${remoteFile.uri || 'unknown'}`)
-      // 同样，这里需要处理URI格式的文件引用
-      return null
+    if (uploadResult.status === 'success' && uploadResult.originalFile?.file) {
+      const remoteFile = uploadResult.originalFile.file as unknown as {
+        uri?: string
+        mimeType?: string
+        name?: string
+      }
+      const part = geminiRemoteFileToFilePart(remoteFile, file.origin_name)
+      if (part) {
+        logger.info(`File ${file.origin_name} uploaded to Gemini with URI: ${remoteFile.uri}`)
+        return part
+      }
+      throw fail(`Gemini upload for "${file.origin_name}" succeeded without a usable file URI`)
     }
+    throw fail(
+      `Gemini upload for "${file.origin_name}" failed with status "${uploadResult.status}" (retrieve status "${fileMetadata.status}")`
+    )
   } catch (error) {
-    logger.error(`Failed to upload file ${file.origin_name} to Gemini:`, error as Error)
+    if (isAttachmentError(error)) throw error
+    throw fail(error instanceof Error ? error.message : String(error))
   }
-
-  return null
 }
 
 /**
@@ -131,6 +188,7 @@ export async function handleOpenAILargeFileUpload(
       purpose: 'file-extract' as OpenAI.FilePurpose
     }
   }
+  const fail = (reason: string): Error => attachmentFailedError(file.origin_name, file.type ?? 'unknown type', reason)
   try {
     // 检查文件是否已经上传过
     const fileMetadata = await window.api.fileService.retrieve(provider, file.id)
@@ -139,8 +197,7 @@ export async function handleOpenAILargeFileUpload(
       const remoteFile = fileMetadata.originalFile.file as OpenAI.Files.FileObject
       // 判断用途是否一致
       if (remoteFile.purpose !== file.purpose) {
-        logger.warn(`File ${file.origin_name} purpose mismatch: ${remoteFile.purpose} vs ${file.purpose}`)
-        throw new Error('File purpose mismatch')
+        throw fail(`File purpose mismatch: remote "${remoteFile.purpose}" vs local "${file.purpose}"`)
       }
       return {
         type: 'file',
@@ -149,14 +206,17 @@ export async function handleOpenAILargeFileUpload(
         data: `fileid://${remoteFile.id}`
       }
     }
+    if (fileMetadata.status !== 'success') {
+      logger.info(`OpenAI retrieve for ${file.origin_name} returned "${fileMetadata.status}", attempting upload`)
+    }
   } catch (error) {
-    logger.error(`Failed to retrieve file ${file.origin_name}:`, error as Error)
-    return null
+    if (isAttachmentError(error)) throw error
+    throw fail(`retrieve failed: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
     // 如果文件未上传，执行上传
     const uploadResult = await window.api.fileService.upload(provider, file)
-    if (uploadResult.originalFile?.file) {
+    if (uploadResult.status === 'success' && uploadResult.originalFile?.file) {
       // 断言OpenAIFile对象
       const remoteFile = uploadResult.originalFile.file as OpenAI.Files.FileObject
       logger.info(`File ${file.origin_name} uploaded.`)
@@ -167,11 +227,11 @@ export async function handleOpenAILargeFileUpload(
         data: `fileid://${remoteFile.id}`
       }
     }
+    throw fail(`upload failed with status "${uploadResult.status}"`)
   } catch (error) {
-    logger.error(`Failed to upload file ${file.origin_name}:`, error as Error)
+    if (isAttachmentError(error)) throw error
+    throw fail(`upload failed: ${error instanceof Error ? error.message : String(error)}`)
   }
-
-  return null
 }
 
 /**
@@ -188,7 +248,7 @@ export async function handleLargeFileUpload(
   }
   const aiSdkId = getAiSdkProviderId(provider)
 
-  if (['google', 'google-vertex'].includes(aiSdkId)) {
+  if (aiSdkId === 'google') {
     return await handleGeminiFileUpload(file, model)
   }
 
@@ -201,10 +261,21 @@ export async function handleLargeFileUpload(
 
 /**
  * 将文件块转换为FilePart（用于原生文件支持）
+ *
+ * Unit B semantics:
+ * - Return a FilePart when the current endpoint/adapter can natively encode
+ *   the attachment.
+ * - Return null ONLY when this file kind is not natively encodable here and
+ *   the caller should try text extraction (e.g. Word/Excel documents).
+ * - Throw (English technical error with filename/type/reason, no locale) when
+ *   a natively-encodable attachment fails to read/convert/upload, or when the
+ *   protocol matrix cannot encode it. Callers must abort the request, never
+ *   silently continue with text-only.
  */
 export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, model: Model): Promise<FilePart | null> {
   const file = fileBlock.file
   const fileSizeLimit = getFileSizeLimit(model, file.type)
+  const fail = (reason: string): Error => attachmentFailedError(file.origin_name, file.type ?? 'unknown type', reason)
 
   try {
     // 处理PDF文档（始终生成 FilePart，由下游插件处理兼容性）
@@ -219,60 +290,115 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
           if (uploadResult) {
             return uploadResult
           }
-          // 如果上传失败，回退到文本处理
-          logger.warn(`Failed to upload large PDF ${file.origin_name}, falling back to text extraction`)
-          window.toast.warning(i18n.t('message.warning.file.pdf_upload_failed', { name: file.origin_name }))
-          return null
+          throw fail('upload failed and no text downgrade is attempted for oversized PDFs')
         } else {
-          logger.warn(`PDF file ${file.origin_name} exceeds size limit (${file.size} > ${fileSizeLimit})`)
-          window.toast.warning(
-            i18n.t('message.warning.file.pdf_exceeds_limit', {
-              name: file.origin_name,
-              limit: `${Math.round(fileSizeLimit / 1024 / 1024)}MB`
-            })
+          throw fail(
+            `file size ${file.size} exceeds protocol limit ${fileSizeLimit} and the current endpoint has no large-file upload`
           )
-          return null // 文件过大，回退到文本处理
         }
       }
 
-      const base64Data = await window.api.file.base64File(file.id + file.ext)
-
-      return {
-        type: 'file',
-        data: base64Data.data,
-        mediaType: base64Data.mime,
-        filename: file.origin_name
+      try {
+        const base64Data = await window.api.file.base64File(file.id + file.ext)
+        return {
+          type: 'file',
+          data: base64Data.data,
+          mediaType: base64Data.mime,
+          filename: file.origin_name
+        }
+      } catch (error) {
+        throw fail(error instanceof Error ? error.message : String(error))
       }
     }
 
-    // 处理图片文件
-    if (file.type === FILE_TYPE.IMAGE && supportsImageInput(model)) {
+    // 处理图片文件：encodability is endpoint-based (supportsImageInput), never
+    // vision metadata. Unencodable images fail explicitly; read failures abort.
+    if (file.type === FILE_TYPE.IMAGE) {
+      if (!supportsImageInput(model)) {
+        throw fail('the current endpoint/adapter cannot encode images')
+      }
       // 检查文件大小
       if (file.size > fileSizeLimit) {
-        logger.warn(`Image file ${file.origin_name} exceeds size limit (${file.size} > ${fileSizeLimit})`)
-        return null
+        throw fail(`file size ${file.size} exceeds protocol limit ${fileSizeLimit}`)
       }
 
-      const base64Data = await window.api.file.base64Image(file.id + file.ext)
+      try {
+        const base64Data = await window.api.file.base64Image(file.id + file.ext)
 
-      // 处理MIME类型，特别是jpg->jpeg的转换（Anthropic要求）
-      let mediaType = base64Data.mime
+        // 处理MIME类型，特别是jpg->jpeg的转换（Anthropic要求）
+        let mediaType = base64Data.mime
+        const provider = getProviderByModel(model)
+        if (!provider) {
+          throw fail('model provider is not configured')
+        }
+        const aiSdkId = getAiSdkProviderId(provider)
+
+        if (aiSdkId === 'anthropic' && mediaType === 'image/jpg') {
+          mediaType = 'image/jpeg'
+        }
+        if (!mediaType || !mediaType.startsWith('image/')) {
+          throw fail(`unreliable image MIME "${mediaType}"`)
+        }
+
+        return {
+          type: 'file',
+          data: base64Data.base64,
+          mediaType: mediaType,
+          filename: file.origin_name
+        }
+      } catch (error) {
+        if (isAttachmentError(error)) throw error
+        throw fail(error instanceof Error ? error.message : String(error))
+      }
+    }
+
+    // 处理音频/视频：endpoint/adapter matrix only (never model metadata).
+    // OpenAI Chat/compatible: WAV/MP3 audio only; Gemini: audio + video;
+    // Responses + Anthropic: no audio/video; other chat: video unsupported.
+    if (file.type === FILE_TYPE.AUDIO || file.type === FILE_TYPE.VIDEO) {
       const provider = getProviderByModel(model)
       if (!provider) {
-        // Unconfigured model/provider: fail explicitly before any provider/API access.
-        return null
+        throw fail('model provider is not configured')
       }
       const aiSdkId = getAiSdkProviderId(provider)
+      const ext = (file.ext ?? '').toLowerCase()
 
-      if (aiSdkId === 'anthropic' && mediaType === 'image/jpg') {
-        mediaType = 'image/jpeg'
+      if (file.type === FILE_TYPE.AUDIO) {
+        // Single matrix: the same adapter-aware resolver backs
+        // supportsAudioInput and the encoder (no fork).
+        const mime = resolveAudioMime(ext, aiSdkId)
+        if (!mime) {
+          throw fail(
+            aiSdkId === 'openai-chat' || aiSdkId === 'openai-compatible'
+              ? `audio format "${file.ext}" cannot be encoded on this endpoint (only WAV/MP3)`
+              : `audio format "${file.ext}" cannot be encoded on the ${aiSdkId} endpoint`
+          )
+        }
+        try {
+          const base64Data = await window.api.file.base64File(file.id + file.ext)
+          return { type: 'file', data: base64Data.data, mediaType: mime, filename: file.origin_name }
+        } catch (error) {
+          throw fail(error instanceof Error ? error.message : String(error))
+        }
       }
 
-      return {
-        type: 'file',
-        data: base64Data.base64,
-        mediaType: mediaType,
-        filename: file.origin_name
+      // VIDEO
+      if (aiSdkId !== 'google') {
+        throw fail(
+          aiSdkId === 'openai' || aiSdkId === 'anthropic'
+            ? `video is not supported on the ${aiSdkId} endpoint`
+            : `video cannot be encoded on the ${aiSdkId} endpoint`
+        )
+      }
+      const mime = resolveVideoMime(ext)
+      if (!mime) {
+        throw fail(`video format "${file.ext}" cannot be reliably encoded on this endpoint`)
+      }
+      try {
+        const base64Data = await window.api.file.base64File(file.id + file.ext)
+        return { type: 'file', data: base64Data.data, mediaType: mime, filename: file.origin_name }
+      } catch (error) {
+        throw fail(error instanceof Error ? error.message : String(error))
       }
     }
 
@@ -285,7 +411,8 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
       return null
     }
   } catch (error) {
-    logger.warn(`Failed to process file ${file.origin_name}:`, error as Error)
+    if (isAttachmentError(error)) throw error
+    throw fail(error instanceof Error ? error.message : String(error))
   }
 
   return null

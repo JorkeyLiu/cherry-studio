@@ -1,4 +1,3 @@
-import { isMandatoryWebSearchModel } from '@renderer/config/models'
 import { defineTool, registerTool, TopicType } from '@renderer/pages/home/Inputbar/types'
 
 import WebSearchButton from './components/WebSearchButton'
@@ -15,7 +14,9 @@ const webSearchTool = defineTool({
   label: (t) => t('chat.input.web_search.label'),
 
   visibleInScopes: [TopicType.Chat],
-  condition: ({ model }) => !isMandatoryWebSearchModel(model),
+  // Unit B: built-in search availability follows the provider adapter at
+  // request time, never model metadata. Always offer the control here.
+  condition: () => true,
 
   render: function WebSearchToolRender(context) {
     const { assistant, quickPanelController } = context

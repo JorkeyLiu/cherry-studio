@@ -1,6 +1,6 @@
 import CustomCollapse from '@renderer/components/CustomCollapse'
 import { DynamicVirtualList, type DynamicVirtualListRef } from '@renderer/components/VirtualList'
-import type { Model } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import type { ModelWithStatus } from '@renderer/types/healthCheck'
 import { Button, Flex, Tooltip } from 'antd'
 import { Minus } from 'lucide-react'
@@ -15,6 +15,7 @@ const MAX_SCROLLER_HEIGHT = 390
 interface ModelListGroupProps {
   groupName: string
   models: Model[]
+  provider: Provider
   duplicateModelNames: Set<string>
   /** 使用 Map 实现 O(1) 查找，替代原来的数组线性搜索 */
   modelStatusMap: Map<string, ModelWithStatus>
@@ -28,6 +29,7 @@ interface ModelListGroupProps {
 const ModelListGroup: React.FC<ModelListGroupProps> = ({
   groupName,
   models,
+  provider,
   duplicateModelNames,
   modelStatusMap,
   defaultOpen,
@@ -92,6 +94,7 @@ const ModelListGroup: React.FC<ModelListGroupProps> = ({
           {(model) => (
             <ModelListItem
               model={model}
+              provider={provider}
               modelStatus={modelStatusMap.get(model.id)}
               showIdentifier={duplicateModelNames.has(model.name)}
               onEdit={onEditModel}

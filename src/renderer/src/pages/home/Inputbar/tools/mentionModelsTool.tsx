@@ -16,13 +16,13 @@ const mentionModelsTool = defineTool({
 
   visibleInScopes: [TopicType.Chat],
   dependencies: {
-    state: ['mentionedModels', 'files', 'couldMentionNotVisionModel'] as const,
+    state: ['mentionedModels', 'files'] as const,
     actions: ['setMentionedModels', 'onTextChange'] as const
   },
 
   render: function MentionModelsToolRender(context) {
     const { state, actions, quickPanel, quickPanelController } = context
-    const { mentionedModels, files, couldMentionNotVisionModel } = state
+    const { mentionedModels, files } = state
     const { setMentionedModels, onTextChange } = actions
 
     return (
@@ -31,7 +31,6 @@ const mentionModelsTool = defineTool({
         quickPanelController={quickPanelController}
         mentionedModels={mentionedModels}
         setMentionedModels={setMentionedModels}
-        couldMentionNotVisionModel={couldMentionNotVisionModel}
         files={files}
         setText={onTextChange as React.Dispatch<React.SetStateAction<string>>}
       />

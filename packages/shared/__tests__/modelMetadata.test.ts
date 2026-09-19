@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  asSafeMetadataFailureReason,
   DEFAULT_NORMALIZATION_LIMITS,
   isSafeMetadataKey,
+  type ModelMetadataSnapshot,
   normalizeModelMetadataPayload,
   parseModelMetadataCache,
-  parseModelMetadataSnapshot
+  parseModelMetadataSnapshot,
+  parseModelMetadataStatus,
+  toModelMetadataStatus
 } from '../modelMetadata'
 
 const RAW_FIXTURE = {
@@ -294,5 +298,76 @@ describe('normalization bounds', () => {
   it('keeps default bounds far above live data (~220 providers / ~7842 models)', () => {
     expect(DEFAULT_NORMALIZATION_LIMITS.maxProviders).toBeGreaterThanOrEqual(440)
     expect(DEFAULT_NORMALIZATION_LIMITS.maxTotalModels).toBeGreaterThanOrEqual(15684)
+  })
+})
+
+describe('toModelMetadataStatus — loading/ready/unavailable state machine', () => {
+  const SNAPSHOT = {
+    source: 'models.dev',
+    fetchedAt: 1,
+    providers: {}
+  } as unknown as ModelMetadataSnapshot
+
+  it('is loading when there is no snapshot and a round is in flight', () => {
+    expect(toModelMetadataStatus({ snapshot: null, inFlight: true })).toEqual({ kind: 'loading', snapshot: null })
+    expect(toModelMetadataStatus({ snapshot: null, inFlight: true, failureReason: 'network-error' })).toEqual({
+      kind: 'loading',
+      snapshot: null
+    })
+  })
+
+  it('is ready whenever a snapshot exists, even after a refresh failure', () => {
+    expect(toModelMetadataStatus({ snapshot: SNAPSHOT, inFlight: false })).toEqual({
+      kind: 'ready',
+      snapshot: SNAPSHOT
+    })
+    expect(toModelMetadataStatus({ snapshot: SNAPSHOT, inFlight: false, failureReason: 'timeout' })).toEqual({
+      kind: 'ready',
+      snapshot: SNAPSHOT
+    })
+  })
+
+  it('is unavailable only for a completed failure with a sanitized reason', () => {
+    expect(toModelMetadataStatus({ snapshot: null, inFlight: false, failureReason: 'network-error' })).toEqual({
+      kind: 'unavailable',
+      snapshot: null,
+      reason: 'network-error'
+    })
+    // non-terminal states without a failure stay loading, never unavailable
+    expect(toModelMetadataStatus({ snapshot: null, inFlight: false })).toEqual({ kind: 'loading', snapshot: null })
+    // unsafe reasons never leak into the status
+    expect(toModelMetadataStatus({ snapshot: null, inFlight: false, failureReason: 'fresh-cache' })).toEqual({
+      kind: 'loading',
+      snapshot: null
+    })
+    expect(
+      toModelMetadataStatus({ snapshot: null, inFlight: false, failureReason: 'ENOENT /secret/path' as never })
+    ).toEqual({ kind: 'loading', snapshot: null })
+  })
+})
+
+describe('asSafeMetadataFailureReason / parseModelMetadataStatus', () => {
+  it('keeps only sanitized fetch/read failure reasons', () => {
+    expect(asSafeMetadataFailureReason('timeout')).toBe('timeout')
+    expect(asSafeMetadataFailureReason('not-modified')).toBeUndefined()
+    expect(asSafeMetadataFailureReason('fresh-cache')).toBeUndefined()
+    expect(asSafeMetadataFailureReason('ENOENT /cache/x')).toBeUndefined()
+    expect(asSafeMetadataFailureReason(undefined)).toBeUndefined()
+  })
+
+  it('parses well-shaped statuses and rejects mismatches', () => {
+    const snapshot = { source: 'models.dev', fetchedAt: 1, providers: {} }
+    expect(parseModelMetadataStatus({ kind: 'loading', snapshot: null })).toEqual({ kind: 'loading', snapshot: null })
+    expect(parseModelMetadataStatus({ kind: 'ready', snapshot })).toEqual({ kind: 'ready', snapshot })
+    expect(parseModelMetadataStatus({ kind: 'unavailable', snapshot: null, reason: 'http-error' })).toEqual({
+      kind: 'unavailable',
+      snapshot: null,
+      reason: 'http-error'
+    })
+    expect(parseModelMetadataStatus({ kind: 'ready', snapshot: null })).toBeNull()
+    expect(parseModelMetadataStatus({ kind: 'unavailable', snapshot: null })).toBeNull()
+    expect(parseModelMetadataStatus({ kind: 'unavailable', snapshot: null, reason: 'evil' })).toBeNull()
+    expect(parseModelMetadataStatus({ kind: 'nope', snapshot: null })).toBeNull()
+    expect(parseModelMetadataStatus(null)).toBeNull()
   })
 })

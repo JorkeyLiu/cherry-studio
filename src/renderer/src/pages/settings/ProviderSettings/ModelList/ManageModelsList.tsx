@@ -1,3 +1,4 @@
+import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import ExpandableText from '@renderer/components/ExpandableText'
 import ModelIdWithTags from '@renderer/components/ModelIdWithTags'
 import CustomTag from '@renderer/components/Tags/CustomTag'
@@ -5,7 +6,6 @@ import { DynamicVirtualList } from '@renderer/components/VirtualList'
 import FileItem from '@renderer/pages/files/FileItem'
 import type { Model, Provider } from '@renderer/types'
 import { Button, Flex, Tooltip } from 'antd'
-import { Avatar } from 'antd'
 import { ChevronRight, Minus, Plus } from 'lucide-react'
 import React, { memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -193,10 +193,10 @@ const ModelListItem: React.FC<ModelListItemProps> = memo(
             boxShadow: 'none'
           }}
           fileInfo={{
-            // Generic model avatar: deterministic initial, no curated model
-            // icon catalog.
-            icon: <Avatar>{model?.name?.[0]?.toUpperCase()}</Avatar>,
-            name: <ModelIdWithTags model={model} showIdentifier={showIdentifier} />,
+            // Model avatar: owning provider's exact models.dev logo, else the
+            // model initial. No curated model icon catalog.
+            icon: <ModelAvatar model={model} provider={provider} size={32} />,
+            name: <ModelIdWithTags model={model} provider={provider} showIdentifier={showIdentifier} />,
             extra: model.description && <ExpandableText text={model.description} />,
             ext: '.model',
             actions: isAdded ? (

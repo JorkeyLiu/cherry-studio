@@ -151,6 +151,7 @@ const ModelList: React.FC<ModelListProps> = ({ providerId }) => {
                 key={group}
                 groupName={group}
                 models={displayedModelGroups[group]}
+                provider={provider}
                 duplicateModelNames={duplicateModelNames}
                 modelStatusMap={modelStatusMap}
                 defaultOpen={i <= 5}

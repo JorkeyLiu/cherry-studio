@@ -5,7 +5,7 @@ import InspectMessagePopup from '@renderer/components/Popups/InspectMessagePopup
 import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
-import { isEmbeddingModel, isRerankModel, isVisionModel } from '@renderer/config/models'
+import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import type { MessageMenubarButtonId, MessageMenubarScope } from '@renderer/config/registry/messageMenubar'
 import { DEFAULT_MESSAGE_MENUBAR_SCOPE, getMessageMenubarConfig } from '@renderer/config/registry/messageMenubar'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
@@ -25,8 +25,7 @@ import { getMessageTitle } from '@renderer/services/MessagesService'
 import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
 import store, { useAppDispatch } from '@renderer/store'
-import { messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import { type messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
@@ -656,40 +655,12 @@ const MessageMenubar: FC<Props> = (props) => {
     void regenerateAssistant({ topicId: topic.id, messageId: message.id })
   }, [regenerateAssistant, topic.id, message.id])
 
-  // 按条件筛选能够提及的模型，该函数仅在isAssistantMessage时会用到
+  // Unit B: mention-model filtering is never gated by vision metadata.
+  // Ordinary chat is user-intent driven; endpoint/adapter encodability is
+  // decided at send time. All non-embedding/rerank models stay mentionable.
   const mentionModelFilter = useMemo(() => {
-    const defaultFilter = (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)
-
-    if (!isAssistantMessage) {
-      return defaultFilter
-    }
-    const state = store.getState()
-    // Bounded loaded projection for related user lookup (fail-open local).
-    const loadedTopicMessages: readonly Message[] = selectLoadedMessagesForTopic(state, topic.id) ?? []
-    const topicMessages: Message[] = loadedTopicMessages as Message[]
-    // 理论上助手消息只会关联一条用户消息
-    const relatedUserMessage = topicMessages.find((msg) => {
-      return msg.role === 'user' && message.askId === msg.id
-    })
-    // 无关联用户消息时，默认返回所有模型
-    if (!relatedUserMessage) {
-      return defaultFilter
-    }
-
-    const relatedUserMessageBlocks = relatedUserMessage.blocks.map((msgBlockId) =>
-      messageBlocksSelectors.selectById(store.getState(), msgBlockId)
-    )
-
-    if (!relatedUserMessageBlocks) {
-      return defaultFilter
-    }
-
-    if (relatedUserMessageBlocks.some((block) => block && block.type === MessageBlockType.IMAGE)) {
-      return (m: Model) => isVisionModel(m) && defaultFilter(m)
-    } else {
-      return defaultFilter
-    }
-  }, [isAssistantMessage, message.askId, topic.id])
+    return (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)
+  }, [])
 
   const onMentionModel = useCallback(async () => {
     const selectedModel = await SelectChatModelPopup.show({ model, filter: mentionModelFilter })

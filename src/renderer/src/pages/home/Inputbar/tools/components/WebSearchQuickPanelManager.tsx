@@ -11,13 +11,7 @@ import {
 } from '@renderer/components/Icons'
 import type { QuickPanelListItem } from '@renderer/components/QuickPanel'
 import { QuickPanelReservedSymbol } from '@renderer/components/QuickPanel'
-import {
-  isGemini3Model,
-  isGeminiModel,
-  isGPT5SeriesReasoningModel,
-  isOpenAIWebSearchModel,
-  isWebSearchModel
-} from '@renderer/config/models'
+import { isGemini3Model, isGeminiModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { useWebSearchProviders } from '@renderer/hooks/useWebSearchProviders'
@@ -106,13 +100,16 @@ export const useWebSearchPanelController = (assistantId: string, quickPanelContr
       enableWebSearch: !assistant.enableWebSearch
     }
     const model = assistant.model
-    const provider = getProviderByModel(model)
     if (!model) {
       logger.error('Model does not exist.')
       window.toast.error(t('error.model.not_exists'))
       return
     }
-    // Gemini 3+ supports combining built-in tools with function calling
+    // Unit B: no model-name veto on the user's built-in search toggle.
+    // Gemini pre-3 tool-combining warning is a protocol fact kept minimal:
+    // only the provider-side adapter check remains; request time enforces
+    // adapter presence with an explicit error.
+    const provider = getProviderByModel(model)
     if (
       provider &&
       isGeminiWebSearchProvider(provider) &&
@@ -125,20 +122,10 @@ export const useWebSearchPanelController = (assistantId: string, quickPanelContr
       update.enableWebSearch = false
       window.toast.warning(t('chat.mcp.warning.gemini_web_search'))
     }
-    if (
-      isOpenAIWebSearchModel(model) &&
-      isGPT5SeriesReasoningModel(model) &&
-      update.enableWebSearch &&
-      assistant.settings?.reasoning_effort === 'minimal'
-    ) {
-      update.enableWebSearch = false
-      window.toast.warning(t('chat.web_search.warning.openai'))
-    }
     setTimeoutTimer('updateSelectedWebSearchBuiltin', () => updateAssistant(update), 200)
   }, [assistant, setTimeoutTimer, t, updateAssistant])
 
   const providerItems = useMemo<QuickPanelListItem[]>(() => {
-    const isWebSearchModelEnabled = assistant.model && isWebSearchModel(assistant.model)
     const items: QuickPanelListItem[] = []
     items.push(
       ...providers
@@ -157,18 +144,17 @@ export const useWebSearchPanelController = (assistantId: string, quickPanelContr
         .filter((item) => !item.disabled)
     )
 
-    if (isWebSearchModelEnabled) {
-      items.unshift({
-        label: t('chat.input.web_search.builtin.label'),
-        description: isWebSearchModelEnabled
-          ? t('chat.input.web_search.builtin.enabled_content')
-          : t('chat.input.web_search.builtin.disabled_content'),
-        icon: <Globe />,
-        isSelected: assistant.enableWebSearch,
-        disabled: !isWebSearchModelEnabled,
-        action: () => updateToModelBuiltinWebSearch()
-      })
-    }
+    // Unit B: built-in search entry is always offered on ordinary chat; model
+    // metadata never gates it. Missing provider adapters fail explicitly at
+    // request time (no fabricated params).
+    items.unshift({
+      label: t('chat.input.web_search.builtin.label'),
+      description: t('chat.input.web_search.builtin.enabled_content'),
+      icon: <Globe />,
+      isSelected: assistant.enableWebSearch,
+      disabled: false,
+      action: () => updateToModelBuiltinWebSearch()
+    })
 
     return items
   }, [assistant, providers, t, updateQuickPanelItem, updateToModelBuiltinWebSearch])

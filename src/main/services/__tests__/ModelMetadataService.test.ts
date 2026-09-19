@@ -265,13 +265,66 @@ describe('ModelMetadataService loading semantics', () => {
   })
 })
 
+describe('ModelMetadataService status machine', () => {
+  it('is loading before the first load completes', () => {
+    const { service } = makeService()
+    expect(service.getStatus()).toEqual({ kind: 'loading', snapshot: null })
+  })
+
+  it('is ready after a successful refresh and stays ready across a later failure', async () => {
+    const { service, fetchFn } = makeService()
+    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    await service.refresh({ force: true })
+    const ready = service.getStatus()
+    expect(ready.kind).toBe('ready')
+    expect(ready.snapshot?.source).toBe('models.dev')
+    expect(ready.reason).toBeUndefined()
+
+    fetchFn.mockRejectedValue(new Error('boom'))
+    const failed = await service.refresh({ force: true })
+    expect(failed.ok).toBe(false)
+    // the failed refresh retains last-known-good: still ready, no reason leak
+    const stillReady = service.getStatus()
+    expect(stillReady.kind).toBe('ready')
+    expect(stillReady.snapshot?.source).toBe('models.dev')
+    expect(stillReady.reason).toBeUndefined()
+  })
+
+  it('is unavailable with a sanitized reason when the round completes without a snapshot', async () => {
+    const { service, fetchFn, readCacheFile } = makeService()
+    readCacheFile.mockRejectedValue(new Error('no cache'))
+    await service.ensureLoaded()
+    fetchFn.mockRejectedValue(new Error('boom'))
+    await service.refresh({ force: true })
+    expect(service.getStatus()).toEqual({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+  })
+
+  it('recovers from unavailable to ready on the next success', async () => {
+    const { service, fetchFn, readCacheFile } = makeService()
+    readCacheFile.mockRejectedValue(new Error('no cache'))
+    await service.ensureLoaded()
+    fetchFn.mockRejectedValue(new Error('boom'))
+    await service.refresh({ force: true })
+    expect(service.getStatus().kind).toBe('unavailable')
+
+    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    await service.refresh({ force: true })
+    const recovered = service.getStatus()
+    expect(recovered.kind).toBe('ready')
+    expect(recovered.snapshot).not.toBeNull()
+    expect(recovered.reason).toBeUndefined()
+  })
+})
+
 describe('registerModelMetadataIpc', () => {
-  it('registers exactly the snapshot and refresh channels in Main house style', () => {
+  it('registers the snapshot, refresh, and status channels in Main house style', () => {
     const { service } = makeService()
     registerModelMetadataIpc(service)
     expect(ipcMain.handle).toHaveBeenCalledWith(IpcChannel.ModelMetadata_GetSnapshot, expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith(IpcChannel.ModelMetadata_Refresh, expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith(IpcChannel.ModelMetadata_GetStatus, expect.any(Function))
     expect(IpcChannel.ModelMetadata_GetSnapshot).toBe('model-metadata:get-snapshot')
     expect(IpcChannel.ModelMetadata_Refresh).toBe('model-metadata:refresh')
+    expect(IpcChannel.ModelMetadata_GetStatus).toBe('model-metadata:get-status')
   })
 })

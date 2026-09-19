@@ -1,10 +1,12 @@
-import type { Model } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import { memo } from 'react'
 
 import ModelTagsWithLabel from './ModelTagsWithLabel'
 
 interface ModelIdWithTagsProps {
   model: Model
+  /** Exact owning provider when the caller already has it; otherwise strict resolution applies. */
+  provider?: Provider | null
   fontSize?: number
   showIdentifier?: boolean
   style?: React.CSSProperties
@@ -13,6 +15,7 @@ interface ModelIdWithTagsProps {
 const ModelIdWithTags = ({
   ref,
   model,
+  provider,
   fontSize = 14,
   showIdentifier = false,
   style
@@ -36,7 +39,7 @@ const ModelIdWithTags = ({
           </span>
         )}
       </div>
-      <ModelTagsWithLabel model={model} size={11} style={{ flexShrink: 0 }} />
+      <ModelTagsWithLabel model={model} provider={provider} size={11} style={{ flexShrink: 0 }} />
     </div>
   )
 }

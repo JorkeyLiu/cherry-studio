@@ -1,12 +1,13 @@
+import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import { showErrorDetailPopup } from '@renderer/components/ErrorDetailModal'
 import { type HealthResult, HealthStatusIndicator } from '@renderer/components/HealthStatusIndicator'
 import { HStack } from '@renderer/components/Layout'
 import ModelIdWithTags from '@renderer/components/ModelIdWithTags'
-import type { Model } from '@renderer/types'
+import type { Model, Provider } from '@renderer/types'
 import type { ModelWithStatus } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { maskApiKey } from '@renderer/utils/api'
-import { Avatar, Button, Tooltip } from 'antd'
+import { Button, Tooltip } from 'antd'
 import { Bolt, Minus } from 'lucide-react'
 import React, { memo, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -15,6 +16,8 @@ import styled from 'styled-components'
 interface ModelListItemProps {
   ref?: React.RefObject<HTMLDivElement>
   model: Model
+  /** Owning provider: avatar shows its exact models.dev logo, else the model initial. */
+  provider?: Provider | null
   modelStatus: ModelWithStatus | undefined
   showIdentifier?: boolean
   disabled?: boolean
@@ -25,6 +28,7 @@ interface ModelListItemProps {
 const ModelListItem: React.FC<ModelListItemProps> = ({
   ref,
   model,
+  provider,
   modelStatus,
   showIdentifier = false,
   disabled,
@@ -68,9 +72,10 @@ const ModelListItem: React.FC<ModelListItemProps> = ({
     <>
       <ListItem ref={ref}>
         <HStack alignItems="center" gap={10} style={{ flex: 1 }}>
-          <Avatar size={24}>{model?.name?.[0]?.toUpperCase()}</Avatar>
+          <ModelAvatar model={model} provider={provider} size={24} />
           <ModelIdWithTags
             model={model}
+            provider={provider}
             showIdentifier={showIdentifier}
             style={{
               flex: 1,

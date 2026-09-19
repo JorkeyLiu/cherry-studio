@@ -1,3 +1,4 @@
+import type * as AntDesignIcons from '@ant-design/icons'
 import type { FileMetadata } from '@renderer/types'
 import type { FileMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -6,9 +7,13 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Mock dependencies
-vi.mock('@ant-design/icons', () => ({
-  PaperClipOutlined: () => <span data-testid="paperclip-icon" />
-}))
+vi.mock('@ant-design/icons', async (importOriginal) => {
+  const actual = await importOriginal<typeof AntDesignIcons>()
+  return {
+    ...actual,
+    PaperClipOutlined: () => <span data-testid="paperclip-icon" />
+  }
+})
 
 vi.mock('i18next', () => ({
   t: (key: string) => key
@@ -28,7 +33,8 @@ vi.mock('@renderer/services/FileManager', () => ({
 }))
 
 vi.mock('@renderer/utils', () => ({
-  parseFileTypes: vi.fn((type: string) => type)
+  parseFileTypes: vi.fn((type: string) => type),
+  formatFileSize: vi.fn((size: number) => `${size}B`)
 }))
 
 vi.mock('antd', () => ({
@@ -37,6 +43,9 @@ vi.mock('antd', () => ({
       {children}
     </div>
   ),
+  Flex: ({ children }: any) => <div>{children}</div>,
+  Button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
+  Image: () => null,
   Upload: ({ fileList, onPreview, disabled, listType }: any) => (
     <div data-testid="upload" data-disabled={disabled} data-list-type={listType}>
       {fileList.map((file: any) => (

@@ -178,6 +178,77 @@ export interface ModelMetadataRefreshResult {
   reason?: ModelMetadataRefreshReason
 }
 
+/**
+ * Reactive models.dev registry status shared across Main/preload/renderer.
+ *
+ * - `loading`: no snapshot yet and a read/fetch is still in progress.
+ * - `ready`: a snapshot is available; a failed background refresh stays ready.
+ * - `unavailable`: no snapshot and the read/fetch round completed with a
+ *   failure. `reason` is always a sanitized `ModelMetadataRefreshReason`
+ *   (status/reason only — never bodies or file paths).
+ */
+export type ModelMetadataStatusKind = 'loading' | 'ready' | 'unavailable'
+
+export interface ModelMetadataStatus {
+  kind: ModelMetadataStatusKind
+  /** Stable last-known-good snapshot; null until the first success. */
+  snapshot: ModelMetadataSnapshot | null
+  /** Present only when `kind` is `unavailable`. */
+  reason?: ModelMetadataRefreshReason
+}
+
+const MODEL_METADATA_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
+  'http-error',
+  'unexpected-content-type',
+  'response-too-large',
+  'invalid-json',
+  'schema-mismatch',
+  'network-error',
+  'timeout'
+])
+
+/** Keep only sanitized failure reasons at the status boundary. */
+export function asSafeMetadataFailureReason(reason: unknown): ModelMetadataRefreshReason | undefined {
+  return typeof reason === 'string' && MODEL_METADATA_FAILURE_REASONS.has(reason)
+    ? (reason as ModelMetadataRefreshReason)
+    : undefined
+}
+
+/**
+ * Pure status-machine helper: snapshot wins (ready, refresh failures
+ * included), otherwise an in-flight round means loading, otherwise a
+ * completed failure means unavailable with its safe reason.
+ */
+export function toModelMetadataStatus(args: {
+  snapshot: ModelMetadataSnapshot | null
+  inFlight: boolean
+  failureReason?: ModelMetadataRefreshReason
+}): ModelMetadataStatus {
+  if (args.snapshot) return { kind: 'ready', snapshot: args.snapshot }
+  if (args.inFlight) return { kind: 'loading', snapshot: null }
+  const reason = asSafeMetadataFailureReason(args.failureReason)
+  if (reason) return { kind: 'unavailable', snapshot: null, reason }
+  return { kind: 'loading', snapshot: null }
+}
+
+/** Defensively parse a status crossing the IPC boundary. Null on mismatch. */
+export function parseModelMetadataStatus(data: unknown): ModelMetadataStatus | null {
+  if (typeof data !== 'object' || data === null) return null
+  const record = data as Record<string, unknown>
+  const kind = record['kind']
+  if (kind !== 'loading' && kind !== 'ready' && kind !== 'unavailable') return null
+  const rawSnapshot = record['snapshot']
+  const snapshot = rawSnapshot === null || rawSnapshot === undefined ? null : parseModelMetadataSnapshot(rawSnapshot)
+  if (snapshot === null && rawSnapshot !== null && rawSnapshot !== undefined) return null
+  if (kind === 'ready' && !snapshot) return null
+  if (kind === 'unavailable') {
+    const reason = asSafeMetadataFailureReason(record['reason'])
+    if (!reason) return null
+    return { kind, snapshot: null, reason }
+  }
+  return { kind, snapshot }
+}
+
 // ---------------------------------------------------------------------------
 // Defensive zod validation
 // ---------------------------------------------------------------------------

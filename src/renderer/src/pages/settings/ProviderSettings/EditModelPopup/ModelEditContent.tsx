@@ -1,33 +1,18 @@
 import CopyIcon from '@renderer/components/Icons/CopyIcon'
-import {
-  EmbeddingTag,
-  ReasoningTag,
-  RerankerTag,
-  ToolsCallingTag,
-  VisionTag,
-  WebSearchTag
-} from '@renderer/components/Tags/Model'
-import { WarnTooltip } from '@renderer/components/TooltipIcons'
-import {
-  isEmbeddingModel,
-  isFunctionCallingModel,
-  isReasoningModel,
-  isRerankModel,
-  isVisionModel,
-  isWebSearchModel
-} from '@renderer/config/models'
-import type { Model, ModelCapability, ModelType, Provider } from '@renderer/types'
-import { getDefaultGroupName, getDifference, getUnion, uniqueObjectArray } from '@renderer/utils'
+import { getExternalModelEntry } from '@renderer/config/models/modelMetadata'
+import { useModelMetadataStatus } from '@renderer/hooks/useModelMetadataStatus'
+import type { Model, Provider } from '@renderer/types'
+import { getDefaultGroupName } from '@renderer/utils'
 import type { ModalProps } from 'antd'
-import { Button, Divider, Flex, Form, Input, InputNumber, message, Modal, Select, Switch, Tooltip } from 'antd'
-import { cloneDeep } from 'lodash'
-import { ChevronDown, ChevronUp, RotateCcw, SaveIcon } from 'lucide-react'
+import { Button, Flex, Form, Input, message, Modal } from 'antd'
+import { SaveIcon } from 'lucide-react'
 import type { FC } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-import ModelMetadataReference from './ModelMetadataReference'
+import ModelCapabilityGroups, { hasKnownFeatures, hasKnownInputModalities } from './ModelCapabilityGroups'
+import ModelMetadataReference, { hasConcreteModelData } from './ModelMetadataReference'
 
 interface ModelEditContentProps {
   provider: Provider
@@ -35,216 +20,65 @@ interface ModelEditContentProps {
   onUpdateModel: (model: Model) => void
 }
 
-const symbols = ['$', '¥', '€', '£']
+/**
+ * Read-only model editor: id/name/group stay editable; capabilities and
+ * model data are information-only. Capability groups read the exact
+ * models.dev entry only (never persisted ModelType predicates). Save submits
+ * id/name/group and preserves every unshown field (capabilities,
+ * supported_text_delta, pricing, endpoint_type/supported_endpoint_types, ...)
+ * exactly as stored — never cleared, zeroed, or rewritten from display state.
+ */
 const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, model, onUpdateModel, ...props }) => {
   const [form] = Form.useForm()
   const { t } = useTranslation()
-  const [showMoreSettings, setShowMoreSettings] = useState(false)
-  const [currencySymbol, setCurrencySymbol] = useState(model.pricing?.currencySymbol || '$')
-  const [isCustomCurrency, setIsCustomCurrency] = useState(!symbols.includes(model.pricing?.currencySymbol || '$'))
-  const [modelCapabilities, setModelCapabilities] = useState(model.capabilities || [])
-  const originalModelCapabilities = cloneDeep(model.capabilities || [])
-  const [supportedTextDelta, setSupportedTextDelta] = useState(model.supported_text_delta)
-  const [hasUserModified, setHasUserModified] = useState(false)
+  // Reactive registry status: subscribing re-renders this open popup when the
+  // async init/refresh round completes, and drives the all-empty state below.
+  const metadataStatus = useModelMetadataStatus()
 
-  // 自动保存函数
-  const autoSave = (overrides?: {
-    capabilities?: ModelCapability[]
-    supported_text_delta?: boolean
-    currencySymbol?: string
-    isCustomCurrency?: boolean
-  }) => {
-    const formValues = form.getFieldsValue()
-    const currentIsCustomCurrency = overrides?.isCustomCurrency ?? isCustomCurrency
-    const currentCurrencySymbol = overrides?.currencySymbol ?? currencySymbol
-    const finalCurrencySymbol = currentIsCustomCurrency
-      ? formValues.customCurrencySymbol || currentCurrencySymbol
-      : formValues.currencySymbol || currentCurrencySymbol || '$'
-    const updatedModel: Model = {
-      ...model,
-      id: formValues.id || model.id,
-      name: formValues.name || model.name,
-      group: formValues.group || model.group,
-      // Legacy endpoint_type (retired NewAPI control) is preserved as-is;
-      // the generic edit flow does not expose it.
-      endpoint_type: model.endpoint_type,
-      capabilities: overrides?.capabilities ?? modelCapabilities,
-      supported_text_delta: overrides?.supported_text_delta ?? supportedTextDelta,
-      pricing: {
-        input_per_million_tokens: Number(formValues.input_per_million_tokens) || 0,
-        output_per_million_tokens: Number(formValues.output_per_million_tokens) || 0,
-        currencySymbol: finalCurrencySymbol
-      }
-    }
-    onUpdateModel(updatedModel)
-  }
+  // Exact models.dev entry for the read-only capability groups (display only).
+  // Recomputed on every subscribed status transition, so async init results
+  // flow into the open popup without remounting.
+  const entry = useMemo(
+    () => getExternalModelEntry(model, provider),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [model, provider, metadataStatus]
+  )
+
+  // All three metadata groups empty: one status line, never per-group hints.
+  // A cached snapshot means ready even for an unknown model id.
+  const allMetadataEmpty = !hasKnownInputModalities(entry) && !hasKnownFeatures(entry) && !hasConcreteModelData(entry)
+  const emptyStateKey =
+    metadataStatus.kind === 'loading'
+      ? 'models.reference.loading'
+      : metadataStatus.kind === 'unavailable'
+        ? 'models.reference.unavailable'
+        : 'models.reference.no_data'
 
   const onFinish = (values: any) => {
-    const finalCurrencySymbol = isCustomCurrency ? values.customCurrencySymbol : values.currencySymbol
     const updatedModel: Model = {
       ...model,
       id: values.id || model.id,
       name: values.name || model.name,
-      group: values.group || model.group,
-      endpoint_type: model.endpoint_type,
-      capabilities: modelCapabilities,
-      supported_text_delta: supportedTextDelta,
-      pricing: {
-        input_per_million_tokens: Number(values.input_per_million_tokens) || 0,
-        output_per_million_tokens: Number(values.output_per_million_tokens) || 0,
-        currencySymbol: finalCurrencySymbol || '$'
-      }
+      group: values.group || model.group
     }
     onUpdateModel(updatedModel)
-    setShowMoreSettings(false)
     props.onOk?.(undefined as any)
   }
 
-  const currencyOptions = [
-    ...symbols.map((symbol) => ({ label: symbol, value: symbol })),
-    { label: t('models.price.custom'), value: 'custom' }
-  ]
-
-  // Explicit models.dev reference adoption: copies only the two fields
-  // representable by Model.pricing into the form/save flow. Never persists
-  // external metadata itself; saved user pricing stays authoritative.
-  const handleUseReferencePricing = (inputPerMillion: number, outputPerMillion: number) => {
-    form.setFieldsValue({
-      input_per_million_tokens: inputPerMillion,
-      output_per_million_tokens: outputPerMillion
-    })
-    autoSave()
-  }
-
-  const defaultTypes: ModelType[] = useMemo(
-    () => [
-      ...(isVisionModel(model) ? (['vision'] as const) : []),
-      ...(isReasoningModel(model) ? (['reasoning'] as const) : []),
-      ...(isFunctionCallingModel(model) ? (['function_calling'] as const) : []),
-      ...(isWebSearchModel(model) ? (['web_search'] as const) : []),
-      ...(isEmbeddingModel(model) ? (['embedding'] as const) : []),
-      ...(isRerankModel(model) ? (['rerank'] as const) : [])
-    ],
-    [model]
-  )
-
-  const selectedTypes: ModelType[] = useMemo(
-    () =>
-      getUnion(
-        modelCapabilities?.filter((t) => t.isUserSelected).map((t) => t.type) || [],
-        getDifference(
-          defaultTypes,
-          modelCapabilities?.filter((t) => t.isUserSelected === false).map((t) => t.type) || []
-        )
-      ),
-    [defaultTypes, modelCapabilities]
-  )
-
-  // 被rerank/embedding改变的类型
-  // const changedTypesRef = useRef<string[]>([])
-
-  useEffect(() => {
-    if (showMoreSettings) {
-      const newModelCapabilities = getUnion(
-        selectedTypes.map((type) => {
-          const existingCapability = modelCapabilities?.find((m) => m.type === type)
-          return {
-            type: type,
-            isUserSelected: existingCapability?.isUserSelected ?? undefined
-          }
-        }),
-        modelCapabilities?.filter((t) => t.isUserSelected === false),
-        (item) => item.type
-      )
-      setModelCapabilities(newModelCapabilities)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMoreSettings])
-
-  // 监听modelCapabilities变化，自动保存（但跳过初始化时的保存）
-  useEffect(() => {
-    if (hasUserModified && showMoreSettings) {
-      autoSave()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelCapabilities])
-
-  const ModelCapability = () => {
-    const isRerankDisabled = selectedTypes.includes('embedding')
-    const isEmbeddingDisabled = selectedTypes.includes('rerank')
-    const isOtherDisabled = selectedTypes.includes('rerank') || selectedTypes.includes('embedding')
-
-    const handleResetTypes = () => {
-      setModelCapabilities(originalModelCapabilities)
-      setHasUserModified(false) // 重置后清除修改标志
-    }
-
-    const updateType = useCallback((type: ModelType) => {
-      setHasUserModified(true)
-      setModelCapabilities((prev) =>
-        uniqueObjectArray([
-          ...prev.filter((t) => t.type !== type),
-          { type, isUserSelected: !selectedTypes.includes(type) }
-        ])
-      )
-    }, [])
-
-    return (
-      <>
-        <TypeTitle>
-          <Flex align="center" gap={4} style={{ height: 24 }}>
-            {t('models.type.select')}
-            <WarnTooltip title={t('settings.moresetting.check.warn')} />
-          </Flex>
-
-          {hasUserModified && (
-            <Tooltip title={t('common.reset')}>
-              <Button size="small" icon={<RotateCcw size={14} />} onClick={handleResetTypes} type="text" />
-            </Tooltip>
-          )}
-        </TypeTitle>
-        <Flex justify="flex-start" align="center" gap={4} wrap={'wrap'} style={{ marginBottom: 8 }}>
-          <VisionTag
-            showLabel
-            inactive={isOtherDisabled || !selectedTypes.includes('vision')}
-            disabled={isOtherDisabled}
-            onClick={() => updateType('vision')}
-          />
-          <WebSearchTag
-            showLabel
-            inactive={isOtherDisabled || !selectedTypes.includes('web_search')}
-            disabled={isOtherDisabled}
-            onClick={() => updateType('web_search')}
-          />
-          <ReasoningTag
-            showLabel
-            inactive={isOtherDisabled || !selectedTypes.includes('reasoning')}
-            disabled={isOtherDisabled}
-            onClick={() => updateType('reasoning')}
-          />
-          <ToolsCallingTag
-            showLabel
-            inactive={isOtherDisabled || !selectedTypes.includes('function_calling')}
-            disabled={isOtherDisabled}
-            onClick={() => updateType('function_calling')}
-          />
-          <RerankerTag
-            disabled={isRerankDisabled}
-            inactive={isRerankDisabled || !selectedTypes.includes('rerank')}
-            onClick={() => updateType('rerank')}
-          />
-          <EmbeddingTag
-            inactive={isEmbeddingDisabled || !selectedTypes.includes('embedding')}
-            disabled={isEmbeddingDisabled}
-            onClick={() => updateType('embedding')}
-          />
-        </Flex>
-      </>
-    )
-  }
-
   return (
-    <Modal title={t('models.edit')} footer={null} transitionName="animation-move-down" centered {...props}>
+    <Modal
+      title={t('models.edit')}
+      transitionName="animation-move-down"
+      centered
+      {...props}
+      footer={
+        <Flex justify="flex-end" align="center" gap={8}>
+          <Button onClick={(e) => props.onCancel?.(e as any)}>{t('common.cancel')}</Button>
+          <Button type="primary" icon={<SaveIcon size={16} />} onClick={() => form.submit()}>
+            {t('common.save')}
+          </Button>
+        </Flex>
+      }>
       <Form
         form={form}
         labelCol={{ flex: '110px' }}
@@ -254,22 +88,10 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
         initialValues={{
           id: model.id,
           name: model.name,
-          group: model.group,
-          input_per_million_tokens: model.pricing?.input_per_million_tokens ?? 0,
-          output_per_million_tokens: model.pricing?.output_per_million_tokens ?? 0,
-          currencySymbol: symbols.includes(model.pricing?.currencySymbol || '$')
-            ? model.pricing?.currencySymbol || '$'
-            : 'custom',
-          customCurrencySymbol: symbols.includes(model.pricing?.currencySymbol || '$')
-            ? ''
-            : model.pricing?.currencySymbol || ''
+          group: model.group
         }}
         onFinish={onFinish}>
-        <Form.Item
-          name="id"
-          label={t('settings.models.add.model_id.label')}
-          tooltip={t('settings.models.add.model_id.tooltip')}
-          rules={[{ required: true }]}>
+        <Form.Item name="id" label={t('settings.models.add.model_id.label')} rules={[{ required: true }]}>
           <Flex justify="space-between" gap={5}>
             <Input
               placeholder={t('settings.models.add.model_id.placeholder')}
@@ -296,154 +118,26 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
             />
           </Flex>
         </Form.Item>
-        <Form.Item
-          name="name"
-          label={t('settings.models.add.model_name.label')}
-          tooltip={t('settings.models.add.model_name.tooltip')}>
+        <Form.Item name="name" label={t('settings.models.add.model_name.label')}>
           <Input placeholder={t('settings.models.add.model_name.placeholder')} spellCheck={false} />
         </Form.Item>
-        <Form.Item
-          name="group"
-          label={t('settings.models.add.group_name.label')}
-          tooltip={t('settings.models.add.group_name.tooltip')}>
+        <Form.Item name="group" label={t('settings.models.add.group_name.label')}>
           <Input placeholder={t('settings.models.add.group_name.placeholder')} spellCheck={false} />
         </Form.Item>
-        <Form.Item style={{ marginBottom: 8, textAlign: 'center' }}>
-          <Flex justify="space-between" align="center" style={{ position: 'relative' }}>
-            <Button
-              color="default"
-              variant="filled"
-              icon={showMoreSettings ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              iconPosition="end"
-              onClick={() => setShowMoreSettings(!showMoreSettings)}
-              style={{ color: 'var(--color-text-3)' }}>
-              {t('settings.moresetting.label')}
-            </Button>
-            <Button type="primary" htmlType="submit" icon={<SaveIcon size={16} />}>
-              {t('common.save')}
-            </Button>
-          </Flex>
-        </Form.Item>
-        <ModelMetadataReference model={model} provider={provider} onUseReferencePricing={handleUseReferencePricing} />
-        {showMoreSettings && (
-          <div style={{ marginBottom: 8 }}>
-            <Divider style={{ margin: '16px 0 16px 0' }} />
-            <ModelCapability />
-            <Divider style={{ margin: '16px 0 12px 0' }} />
-            <Form.Item
-              name="supported_text_delta"
-              style={{ marginBottom: 10 }}
-              labelCol={{ flex: 1 }}
-              label={t('settings.models.add.supported_text_delta.label')}
-              tooltip={t('settings.models.add.supported_text_delta.tooltip')}>
-              <Switch
-                checked={supportedTextDelta}
-                style={{ marginLeft: 'auto' }}
-                size="small"
-                onChange={(checked) => {
-                  setSupportedTextDelta(checked)
-                  // 直接传递新值给autoSave
-                  autoSave({ supported_text_delta: checked })
-                }}
-              />
-            </Form.Item>
-            <Divider style={{ margin: '12px 0 16px 0' }} />
-            <Form.Item name="currencySymbol" label={t('models.price.currency')} style={{ marginBottom: 10 }}>
-              <Select
-                style={{ width: '100px' }}
-                options={currencyOptions}
-                onChange={(value) => {
-                  if (value === 'custom') {
-                    const customSymbol = form.getFieldValue('customCurrencySymbol') || ''
-                    setIsCustomCurrency(true)
-                    setCurrencySymbol(customSymbol)
-                    // 自动保存
-                    autoSave({
-                      isCustomCurrency: true,
-                      currencySymbol: customSymbol
-                    })
-                  } else {
-                    setIsCustomCurrency(false)
-                    setCurrencySymbol(value)
-                    // 自动保存
-                    autoSave({
-                      isCustomCurrency: false,
-                      currencySymbol: value
-                    })
-                  }
-                }}
-                dropdownMatchSelectWidth={false}
-              />
-            </Form.Item>
-
-            {isCustomCurrency && (
-              <Form.Item
-                name="customCurrencySymbol"
-                label={t('models.price.custom_currency')}
-                style={{ marginBottom: 10 }}
-                rules={[{ required: isCustomCurrency }]}>
-                <Input
-                  style={{ width: '100px' }}
-                  placeholder={t('models.price.custom_currency_placeholder')}
-                  defaultValue={model.pricing?.currencySymbol}
-                  maxLength={5}
-                  onChange={(e) => {
-                    const newValue = e.target.value
-                    setCurrencySymbol(newValue)
-                    // 自动保存
-                    autoSave({
-                      currencySymbol: newValue,
-                      isCustomCurrency: true
-                    })
-                  }}
-                />
-              </Form.Item>
-            )}
-
-            <Form.Item label={t('models.price.input')} style={{ marginBottom: 10 }} name="input_per_million_tokens">
-              <InputNumber
-                placeholder="0.00"
-                defaultValue={model.pricing?.input_per_million_tokens}
-                min={0}
-                step={0.01}
-                precision={2}
-                style={{ width: '240px' }}
-                addonAfter={`${currencySymbol} / ${t('models.price.million_tokens')}`}
-                onChange={() => {
-                  // 自动保存
-                  autoSave()
-                }}
-              />
-            </Form.Item>
-            <Form.Item label={t('models.price.output')} style={{ marginBottom: 10 }} name="output_per_million_tokens">
-              <InputNumber
-                placeholder="0.00"
-                defaultValue={model.pricing?.output_per_million_tokens}
-                min={0}
-                step={0.01}
-                precision={2}
-                style={{ width: '240px' }}
-                addonAfter={`${currencySymbol} / ${t('models.price.million_tokens')}`}
-                onChange={() => {
-                  // 自动保存
-                  autoSave()
-                }}
-              />
-            </Form.Item>
-          </div>
-        )}
       </Form>
+      <ModelCapabilityGroups entry={entry} />
+      <ModelMetadataReference entry={entry} />
+      {allMetadataEmpty && <MetadataEmpty data-testid="model-metadata-empty">{t(emptyStateKey)}</MetadataEmpty>}
     </Modal>
   )
 }
 
-const TypeTitle = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin: 12px 0;
-  font-size: 14px;
-  font-weight: 600;
+const MetadataEmpty = styled.div`
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--color-text-2);
 `
 
 export default ModelEditContent

@@ -13,6 +13,8 @@ import {
 import { validateStoredFilePath } from '@main/utils/fileValidator'
 import { t } from '@main/utils/locales'
 import { documentExts, imageExts, KB, MB } from '@shared/config/constant'
+import type { MediaAttachmentOpenRequest } from '@shared/mediaAttachment'
+import { isMediaAttachmentOpenRequest, isSupportedMediaAttachmentExt } from '@shared/mediaAttachment'
 import { parseDataUrl } from '@shared/utils'
 import type { FileMetadata, FileType, NotesTreeNode } from '@types'
 import { FILE_TYPE } from '@types'
@@ -155,6 +157,16 @@ class FileStorage {
   private debounceTimer?: NodeJS.Timeout
   private watcherConfig: Required<FileWatcherConfig> = DEFAULT_WATCHER_CONFIG
   private isPaused = false
+  /**
+   * In-memory allow-set of realpaths for pre-upload external media files.
+   * Populated only when the current Main process returns a path from
+   * `selectFile` (file dialog) or `getFile` (drag-drop). Never persisted and
+   * never a generic arbitrary-path capability — it only gates the narrow
+   * `openMediaAttachment` external branch.
+   */
+  private readonly externalMediaAllowedPaths = new Set<string>()
+  /** Upper bound for the external media allow-set (FIFO eviction). */
+  private static readonly MAX_EXTERNAL_MEDIA_PATHS = 1000
 
   private get tempDir(): string {
     if (!fs.existsSync(this._tempDir)) {
@@ -259,6 +271,8 @@ class FileStorage {
       const ext = path.extname(filePath)
       const fileType = await this.getFileType(filePath)
 
+      this.registerExternalMediaPath(filePath)
+
       return {
         id: uuidv4(),
         origin_name: path.basename(filePath),
@@ -350,6 +364,8 @@ class FileStorage {
     const stats = fs.statSync(filePath)
     const fileType = await this.getFileType(filePath)
 
+    this.registerExternalMediaPath(filePath)
+
     return {
       id: uuidv4(),
       origin_name: path.basename(filePath),
@@ -392,6 +408,102 @@ class FileStorage {
    */
   public fileExists = async (_: Electron.IpcMainInvokeEvent, storedFileName: string): Promise<boolean> => {
     return (await this.validateStoredFilePath(storedFileName)) !== null
+  }
+
+  /**
+   * Best-effort registration of a pre-upload external path into the in-memory
+   * media allow-set. Only realpaths of existing regular files with a
+   * supported audio/video attachment extension are recorded; anything else
+   * is silently ignored. Never throws.
+   */
+  private registerExternalMediaPath = (filePath: string): void => {
+    try {
+      if (typeof filePath !== 'string' || filePath.length === 0) {
+        return
+      }
+      const real = fs.realpathSync(filePath)
+      if (!isSupportedMediaAttachmentExt(path.extname(real))) {
+        return
+      }
+      const stat = fs.lstatSync(real)
+      if (!stat.isFile()) {
+        return
+      }
+      if (
+        this.externalMediaAllowedPaths.size >= FileStorage.MAX_EXTERNAL_MEDIA_PATHS &&
+        !this.externalMediaAllowedPaths.has(real)
+      ) {
+        const oldest = this.externalMediaAllowedPaths.values().next().value
+        if (oldest !== undefined) {
+          this.externalMediaAllowedPaths.delete(oldest)
+        }
+      }
+      this.externalMediaAllowedPaths.add(real)
+    } catch {
+      // Best-effort only: unresolvable paths are simply not registered.
+    }
+  }
+
+  /**
+   * Narrow secure open for media attachments backing the in-app audio/video
+   * preview's "open with default app" action. This is the only new media
+   * operation — the generic `openPath` (arbitrary path) semantics used by
+   * knowledge base, citations and other surfaces are intentionally untouched.
+   *
+   * - `stored`: `id + ext` resolved inside `storageDir` via the shared
+   *   `validateStoredFilePath` production helper (rejects absolute paths,
+   *   traversal, symlinks and directories; requires a regular file). The
+   *   renderer never supplies a final resolved path on this branch.
+   * - `external`: only a realpath with a supported audio/video attachment
+   *   extension previously registered by this process via `selectFile` /
+   *   `getFile` is honored (extension + realpath + regular-file check).
+   *
+   * A non-empty `shell.openPath` error string is thrown so the IPC invoke
+   * rejects and the renderer can surface the existing preview error.
+   */
+  public openMediaAttachment = async (
+    _: Electron.IpcMainInvokeEvent,
+    request: MediaAttachmentOpenRequest
+  ): Promise<void> => {
+    if (!isMediaAttachmentOpenRequest(request)) {
+      throw new Error('Invalid media attachment open request')
+    }
+
+    if (request.kind === 'stored') {
+      const resolved = await this.validateStoredFilePath(request.storedFileName)
+      if (!resolved) {
+        throw new Error(`Media attachment is unavailable: ${request.storedFileName}`)
+      }
+      const error = await shell.openPath(resolved)
+      if (error !== '') {
+        throw new Error(error)
+      }
+      return
+    }
+
+    let real: string
+    try {
+      real = await fs.promises.realpath(request.filePath)
+    } catch {
+      throw new Error(`Media attachment is unavailable: ${request.filePath}`)
+    }
+    if (
+      !isSupportedMediaAttachmentExt(path.extname(request.filePath)) ||
+      !isSupportedMediaAttachmentExt(path.extname(real))
+    ) {
+      throw new Error(`Media attachment type is not supported: ${request.filePath}`)
+    }
+    if (!this.externalMediaAllowedPaths.has(real)) {
+      throw new Error(`Media attachment is not registered for opening: ${request.filePath}`)
+    }
+    const stat = await fs.promises.stat(real)
+    if (!stat.isFile()) {
+      throw new Error(`Media attachment is unavailable: ${request.filePath}`)
+    }
+    const error = await shell.openPath(real)
+    if (error !== '') {
+      throw new Error(error)
+    }
   }
 
   public deleteDir = async (_: Electron.IpcMainInvokeEvent, id: string): Promise<void> => {
