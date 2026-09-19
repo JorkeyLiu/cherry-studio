@@ -5,25 +5,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ModelMetadataService, registerModelMetadataIpc } from '../ModelMetadataService'
 
-const RAW_FIXTURE = {
-  anthropic: {
-    id: 'anthropic',
-    name: 'Anthropic',
-    models: {
-      'claude-sonnet-4-6': {
-        id: 'claude-sonnet-4-6',
-        attachment: false,
-        reasoning: true,
-        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
-        tool_call: true,
-        temperature: true,
-        modalities: { input: ['text', 'image'], output: ['text'] },
-        limit: { context: 1000000, output: 128000 },
-        cost: { input: 3, output: 15, cache_read: 0.3 }
-      },
-      'legacy-unknown': { id: 'legacy-unknown', name: 'Legacy' }
-    }
-  }
+const RAW_CANONICAL_FIXTURE = {
+  'moonshotai/kimi-k3': {
+    id: 'moonshotai/kimi-k3',
+    name: 'Kimi K3',
+    attachment: true,
+    reasoning: true,
+    tool_call: true,
+    temperature: false,
+    modalities: { input: ['text', 'image'], output: ['text'] },
+    limit: { context: 1048576, output: 131072 }
+  },
+  'legacy-unknown': { id: 'legacy-unknown', name: 'Legacy' }
+}
+
+const RAW_PROVIDER_SOURCES_FIXTURE = {
+  anthropic: { id: 'anthropic', name: 'Anthropic' },
+  openai: { id: 'openai', name: 'OpenAI', api: 'https://api.openai.com/v1' }
 }
 
 function mockResponse(overrides: {
@@ -49,7 +47,7 @@ function makeService(overrides: ConstructorParameters<typeof ModelMetadataServic
     fetchFn: fetchFn as unknown as typeof fetch,
     readCacheFile,
     writeCacheFileAtomic,
-    cacheFilePath: '/cache/model-metadata/models-dev.json',
+    cacheFilePath: '/cache/model-metadata/models-dev-models.json',
     now: () => 1_000_000,
     ...overrides
   })
@@ -58,7 +56,7 @@ function makeService(overrides: ConstructorParameters<typeof ModelMetadataServic
 
 function diskEnvelope(snapshot: unknown, etag?: string) {
   return JSON.stringify({
-    version: 1,
+    version: 2,
     fetchedAt: 500_000,
     ...(etag ? { etag } : {}),
     snapshot
@@ -70,10 +68,30 @@ function diskSnapshot() {
     source: 'models.dev',
     fetchedAt: 500_000,
     etag: '"v1"',
+    models: {
+      'moonshotai/kimi-k3': {
+        id: 'moonshotai/kimi-k3',
+        modalities: { input: ['text'], output: ['text'] }
+      }
+    },
     providers: {
-      anthropic: { api: '', name: 'Anthropic', models: { 'known-cached': { id: 'known-cached' } } }
+      anthropic: { api: '', name: 'Anthropic' }
     }
   }
+}
+
+function mockBothSuccess(fetchFn: ReturnType<typeof vi.fn>, etag?: string) {
+  fetchFn.mockImplementation((url: string) =>
+    Promise.resolve(
+      mockResponse({
+        headers: etag ? { 'content-type': 'application/json', etag } : { 'content-type': 'application/json' },
+        text:
+          String(url).endsWith('/models.json') || String(url).includes('models.json')
+            ? JSON.stringify(RAW_CANONICAL_FIXTURE)
+            : JSON.stringify(RAW_PROVIDER_SOURCES_FIXTURE)
+      })
+    )
+  )
 }
 
 beforeEach(() => {
@@ -81,45 +99,52 @@ beforeEach(() => {
 })
 
 describe('ModelMetadataService refresh', () => {
-  it('normalizes upstream payload (absent vs false, reasoning controls) and persists atomically', async () => {
+  it('fetches canonical models.json + provider list and persists the v2 envelope', async () => {
     const { service, fetchFn, writeCacheFileAtomic } = makeService()
-    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(fetchFn)
 
     const result = await service.refresh({ force: true })
 
     expect(result).toEqual({ ok: true, fetchedAt: 1_000_000 })
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(String(fetchFn.mock.calls[0][0])).toContain('models.json')
     const snapshot = service.getSnapshot()!
-    expect(snapshot.providers['anthropic'].models['claude-sonnet-4-6']).toMatchObject({
-      id: 'claude-sonnet-4-6',
-      attachment: false,
+    // Canonical model facts: validated booleans, no proxy-only fields.
+    expect(snapshot.models['moonshotai/kimi-k3']).toMatchObject({
+      id: 'moonshotai/kimi-k3',
+      attachment: true,
       toolCall: true,
       reasoning: true,
-      temperature: true,
+      temperature: false,
       modalities: { input: ['text', 'image'], output: ['text'] },
-      reasoningControls: { toggle: true, budget: true },
-      limits: { context: 1000000, output: 128000 },
-      pricing: { input: 3, output: 15, cacheRead: 0.3 }
+      limits: { context: 1048576, output: 131072 }
     })
+    expect('pricing' in snapshot.models['moonshotai/kimi-k3']).toBe(false)
     // absent optional fields stay unknown, not false
-    const legacy = snapshot.providers['anthropic'].models['legacy-unknown']
+    const legacy = snapshot.models['legacy-unknown']
     expect(legacy.attachment).toBeUndefined()
     expect(legacy.toolCall).toBeUndefined()
     expect(legacy.reasoning).toBeUndefined()
+    // Provider-source list carries api + name only (connection logos).
+    expect(snapshot.providers).toEqual({
+      anthropic: { api: '', name: 'Anthropic' },
+      openai: { api: 'https://api.openai.com/v1', name: 'OpenAI' }
+    })
 
     expect(writeCacheFileAtomic).toHaveBeenCalledTimes(1)
     const [filePath, data] = writeCacheFileAtomic.mock.calls[0]
-    expect(filePath).toBe('/cache/model-metadata/models-dev.json')
+    expect(filePath).toBe('/cache/model-metadata/models-dev-models.json')
     const envelope = JSON.parse(data)
-    expect(envelope.version).toBe(1)
+    expect(envelope.version).toBe(2)
     expect(envelope.snapshot.source).toBe('models.dev')
-    expect(envelope.snapshot.providers['anthropic'].models['claude-sonnet-4-6'].id).toBe('claude-sonnet-4-6')
+    expect(envelope.snapshot.models['moonshotai/kimi-k3'].id).toBe('moonshotai/kimi-k3')
   })
 
-  it('retains last-known-good memory/disk snapshot when fetch fails', async () => {
+  it('retains last-known-good memory/disk snapshot when the canonical fetch fails', async () => {
     const { service, fetchFn, readCacheFile } = makeService()
     readCacheFile.mockResolvedValue(diskEnvelope(diskSnapshot()))
     await service.ensureLoaded()
-    expect(service.getSnapshot()?.providers['anthropic'].models['known-cached']).toBeDefined()
+    expect(service.getSnapshot()?.models['moonshotai/kimi-k3']).toBeDefined()
 
     fetchFn.mockRejectedValue(new Error('boom'))
     const result = await service.refresh({ force: true })
@@ -127,7 +152,26 @@ describe('ModelMetadataService refresh', () => {
     expect(result.ok).toBe(false)
     expect(result.reason).toBe('network-error')
     // prior snapshot retained in memory
-    expect(service.getSnapshot()?.providers['anthropic'].models['known-cached']).toBeDefined()
+    expect(service.getSnapshot()?.models['moonshotai/kimi-k3']).toBeDefined()
+  })
+
+  it('keeps the prior provider list when the provider-list fetch fails (models still succeed)', async () => {
+    const { service, fetchFn, readCacheFile } = makeService()
+    readCacheFile.mockResolvedValue(diskEnvelope(diskSnapshot()))
+    await service.ensureLoaded()
+
+    fetchFn.mockImplementation((url: string) => {
+      if (String(url).includes('models.json')) {
+        return Promise.resolve(mockResponse({ text: JSON.stringify(RAW_CANONICAL_FIXTURE) }))
+      }
+      return Promise.reject(new Error('provider list down'))
+    })
+    const result = await service.refresh({ force: true })
+
+    // Canonical model facts succeed; the prior provider list is retained.
+    expect(result).toEqual({ ok: true, fetchedAt: 1_000_000 })
+    expect(service.getSnapshot()?.models['moonshotai/kimi-k3']).toBeDefined()
+    expect(service.getSnapshot()?.providers).toEqual({ anthropic: { api: '', name: 'Anthropic' } })
   })
 
   it('rejects oversize responses via content-length and via body size', async () => {
@@ -150,7 +194,7 @@ describe('ModelMetadataService refresh', () => {
     expect(service.getSnapshot()).toBeNull()
 
     // an ASCII body within the byte cap proceeds to JSON parsing
-    fetchFn.mockResolvedValue(mockResponse({ text: '{"a":{}}' }))
+    fetchFn.mockResolvedValue(mockResponse({ text: '[]' }))
     expect((await service.refresh({ force: true })).reason).toBe('schema-mismatch')
   })
 
@@ -166,7 +210,7 @@ describe('ModelMetadataService refresh', () => {
     fetchFn.mockResolvedValue(mockResponse({ text: 'not json{' }))
     expect((await service.refresh({ force: true })).reason).toBe('invalid-json')
 
-    // valid JSON but no usable providers: retain prior (null) instead of persisting emptiness
+    // valid JSON but no usable canonical models: retain prior (null) instead of persisting emptiness
     fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify({}) }))
     expect((await service.refresh({ force: true })).reason).toBe('schema-mismatch')
     expect(service.getSnapshot()).toBeNull()
@@ -174,7 +218,7 @@ describe('ModelMetadataService refresh', () => {
 
   it('keeps memory snapshot when the atomic cache write fails', async () => {
     const { service, fetchFn, writeCacheFileAtomic } = makeService()
-    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(fetchFn)
     writeCacheFileAtomic.mockRejectedValue(new Error('disk full'))
 
     const result = await service.refresh({ force: true })
@@ -191,25 +235,25 @@ describe('ModelMetadataService refresh', () => {
     fetchFn.mockResolvedValue(mockResponse({ status: 304, ok: false, text: '' }))
     const result = await service.refresh({ force: true })
     expect(result).toEqual({ ok: true, fetchedAt: 1_000_000, notModified: true })
-    // revalidation sent the stored ETag
+    // revalidation sent the stored ETag on the canonical fetch
     expect(fetchFn.mock.calls[0][1]).toMatchObject({ headers: { 'If-None-Match': '"v1"' } })
-    expect(service.getSnapshot()?.providers).toEqual(before.providers)
+    expect(service.getSnapshot()?.models).toEqual(before.models)
     expect(service.getSnapshot()?.fetchedAt).toBe(1_000_000)
     expect(writeCacheFileAtomic).toHaveBeenCalledTimes(1)
   })
 
   it('skips refresh within 24h unless forced', async () => {
     const { service, fetchFn } = makeService()
-    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(fetchFn)
     await service.refresh({ force: true })
-    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
 
     const fresh = await service.refresh()
     expect(fresh).toEqual({ ok: true, fetchedAt: 1_000_000, reason: 'fresh-cache' })
-    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn).toHaveBeenCalledTimes(2)
 
     await service.refresh({ force: true })
-    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(fetchFn).toHaveBeenCalledTimes(4)
   })
 
   it('treats snapshots older than 24h as stale', () => {
@@ -233,9 +277,9 @@ describe('ModelMetadataService loading semantics', () => {
     expect(broken.service.getSnapshot()).toBeNull()
   })
 
-  it('rejects cache envelopes with a non-current version', async () => {
+  it('rejects cache envelopes with a non-current version (v1 api.json caches)', async () => {
     const { service, readCacheFile } = makeService()
-    readCacheFile.mockResolvedValue(JSON.stringify({ version: 2, fetchedAt: 1, snapshot: diskSnapshot() }))
+    readCacheFile.mockResolvedValue(JSON.stringify({ version: 1, fetchedAt: 1, snapshot: diskSnapshot() }))
     await expect(service.ensureLoaded()).resolves.toBeNull()
     expect(service.getSnapshot()).toBeNull()
   })
@@ -244,19 +288,19 @@ describe('ModelMetadataService loading semantics', () => {
     // seeded snapshot is stale (now is past fetchedAt + 24h)
     const stale = makeService({ now: () => 500_000 + MODEL_METADATA_REFRESH_INTERVAL_MS + 1 })
     stale.readCacheFile.mockResolvedValue(diskEnvelope(diskSnapshot()))
-    stale.fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(stale.fetchFn)
     await stale.service.ensureLoaded()
 
     const immediate = stale.service.getSnapshotWithStaleRefresh()
-    expect(immediate?.providers['anthropic'].models['known-cached']).toBeDefined()
+    expect(immediate?.models['moonshotai/kimi-k3']).toBeDefined()
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(stale.fetchFn).toHaveBeenCalledTimes(1)
+    expect(stale.fetchFn).toHaveBeenCalled()
   })
 
   it('returns null quickly when nothing is loaded and kicks off load+refresh', async () => {
     const { service, fetchFn, readCacheFile } = makeService()
     readCacheFile.mockResolvedValue(diskEnvelope(diskSnapshot()))
-    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(fetchFn)
 
     expect(service.getSnapshotWithStaleRefresh()).toBeNull()
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -271,9 +315,35 @@ describe('ModelMetadataService status machine', () => {
     expect(service.getStatus()).toEqual({ kind: 'loading', snapshot: null })
   })
 
+  it('converges loading -> ready on the first success without a restart', async () => {
+    const { service, fetchFn, readCacheFile } = makeService()
+    readCacheFile.mockRejectedValue(new Error('no cache'))
+    await service.ensureLoaded()
+    expect(service.getStatus().kind).toBe('loading')
+
+    mockBothSuccess(fetchFn)
+    await service.refresh({ force: true })
+    const ready = service.getStatus()
+    expect(ready.kind).toBe('ready')
+    expect(ready.snapshot?.source).toBe('models.dev')
+    expect(ready.snapshot?.models['moonshotai/kimi-k3']).toBeDefined()
+    expect(ready.reason).toBeUndefined()
+  })
+
+  it('converges loading -> unavailable on a completed failure without a snapshot', async () => {
+    const { service, fetchFn, readCacheFile } = makeService()
+    readCacheFile.mockRejectedValue(new Error('no cache'))
+    await service.ensureLoaded()
+    expect(service.getStatus().kind).toBe('loading')
+
+    fetchFn.mockRejectedValue(new Error('boom'))
+    await service.refresh({ force: true })
+    expect(service.getStatus()).toEqual({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+  })
+
   it('is ready after a successful refresh and stays ready across a later failure', async () => {
     const { service, fetchFn } = makeService()
-    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(fetchFn)
     await service.refresh({ force: true })
     const ready = service.getStatus()
     expect(ready.kind).toBe('ready')
@@ -307,7 +377,7 @@ describe('ModelMetadataService status machine', () => {
     await service.refresh({ force: true })
     expect(service.getStatus().kind).toBe('unavailable')
 
-    fetchFn.mockResolvedValue(mockResponse({ text: JSON.stringify(RAW_FIXTURE) }))
+    mockBothSuccess(fetchFn)
     await service.refresh({ force: true })
     const recovered = service.getStatus()
     expect(recovered.kind).toBe('ready')

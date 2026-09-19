@@ -15,8 +15,11 @@ vi.mock('@logger', () => ({
 const SNAPSHOT: ModelMetadataSnapshot = {
   source: 'models.dev',
   fetchedAt: 1_000_000,
+  models: {
+    'anthropic/claude-sonnet-4-6': { id: 'anthropic/claude-sonnet-4-6', modalities: { input: [], output: [] } }
+  },
   providers: {
-    anthropic: { api: '', name: 'Anthropic', models: {} }
+    anthropic: { api: '', name: 'Anthropic' }
   }
 }
 

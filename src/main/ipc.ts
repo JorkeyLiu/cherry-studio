@@ -20,6 +20,7 @@ import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
 import type { UpgradeChannel } from '@shared/config/constant'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
+import { getCanonicalLabs } from '@shared/modelMetadata'
 import { extractPdfText } from '@shared/utils/pdf'
 import type { FileMetadata, Notification, OcrProvider, Provider, Shortcut, SupportedOcrFile, ThemeMode } from '@types'
 import checkDiskSpace from 'check-disk-space'
@@ -866,13 +867,14 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   void modelMetadataService.init()
 
   // ProviderLogo — optional models.dev logo enhancement (never gates admission).
-  // Exact metadata sources are the admission gate: only sources present in the
-  // last-known-good metadata snapshot may be fetched; HTTP status is never
-  // trusted because models.dev serves a default SVG for unknown ids.
+  // Exact metadata sources are the admission gate: only provider sources
+  // present in the last-known-good snapshot and canonical model labs may be
+  // fetched; HTTP status is never trusted because models.dev serves a
+  // default SVG for unknown ids.
   providerLogoService.setKnownSourcesGetter(() => {
     const snapshot = modelMetadataService.getSnapshot()
     if (!snapshot) return null
-    return Object.keys(snapshot.providers ?? {})
+    return [...Object.keys(snapshot.providers ?? {}), ...getCanonicalLabs(snapshot)]
   })
   registerProviderLogoIpc(providerLogoService)
   void providerLogoService.ensureLoaded()

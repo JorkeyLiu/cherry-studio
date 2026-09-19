@@ -8,15 +8,15 @@ vi.mock('antd', () => ({
 
 vi.mock('@renderer/services/providerLogo', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
-  return { ...actual, useModelProviderLogo: () => null }
+  return { ...actual, useCanonicalModelLogo: () => null }
 })
 
 import ModelAvatar from '../Avatar/ModelAvatar'
 
 const MODELS_DEV_SRC = 'data:image/svg+xml;utf8,%3Csvg%3E'
 
-describe('ModelAvatar models.dev priority', () => {
-  it('renders the owning provider logo as a shared monochrome theme mask', () => {
+describe('ModelAvatar canonical logo priority', () => {
+  it('renders the canonical lab logo as a shared monochrome theme mask', () => {
     const { container } = render(
       <ModelAvatar model={{ id: 'm', name: 'Claude' } as any} size={20} modelsDevLogoSrc={MODELS_DEV_SRC} />
     )

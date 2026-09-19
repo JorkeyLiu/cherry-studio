@@ -5,7 +5,7 @@ import { isSafeLogoSourceId, toProviderLogoDataUrl } from '@shared/providerLogo'
 import { useEffect, useState } from 'react'
 
 import { resolveExactProvider } from './exactProviderResolver'
-import { getModelMetadataSnapshot, resolveMetadataSource } from './modelMetadata'
+import { getModelMetadataSnapshot, resolveCanonicalModelLogoSource, resolveMetadataSource } from './modelMetadata'
 
 const logger = loggerService.withContext('ProviderLogo')
 
@@ -131,6 +131,10 @@ export function useProviderModelsDevLogo(provider: Provider | undefined | null):
  * React hook: owning provider's exact cached models.dev logo for a model,
  * else null. Resolution is exact `model.provider` id match only with no
  * default fallback; model-specific logos are never invented.
+ *
+ * Used ONLY for connection/provider UI (provider settings rows, provider
+ * avatars): the logo reflects the configured proxy connection's resolved
+ * provider source. Model UI uses `useCanonicalModelLogo` instead.
  */
 export function useModelProviderLogo(model: Model | undefined | null, explicit?: Provider | null): string | null {
   let provider: Provider | null = null
@@ -144,4 +148,47 @@ export function useModelProviderLogo(model: Model | undefined | null, explicit?:
     provider = null
   }
   return useProviderModelsDevLogo(provider)
+}
+
+/**
+ * Canonical lab (model-brand logo key) for a model, resolved from the
+ * canonical `models.json` entry — independent of the serving proxy
+ * connection. Null means unknown/ambiguous: the caller must use the generic
+ * model fallback, never the proxy connection logo. Never throws.
+ */
+export function resolveCanonicalModelLogo(
+  model: Model | undefined | null,
+  current: ModelMetadataSnapshot | null = getModelMetadataSnapshot()
+): string | null {
+  try {
+    return resolveCanonicalModelLogoSource(model, current)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * React hook: canonical model's lab/brand logo for model UI, else null.
+ * The logo follows canonical resolution (`moonshotai` for `kimi-k3` no
+ * matter which proxy serves it); unknown/ambiguous resolution yields null
+ * (generic fallback), never the proxy logo. Connection UI keeps
+ * `useProviderModelsDevLogo` / `useModelProviderLogo`.
+ */
+export function useCanonicalModelLogo(model: Model | undefined | null): string | null {
+  const source = resolveCanonicalModelLogo(model)
+  const [logo, setLogo] = useState<string | null>(() => (source ? (dataUrlCache.get(source) ?? null) : null))
+  useEffect(() => {
+    if (!source) {
+      setLogo(null)
+      return
+    }
+    let cancelled = false
+    void getProviderLogoDataUrl(source).then((dataUrl) => {
+      if (!cancelled) setLogo(dataUrl)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [source])
+  return logo
 }

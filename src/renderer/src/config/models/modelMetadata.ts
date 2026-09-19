@@ -1,56 +1,64 @@
-import {
-  lookupModelMetadata,
-  resolveMetadataSource,
-  resolveProviderForMetadata
-} from '@renderer/services/modelMetadata'
-import type { Model, Provider, ReasoningEffortOption } from '@renderer/types'
+import { resolveCanonicalModelEntry, resolveProviderForMetadata } from '@renderer/services/modelMetadata'
+import type { Model, Provider } from '@renderer/types'
 import { isUserSelectedModelType } from '@renderer/utils'
-import type { ModelMetadataReasoningControls, NormalizedModelMetadata } from '@shared/modelMetadata'
+import type { NormalizedModelMetadata } from '@shared/modelMetadata'
 
 /**
- * Tri-state capability resolvers over the optional models.dev registry.
+ * Tri-state capability resolvers over the optional canonical models.dev
+ * registry (`models.json`).
  *
  * This module is intentionally pure: it never imports AssistantService or
  * the store/data-source chain (that edge caused a deterministic
- * collection-time TDZ). Provider attribution flows through the injected
- * `resolveProviderForMetadata` accessor instead.
+ * collection-time TDZ). Request-lane provider resolution flows through the
+ * injected `resolveProviderForMetadata` accessor instead.
+ *
+ * Model identity is canonical only: entries resolve by model id through the
+ * shared canonical matching contract (exact id -> unique basename -> unique
+ * case-fold, fail closed). Identity never uses the API URL, `group`,
+ * editable `name`, provider brand id, or `owned_by`, so the same proxy model
+ * id reports the same standard capability on every connection. The optional
+ * `provider` argument is accepted for call-site compatibility but never
+ * participates in resolution.
  *
  * Priority everywhere: explicit user override
- * (`capabilities[].isUserSelected`) -> validated external metadata -> legacy
+ * (`capabilities[].isUserSelected`) -> validated canonical metadata -> legacy
  * heuristic fallback (owned by the existing predicates, untouched here).
  *
  * Every resolver returns true/false only for validated known values and
- * undefined for unknown (absent snapshot, unmapped provider, unmapped model
- * id, or absent upstream field). Unknown must never harden into a rejection:
+ * undefined for unknown (absent snapshot, unmapped/ambiguous model id, or
+ * absent upstream field). Unknown must never harden into a rejection:
  * callers fall through to the legacy heuristic and unknown ids still reach
  * request resolution.
+ *
+ * Canonical `models.json` publishes no provider-specific pricing or
+ * reasoning options: those UI fields read as unknown/absent (no
+ * proxy-serving record is ever filled in as a canonical fact).
  */
 
 /**
- * Strict owning-provider lookup for external attribution.
+ * Strict owning-provider lookup for request-lane attribution.
  *
  * Attribution requires the exact owning provider: a resolver result whose id
  * does not equal the model's own provider id is treated as unknown (this
  * also neutralizes any silent default-provider substitution). An explicit
  * provider argument (including explicit null = known absent) bypasses the
- * accessor.
+ * accessor. Capability facts never use this function.
  */
 export function strictProviderForModel(model: Model | undefined | null, explicit?: Provider | null): Provider | null {
   return resolveProviderForMetadata(model, explicit)
 }
 
-/** Exact-match external entry for a model, or undefined when unknown. */
+/** Canonical external entry for a model id, or undefined when unknown/ambiguous. */
 export function getExternalModelEntry(
   model: Model | undefined | null,
-  provider?: Provider | null
+  _provider?: Provider | null
 ): NormalizedModelMetadata | undefined {
   if (!model || typeof model.id !== 'string') return undefined
-  const source = resolveMetadataSource(strictProviderForModel(model, provider))
-  return lookupModelMetadata(source, model.id)
+  return resolveCanonicalModelEntry(model.id)
 }
 
 /**
- * Vision support from external metadata: `modalities.input includes image`.
+ * Vision support from canonical metadata: `modalities.input includes image`.
  * Attachment is deliberately NOT consulted (it describes file upload, not
  * image understanding). An empty/absent input list means unknown.
  */
@@ -65,7 +73,7 @@ export function resolveExternalVisionSupport(
   return input.includes('image')
 }
 
-/** Tool-calling support from external `tool_call` (absent means unknown). */
+/** Tool-calling support from canonical `tool_call` (absent means unknown). */
 export function resolveExternalToolCallSupport(
   model: Model | undefined | null,
   provider?: Provider | null
@@ -75,7 +83,7 @@ export function resolveExternalToolCallSupport(
   return entry.toolCall
 }
 
-/** Reasoning support from external `reasoning` (absent means unknown). */
+/** Reasoning support from canonical `reasoning` (absent means unknown). */
 export function resolveExternalReasoningSupport(
   model: Model | undefined | null,
   provider?: Provider | null
@@ -85,7 +93,7 @@ export function resolveExternalReasoningSupport(
   return entry.reasoning
 }
 
-/** Temperature support from external `temperature` (absent means unknown). */
+/** Temperature support from canonical `temperature` (absent means unknown). */
 export function resolveExternalTemperatureSupport(
   model: Model | undefined | null,
   provider?: Provider | null
@@ -93,80 +101,6 @@ export function resolveExternalTemperatureSupport(
   const entry = getExternalModelEntry(model, provider)
   if (!entry || entry.temperature === undefined) return undefined
   return entry.temperature
-}
-
-/** Typed external reasoning controls, if the source publishes any. */
-export function getExternalReasoningControls(
-  model: Model | undefined | null,
-  provider?: Provider | null
-): ModelMetadataReasoningControls | undefined {
-  return getExternalModelEntry(model, provider)?.reasoningControls
-}
-
-/**
- * External reasoning-effort options for effort-option construction.
- *
- * Precise external metadata overrides heuristic option lists when the exact
- * owning-provider + exact model-id entry is known-reasoning. Known effort
- * values map 1:1; upstream `max` maps to `xhigh` (the closest local level,
- * displayed as Max); anything unrecognized is dropped. Reasoning-known with
- * toggle-only controls degrades to toggle semantics
- * (`default` + `none` + `auto`) to the extent the active lane can emit
- * on/off. Reasoning-known without any controls returns `default` only
- * (fixed reasoning, no false menu). `default` is always first, matching the
- * legacy convention. Budget-only controls are intentionally not modeled here.
- */
-export function getExternalReasoningEffortOptions(
-  model: Model | undefined | null,
-  provider?: Provider | null
-): ReasoningEffortOption[] | undefined {
-  const entry = getExternalModelEntry(model, provider)
-  if (!entry || entry.reasoning !== true) return undefined
-  const known: ReasoningEffortOption[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto']
-  const mapped: ReasoningEffortOption[] = []
-  for (const value of entry.reasoningControls?.effort ?? []) {
-    const normalized = value.trim().toLowerCase()
-    const option: ReasoningEffortOption | undefined =
-      normalized === 'max'
-        ? 'xhigh'
-        : known.includes(normalized as ReasoningEffortOption)
-          ? (normalized as ReasoningEffortOption)
-          : undefined
-    if (option && !mapped.includes(option)) mapped.push(option)
-  }
-  if (mapped.length === 0) {
-    return entry.reasoningControls?.toggle ? ['default', 'none', 'auto'] : ['default']
-  }
-  return ['default', ...mapped]
-}
-
-export interface ExternalModelPricing {
-  inputPerMillion: number
-  outputPerMillion: number
-  cacheReadPerMillion?: number
-  cacheWritePerMillion?: number
-  /** Distinguishes external enrichment from user-configured pricing. */
-  source: 'models.dev'
-}
-
-/**
- * Pricing enrichment only: defined solely when the mapped entry publishes
- * numeric input+output pricing. Never claims a route price for an
- * unidentified host — unmapped providers return undefined.
- */
-export function getExternalModelPricing(
-  model: Model | undefined | null,
-  provider?: Provider | null
-): ExternalModelPricing | undefined {
-  const entry = getExternalModelEntry(model, provider)
-  const pricingFields = entry?.pricing
-  const input = pricingFields?.input
-  const output = pricingFields?.output
-  if (typeof input !== 'number' || typeof output !== 'number') return undefined
-  const pricing: ExternalModelPricing = { inputPerMillion: input, outputPerMillion: output, source: 'models.dev' }
-  if (typeof pricingFields?.cacheRead === 'number') pricing.cacheReadPerMillion = pricingFields.cacheRead
-  if (typeof pricingFields?.cacheWrite === 'number') pricing.cacheWritePerMillion = pricingFields.cacheWrite
-  return pricing
 }
 
 export interface ExternalModelContext {

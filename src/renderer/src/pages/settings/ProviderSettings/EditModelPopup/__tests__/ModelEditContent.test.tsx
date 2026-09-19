@@ -72,16 +72,14 @@ function renderEditor(model: Model, onUpdateModel = vi.fn()) {
 }
 
 function installEntry(modelId: string, entry: Record<string, unknown>) {
+  // Canonical snapshot: the model id resolves through its unique basename to
+  // the canonical `openai/<id>` entry.
+  const canonicalId = `openai/${modelId}`
   setModelMetadataSnapshotForTests({
     source: 'models.dev',
     fetchedAt: 1,
-    providers: {
-      openai: {
-        api: 'https://api.openai.com/v1',
-        name: 'OpenAI',
-        models: { [modelId]: { id: modelId, ...entry } as never }
-      }
-    }
+    models: { [canonicalId]: { id: canonicalId, ...entry } as never },
+    providers: {}
   })
 }
 
@@ -110,7 +108,7 @@ describe('ModelEditContent', () => {
   it('shows only groups with data above the model data, in DOM order', () => {
     installEntry('gpt-4o', {
       modalities: { input: ['text', 'image'], output: ['text'] },
-      pricing: { input: 2.5, output: 10 }
+      limits: { context: 250000 }
     })
     renderEditor(makeModel())
 
@@ -168,7 +166,7 @@ describe('ModelEditContent', () => {
     // A cached snapshot means ready even when this model id is unknown.
     installEntry('other-model', {
       modalities: { input: ['text'], output: ['text'] },
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel({ id: 'some-unknown-model', name: 'some-unknown-model' }))
 
@@ -193,7 +191,7 @@ describe('ModelEditContent', () => {
     act(() => {
       installEntry('gpt-4o', {
         modalities: { input: ['text', 'image'], output: ['text'] },
-        pricing: { input: 1, output: 2 }
+        limits: { context: 200000 }
       })
     })
 
@@ -208,7 +206,7 @@ describe('ModelEditContent', () => {
   it('maps five input modalities from entry.modalities.input only', () => {
     installEntry('gpt-4o', {
       modalities: { input: ['text', 'image'], output: ['text'] },
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     // User override and vision-like names must not leak into the modality group.
     renderEditor(makeModel({ capabilities: [{ type: 'vision', isUserSelected: false }] }))
@@ -225,7 +223,7 @@ describe('ModelEditContent', () => {
   it('hides the modality group without tags when modalities are empty', () => {
     installEntry('empty-modal', {
       modalities: { input: [], output: [] },
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel({ id: 'empty-modal', name: 'empty-modal' }))
 
@@ -235,7 +233,7 @@ describe('ModelEditContent', () => {
     for (const testId of ALL_MODALITY_IDS) {
       expect(screen.queryByTestId(testId)).not.toBeInTheDocument()
     }
-    // Model Data still shows (pricing is concrete): no empty-state line.
+    // Model Data still shows (context limit is concrete): no empty-state line.
     expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
     expect(screen.queryByTestId('model-metadata-empty')).not.toBeInTheDocument()
   })
@@ -247,7 +245,7 @@ describe('ModelEditContent', () => {
       toolCall: false,
       structuredOutput: undefined,
       temperature: false,
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel())
 
@@ -268,7 +266,7 @@ describe('ModelEditContent', () => {
       toolCall: false,
       structuredOutput: undefined,
       temperature: true,
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel())
 
@@ -286,7 +284,7 @@ describe('ModelEditContent', () => {
       toolCall: undefined,
       structuredOutput: undefined,
       temperature: undefined,
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     render(
       <ModelEditContent
@@ -314,7 +312,7 @@ describe('ModelEditContent', () => {
       toolCall: false,
       structuredOutput: true,
       temperature: false,
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel())
 
@@ -323,9 +321,9 @@ describe('ModelEditContent', () => {
     expect(screen.getByTestId('cap-feature-tool-call')).toHaveAttribute('data-state', 'unsupported')
     expect(screen.getByTestId('cap-feature-structured-output')).toHaveAttribute('data-state', 'supported')
     expect(screen.getByTestId('cap-feature-temperature')).toHaveAttribute('data-state', 'unsupported')
-    // Model Data shows pricing but never duplicates the four features.
+    // Model Data shows context limit but never duplicates the four features.
     expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-input')).toBeInTheDocument()
+    expect(screen.getByTestId('ref-limit-context')).toBeInTheDocument()
     expect(screen.queryByTestId('ref-reasoning-support')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-tool-call')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-structured-output')).not.toBeInTheDocument()
@@ -339,7 +337,7 @@ describe('ModelEditContent', () => {
       toolCall: false,
       structuredOutput: true,
       temperature: false,
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel())
 
@@ -355,7 +353,7 @@ describe('ModelEditContent', () => {
   it('renders no Form.Item help tooltips in Edit Model', () => {
     installEntry('gpt-4o', {
       modalities: { input: ['text'], output: ['text'] },
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel())
 
@@ -371,7 +369,7 @@ describe('ModelEditContent', () => {
       toolCall: false,
       structuredOutput: true,
       temperature: false,
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     const { onUpdateModel } = renderEditor(makeModel())
     const user = userEvent.setup()
@@ -405,7 +403,7 @@ describe('ModelEditContent', () => {
   it('hides the features group when the entry has modalities but no feature metadata', () => {
     installEntry('gpt-4o', {
       modalities: { input: ['text', 'image'], output: ['text'] },
-      pricing: { input: 1, output: 2 }
+      limits: { context: 200000 }
     })
     renderEditor(makeModel())
 

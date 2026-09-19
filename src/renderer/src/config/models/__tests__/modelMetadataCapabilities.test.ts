@@ -6,13 +6,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveCustomProviderForModel } from '../../../services/customProviderRegistry'
 import {
   getExternalModelContext,
-  getExternalModelPricing,
-  getExternalReasoningEffortOptions,
+  getExternalModelEntry,
   resolveExternalTemperatureSupport,
   resolveExternalToolCallSupport,
   resolveExternalVisionSupport
 } from '../modelMetadata'
-import { getModelSupportedReasoningEffortOptions, isReasoningModel } from '../reasoning'
+import { isReasoningModel } from '../reasoning'
 import { isFunctionCallingModel } from '../tooluse'
 import { isVisionModel } from '../vision'
 
@@ -43,81 +42,102 @@ vi.mock('@renderer/hooks/useSettings', () => ({
   getStoreSetting: vi.fn()
 }))
 
-const anthropicProvider = {
-  id: 'a',
-  type: 'anthropic',
-  name: 'a',
+const proxyProvider = {
+  id: 'my-proxy',
+  type: 'openai',
+  name: 'My Proxy',
   apiKey: '',
-  apiHost: '',
+  apiHost: 'https://proxy.example/v1',
   models: []
 } as unknown as Provider
 
-const providersById: Record<string, Provider> = { a: anthropicProvider }
+const otherProxyProvider = {
+  id: 'other-proxy',
+  type: 'openai',
+  name: 'Other Proxy',
+  apiKey: '',
+  apiHost: 'https://other-proxy.example/v1',
+  models: []
+} as unknown as Provider
 
 const SNAPSHOT: ModelMetadataSnapshot = {
   source: 'models.dev',
   fetchedAt: 1_000_000,
-  providers: {
-    anthropic: {
-      api: '',
-      name: 'Anthropic',
-      models: {
-        'zzz-custom-1': {
-          id: 'zzz-custom-1',
-          modalities: { input: ['text', 'image'], output: ['text'] },
-          attachment: false,
-          toolCall: true,
-          reasoning: true,
-          reasoningControls: { toggle: true, effort: ['low', 'high', 'max'] },
-          temperature: true,
-          limits: { context: 500000, output: 64000 },
-          pricing: { input: 2, output: 10, cacheRead: 0.2 },
-          family: 'zzz',
-          knowledgeCutoff: '2026-01-01'
-        },
-        'gpt-4o-custom': {
-          id: 'gpt-4o-custom',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: false,
-          reasoning: false
-        },
-        'my-thinking-fork': {
-          id: 'my-thinking-fork',
-          modalities: { input: ['text'], output: ['text'] },
-          reasoning: false,
-          toolCall: false
-        },
-        'claude-xyz-custom': {
-          id: 'claude-xyz-custom',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: false
-        }
-      }
+  models: {
+    'lab-zzz/zzz-custom-1': {
+      id: 'lab-zzz/zzz-custom-1',
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      attachment: false,
+      toolCall: true,
+      reasoning: true,
+      temperature: true,
+      limits: { context: 500000, output: 64000 },
+      family: 'zzz',
+      knowledgeCutoff: '2026-01-01'
+    },
+    'lab-zzz/gpt-4o-custom': {
+      id: 'lab-zzz/gpt-4o-custom',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: false,
+      reasoning: false
+    },
+    'lab-zzz/my-thinking-fork': {
+      id: 'lab-zzz/my-thinking-fork',
+      modalities: { input: ['text'], output: ['text'] },
+      reasoning: false,
+      toolCall: false
+    },
+    'lab-zzz/claude-xyz-custom': {
+      id: 'lab-zzz/claude-xyz-custom',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: false
     }
-  }
+  },
+  providers: {}
 }
 
-const makeModel = (id: string, provider = 'a', capabilities?: Model['capabilities']): Model =>
+const makeModel = (id: string, provider = 'my-proxy', capabilities?: Model['capabilities']): Model =>
   ({ id, name: id, provider, group: provider, ...(capabilities ? { capabilities } : {}) }) as Model
 
 beforeEach(() => {
   vi.clearAllMocks()
-  // Attribution flows through the injected accessor (no AssistantService /
-  // store import inside config/models): exact provider-id match only.
-  setMetadataProviderResolver((model) => providersById[model?.provider ?? ''] ?? null)
+  // Capability facts never consult the provider resolver, but request-lane
+  // code does: register an exact-match fake for realism.
+  setMetadataProviderResolver((model) => (model?.provider === 'my-proxy' ? proxyProvider : null))
   setModelMetadataSnapshotForTests(SNAPSHOT)
 })
 
-describe('priority: user override -> external metadata -> legacy heuristic', () => {
-  it('prefers validated external metadata over the legacy name heuristic', () => {
+describe('canonical identity: the same proxy id reports the same capability on every connection', () => {
+  it('resolves identically no matter which proxy serves the id', () => {
+    const viaProxy = makeModel('zzz-custom-1', 'my-proxy')
+    const viaOther = makeModel('zzz-custom-1', 'other-proxy')
+    expect(isVisionModel(viaProxy)).toBe(true)
+    expect(isVisionModel(viaOther)).toBe(true)
+    expect(isFunctionCallingModel(viaProxy)).toBe(true)
+    expect(isFunctionCallingModel(viaOther)).toBe(true)
+    expect(isReasoningModel(viaProxy)).toBe(true)
+    expect(isReasoningModel(viaOther)).toBe(true)
+    // The provider argument never participates in resolution.
+    expect(getExternalModelEntry(viaProxy, proxyProvider)).toEqual(getExternalModelEntry(viaOther, otherProxyProvider))
+  })
+
+  it('returns the canonical id for bare, qualified, and case-variant queries', () => {
+    expect(getExternalModelEntry(makeModel('zzz-custom-1'))?.id).toBe('lab-zzz/zzz-custom-1')
+    expect(getExternalModelEntry(makeModel('lab-zzz/zzz-custom-1'))?.id).toBe('lab-zzz/zzz-custom-1')
+    expect(getExternalModelEntry(makeModel('proxy-lab/zzz-custom-1'))?.id).toBe('lab-zzz/zzz-custom-1')
+  })
+})
+
+describe('priority: user override -> canonical metadata -> legacy heuristic', () => {
+  it('prefers validated canonical metadata over the legacy name heuristic', () => {
     // zzz-custom-1 matches no legacy vision/tool/reasoning pattern, but the
-    // registry knows it.
+    // canonical registry knows it.
     expect(isVisionModel(makeModel('zzz-custom-1'))).toBe(true)
     expect(isFunctionCallingModel(makeModel('zzz-custom-1'))).toBe(true)
     expect(isReasoningModel(makeModel('zzz-custom-1'))).toBe(true)
   })
 
-  it('lets external false overrule a legacy true', () => {
+  it('lets canonical false overrule a legacy true', () => {
     // gpt-4o-custom matches legacy vision; my-thinking-fork matches legacy
     // reasoning ("thinking"); claude-xyz-custom matches legacy tool calling.
     expect(isVisionModel(makeModel('gpt-4o-custom'))).toBe(false)
@@ -126,15 +146,15 @@ describe('priority: user override -> external metadata -> legacy heuristic', () 
   })
 
   it('keeps explicit user overrides at highest priority', () => {
-    const visionOff = makeModel('zzz-custom-1', 'a', [{ type: 'vision', isUserSelected: false }])
+    const visionOff = makeModel('zzz-custom-1', 'my-proxy', [{ type: 'vision', isUserSelected: false }])
     expect(isVisionModel(visionOff)).toBe(false)
-    const visionOn = makeModel('gpt-4o-custom', 'a', [{ type: 'vision', isUserSelected: true }])
+    const visionOn = makeModel('gpt-4o-custom', 'my-proxy', [{ type: 'vision', isUserSelected: true }])
     expect(isVisionModel(visionOn)).toBe(true)
 
-    const toolOff = makeModel('zzz-custom-1', 'a', [{ type: 'function_calling', isUserSelected: false }])
+    const toolOff = makeModel('zzz-custom-1', 'my-proxy', [{ type: 'function_calling', isUserSelected: false }])
     expect(isFunctionCallingModel(toolOff)).toBe(false)
 
-    const reasoningOn = makeModel('my-thinking-fork', 'a', [{ type: 'reasoning', isUserSelected: true }])
+    const reasoningOn = makeModel('my-thinking-fork', 'my-proxy', [{ type: 'reasoning', isUserSelected: true }])
     expect(isReasoningModel(reasoningOn)).toBe(true)
   })
 
@@ -171,59 +191,34 @@ describe('tool_call / temperature tri-state', () => {
   })
 })
 
-describe('strict provider attribution (no silent default fallback)', () => {
-  it('returns unknown when the owning provider entry is gone', () => {
+describe('canonical metadata is connection-independent (no silent provider fallback)', () => {
+  it('resolves for orphaned provider ids exactly like configured ones', () => {
     setMetadataProviderResolver(() => null)
     const orphan = makeModel('zzz-custom-1', 'deleted-provider')
-    expect(resolveExternalVisionSupport(orphan)).toBeUndefined()
-    expect(resolveExternalToolCallSupport(orphan)).toBeUndefined()
-    expect(getExternalModelPricing(orphan)).toBeUndefined()
+    expect(resolveExternalVisionSupport(orphan)).toBe(true)
+    expect(resolveExternalToolCallSupport(orphan)).toBe(true)
+    expect(getExternalModelContext(orphan)?.contextLimit).toBe(500000)
   })
 
-  it('rejects a sloppy resolver result whose id is not the model provider', () => {
-    // Even if a resolver substitutes another provider (the old silent
-    // default fallback), the boundary enforces the exact id match.
-    setMetadataProviderResolver(() => ({ ...anthropicProvider, id: 'default-other' }) as Provider)
+  it('ignores sloppy resolver results: identity is the model id alone', () => {
+    // Even a resolver substituting another provider cannot change the facts.
+    setMetadataProviderResolver(() => ({ ...proxyProvider, id: 'default-other' }) as Provider)
     const orphan = makeModel('zzz-custom-1', 'deleted-provider')
-    expect(resolveExternalVisionSupport(orphan)).toBeUndefined()
-    expect(getExternalModelPricing(orphan)).toBeUndefined()
+    expect(resolveExternalVisionSupport(orphan)).toBe(true)
+    expect(getExternalModelContext(orphan)?.contextLimit).toBe(500000)
   })
 })
 
-describe('reasoning effort options — external supplement only', () => {
-  it('maps external effort values (max -> xhigh) when legacy has no answer', () => {
-    expect(getExternalReasoningEffortOptions(makeModel('zzz-custom-1'))).toEqual(['default', 'low', 'high', 'xhigh'])
-    expect(getModelSupportedReasoningEffortOptions(makeModel('zzz-custom-1'))).toEqual([
-      'default',
-      'low',
-      'high',
-      'xhigh'
-    ])
-  })
-
-  it('leaves legacy answers untouched and unknown ids permissive', () => {
-    // o3-mini has a legacy answer; external must not override it.
-    const legacy = getModelSupportedReasoningEffortOptions(makeModel('o3-mini'))
-    expect(legacy).toBeDefined()
-    // external reasoning false -> no supplement -> still undefined
-    expect(getExternalReasoningEffortOptions(makeModel('gpt-4o-custom'))).toBeUndefined()
-    // unmapped id -> undefined exactly as before (never a rejection)
-    expect(getModelSupportedReasoningEffortOptions(makeModel('definitely-not-a-model-zzz'))).toBeUndefined()
-    expect(getExternalReasoningEffortOptions(makeModel('definitely-not-a-model-zzz'))).toBeUndefined()
+describe('canonical models.json carries no pricing or reasoning options', () => {
+  it('exposes no pricing or reasoning-option getters as canonical facts', async () => {
+    const metadata = await import('../modelMetadata')
+    expect('getExternalModelPricing' in metadata).toBe(false)
+    expect('getExternalReasoningEffortOptions' in metadata).toBe(false)
+    expect('getExternalReasoningControls' in metadata).toBe(false)
   })
 })
 
-describe('pricing/context enrichment only', () => {
-  it('returns externally-sourced pricing distinguishable from user pricing', () => {
-    expect(getExternalModelPricing(makeModel('zzz-custom-1'))).toEqual({
-      inputPerMillion: 2,
-      outputPerMillion: 10,
-      cacheReadPerMillion: 0.2,
-      source: 'models.dev'
-    })
-    expect(getExternalModelPricing(makeModel('not-mapped'))).toBeUndefined()
-  })
-
+describe('context enrichment only', () => {
   it('returns context/family enrichment and undefined when nothing is published', () => {
     expect(getExternalModelContext(makeModel('zzz-custom-1'))).toEqual({
       contextLimit: 500000,
@@ -237,18 +232,14 @@ describe('pricing/context enrichment only', () => {
 
 describe('malformed in-memory shapes never throw in predicates', () => {
   it.each([
-    ['null providers', { source: 'models.dev', fetchedAt: 1, providers: null }],
-    ['null source entry', { source: 'models.dev', fetchedAt: 1, providers: { anthropic: null } }],
-    [
-      'null models',
-      { source: 'models.dev', fetchedAt: 1, providers: { anthropic: { api: '', name: 'A', models: null } } }
-    ]
+    ['null models', { source: 'models.dev', fetchedAt: 1, models: null, providers: {} }],
+    ['null providers', { source: 'models.dev', fetchedAt: 1, models: {}, providers: null }],
+    ['string models', { source: 'models.dev', fetchedAt: 1, models: 'nope', providers: {} }]
   ])('falls back to legacy behavior for %s', (_label, shape) => {
     setModelMetadataSnapshotForTests(shape as never)
     expect(() => isVisionModel(makeModel('zzz-custom-1'))).not.toThrow()
     expect(() => isFunctionCallingModel(makeModel('zzz-custom-1'))).not.toThrow()
     expect(() => isReasoningModel(makeModel('zzz-custom-1'))).not.toThrow()
-    expect(() => getModelSupportedReasoningEffortOptions(makeModel('zzz-custom-1'))).not.toThrow()
     // legacy answers unchanged: unknown ids stay permissive
     expect(isVisionModel(makeModel('zzz-custom-1'))).toBe(false)
     expect(isReasoningModel(makeModel('my-thinking-fork'))).toBe(true)
@@ -259,9 +250,9 @@ describe('malformed in-memory shapes never throw in predicates', () => {
 describe('unknown/no-snapshot permissive request path', () => {
   it('still resolves unknown model ids to their owning provider (never gated)', () => {
     setModelMetadataSnapshotForTests(null)
-    const providers = [anthropicProvider]
-    const resolved = resolveCustomProviderForModel(makeModel('never-seen-custom-id', 'a'), providers)
-    expect(resolved.id).toBe('a')
+    const providers = [proxyProvider]
+    const resolved = resolveCustomProviderForModel(makeModel('never-seen-custom-id', 'my-proxy'), providers)
+    expect(resolved.id).toBe('my-proxy')
     // ...while capability predicates degrade to legacy behavior, not rejection
     expect(isVisionModel(makeModel('never-seen-custom-id'))).toBe(false)
     expect(isReasoningModel(makeModel('never-seen-custom-id'))).toBe(false)

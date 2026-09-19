@@ -13,59 +13,21 @@ function isDisplayText(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-/** USD per-million reference price, rendered deterministically for tests. */
-export function formatReferencePrice(value: number): string {
-  return `$${String(value)}`
-}
-
 /** Token limits render with en-US grouping (e.g. 200000 -> 200,000). */
 export function formatLimitTokens(value: number): string {
   return value.toLocaleString('en-US')
 }
 
 /**
- * Reasoning effort display from actually published effort values only.
- *
- * Only the raw models.dev `effort` array is shown (e.g. low, high, max via
- * join(', ')). Toggle/budget are never shown and Supported wording is never
- * used. Empty/missing effort is unknown, so the row hides: it never renders
- * a Not supported placeholder and never triggers section visibility alone.
- */
-export function formatReasoningControls(controls: NormalizedModelMetadata['reasoningControls']): {
-  text: string
-  known: boolean
-} {
-  const effort = Array.isArray(controls?.effort)
-    ? controls.effort.map((v) => String(v).trim()).filter((v) => v.length > 0)
-    : []
-  if (effort.length > 0) return { text: effort.join(', '), known: true }
-  return { text: '', known: false }
-}
-
-/**
- * Whether the entry carries any concrete Model Data row (pricing, context
- * limit, dates, tier note). Reasoning effort alone never counts: features
- * already show in the icon group above. Exported so the Edit Model
- * empty-state can detect "all three groups empty".
+ * Whether the entry carries any concrete Model Data row (context limit,
+ * dates). Canonical `models.json` publishes no provider-specific pricing or
+ * reasoning options, so those rows never render: they read as unknown/absent
+ * (never filled from proxy-serving records). Reasoning effort alone never
+ * counts: features already show in the icon group above. Exported so the
+ * Edit Model empty-state can detect "all three groups empty".
  */
 export function hasConcreteModelData(entry: NormalizedModelMetadata | undefined | null): boolean {
   if (!entry || typeof entry !== 'object') return false
-  const pricing = entry.pricing
-  if (pricing && typeof pricing === 'object') {
-    for (const value of [
-      pricing.input,
-      pricing.output,
-      pricing.cacheRead,
-      pricing.cacheWrite,
-      pricing.reasoning,
-      pricing.inputAudio,
-      pricing.outputAudio,
-      pricing.contextOver200k
-    ]) {
-      if (typeof value === 'number' && Number.isFinite(value)) return true
-    }
-    if (pricing.hasTiers === true) return true
-  }
   if (entry.limits && typeof entry.limits === 'object') {
     if (typeof entry.limits.context === 'number' && Number.isFinite(entry.limits.context)) return true
   }
@@ -81,7 +43,7 @@ interface ReferenceRow {
   testId: string
   /** Whether the row carries a known value. */
   known: boolean
-  /** Concrete rows (pricing/limits/dates/tier note) gate section visibility. */
+  /** Concrete rows (limits/dates) gate section visibility. */
   concrete: boolean
 }
 
@@ -92,9 +54,10 @@ interface ReferenceRow {
  * subscribes to the registry status): this component never looks the entry up
  * itself, so async snapshot resolution always flows into the open popup for
  * both capability icons and model data together. Never writes, never applies,
- * never edits: it only displays published metadata. Capability icons live in
- * ModelCapabilityGroups; this section keeps pricing, context limit, dates,
- * tier note, and effort-only reasoning controls.
+ * never edits: it only displays published canonical metadata. Capability
+ * icons live in ModelCapabilityGroups; this section keeps context limit and
+ * dates. Pricing and reasoning-option rows never render: canonical
+ * `models.json` does not publish them, so they read as unknown/absent.
  */
 const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = ({ entry }) => {
   const { t } = useTranslation()
@@ -102,74 +65,7 @@ const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = (
   const rows = useMemo<ReferenceRow[]>(() => {
     if (!entry || typeof entry !== 'object') return []
     const out: ReferenceRow[] = []
-    const pricing = entry.pricing
     const limits = entry.limits
-    const unit = t('models.reference.per_million_tokens')
-
-    if (pricing && typeof pricing === 'object') {
-      const priced: Array<{ key: string; labelKey: string; value: unknown; testId: string }> = [
-        { key: 'input', labelKey: 'models.reference.input', value: pricing.input, testId: 'ref-price-input' },
-        { key: 'output', labelKey: 'models.reference.output', value: pricing.output, testId: 'ref-price-output' },
-        {
-          key: 'cacheRead',
-          labelKey: 'models.reference.cache_read',
-          value: pricing.cacheRead,
-          testId: 'ref-price-cache-read'
-        },
-        {
-          key: 'cacheWrite',
-          labelKey: 'models.reference.cache_write',
-          value: pricing.cacheWrite,
-          testId: 'ref-price-cache-write'
-        },
-        {
-          key: 'reasoning',
-          labelKey: 'models.reference.reasoning',
-          value: pricing.reasoning,
-          testId: 'ref-price-reasoning'
-        },
-        {
-          key: 'inputAudio',
-          labelKey: 'models.reference.input_audio',
-          value: pricing.inputAudio,
-          testId: 'ref-price-input-audio'
-        },
-        {
-          key: 'outputAudio',
-          labelKey: 'models.reference.output_audio',
-          value: pricing.outputAudio,
-          testId: 'ref-price-output-audio'
-        },
-        {
-          key: 'contextOver200k',
-          labelKey: 'models.reference.context_over_200k',
-          value: pricing.contextOver200k,
-          testId: 'ref-price-context-over-200k'
-        }
-      ]
-      for (const item of priced) {
-        if (isDisplayNumber(item.value)) {
-          out.push({
-            key: `pricing.${item.key}`,
-            label: t(item.labelKey),
-            value: `${formatReferencePrice(item.value)} ${unit}`,
-            testId: item.testId,
-            known: true,
-            concrete: true
-          })
-        }
-      }
-      if (pricing.hasTiers === true) {
-        out.push({
-          key: 'pricing.hasTiers',
-          label: t('models.reference.tiered_pricing'),
-          value: t('models.reference.tiered_pricing_note'),
-          testId: 'ref-price-tiers',
-          known: true,
-          concrete: true
-        })
-      }
-    }
 
     if (limits && typeof limits === 'object') {
       if (isDisplayNumber(limits.context)) {
@@ -205,27 +101,12 @@ const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = (
       })
     }
 
-    // Reasoning effort renders only when the source publishes effort values;
-    // otherwise the row hides entirely (no Not supported placeholder).
-    const effortFormatted = formatReasoningControls(entry.reasoningControls)
-    if (effortFormatted.known) {
-      out.push({
-        key: 'reasoningControls',
-        label: t('models.reference.reasoning_controls'),
-        value: effortFormatted.text,
-        testId: 'ref-reasoning-controls',
-        known: true,
-        concrete: false
-      })
-    }
-
     return out
   }, [entry, t])
 
-  // The section shows only when concrete model data exists (pricing, context
-  // limit, dates, tier note). The effort-only row never triggers visibility
-  // alone, so a features-only or effort-only entry stays hidden because
-  // features already show in the icon group above.
+  // The section shows only when concrete model data exists (context limit,
+  // dates). A features-only entry stays hidden because features already show
+  // in the icon group above.
   const hasConcreteValue = rows.some((row) => row.known && row.concrete)
   if (!entry || !hasConcreteValue) return null
   const visibleRows = rows.filter((row) => row.known)

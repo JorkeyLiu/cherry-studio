@@ -9,12 +9,7 @@ import type {
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
-import {
-  getExternalReasoningEffortOptions,
-  resolveCapabilityWithOverride,
-  resolveExternalReasoningSupport,
-  strictProviderForModel
-} from './modelMetadata'
+import { resolveCapabilityWithOverride, resolveExternalReasoningSupport, strictProviderForModel } from './modelMetadata'
 import {
   isGPT5FamilyModel,
   isGPT5ProModel,
@@ -312,15 +307,13 @@ const _getModelSupportedReasoningEffortOptions = (model: Model): ReasoningEffort
  * Single effective reasoning-options resolver.
  *
  * Priority: explicit user override (only when actually present) -> exact
- * owning-provider + exact model-id models.dev metadata -> model/family
+ * canonical model-id models.dev `reasoning` support -> model/family
  * heuristics (offline fallback) -> unknown.
  *
- * Precise external metadata overrides heuristic option lists; heuristics
- * remain the offline fallback. `default` means no override; `none`, `auto`,
- * and effort levels appear only when resolved and sendable in the active
- * lane. Internal `xhigh` remains the normalized representation of upstream
- * `max`. Toggle-only metadata is represented only to the extent the current
- * lane can emit on/off; budget-only metadata is not modeled (fixed).
+ * Canonical `models.json` publishes no reasoning options, so precise
+ * external effort lists never apply: reasoning-known models use the
+ * heuristic option lists, and unknown models stay undefined (no gating,
+ * requests never blocked).
  *
  * The optional provider selects the active request lane for protocol
  * filtering. When omitted, the exact owning provider is resolved internally;
@@ -337,7 +330,10 @@ export function getResolvedReasoningOptions(
   const override = isUserSelectedModelType(model, 'reasoning')
   if (override === false) return undefined
 
-  const externalOptions = getExternalReasoningEffortOptions(model, provider ?? undefined)
+  // Canonical models.json publishes no reasoning options: precise external
+  // effort lists never apply (unknown/absent, never filled from proxy
+  // records). Heuristics remain the option source.
+  const externalOptions: ReasoningEffortOption[] | undefined = undefined
   const externalSupport = resolveExternalReasoningSupport(model, provider ?? undefined)
 
   const heuristicOptions = (() => {
@@ -347,12 +343,13 @@ export function getResolvedReasoningOptions(
 
   let base: ReasoningEffortOption[] | undefined
   if (override === true) {
-    // User forces reasoning: prefer precise external controls, fall back to
-    // heuristic, degrade to fixed (`default` only) when neither knows controls.
+    // User forces reasoning: heuristic options, degraded to fixed (`default`
+    // only) when the heuristics know no controls.
     base = externalOptions ?? heuristicOptions ?? ['default']
   } else {
-    // No user override: external false overrules a legacy true; external
-    // true with controls overrides heuristic lists; otherwise heuristic.
+    // No user override: external false overrules a legacy true; otherwise
+    // heuristic (canonical metadata carries no effort controls to override
+    // with).
     if (externalSupport === false) return undefined
     if (externalSupport === true && externalOptions) {
       base = externalOptions
@@ -391,8 +388,9 @@ function resolveReasoningLane(provider?: Provider | null): 'anthropic' | 'gemini
  *
  * Current lanes can all emit `none` (disable/off), `auto` (on/auto), and
  * named effort levels via their protocol-standard shapes, except the Gemini
- * native lane, which only emits thinking controls for Gemini-family or
- * externally-known reasoning models. A Gemini-lane mismatch degrades to
+ * native lane, which only emits thinking controls for Gemini-family models.
+ * Canonical reasoning support is deliberately provider-independent, so it
+ * never counts as lane nativeness here. A Gemini-lane mismatch degrades to
  * fixed (`default` only) so no false strength menu appears.
  */
 function filterReasoningOptionsByLane(
@@ -412,8 +410,7 @@ function filterReasoningOptionsByLane(
   if (lane !== 'gemini') return base
   const { idResult, nameResult } = withModelIdAndNameAsId(model, isSupportedThinkingTokenGeminiModel)
   const isGeminiFamily = idResult || nameResult
-  const externalSupport = resolveExternalReasoningSupport(model, provider)
-  if (isGeminiFamily || externalSupport === true) return base
+  if (isGeminiFamily) return base
   // Reasoning resolved for another protocol but served via the Gemini native
   // lane: no explicit emit shape here, so expose no false controls.
   return ['default']

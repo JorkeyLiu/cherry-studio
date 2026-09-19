@@ -2,12 +2,7 @@ import type { NormalizedModelMetadata } from '@shared/modelMetadata'
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import ModelMetadataReference, {
-  formatLimitTokens,
-  formatReasoningControls,
-  formatReferencePrice,
-  hasConcreteModelData
-} from '../ModelMetadataReference'
+import ModelMetadataReference, { formatLimitTokens, hasConcreteModelData } from '../ModelMetadataReference'
 
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<any>()
@@ -15,7 +10,7 @@ vi.mock('react-i18next', async (importOriginal) => {
 })
 
 const FULL_ENTRY = {
-  id: 'claude-full',
+  id: 'moonshotai/kimi-k3',
   modalities: { input: ['text', 'image'], output: ['text'] },
   knowledgeCutoff: '2025-01-01',
   releaseDate: '2025-02-01',
@@ -23,19 +18,7 @@ const FULL_ENTRY = {
   toolCall: false,
   structuredOutput: true,
   temperature: false,
-  reasoningControls: { toggle: true, budget: true, effort: ['low', 'max'] },
-  limits: { context: 200000, input: 180000, output: 32000 },
-  pricing: {
-    input: 3,
-    output: 15,
-    cacheRead: 0.3,
-    cacheWrite: 3.75,
-    reasoning: 1.5,
-    inputAudio: 2,
-    outputAudio: 6,
-    contextOver200k: 6,
-    hasTiers: true
-  }
+  limits: { context: 200000, input: 180000, output: 32000 }
 } as unknown as NormalizedModelMetadata
 
 function entryOf(partial: Record<string, unknown>): NormalizedModelMetadata {
@@ -47,30 +30,17 @@ describe('ModelMetadataReference', () => {
     vi.clearAllMocks()
   })
 
-  it('shows the exact-match model-data section with source label and formatted rows', () => {
+  it('shows the canonical model-data section with source label and formatted rows', () => {
     render(<ModelMetadataReference entry={FULL_ENTRY} />)
 
     expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
     expect(screen.getByTestId('ref-source')).toHaveTextContent('models.dev')
-    // Pricing rows expose every normalized category present in the schema.
-    expect(screen.getByTestId('ref-price-input')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-output')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-cache-read')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-cache-write')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-reasoning')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-input-audio')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-output-audio')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-context-over-200k')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-tiers')).toBeInTheDocument()
     // Only context limit survives; input/output limits are removed.
     expect(screen.getByTestId('ref-limit-context')).toHaveTextContent('200,000')
     expect(screen.queryByTestId('ref-limit-input')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-limit-output')).not.toBeInTheDocument()
     expect(screen.getByTestId('ref-release-date')).toHaveTextContent('2025-02-01')
     expect(screen.getByTestId('ref-knowledge-cutoff')).toHaveTextContent('2025-01-01')
-    // Tiered pricing uses its own label, never the generic status label.
-    expect(screen.getByText('models.reference.tiered_pricing')).toBeInTheDocument()
-    expect(screen.queryByText('models.reference.status')).not.toBeInTheDocument()
     // Removed Model Data fields never render.
     expect(screen.queryByTestId('ref-family')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-status')).not.toBeInTheDocument()
@@ -82,11 +52,29 @@ describe('ModelMetadataReference', () => {
     expect(screen.queryByTestId('ref-tool-call')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-structured-output')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-temperature')).not.toBeInTheDocument()
-    // Reasoning controls show raw effort values only: no toggle/budget/Supported wording.
-    expect(screen.getByTestId('ref-reasoning-controls')).toHaveTextContent('low, max')
-    expect(screen.getByTestId('ref-reasoning-controls')).not.toHaveTextContent('toggle')
-    expect(screen.getByTestId('ref-reasoning-controls')).not.toHaveTextContent('budget')
-    expect(screen.getByTestId('ref-reasoning-controls')).not.toHaveTextContent('models.reference.supported')
+  })
+
+  it('never renders pricing or reasoning-option rows: canonical models.json does not publish them', () => {
+    render(
+      <ModelMetadataReference
+        entry={entryOf({
+          id: 'moonshotai/kimi-k3',
+          modalities: { input: ['text'], output: ['text'] },
+          limits: { context: 200000 },
+          // Proxy-shaped leftovers must never render as canonical facts.
+          pricing: { input: 3, output: 15, cacheRead: 0.3, hasTiers: true },
+          reasoningControls: { toggle: true, effort: ['low', 'max'] }
+        })}
+      />
+    )
+
+    expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
+    expect(screen.queryByTestId('ref-price-input')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ref-price-output')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ref-price-cache-read')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ref-price-tiers')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ref-reasoning-controls')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ref-limit-context')).toBeInTheDocument()
   })
 
   it('renders no pricing adoption action and no read-only note', () => {
@@ -97,22 +85,20 @@ describe('ModelMetadataReference', () => {
     expect(screen.queryByText('models.reference.use_pricing')).not.toBeInTheDocument()
   })
 
-  it('hides unavailable rows for partial metadata but keeps available pricing', () => {
+  it('hides unavailable rows for partial metadata but keeps available rows', () => {
     render(
       <ModelMetadataReference
         entry={entryOf({
           id: 'partial-1',
           modalities: { input: [], output: [] },
-          pricing: { input: 1.25, output: 5 }
+          limits: { context: 200000 }
         })}
       />
     )
 
     expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-input')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-output')).toBeInTheDocument()
-    expect(screen.queryByTestId('ref-price-cache-read')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('ref-limit-context')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ref-limit-context')).toBeInTheDocument()
+    expect(screen.queryByTestId('ref-release-date')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-family')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-status')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-limit-input')).not.toBeInTheDocument()
@@ -123,8 +109,6 @@ describe('ModelMetadataReference', () => {
     expect(screen.queryByTestId('ref-tool-call')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-structured-output')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-temperature')).not.toBeInTheDocument()
-    // Missing effort hides the row entirely: no Not supported placeholder.
-    expect(screen.queryByTestId('ref-reasoning-controls')).not.toBeInTheDocument()
   })
 
   it('hides Model Data for a features-only entry because features show in the icon group', () => {
@@ -143,53 +127,6 @@ describe('ModelMetadataReference', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('never shows Model Data from reasoning-controls alone', () => {
-    const { container } = render(
-      <ModelMetadataReference
-        entry={entryOf({
-          id: 'effort-only',
-          reasoning: true,
-          reasoningControls: { toggle: true, budget: true, effort: [] }
-        })}
-      />
-    )
-    expect(screen.queryByTestId('models-dev-reference')).not.toBeInTheDocument()
-    expect(container).toBeEmptyDOMElement()
-  })
-
-  it('hides reasoning controls for known reasoning without published effort', () => {
-    render(
-      <ModelMetadataReference
-        entry={entryOf({
-          id: 'reason-only',
-          modalities: { input: ['text'], output: ['text'] },
-          reasoning: true,
-          pricing: { input: 1, output: 2 }
-        })}
-      />
-    )
-
-    // The section still shows (pricing is concrete) but the effort row hides.
-    expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
-    expect(screen.queryByTestId('ref-reasoning-controls')).not.toBeInTheDocument()
-  })
-
-  it('hides reasoning controls when effort is empty, even with toggle/budget', () => {
-    render(
-      <ModelMetadataReference
-        entry={entryOf({
-          id: 'empty-effort',
-          reasoning: true,
-          reasoningControls: { toggle: true, budget: true, effort: [] },
-          pricing: { input: 1, output: 2 }
-        })}
-      />
-    )
-
-    expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
-    expect(screen.queryByTestId('ref-reasoning-controls')).not.toBeInTheDocument()
-  })
-
   it('gates section visibility on concrete rows only', () => {
     expect(hasConcreteModelData(undefined)).toBe(false)
     expect(hasConcreteModelData({ id: 'x', modalities: { input: [], output: [] } } as never)).toBe(false)
@@ -202,21 +139,15 @@ describe('ModelMetadataReference', () => {
         modalities: { input: [], output: [] }
       } as never)
     ).toBe(false)
-    // effort alone never counts either
-    expect(
-      hasConcreteModelData({
-        id: 'x',
-        reasoningControls: { effort: ['low'] },
-        modalities: { input: [], output: [] }
-      } as never)
-    ).toBe(false)
+    // proxy-shaped pricing/reasoning leftovers never count either
     expect(
       hasConcreteModelData({
         id: 'x',
         pricing: { input: 1, output: 2 },
+        reasoningControls: { effort: ['low'] },
         modalities: { input: [], output: [] }
       } as never)
-    ).toBe(true)
+    ).toBe(false)
     expect(
       hasConcreteModelData({
         id: 'x',
@@ -253,7 +184,6 @@ describe('ModelMetadataReference', () => {
         entry={entryOf({
           id: 'broken',
           modalities: { input: [], output: [] },
-          pricing: { input: 'cheap', output: null, cacheRead: Number.NaN },
           limits: { context: 'big', input: 10, output: 20 },
           releaseDate: null,
           knowledgeCutoff: '  '
@@ -264,21 +194,8 @@ describe('ModelMetadataReference', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('formats prices and limits deterministically', () => {
-    expect(formatReferencePrice(3)).toBe('$3')
-    expect(formatReferencePrice(0.3)).toBe('$0.3')
+  it('formats limits deterministically', () => {
     expect(formatLimitTokens(200000)).toBe('200,000')
     expect(formatLimitTokens(32000)).toBe('32,000')
-  })
-
-  it('formats reasoning controls from effort values only', () => {
-    expect(formatReasoningControls({ toggle: true, budget: true, effort: ['low', 'max'] })).toEqual({
-      text: 'low, max',
-      known: true
-    })
-    // Empty/missing effort is unknown: the row hides, never a placeholder.
-    expect(formatReasoningControls({ toggle: true, budget: true, effort: [] })).toEqual({ text: '', known: false })
-    expect(formatReasoningControls(undefined)).toEqual({ text: '', known: false })
-    expect(formatReasoningControls({})).toEqual({ text: '', known: false })
   })
 })

@@ -8,8 +8,10 @@ import {
   type ModelMetadataStatus,
   type NormalizedModelMetadata,
   parseModelMetadataSnapshot,
-  parseModelMetadataStatus
+  parseModelMetadataStatus,
+  resolveCanonicalModel
 } from '@shared/modelMetadata'
+import { isSafeLogoSourceId } from '@shared/providerLogo'
 
 import { resolveExactProvider, setExactProviderResolver } from './exactProviderResolver'
 
@@ -76,7 +78,7 @@ export function getModelMetadataStatus(): ModelMetadataStatus {
 }
 
 /**
- * Runtime provider resolver for external attribution (dependency-injected).
+ * Runtime provider resolver for request-lane attribution (dependency-injected).
  *
  * `config/models` capability modules must stay pure and lightweight: they
  * never import AssistantService or the store/data-source chain (that edge
@@ -89,7 +91,10 @@ export function getModelMetadataStatus(): ModelMetadataStatus {
  * is verified at this boundary, so even a sloppy resolver cannot cause
  * cross-provider attribution, and there is never a silent default-provider
  * fallback. Backed by the shared exact-provider registry so vision/websearch
- * predicates and metadata attribution share one contract.
+ * predicates and request-lane resolution share one contract.
+ *
+ * Model capability facts themselves never use this resolver: they resolve by
+ * canonical model id only (see `resolveCanonicalModelEntry`).
  */
 export type MetadataProviderResolver = (model: Model | undefined | null) => Provider | null | undefined
 
@@ -144,15 +149,18 @@ export function normalizeApiUrl(url: string | undefined | null): string {
 }
 
 /**
- * Map a configured provider to its models.dev source id.
+ * Map a configured connection to its models.dev provider-source id for
+ * CONNECTION logos only.
  *
  * - `anthropic` protocol -> `anthropic` source.
  * - `gemini` protocol -> `google` source (never `google-vertex`).
  * - OpenAI official host -> `openai` source.
  * - Any other connection -> exact normalized API URL match against the
- *   snapshot providers' `api`; only when exactly one provider matches.
- *   Zero or multiple matches -> unknown (null). A miss never falls back to
- *   another source.
+ *   snapshot provider-source list's `api`; only when exactly one source
+ *   matches. Zero or multiple matches -> unknown (null). A miss never falls
+ *   back to another source.
+ *
+ * Model capability facts and model logos never use this function.
  */
 export function resolveMetadataSource(
   provider: Provider | undefined | null,
@@ -179,39 +187,40 @@ export function resolveMetadataSource(
 }
 
 /**
- * Exact trimmed model-id lookup inside one source only. Case-sensitive, no
- * lowercasing, no suffix handling — a miss returns undefined (unknown).
- * Unsafe dictionary keys and malformed in-memory shapes are rejected without
- * throwing, so a corrupt snapshot can never confuse capability predicates.
+ * Canonical model entry for a user/proxy model id, independent of the
+ * serving connection. Resolution follows the shared canonical matching
+ * contract (exact id -> unique basename -> unique case-fold, fail closed);
+ * identity never uses the API URL, `group`, editable `name`, provider brand
+ * id, or `owned_by`. Returns undefined when unknown or ambiguous. Never
+ * throws.
  */
-export function lookupModelMetadata(
-  sourceId: string | null | undefined,
+export function resolveCanonicalModelEntry(
   modelId: string | undefined | null,
   current: ModelMetadataSnapshot | null = snapshot
 ): NormalizedModelMetadata | undefined {
-  if (!current || typeof current !== 'object' || !sourceId || modelId == null) return undefined
-  if (!isSafeMetadataKey(sourceId)) return undefined
-  const key = modelId.trim()
-  if (!key || !isSafeMetadataKey(key)) return undefined
-  const providers = current.providers
-  if (!providers || typeof providers !== 'object') return undefined
-  const source = (providers as Record<string, unknown>)[sourceId]
-  if (!source || typeof source !== 'object') return undefined
-  const models = (source as { models?: unknown }).models
-  if (!models || typeof models !== 'object') return undefined
-  const entry = (models as Record<string, unknown>)[key]
-  if (!entry || typeof entry !== 'object') return undefined
-  return entry as NormalizedModelMetadata
+  return resolveCanonicalModel(modelId, current)?.entry
 }
 
-/** Convenience: source mapping + exact lookup for a model/provider pair. */
-export function resolveModelMetadata(
+/**
+ * Canonical lab (model-brand logo key) for a user/proxy model id. Returns
+ * the canonical id prefix (e.g. `moonshotai` for `moonshotai/kimi-k3`) only
+ * when canonical resolution succeeds and the lab is a safe logo key;
+ * otherwise null — the caller must use the generic model fallback, never
+ * the proxy connection logo. Never throws.
+ */
+export function resolveCanonicalModelLogoSource(
   model: Model | undefined | null,
-  provider?: Provider | null,
   current: ModelMetadataSnapshot | null = snapshot
-): NormalizedModelMetadata | undefined {
-  if (!model) return undefined
-  return lookupModelMetadata(resolveMetadataSource(provider ?? null, current), model.id, current)
+): string | null {
+  try {
+    if (!model || typeof model.id !== 'string') return null
+    const lab = resolveCanonicalModel(model.id, current)?.lab
+    if (!lab || !isSafeLogoSourceId(lab)) return null
+    if (!isSafeMetadataKey(lab)) return null
+    return lab
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -224,11 +233,14 @@ export function resolveModelMetadata(
  * an open Edit Model popup re-renders when the async round completes):
  * - Main-reported `ready`/`unavailable` are adopted as-is (single source of
  *   truth; reasons stay sanitized).
- * - Main-reported `loading` stays loading: the Main round is still running.
- *   A null snapshot read in that window is not a completed failure.
+ * - Main-reported `loading` with an empty snapshot read means this one-shot
+ *   read caught Main still loading: converge with one bounded, awaited
+ *   refresh + re-read round (existing `refresh` path, no polling, no push
+ *   subsystem) to `ready` or `unavailable`. A failed convergence keeps
+ *   last-known-good when present, else `unavailable`.
  * - Compat path (no `getStatus` surface): a parsed snapshot is ready; a
  *   malformed payload is a completed validation failure (unavailable); a
- *   null read may mean Main is still fetching, so it stays loading.
+ *   null read with no snapshot is a completed empty round (unavailable).
  * - IPC throws with no snapshot are completed failures (unavailable).
  * - An existing snapshot is never demoted: refresh failures stay ready.
  */
@@ -280,13 +292,14 @@ export function initModelMetadataRegistry(): Promise<ModelMetadataSnapshot | nul
         setStatus({ kind: 'unavailable', snapshot: null, reason: 'schema-mismatch' })
         return null
       }
-      // Null reads may mean Main is still fetching in the background: stay
-      // loading when Main says so, otherwise the round completed empty.
       if (mainInFlight) {
-        setStatus({ kind: 'loading', snapshot: null })
-      } else {
-        setStatus({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+        // This one-shot read caught Main still loading with no snapshot:
+        // converge with a single bounded, awaited refresh + re-read round.
+        // No polling, no push subsystem; still never throws and never gates
+        // app readiness (callers treat the registry as enhancement-only).
+        return await convergeAfterMainLoading(surface)
       }
+      setStatus({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
       return null
     } catch (error) {
       logger.warn('model metadata init failed; registry stays unknown', error as Error)
@@ -295,6 +308,64 @@ export function initModelMetadataRegistry(): Promise<ModelMetadataSnapshot | nul
     }
   })()
   return initPromise
+}
+
+/**
+ * Bounded convergence after catching Main still loading: one awaited
+ * `refresh` (existing path) plus one re-read of status/snapshot, then a
+ * terminal `ready` or `unavailable`. Never throws; never demotes an existing
+ * snapshot.
+ */
+async function convergeAfterMainLoading(surface: {
+  refresh?: unknown
+  getStatus?: unknown
+  getSnapshot: unknown
+}): Promise<ModelMetadataSnapshot | null> {
+  try {
+    if (typeof surface.refresh === 'function') {
+      try {
+        await (surface.refresh as () => Promise<unknown>)()
+      } catch (error) {
+        logger.warn('model metadata convergence refresh failed; re-reading once', error as Error)
+      }
+    }
+    if (typeof surface.getStatus === 'function') {
+      try {
+        const reread: unknown = await (surface.getStatus as () => Promise<unknown>)()
+        const parsedStatus = parseModelMetadataStatus(reread)
+        if (parsedStatus?.snapshot) {
+          setStatusFromSnapshot(parsedStatus.snapshot)
+          return snapshot
+        }
+        if (parsedStatus?.kind === 'unavailable' && !snapshot) {
+          setStatus(parsedStatus)
+          return null
+        }
+      } catch {
+        // Fall through to the single snapshot re-read below.
+      }
+    }
+    try {
+      const reread: unknown = await (surface.getSnapshot as () => Promise<unknown>)()
+      const parsed = parseModelMetadataSnapshot(reread)
+      if (parsed) {
+        setStatusFromSnapshot(parsed)
+        return snapshot
+      }
+      if (reread !== null && reread !== undefined) {
+        if (!snapshot) setStatus({ kind: 'unavailable', snapshot: null, reason: 'schema-mismatch' })
+        return snapshot
+      }
+    } catch (error) {
+      logger.warn('model metadata convergence re-read failed', error as Error)
+    }
+  } catch (error) {
+    logger.warn('model metadata convergence failed; registry stays unknown', error as Error)
+  }
+  // Converged: still empty after the bounded round — unavailable, never
+  // permanently loading. An existing snapshot is never demoted.
+  if (!snapshot) setStatus({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+  return snapshot
 }
 
 /** Synchronous in-memory read after init. Null until/unless loaded. */

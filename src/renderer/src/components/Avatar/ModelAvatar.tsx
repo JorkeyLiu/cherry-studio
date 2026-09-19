@@ -1,4 +1,4 @@
-import { useModelProviderLogo } from '@renderer/services/providerLogo'
+import { useCanonicalModelLogo } from '@renderer/services/providerLogo'
 import type { Model, Provider } from '@renderer/types'
 import type { AvatarProps } from 'antd'
 import { Avatar } from 'antd'
@@ -9,7 +9,7 @@ import { ModelsDevLogoMark } from './ModelsDevLogoMark'
 
 interface Props {
   model?: Model
-  /** Explicit owning provider (exact id match still enforced by the hook). */
+  /** Explicit owning provider (accepted for call-site compatibility; model logos never use it). */
   provider?: Provider | null
   /** Test seam: explicit models.dev logo override (null = no logo). */
   modelsDevLogoSrc?: string | null
@@ -18,12 +18,14 @@ interface Props {
   className?: string
 }
 
-const ModelAvatar: FC<Props> = ({ model, provider, modelsDevLogoSrc, size, props, className }) => {
-  // Model avatar priority: owning provider's exact cached models.dev logo >
-  // deterministic model initial. No model-specific logos are invented.
+const ModelAvatar: FC<Props> = ({ model, provider: _provider, modelsDevLogoSrc, size, props, className }) => {
+  // Model avatar priority: canonical model's lab/brand logo (resolved from
+  // models.json, independent of the serving proxy connection) >
+  // deterministic model initial. Unknown/ambiguous canonical resolution
+  // yields the generic fallback, never the proxy connection logo.
   // The models.dev logo shares ModelsDevLogoMark with ProviderAvatar (single
   // mask implementation): monochrome theme token on transparency.
-  const hookLogo = useModelProviderLogo(model, provider !== undefined ? provider : undefined)
+  const hookLogo = useCanonicalModelLogo(model)
   const logoSrc = modelsDevLogoSrc !== undefined ? modelsDevLogoSrc : hookLogo
   const avatarStyle = {
     width: size,

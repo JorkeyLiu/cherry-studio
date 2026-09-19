@@ -11,11 +11,11 @@ import {
   getModelMetadataStatus,
   getModelMetadataStatusSnapshot,
   initModelMetadataRegistry,
-  lookupModelMetadata,
   normalizeApiUrl,
   refreshModelMetadataRegistry,
+  resolveCanonicalModelEntry,
+  resolveCanonicalModelLogoSource,
   resolveMetadataSource,
-  resolveModelMetadata,
   resolveProviderForMetadata,
   setMetadataProviderResolver,
   setModelMetadataSnapshotForTests,
@@ -26,57 +26,32 @@ import {
 const SNAPSHOT: ModelMetadataSnapshot = {
   source: 'models.dev',
   fetchedAt: 1_000_000,
-  providers: {
-    anthropic: {
-      api: '',
-      name: 'Anthropic',
-      models: {
-        'claude-sonnet-4-6': {
-          id: 'claude-sonnet-4-6',
-          modalities: { input: ['text', 'image'], output: ['text'] },
-          toolCall: true,
-          reasoning: true
-        }
-      }
+  models: {
+    'moonshotai/kimi-k3': {
+      id: 'moonshotai/kimi-k3',
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      toolCall: true,
+      reasoning: true
     },
-    openai: {
-      api: '',
-      name: 'OpenAI',
-      models: {
-        'gpt-5-mini': {
-          id: 'gpt-5-mini',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: true,
-          reasoning: false
-        }
-      }
+    'openai/gpt-5-mini': {
+      id: 'openai/gpt-5-mini',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: true,
+      reasoning: false
     },
-    google: {
-      api: '',
-      name: 'Google',
-      models: {
-        'gemini-3-flash': {
-          id: 'gemini-3-flash',
-          modalities: { input: ['text', 'image'], output: ['text'] },
-          reasoning: true
-        }
-      }
-    },
-    'party-a': {
-      api: 'https://api.party-a.example/v1',
-      name: 'Party A',
-      models: { 'party-a/model-x': { id: 'party-a/model-x', modalities: { input: ['text'], output: ['text'] } } }
-    },
-    'party-b': {
-      api: 'https://api.party-b.example/v1/',
-      name: 'Party B',
-      models: {}
-    },
-    'party-dup': {
-      api: 'https://api.party-a.example/v1/',
-      name: 'Party Dup',
-      models: {}
+    'google/gemini-3-flash': {
+      id: 'google/gemini-3-flash',
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      reasoning: true
     }
+  },
+  providers: {
+    anthropic: { api: '', name: 'Anthropic' },
+    openai: { api: '', name: 'OpenAI' },
+    google: { api: '', name: 'Google' },
+    'party-a': { api: 'https://api.party-a.example/v1', name: 'Party A' },
+    'party-b': { api: 'https://api.party-b.example/v1/', name: 'Party B' },
+    'party-dup': { api: 'https://api.party-a.example/v1/', name: 'Party Dup' }
   }
 }
 
@@ -104,7 +79,7 @@ describe('normalizeApiUrl', () => {
   })
 })
 
-describe('resolveMetadataSource', () => {
+describe('resolveMetadataSource — connection logos only', () => {
   it('maps anthropic protocol to anthropic and gemini to google (never google-vertex)', () => {
     expect(resolveMetadataSource(makeProvider({ id: 'a', type: 'anthropic' }), SNAPSHOT)).toBe('anthropic')
     expect(resolveMetadataSource(makeProvider({ id: 'g', type: 'gemini' }), SNAPSHOT)).toBe('google')
@@ -158,7 +133,7 @@ describe('resolveMetadataSource', () => {
       ...SNAPSHOT,
       providers: {
         ...SNAPSHOT.providers,
-        'party-q': { api: 'https://api.unique-q.example/v1?key=1', name: 'Party Q', models: {} }
+        'party-q': { api: 'https://api.unique-q.example/v1?key=1', name: 'Party Q' }
       }
     }
     expect(
@@ -175,55 +150,47 @@ describe('resolveMetadataSource', () => {
   })
 })
 
-describe('lookupModelMetadata — exact id only', () => {
-  it('finds exact trimmed ids and rejects fuzzy variants', () => {
-    expect(lookupModelMetadata('anthropic', 'claude-sonnet-4-6', SNAPSHOT)?.id).toBe('claude-sonnet-4-6')
-    expect(lookupModelMetadata('anthropic', '  claude-sonnet-4-6  ', SNAPSHOT)?.id).toBe('claude-sonnet-4-6')
-    // no lowercasing, no suffix stripping, no partial match
-    expect(lookupModelMetadata('anthropic', 'Claude-Sonnet-4-6', SNAPSHOT)).toBeUndefined()
-    expect(lookupModelMetadata('anthropic', 'claude-sonnet-4', SNAPSHOT)).toBeUndefined()
-    expect(lookupModelMetadata('anthropic', 'claude-sonnet', SNAPSHOT)).toBeUndefined()
-    expect(lookupModelMetadata('anthropic', '', SNAPSHOT)).toBeUndefined()
+describe('resolveCanonicalModelEntry — canonical identity, no provider attribution', () => {
+  it('resolves exact ids, bare basenames, and proxy-qualified aliases to the canonical entry', () => {
+    expect(resolveCanonicalModelEntry('moonshotai/kimi-k3', SNAPSHOT)?.id).toBe('moonshotai/kimi-k3')
+    expect(resolveCanonicalModelEntry('  kimi-k3  ', SNAPSHOT)?.id).toBe('moonshotai/kimi-k3')
+    expect(resolveCanonicalModelEntry('alibaba/kimi-k3', SNAPSHOT)?.id).toBe('moonshotai/kimi-k3')
+    expect(resolveCanonicalModelEntry('gpt-5-mini', SNAPSHOT)?.id).toBe('openai/gpt-5-mini')
   })
 
-  it('never falls back to another source on a miss', () => {
-    // gpt-5-mini exists in openai but the lookup is scoped to anthropic
-    expect(lookupModelMetadata('anthropic', 'gpt-5-mini', SNAPSHOT)).toBeUndefined()
-    expect(lookupModelMetadata('no-such-source', 'gpt-5-mini', SNAPSHOT)).toBeUndefined()
-    expect(lookupModelMetadata('openai', 'gpt-5-mini', null)).toBeUndefined()
+  it('is independent of the serving connection (no API URL / brand / group / name)', () => {
+    // The entry resolves identically no matter which proxy connection serves
+    // the id: the provider argument does not exist on this path.
+    expect(resolveCanonicalModelEntry('kimi-k3', SNAPSHOT)?.toolCall).toBe(true)
+    expect(resolveCanonicalModelEntry('custom-unknown-1', SNAPSHOT)).toBeUndefined()
+    expect(resolveCanonicalModelEntry('', SNAPSHOT)).toBeUndefined()
+    expect(resolveCanonicalModelEntry(undefined, SNAPSHOT)).toBeUndefined()
+    expect(resolveCanonicalModelEntry('kimi-k3', null)).toBeUndefined()
   })
 
-  it('rejects unsafe dictionary keys and malformed shapes without throwing', () => {
+  it('rejects unsafe queries and malformed shapes without throwing', () => {
     for (const key of ['__proto__', 'constructor', 'prototype']) {
-      expect(lookupModelMetadata('anthropic', key, SNAPSHOT)).toBeUndefined()
-      expect(lookupModelMetadata(key, 'claude-sonnet-4-6', SNAPSHOT)).toBeUndefined()
+      expect(resolveCanonicalModelEntry(key, SNAPSHOT)).toBeUndefined()
     }
-    const malformed = [
-      { providers: null },
-      { providers: { anthropic: null } },
-      { providers: { anthropic: { models: null } } },
-      { providers: { anthropic: { models: 'nope' } } },
-      { providers: 'nope' },
-      null
-    ]
+    const malformed = [{ models: null, providers: {} }, { models: 'nope', providers: {} }, { providers: {} }, null]
     for (const shape of malformed) {
-      expect(lookupModelMetadata('anthropic', 'claude-sonnet-4-6', shape as never)).toBeUndefined()
-      expect(
-        resolveMetadataSource(
-          makeProvider({ id: 'c', type: 'openai', apiHost: 'https://x.example/v1' }),
-          shape as never
-        )
-      ).toBeNull()
+      expect(resolveCanonicalModelEntry('kimi-k3', shape as never)).toBeUndefined()
     }
   })
 })
 
-describe('resolveModelMetadata', () => {
-  it('combines source mapping with exact lookup', () => {
-    const provider = makeProvider({ id: 'a', type: 'anthropic' })
-    expect(resolveModelMetadata(makeModel('claude-sonnet-4-6', 'a'), provider, SNAPSHOT)?.toolCall).toBe(true)
-    expect(resolveModelMetadata(makeModel('custom-unknown-1', 'a'), provider, SNAPSHOT)).toBeUndefined()
-    expect(resolveModelMetadata(undefined, provider, SNAPSHOT)).toBeUndefined()
+describe('resolveCanonicalModelLogoSource — model-brand logo key', () => {
+  it('returns the canonical lab independent of the serving proxy', () => {
+    expect(resolveCanonicalModelLogoSource(makeModel('kimi-k3', 'proxy-1'), SNAPSHOT)).toBe('moonshotai')
+    expect(resolveCanonicalModelLogoSource(makeModel('alibaba/kimi-k3', 'proxy-1'), SNAPSHOT)).toBe('moonshotai')
+    expect(resolveCanonicalModelLogoSource(makeModel('openai/gpt-5-mini', 'o'), SNAPSHOT)).toBe('openai')
+  })
+
+  it('returns null for unknown/ambiguous/malformed ids (generic fallback, never proxy logo)', () => {
+    expect(resolveCanonicalModelLogoSource(makeModel('custom-unknown-1', 'proxy-1'), SNAPSHOT)).toBeNull()
+    expect(resolveCanonicalModelLogoSource(makeModel('', 'proxy-1'), SNAPSHOT)).toBeNull()
+    expect(resolveCanonicalModelLogoSource(undefined, SNAPSHOT)).toBeNull()
+    expect(resolveCanonicalModelLogoSource(makeModel('kimi-k3', 'proxy-1'), null)).toBeNull()
   })
 })
 
@@ -308,14 +275,53 @@ describe('modelMetadata status subscription — stable useSyncExternalStore sour
     }
   })
 
-  it('stays loading (never unavailable) while Main reports a round in flight', async () => {
-    const getSnapshot = vi.fn().mockResolvedValue(null)
+  it('converges loading -> ready when the first read catches Main still loading', async () => {
+    // Main reports a round in flight; the one-shot snapshot read is empty.
+    const getStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: 'loading', snapshot: null })
+      .mockResolvedValue({ kind: 'ready', snapshot: SNAPSHOT })
+    const getSnapshot = vi.fn().mockResolvedValueOnce(null).mockResolvedValue(SNAPSHOT)
+    const refresh = vi.fn().mockResolvedValue({ ok: true, fetchedAt: 1_000_000 })
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot, getStatus, refresh } }
+    try {
+      setModelMetadataSnapshotForTests(null)
+      await expect(initModelMetadataRegistry()).resolves.toEqual(SNAPSHOT)
+      // Bounded convergence: exactly one refresh and one re-read round.
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(getModelMetadataStatus().kind).toBe('ready')
+      expect(getModelMetadataStatus().snapshot).toEqual(SNAPSHOT)
+      expect(resolveCanonicalModelEntry('kimi-k3')?.id).toBe('moonshotai/kimi-k3')
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('converges loading -> unavailable when the bounded refresh round still finds nothing', async () => {
     const getStatus = vi.fn().mockResolvedValue({ kind: 'loading', snapshot: null })
-    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot, getStatus } }
+    const getSnapshot = vi.fn().mockResolvedValue(null)
+    const refresh = vi.fn().mockRejectedValue(new Error('ipc down'))
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { getSnapshot, getStatus, refresh } }
     try {
       setModelMetadataSnapshotForTests(null)
       await expect(initModelMetadataRegistry()).resolves.toBeNull()
-      expect(getModelMetadataStatus()).toEqual({ kind: 'loading', snapshot: null })
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(getModelMetadataStatus()).toEqual({ kind: 'unavailable', snapshot: null, reason: 'network-error' })
+    } finally {
+      delete (window as any).api.modelMetadata
+      setModelMetadataSnapshotForTests(null)
+    }
+  })
+
+  it('keeps last-known-good ready when a manual refresh fails', async () => {
+    const refresh = vi.fn().mockRejectedValue(new Error('ipc down'))
+    ;(window as any).api = { ...(window as any).api, modelMetadata: { refresh } }
+    try {
+      setModelMetadataSnapshotForTests(SNAPSHOT)
+      // An installed snapshot short-circuits init: refresh failures stay ready.
+      await expect(refreshModelMetadataRegistry()).resolves.toEqual(SNAPSHOT)
+      expect(getModelMetadataStatus().kind).toBe('ready')
     } finally {
       delete (window as any).api.modelMetadata
       setModelMetadataSnapshotForTests(null)
@@ -396,7 +402,7 @@ describe('initModelMetadataRegistry — boot never blocks', () => {
     try {
       setModelMetadataSnapshotForTests(null)
       await expect(initModelMetadataRegistry()).resolves.toEqual(SNAPSHOT)
-      expect(lookupModelMetadata('anthropic', 'claude-sonnet-4-6')?.id).toBe('claude-sonnet-4-6')
+      expect(resolveCanonicalModelEntry('kimi-k3')?.id).toBe('moonshotai/kimi-k3')
     } finally {
       delete (window as any).api.modelMetadata
       setModelMetadataSnapshotForTests(null)
@@ -409,7 +415,7 @@ describe('initModelMetadataRegistry — boot never blocks', () => {
     try {
       setModelMetadataSnapshotForTests(null)
       await expect(initModelMetadataRegistry()).resolves.toBeNull()
-      expect(lookupModelMetadata('anthropic', 'claude-sonnet-4-6')).toBeUndefined()
+      expect(resolveCanonicalModelEntry('kimi-k3')).toBeUndefined()
     } finally {
       delete (window as any).api.modelMetadata
       setModelMetadataSnapshotForTests(null)
@@ -417,8 +423,8 @@ describe('initModelMetadataRegistry — boot never blocks', () => {
   })
 
   it.each([
-    ['missing providers', { source: 'models.dev', fetchedAt: 1 }],
-    ['wrong source', { source: 'evil', fetchedAt: 1, providers: {} }],
+    ['missing models', { source: 'models.dev', fetchedAt: 1, providers: {} }],
+    ['wrong source', { source: 'evil', fetchedAt: 1, models: {}, providers: {} }],
     ['array', []],
     ['string', 'nope'],
     ['null', null],
@@ -429,7 +435,7 @@ describe('initModelMetadataRegistry — boot never blocks', () => {
     try {
       setModelMetadataSnapshotForTests(null)
       await expect(initModelMetadataRegistry()).resolves.toBeNull()
-      expect(lookupModelMetadata('anthropic', 'claude-sonnet-4-6')).toBeUndefined()
+      expect(resolveCanonicalModelEntry('kimi-k3')).toBeUndefined()
     } finally {
       delete (window as any).api.modelMetadata
       setModelMetadataSnapshotForTests(null)

@@ -8,24 +8,41 @@ import * as z from 'zod'
  *   basic requests: user-configured or provider-returned model ids remain
  *   requestable when the network/cache/schema/lookup fails or the id is
  *   mapped/unknown.
- * - Exact provider/model matching only: no fuzzy names, lowercasing, suffix
- *   stripping, aliases, or global first-match.
+ * - Model facts are canonical/standard capabilities from `models.json`,
+ *   independent of proxy endpoint restrictions. Model identity never uses the
+ *   API URL, `group`, editable `name`, provider brand id, or `owned_by`:
+ *   resolution is by canonical model id only (see the matching contract on
+ *   `resolveCanonicalModel`).
+ * - `models.json` publishes no provider-specific pricing or reasoning
+ *   options. Those fields are absent (unknown), never filled from
+ *   proxy-serving records as canonical facts.
  * - External absent optional fields mean unknown, not false. Required
  *   models.dev booleans normalize to supported/unsupported after validated
  *   parsing.
  * - External data must not be persisted into the existing `llm` Redux slice
  *   or overwrite user model objects. The snapshot below is renderer
  *   memory-only / Main cache-file-only.
+ * - Connection (provider-settings) logos keep the separate provider-source
+ *   list from `api.json`; model logos use the canonical lab (see below).
+ *   Logo safety gates stay fail-closed.
  */
 
 /** Canonical source tag carried on every snapshot. */
 export const MODEL_METADATA_SOURCE = 'models.dev' as const
 
-/** Upstream endpoint owned by the Main ModelMetadataService. */
-export const MODEL_METADATA_ENDPOINT = 'https://models.dev/api.json'
+/** Upstream canonical model-facts endpoint owned by the Main ModelMetadataService. */
+export const MODEL_METADATA_ENDPOINT = 'https://models.dev/models.json'
 
-/** Version of the Main on-disk cache envelope. */
-export const MODEL_METADATA_CACHE_VERSION = 1
+/**
+ * Upstream provider-source list endpoint. Owned by the Main
+ * ModelMetadataService for connection-logo attribution ONLY (normalized
+ * `api` base URL + display name per source; no model facts). Model metadata
+ * and model logos never read this endpoint.
+ */
+export const MODEL_METADATA_PROVIDER_SOURCES_ENDPOINT = 'https://models.dev/api.json'
+
+/** Version of the Main on-disk cache envelope (v2 = canonical models.json shape). */
+export const MODEL_METADATA_CACHE_VERSION = 2
 
 /** Background refresh cadence: no more than once per 24h. */
 export const MODEL_METADATA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -34,48 +51,41 @@ export const MODEL_METADATA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
 export const MODEL_METADATA_FETCH_TIMEOUT_MS = 15_000
 
 /**
- * Maximum accepted upstream response size. The live payload is currently
- * ~4.7MiB; this leaves generous headroom while bounding memory/disk abuse.
- * Enforced in UTF-8 bytes, never JS string length.
+ * Maximum accepted upstream response size. The live canonical payload is
+ * currently well under a megabyte; this leaves generous headroom while
+ * bounding memory/disk abuse. Enforced in UTF-8 bytes, never JS string
+ * length. Applies per endpoint fetch.
  */
 export const MODEL_METADATA_MAX_BYTES = 10 * 1024 * 1024
 
 /**
- * Proportional raw-normalization bounds inside the total byte cap. Live data
- * is ~220 providers / ~7842 models; every bound below carries several times
- * headroom over that. On excess the offending entry is skipped (or narrowed
- * by truncation) and a wholly disproportionate payload rejects the snapshot;
- * requests are never blocked either way because the registry never gates.
+ * Proportional raw-normalization bounds inside the total byte cap. Live
+ * canonical data is ~408 models; every bound below carries several times
+ * headroom over that. On excess the offending entry is skipped and a wholly
+ * disproportionate payload rejects the snapshot; requests are never blocked
+ * either way because the registry never gates.
  */
 export interface ModelMetadataNormalizationLimits {
   maxProviders: number
-  maxModelsPerProvider: number
   maxTotalModels: number
   maxKeyLength: number
   maxStringLength: number
   maxModalities: number
-  maxReasoningOptions: number
-  maxEffortValues: number
-  maxEffortValueLength: number
 }
 
 export const DEFAULT_NORMALIZATION_LIMITS: ModelMetadataNormalizationLimits = {
   maxProviders: 1000,
-  maxModelsPerProvider: 2000,
   maxTotalModels: 20000,
   maxKeyLength: 256,
   maxStringLength: 1024,
-  maxModalities: 32,
-  maxReasoningOptions: 16,
-  maxEffortValues: 32,
-  maxEffortValueLength: 64
+  maxModalities: 32
 }
 
 /**
  * Dictionary keys that must never be assigned through computed indexing:
  * `obj['__proto__'] = value` mutates the prototype instead of creating an
  * own property. Such keys are skipped during normalization and rejected at
- * lookup, so upstream data can never confuse provider/model dictionaries.
+ * lookup, so upstream data can never confuse the canonical dictionaries.
  */
 const UNSAFE_METADATA_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
 
@@ -84,7 +94,7 @@ export function isSafeMetadataKey(key: string): boolean {
 }
 
 /** Relative cache file location under the existing userData Cache convention. */
-export const MODEL_METADATA_CACHE_REL_PATH = 'model-metadata/models-dev.json'
+export const MODEL_METADATA_CACHE_REL_PATH = 'model-metadata/models-dev-models.json'
 
 export type ModelMetadataSource = typeof MODEL_METADATA_SOURCE
 
@@ -93,41 +103,17 @@ export interface ModelMetadataModalities {
   output: string[]
 }
 
-export interface ModelMetadataReasoningControls {
-  /** The model exposes an on/off (or auto) reasoning toggle. */
-  toggle?: boolean
-  /** Named effort levels, as published (e.g. low/medium/high/max). */
-  effort?: string[]
-  /** The model accepts a thinking-budget control. */
-  budget?: boolean
-}
-
 export interface ModelMetadataLimits {
   context?: number
   output?: number
   input?: number
 }
 
-export interface ModelMetadataPricing {
-  /** USD per million tokens, as published. */
-  input?: number
-  output?: number
-  cacheRead?: number
-  cacheWrite?: number
-  reasoning?: number
-  inputAudio?: number
-  outputAudio?: number
-  contextOver200k?: number
-  /** Tiered pricing exists upstream; exact tiers are intentionally not modeled. */
-  hasTiers?: boolean
-}
-
 export interface NormalizedModelMetadata {
-  /** Exact model id (the upstream record key). */
+  /** Exact canonical model id (the upstream record key, e.g. `moonshotai/kimi-k3`). */
   id: string
   name?: string
   family?: string
-  status?: string
   knowledgeCutoff?: string
   releaseDate?: string
   lastUpdated?: string
@@ -138,17 +124,17 @@ export interface NormalizedModelMetadata {
   structuredOutput?: boolean
   temperature?: boolean
   reasoning?: boolean
-  reasoningControls?: ModelMetadataReasoningControls
   limits?: ModelMetadataLimits
-  pricing?: ModelMetadataPricing
 }
 
-export interface NormalizedProviderMetadata {
-  /** Normalized upstream `api` base URL (empty when the source publishes none). */
+/**
+ * Minimal provider-source record for connection-logo attribution only.
+ * Normalized `api` base URL (empty when the source publishes none) plus the
+ * display name. Carries no model facts.
+ */
+export interface NormalizedProviderSource {
   api: string
   name: string
-  /** Models keyed by exact id — lookup is exact trimmed-id only. */
-  models: Record<string, NormalizedModelMetadata>
 }
 
 export interface ModelMetadataSnapshot {
@@ -156,8 +142,10 @@ export interface ModelMetadataSnapshot {
   /** Epoch ms of the successful upstream fetch that produced this snapshot. */
   fetchedAt: number
   etag?: string
-  /** Providers keyed by source provider id (e.g. `anthropic`, `openai`, `google`). */
-  providers: Record<string, NormalizedProviderMetadata>
+  /** Canonical models keyed by exact canonical id (`lab/name`). */
+  models: Record<string, NormalizedModelMetadata>
+  /** Provider sources keyed by source id — connection logos only. */
+  providers: Record<string, NormalizedProviderSource>
 }
 
 export type ModelMetadataRefreshReason =
@@ -258,35 +246,16 @@ const ModalitiesSchema = z.looseObject({
   output: z.array(z.string()).default([])
 })
 
-const ReasoningControlsSchema = z.looseObject({
-  toggle: z.boolean().optional(),
-  effort: z.array(z.string()).optional(),
-  budget: z.boolean().optional()
-})
-
 const LimitsSchema = z.looseObject({
   context: z.number().optional(),
   output: z.number().optional(),
   input: z.number().optional()
 })
 
-const PricingSchema = z.looseObject({
-  input: z.number().optional(),
-  output: z.number().optional(),
-  cacheRead: z.number().optional(),
-  cacheWrite: z.number().optional(),
-  reasoning: z.number().optional(),
-  inputAudio: z.number().optional(),
-  outputAudio: z.number().optional(),
-  contextOver200k: z.number().optional(),
-  hasTiers: z.boolean().optional()
-})
-
 const NormalizedModelSchema = z.looseObject({
   id: z.string(),
   name: z.string().optional(),
   family: z.string().optional(),
-  status: z.string().optional(),
   knowledgeCutoff: z.string().optional(),
   releaseDate: z.string().optional(),
   lastUpdated: z.string().optional(),
@@ -296,22 +265,20 @@ const NormalizedModelSchema = z.looseObject({
   structuredOutput: z.boolean().optional(),
   temperature: z.boolean().optional(),
   reasoning: z.boolean().optional(),
-  reasoningControls: ReasoningControlsSchema.optional(),
-  limits: LimitsSchema.optional(),
-  pricing: PricingSchema.optional()
+  limits: LimitsSchema.optional()
 })
 
-const NormalizedProviderSchema = z.looseObject({
+const NormalizedProviderSourceSchema = z.looseObject({
   api: z.string(),
-  name: z.string(),
-  models: z.record(z.string(), NormalizedModelSchema)
+  name: z.string()
 })
 
 export const ModelMetadataSnapshotSchema = z.looseObject({
   source: z.literal(MODEL_METADATA_SOURCE),
   fetchedAt: z.number(),
   etag: z.string().optional(),
-  providers: z.record(z.string(), NormalizedProviderSchema)
+  models: z.record(z.string(), NormalizedModelSchema),
+  providers: z.record(z.string(), NormalizedProviderSourceSchema)
 })
 
 export const ModelMetadataCacheEnvelopeSchema = z.looseObject({
@@ -323,11 +290,11 @@ export const ModelMetadataCacheEnvelopeSchema = z.looseObject({
 
 export type ModelMetadataCacheEnvelope = z.infer<typeof ModelMetadataCacheEnvelopeSchema>
 
-/** Top-level raw endpoint shape: a record of source-id -> provider-ish. */
-const RawProvidersSchema = z.record(z.string(), z.unknown())
+/** Top-level raw endpoint shape: a record of id -> model-ish / source-ish. */
+const RawRecordSchema = z.record(z.string(), z.unknown())
 
 // ---------------------------------------------------------------------------
-// Normalization (raw endpoint -> bounded snapshot)
+// Normalization (raw endpoints -> bounded snapshot parts)
 // ---------------------------------------------------------------------------
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -359,41 +326,6 @@ function asLowerStringArray(value: unknown, limits: ModelMetadataNormalizationLi
   return out
 }
 
-function normalizeReasoningControls(
-  value: unknown,
-  limits: ModelMetadataNormalizationLimits
-): ModelMetadataReasoningControls | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined
-  const controls: ModelMetadataReasoningControls = {}
-  let seen = 0
-  for (const entry of value) {
-    if (seen >= limits.maxReasoningOptions) break
-    if (!isRecord(entry)) continue
-    seen += 1
-    const type = asString(entry['type'], limits.maxStringLength)
-    if (type === 'toggle') {
-      controls.toggle = true
-    } else if (type === 'budget_tokens') {
-      controls.budget = true
-    } else if (type === 'effort') {
-      const values = Array.isArray(entry['values']) ? entry['values'] : []
-      const picked: string[] = []
-      for (const v of values) {
-        if (picked.length >= limits.maxEffortValues) break
-        if (typeof v === 'string' && v.length > 0 && v.length <= limits.maxEffortValueLength) {
-          picked.push(v)
-        }
-      }
-      if (picked.length > 0) {
-        controls.effort = [...(controls.effort ?? []), ...picked]
-      }
-    }
-  }
-  return controls.toggle !== undefined || controls.budget !== undefined || controls.effort !== undefined
-    ? controls
-    : undefined
-}
-
 function normalizeLimits(value: unknown): ModelMetadataLimits | undefined {
   if (!isRecord(value)) return undefined
   const limits: ModelMetadataLimits = {}
@@ -406,30 +338,7 @@ function normalizeLimits(value: unknown): ModelMetadataLimits | undefined {
   return Object.keys(limits).length > 0 ? limits : undefined
 }
 
-function normalizePricing(value: unknown): ModelMetadataPricing | undefined {
-  if (!isRecord(value)) return undefined
-  const pricing: ModelMetadataPricing = {}
-  const input = asFiniteNumber(value['input'])
-  const output = asFiniteNumber(value['output'])
-  const cacheRead = asFiniteNumber(value['cache_read'])
-  const cacheWrite = asFiniteNumber(value['cache_write'])
-  const reasoning = asFiniteNumber(value['reasoning'])
-  const inputAudio = asFiniteNumber(value['input_audio'])
-  const outputAudio = asFiniteNumber(value['output_audio'])
-  const contextOver200k = asFiniteNumber(value['context_over_200k'])
-  if (input !== undefined) pricing.input = input
-  if (output !== undefined) pricing.output = output
-  if (cacheRead !== undefined) pricing.cacheRead = cacheRead
-  if (cacheWrite !== undefined) pricing.cacheWrite = cacheWrite
-  if (reasoning !== undefined) pricing.reasoning = reasoning
-  if (inputAudio !== undefined) pricing.inputAudio = inputAudio
-  if (outputAudio !== undefined) pricing.outputAudio = outputAudio
-  if (contextOver200k !== undefined) pricing.contextOver200k = contextOver200k
-  if (value['tiers'] !== undefined) pricing.hasTiers = true
-  return Object.keys(pricing).length > 0 ? pricing : undefined
-}
-
-function normalizeModel(
+function normalizeCanonicalModel(
   key: string,
   raw: unknown,
   limits: ModelMetadataNormalizationLimits
@@ -445,13 +354,11 @@ function normalizeModel(
 
   const name = asString(raw['name'], limits.maxStringLength)
   const family = asString(raw['family'], limits.maxStringLength)
-  const status = asString(raw['status'], limits.maxStringLength)
   const knowledgeCutoff = asString(raw['knowledge'], limits.maxStringLength)
   const releaseDate = asString(raw['release_date'], limits.maxStringLength)
   const lastUpdated = asString(raw['last_updated'], limits.maxStringLength)
   if (name !== undefined) model.name = name
   if (family !== undefined) model.family = family
-  if (status !== undefined) model.status = status
   if (knowledgeCutoff !== undefined) model.knowledgeCutoff = knowledgeCutoff
   if (releaseDate !== undefined) model.releaseDate = releaseDate
   if (lastUpdated !== undefined) model.lastUpdated = lastUpdated
@@ -469,64 +376,65 @@ function normalizeModel(
   if (temperature !== undefined) model.temperature = temperature
   if (reasoning !== undefined) model.reasoning = reasoning
 
-  const reasoningControls = normalizeReasoningControls(raw['reasoning_options'], limits)
-  if (reasoningControls !== undefined) model.reasoningControls = reasoningControls
-
   const modelLimits = normalizeLimits(raw['limit'])
   if (modelLimits !== undefined) model.limits = modelLimits
-
-  const pricing = normalizePricing(raw['cost'])
-  if (pricing !== undefined) model.pricing = pricing
 
   return model
 }
 
 /**
- * Normalize a raw `https://models.dev/api.json` payload into the bounded
- * renderer-safe snapshot. Returns null when the top level is not a provider
- * record, when provider/total-model counts exceed their bounds, or when no
- * usable provider remains; individually malformed or over-long entries are
- * skipped (per-provider models truncate at their bound) so one bad entry
- * never poisons the snapshot. Optional `limits` override exists for tests.
+ * Normalize a raw `https://models.dev/models.json` payload (flat canonical
+ * id -> model map) into the bounded canonical models record. Returns null
+ * when the top level is not a record or when no usable model remains;
+ * individually malformed or over-long entries are skipped so one bad entry
+ * never poisons the snapshot. `models.json` publishes no pricing or
+ * reasoning options, so those fields are never filled here. Optional
+ * `limits` override exists for tests.
  */
-export function normalizeModelMetadataPayload(
+export function normalizeCanonicalModelsPayload(
   raw: unknown,
-  fetchedAt: number,
-  etag?: string,
   limits: ModelMetadataNormalizationLimits = DEFAULT_NORMALIZATION_LIMITS
-): ModelMetadataSnapshot | null {
-  const parsed = RawProvidersSchema.safeParse(raw)
+): Record<string, NormalizedModelMetadata> | null {
+  const parsed = RawRecordSchema.safeParse(raw)
   if (!parsed.success) return null
-  const providers: Record<string, NormalizedProviderMetadata> = {}
+  const models: Record<string, NormalizedModelMetadata> = {}
   let totalModels = 0
+  for (const [key, modelRaw] of Object.entries(parsed.data)) {
+    if (!isSafeMetadataKey(key) || key.length === 0 || key.length > limits.maxKeyLength) continue
+    const normalized = normalizeCanonicalModel(key, modelRaw, limits)
+    if (!normalized) continue
+    models[key] = normalized
+    totalModels += 1
+    if (totalModels > limits.maxTotalModels) return null
+  }
+  if (Object.keys(models).length === 0) return null
+  return models
+}
+
+/**
+ * Normalize a raw `https://models.dev/api.json` payload into the minimal
+ * provider-source list for connection-logo attribution only (`api` + `name`
+ * per source; model records are deliberately not read). Returns null when the
+ * top level is not a record; an empty record is a usable (if logo-poor)
+ * result, never a failure. Optional `limits` override exists for tests.
+ */
+export function normalizeProviderSourcesPayload(
+  raw: unknown,
+  limits: ModelMetadataNormalizationLimits = DEFAULT_NORMALIZATION_LIMITS
+): Record<string, NormalizedProviderSource> | null {
+  const parsed = RawRecordSchema.safeParse(raw)
+  if (!parsed.success) return null
+  const providers: Record<string, NormalizedProviderSource> = {}
   for (const [sourceId, providerRaw] of Object.entries(parsed.data)) {
     if (!isSafeMetadataKey(sourceId) || sourceId.length === 0 || sourceId.length > limits.maxKeyLength) continue
     if (!isRecord(providerRaw)) continue
     if (Object.keys(providers).length >= limits.maxProviders) return null
-    const modelsRaw = providerRaw['models']
-    if (!isRecord(modelsRaw)) continue
-    const models: Record<string, NormalizedModelMetadata> = {}
-    let kept = 0
-    for (const [key, modelRaw] of Object.entries(modelsRaw)) {
-      if (kept >= limits.maxModelsPerProvider) break
-      if (!isSafeMetadataKey(key) || key.length === 0 || key.length > limits.maxKeyLength) continue
-      const normalized = normalizeModel(key, modelRaw, limits)
-      if (!normalized) continue
-      models[key] = normalized
-      kept += 1
-      totalModels += 1
-      if (totalModels > limits.maxTotalModels) return null
-    }
     providers[sourceId] = {
       api: asString(providerRaw['api'], limits.maxStringLength) ?? '',
-      name: asString(providerRaw['name'], limits.maxStringLength) ?? sourceId,
-      models
+      name: asString(providerRaw['name'], limits.maxStringLength) ?? sourceId
     }
   }
-  if (Object.keys(providers).length === 0) return null
-  const snapshot: ModelMetadataSnapshot = { source: MODEL_METADATA_SOURCE, fetchedAt, providers }
-  if (etag !== undefined) snapshot.etag = etag
-  return snapshot
+  return providers
 }
 
 /** Defensively parse a snapshot (IPC/cache boundary). Null on any mismatch. */
@@ -537,7 +445,10 @@ export function parseModelMetadataSnapshot(data: unknown): ModelMetadataSnapshot
 
 /**
  * Defensively parse the Main on-disk cache envelope. Accepts the versioned
- * envelope and (forward-compat) a bare snapshot; null when neither parses.
+ * v2 envelope and (forward-compat) a bare v2 snapshot; null when neither
+ * parses. v1 (api.json-shaped) caches are rejected by the version literal
+ * and by the new snapshot shape — this is a Main cache format change, not a
+ * Redux migration.
  */
 export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadataSnapshot; etag?: string } | null {
   const envelope = ModelMetadataCacheEnvelopeSchema.safeParse(data)
@@ -549,4 +460,170 @@ export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadat
   }
   const snapshot = parseModelMetadataSnapshot(data)
   return snapshot ? { snapshot, etag: snapshot.etag } : null
+}
+
+// ---------------------------------------------------------------------------
+// Canonical matching contract (model identity — no provider attribution)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical model resolution over the `models.json` snapshot.
+ *
+ * Matching contract (fail closed, in order):
+ * - The query is normalized only by trimming. Empty or unsafe queries are
+ *   unknown.
+ * - Tier 1: exact case-sensitive full canonical model id match.
+ * - Tier 2: exact case-sensitive basename (substring after the final `/`)
+ *   match, only when exactly one canonical model carries that basename.
+ * - Tier 3: case-folded full id or basename match, only when the folded key
+ *   identifies exactly one canonical model and creates no ambiguity.
+ *
+ * Never: stripping route suffixes such as `:thinking`, inferring versions,
+ * prefix/partial similarity matching, or selecting the first candidate.
+ * Identity never uses the API URL, `group`, editable `name`, provider brand
+ * id, or `owned_by` — the caller passes the model id only.
+ */
+export interface CanonicalModelResolution {
+  entry: NormalizedModelMetadata
+  /** Exact canonical id (the `models.json` record key). */
+  canonicalId: string
+  /** Lab prefix (substring before the first `/`) driving model-brand logos. */
+  lab: string
+}
+
+interface CanonicalModelIndex {
+  byId: ReadonlySet<string>
+  basenameToIds: ReadonlyMap<string, readonly string[]>
+  foldedToIds: ReadonlyMap<string, readonly string[]>
+}
+
+function basenameOf(canonicalId: string): string {
+  const slash = canonicalId.lastIndexOf('/')
+  return slash >= 0 ? canonicalId.slice(slash + 1) : canonicalId
+}
+
+function labOf(canonicalId: string): string {
+  const slash = canonicalId.indexOf('/')
+  return slash > 0 ? canonicalId.slice(0, slash) : ''
+}
+
+function buildCanonicalModelIndex(models: Record<string, NormalizedModelMetadata>): CanonicalModelIndex {
+  const byId = new Set<string>()
+  const basenameToIds = new Map<string, string[]>()
+  const foldedToIds = new Map<string, string[]>()
+  for (const canonicalId of Object.keys(models)) {
+    byId.add(canonicalId)
+    const basename = basenameOf(canonicalId)
+    const bucket = basenameToIds.get(basename)
+    if (bucket) bucket.push(canonicalId)
+    else basenameToIds.set(basename, [canonicalId])
+    const foldedId = canonicalId.toLowerCase()
+    const foldedBucket = foldedToIds.get(foldedId)
+    if (foldedBucket) {
+      if (!foldedBucket.includes(canonicalId)) foldedBucket.push(canonicalId)
+    } else {
+      foldedToIds.set(foldedId, [canonicalId])
+    }
+    const foldedBasename = basename.toLowerCase()
+    if (foldedBasename !== foldedId) {
+      const foldedBaseBucket = foldedToIds.get(foldedBasename)
+      if (foldedBaseBucket) {
+        if (!foldedBaseBucket.includes(canonicalId)) foldedBaseBucket.push(canonicalId)
+      } else {
+        foldedToIds.set(foldedBasename, [canonicalId])
+      }
+    }
+  }
+  return { byId, basenameToIds, foldedToIds }
+}
+
+/** Index cache: built once per snapshot object, never scanned per render. */
+const canonicalIndexCache = new WeakMap<object, CanonicalModelIndex>()
+
+export function getCanonicalModelIndex(snapshot: ModelMetadataSnapshot | null | undefined): CanonicalModelIndex | null {
+  if (!snapshot || typeof snapshot !== 'object') return null
+  const models = (snapshot as { models?: unknown }).models
+  if (!models || typeof models !== 'object') return null
+  const cached = canonicalIndexCache.get(snapshot)
+  if (cached) return cached
+  const built = buildCanonicalModelIndex(models as Record<string, NormalizedModelMetadata>)
+  canonicalIndexCache.set(snapshot, built)
+  return built
+}
+
+/**
+ * Resolve a user/proxy model id to its canonical entry. Returns undefined
+ * for unknown, ambiguous, or malformed queries. Never throws.
+ */
+export function resolveCanonicalModel(
+  query: string | undefined | null,
+  snapshot: ModelMetadataSnapshot | null | undefined
+): CanonicalModelResolution | undefined {
+  if (typeof query !== 'string') return undefined
+  const key = query.trim()
+  if (!key || !isSafeMetadataKey(key)) return undefined
+  if (!snapshot || typeof snapshot !== 'object') return undefined
+  const models = snapshot.models
+  if (!models || typeof models !== 'object') return undefined
+
+  // Tier 1: exact case-sensitive full canonical id.
+  if (isSafeMetadataKey(key)) {
+    const exact = (models as Record<string, unknown>)[key]
+    if (exact && typeof exact === 'object') {
+      return { entry: exact as NormalizedModelMetadata, canonicalId: key, lab: labOf(key) }
+    }
+  }
+
+  const index = getCanonicalModelIndex(snapshot)
+  if (!index) return undefined
+
+  // Tier 2: exact case-sensitive basename, only when unique.
+  const basename = basenameOf(key)
+  if (basename && isSafeMetadataKey(basename)) {
+    const candidates = index.basenameToIds.get(basename)
+    if (candidates && candidates.length === 1) {
+      const canonicalId = candidates[0]
+      const entry = models[canonicalId]
+      if (entry && typeof entry === 'object') {
+        return { entry, canonicalId, lab: labOf(canonicalId) }
+      }
+    }
+  }
+
+  // Tier 3: case-folded full id or basename, only when unambiguous: the
+  // folded full query and the folded basename each identify candidates and
+  // their union must be exactly one canonical model.
+  const folded = key.toLowerCase()
+  if (!folded || !isSafeMetadataKey(folded)) return undefined
+  const foldedBasename = basenameOf(key).toLowerCase()
+  const foldedCandidates = new Set<string>([
+    ...(index.foldedToIds.get(folded) ?? []),
+    ...(foldedBasename !== folded ? (index.foldedToIds.get(foldedBasename) ?? []) : [])
+  ])
+  if (foldedCandidates.size === 1) {
+    const canonicalId = [...foldedCandidates][0]
+    if (!isSafeMetadataKey(canonicalId)) return undefined
+    const entry = models[canonicalId]
+    if (entry && typeof entry === 'object') {
+      return { entry, canonicalId, lab: labOf(canonicalId) }
+    }
+  }
+  return undefined
+}
+
+/**
+ * Distinct canonical labs (id prefixes) in a snapshot, for the Main logo
+ * admission gate alongside provider source ids. Unsafe entries are excluded;
+ * the result never invents a logo key.
+ */
+export function getCanonicalLabs(snapshot: ModelMetadataSnapshot | null | undefined): string[] {
+  if (!snapshot || typeof snapshot !== 'object') return []
+  const models = snapshot.models
+  if (!models || typeof models !== 'object') return []
+  const labs = new Set<string>()
+  for (const canonicalId of Object.keys(models)) {
+    const lab = labOf(canonicalId)
+    if (lab && isSafeMetadataKey(lab)) labs.add(lab)
+  }
+  return [...labs]
 }

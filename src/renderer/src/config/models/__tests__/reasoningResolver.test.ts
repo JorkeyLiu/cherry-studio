@@ -55,51 +55,41 @@ const geminiProvider = {
 
 const providersById: Record<string, Provider> = { a: anthropicProvider, g: geminiProvider }
 
+// Canonical snapshot: canonical models.json publishes reasoning support but
+// no reasoning options, so option lists always come from heuristics.
 const SNAPSHOT: ModelMetadataSnapshot = {
   source: 'models.dev',
   fetchedAt: 1_000_000,
-  providers: {
-    anthropic: {
-      api: '',
-      name: 'Anthropic',
-      models: {
-        // Matches the o-series heuristic (default/low/medium/high) but the
-        // exact external entry publishes a narrower precise set.
-        'o3-mini': {
-          id: 'o3-mini',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: false,
-          reasoning: true,
-          reasoningControls: { effort: ['low', 'high'] }
-        },
-        'toggle-only-model': {
-          id: 'toggle-only-model',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: false,
-          reasoning: true,
-          reasoningControls: { toggle: true }
-        },
-        'fixed-ext-model': {
-          id: 'fixed-ext-model',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: false,
-          reasoning: true
-        },
-        // External false overrules a legacy true ('thinking' in the id).
-        'my-thinking-fork': {
-          id: 'my-thinking-fork',
-          modalities: { input: ['text'], output: ['text'] },
-          toolCall: false,
-          reasoning: false
-        }
-      }
+  models: {
+    // Matches the o-series heuristic (default/low/medium/high); canonical
+    // metadata knows reasoning support but publishes no controls.
+    'lab/o3-mini': {
+      id: 'lab/o3-mini',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: false,
+      reasoning: true
     },
-    gemini: {
-      api: '',
-      name: 'Google',
-      models: {}
+    'lab/toggle-only-model': {
+      id: 'lab/toggle-only-model',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: false,
+      reasoning: true
+    },
+    'lab/fixed-ext-model': {
+      id: 'lab/fixed-ext-model',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: false,
+      reasoning: true
+    },
+    // Canonical false overrules a legacy true ('thinking' in the id).
+    'lab/my-thinking-fork': {
+      id: 'lab/my-thinking-fork',
+      modalities: { input: ['text'], output: ['text'] },
+      toolCall: false,
+      reasoning: false
     }
-  }
+  },
+  providers: {}
 }
 
 const makeModel = (id: string, provider = 'a', capabilities?: Model['capabilities']): Model =>
@@ -117,7 +107,7 @@ describe('single resolver: automatic capability, no manual marking', () => {
     expect(isFixedReasoningModel(makeModel('o3-mini'))).toBe(false)
   })
 
-  it('lets an explicit user override win over external metadata', () => {
+  it('lets an explicit user override win over canonical metadata', () => {
     const forced = makeModel('never-seen-zzz', 'a', [{ type: 'reasoning', isUserSelected: true }])
     expect(getResolvedReasoningOptions(forced)).toEqual(['default'])
     const rejected = makeModel('o3-mini', 'a', [{ type: 'reasoning', isUserSelected: false }])
@@ -125,13 +115,13 @@ describe('single resolver: automatic capability, no manual marking', () => {
   })
 })
 
-describe('single resolver: exact external metadata overrides heuristics', () => {
-  it('prefers precise external effort lists over heuristic lists', () => {
-    expect(getResolvedReasoningOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'high'])
-    expect(getModelSupportedReasoningEffortOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'high'])
+describe('single resolver: canonical support with heuristic option lists', () => {
+  it('uses heuristic lists when canonical metadata knows reasoning but publishes no controls', () => {
+    expect(getResolvedReasoningOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'medium', 'high'])
+    expect(getModelSupportedReasoningEffortOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'medium', 'high'])
   })
 
-  it('lets external false overrule a legacy true', () => {
+  it('lets canonical false overrule a legacy true', () => {
     expect(isReasoningModel(makeModel('my-thinking-fork'))).toBe(false)
     expect(getResolvedReasoningOptions(makeModel('my-thinking-fork'))).toBeUndefined()
   })
@@ -142,13 +132,8 @@ describe('single resolver: exact external metadata overrides heuristics', () => 
   })
 })
 
-describe('single resolver: fixed and toggle-only models', () => {
-  it('represents toggle-only metadata as default/none/auto (no invented budget)', () => {
-    expect(getResolvedReasoningOptions(makeModel('toggle-only-model'))).toEqual(['default', 'none', 'auto'])
-    expect(isFixedReasoningModel(makeModel('toggle-only-model'))).toBe(false)
-  })
-
-  it('represents reasoning without controls as fixed (default only, no false menu)', () => {
+describe('single resolver: fixed models', () => {
+  it('represents reasoning without heuristic controls as fixed (default only, no false menu)', () => {
     expect(getResolvedReasoningOptions(makeModel('fixed-ext-model'))).toEqual(['default'])
     expect(isFixedReasoningModel(makeModel('fixed-ext-model'))).toBe(true)
   })
@@ -173,7 +158,7 @@ describe('single resolver: protocol lane filtering (no brand branches)', () => {
   })
 
   it('skips lane filtering when the connection is explicitly unknown', () => {
-    expect(getResolvedReasoningOptions(makeModel('o3-mini'), null)).toEqual(['default', 'low', 'high'])
+    expect(getResolvedReasoningOptions(makeModel('o3-mini'), null)).toEqual(['default', 'low', 'medium', 'high'])
   })
 
   it('keeps Gemini-family controls on the Gemini native lane', () => {

@@ -3,186 +3,236 @@ import { describe, expect, it } from 'vitest'
 import {
   asSafeMetadataFailureReason,
   DEFAULT_NORMALIZATION_LIMITS,
+  getCanonicalLabs,
+  getCanonicalModelIndex,
   isSafeMetadataKey,
   type ModelMetadataSnapshot,
-  normalizeModelMetadataPayload,
+  normalizeCanonicalModelsPayload,
+  normalizeProviderSourcesPayload,
   parseModelMetadataCache,
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
+  resolveCanonicalModel,
   toModelMetadataStatus
 } from '../modelMetadata'
 
-const RAW_FIXTURE = {
-  anthropic: {
-    id: 'anthropic',
-    name: 'Anthropic',
-    models: {
-      'claude-sonnet-4-6': {
-        id: 'claude-sonnet-4-6',
-        name: 'Claude Sonnet 4.6',
-        family: 'claude',
-        attachment: false,
-        reasoning: true,
-        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
-        tool_call: true,
-        structured_output: true,
-        temperature: true,
-        release_date: '2026-01-01',
-        last_updated: '2026-02-01',
-        modalities: { input: ['text', 'image', 'PDF'], output: ['text'] },
-        limit: { context: 1000000, output: 128000 },
-        cost: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 }
-      },
-      'legacy-no-flags': {
-        id: 'legacy-no-flags',
-        name: 'Legacy'
-        // absent optional capability booleans must stay unknown, not false
-      },
-      'string-bool': {
-        id: 'string-bool',
-        attachment: 'yes',
-        tool_call: 1,
-        reasoning: 'true',
-        modalities: { input: 'image' },
-        cost: { input: 'cheap' }
-      }
-    }
+const RAW_CANONICAL_FIXTURE = {
+  'deepseek/deepseek-v4.1-flash': {
+    id: 'deepseek/deepseek-v4.1-flash',
+    name: 'DeepSeek V4.1 Flash',
+    family: 'deepseek-flash',
+    attachment: true,
+    reasoning: true,
+    tool_call: true,
+    structured_output: true,
+    temperature: true,
+    knowledge: '2025-05',
+    release_date: '2026-09-10',
+    last_updated: '2026-09-10',
+    modalities: { input: ['text', 'image', 'PDF'], output: ['text'] },
+    limit: { context: 1000000, output: 384000 }
   },
-  'third-party': {
-    id: 'third-party',
-    name: 'Third Party',
-    api: 'https://api.example.com/v1',
-    models: {
-      'effort-model': {
-        id: 'effort-model',
-        reasoning: true,
-        reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }, { type: 'toggle' }],
-        tool_call: false,
-        modalities: { input: ['text'], output: ['text'] },
-        limit: { context: 200000, output: 32000 },
-        cost: { input: 1, output: 2, tiers: [{ min: 1 }] }
-      },
-      'empty-controls': {
-        id: 'empty-controls',
-        reasoning: true,
-        reasoning_options: [],
-        modalities: { input: ['text'], output: ['text'] }
-      }
-    }
+  'moonshotai/kimi-k3': {
+    id: 'moonshotai/kimi-k3',
+    name: 'Kimi K3',
+    family: 'kimi-k3',
+    attachment: true,
+    reasoning: true,
+    tool_call: true,
+    structured_output: true,
+    temperature: false,
+    release_date: '2026-07-16',
+    last_updated: '2026-07-16',
+    modalities: { input: ['text', 'image', 'video'], output: ['text'] },
+    limit: { context: 1048576, output: 131072 }
   },
-  broken: 'not-a-provider',
-  'no-models': { id: 'no-models', name: 'No Models' }
+  'alibaba/qwen3.5-plus': {
+    id: 'alibaba/qwen3.5-plus',
+    name: 'Qwen3.5 Plus',
+    attachment: false,
+    reasoning: true,
+    tool_call: true,
+    temperature: true,
+    modalities: { input: ['text', 'image'], output: ['text'] },
+    limit: { context: 1000000, output: 65536 }
+  },
+  'openai/gpt-5.6-sol': {
+    id: 'openai/gpt-5.6-sol',
+    name: 'GPT-5.6 Sol',
+    attachment: true,
+    reasoning: true,
+    tool_call: true,
+    structured_output: true,
+    temperature: false,
+    modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+    limit: { context: 1050000, input: 922000, output: 128000 }
+  },
+  'legacy-no-flags': {
+    id: 'legacy-no-flags',
+    name: 'Legacy'
+    // absent optional capability booleans must stay unknown, not false
+  },
+  'string-bool': {
+    id: 'string-bool',
+    attachment: 'yes',
+    tool_call: 1,
+    reasoning: 'true',
+    modalities: { input: 'image' },
+    cost: { input: 'cheap' },
+    reasoning_options: [{ type: 'effort', values: ['low'] }]
+  }
 }
 
-describe('normalizeModelMetadataPayload', () => {
-  it('normalizes providers, keeps exact model keys, and records source/fetchedAt', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 123456789)
-    expect(snapshot).not.toBeNull()
-    expect(snapshot!.source).toBe('models.dev')
-    expect(snapshot!.fetchedAt).toBe(123456789)
-    expect(Object.keys(snapshot!.providers).sort()).toEqual(['anthropic', 'third-party'])
-    expect(snapshot!.providers['third-party'].api).toBe('https://api.example.com/v1')
-    expect(Object.keys(snapshot!.providers['anthropic'].models).sort()).toEqual([
-      'claude-sonnet-4-6',
+const RAW_PROVIDER_SOURCES_FIXTURE = {
+  anthropic: { id: 'anthropic', name: 'Anthropic' },
+  openai: { id: 'openai', name: 'OpenAI', api: 'https://api.openai.com/v1' },
+  'party-a': {
+    id: 'party-a',
+    name: 'Party A',
+    api: 'https://api.party-a.example/v1',
+    models: { anything: { id: 'anything' } }
+  },
+  broken: 'not-a-provider'
+}
+
+function makeSnapshot(models: Record<string, never> | Record<string, object> = {}): ModelMetadataSnapshot {
+  return {
+    source: 'models.dev',
+    fetchedAt: 999,
+    models: models as unknown as ModelMetadataSnapshot['models'],
+    providers: {}
+  }
+}
+
+describe('normalizeCanonicalModelsPayload', () => {
+  it('normalizes the flat canonical map, keeping exact canonical ids', () => {
+    const models = normalizeCanonicalModelsPayload(RAW_CANONICAL_FIXTURE)
+    expect(models).not.toBeNull()
+    expect(Object.keys(models!).sort()).toEqual([
+      'alibaba/qwen3.5-plus',
+      'deepseek/deepseek-v4.1-flash',
       'legacy-no-flags',
+      'moonshotai/kimi-k3',
+      'openai/gpt-5.6-sol',
       'string-bool'
     ])
   })
 
   it('keeps validated booleans and leaves absent fields unknown (not false)', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 1)!
-    const known = snapshot.providers['anthropic'].models['claude-sonnet-4-6']
-    expect(known.attachment).toBe(false)
+    const models = normalizeCanonicalModelsPayload(RAW_CANONICAL_FIXTURE)!
+    const known = models['deepseek/deepseek-v4.1-flash']
+    expect(known.attachment).toBe(true)
     expect(known.toolCall).toBe(true)
     expect(known.reasoning).toBe(true)
     expect(known.temperature).toBe(true)
     expect(known.structuredOutput).toBe(true)
 
-    const legacy = snapshot.providers['anthropic'].models['legacy-no-flags']
+    const legacy = models['legacy-no-flags']
     expect(legacy.attachment).toBeUndefined()
     expect(legacy.toolCall).toBeUndefined()
     expect(legacy.reasoning).toBeUndefined()
     expect(legacy.temperature).toBeUndefined()
     expect(legacy.modalities).toEqual({ input: [], output: [] })
-    expect(legacy.reasoningControls).toBeUndefined()
     expect(legacy.limits).toBeUndefined()
-    expect(legacy.pricing).toBeUndefined()
   })
 
-  it('does not coerce non-boolean capability values to false', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 1)!
-    const coerced = snapshot.providers['anthropic'].models['string-bool']
+  it('does not coerce non-boolean capability values and never fills proxy-only facts', () => {
+    const models = normalizeCanonicalModelsPayload(RAW_CANONICAL_FIXTURE)!
+    const coerced = models['string-bool']
     expect(coerced.attachment).toBeUndefined()
     expect(coerced.toolCall).toBeUndefined()
     expect(coerced.reasoning).toBeUndefined()
-    // malformed modalities/cost degrade to empty/absent, never throw
     expect(coerced.modalities).toEqual({ input: [], output: [] })
-    expect(coerced.pricing).toBeUndefined()
+    // models.json publishes no pricing or reasoning options: the normalized
+    // shape carries neither, even when proxy-shaped fields are present.
+    expect('pricing' in coerced).toBe(false)
+    expect('reasoningControls' in coerced).toBe(false)
+    expect('pricing' in models['deepseek/deepseek-v4.1-flash']).toBe(false)
+    expect('reasoningControls' in models['deepseek/deepseek-v4.1-flash']).toBe(false)
   })
 
-  it('normalizes modalities to lowercase and preserves pricing/limits', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 1)!
-    const known = snapshot.providers['anthropic'].models['claude-sonnet-4-6']
+  it('normalizes modalities to lowercase and preserves limits', () => {
+    const models = normalizeCanonicalModelsPayload(RAW_CANONICAL_FIXTURE)!
+    const known = models['deepseek/deepseek-v4.1-flash']
     expect(known.modalities).toEqual({ input: ['text', 'image', 'pdf'], output: ['text'] })
-    expect(known.limits).toEqual({ context: 1000000, output: 128000 })
-    expect(known.pricing).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 })
-    expect(known.family).toBe('claude')
-    expect(known.releaseDate).toBe('2026-01-01')
-    expect(known.lastUpdated).toBe('2026-02-01')
+    expect(known.limits).toEqual({ context: 1000000, output: 384000 })
+    expect(known.family).toBe('deepseek-flash')
+    expect(known.knowledgeCutoff).toBe('2025-05')
+    expect(models['openai/gpt-5.6-sol'].limits).toEqual({ context: 1050000, input: 922000, output: 128000 })
   })
 
-  it('normalizes reasoning control shapes (toggle/effort/budget, empty)', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 1)!
-    const claude = snapshot.providers['anthropic'].models['claude-sonnet-4-6']
-    expect(claude.reasoningControls).toEqual({ toggle: true, budget: true })
+  it('returns null when the top level is not a model record or has no usable model', () => {
+    expect(normalizeCanonicalModelsPayload(null)).toBeNull()
+    expect(normalizeCanonicalModelsPayload([])).toBeNull()
+    expect(normalizeCanonicalModelsPayload('nope')).toBeNull()
+    expect(normalizeCanonicalModelsPayload({ broken: 42 })).toBeNull()
+  })
+})
 
-    const effort = snapshot.providers['third-party'].models['effort-model']
-    expect(effort.reasoningControls).toEqual({ toggle: true, effort: ['low', 'high', 'max'] })
-    expect(effort.toolCall).toBe(false)
-    expect(effort.pricing?.hasTiers).toBe(true)
-
-    const empty = snapshot.providers['third-party'].models['empty-controls']
-    expect(empty.reasoning).toBe(true)
-    expect(empty.reasoningControls).toBeUndefined()
+describe('normalizeProviderSourcesPayload', () => {
+  it('keeps api + name per source and never reads model records', () => {
+    const providers = normalizeProviderSourcesPayload(RAW_PROVIDER_SOURCES_FIXTURE)!
+    expect(Object.keys(providers).sort()).toEqual(['anthropic', 'openai', 'party-a'])
+    expect(providers['anthropic']).toEqual({ api: '', name: 'Anthropic' })
+    expect(providers['openai']).toEqual({ api: 'https://api.openai.com/v1', name: 'OpenAI' })
+    expect(providers['party-a']).toEqual({ api: 'https://api.party-a.example/v1', name: 'Party A' })
+    for (const entry of Object.values(providers)) {
+      expect('models' in entry).toBe(false)
+    }
   })
 
-  it('returns null when the top level is not a provider record or has no usable provider', () => {
-    expect(normalizeModelMetadataPayload(null, 1)).toBeNull()
-    expect(normalizeModelMetadataPayload([], 1)).toBeNull()
-    expect(normalizeModelMetadataPayload('nope', 1)).toBeNull()
-    // malformed entries are skipped, never fatal; a payload with no usable
-    // provider is rejected rather than persisted as emptiness
-    expect(normalizeModelMetadataPayload({ broken: 42 }, 1)).toBeNull()
+  it('returns null for a non-record top level and an empty record otherwise', () => {
+    expect(normalizeProviderSourcesPayload(null)).toBeNull()
+    expect(normalizeProviderSourcesPayload([])).toBeNull()
+    expect(normalizeProviderSourcesPayload({})).toEqual({})
   })
 })
 
 describe('parseModelMetadataSnapshot / parseModelMetadataCache', () => {
-  it('round-trips a normalized snapshot through the defensive snapshot schema', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 999)!
+  function fullSnapshot(): ModelMetadataSnapshot {
+    return {
+      source: 'models.dev',
+      fetchedAt: 999,
+      etag: '"abc"',
+      models: normalizeCanonicalModelsPayload(RAW_CANONICAL_FIXTURE)!,
+      providers: normalizeProviderSourcesPayload(RAW_PROVIDER_SOURCES_FIXTURE)!
+    }
+  }
+
+  it('round-trips a canonical snapshot through the defensive snapshot schema', () => {
+    const snapshot = fullSnapshot()
     expect(parseModelMetadataSnapshot(JSON.parse(JSON.stringify(snapshot)))).toEqual(snapshot)
   })
 
-  it('rejects snapshots with wrong source or missing providers', () => {
+  it('rejects snapshots with wrong source or missing canonical maps', () => {
     expect(parseModelMetadataSnapshot(null)).toBeNull()
-    expect(parseModelMetadataSnapshot({ source: 'other', fetchedAt: 1, providers: {} })).toBeNull()
+    expect(parseModelMetadataSnapshot({ source: 'other', fetchedAt: 1, models: {}, providers: {} })).toBeNull()
     expect(parseModelMetadataSnapshot({ source: 'models.dev', fetchedAt: 1 })).toBeNull()
+    expect(parseModelMetadataSnapshot({ source: 'models.dev', fetchedAt: 1, models: {} })).toBeNull()
   })
 
-  it('parses the versioned cache envelope and falls back to a bare snapshot', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 999)!
-    const envelope = { version: 1, fetchedAt: 999, etag: '"abc"', snapshot }
+  it('parses the versioned v2 cache envelope and falls back to a bare snapshot', () => {
+    const snapshot = fullSnapshot()
+    const envelope = { version: 2, fetchedAt: 999, etag: '"abc"', snapshot }
     expect(parseModelMetadataCache(envelope)).toEqual({ snapshot, etag: '"abc"' })
-    expect(parseModelMetadataCache(snapshot)).toEqual({ snapshot, etag: undefined })
-    expect(parseModelMetadataCache({ version: 1 })).toBeNull()
+    expect(parseModelMetadataCache(snapshot)).toEqual({ snapshot, etag: '"abc"' })
+    expect(parseModelMetadataCache({ version: 2 })).toBeNull()
     expect(parseModelMetadataCache(null)).toBeNull()
   })
 
-  it('requires the literal current cache version', () => {
-    const snapshot = normalizeModelMetadataPayload(RAW_FIXTURE, 999)!
-    expect(parseModelMetadataCache({ version: 2, fetchedAt: 999, snapshot })).toBeNull()
-    expect(parseModelMetadataCache({ version: 0, fetchedAt: 999, snapshot })).toBeNull()
-    expect(parseModelMetadataCache({ version: '1', fetchedAt: 999, snapshot })).toBeNull()
-    expect(parseModelMetadataCache({ version: 1, fetchedAt: 999, snapshot })).not.toBeNull()
+  it('requires the literal current cache version (rejects v1 api.json caches)', () => {
+    const snapshot = fullSnapshot()
+    expect(parseModelMetadataCache({ version: 1, fetchedAt: 999, snapshot })).toBeNull()
+    expect(parseModelMetadataCache({ version: 2, fetchedAt: 999, snapshot })).not.toBeNull()
+    expect(parseModelMetadataCache({ version: '2', fetchedAt: 999, snapshot })).toBeNull()
+    // A v1-shaped provider-mapped payload is not a v2 snapshot.
+    expect(
+      parseModelMetadataCache({
+        source: 'models.dev',
+        fetchedAt: 1,
+        providers: { anthropic: { api: '', name: 'A', models: {} } }
+      })
+    ).toBeNull()
   })
 })
 
@@ -194,29 +244,16 @@ describe('prototype-key safety', () => {
     expect(isSafeMetadataKey('anthropic')).toBe(true)
   })
 
-  it('skips unsafe provider/model keys without polluting the dictionaries', () => {
+  it('skips unsafe canonical keys without polluting the dictionaries', () => {
     const raw = {
-      anthropic: {
-        id: 'anthropic',
-        name: 'Anthropic',
-        models: {
-          ok: { id: 'ok', reasoning: true },
-          __proto__: { id: 'evil', reasoning: true },
-          constructor: { id: 'evil', reasoning: true }
-        }
-      },
-      __proto__: { id: 'evil', name: 'Evil', models: {} }
+      'lab/ok': { id: 'lab/ok', reasoning: true },
+      __proto__: { id: 'evil', reasoning: true },
+      constructor: { id: 'evil', reasoning: true }
     }
-    const snapshot = normalizeModelMetadataPayload(raw, 1)!
-    expect(Object.keys(snapshot.providers)).toEqual(['anthropic'])
-    expect(Object.keys(snapshot.providers['anthropic'].models)).toEqual(['ok'])
-    // no own phantom keys and no prototype mutation through assignment
-    expect(Object.prototype.hasOwnProperty.call(snapshot.providers, '__proto__')).toBe(false)
-    expect(Object.getPrototypeOf(snapshot.providers)).toBe(Object.prototype)
-    expect(Object.prototype.hasOwnProperty.call(snapshot.providers['anthropic'].models, '__proto__')).toBe(false)
-    // serialization round-trips stably with no phantom keys
-    const reparsed = parseModelMetadataSnapshot(JSON.parse(JSON.stringify(snapshot)))!
-    expect(Object.keys(reparsed.providers['anthropic'].models)).toEqual(['ok'])
+    const models = normalizeCanonicalModelsPayload(raw)!
+    expect(Object.keys(models)).toEqual(['lab/ok'])
+    expect(Object.prototype.hasOwnProperty.call(models, '__proto__')).toBe(false)
+    expect(Object.getPrototypeOf(models)).toBe(Object.prototype)
   })
 })
 
@@ -224,80 +261,156 @@ describe('normalization bounds', () => {
   const tiny = {
     ...DEFAULT_NORMALIZATION_LIMITS,
     maxProviders: 2,
-    maxModelsPerProvider: 2,
     maxTotalModels: 3,
-    maxKeyLength: 8,
+    maxKeyLength: 12,
     maxStringLength: 8,
-    maxModalities: 2,
-    maxReasoningOptions: 2,
-    maxEffortValues: 2,
-    maxEffortValueLength: 4
+    maxModalities: 2
   }
 
-  const provider = (models: Record<string, unknown>) => ({ id: 'p', name: 'P', models })
-
-  it('rejects payloads exceeding provider or total-model counts', () => {
-    const three = { a: provider({}), b: provider({}), c: provider({}) }
-    expect(normalizeModelMetadataPayload(three, 1, undefined, tiny)).toBeNull()
-    // each provider fits its own cap, but the total exceeds maxTotalModels
+  it('rejects canonical payloads exceeding the total-model count', () => {
     const many = {
-      a: provider({ m1: { id: 'm1' }, m2: { id: 'm2' } }),
-      b: provider({ m3: { id: 'm3' }, m4: { id: 'm4' } })
+      'a/m1': { id: 'a/m1' },
+      'a/m2': { id: 'a/m2' },
+      'b/m3': { id: 'b/m3' },
+      'b/m4': { id: 'b/m4' }
     }
-    expect(normalizeModelMetadataPayload(many, 1, undefined, tiny)).toBeNull()
+    expect(normalizeCanonicalModelsPayload(many, tiny)).toBeNull()
   })
 
-  it('truncates per-provider models and skips over-long keys/strings/lists', () => {
+  it('skips over-long keys and truncates modalities', () => {
     const raw = {
-      // key 'toolongprovider' exceeds maxKeyLength 8 -> skipped entirely
-      toolongprovider: provider({ ok: { id: 'ok' } }),
-      p1: provider({
-        m1: {
-          id: 'm1',
-          name: 'way-too-long-name',
-          modalities: { input: ['text', 'image', 'video', 'audio'], output: ['text'] },
-          reasoning_options: [
-            { type: 'toggle' },
-            { type: 'effort', values: ['low', 'mid', 'high'] },
-            { type: 'toggle' }
-          ],
-          cost: { input: 1, output: 2 }
-        },
-        m2: { id: 'm2' },
-        m3: { id: 'm3' },
-        toolongmodelkey: { id: 'toolongmodelkey' }
-      })
+      'toolonglab/toolongmodelname': { id: 'x' },
+      'lab/m1': {
+        id: 'lab/m1',
+        name: 'way-too-long-name',
+        modalities: { input: ['text', 'image', 'video', 'audio'], output: ['text'] }
+      }
     }
-    const snapshot = normalizeModelMetadataPayload(raw, 1, undefined, tiny)!
-    expect(Object.keys(snapshot.providers)).toEqual(['p1'])
-    // per-provider truncation keeps the first two models only
-    expect(Object.keys(snapshot.providers['p1'].models)).toEqual(['m1', 'm2'])
-    const m1 = snapshot.providers['p1'].models['m1']
-    // over-long free strings degrade to unknown, modalities truncate
-    expect(m1.name).toBeUndefined()
-    expect(m1.modalities.input).toEqual(['text', 'image'])
-    // reasoning options truncate to the first two controls, and effort
-    // values truncate to the first two entries
-    expect(m1.reasoningControls).toEqual({ toggle: true, effort: ['low', 'mid'] })
+    const models = normalizeCanonicalModelsPayload(raw, tiny)!
+    expect(Object.keys(models)).toEqual(['lab/m1'])
+    expect(models['lab/m1'].name).toBeUndefined()
+    expect(models['lab/m1'].modalities.input).toEqual(['text', 'image'])
   })
 
-  it('bounds effort value counts and lengths', () => {
-    const raw = {
-      p: provider({
-        m: {
-          id: 'm',
-          reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high', 'toolongvalue'] }]
-        }
-      })
-    }
-    const snapshot = normalizeModelMetadataPayload(raw, 1, undefined, tiny)!
-    // 'medium' exceeds maxEffortValueLength, count caps at maxEffortValues
-    expect(snapshot.providers['p'].models['m'].reasoningControls).toEqual({ effort: ['low', 'high'] })
+  it('rejects provider lists exceeding the provider count', () => {
+    const three = { a: { name: 'A' }, b: { name: 'B' }, c: { name: 'C' } }
+    expect(normalizeProviderSourcesPayload(three, tiny)).toBeNull()
   })
 
-  it('keeps default bounds far above live data (~220 providers / ~7842 models)', () => {
-    expect(DEFAULT_NORMALIZATION_LIMITS.maxProviders).toBeGreaterThanOrEqual(440)
-    expect(DEFAULT_NORMALIZATION_LIMITS.maxTotalModels).toBeGreaterThanOrEqual(15684)
+  it('keeps default bounds far above live canonical data (~408 models)', () => {
+    expect(DEFAULT_NORMALIZATION_LIMITS.maxTotalModels).toBeGreaterThanOrEqual(816)
+  })
+})
+
+describe('resolveCanonicalModel — matching contract', () => {
+  function contractSnapshot(): ModelMetadataSnapshot {
+    return {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'deepseek/deepseek-v4.1-flash': { id: 'deepseek/deepseek-v4.1-flash', modalities: { input: [], output: [] } },
+        'moonshotai/kimi-k3': { id: 'moonshotai/kimi-k3', modalities: { input: [], output: [] } },
+        'alibaba/qwen3.5-plus': { id: 'alibaba/qwen3.5-plus', modalities: { input: [], output: [] } },
+        'openai/gpt-5.6-sol': { id: 'openai/gpt-5.6-sol', modalities: { input: [], output: [] } },
+        'lab-a/shared-name': { id: 'lab-a/shared-name', modalities: { input: [], output: [] } },
+        'lab-b/shared-name': { id: 'lab-b/shared-name', modalities: { input: [], output: [] } },
+        'lab-c/Model-X': { id: 'lab-c/Model-X', modalities: { input: [], output: [] } },
+        'lab-d/model-x': { id: 'lab-d/model-x', modalities: { input: [], output: [] } },
+        'deepseek/deepseek-thinker': { id: 'deepseek/deepseek-thinker', modalities: { input: [], output: [] } }
+      },
+      providers: {}
+    }
+  }
+
+  it('Tier 1: exact case-sensitive full canonical id match', () => {
+    const snapshot = contractSnapshot()
+    expect(resolveCanonicalModel('moonshotai/kimi-k3', snapshot)?.canonicalId).toBe('moonshotai/kimi-k3')
+    expect(resolveCanonicalModel('  moonshotai/kimi-k3  ', snapshot)?.canonicalId).toBe('moonshotai/kimi-k3')
+    // Case differs: not Tier 1, but the unique case-fold still resolves at Tier 3.
+    expect(resolveCanonicalModel('Moonshotai/Kimi-K3', snapshot)?.canonicalId).toBe('moonshotai/kimi-k3')
+  })
+
+  it('Tier 2: exact unique basename (bare ids and proxy-qualified aliases)', () => {
+    const snapshot = contractSnapshot()
+    expect(resolveCanonicalModel('deepseek-v4.1-flash', snapshot)?.canonicalId).toBe('deepseek/deepseek-v4.1-flash')
+    expect(resolveCanonicalModel('kimi-k3', snapshot)?.canonicalId).toBe('moonshotai/kimi-k3')
+    // Proxy-qualified alias: Tier 1 misses, Tier 2 basename resolves canonically.
+    expect(resolveCanonicalModel('alibaba/kimi-k3', snapshot)?.canonicalId).toBe('moonshotai/kimi-k3')
+    expect(resolveCanonicalModel('azure/gpt-5.6-sol', snapshot)?.canonicalId).toBe('openai/gpt-5.6-sol')
+    expect(resolveCanonicalModel('gpt-5.6-sol', snapshot)?.canonicalId).toBe('openai/gpt-5.6-sol')
+  })
+
+  it('Tier 3: unique case-folded full id or basename', () => {
+    const snapshot = contractSnapshot()
+    // Case-variant proxy-qualified alias resolves through the folded basename.
+    expect(resolveCanonicalModel('Qwen/Qwen3.5-Plus', snapshot)?.canonicalId).toBe('alibaba/qwen3.5-plus')
+    expect(resolveCanonicalModel('QWEN3.5-PLUS', snapshot)?.canonicalId).toBe('alibaba/qwen3.5-plus')
+  })
+
+  it('rejects basename collisions (unknown, never first candidate)', () => {
+    const snapshot = contractSnapshot()
+    expect(resolveCanonicalModel('shared-name', snapshot)).toBeUndefined()
+    expect(resolveCanonicalModel('lab-a/shared-name', snapshot)?.canonicalId).toBe('lab-a/shared-name')
+    expect(resolveCanonicalModel('lab-b/shared-name', snapshot)?.canonicalId).toBe('lab-b/shared-name')
+  })
+
+  it('rejects case-fold collisions (unknown)', () => {
+    const snapshot = contractSnapshot()
+    // Folded 'model-x' identifies two canonical models: ambiguous -> unknown.
+    expect(resolveCanonicalModel('MODEL-X', snapshot)).toBeUndefined()
+    // Exact case-sensitive basename still resolves at Tier 2 when unique.
+    expect(resolveCanonicalModel('model-x', snapshot)?.canonicalId).toBe('lab-d/model-x')
+    // Exact full ids still resolve through Tier 1.
+    expect(resolveCanonicalModel('lab-c/Model-X', snapshot)?.canonicalId).toBe('lab-c/Model-X')
+    expect(resolveCanonicalModel('lab-d/model-x', snapshot)?.canonicalId).toBe('lab-d/model-x')
+  })
+
+  it('never strips route suffixes such as :thinking', () => {
+    const snapshot = contractSnapshot()
+    expect(resolveCanonicalModel('deepseek-thinker:thinking', snapshot)).toBeUndefined()
+    expect(resolveCanonicalModel('deepseek/deepseek-thinker:thinking', snapshot)).toBeUndefined()
+    expect(resolveCanonicalModel('deepseek-thinker', snapshot)?.canonicalId).toBe('deepseek/deepseek-thinker')
+  })
+
+  it('rejects empty and unsafe malformed queries', () => {
+    const snapshot = contractSnapshot()
+    expect(resolveCanonicalModel('', snapshot)).toBeUndefined()
+    expect(resolveCanonicalModel('   ', snapshot)).toBeUndefined()
+    expect(resolveCanonicalModel(undefined, snapshot)).toBeUndefined()
+    expect(resolveCanonicalModel(null, snapshot)).toBeUndefined()
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(resolveCanonicalModel(key, snapshot)).toBeUndefined()
+    }
+    expect(resolveCanonicalModel('kimi-k3', null)).toBeUndefined()
+    expect(resolveCanonicalModel('kimi-k3', makeSnapshot())).toBeUndefined()
+  })
+
+  it('returns the canonical entry, id, and lab for logo attribution', () => {
+    const snapshot = contractSnapshot()
+    const resolved = resolveCanonicalModel('alibaba/kimi-k3', snapshot)!
+    expect(resolved.canonicalId).toBe('moonshotai/kimi-k3')
+    expect(resolved.lab).toBe('moonshotai')
+    expect(resolved.entry.id).toBe('moonshotai/kimi-k3')
+  })
+
+  it('builds indexes once per snapshot instead of scanning per render', () => {
+    const snapshot = contractSnapshot()
+    expect(getCanonicalModelIndex(snapshot)).toBe(getCanonicalModelIndex(snapshot))
+    expect(getCanonicalModelIndex(null)).toBeNull()
+  })
+
+  it('derives distinct safe canonical labs for the logo admission gate', () => {
+    expect(getCanonicalLabs(contractSnapshot()).sort()).toEqual([
+      'alibaba',
+      'deepseek',
+      'lab-a',
+      'lab-b',
+      'lab-c',
+      'lab-d',
+      'moonshotai',
+      'openai'
+    ])
+    expect(getCanonicalLabs(null)).toEqual([])
   })
 })
 
@@ -305,6 +418,7 @@ describe('toModelMetadataStatus — loading/ready/unavailable state machine', ()
   const SNAPSHOT = {
     source: 'models.dev',
     fetchedAt: 1,
+    models: {},
     providers: {}
   } as unknown as ModelMetadataSnapshot
 
@@ -356,7 +470,7 @@ describe('asSafeMetadataFailureReason / parseModelMetadataStatus', () => {
   })
 
   it('parses well-shaped statuses and rejects mismatches', () => {
-    const snapshot = { source: 'models.dev', fetchedAt: 1, providers: {} }
+    const snapshot = { source: 'models.dev', fetchedAt: 1, models: {}, providers: {} }
     expect(parseModelMetadataStatus({ kind: 'loading', snapshot: null })).toEqual({ kind: 'loading', snapshot: null })
     expect(parseModelMetadataStatus({ kind: 'ready', snapshot })).toEqual({ kind: 'ready', snapshot })
     expect(parseModelMetadataStatus({ kind: 'unavailable', snapshot: null, reason: 'http-error' })).toEqual({
