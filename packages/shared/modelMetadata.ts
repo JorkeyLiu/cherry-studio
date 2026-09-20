@@ -42,8 +42,8 @@ export const MODEL_METADATA_ENDPOINT = 'https://models.dev/models.json'
  */
 export const MODEL_METADATA_PROVIDER_SOURCES_ENDPOINT = 'https://models.dev/api.json'
 
-/** Version of the Main on-disk cache envelope (v3 = canonical + provider serving reasoning options). */
-export const MODEL_METADATA_CACHE_VERSION = 3
+/** Version of the Main on-disk cache envelope (v4 = canonical + provider serving full metadata). */
+export const MODEL_METADATA_CACHE_VERSION = 4
 
 /** Background refresh cadence: no more than once per 24h. */
 export const MODEL_METADATA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -136,7 +136,31 @@ export interface NormalizedModelMetadata {
   limits?: ModelMetadataLimits
 }
 
+export interface NormalizedProviderServingCost {
+  input?: number
+  output?: number
+  cacheRead?: number
+  cacheWrite?: number
+}
+
 export interface NormalizedProviderServingModel {
+  /** Exact serving id (key), may differ from display name. */
+  id?: string
+  name?: string
+  description?: string
+  family?: string
+  knowledgeCutoff?: string
+  releaseDate?: string
+  lastUpdated?: string
+  modalities?: ModelMetadataModalities
+  /** Tri-state: true/false known, undefined unknown. */
+  attachment?: boolean
+  toolCall?: boolean
+  structuredOutput?: boolean
+  temperature?: boolean
+  reasoning?: boolean
+  limits?: ModelMetadataLimits
+  cost?: NormalizedProviderServingCost
   /** Normalized effort values extracted from `reasoning_options` type `effort`; `max` is mapped to `xhigh`. */
   effort?: string[]
 }
@@ -279,7 +303,29 @@ const NormalizedModelSchema = z.looseObject({
   limits: LimitsSchema.optional()
 })
 
+const ProviderServingCostSchema = z.looseObject({
+  input: z.number().optional(),
+  output: z.number().optional(),
+  cacheRead: z.number().optional(),
+  cacheWrite: z.number().optional()
+})
+
 const NormalizedProviderServingModelSchema = z.looseObject({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  family: z.string().optional(),
+  knowledgeCutoff: z.string().optional(),
+  releaseDate: z.string().optional(),
+  lastUpdated: z.string().optional(),
+  modalities: ModalitiesSchema.optional(),
+  attachment: z.boolean().optional(),
+  toolCall: z.boolean().optional(),
+  structuredOutput: z.boolean().optional(),
+  temperature: z.boolean().optional(),
+  reasoning: z.boolean().optional(),
+  limits: LimitsSchema.optional(),
+  cost: ProviderServingCostSchema.optional(),
   effort: z.array(z.string()).optional()
 })
 
@@ -454,26 +500,102 @@ function normalizeReasoningEffortValues(
   return eff.length > 0 ? eff : undefined
 }
 
+function normalizeProviderServingCost(value: unknown): NormalizedProviderServingCost | undefined {
+  if (!isRecord(value)) return undefined
+  const cost: NormalizedProviderServingCost = {}
+  const input = asFiniteNumber(value['input'])
+  const output = asFiniteNumber(value['output'])
+  const cacheRead = asFiniteNumber(value['cache_read'] ?? value['cacheRead'] ?? value['input_cache_read'])
+  const cacheWrite = asFiniteNumber(value['cache_write'] ?? value['cacheWrite'] ?? value['input_cache_write'])
+  if (input !== undefined) cost.input = input
+  if (output !== undefined) cost.output = output
+  if (cacheRead !== undefined) cost.cacheRead = cacheRead
+  if (cacheWrite !== undefined) cost.cacheWrite = cacheWrite
+  return Object.keys(cost).length > 0 ? cost : undefined
+}
+
+function normalizeProviderServingModalities(
+  value: unknown,
+  limits: ModelMetadataNormalizationLimits
+): ModelMetadataModalities | undefined {
+  if (!isRecord(value)) return undefined
+  const input = asLowerStringArray(value['input'], limits)
+  const output = asLowerStringArray(value['output'], limits)
+  if (input.length === 0 && output.length === 0) return undefined
+  return { input, output }
+}
+
 function normalizeProviderServingModel(
   raw: unknown,
   limits: ModelMetadataNormalizationLimits
 ): NormalizedProviderServingModel | null {
   if (!isRecord(raw)) return null
+  const out: NormalizedProviderServingModel = {}
+
+  const id = asString(raw['id'], limits.maxStringLength)
+  const name = asString(raw['name'], limits.maxStringLength)
+  const description = asString(raw['description'], limits.maxStringLength)
+  const family = asString(raw['family'], limits.maxStringLength)
+  const knowledgeCutoff = asString(raw['knowledge'] ?? raw['knowledge_cutoff'], limits.maxStringLength)
+  const releaseDate = asString(raw['release_date'], limits.maxStringLength)
+  const lastUpdated = asString(raw['last_updated'], limits.maxStringLength)
+
+  if (id !== undefined) out.id = id
+  if (name !== undefined) out.name = name
+  if (description !== undefined) out.description = description
+  if (family !== undefined) out.family = family
+  if (knowledgeCutoff !== undefined) out.knowledgeCutoff = knowledgeCutoff
+  if (releaseDate !== undefined) out.releaseDate = releaseDate
+  if (lastUpdated !== undefined) out.lastUpdated = lastUpdated
+
+  const modalities = normalizeProviderServingModalities(raw['modalities'], limits)
+  if (modalities) out.modalities = modalities
+
+  const attachment = asBool(raw['attachment'])
+  const toolCall = asBool(raw['tool_call'])
+  const structuredOutput = asBool(raw['structured_output'])
+  const temperature = asBool(raw['temperature'])
+  const reasoning = asBool(raw['reasoning'])
+  if (attachment !== undefined) out.attachment = attachment
+  if (toolCall !== undefined) out.toolCall = toolCall
+  if (structuredOutput !== undefined) out.structuredOutput = structuredOutput
+  if (temperature !== undefined) out.temperature = temperature
+  if (reasoning !== undefined) out.reasoning = reasoning
+
+  const limitsVal = normalizeLimits(raw['limit'])
+  if (limitsVal !== undefined) out.limits = limitsVal
+
+  const cost = normalizeProviderServingCost(raw['cost'])
+  if (cost !== undefined) out.cost = cost
+
   const effort = normalizeReasoningEffortValues(raw['reasoning_options'], limits)
-  if (!effort) return null
-  return { effort }
+  if (effort) out.effort = effort
+
+  // Keep record if any recognized stable display field was extracted.
+  // An isolated `id` alone (without any other display field) is not
+  // considered a useful serving record — it would pollute the map with
+  // trivial entries like `anything: {id:'anything'}` from the legacy
+  // fixture, while the exact-serving resolver still requires a non-trivial
+  // record to surface.
+  if (Object.keys(out).length === 0) return null
+  if (Object.keys(out).length === 1 && out.id !== undefined) return null
+  return out
 }
 
 /**
  * Normalize a raw `https://models.dev/api.json` payload into the provider-source
  * list with optional provider-specific serving metadata. Each source keeps
  * `api` + `name` for connection-logo attribution, and when the upstream
- * publishes `models` with `reasoning_options` type `effort`, those effort
- * values are kept under `providers[*].models` (with `max` mapped to `xhigh`).
- * Provider serving records are never merged into canonical `models`. Returns
- * null when the top level is not a record; an empty record is a usable
- * (if logo-poor) result, never a failure. Optional `limits` override exists
- * for tests.
+ * publishes `models`, stable display fields are kept under
+ * `providers[*].models` (id/name/description/family, modalities,
+ * reasoning/tool_call/structured_output/temperature/attachment, limit
+ * context/output, release_date/last_updated/knowledge, cost, reasoning_options
+ * effort with `max` mapped to `xhigh`). Provider serving records are never
+ * merged into canonical `models` and never overwrite canonical entries; they
+ * are accessed only through the exact owning-provider+serving-id resolver.
+ * Returns null when the top level is not a record; an empty record is a
+ * usable (if logo-poor) result, never a failure. Optional `limits` override
+ * exists for tests.
  */
 export function normalizeProviderSourcesPayload(
   raw: unknown,
@@ -517,12 +639,12 @@ export function parseModelMetadataSnapshot(data: unknown): ModelMetadataSnapshot
 
 /**
  * Defensively parse the Main on-disk cache envelope. Accepts the versioned
- * v3 envelope and (forward-compat) a bare v3 snapshot; null when neither
- * parses. v1 (api.json-shaped) and v2 (no serving models) caches are
- * rejected by the version literal — this is a Main cache format change, not
- * a Redux migration. v2 snapshots are accepted as bare snapshots for
- * forward compat via the loose provider schema (missing `models` stays
- * undefined).
+ * v4 envelope and (forward-compat) a bare v4 snapshot; null when neither
+ * parses. v1 (api.json-shaped), v2 (no serving models), and v3 (effort-only
+ * serving) caches are rejected by the version literal — this is a Main cache
+ * format change, not a Redux migration. Prior snapshots are accepted as bare
+ * snapshots for forward compat via the loose provider schema (missing `models`
+ * stays undefined).
  */
 export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadataSnapshot; etag?: string } | null {
   const envelope = ModelMetadataCacheEnvelopeSchema.safeParse(data)
@@ -541,16 +663,19 @@ export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadat
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve provider-specific serving effort values for a model id inside one
- * source. Exact trimmed model-id only (case-sensitive, no basename or
+ * Resolve the exact provider-serving metadata record for a model id inside
+ * one source. Exact trimmed model-id only (case-sensitive, no basename or
  * case-fold), zero model record -> undefined. Provider-specific records never
- * merge into canonical capabilities.
+ * merge into canonical capabilities and never overwrite canonical fields; callers
+ * that need both must read them separately and decide display priority
+ * (serving exact wins for UI display, canonical fills only missing fields).
+ * Never throws.
  */
-export function resolveProviderServingEffort(
+export function resolveProviderServingModel(
   sourceId: string | null | undefined,
   modelId: string | undefined | null,
   snapshot: ModelMetadataSnapshot | null | undefined
-): string[] | undefined {
+): NormalizedProviderServingModel | undefined {
   if (!sourceId || !modelId || !snapshot) return undefined
   if (!isSafeMetadataKey(sourceId)) return undefined
   const key = modelId.trim()
@@ -563,9 +688,23 @@ export function resolveProviderServingEffort(
   if (!models || typeof models !== 'object') return undefined
   const entry = (models as Record<string, unknown>)[key]
   if (!entry || typeof entry !== 'object') return undefined
-  const effort = (entry as { effort?: unknown }).effort
-  if (!Array.isArray(effort) || effort.length === 0) return undefined
-  return effort as string[]
+  return entry as NormalizedProviderServingModel
+}
+
+/**
+ * Resolve provider-specific serving effort values for a model id inside one
+ * source. Exact trimmed model-id only (case-sensitive, no basename or
+ * case-fold), zero model record -> undefined. Provider-specific records never
+ * merge into canonical capabilities.
+ */
+export function resolveProviderServingEffort(
+  sourceId: string | null | undefined,
+  modelId: string | undefined | null,
+  snapshot: ModelMetadataSnapshot | null | undefined
+): string[] | undefined {
+  const entry = resolveProviderServingModel(sourceId, modelId, snapshot)
+  if (!entry || !Array.isArray(entry.effort) || entry.effort.length === 0) return undefined
+  return entry.effort
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ This directory contains the project documentation in multiple languages.
 | [Application Identity ADR](./cherry-chat-application-identity.md) | Identity, compatibility boundary, updater/release freeze, platform scope |
 | [SQLite Migration Governance](./sqlite-migration.md) | SQLite chat authority, L2 Cherry Studio ZIP compatibility import, migration process |
 | [Context Window Governance](./context-window.md) | Stable topic context anchor, allowed anchor transitions, compatibility repair, persistence boundary |
+| [Model Metadata Governance](./model-metadata.md) | Model metadata & request identity (serving vs canonical vs display, enrichment-only, exact lookup, cache boundary) |
 | [Performance Program](./performance-program.md) | Performance methodology entry (amplification-first, hypothesis-driven lifecycle, evidence principles) |
 | [Performance Measurement](./performance-measurement.md) | Persistent measurement contract (toolchain, evidence hierarchy, schema v1, thresholds) |
 | [Performance Workstreams](./performance-workstreams.md) | Current actionable performance state (open product problems, evidence, acceptance framework) |

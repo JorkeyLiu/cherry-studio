@@ -1,5 +1,5 @@
 import CopyIcon from '@renderer/components/Icons/CopyIcon'
-import { getExternalModelEntry } from '@renderer/config/models/modelMetadata'
+import { getModelMetadataForDisplay } from '@renderer/config/models/modelMetadata'
 import { useModelMetadataStatus } from '@renderer/hooks/useModelMetadataStatus'
 import type { Model, Provider } from '@renderer/types'
 import { getDefaultGroupName } from '@renderer/utils'
@@ -35,14 +35,16 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
   // async init/refresh round completes, and drives the all-empty state below.
   const metadataStatus = useModelMetadataStatus()
 
-  // Exact models.dev entry for the read-only capability groups (display only).
-  // Recomputed on every subscribed status transition, so async init results
-  // flow into the open popup without remounting.
-  const entry = useMemo(
-    () => getExternalModelEntry(model, provider),
+  // Effective model metadata for display: exact serving entry wins, canonical
+  // fills only missing fields (serving and canonical are never merged as one
+  // identity; the helper keeps sources distinct and the reference below shows
+  // which source contributed).
+  const display = useMemo(
+    () => getModelMetadataForDisplay(model, provider),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [model, provider, metadataStatus]
   )
+  const entry = display.effective
 
   // All three metadata groups empty: one status line, never per-group hints.
   // A cached snapshot means ready even for an unknown model id.

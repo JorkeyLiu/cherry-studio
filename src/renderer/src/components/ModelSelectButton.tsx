@@ -22,6 +22,8 @@ const ModelSelectButton = ({ model, onSelectModel, modelFilter, noTooltip, toolt
     }
   }, [model, modelFilter, onSelectModel])
 
+  const servingTitle =
+    (model.id?.trim() ?? '') !== (model.name?.trim() ?? '') ? `${model.name} (${model.id})` : model.name
   const button = useMemo(() => {
     return <Button icon={<ModelAvatar model={model} size={22} />} type="text" shape="circle" onClick={onClick} />
   }, [model, onClick])
@@ -30,7 +32,7 @@ const ModelSelectButton = ({ model, onSelectModel, modelFilter, noTooltip, toolt
     return button
   } else {
     return (
-      <Tooltip title={model.name} {...tooltipProps}>
+      <Tooltip title={servingTitle} {...tooltipProps}>
         {button}
       </Tooltip>
     )

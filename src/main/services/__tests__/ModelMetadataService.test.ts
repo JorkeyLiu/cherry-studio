@@ -56,7 +56,7 @@ function makeService(overrides: ConstructorParameters<typeof ModelMetadataServic
 
 function diskEnvelope(snapshot: unknown, etag?: string) {
   return JSON.stringify({
-    version: 3,
+    version: 4,
     fetchedAt: 500_000,
     ...(etag ? { etag } : {}),
     snapshot
@@ -99,7 +99,7 @@ beforeEach(() => {
 })
 
 describe('ModelMetadataService refresh', () => {
-  it('fetches canonical models.json + provider list and persists the v3 envelope', async () => {
+  it('fetches canonical models.json + provider list and persists the v4 envelope', async () => {
     const { service, fetchFn, writeCacheFileAtomic } = makeService()
     mockBothSuccess(fetchFn)
 
@@ -135,7 +135,7 @@ describe('ModelMetadataService refresh', () => {
     const [filePath, data] = writeCacheFileAtomic.mock.calls[0]
     expect(filePath).toBe('/cache/model-metadata/models-dev-models.json')
     const envelope = JSON.parse(data)
-    expect(envelope.version).toBe(3)
+    expect(envelope.version).toBe(4)
     expect(envelope.snapshot.source).toBe('models.dev')
     expect(envelope.snapshot.models['moonshotai/kimi-k3'].id).toBe('moonshotai/kimi-k3')
   })
@@ -277,7 +277,7 @@ describe('ModelMetadataService loading semantics', () => {
     expect(broken.service.getSnapshot()).toBeNull()
   })
 
-  it('rejects cache envelopes with a non-current version (v1/v2 caches)', async () => {
+  it('rejects cache envelopes with a non-current version (v1/v2/v3 caches)', async () => {
     const { service, readCacheFile } = makeService()
     readCacheFile.mockResolvedValue(JSON.stringify({ version: 1, fetchedAt: 1, snapshot: diskSnapshot() }))
     await expect(service.ensureLoaded()).resolves.toBeNull()
@@ -286,6 +286,10 @@ describe('ModelMetadataService loading semantics', () => {
     readCacheFile2.mockResolvedValue(JSON.stringify({ version: 2, fetchedAt: 1, snapshot: diskSnapshot() }))
     await expect(service2.ensureLoaded()).resolves.toBeNull()
     expect(service2.getSnapshot()).toBeNull()
+    const { service: service3, readCacheFile: readCacheFile3 } = makeService()
+    readCacheFile3.mockResolvedValue(JSON.stringify({ version: 3, fetchedAt: 1, snapshot: diskSnapshot() }))
+    await expect(service3.ensureLoaded()).resolves.toBeNull()
+    expect(service3.getSnapshot()).toBeNull()
   })
 
   it('getSnapshotWithStaleRefresh returns memory immediately and refreshes stale data in background', async () => {

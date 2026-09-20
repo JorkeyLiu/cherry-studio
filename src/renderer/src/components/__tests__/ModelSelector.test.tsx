@@ -150,7 +150,9 @@ describe('ModelSelector', () => {
       render(<ModelSelector providers={mockProviders} grouped={false} showSuffix={false} open />)
 
       const gpt4 = screen.getByText('GPT-4.1')
-      expect(gpt4.textContent).toBe('GPT-4.1')
+      // serving id (model.id) is shown whenever id != name, even when suffix is hidden
+      expect(gpt4.textContent).toContain('GPT-4.1')
+      expect(gpt4.textContent).toContain('gpt-4.1')
       expect(gpt4.textContent).not.toContain(' | OpenAI')
     })
   })
@@ -220,6 +222,110 @@ describe('ModelSelector', () => {
       // The group titles for visible items should still be there
       expect(screen.getByText('OpenAI')).toBeInTheDocument()
       expect(screen.getByText('Cohere')).toBeInTheDocument()
+    })
+  })
+
+  describe('serving id visibility and title (trim-based)', () => {
+    it('shows serving id inline and in title when trimmed id != trimmed name', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      render(<ModelSelector providers={providers} open />)
+      // inline id visible
+      expect(screen.getByText('gpt-4o-2024-08-06')).toBeInTheDocument()
+      // title via aria or option title — search combobox options have title attribute in DOM
+      // Check that at least one option carries title with id
+      const option = document.querySelector('[title*="gpt-4o-2024-08-06"]')
+      expect(option).not.toBeNull()
+    })
+
+    it('distinguishes same name different id (both ids visible)', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [
+            { id: 'gpt-4o-a', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any,
+            { id: 'gpt-4o-b', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any
+          ]
+        }
+      ]
+      render(<ModelSelector providers={providers} open />)
+      expect(screen.getByText('gpt-4o-a')).toBeInTheDocument()
+      expect(screen.getByText('gpt-4o-b')).toBeInTheDocument()
+    })
+
+    it('does not show duplicate id when trimmed id == trimmed name', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: 'gpt-4o', name: 'gpt-4o', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      render(<ModelSelector providers={providers} open />)
+      // name appears but no second id element duplicate
+      const text = screen.getByText('gpt-4o').textContent
+      // should be just name (+ maybe suffix), not name + id duplicate
+      expect(text).toBe('gpt-4o | OpenAI')
+    })
+
+    it('whitespace-trimmed equality hides id, whitespace difference shows id', () => {
+      const providersTrimSame: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      const { unmount } = render(<ModelSelector providers={providersTrimSame} open />)
+      expect(screen.queryByText('  gpt-4o  ')).toBeNull()
+      unmount()
+
+      const providersDiff: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      render(<ModelSelector providers={providersDiff} open />)
+      const el = document.querySelector('[title=" gpt-4o-1 "]')
+      expect(el).not.toBeNull()
+    })
+
+    it('case difference shows id (case-sensitive trim)', () => {
+      const providers: Provider[] = [
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          type: 'openai',
+          apiKey: '123',
+          apiHost: 'https://api.openai.com',
+          models: [{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'chat' } as any]
+        }
+      ]
+      render(<ModelSelector providers={providers} open />)
+      expect(screen.getByText('gpt-4o')).toBeInTheDocument()
     })
   })
 })

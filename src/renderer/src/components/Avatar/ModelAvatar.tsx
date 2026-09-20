@@ -1,4 +1,4 @@
-import { useCanonicalModelLogo } from '@renderer/services/providerLogo'
+import { useCanonicalModelLogo, useModelProviderLogo } from '@renderer/services/providerLogo'
 import type { Model, Provider } from '@renderer/types'
 import type { AvatarProps } from 'antd'
 import { Avatar } from 'antd'
@@ -18,14 +18,21 @@ interface Props {
   className?: string
 }
 
-const ModelAvatar: FC<Props> = ({ model, provider: _provider, modelsDevLogoSrc, size, props, className }) => {
-  // Model avatar priority: canonical model's lab/brand logo (resolved from
-  // models.json, independent of the serving proxy connection) >
-  // deterministic model initial. Unknown/ambiguous canonical resolution
-  // yields the generic fallback, never the proxy connection logo.
+const ModelAvatar: FC<Props> = ({ model, provider, modelsDevLogoSrc, size, props, className }) => {
+  // Model avatar honesty: canonical lab logo (from models.json, independent of
+  // proxy) > owning provider's exact models.dev source logo (connection/
+  // provider fallback only when canonical is unknown) > deterministic model
+  // initial. The provider fallback MUST NOT be treated as a canonical lab
+  // logo — it is explicitly a connection/provider attribution used only when
+  // the canonical lab is unknown, and is clearly documented as such.
   // The models.dev logo shares ModelsDevLogoMark with ProviderAvatar (single
   // mask implementation): monochrome theme token on transparency.
-  const hookLogo = useCanonicalModelLogo(model)
+  const canonicalLogo = useCanonicalModelLogo(model)
+  // `useModelProviderLogo` respects the exact owning-provider contract (no
+  // default fallback) and is used here only as a second-tier fallback when
+  // canonical is absent; never as a substitute for canonical lab identity.
+  const providerLogo = useModelProviderLogo(model, provider === undefined ? undefined : provider)
+  const hookLogo = canonicalLogo ?? providerLogo
   const logoSrc = modelsDevLogoSrc !== undefined ? modelsDevLogoSrc : hookLogo
   const avatarStyle = {
     width: size,

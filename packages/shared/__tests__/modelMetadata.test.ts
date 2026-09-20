@@ -13,6 +13,7 @@ import {
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
   resolveCanonicalModel,
+  resolveProviderServingModel,
   toModelMetadataStatus
 } from '../modelMetadata'
 
@@ -259,21 +260,22 @@ describe('parseModelMetadataSnapshot / parseModelMetadataCache', () => {
     expect(parseModelMetadataSnapshot({ source: 'models.dev', fetchedAt: 1, models: {} })).toBeNull()
   })
 
-  it('parses the versioned v3 cache envelope and falls back to a bare snapshot', () => {
+  it('parses the versioned v4 cache envelope and falls back to a bare snapshot', () => {
     const snapshot = fullSnapshot()
-    const envelope = { version: 3, fetchedAt: 999, etag: '"abc"', snapshot }
+    const envelope = { version: 4, fetchedAt: 999, etag: '"abc"', snapshot }
     expect(parseModelMetadataCache(envelope)).toEqual({ snapshot, etag: '"abc"' })
     expect(parseModelMetadataCache(snapshot)).toEqual({ snapshot, etag: '"abc"' })
-    expect(parseModelMetadataCache({ version: 3 })).toBeNull()
+    expect(parseModelMetadataCache({ version: 4 })).toBeNull()
     expect(parseModelMetadataCache(null)).toBeNull()
   })
 
-  it('requires the literal current cache version (rejects v1/v2 caches)', () => {
+  it('requires the literal current cache version (rejects v1/v2/v3 caches)', () => {
     const snapshot = fullSnapshot()
     expect(parseModelMetadataCache({ version: 1, fetchedAt: 999, snapshot })).toBeNull()
     expect(parseModelMetadataCache({ version: 2, fetchedAt: 999, snapshot })).toBeNull()
-    expect(parseModelMetadataCache({ version: 3, fetchedAt: 999, snapshot })).not.toBeNull()
-    expect(parseModelMetadataCache({ version: '3', fetchedAt: 999, snapshot })).toBeNull()
+    expect(parseModelMetadataCache({ version: 3, fetchedAt: 999, snapshot })).toBeNull()
+    expect(parseModelMetadataCache({ version: 4, fetchedAt: 999, snapshot })).not.toBeNull()
+    expect(parseModelMetadataCache({ version: '4', fetchedAt: 999, snapshot })).toBeNull()
     // A v1-shaped provider-mapped payload is not a v3 snapshot.
     expect(
       parseModelMetadataCache({
@@ -532,5 +534,126 @@ describe('asSafeMetadataFailureReason / parseModelMetadataStatus', () => {
     expect(parseModelMetadataStatus({ kind: 'unavailable', snapshot: null, reason: 'evil' })).toBeNull()
     expect(parseModelMetadataStatus({ kind: 'nope', snapshot: null })).toBeNull()
     expect(parseModelMetadataStatus(null)).toBeNull()
+  })
+})
+
+describe('provider serving full metadata — normalization + exact resolver', () => {
+  it('keeps stable display fields from api.json serving records (no unbounded any)', () => {
+    const raw = {
+      'provider-a': {
+        id: 'provider-a',
+        name: 'Provider A',
+        api: 'https://api.a.example/v1',
+        models: {
+          'model-x': {
+            id: 'model-x',
+            name: 'Model X',
+            description: 'A test model',
+            family: 'test-family',
+            knowledge: '2025-01',
+            release_date: '2026-01-01',
+            last_updated: '2026-09-01',
+            modalities: { input: ['text', 'image'], output: ['text'] },
+            attachment: true,
+            tool_call: true,
+            structured_output: false,
+            temperature: true,
+            reasoning: true,
+            limit: { context: 128000, output: 4096 },
+            cost: { input: 0.5, output: 1.5 },
+            reasoning_options: [{ type: 'effort', values: ['low', 'max'] }]
+          },
+          'model-y': {
+            id: 'model-y',
+            name: 'Model Y',
+            modalities: { input: ['TEXT'], output: ['TEXT'] },
+            cost: { input: 'cheap' }
+          },
+          'empty-model': { id: 'empty-model' }
+        }
+      }
+    }
+    const providers = normalizeProviderSourcesPayload(raw)!
+    const x = providers['provider-a'].models?.['model-x']
+    expect(x?.id).toBe('model-x')
+    expect(x?.name).toBe('Model X')
+    expect(x?.description).toBe('A test model')
+    expect(x?.family).toBe('test-family')
+    expect(x?.knowledgeCutoff).toBe('2025-01')
+    expect(x?.releaseDate).toBe('2026-01-01')
+    expect(x?.lastUpdated).toBe('2026-09-01')
+    expect(x?.modalities).toEqual({ input: ['text', 'image'], output: ['text'] })
+    expect(x?.attachment).toBe(true)
+    expect(x?.toolCall).toBe(true)
+    expect(x?.structuredOutput).toBe(false)
+    expect(x?.temperature).toBe(true)
+    expect(x?.reasoning).toBe(true)
+    expect(x?.limits).toEqual({ context: 128000, output: 4096 })
+    expect(x?.cost).toEqual({ input: 0.5, output: 1.5 })
+    expect(x?.effort).toEqual(['low', 'xhigh'])
+    const y = providers['provider-a'].models?.['model-y']
+    expect(y?.modalities).toEqual({ input: ['text'], output: ['text'] })
+    expect(y?.cost).toBeUndefined()
+    // isolated id-only record is not a useful serving entry and is dropped
+    expect(providers['provider-a'].models?.['empty-model']).toBeUndefined()
+    // non-boolean cost stays unknown, not coerced
+    expect('pricing' in (x as any)).toBe(false)
+  })
+
+  it('resolveProviderServingModel is exact, trimmed, case-sensitive, never canonical-merge', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {},
+      providers: normalizeProviderSourcesPayload({
+        'provider-a': {
+          id: 'provider-a',
+          name: 'Provider A',
+          api: 'https://api.a.example/v1',
+          models: {
+            'deepseek/deepseek-v3': { id: 'deepseek/deepseek-v3', name: 'DeepSeek V3', limit: { context: 128000 } },
+            'Model-Case': { id: 'Model-Case', name: 'Case' }
+          }
+        }
+      })!
+    }
+    expect(resolveProviderServingModel('provider-a', 'deepseek/deepseek-v3', snapshot)?.name).toBe('DeepSeek V3')
+    expect(resolveProviderServingModel('provider-a', '  deepseek/deepseek-v3  ', snapshot)?.name).toBe('DeepSeek V3')
+    expect(resolveProviderServingModel('provider-a', 'DEEPSEEK/DEEPSEEK-V3', snapshot)).toBeUndefined()
+    expect(resolveProviderServingModel('provider-a', 'deepseek-v3', snapshot)).toBeUndefined()
+    expect(resolveProviderServingModel('provider-a', 'Model-Case', snapshot)?.name).toBe('Case')
+    expect(resolveProviderServingModel('provider-a', 'model-case', snapshot)).toBeUndefined()
+    expect(resolveProviderServingModel('provider-a', '__proto__', snapshot)).toBeUndefined()
+    expect(resolveProviderServingModel('provider-a', 'deepseek/deepseek-v3', null)).toBeUndefined()
+    // different provider -> undefined
+    expect(resolveProviderServingModel('provider-b', 'deepseek/deepseek-v3', snapshot)).toBeUndefined()
+  })
+
+  it('parseModelMetadataSnapshot keeps serving fields and is separate from canonical', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 999,
+      models: {
+        'lab-a/model-x': {
+          id: 'lab-a/model-x',
+          modalities: { input: ['text'], output: ['text'] },
+          limits: { context: 10 }
+        }
+      },
+      providers: {
+        'provider-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Provider A',
+          models: {
+            'model-x': { name: 'Model X', limits: { context: 999999 }, effort: ['low'] } as any
+          }
+        }
+      }
+    }
+    const parsed = parseModelMetadataSnapshot(JSON.parse(JSON.stringify(snapshot)))!
+    expect(parsed.providers['provider-a'].models?.['model-x']?.limits?.context).toBe(999999)
+    expect(parsed.models['lab-a/model-x'].limits?.context).toBe(10)
+    // serving never overwrote canonical
+    expect(parsed.models['lab-a/model-x'].limits?.context).not.toBe(999999)
   })
 })

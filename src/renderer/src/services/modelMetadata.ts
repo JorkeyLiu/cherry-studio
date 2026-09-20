@@ -7,10 +7,11 @@ import {
   type ModelMetadataSnapshot,
   type ModelMetadataStatus,
   type NormalizedModelMetadata,
+  type NormalizedProviderServingModel,
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
   resolveCanonicalModel,
-  resolveProviderServingEffort
+  resolveProviderServingModel
 } from '@shared/modelMetadata'
 import { isSafeLogoSourceId } from '@shared/providerLogo'
 
@@ -203,6 +204,32 @@ export function resolveCanonicalModelEntry(
 }
 
 /**
+ * Provider-specific serving metadata record for a model, resolved through
+ * the exact owning provider -> source-id mapping. Exact trimmed model-id
+ * match only (case-sensitive, no basename/case-fold). Provider-specific
+ * records are enrichment only and never merged into canonical capabilities;
+ * they never overwrite canonical fields. Returns undefined when unknown or
+ * when the connection is explicitly absent. Never throws.
+ */
+export function resolveServingModelForModel(
+  model: Model | undefined | null,
+  explicitProvider?: Provider | null,
+  current: ModelMetadataSnapshot | null = snapshot
+): NormalizedProviderServingModel | undefined {
+  try {
+    if (!model || typeof model.id !== 'string') return undefined
+    const snapshotToUse = current ?? snapshot
+    const provider = explicitProvider !== undefined ? explicitProvider : resolveProviderForMetadata(model)
+    if (!provider) return undefined
+    const sourceId = resolveMetadataSource(provider, snapshotToUse)
+    if (!sourceId) return undefined
+    return resolveProviderServingModel(sourceId, model.id, snapshotToUse)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Provider-specific serving effort values for a model, resolved through the
  * exact owning provider -> source-id mapping. Exact trimmed model-id match
  * only, no basename/case-fold. Provider-specific records never merge into
@@ -214,17 +241,7 @@ export function resolveServingEffortForModel(
   explicitProvider?: Provider | null,
   current: ModelMetadataSnapshot | null = snapshot
 ): string[] | undefined {
-  try {
-    if (!model || typeof model.id !== 'string') return undefined
-    const snapshotToUse = current ?? snapshot
-    const provider = explicitProvider !== undefined ? explicitProvider : resolveProviderForMetadata(model)
-    if (!provider) return undefined
-    const sourceId = resolveMetadataSource(provider, snapshotToUse)
-    if (!sourceId) return undefined
-    return resolveProviderServingEffort(sourceId, model.id, snapshotToUse)
-  } catch {
-    return undefined
-  }
+  return resolveServingModelForModel(model, explicitProvider, current)?.effort
 }
 
 /**

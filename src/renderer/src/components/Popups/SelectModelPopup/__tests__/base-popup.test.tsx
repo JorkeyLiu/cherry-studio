@@ -293,4 +293,70 @@ describe('SelectModelPopupView "Add Model" action', () => {
       expect(Math.min(PAGE_SIZE, 1) * ITEM_HEIGHT).toBe(36)
     })
   })
+
+  describe('serving id visibility (trim-based id != name)', () => {
+    it('shows serving id when same display name but different id', () => {
+      const providers = [
+        provider('openai', 'OpenAI', [
+          { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' } as any,
+          { id: 'gpt-4o-2024-11-20', name: 'GPT-4o', provider: 'openai', group: 'default' } as any
+        ])
+      ]
+      renderPopup(providers)
+      // both ids should be visible as muted monospace
+      expect(screen.getByTitle('gpt-4o-2024-08-06')).toBeInTheDocument()
+      expect(screen.getByTitle('gpt-4o-2024-11-20')).toBeInTheDocument()
+    })
+
+    it('does not show duplicate second line when trimmed id == trimmed name', () => {
+      const providers = [provider('openai', 'OpenAI', [model('gpt-4o', 'gpt-4o')])]
+      renderPopup(providers)
+      // when id==name, no title id element should exist
+      expect(screen.queryByTitle('gpt-4o')).toBeNull()
+      // name still present
+      expect(screen.getByText('gpt-4o')).toBeInTheDocument()
+    })
+
+    it('treats whitespace-trimmed equality as same (no id row)', () => {
+      const providers = [
+        provider('openai', 'OpenAI', [
+          { id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai', group: 'default' } as any
+        ])
+      ]
+      renderPopup(providers)
+      expect(screen.queryByTitle('  gpt-4o  ')).toBeNull()
+    })
+
+    it('shows id when case differs (case-sensitive)', () => {
+      const providers = [
+        provider('openai', 'OpenAI', [{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' } as any])
+      ]
+      renderPopup(providers)
+      expect(screen.getByTitle('gpt-4o')).toBeInTheDocument()
+    })
+
+    it('shows id when whitespace-trimmed differs', () => {
+      const providers = [
+        provider('openai', 'OpenAI', [
+          { id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai', group: 'default' } as any
+        ])
+      ]
+      renderPopup(providers)
+      // original id with spaces is title, but visibility is trim-based
+      const el = document.querySelector('[title=" gpt-4o-1 "]')
+      expect(el).not.toBeNull()
+    })
+
+    it('shows id for near-identical names with different ids (distinguishable)', () => {
+      const providers = [
+        provider('openai', 'OpenAI', [
+          { id: 'gpt-4o-mini', name: 'GPT-4o mini', provider: 'openai', group: 'default' } as any,
+          { id: 'gpt-4o-mini-2024', name: 'GPT-4o mini', provider: 'openai', group: 'default' } as any
+        ])
+      ]
+      renderPopup(providers)
+      expect(screen.getByTitle('gpt-4o-mini')).toBeInTheDocument()
+      expect(screen.getByTitle('gpt-4o-mini-2024')).toBeInTheDocument()
+    })
+  })
 })

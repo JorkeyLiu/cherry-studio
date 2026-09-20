@@ -10,7 +10,6 @@ import type { Model, Provider } from '@renderer/types'
 import { objectEntries } from '@renderer/types'
 import { classNames, filterModelsByKeywords, getFancyProviderName } from '@renderer/utils'
 import { getInputModalityAvailabilityFromProviders } from '@renderer/utils/inputModalities'
-import { getDuplicateModelNames } from '@renderer/utils/model'
 import { Divider, Empty, Modal, Tooltip } from 'antd'
 import { sortBy } from 'lodash'
 import { Plus, Settings2 } from 'lucide-react'
@@ -122,11 +121,14 @@ const SelectModelPopupView: React.FC<Props> = ({
     [searchText]
   )
 
-  // 创建模型列表项
+  // 创建模型列表项 — serving id visibility: whenever trimmed serving id
+  // differs from trimmed display name, show the muted monospace id inline.
+  // Duplicate-name gating was removed (see review findings).
   const createModelItem = useCallback(
-    (model: Model, provider: Provider, isPinned: boolean, showIdentifier: boolean): FlatListModel => {
+    (model: Model, provider: Provider, isPinned: boolean): FlatListModel => {
       const modelId = getModelUniqId(model)
       const groupName = getFancyProviderName(provider)
+      const showServingId = (model.id?.trim() ?? '') !== (model.name?.trim() ?? '')
 
       return {
         key: isPinned ? `${modelId}_pinned` : modelId,
@@ -135,7 +137,7 @@ const SelectModelPopupView: React.FC<Props> = ({
           <ModelName>
             <div className="flex min-w-0 flex-1 items-center gap-1.5">
               <span className="min-w-0 truncate">{model.name}</span>
-              {showIdentifier && model.id !== model.name && (
+              {showServingId && (
                 <span
                   className="min-w-0 max-w-[45%] shrink truncate font-mono text-[12px] text-[var(--color-text-3)]"
                   title={model.id}>
@@ -165,12 +167,6 @@ const SelectModelPopupView: React.FC<Props> = ({
     const items: FlatListItem[] = []
     const pinnedModelIds = new Set(pinnedModels)
     const finalModelFilter = (model: Model, provider?: Provider) => !showTagFilter || tagFilter(model, provider)
-    const duplicateNamesByProvider = new Map<string, Set<string>>(
-      sortedProviders.map((provider) => [
-        provider.id,
-        getDuplicateModelNames(searchFilter(provider).filter((m) => finalModelFilter(m, provider)))
-      ])
-    )
 
     // 添加置顶模型分组（仅在无搜索文本时）
     if (searchText.length === 0 && showPinnedModels && pinnedModelIds.size > 0) {
@@ -178,9 +174,7 @@ const SelectModelPopupView: React.FC<Props> = ({
         provider.models
           .filter((item) => pinnedModelIds.has(getModelUniqId(item)))
           .filter((item) => finalModelFilter(item, provider))
-          .map((item) =>
-            createModelItem(item, provider, true, duplicateNamesByProvider.get(provider.id)?.has(item.name) ?? false)
-          )
+          .map((item) => createModelItem(item, provider, true))
       )
 
       if (pinnedItems.length > 0) {
@@ -231,12 +225,7 @@ const SelectModelPopupView: React.FC<Props> = ({
 
       items.push(
         ...filteredModels.map((item) =>
-          createModelItem(
-            item,
-            provider,
-            showPinnedModels && pinnedModelIds.has(getModelUniqId(item)),
-            duplicateNamesByProvider.get(provider.id)?.has(item.name) ?? false
-          )
+          createModelItem(item, provider, showPinnedModels && pinnedModelIds.has(getModelUniqId(item)))
         )
       )
     })

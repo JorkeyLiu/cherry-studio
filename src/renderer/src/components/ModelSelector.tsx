@@ -54,25 +54,47 @@ const ModelSelector = ({
 }: ModelSelectorProps & { ref?: React.Ref<BaseSelectRef> | null }) => {
   const { t } = useTranslation()
 
-  // 单个 provider 的模型选项
+  // 单个 provider 的模型选项 — when serving id differs from display name,
+  // show the muted monospace id and ensure title/tooltip also carries it so
+  // the exact serving id is always discoverable (selected + current model).
   const getModelOptions = useCallback(
     (p: Provider, fancyName: string) => {
       const suffix = showSuffix ? <span style={{ opacity: 0.45 }}>{` | ${fancyName}`}</span> : null
       return sortBy(p.models, 'name')
         .filter((model) => predicate?.(model) ?? true)
-        .map((m) => ({
-          label: (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {showAvatar && <ModelAvatar model={m} size={18} />}
-              <span>
-                {m.name}
-                {suffix}
-              </span>
-            </div>
-          ),
-          title: `${m.name} | ${fancyName}`,
-          value: getModelUniqId(m)
-        }))
+        .map((m) => {
+          const servingIdVisible = (m.id?.trim() ?? '') !== (m.name?.trim() ?? '')
+          return {
+            label: (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {showAvatar && <ModelAvatar model={m} size={18} />}
+                <span>
+                  {m.name}
+                  {servingIdVisible && (
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        opacity: 0.55,
+                        marginLeft: 6,
+                        maxWidth: 220,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        verticalAlign: 'middle'
+                      }}
+                      title={m.id}>
+                      {m.id}
+                    </span>
+                  )}
+                  {suffix}
+                </span>
+              </div>
+            ),
+            title: servingIdVisible ? `${m.name} (${m.id}) | ${fancyName}` : `${m.name} | ${fancyName}`,
+            value: getModelUniqId(m)
+          }
+        })
     },
     [predicate, showAvatar, showSuffix]
   )

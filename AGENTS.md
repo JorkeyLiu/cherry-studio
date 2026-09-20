@@ -112,6 +112,8 @@ The single native module, `better-sqlite3`, is compiled for **either** Node 24 (
 
 This section is the durable mental model of Cherry Chat: what the product is, which runtime role owns what, where authority lives, how intent and state move, how a change propagates, and how evidence becomes judgment. It deliberately describes relationships and semantics, not file locations; the detailed directory/service/slice/path reference lives in [docs/architecture.md](docs/architecture.md), and local code location is specialist work.
 
+Non-violatable invariants (4-6 sentences): Cherry Chat identity, compatibility contracts, release freeze, platform scope, and SQLite chat authority are governed by ADRs and never reinterpreted locally. Main owns persistent chat and SQLite; renderer is projection and never holds a SQLite connection, and preload is the only capability door. Provider identity for serving never infers from display names, and model capability facts resolve only by canonical ID. Model metadata is enrichment-only and never gates admission or basic requests. Detailed tables and service locations live in [Detailed References](#detailed-references) and [docs/architecture.md](docs/architecture.md); read the governing doc before crossing its boundary.
+
 ### Product Meaning
 
 Cherry Chat is the sole target product of this repository, and its identity is a governance decision, not a string: the [Application Identity ADR](docs/cherry-chat-application-identity.md) defines identity, compatibility, the updater/release freeze, and platform scope, and the base build *is* Cherry Chat — there is no build flavor for another target. Cherry Studio is not a competing identity but a compatibility domain: its source-format identifiers, database names, and import structures are contracts that must remain stable so user data keeps importing, and data isolation comes from profiles, not from renaming compatibility artifacts. The current repository path is a transitional carrier for a future Cherry Chat repository; the path itself is not a product decision. Understanding the product starts with the ADRs, not with a list of constants.
@@ -157,7 +159,7 @@ Before changing anything, classify the change. Risk follows the boundary the cha
 - **Native/lifecycle/multi-window** — capabilities, windows, and app lifecycle.
 - **Product identity/governance** — identity, compatibility, release, or platform decisions; these are ADR-level and require user decisions, not code edits.
 
-The higher the boundary, the broader the evidence and the higher the decision: a migration is not a UI tweak, and a contract change is not a local fix. Local fixes must not silently cross an authority boundary — a renderer workaround that writes chat data directly, or a rename of a compatibility identifier, is a governance violation even if it works locally.
+The higher the boundary, the broader the evidence and the higher the decision: a migration is not a UI tweak, and a contract change is not a local fix. Local fixes must not silently cross an authority boundary — a renderer workaround that writes chat data directly, or a rename of a compatibility identifier, is a governance violation even if it works locally. For boundary-to-evidence mapping details see [Detailed References](#detailed-references); model-metadata boundaries are governed by [Model Metadata Governance](docs/model-metadata.md) §12, implemented locations by [docs/architecture.md](docs/architecture.md).
 
 ### Evidence and Judgment
 

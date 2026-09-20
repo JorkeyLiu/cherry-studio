@@ -1,4 +1,5 @@
 import EmojiAvatar from '@renderer/components/Avatar/EmojiAvatar'
+import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import { HStack } from '@renderer/components/Layout'
 import UserPopup from '@renderer/components/Popups/UserPopup'
 import { APP_NAME, AppLogo, isLocalAi } from '@renderer/config/env'
@@ -66,6 +67,12 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
 
   const avatarName = useMemo(() => firstLetter(assistant?.name).toUpperCase(), [assistant?.name])
   const username = useMemo(() => removeLeadingEmoji(getUserName()), [getUserName])
+  const displayModelId = model?.id?.trim()
+  const displayModelName = model?.name?.trim()
+  const modelTitle =
+    model && displayModelId && displayModelName && displayModelId !== displayModelName
+      ? `${displayModelName} (${displayModelId})`
+      : (displayModelName ?? displayModelId ?? username)
 
   const userNameJustifyContent = useMemo(() => {
     if (!isBubbleStyle) return 'flex-start'
@@ -76,16 +83,40 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   return (
     <Container className={isUserBubbleMessage ? 'message-header user-bubble-header' : 'message-header'}>
       {isAssistantMessage ? (
-        <Avatar
-          src={avatarSource}
-          size={35}
-          style={{
-            borderRadius: '25%',
-            border: isLocalAi ? '1px solid var(--color-border-soft)' : 'none',
-            filter: theme === 'dark' ? 'invert(0.05)' : undefined
-          }}>
-          {avatarName}
-        </Avatar>
+        isLocalAi ? (
+          <Avatar
+            src={avatarSource}
+            size={35}
+            style={{
+              borderRadius: '25%',
+              border: '1px solid var(--color-border-soft)',
+              filter: theme === 'dark' ? 'invert(0.05)' : undefined
+            }}>
+            {avatarName}
+          </Avatar>
+        ) : model ? (
+          <ModelAvatar model={model} size={35} />
+        ) : avatarSource ? (
+          <Avatar
+            src={avatarSource}
+            size={35}
+            style={{
+              borderRadius: '25%',
+              border: 'none',
+              filter: theme === 'dark' ? 'invert(0.05)' : undefined
+            }}>
+            {avatarName}
+          </Avatar>
+        ) : (
+          <Avatar
+            size={35}
+            style={{
+              borderRadius: '25%',
+              border: 'none'
+            }}>
+            {avatarName}
+          </Avatar>
+        )
       ) : (
         <>
           {isEmoji(avatar) ? (
@@ -105,7 +136,10 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
       {!isUserBubbleMessage && (
         <UserWrap>
           <HStack alignItems="center" justifyContent={userNameJustifyContent}>
-            <UserName isBubbleStyle={isBubbleStyle && isUserMessage} theme={theme}>
+            <UserName
+              isBubbleStyle={isBubbleStyle && isUserMessage}
+              theme={theme}
+              title={isAssistantMessage ? modelTitle : username}>
               {username}
             </UserName>
             {isGroupContextMessage && (
