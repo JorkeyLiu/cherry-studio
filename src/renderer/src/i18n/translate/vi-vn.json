@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Đặt số lượng token suy nghĩ cần sử dụng."
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "Thu gọn",
@@ -5496,17 +5497,6 @@
         "title": "Chế độ Proxy"
       },
       "tip": "Hỗ trợ khớp ký tự đại diện (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Quay lại",
-      "close": "Đóng",
-      "confirm": "Xác nhận",
-      "forward": "Vooruit",
-      "multiple": "Chọn nhiều",
-      "noResult": "Không tìm thấy kết quả",
-      "page": "Trang",
-      "select": "Chọn",
-      "title": "Menú Rápido"
     },
     "scheduledTasks": {
       "description": "Quản lý các tác vụ đã lên lịch trên tất cả các tác nhân. Các tác vụ sẽ tự động chạy theo lịch đã cấu hình.",

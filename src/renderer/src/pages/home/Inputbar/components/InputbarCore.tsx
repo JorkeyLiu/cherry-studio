@@ -1,15 +1,11 @@
 import { HolderOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
 import { ActionIconButton } from '@renderer/components/Buttons'
-import type { QuickPanelTriggerInfo } from '@renderer/components/QuickPanel'
-import { QuickPanelReservedSymbol, QuickPanelView, useQuickPanel } from '@renderer/components/QuickPanel'
 import TranslateButton from '@renderer/components/TranslateButton'
 import { useRuntime } from '@renderer/hooks/useRuntime'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useTimer } from '@renderer/hooks/useTimer'
-import useTranslate from '@renderer/hooks/useTranslate'
 import PasteService from '@renderer/services/PasteService'
-import { translateText } from '@renderer/services/TranslateService'
 import { useAppDispatch } from '@renderer/store'
 import { setSearching } from '@renderer/store/runtime'
 import type { FileMetadata } from '@renderer/types'
@@ -20,7 +16,7 @@ import { IpcChannel } from '@shared/IpcChannel'
 import { Divider, Tooltip } from 'antd'
 import TextArea from 'antd/es/input/TextArea'
 import type { TextAreaRef } from 'antd/lib/input/TextArea'
-import { CirclePause, Languages } from 'lucide-react'
+import { CirclePause } from 'lucide-react'
 import type { CSSProperties, FC } from 'react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -72,9 +68,6 @@ export interface InputbarCoreProps {
 
   // Overlay rendered inside InputBarContainer at top-right (absolute positioned)
   topRightOverlay?: React.ReactNode
-
-  // Override the user preference for quick panel triggers
-  forceEnableQuickPanelTriggers?: boolean
 }
 
 const TextareaStyle: CSSProperties = {
@@ -82,30 +75,6 @@ const TextareaStyle: CSSProperties = {
   padding: '6px 15px 0px'
 }
 
-/**
- * InputbarCore - 核心输入栏组件
- *
- * 提供基础的文本输入、工具栏、拖拽等功能的 UI 框架
- * 业务逻辑通过 props 注入，保持组件纯粹
- *
- * @example
- * ```tsx
- * <InputbarCore
- *   text={text}
- *   onTextChange={(e) => setText(e.target.value)}
- *   textareaRef={textareaRef}
- *   textareaHeight={customHeight}
- *   onKeyDown={handleKeyDown}
- *   onPaste={handlePaste}
- *   topContent={<AttachmentPreview files={files} />}
- *   leftToolbar={<InputbarTools />}
- *   rightToolbar={<SendMessageButton />}
- *   quickPanel={<QuickPanelView />}
- *   fontSize={14}
- *   enableSpellCheck={true}
- * />
- * ```
- */
 export const InputbarCore: FC<InputbarCoreProps> = ({
   scope,
   placeholder,
@@ -124,39 +93,24 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   rightToolbar,
   topContent,
   pinnedContent,
-  topRightOverlay,
-  forceEnableQuickPanelTriggers
+  topRightOverlay
 }) => {
   const config = useMemo(() => getInputbarConfig(scope), [scope])
   const { files } = useInputbarToolsState()
-  const { setFiles, toolsRegistry, triggers } = useInputbarToolsDispatch()
+  const { setFiles } = useInputbarToolsDispatch()
   const { setExtensions } = useInputbarToolsInternalDispatch()
   const isEmpty = text.trim().length === 0
   const [inputFocus, setInputFocus] = useState(false)
-  const {
-    targetLanguage,
-    sendMessageShortcut,
-    fontSize,
-    pasteLongTextAsFile,
-    pasteLongTextThreshold,
-    enableQuickPanelTriggers,
-    enableSpellCheck
-  } = useSettings()
-  const quickPanelTriggersEnabled = forceEnableQuickPanelTriggers ?? enableQuickPanelTriggers
+  const { sendMessageShortcut, fontSize, pasteLongTextAsFile, pasteLongTextThreshold, enableSpellCheck } = useSettings()
 
   const { t } = useTranslation()
-  const [isTranslating, setIsTranslating] = useState(false)
-  const { getLanguageByLangcode } = useTranslate()
+  const [isTranslating] = useState(false)
 
   const dispatch = useAppDispatch()
   const { searching } = useRuntime()
   const startDragY = useRef<number>(0)
   const startHeight = useRef<number>(0)
   const { setTimeoutTimer } = useTimer()
-
-  // 全局 QuickPanel Hook (用于控制面板显示状态)
-  const quickPanel = useQuickPanel()
-  const quickPanelOpen = quickPanel.open
 
   const textRef = useRef(text)
   useEffect(() => {
@@ -187,100 +141,30 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     enabled: config.enableDragDrop,
     t
   })
-  // 判断是否有内容：文本不为空或有文件
   const noContent = isEmpty && files.length === 0
-  // 发送入口统一禁用条件：空内容、正在生成、全局搜索态
   const isSendDisabled = noContent || isLoading || searching
 
   useEffect(() => {
     setExtensions(supportedExts)
   }, [setExtensions, supportedExts])
 
-  const translate = useCallback(async () => {
-    if (isTranslating) {
-      return
-    }
-
-    try {
-      setIsTranslating(true)
-      const translatedText = await translateText(text, getLanguageByLangcode(targetLanguage))
-      translatedText && setText(translatedText)
-      setTimeoutTimer('translate', () => resizeTextArea(), 0)
-    } catch (error) {
-      logger.warn('Translation failed:', error as Error)
-    } finally {
-      setIsTranslating(false)
-    }
-  }, [getLanguageByLangcode, isTranslating, resizeTextArea, setText, setTimeoutTimer, targetLanguage, text])
-
-  const rootTriggerHandlerRef = useRef<((payload?: unknown) => void) | undefined>(undefined)
-
-  useEffect(() => {
-    rootTriggerHandlerRef.current = (payload) => {
-      const menuItems = triggers.getRootMenu()
-
-      if (text.trim()) {
-        menuItems.push({
-          label: t('translate.title'),
-          description: t('translate.menu.description'),
-          icon: <Languages size={16} />,
-          action: () => translate()
-        })
-      }
-
-      if (!menuItems.length) {
-        return
-      }
-
-      const triggerInfo = (payload ?? {}) as QuickPanelTriggerInfo
-      quickPanelOpen({
-        title: t('settings.quickPanel.title'),
-        list: menuItems,
-        symbol: QuickPanelReservedSymbol.Root,
-        triggerInfo
-      })
-    }
-  }, [triggers, quickPanelOpen, t, text, translate])
-
-  useEffect(() => {
-    if (!config.enableQuickPanel) {
-      return
-    }
-
-    const disposeRootTrigger = toolsRegistry.registerTrigger(
-      'inputbar-root',
-      QuickPanelReservedSymbol.Root,
-      (payload) => rootTriggerHandlerRef.current?.(payload)
-    )
-
-    return () => {
-      disposeRootTrigger()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.enableQuickPanel])
-
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (event.key === 'Tab' && inputFocus) {
         event.preventDefault()
         const textArea = textareaRef.current?.resizableTextArea?.textArea
-        if (!textArea) {
-          return
-        }
+        if (!textArea) return
         const cursorPosition = textArea.selectionStart
         const selectionLength = textArea.selectionEnd - textArea.selectionStart
-        const text = textArea.value
-
-        let match = text.slice(cursorPosition + selectionLength).match(/\$\{[^}]+\}/)
+        const textValue = textArea.value
+        let match = textValue.slice(cursorPosition + selectionLength).match(/\$\{[^}]+\}/)
         let startIndex: number
-
         if (!match) {
-          match = text.match(/\$\{[^}]+\}/)
+          match = textValue.match(/\$\{[^}]+\}/)
           startIndex = match?.index ?? -1
         } else {
           startIndex = cursorPosition + selectionLength + match.index!
         }
-
         if (startIndex !== -1) {
           const endIndex = startIndex + match![0].length
           textArea.setSelectionRange(startIndex, endIndex)
@@ -294,12 +178,8 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
           event.preventDefault()
           return
         }
-
-        if (event.shiftKey) {
-          return
-        }
+        if (event.shiftKey) return
       }
-
       if (event.key === 'Backspace' && text.length === 0 && files.length > 0) {
         setFiles((prev) => prev.slice(0, -1))
         event.preventDefault()
@@ -310,7 +190,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
       text.length,
       files.length,
       textareaRef,
-      translate,
       sendMessageShortcut,
       isSendDisabled,
       handleSendMessage,
@@ -322,99 +201,8 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const newText = e.target.value
       setText(newText)
-
-      const isDeletion = newText.length < textRef.current.length
-
-      const textArea = textareaRef.current?.resizableTextArea?.textArea
-      const cursorPosition = textArea?.selectionStart ?? newText.length
-      const lastSymbol = newText[cursorPosition - 1]
-      const previousChar = newText[cursorPosition - 2]
-      const isCursorAtTextStart = cursorPosition <= 1
-      const hasValidTriggerBoundary = previousChar === ' ' || isCursorAtTextStart
-
-      const openRootPanelAt = (position: number) => {
-        triggers.emit(QuickPanelReservedSymbol.Root, {
-          type: 'input',
-          position,
-          originalText: newText
-        })
-      }
-
-      const openMentionPanelAt = (position: number) => {
-        triggers.emit(QuickPanelReservedSymbol.MentionModels, {
-          type: 'input',
-          position,
-          originalText: newText
-        })
-      }
-
-      if (quickPanelTriggersEnabled && config.enableQuickPanel) {
-        const hasRootMenuItems = triggers.getRootMenu().length > 0
-        const textBeforeCursor = newText.slice(0, cursorPosition)
-        const lastRootIndex = textBeforeCursor.lastIndexOf(QuickPanelReservedSymbol.Root)
-        const lastMentionIndex = textBeforeCursor.lastIndexOf(QuickPanelReservedSymbol.MentionModels)
-        const lastTriggerIndex = Math.max(lastRootIndex, lastMentionIndex)
-
-        const allowResumeSearch =
-          !quickPanel.isVisible &&
-          (quickPanel.lastCloseAction === undefined || quickPanel.lastCloseAction === 'outsideclick')
-
-        if (!quickPanel.isVisible && lastTriggerIndex !== -1 && cursorPosition > lastTriggerIndex) {
-          const triggerChar = newText[lastTriggerIndex]
-          const boundaryChar = newText[lastTriggerIndex - 1] ?? ''
-          const hasBoundary = lastTriggerIndex === 0 || /\s/.test(boundaryChar)
-          const searchSegment = newText.slice(lastTriggerIndex + 1, cursorPosition)
-          const hasSearchContent = searchSegment.trim().length > 0
-
-          if (hasBoundary && (!hasSearchContent || isDeletion || allowResumeSearch)) {
-            if (triggerChar === QuickPanelReservedSymbol.Root && hasRootMenuItems) {
-              openRootPanelAt(lastTriggerIndex)
-            } else if (triggerChar === QuickPanelReservedSymbol.MentionModels) {
-              openMentionPanelAt(lastTriggerIndex)
-            }
-          }
-        }
-
-        if (lastSymbol === QuickPanelReservedSymbol.Root && hasValidTriggerBoundary && hasRootMenuItems) {
-          if (quickPanel.isVisible && quickPanel.symbol !== QuickPanelReservedSymbol.Root) {
-            quickPanel.close('switch-symbol')
-          }
-          if (!quickPanel.isVisible || quickPanel.symbol !== QuickPanelReservedSymbol.Root) {
-            openRootPanelAt(cursorPosition - 1)
-          }
-        }
-
-        if (lastSymbol === QuickPanelReservedSymbol.MentionModels && hasValidTriggerBoundary) {
-          if (quickPanel.isVisible && quickPanel.symbol !== QuickPanelReservedSymbol.MentionModels) {
-            quickPanel.close('switch-symbol')
-          }
-          if (!quickPanel.isVisible || quickPanel.symbol !== QuickPanelReservedSymbol.MentionModels) {
-            openMentionPanelAt(cursorPosition - 1)
-          }
-        }
-      }
-
-      if (quickPanel.isVisible && quickPanel.triggerInfo?.type === 'input') {
-        const activeSymbol = quickPanel.symbol as QuickPanelReservedSymbol
-        const triggerPosition = quickPanel.triggerInfo.position ?? -1
-        const isTrackedSymbol =
-          activeSymbol === QuickPanelReservedSymbol.Root || activeSymbol === QuickPanelReservedSymbol.MentionModels
-
-        if (isTrackedSymbol && triggerPosition >= 0) {
-          // Check if cursor is before the trigger position (user deleted the symbol)
-          if (cursorPosition <= triggerPosition) {
-            quickPanel.close('delete-symbol')
-          } else {
-            // Check if the trigger symbol still exists at the expected position
-            const triggerChar = newText[triggerPosition]
-            if (triggerChar !== activeSymbol) {
-              quickPanel.close('delete-symbol')
-            }
-          }
-        }
-      }
     },
-    [setText, textareaRef, quickPanelTriggersEnabled, config.enableQuickPanel, quickPanel, triggers]
+    [setText]
   )
 
   const onTranslated = useCallback(
@@ -429,7 +217,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     async (file: FileMetadata, event: React.MouseEvent<HTMLDivElement>) => {
       event.preventDefault()
       event.stopPropagation()
-
       try {
         const targetPath = file.path
         const content = await window.api.file.readExternal(targetPath, true)
@@ -438,18 +225,12 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         } catch (clipboardError) {
           logger.warn('Failed to copy txt attachment content to clipboard:', clipboardError as Error)
         }
-
         setText((prev) => {
-          if (!prev) {
-            return content
-          }
-
+          if (!prev) return content
           const needsSeparator = !prev.endsWith('\n')
           return needsSeparator ? `${prev}\n${content}` : prev + content
         })
-
         setFiles((prev) => prev.filter((currentFile) => currentFile.id !== file.id))
-
         setTimeoutTimer(
           'appendTxtAttachment',
           () => {
@@ -459,7 +240,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
               focusTextarea()
               textArea.setSelectionRange(end, end)
             }
-
             resizeTextArea(true)
           },
           0
@@ -475,33 +255,23 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
   const handleFocus = useCallback(() => {
     setInputFocus(true)
     dispatch(setSearching(false))
-    // Don't close panel in multiple selection mode, or if triggered by input
-    if (quickPanel.isVisible && quickPanel.triggerInfo?.type !== 'input' && !quickPanel.multiple) {
-      quickPanel.close()
-    }
     PasteService.setLastFocusedComponent('inputbar')
-  }, [dispatch, quickPanel])
+  }, [dispatch])
 
   const handleDragStart = useCallback(
     (event: React.MouseEvent) => {
-      if (!config.enableDragDrop) {
-        return
-      }
-
+      if (!config.enableDragDrop) return
       startDragY.current = event.clientY
       startHeight.current = textareaRef.current?.resizableTextArea?.textArea?.offsetHeight || 0
-
       const handleMouseMove = (e: MouseEvent) => {
         const deltaY = startDragY.current - e.clientY
         const newHeight = Math.max(40, Math.min(500, startHeight.current + deltaY))
         onHeightChange(newHeight)
       }
-
       const handleMouseUp = () => {
         document.removeEventListener('mousemove', handleMouseMove)
         document.removeEventListener('mouseup', handleMouseUp)
       }
-
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', handleMouseUp)
     },
@@ -537,25 +307,17 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
 
   useEffect(() => {
     const onFocus = () => {
-      if (document.activeElement?.closest('.ant-modal')) {
-        return
-      }
-
+      if (document.activeElement?.closest('.ant-modal')) return
       const lastFocusedComponent = PasteService.getLastFocusedComponent()
-      if (!lastFocusedComponent || lastFocusedComponent === 'inputbar') {
-        focusTextarea()
-      }
+      if (!lastFocusedComponent || lastFocusedComponent === 'inputbar') focusTextarea()
     }
-
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [focusTextarea])
 
   useEffect(() => {
     PasteService.init()
-
     PasteService.registerHandler('inputbar', handlePaste)
-
     return () => {
       PasteService.unregisterHandler('inputbar')
     }
@@ -573,7 +335,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
       />
     )
     extras.push(<SendMessageButton key="send-message" sendMessage={handleSendMessage} disabled={isSendDisabled} />)
-
     if (isLoading) {
       extras.push(
         <Tooltip key="pause" placement="top" title={t('chat.input.pause')} mouseLeaveDelay={0} arrow>
@@ -583,11 +344,8 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         </Tooltip>
       )
     }
-
     return <>{extras}</>
   }, [text, onTranslated, isTranslating, handleSendMessage, isSendDisabled, isLoading, t, onPause])
-
-  const quickPanelElement = config.enableQuickPanel ? <QuickPanelView setInputText={setText} /> : null
 
   return (
     <div style={{ width: '100%' }}>
@@ -598,7 +356,6 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         onDrop={handleDrop}
         className={classNames('inputbar')}>
         {pinnedContent}
-        {quickPanelElement}
         <InputBarContainer id="inputbar" className={classNames('inputbar-container', isDragging && 'file-dragging')}>
           <DragHandle onMouseDown={handleDragStart}>
             <HolderOutlined style={{ fontSize: 12 }} />
@@ -624,22 +381,16 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
             rows={2}
             autoSize={height ? false : { minRows: 2, maxRows: 20 }}
             styles={{ textarea: TextareaStyle }}
-            style={{
-              fontSize,
-              height: height,
-              minHeight: '30px'
-            }}
+            style={{ fontSize, height, minHeight: '30px' }}
             disabled={isTranslating || searching}
             onClick={() => {
               searching && dispatch(setSearching(false))
-              quickPanel.close()
             }}
           />
 
           <BottomBar>
             <LeftSection>
               {leftToolbar}
-              {/* input-toolbar divider + settings icon/button */}
               <Divider type="vertical" style={{ margin: '0 6px' }} />
               <InputbarSettings />
             </LeftSection>
@@ -669,11 +420,9 @@ const DragHandle = styled.div`
   opacity: 0;
   transition: opacity 0.2s;
   z-index: 1;
-
   &:hover {
     opacity: 1;
   }
-
   .anticon {
     transform: rotate(90deg);
     font-size: 14px;
@@ -695,10 +444,8 @@ const InputBarContainer = styled.div`
   border-radius: 17px;
   padding-top: 8px;
   background-color: var(--color-background-opacity);
-
   &.file-dragging {
     border: 2px dashed #2ecc71;
-
     &::before {
       content: '';
       position: absolute;

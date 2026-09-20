@@ -14,8 +14,9 @@ import * as z from 'zod'
  *   resolution is by canonical model id only (see the matching contract on
  *   `resolveCanonicalModel`).
  * - `models.json` publishes no provider-specific pricing or reasoning
- *   options. Those fields are absent (unknown), never filled from
- *   proxy-serving records as canonical facts.
+ *   options. Provider-specific `reasoning_options` from `api.json` are kept
+ *   as serving metadata under `providers[*].models` and never merged into
+ *   canonical `models` facts.
  * - External absent optional fields mean unknown, not false. Required
  *   models.dev booleans normalize to supported/unsupported after validated
  *   parsing.
@@ -41,8 +42,8 @@ export const MODEL_METADATA_ENDPOINT = 'https://models.dev/models.json'
  */
 export const MODEL_METADATA_PROVIDER_SOURCES_ENDPOINT = 'https://models.dev/api.json'
 
-/** Version of the Main on-disk cache envelope (v2 = canonical models.json shape). */
-export const MODEL_METADATA_CACHE_VERSION = 2
+/** Version of the Main on-disk cache envelope (v3 = canonical + provider serving reasoning options). */
+export const MODEL_METADATA_CACHE_VERSION = 3
 
 /** Background refresh cadence: no more than once per 24h. */
 export const MODEL_METADATA_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -68,17 +69,25 @@ export const MODEL_METADATA_MAX_BYTES = 10 * 1024 * 1024
 export interface ModelMetadataNormalizationLimits {
   maxProviders: number
   maxTotalModels: number
+  maxModelsPerProvider: number
   maxKeyLength: number
   maxStringLength: number
   maxModalities: number
+  maxReasoningOptions: number
+  maxEffortValues: number
+  maxEffortValueLength: number
 }
 
 export const DEFAULT_NORMALIZATION_LIMITS: ModelMetadataNormalizationLimits = {
   maxProviders: 1000,
   maxTotalModels: 20000,
+  maxModelsPerProvider: 2000,
   maxKeyLength: 256,
   maxStringLength: 1024,
-  maxModalities: 32
+  maxModalities: 32,
+  maxReasoningOptions: 16,
+  maxEffortValues: 32,
+  maxEffortValueLength: 64
 }
 
 /**
@@ -127,14 +136,16 @@ export interface NormalizedModelMetadata {
   limits?: ModelMetadataLimits
 }
 
-/**
- * Minimal provider-source record for connection-logo attribution only.
- * Normalized `api` base URL (empty when the source publishes none) plus the
- * display name. Carries no model facts.
- */
+export interface NormalizedProviderServingModel {
+  /** Normalized effort values extracted from `reasoning_options` type `effort`; `max` is mapped to `xhigh`. */
+  effort?: string[]
+}
+
 export interface NormalizedProviderSource {
   api: string
   name: string
+  /** Provider-specific serving models, keyed by exact model id. Never merged into canonical `models`. */
+  models?: Record<string, NormalizedProviderServingModel>
 }
 
 export interface ModelMetadataSnapshot {
@@ -268,9 +279,14 @@ const NormalizedModelSchema = z.looseObject({
   limits: LimitsSchema.optional()
 })
 
+const NormalizedProviderServingModelSchema = z.looseObject({
+  effort: z.array(z.string()).optional()
+})
+
 const NormalizedProviderSourceSchema = z.looseObject({
   api: z.string(),
-  name: z.string()
+  name: z.string(),
+  models: z.record(z.string(), NormalizedProviderServingModelSchema).optional()
 })
 
 export const ModelMetadataSnapshotSchema = z.looseObject({
@@ -411,12 +427,53 @@ export function normalizeCanonicalModelsPayload(
   return models
 }
 
+function normalizeReasoningEffortValues(
+  value: unknown,
+  limits: ModelMetadataNormalizationLimits
+): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set<string>()
+  const eff: string[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    if (eff.length >= limits.maxReasoningOptions) break
+    const type = asString(entry['type'], limits.maxStringLength)
+    if (type !== 'effort') continue
+    const rawValues = Array.isArray(entry['values']) ? entry['values'] : []
+    for (const v of rawValues) {
+      if (eff.length >= limits.maxEffortValues) break
+      if (typeof v !== 'string' || v.length === 0 || v.length > limits.maxEffortValueLength) continue
+      const lower = v.trim().toLowerCase()
+      if (!lower) continue
+      const mapped = lower === 'max' ? 'xhigh' : lower
+      if (seen.has(mapped)) continue
+      seen.add(mapped)
+      eff.push(mapped)
+    }
+  }
+  return eff.length > 0 ? eff : undefined
+}
+
+function normalizeProviderServingModel(
+  raw: unknown,
+  limits: ModelMetadataNormalizationLimits
+): NormalizedProviderServingModel | null {
+  if (!isRecord(raw)) return null
+  const effort = normalizeReasoningEffortValues(raw['reasoning_options'], limits)
+  if (!effort) return null
+  return { effort }
+}
+
 /**
- * Normalize a raw `https://models.dev/api.json` payload into the minimal
- * provider-source list for connection-logo attribution only (`api` + `name`
- * per source; model records are deliberately not read). Returns null when the
- * top level is not a record; an empty record is a usable (if logo-poor)
- * result, never a failure. Optional `limits` override exists for tests.
+ * Normalize a raw `https://models.dev/api.json` payload into the provider-source
+ * list with optional provider-specific serving metadata. Each source keeps
+ * `api` + `name` for connection-logo attribution, and when the upstream
+ * publishes `models` with `reasoning_options` type `effort`, those effort
+ * values are kept under `providers[*].models` (with `max` mapped to `xhigh`).
+ * Provider serving records are never merged into canonical `models`. Returns
+ * null when the top level is not a record; an empty record is a usable
+ * (if logo-poor) result, never a failure. Optional `limits` override exists
+ * for tests.
  */
 export function normalizeProviderSourcesPayload(
   raw: unknown,
@@ -429,10 +486,25 @@ export function normalizeProviderSourcesPayload(
     if (!isSafeMetadataKey(sourceId) || sourceId.length === 0 || sourceId.length > limits.maxKeyLength) continue
     if (!isRecord(providerRaw)) continue
     if (Object.keys(providers).length >= limits.maxProviders) return null
-    providers[sourceId] = {
+    const source: NormalizedProviderSource = {
       api: asString(providerRaw['api'], limits.maxStringLength) ?? '',
       name: asString(providerRaw['name'], limits.maxStringLength) ?? sourceId
     }
+    const modelsRaw = providerRaw['models']
+    if (isRecord(modelsRaw)) {
+      const models: Record<string, NormalizedProviderServingModel> = {}
+      let count = 0
+      for (const [modelKey, modelRaw] of Object.entries(modelsRaw)) {
+        if (!isSafeMetadataKey(modelKey) || modelKey.length === 0 || modelKey.length > limits.maxKeyLength) continue
+        if (count >= limits.maxModelsPerProvider) break
+        const norm = normalizeProviderServingModel(modelRaw, limits)
+        if (!norm) continue
+        models[modelKey] = norm
+        count += 1
+      }
+      if (Object.keys(models).length > 0) source.models = models
+    }
+    providers[sourceId] = source
   }
   return providers
 }
@@ -445,10 +517,12 @@ export function parseModelMetadataSnapshot(data: unknown): ModelMetadataSnapshot
 
 /**
  * Defensively parse the Main on-disk cache envelope. Accepts the versioned
- * v2 envelope and (forward-compat) a bare v2 snapshot; null when neither
- * parses. v1 (api.json-shaped) caches are rejected by the version literal
- * and by the new snapshot shape — this is a Main cache format change, not a
- * Redux migration.
+ * v3 envelope and (forward-compat) a bare v3 snapshot; null when neither
+ * parses. v1 (api.json-shaped) and v2 (no serving models) caches are
+ * rejected by the version literal — this is a Main cache format change, not
+ * a Redux migration. v2 snapshots are accepted as bare snapshots for
+ * forward compat via the loose provider schema (missing `models` stays
+ * undefined).
  */
 export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadataSnapshot; etag?: string } | null {
   const envelope = ModelMetadataCacheEnvelopeSchema.safeParse(data)
@@ -460,6 +534,38 @@ export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadat
   }
   const snapshot = parseModelMetadataSnapshot(data)
   return snapshot ? { snapshot, etag: snapshot.etag } : null
+}
+
+// ---------------------------------------------------------------------------
+// Provider-specific serving metadata (never merged into canonical)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve provider-specific serving effort values for a model id inside one
+ * source. Exact trimmed model-id only (case-sensitive, no basename or
+ * case-fold), zero model record -> undefined. Provider-specific records never
+ * merge into canonical capabilities.
+ */
+export function resolveProviderServingEffort(
+  sourceId: string | null | undefined,
+  modelId: string | undefined | null,
+  snapshot: ModelMetadataSnapshot | null | undefined
+): string[] | undefined {
+  if (!sourceId || !modelId || !snapshot) return undefined
+  if (!isSafeMetadataKey(sourceId)) return undefined
+  const key = modelId.trim()
+  if (!key || !isSafeMetadataKey(key)) return undefined
+  const providers = (snapshot as { providers?: unknown }).providers
+  if (!providers || typeof providers !== 'object') return undefined
+  const source = (providers as Record<string, unknown>)[sourceId]
+  if (!source || typeof source !== 'object') return undefined
+  const models = (source as { models?: unknown }).models
+  if (!models || typeof models !== 'object') return undefined
+  const entry = (models as Record<string, unknown>)[key]
+  if (!entry || typeof entry !== 'object') return undefined
+  const effort = (entry as { effort?: unknown }).effort
+  if (!Array.isArray(effort) || effort.length === 0) return undefined
+  return effort as string[]
 }
 
 // ---------------------------------------------------------------------------

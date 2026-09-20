@@ -64,11 +64,13 @@ import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, R
 import storage from 'redux-persist/lib/storage'
 import { bench, expect, vi } from 'vitest'
 
-// Isolate from global singleton store — assistants slice transitively imports
-// `store` via AssistantService. Mock that service before the slice is evaluated
-// (vi.mock is hoisted) so the bench reducer can be constructed without the
-// singleton side effects, while still reusing the real migrate + persist wire.
-vi.mock('@renderer/services/AssistantService', () => {
+// Isolate from global singleton store — assistants slice previously imported
+// `store` via AssistantService; after the cycle break it imports the
+// cycle-free `@renderer/services/assistantDefaults`. Mock that module before
+// the slice is evaluated (vi.mock is hoisted) so the bench reducer can be
+// constructed without singleton side effects, while still reusing the real
+// migrate + persist wire.
+vi.mock('@renderer/services/assistantDefaults', () => {
   const DEFAULT_ASSISTANT_SETTINGS = {
     temperature: 1,
     contextCount: 25,
@@ -109,10 +111,7 @@ vi.mock('@renderer/services/AssistantService', () => {
       type: 'assistant' as const,
       settings: { ...DEFAULT_ASSISTANT_SETTINGS }
     }),
-    getDefaultTopic: (assistantId: string) => makeTopic(assistantId),
-    getDefaultAssistantSettings: () => ({ ...DEFAULT_ASSISTANT_SETTINGS }),
-    getDefaultTopicSettings: () => ({}),
-    ensureOrdinaryTopicOwnership: async () => {}
+    getDefaultTopic: (assistantId: string) => makeTopic(assistantId)
   }
 })
 

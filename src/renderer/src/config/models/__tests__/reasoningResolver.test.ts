@@ -10,8 +10,6 @@ import {
   isReasoningModel
 } from '../reasoning'
 
-// Isolate the predicate chain from the real Redux store (same pattern as the
-// sibling capability tests).
 vi.mock('@renderer/hooks/useStore', () => ({
   getStoreProviders: vi.fn(() => [])
 }))
@@ -55,33 +53,35 @@ const geminiProvider = {
 
 const providersById: Record<string, Provider> = { a: anthropicProvider, g: geminiProvider }
 
-// Canonical snapshot: canonical models.json publishes reasoning support but
-// no reasoning options, so option lists always come from heuristics.
 const SNAPSHOT: ModelMetadataSnapshot = {
   source: 'models.dev',
   fetchedAt: 1_000_000,
   models: {
-    // Matches the o-series heuristic (default/low/medium/high); canonical
-    // metadata knows reasoning support but publishes no controls.
     'lab/o3-mini': {
       id: 'lab/o3-mini',
       modalities: { input: ['text'], output: ['text'] },
       toolCall: false,
       reasoning: true
     },
-    'lab/toggle-only-model': {
-      id: 'lab/toggle-only-model',
+    'lab/reasoning-true': {
+      id: 'lab/reasoning-true',
       modalities: { input: ['text'], output: ['text'] },
-      toolCall: false,
       reasoning: true
     },
-    'lab/fixed-ext-model': {
-      id: 'lab/fixed-ext-model',
+    'lab/reasoning-false': {
+      id: 'lab/reasoning-false',
       modalities: { input: ['text'], output: ['text'] },
-      toolCall: false,
+      reasoning: false
+    },
+    'lab/unknown-missing': {
+      id: 'lab/unknown-missing',
+      modalities: { input: ['text'], output: ['text'] }
+    },
+    'lab/served-model': {
+      id: 'lab/served-model',
+      modalities: { input: ['text'], output: ['text'] },
       reasoning: true
     },
-    // Canonical false overrules a legacy true ('thinking' in the id).
     'lab/my-thinking-fork': {
       id: 'lab/my-thinking-fork',
       modalities: { input: ['text'], output: ['text'] },
@@ -89,7 +89,25 @@ const SNAPSHOT: ModelMetadataSnapshot = {
       reasoning: false
     }
   },
-  providers: {}
+  providers: {
+    anthropic: {
+      api: '',
+      name: 'a',
+      models: {
+        'served-model': { effort: ['low', 'high', 'max'] },
+        'low-only': { effort: ['low'] },
+        'dedup-model': { effort: ['low', 'high', 'max', 'low'] },
+        'with-none': { effort: ['none', 'low'] }
+      }
+    },
+    google: {
+      api: '',
+      name: 'g',
+      models: {
+        'gemini-served': { effort: ['low', 'high'] }
+      }
+    }
+  }
 }
 
 const makeModel = (id: string, provider = 'a', capabilities?: Model['capabilities']): Model =>
@@ -101,69 +119,146 @@ beforeEach(() => {
   setModelMetadataSnapshotForTests(SNAPSHOT)
 })
 
-describe('single resolver: automatic capability, no manual marking', () => {
-  it('resolves reasoning capability without user-selected capabilities', () => {
-    expect(isReasoningModel(makeModel('o3-mini'))).toBe(true)
-    expect(isFixedReasoningModel(makeModel('o3-mini'))).toBe(false)
+describe('single resolver: product options default/none', () => {
+  it('reasoning:false returns default/none', () => {
+    expect(getResolvedReasoningOptions(makeModel('reasoning-false'))).toEqual(['default', 'none'])
+    expect(getResolvedReasoningOptions(makeModel('my-thinking-fork'))).toEqual(['default', 'none'])
   })
 
-  it('lets an explicit user override win over canonical metadata', () => {
+  it('isFixed is always false (UI fixed determination removed)', () => {
+    expect(isFixedReasoningModel(makeModel('reasoning-false'))).toBe(false)
+    expect(isFixedReasoningModel(makeModel('o3-mini'))).toBe(false)
+    expect(isFixedReasoningModel(makeModel('served-model'))).toBe(false)
+  })
+})
+
+describe('single resolver: canonical true or missing -> generic fallback', () => {
+  it('reasoning:true without serving returns generic low/medium/high', () => {
+    expect(getResolvedReasoningOptions(makeModel('reasoning-true'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'medium',
+      'high'
+    ])
+    expect(getResolvedReasoningOptions(makeModel('o3-mini'))).toEqual(['default', 'none', 'low', 'medium', 'high'])
+  })
+
+  it('missing reasoning (unknown) returns same generic fallback', () => {
+    expect(getResolvedReasoningOptions(makeModel('unknown-missing'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+
+  it('falls back to generic when snapshot is absent', () => {
+    setModelMetadataSnapshotForTests(null)
+    expect(getResolvedReasoningOptions(makeModel('o3-mini'))).toEqual(['default', 'none', 'low', 'medium', 'high'])
+  })
+})
+
+describe('single resolver: provider-specific serving effort', () => {
+  it('with serving effort values returns default/none + normalized values, max->xhigh', () => {
+    expect(getResolvedReasoningOptions(makeModel('served-model'))).toEqual(['default', 'none', 'low', 'high', 'xhigh'])
+    expect(getModelSupportedReasoningEffortOptions(makeModel('served-model'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'high',
+      'xhigh'
+    ])
+  })
+
+  it('deduplicates and keeps product none only once', () => {
+    expect(getResolvedReasoningOptions(makeModel('dedup-model'))).toEqual(['default', 'none', 'low', 'high', 'xhigh'])
+    expect(getResolvedReasoningOptions(makeModel('with-none'))).toEqual(['default', 'none', 'low'])
+  })
+
+  it('without serving for this provider falls back to generic', () => {
+    // reasoning-true has no serving entry for provider a
+    expect(getResolvedReasoningOptions(makeModel('reasoning-true'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+
+  it('provider mismatch does not leak serving (exact provider->source mapping)', () => {
+    // served-model only exists under provider a, not g
+    expect(getResolvedReasoningOptions(makeModel('served-model', 'g'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+
+  it('explicit null provider (known absent) falls back to generic, no serving', () => {
+    expect(getResolvedReasoningOptions(makeModel('served-model'), null)).toEqual([
+      'default',
+      'none',
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+})
+
+describe('single resolver: provider-specific not merged into canonical', () => {
+  it('canonical false stays false regardless of other provider serving', () => {
+    // reasoning-false is canonical false; even if another provider had serving for same id (not in this snapshot), it must stay default/none
+    expect(isReasoningModel(makeModel('reasoning-false'))).toBe(false)
+    expect(getResolvedReasoningOptions(makeModel('reasoning-false'))).toEqual(['default', 'none'])
+  })
+
+  it('same model id served under one provider does not affect canonical global', () => {
+    // served-model is canonical true with serving under a; under g it should not inherit a's serving
+    expect(getResolvedReasoningOptions(makeModel('served-model', 'a'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'high',
+      'xhigh'
+    ])
+    expect(getResolvedReasoningOptions(makeModel('served-model', 'g'))).not.toEqual([
+      'default',
+      'none',
+      'low',
+      'high',
+      'xhigh'
+    ])
+  })
+})
+
+describe('single resolver: user override', () => {
+  it('lets explicit user override win: false -> undefined, true -> generic or serving', () => {
     const forced = makeModel('never-seen-zzz', 'a', [{ type: 'reasoning', isUserSelected: true }])
-    expect(getResolvedReasoningOptions(forced)).toEqual(['default'])
+    expect(getResolvedReasoningOptions(forced)).toEqual(['default', 'none', 'low', 'medium', 'high'])
     const rejected = makeModel('o3-mini', 'a', [{ type: 'reasoning', isUserSelected: false }])
     expect(getResolvedReasoningOptions(rejected)).toBeUndefined()
   })
-})
 
-describe('single resolver: canonical support with heuristic option lists', () => {
-  it('uses heuristic lists when canonical metadata knows reasoning but publishes no controls', () => {
-    expect(getResolvedReasoningOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'medium', 'high'])
-    expect(getModelSupportedReasoningEffortOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'medium', 'high'])
-  })
-
-  it('lets canonical false overrule a legacy true', () => {
-    expect(isReasoningModel(makeModel('my-thinking-fork'))).toBe(false)
-    expect(getResolvedReasoningOptions(makeModel('my-thinking-fork'))).toBeUndefined()
-  })
-
-  it('falls back to heuristics when the snapshot is absent', () => {
-    setModelMetadataSnapshotForTests(null)
-    expect(getResolvedReasoningOptions(makeModel('o3-mini'))).toEqual(['default', 'low', 'medium', 'high'])
+  it('user forced true with serving returns serving options', () => {
+    const forcedServed = makeModel('served-model', 'a', [{ type: 'reasoning', isUserSelected: true }])
+    expect(getResolvedReasoningOptions(forcedServed)).toEqual(['default', 'none', 'low', 'high', 'xhigh'])
   })
 })
 
-describe('single resolver: fixed models', () => {
-  it('represents reasoning without heuristic controls as fixed (default only, no false menu)', () => {
-    expect(getResolvedReasoningOptions(makeModel('fixed-ext-model'))).toEqual(['default'])
-    expect(isFixedReasoningModel(makeModel('fixed-ext-model'))).toBe(true)
-  })
-
-  it('keeps always-thinking Qwen fixed and controllable Qwen listed', () => {
-    expect(getResolvedReasoningOptions(makeModel('qwen3-thinking'))).toEqual(['default'])
-    expect(isFixedReasoningModel(makeModel('qwen3-thinking'))).toBe(true)
-    const controllable = getResolvedReasoningOptions(makeModel('qwen3-235b-a22b'))
-    expect(controllable).toContain('high')
-    expect(controllable?.length).toBeGreaterThan(1)
-  })
-
-  it('leaves unknown models undefined (never gated, never fixed)', () => {
-    expect(getResolvedReasoningOptions(makeModel('never-seen-zzz'))).toBeUndefined()
+describe('single resolver: request layer lazy (no extra blocking)', () => {
+  it('unknown model without serving still returns generic (never undefined) unless user override false', () => {
+    expect(getResolvedReasoningOptions(makeModel('never-seen-zzz'))).toEqual([
+      'default',
+      'none',
+      'low',
+      'medium',
+      'high'
+    ])
     expect(isFixedReasoningModel(makeModel('never-seen-zzz'))).toBe(false)
-  })
-})
-
-describe('single resolver: protocol lane filtering (no brand branches)', () => {
-  it('degrades non-Gemini reasoning to fixed on the Gemini native lane', () => {
-    expect(getResolvedReasoningOptions(makeModel('o3-mini'), geminiProvider)).toEqual(['default'])
-  })
-
-  it('skips lane filtering when the connection is explicitly unknown', () => {
-    expect(getResolvedReasoningOptions(makeModel('o3-mini'), null)).toEqual(['default', 'low', 'medium', 'high'])
-  })
-
-  it('keeps Gemini-family controls on the Gemini native lane', () => {
-    const options = getResolvedReasoningOptions(makeModel('gemini-2.5-flash'), geminiProvider)
-    expect(options).toContain('high')
-    expect(options?.length).toBeGreaterThan(1)
   })
 })

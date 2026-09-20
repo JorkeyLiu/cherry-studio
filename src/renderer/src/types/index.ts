@@ -203,6 +203,12 @@ export type AssistantSettings = {
    * FIXME: It should be managed by external cache service instead of being stored in the assistant
    */
   reasoning_effort_cache?: ReasoningEffortOption
+  /**
+   * Per-model toggle for showing full reasoning options in the thinking panel.
+   * Key format matches `reasoning_effort_by_model` (`${provider}:${model.id}`).
+   * True means show all 8 options; false/undefined shows resolver defaults.
+   */
+  reasoning_effort_show_all_by_model?: Record<string, boolean>
   qwenThinkMode?: boolean
   toolUseMode: 'function' | 'prompt'
   maxToolCalls?: number

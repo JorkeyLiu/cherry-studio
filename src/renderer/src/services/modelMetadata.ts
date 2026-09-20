@@ -9,7 +9,8 @@ import {
   type NormalizedModelMetadata,
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
-  resolveCanonicalModel
+  resolveCanonicalModel,
+  resolveProviderServingEffort
 } from '@shared/modelMetadata'
 import { isSafeLogoSourceId } from '@shared/providerLogo'
 
@@ -199,6 +200,31 @@ export function resolveCanonicalModelEntry(
   current: ModelMetadataSnapshot | null = snapshot
 ): NormalizedModelMetadata | undefined {
   return resolveCanonicalModel(modelId, current)?.entry
+}
+
+/**
+ * Provider-specific serving effort values for a model, resolved through the
+ * exact owning provider -> source-id mapping. Exact trimmed model-id match
+ * only, no basename/case-fold. Provider-specific records never merge into
+ * canonical capabilities. Returns undefined when unknown or when the
+ * connection is explicitly absent. Never throws.
+ */
+export function resolveServingEffortForModel(
+  model: Model | undefined | null,
+  explicitProvider?: Provider | null,
+  current: ModelMetadataSnapshot | null = snapshot
+): string[] | undefined {
+  try {
+    if (!model || typeof model.id !== 'string') return undefined
+    const snapshotToUse = current ?? snapshot
+    const provider = explicitProvider !== undefined ? explicitProvider : resolveProviderForMetadata(model)
+    if (!provider) return undefined
+    const sourceId = resolveMetadataSource(provider, snapshotToUse)
+    if (!sourceId) return undefined
+    return resolveProviderServingEffort(sourceId, model.id, snapshotToUse)
+  } catch {
+    return undefined
+  }
 }
 
 /**

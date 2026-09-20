@@ -1,127 +1,154 @@
 import { ActionIconButton } from '@renderer/components/Buttons'
-import type { QuickPanelListItem } from '@renderer/components/QuickPanel'
-import { QuickPanelReservedSymbol, useQuickPanel } from '@renderer/components/QuickPanel'
-import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
+import ToolPopover from '@renderer/pages/home/Inputbar/components/ToolPopover'
 import { useAppSelector } from '@renderer/store'
 import type { KnowledgeBase } from '@renderer/types'
 import { Tooltip } from 'antd'
-import { CircleX, FileSearch, Plus } from 'lucide-react'
+import { Check, CircleX, FileSearch, Plus } from 'lucide-react'
 import type { FC } from 'react'
-import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
+import styled from 'styled-components'
 
 interface Props {
-  quickPanel: ToolQuickPanelApi
   selectedBases?: KnowledgeBase[]
   onSelect: (bases: KnowledgeBase[]) => void
   disabled?: boolean
 }
 
-const KnowledgeBaseButton: FC<Props> = ({ quickPanel, selectedBases, onSelect, disabled }) => {
+const KnowledgeBaseButton: FC<Props> = ({ selectedBases, onSelect, disabled }) => {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const quickPanelHook = useQuickPanel()
   const knowledgeState = useAppSelector((state) => state.knowledge)
-  const selectedBasesRef = useRef(selectedBases)
-
-  useEffect(() => {
-    selectedBasesRef.current = selectedBases
-  }, [selectedBases])
+  const [open, setOpen] = useState(false)
 
   const handleBaseSelect = useCallback(
     (base: KnowledgeBase) => {
-      const currentSelectedBases = selectedBasesRef.current
-
-      if (currentSelectedBases?.some((selected) => selected.id === base.id)) {
-        onSelect(currentSelectedBases.filter((selected) => selected.id !== base.id))
+      const current = selectedBases ?? []
+      if (current.some((selected) => selected.id === base.id)) {
+        onSelect(current.filter((selected) => selected.id !== base.id))
       } else {
-        onSelect([...(currentSelectedBases || []), base])
+        onSelect([...current, base])
       }
     },
-    [onSelect]
+    [onSelect, selectedBases]
   )
 
-  const baseItems = useMemo<QuickPanelListItem[]>(() => {
-    const items: QuickPanelListItem[] = knowledgeState.bases.map((base) => ({
-      label: base.name,
-      description: `${base.items.length} ${t('files.count')}`,
-      icon: <FileSearch />,
-      action: () => handleBaseSelect(base),
-      isSelected: selectedBases?.some((selected) => selected.id === base.id)
-    }))
+  const handleClearAll = useCallback(() => {
+    onSelect([])
+    setOpen(false)
+  }, [onSelect])
 
-    items.push({
-      label: t('knowledge.add.title') + '...',
-      icon: <Plus />,
-      action: () => navigate('/knowledge'),
-      isSelected: false
-    })
+  const content = useMemo(() => {
+    return (
+      <div>
+        <PopoverTitle>{t('chat.input.knowledge_base')}</PopoverTitle>
+        <List>
+          <ListItem onClick={handleClearAll} data-testid="kb-clear-all">
+            <Left>
+              <CircleX size={16} />
+              <div>
+                <Label>{t('settings.input.clear.all')}</Label>
+                <Desc>{t('settings.input.clear.knowledge_base')}</Desc>
+              </div>
+            </Left>
+          </ListItem>
+          {knowledgeState.bases.map((base) => {
+            const isSelected = selectedBases?.some((selected) => selected.id === base.id) ?? false
+            return (
+              <ListItem
+                key={base.id}
+                $selected={isSelected}
+                onClick={() => handleBaseSelect(base)}
+                data-testid={`kb-option-${base.id}`}
+                data-selected={isSelected}>
+                <Left>
+                  <FileSearch size={16} />
+                  <div>
+                    <Label>{base.name}</Label>
+                    <Desc>
+                      {base.items.length} {t('files.count')}
+                    </Desc>
+                  </div>
+                </Left>
+                {isSelected && <Check size={14} />}
+              </ListItem>
+            )
+          })}
+          <ListItem
+            onClick={() => {
+              navigate('/knowledge')
+              setOpen(false)
+            }}
+            data-testid="kb-add">
+            <Left>
+              <Plus size={16} />
+              <Label>{t('knowledge.add.title')}...</Label>
+            </Left>
+          </ListItem>
+        </List>
+      </div>
+    )
+  }, [t, knowledgeState.bases, selectedBases, handleBaseSelect, handleClearAll, navigate])
 
-    items.unshift({
-      label: t('settings.input.clear.all'),
-      description: t('settings.input.clear.knowledge_base'),
-      icon: <CircleX />,
-      isSelected: false,
-      action: ({ context: ctx }) => {
-        onSelect([])
-        ctx.close()
-      }
-    })
-
-    return items
-  }, [knowledgeState.bases, t, selectedBases, handleBaseSelect, navigate, onSelect])
-
-  const openQuickPanel = useCallback(() => {
-    quickPanelHook.open({
-      title: t('chat.input.knowledge_base'),
-      list: baseItems,
-      symbol: QuickPanelReservedSymbol.KnowledgeBase,
-      multiple: true,
-      afterAction({ item }) {
-        item.isSelected = !item.isSelected
-      }
-    })
-  }, [baseItems, quickPanelHook, t])
-
-  const handleOpenQuickPanel = useCallback(() => {
-    if (quickPanelHook.isVisible && quickPanelHook.symbol === QuickPanelReservedSymbol.KnowledgeBase) {
-      quickPanelHook.close()
-    } else {
-      openQuickPanel()
-    }
-  }, [openQuickPanel, quickPanelHook])
-
-  useEffect(() => {
-    const disposeRootMenu = quickPanel.registerRootMenu([
-      {
-        label: t('chat.input.knowledge_base'),
-        description: '',
-        icon: <FileSearch />,
-        isMenu: true,
-        action: () => openQuickPanel()
-      }
-    ])
-
-    const disposeTrigger = quickPanel.registerTrigger(QuickPanelReservedSymbol.KnowledgeBase, () => openQuickPanel())
-
-    return () => {
-      disposeRootMenu()
-      disposeTrigger()
-    }
-  }, [openQuickPanel, quickPanel, t])
+  const active = selectedBases && selectedBases.length > 0
 
   return (
-    <Tooltip placement="top" title={t('chat.input.knowledge_base')} mouseLeaveDelay={0} arrow>
-      <ActionIconButton
-        onClick={handleOpenQuickPanel}
-        active={selectedBases && selectedBases.length > 0}
-        disabled={disabled}
-        aria-label={t('chat.input.knowledge_base')}>
-        <FileSearch size={18} />
-      </ActionIconButton>
-    </Tooltip>
+    <ToolPopover open={open} onOpenChange={setOpen} content={content}>
+      <Tooltip
+        placement="top"
+        title={t('chat.input.knowledge_base')}
+        mouseLeaveDelay={0}
+        arrow
+        open={open ? false : undefined}>
+        <ActionIconButton active={!!active} disabled={disabled} aria-label={t('chat.input.knowledge_base')}>
+          <FileSearch size={18} />
+        </ActionIconButton>
+      </Tooltip>
+    </ToolPopover>
   )
 }
+
+const PopoverTitle = styled.div`
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+`
+
+const List = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+`
+
+const ListItem = styled.div<{ $selected?: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: ${(p) => (p.$selected ? 'var(--color-background-soft)' : 'transparent')};
+  &:hover {
+    background: var(--color-background-soft);
+  }
+`
+
+const Left = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`
+
+const Label = styled.div`
+  font-size: 13px;
+`
+
+const Desc = styled.div`
+  font-size: 11px;
+  color: var(--color-text-3);
+`
 
 export default memo(KnowledgeBaseButton)

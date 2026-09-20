@@ -1,29 +1,16 @@
 import { defineTool, registerTool, TopicType } from '@renderer/pages/home/Inputbar/types'
 
 import WebSearchButton from './components/WebSearchButton'
-import WebSearchQuickPanelManager from './components/WebSearchQuickPanelManager'
 
-/**
- * Web Search Tool
- *
- * Allows users to enable web search for their messages.
- * Supports both model built-in search and external search providers.
- */
 const webSearchTool = defineTool({
   key: 'web_search',
   label: (t) => t('chat.input.web_search.label'),
-
   visibleInScopes: [TopicType.Chat],
-  // Unit B: built-in search availability follows the provider adapter at
-  // request time, never model metadata. Always offer the control here.
   condition: () => true,
-
   render: function WebSearchToolRender(context) {
-    const { assistant, quickPanelController } = context
-
-    return <WebSearchButton quickPanelController={quickPanelController} assistantId={assistant.id} />
-  },
-  quickPanelManager: WebSearchQuickPanelManager
+    const { assistant } = context
+    return <WebSearchButton assistantId={assistant.id} />
+  }
 })
 
 registerTool(webSearchTool)

@@ -1,4 +1,8 @@
-import { resolveCanonicalModelEntry, resolveProviderForMetadata } from '@renderer/services/modelMetadata'
+import {
+  resolveCanonicalModelEntry,
+  resolveProviderForMetadata,
+  resolveServingEffortForModel
+} from '@renderer/services/modelMetadata'
 import type { Model, Provider } from '@renderer/types'
 import { isUserSelectedModelType } from '@renderer/utils'
 import type { NormalizedModelMetadata } from '@shared/modelMetadata'
@@ -91,6 +95,15 @@ export function resolveExternalReasoningSupport(
   const entry = getExternalModelEntry(model, provider)
   if (!entry || entry.reasoning === undefined) return undefined
   return entry.reasoning
+}
+
+/** Provider-specific serving effort values (`reasoning_options` type `effort`), normalized (`max` -> `xhigh`). */
+export function resolveServingReasoningEffort(
+  model: Model | undefined | null,
+  provider?: Provider | null
+): string[] | undefined {
+  // Preserve explicit null (known absent) vs undefined (auto-resolve via exact provider).
+  return resolveServingEffortForModel(model, provider === undefined ? undefined : provider)
 }
 
 /** Temperature support from canonical `temperature` (absent means unknown). */

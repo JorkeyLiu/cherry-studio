@@ -1,8 +1,5 @@
-import type { QuickPanelListItem, QuickPanelReservedSymbol } from '@renderer/components/QuickPanel'
 import type { FileMetadata, KnowledgeBase, Model } from '@renderer/types'
-import React, { createContext, use, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-
-type QuickPanelTriggerHandler = (payload?: unknown) => void
+import React, { createContext, use, useEffect, useMemo, useRef, useState } from 'react'
 
 /**
  * Read-only state interface for Inputbar tools.
@@ -23,48 +20,6 @@ export interface InputbarToolsState {
 }
 
 /**
- * Tools registry API for tool buttons.
- * Used to register menu items and triggers.
- */
-export interface ToolsRegistryAPI {
-  /**
-   * Register a tool to the root menu (triggered by `/`).
-   * @param toolKey - Unique tool identifier
-   * @param entries - Menu items to register
-   * @returns Cleanup function to unregister
-   */
-  registerRootMenu: (toolKey: string, entries: QuickPanelListItem[]) => () => void
-
-  /**
-   * Register a trigger handler function.
-   * @param toolKey - Unique tool identifier
-   * @param symbol - Trigger symbol (e.g., @, #, /)
-   * @param handler - Handler function to execute on trigger
-   * @returns Cleanup function to unregister
-   */
-  registerTrigger: (toolKey: string, symbol: QuickPanelReservedSymbol, handler: QuickPanelTriggerHandler) => () => void
-}
-
-/**
- * Triggers API for Inputbar component.
- * Used to trigger panels and retrieve menu items.
- */
-export interface TriggersAPI {
-  /**
-   * Emit a trigger for the specified symbol.
-   * @param symbol - Trigger symbol
-   * @param payload - Data to pass to trigger handlers
-   */
-  emit: (symbol: QuickPanelReservedSymbol, payload?: unknown) => void
-
-  /**
-   * Get all root menu items (merged from all registered tools).
-   * @returns Merged menu items list
-   */
-  getRootMenu: () => QuickPanelListItem[]
-}
-
-/**
  * Dispatch interface containing all action functions.
  * These functions have stable references and won't cause re-renders.
  */
@@ -80,12 +35,6 @@ export interface InputbarToolsDispatch {
 
   /** Text manipulation (avoids putting text state in Context) */
   onTextChange: (updater: string | ((prev: string) => string)) => void
-
-  /** Tools registry API (for tool buttons) */
-  toolsRegistry: ToolsRegistryAPI
-
-  /** Triggers API (for Inputbar component) */
-  triggers: TriggersAPI
 }
 
 const InputbarToolsStateContext = createContext<InputbarToolsState | undefined>(undefined)
@@ -159,58 +108,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
   const [couldAddImageFile, setCouldAddImageFile] = useState(initialState?.couldAddImageFile || false)
   const [extensions, setExtensions] = useState<string[]>(initialState?.extensions || [])
 
-  // Ordinary chat mention is never gated by vision metadata: the
-  // endpoint/adapter decides encodability at send time.
-
-  // Quick Panel Registry (stored in refs to avoid re-renders)
-  const rootMenuRegistryRef = useRef(new Map<string, QuickPanelListItem[]>())
-  const triggerRegistryRef = useRef(new Map<QuickPanelReservedSymbol, Map<string, QuickPanelTriggerHandler>>())
-
-  // Quick Panel API (stable references)
-  const getQuickPanelRootMenu = useCallback(() => {
-    const allEntries: QuickPanelListItem[] = []
-    rootMenuRegistryRef.current.forEach((entries) => {
-      allEntries.push(...entries)
-    })
-    return allEntries
-  }, [])
-
-  const registerRootMenu = useCallback((toolKey: string, entries: QuickPanelListItem[]) => {
-    rootMenuRegistryRef.current.set(toolKey, entries)
-    return () => {
-      rootMenuRegistryRef.current.delete(toolKey)
-    }
-  }, [])
-
-  const registerTrigger = useCallback(
-    (toolKey: string, symbol: QuickPanelReservedSymbol, handler: QuickPanelTriggerHandler) => {
-      if (!triggerRegistryRef.current.has(symbol)) {
-        triggerRegistryRef.current.set(symbol, new Map())
-      }
-
-      const handlers = triggerRegistryRef.current.get(symbol)!
-      handlers.set(toolKey, handler)
-
-      return () => {
-        const currentHandlers = triggerRegistryRef.current.get(symbol)
-        if (!currentHandlers) return
-
-        currentHandlers.delete(toolKey)
-        if (currentHandlers.size === 0) {
-          triggerRegistryRef.current.delete(symbol)
-        }
-      }
-    },
-    []
-  )
-
-  const emitTrigger = useCallback((symbol: QuickPanelReservedSymbol, payload?: unknown) => {
-    const handlers = triggerRegistryRef.current.get(symbol)
-    handlers?.forEach((handler) => {
-      handler?.(payload)
-    })
-  }, [])
-
   // Stabilize parent actions (prevent dispatch context updates from parent action reference changes)
   const actionsRef = useRef(actions)
   useEffect(() => {
@@ -238,24 +135,6 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
     [files, mentionedModels, selectedKnowledgeBases, couldAddImageFile, extensions]
   )
 
-  // Tools Registry API (stable references for tool buttons)
-  const toolsRegistryAPI = useMemo<ToolsRegistryAPI>(
-    () => ({
-      registerRootMenu,
-      registerTrigger
-    }),
-    [registerRootMenu, registerTrigger]
-  )
-
-  // Triggers API (stable references for Inputbar component)
-  const triggersAPI = useMemo<TriggersAPI>(
-    () => ({
-      emit: emitTrigger,
-      getRootMenu: getQuickPanelRootMenu
-    }),
-    [emitTrigger, getQuickPanelRootMenu]
-  )
-
   // Dispatch Context Value (stable references)
   const dispatchValue = useMemo<InputbarToolsDispatch>(
     () => ({
@@ -265,18 +144,12 @@ export const InputbarToolsProvider: React.FC<InputbarToolsProviderProps> = ({ ch
       setSelectedKnowledgeBases,
 
       // Stable actions
-      ...stableActions,
-
-      // API objects
-      toolsRegistry: toolsRegistryAPI,
-      triggers: triggersAPI
+      ...stableActions
     }),
-    [stableActions, toolsRegistryAPI, triggersAPI]
+    [stableActions]
   )
 
   // Internal Dispatch (contains setCouldAddImageFile and setExtensions)
-  // These setters are exposed to Inputbar but not to tool buttons
-  // Using a separate internal context to avoid polluting the main dispatch context
   const internalDispatchValue = useMemo(
     () => ({
       setCouldAddImageFile,

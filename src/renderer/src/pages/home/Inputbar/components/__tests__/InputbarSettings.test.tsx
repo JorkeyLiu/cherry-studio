@@ -2,7 +2,7 @@
  * Focused tests for the input-settings popover.
  *
  * Verifies:
- *  - the five rows render in the specified order;
+ *  - rows render in the specified order;
  *  - the paste-long-text threshold row appears only when paste-long-text is
  *    enabled (and is hidden otherwise);
  *  - toggles dispatch the corresponding actions.
@@ -16,7 +16,6 @@ const mocks = vi.hoisted(() => {
     pasteLongTextAsFile: false,
     pasteLongTextThreshold: 1500,
     renderInputMessageAsMarkdown: false,
-    enableQuickPanelTriggers: false,
     sendMessageShortcut: 'Enter',
     setSendMessageShortcut: vi.fn()
   }
@@ -77,17 +76,15 @@ describe('InputbarSettings', () => {
     mocks.useSettings.mockReturnValue({ ...mocks.defaultSettings })
   })
 
-  it('renders the five rows in the specified order with paste-long-text off', () => {
+  it('renders the rows in the specified order with paste-long-text off', () => {
     render(<InputbarSettings />)
 
     const titles = screen.getAllByTestId('setting-row-title').map((el) => el.textContent)
     expect(titles).toEqual([
       'settings.messages.input.paste_long_text_as_file',
       'settings.messages.markdown_rendering_input_message',
-      'settings.messages.input.enable_quick_triggers',
       'settings.messages.input.send_shortcuts'
     ])
-    // Threshold row is hidden while paste-long-text is disabled
     expect(screen.queryByTestId('editable-number')).not.toBeInTheDocument()
   })
 
@@ -100,7 +97,6 @@ describe('InputbarSettings', () => {
       'settings.messages.input.paste_long_text_as_file',
       'settings.messages.input.paste_long_text_threshold',
       'settings.messages.markdown_rendering_input_message',
-      'settings.messages.input.enable_quick_triggers',
       'settings.messages.input.send_shortcuts'
     ])
     expect(screen.getByTestId('editable-number')).toBeInTheDocument()
@@ -113,15 +109,10 @@ describe('InputbarSettings', () => {
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setPasteLongTextAsFile', payload: true })
   })
 
-  it('toggles render-input-as-markdown and quick-menu triggers', () => {
+  it('toggles render-input-as-markdown', () => {
     render(<InputbarSettings />)
 
-    // Switches with paste off: [paste(0), markdown(1), quick triggers(2)]
     fireEvent.click(screen.getAllByTestId('switch')[1])
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setRenderInputMessageAsMarkdown', payload: true })
-
-    vi.clearAllMocks()
-    fireEvent.click(screen.getAllByTestId('switch')[2])
-    expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setEnableQuickPanelTriggers', payload: true })
   })
 })

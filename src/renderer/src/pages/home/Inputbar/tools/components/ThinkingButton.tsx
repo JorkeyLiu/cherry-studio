@@ -9,72 +9,87 @@ import {
   MdiLightbulbOn90,
   MdiLightbulbQuestion
 } from '@renderer/components/Icons/SVGIcon'
-import { QuickPanelReservedSymbol, useQuickPanel } from '@renderer/components/QuickPanel'
-import { getModelSupportedReasoningEffortOptions, isFixedReasoningModel } from '@renderer/config/models'
+import { getModelSupportedReasoningEffortOptions } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
-import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
+import ToolPopover from '@renderer/pages/home/Inputbar/components/ToolPopover'
 import type { Model, ThinkingOption } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
-import { Tooltip } from 'antd'
+import { Divider, Switch, Tooltip } from 'antd'
+import { Check } from 'lucide-react'
 import type { FC, ReactElement } from 'react'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import styled from 'styled-components'
 
 interface Props {
-  quickPanel: ToolQuickPanelApi
   model: Model
   assistantId: string
 }
 
-const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactElement => {
-  const { t } = useTranslation()
-  const quickPanelHook = useQuickPanel()
-  const { assistant, updateAssistantSettings } = useAssistant(assistantId)
+const FULL_OPTIONS: ThinkingOption[] = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto']
 
-  const currentReasoningEffort = useMemo(() => {
-    return assistant.settings?.reasoning_effort || 'default'
+const ThinkingButton: FC<Props> = ({ model, assistantId }): ReactElement => {
+  const { t } = useTranslation()
+  const { assistant, updateAssistantSettings } = useAssistant(assistantId)
+  const [open, setOpen] = useState(false)
+
+  const currentReasoningEffort: ThinkingOption = useMemo(() => {
+    return (assistant.settings?.reasoning_effort as ThinkingOption) || 'default'
   }, [assistant.settings?.reasoning_effort])
 
-  // Single-resolver options: user override -> exact external -> heuristic,
-  // lane-filtered for the current connection. `default` means no override;
-  // `none`/`auto`/effort levels appear only when resolved and sendable.
-  const isFixedReasoning = isFixedReasoningModel(model)
+  const modelKey = useMemo(() => getModelReasoningEffortKey(model), [model])
+  const showAllByModel = assistant.settings?.reasoning_effort_show_all_by_model ?? {}
+  const showAll = modelKey ? (showAllByModel[modelKey] ?? false) : false
 
-  // 获取当前模型支持的选项
-  const supportedOptions: ThinkingOption[] = useMemo(() => {
-    return getModelSupportedReasoningEffortOptions(model) ?? ['default']
+  const resolvedOptions: ThinkingOption[] = useMemo(() => {
+    return (
+      (getModelSupportedReasoningEffortOptions(model) as ThinkingOption[]) ?? [
+        'default',
+        'none',
+        'low',
+        'medium',
+        'high'
+      ]
+    )
   }, [model])
+
+  const displayOptions: ThinkingOption[] = useMemo(() => {
+    if (showAll) return FULL_OPTIONS
+    // default view: resolver options + current if missing (so selection not reset)
+    const base = [...resolvedOptions]
+    if (!base.includes(currentReasoningEffort)) {
+      base.push(currentReasoningEffort)
+    }
+    return base
+  }, [showAll, resolvedOptions, currentReasoningEffort])
 
   const onThinkingChange = useCallback(
     (option: ThinkingOption) => {
-      // `default` means no override (not enabled); only concrete on-levels
-      // enable think mode. Matches useAssistant normalization. Unit B: no
-      // model-name veto on the user's explicit level.
       const thinkModeEnabled = option !== 'none' && option !== 'default'
-
-      if (!thinkModeEnabled) {
-        const modelKey = getModelReasoningEffortKey(model)
-        updateAssistantSettings({
-          reasoning_effort: option,
-          reasoning_effort_by_model: modelKey
-            ? { ...assistant.settings?.reasoning_effort_by_model, [modelKey]: option }
-            : assistant.settings?.reasoning_effort_by_model,
-          reasoning_effort_cache: option,
-          qwenThinkMode: false
-        })
-        return
-      }
-      const modelKey = getModelReasoningEffortKey(model)
+      const key = getModelReasoningEffortKey(model)
+      const currentMap = assistant.settings?.reasoning_effort_by_model ?? {}
       updateAssistantSettings({
         reasoning_effort: option,
-        reasoning_effort_by_model: modelKey
-          ? { ...assistant.settings?.reasoning_effort_by_model, [modelKey]: option }
-          : assistant.settings?.reasoning_effort_by_model,
+        reasoning_effort_by_model: key ? { ...currentMap, [key]: option } : currentMap,
         reasoning_effort_cache: option,
-        qwenThinkMode: true
+        qwenThinkMode: thinkModeEnabled
       })
+      setOpen(false)
     },
     [updateAssistantSettings, assistant.settings?.reasoning_effort_by_model, model]
+  )
+
+  const handleShowAllToggle = useCallback(
+    (checked: boolean) => {
+      const key = getModelReasoningEffortKey(model)
+      if (!key) return
+      const currentMap = assistant.settings?.reasoning_effort_show_all_by_model ?? {}
+      updateAssistantSettings({
+        reasoning_effort_show_all_by_model: { ...currentMap, [key]: checked }
+      })
+      // must not change reasoning_effort
+    },
+    [model, assistant.settings?.reasoning_effort_show_all_by_model, updateAssistantSettings]
   )
 
   const reasoningEffortOptionLabelMap = {
@@ -99,148 +114,151 @@ const ThinkingButton: FC<Props> = ({ quickPanel, model, assistantId }): ReactEle
     auto: t('assistants.settings.reasoning_effort.auto_description')
   } as const satisfies Record<ThinkingOption, string>
 
-  const panelItems = useMemo(() => {
-    // 使用表中定义的选项创建UI选项
-    return supportedOptions.map((option) => ({
-      level: option,
-      label: reasoningEffortOptionLabelMap[option],
-      description: reasoningEffortDescriptionMap[option],
-      icon: ThinkingIcon({ option }),
-      isSelected: currentReasoningEffort === option,
-      action: () => onThinkingChange(option)
-    }))
-  }, [
-    supportedOptions,
-    reasoningEffortOptionLabelMap,
-    reasoningEffortDescriptionMap,
-    currentReasoningEffort,
-    onThinkingChange
-  ])
+  const isThinkingEnabled = currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
 
-  const isThinkingEnabled =
-    currentReasoningEffort !== undefined && currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
+  const popoverContent = (
+    <ThinkingPopoverInner data-testid="thinking-popover">
+      <PopoverHeaderRow>
+        <span>{t('assistants.settings.reasoning_effort.label')}</span>
+      </PopoverHeaderRow>
+      <SwitchRow onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+        <span>{t('chat.input.thinking.show_all', 'Show all')}</span>
+        <Switch
+          size="small"
+          checked={showAll}
+          onChange={handleShowAllToggle}
+          onClick={(_: boolean, e: any) => e?.stopPropagation?.()}
+          data-testid="thinking-show-all-switch"
+        />
+      </SwitchRow>
+      <Divider style={{ margin: '8px 0' }} />
+      <OptionsList>
+        {displayOptions.map((option) => {
+          const isSelected = currentReasoningEffort === option
+          return (
+            <OptionItem
+              key={option}
+              $selected={isSelected}
+              onClick={(e) => {
+                e.stopPropagation()
+                onThinkingChange(option)
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              data-testid={`thinking-option-${option}`}
+              data-selected={isSelected}>
+              <OptionLeft>
+                <span style={{ display: 'flex', alignItems: 'center' }}>{ThinkingIcon({ option })}</span>
+                <span>
+                  <OptionLabel>{reasoningEffortOptionLabelMap[option]}</OptionLabel>
+                  <OptionDesc>{reasoningEffortDescriptionMap[option]}</OptionDesc>
+                </span>
+              </OptionLeft>
+              {isSelected && <Check size={14} />}
+            </OptionItem>
+          )
+        })}
+      </OptionsList>
+    </ThinkingPopoverInner>
+  )
 
-  // Check if model supports multiple thinking levels (more than one of: low, medium, high, xhigh, minimal)
-  const hasMultipleLevels = useMemo(() => {
-    return supportedOptions.filter((opt) => ['low', 'medium', 'high', 'xhigh', 'minimal'].includes(opt)).length > 1
-  }, [supportedOptions])
-
-  const disableThinking = useCallback(() => {
-    onThinkingChange('none')
-  }, [onThinkingChange])
-
-  const openQuickPanel = useCallback(() => {
-    quickPanelHook.open({
-      title: t('assistants.settings.reasoning_effort.label'),
-      list: panelItems,
-      symbol: QuickPanelReservedSymbol.Thinking
-    })
-  }, [quickPanelHook, panelItems, t])
-
-  const handleOpenQuickPanel = useCallback(() => {
-    if (isFixedReasoning) return
-
-    if (quickPanelHook.isVisible && quickPanelHook.symbol === QuickPanelReservedSymbol.Thinking) {
-      quickPanelHook.close()
-      return
-    }
-
-    // If model has only single level (doesn't support multiple levels), directly disable thinking
-    if (isThinkingEnabled && supportedOptions.includes('none') && !hasMultipleLevels) {
-      disableThinking()
-      return
-    }
-    openQuickPanel()
-  }, [
-    openQuickPanel,
-    quickPanelHook,
-    isThinkingEnabled,
-    supportedOptions,
-    hasMultipleLevels,
-    disableThinking,
-    isFixedReasoning
-  ])
-
-  useEffect(() => {
-    if (isFixedReasoning) return
-
-    const disposeMenu = quickPanel.registerRootMenu([
-      {
-        label: t('assistants.settings.reasoning_effort.label'),
-        description: '',
-        icon: ThinkingIcon({ option: currentReasoningEffort }),
-        isMenu: true,
-        action: () => openQuickPanel()
-      }
-    ])
-
-    const disposeTrigger = quickPanel.registerTrigger(QuickPanelReservedSymbol.Thinking, () => openQuickPanel())
-
-    return () => {
-      disposeMenu()
-      disposeTrigger()
-    }
-  }, [currentReasoningEffort, openQuickPanel, quickPanel, t, isFixedReasoning])
-
-  // Determine tooltip label, consistent with handleOpenQuickPanel behavior:
-  // - Fixed reasoning models: always show "Thinking"
-  // - Multi-level models: always show "Reasoning Effort" (opens panel)
-  // - Single-level models: show "Close" when thinking enabled, otherwise "Reasoning Effort"
-  const ariaLabel = isFixedReasoning
-    ? t('chat.input.thinking.label')
-    : hasMultipleLevels || !isThinkingEnabled
-      ? t('assistants.settings.reasoning_effort.label')
-      : t('common.close')
+  const ariaLabel = t('assistants.settings.reasoning_effort.label')
 
   return (
-    <Tooltip placement="top" title={ariaLabel} mouseLeaveDelay={0} arrow>
-      <ActionIconButton
-        onClick={handleOpenQuickPanel}
-        active={isFixedReasoning || isThinkingEnabled}
-        aria-label={ariaLabel}
-        aria-pressed={isThinkingEnabled}
-        style={isFixedReasoning ? { cursor: 'default' } : undefined}>
-        {ThinkingIcon({ option: currentReasoningEffort, isFixedReasoning })}
-      </ActionIconButton>
-    </Tooltip>
+    <ToolPopover open={open} onOpenChange={setOpen} content={popoverContent}>
+      <Tooltip placement="top" title={ariaLabel} mouseLeaveDelay={0} arrow open={open ? false : undefined}>
+        <ActionIconButton active={isThinkingEnabled} aria-label={ariaLabel} aria-pressed={isThinkingEnabled}>
+          {ThinkingIcon({ option: currentReasoningEffort })}
+        </ActionIconButton>
+      </Tooltip>
+    </ToolPopover>
   )
 }
 
-const ThinkingIcon = (props: { option?: ThinkingOption; isFixedReasoning?: boolean }) => {
+const ThinkingIcon = (props: { option?: ThinkingOption }) => {
   let IconComponent: React.FC<React.SVGProps<SVGSVGElement>> | null = null
-  if (props.isFixedReasoning) {
-    IconComponent = MdiLightbulbAutoOutline
-  } else {
-    switch (props.option) {
-      case 'minimal':
-        IconComponent = MdiLightbulbOn30
-        break
-      case 'low':
-        IconComponent = MdiLightbulbOn50
-        break
-      case 'medium':
-        IconComponent = MdiLightbulbOn80
-        break
-      case 'high':
-        IconComponent = MdiLightbulbOn90
-        break
-      case 'xhigh':
-        IconComponent = MdiLightbulbOn
-        break
-      case 'auto':
-        IconComponent = MdiLightbulbAutoOutline
-        break
-      case 'none':
-        IconComponent = MdiLightbulbOffOutline
-        break
-      case 'default':
-      default:
-        IconComponent = MdiLightbulbQuestion
-        break
-    }
+  switch (props.option) {
+    case 'minimal':
+      IconComponent = MdiLightbulbOn30
+      break
+    case 'low':
+      IconComponent = MdiLightbulbOn50
+      break
+    case 'medium':
+      IconComponent = MdiLightbulbOn80
+      break
+    case 'high':
+      IconComponent = MdiLightbulbOn90
+      break
+    case 'xhigh':
+      IconComponent = MdiLightbulbOn
+      break
+    case 'auto':
+      IconComponent = MdiLightbulbAutoOutline
+      break
+    case 'none':
+      IconComponent = MdiLightbulbOffOutline
+      break
+    case 'default':
+    default:
+      IconComponent = MdiLightbulbQuestion
+      break
   }
 
   return <IconComponent className="icon" width={18} height={18} style={{ marginTop: -2 }} />
 }
+
+const ThinkingPopoverInner = styled.div`
+  width: 100%;
+`
+
+const PopoverHeaderRow = styled.div`
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+`
+
+const SwitchRow = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+`
+
+const OptionsList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+`
+
+const OptionItem = styled.div<{ $selected?: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: ${(p) => (p.$selected ? 'var(--color-background-soft)' : 'transparent')};
+  &:hover {
+    background: var(--color-background-soft);
+  }
+`
+
+const OptionLeft = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`
+
+const OptionLabel = styled.div`
+  font-size: 13px;
+  line-height: 1;
+`
+
+const OptionDesc = styled.div`
+  font-size: 11px;
+  color: var(--color-text-3);
+`
 
 export default ThinkingButton

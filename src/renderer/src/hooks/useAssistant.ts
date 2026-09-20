@@ -1,5 +1,4 @@
 import { loggerService } from '@logger'
-import { getModelSupportedReasoningEffortOptions, isReasoningModel } from '@renderer/config/models'
 import { getDefaultTopic } from '@renderer/services/AssistantService'
 import { dbService } from '@renderer/services/db'
 import { persistTopicMetadata } from '@renderer/services/db/topicMetadataPersist'
@@ -126,96 +125,46 @@ export function useAssistant(id: string) {
     [assistant?.id, dispatch]
   )
 
-  // Unit B: user-intent lazy execution. Model switches never coerce the active
-  // reasoning effort to `none`/`default` because of reasoning metadata, and a
-  // concrete user level is never rejected for not appearing in a model-name
-  // derived list. Per-model memory restore on switch is preserved; fixed
-  // reasoning (`default` only, no controllable params) keeps its protocol fact
-  // without touching the active value.
+  // Per-model independent memory: leave-saves, enter-restores.
+  // - Leaving a model saves its explicit non-default active effort (none/low/medium/high/xhigh/auto/minimal etc.) into reasoning_effort_by_model[prevKey]; placeholder 'default' is never written by leave-save (target without history still restores 'default'; ThinkingButton explicit 'default' keeps its own write).
+  // - Entering a model restores reasoning_effort_by_model[currKey] if present, else app default 'default'.
+  // - Never gate/degrade by model capability (lazy request principle); keep qwenThinkMode/cache consistent.
+  // - Avoid effect loops via settingsRef and dispatch only when map or effort actually changes.
   useEffect(() => {
-    // Model may be explicitly unconfigured (undefined). Skip the model-driven
-    // reasoning-effort sync — nothing to sync without a model.
     if (!model) return
     const settings = settingsRef.current
-    if (settings) {
-      const currentReasoningEffort = settings.reasoning_effort
-      const currentModelKey = getModelReasoningEffortKey(model)
-      const previousModelKey = previousModelKeyRef.current
-      const reasoningEffortByModel = { ...settings.reasoning_effort_by_model }
-      const isModelChanged = previousModelKey !== undefined && previousModelKey !== currentModelKey
-
-      if (isModelChanged && previousModelKey && currentReasoningEffort) {
-        reasoningEffortByModel[previousModelKey] = currentReasoningEffort
-      }
-
-      const supportedOptions = getModelSupportedReasoningEffortOptions(model)
-      const isControllable = !!supportedOptions && supportedOptions.filter((option) => option !== 'default').length > 0
-      if (isControllable && supportedOptions) {
-        const modelCachedOption = currentModelKey ? reasoningEffortByModel[currentModelKey] : undefined
-
-        if (modelCachedOption && supportedOptions.includes(modelCachedOption)) {
-          if (
-            modelCachedOption !== currentReasoningEffort ||
-            reasoningEffortByModel[currentModelKey!] !== modelCachedOption
-          ) {
-            updateAssistantSettings({
-              reasoning_effort: modelCachedOption,
-              reasoning_effort_by_model: reasoningEffortByModel,
-              qwenThinkMode: modelCachedOption !== 'none' && modelCachedOption !== 'default'
-            })
-          }
-        } else if (currentReasoningEffort) {
-          // Keep the explicit user level even when it is absent from the
-          // model-derived list (endpoint/adapter decides encodability at
-          // request time). Only record per-model memory/cache bookkeeping.
-          if (
-            currentModelKey &&
-            (reasoningEffortByModel[currentModelKey] !== currentReasoningEffort ||
-              settings.reasoning_effort_cache !== currentReasoningEffort)
-          ) {
-            if (currentModelKey) {
-              reasoningEffortByModel[currentModelKey] = currentReasoningEffort
-            }
-            updateAssistantSettings({
-              reasoning_effort_by_model: reasoningEffortByModel,
-              reasoning_effort_cache: currentReasoningEffort,
-              qwenThinkMode: currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
-            })
-          }
-        }
-      } else if (isReasoningModel(model)) {
-        // Fixed reasoning (resolved `default` only): no strength menu. Keep
-        // the active value untouched while preserving per-model memory.
-        if (
-          currentModelKey &&
-          currentReasoningEffort &&
-          reasoningEffortByModel[currentModelKey] !== currentReasoningEffort
-        ) {
-          reasoningEffortByModel[currentModelKey] = currentReasoningEffort
-          updateAssistantSettings({
-            reasoning_effort_by_model: reasoningEffortByModel,
-            qwenThinkMode: false
-          })
-        }
-      } else {
-        // Non-reasoning metadata models: preserve the user's active level
-        // (never coerce to `none`). Only keep per-model memory consistent.
-        if (
-          isModelChanged &&
-          currentModelKey &&
-          currentReasoningEffort &&
-          reasoningEffortByModel[currentModelKey] !== currentReasoningEffort
-        ) {
-          reasoningEffortByModel[currentModelKey] = currentReasoningEffort
-          updateAssistantSettings({
-            reasoning_effort_by_model: reasoningEffortByModel,
-            reasoning_effort_cache: currentReasoningEffort,
-            qwenThinkMode: currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
-          })
-        }
-      }
+    if (!settings) return
+    const rawEffort = settings.reasoning_effort as string | undefined
+    const currentReasoningEffort = rawEffort ?? 'default'
+    const currentModelKey = getModelReasoningEffortKey(model)
+    const previousModelKey = previousModelKeyRef.current
+    const isModelChanged = previousModelKey !== undefined && previousModelKey !== currentModelKey
+    if (!isModelChanged) {
       previousModelKeyRef.current = currentModelKey
+      return
     }
+    const previousMap = settings.reasoning_effort_by_model ?? {}
+    const nextByModel: Record<string, string> = { ...previousMap }
+    let mapChanged = false
+    if (previousModelKey && rawEffort && rawEffort !== 'default') {
+      if (nextByModel[previousModelKey] !== rawEffort) {
+        nextByModel[previousModelKey] = rawEffort as any
+        mapChanged = true
+      }
+    }
+    const targetEffort = currentModelKey && nextByModel[currentModelKey] ? nextByModel[currentModelKey] : 'default'
+    const effortChanged = targetEffort !== currentReasoningEffort
+    if (!effortChanged && !mapChanged) {
+      previousModelKeyRef.current = currentModelKey
+      return
+    }
+    updateAssistantSettings({
+      reasoning_effort: targetEffort as any,
+      reasoning_effort_by_model: nextByModel as any,
+      reasoning_effort_cache: targetEffort as any,
+      qwenThinkMode: targetEffort !== 'none' && targetEffort !== 'default'
+    })
+    previousModelKeyRef.current = currentModelKey
   }, [model, updateAssistantSettings])
 
   return {

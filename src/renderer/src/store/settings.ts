@@ -191,7 +191,6 @@ export interface SettingsState {
   enableDataCollection: boolean
   enableSpellCheck: boolean
   spellCheckLanguages: string[]
-  enableQuickPanelTriggers: boolean
   injectContextTimestamp: boolean
   // 硬件加速设置
   disableHardwareAcceleration: boolean
@@ -349,7 +348,6 @@ export const initialState: SettingsState = {
   enableDataCollection: true,
   enableSpellCheck: false,
   spellCheckLanguages: [],
-  enableQuickPanelTriggers: false,
   injectContextTimestamp: false,
   // 消息操作确认设置
   confirmDeleteMessage: true,
@@ -665,9 +663,6 @@ const settingsSlice = createSlice({
     setExportMenuOptions: (state, action: PayloadAction<typeof initialState.exportMenuOptions>) => {
       state.exportMenuOptions = action.payload
     },
-    setEnableQuickPanelTriggers: (state, action: PayloadAction<boolean>) => {
-      state.enableQuickPanelTriggers = action.payload
-    },
     setInjectContextTimestamp: (state, action: PayloadAction<boolean>) => {
       state.injectContextTimestamp = action.payload
     },
@@ -832,7 +827,6 @@ export const {
   setEnableSpellCheck,
   setSpellCheckLanguages,
   setExportMenuOptions,
-  setEnableQuickPanelTriggers,
   setInjectContextTimestamp,
   setConfirmDeleteMessage,
   setConfirmRegenerateMessage,

@@ -9,12 +9,7 @@ import type { FC } from 'react'
 import { memo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
-export interface UrlContextButtonRef {
-  openQuickPanel: () => void
-}
-
 interface Props {
-  ref?: React.RefObject<UrlContextButtonRef | null>
   assistantId: string
 }
 

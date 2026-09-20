@@ -170,7 +170,7 @@ describe('normalizeCanonicalModelsPayload', () => {
 })
 
 describe('normalizeProviderSourcesPayload', () => {
-  it('keeps api + name per source and never reads model records', () => {
+  it('keeps api + name per source and keeps serving effort only when present', () => {
     const providers = normalizeProviderSourcesPayload(RAW_PROVIDER_SOURCES_FIXTURE)!
     expect(Object.keys(providers).sort()).toEqual(['anthropic', 'openai', 'party-a'])
     expect(providers['anthropic']).toEqual({ api: '', name: 'Anthropic' })
@@ -179,6 +179,54 @@ describe('normalizeProviderSourcesPayload', () => {
     for (const entry of Object.values(providers)) {
       expect('models' in entry).toBe(false)
     }
+  })
+
+  it('keeps provider-specific serving effort (max -> xhigh) and never merges into canonical', () => {
+    const raw = {
+      'provider-a': {
+        id: 'provider-a',
+        name: 'Provider A',
+        api: 'https://api.a.example/v1',
+        models: {
+          'model-x': {
+            id: 'model-x',
+            reasoning: true,
+            reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }]
+          },
+          'model-y': {
+            id: 'model-y',
+            reasoning_options: [{ type: 'effort', values: ['low', 'MAX', 'low'] }]
+          },
+          'model-no-effort': {
+            id: 'model-no-effort',
+            reasoning_options: [{ type: 'toggle' }]
+          },
+          'model-bad': {
+            id: 'model-bad',
+            reasoning_options: [{ type: 'effort', values: [''] }]
+          }
+        }
+      },
+      'provider-b': {
+        id: 'provider-b',
+        name: 'Provider B',
+        api: 'https://api.b.example/v1',
+        models: {
+          'model-x': {
+            id: 'model-x',
+            reasoning_options: [{ type: 'effort', values: ['minimal', 'medium'] }]
+          }
+        }
+      }
+    }
+    const providers = normalizeProviderSourcesPayload(raw)!
+    expect(providers['provider-a'].models?.['model-x']?.effort).toEqual(['low', 'high', 'xhigh'])
+    expect(providers['provider-a'].models?.['model-y']?.effort).toEqual(['low', 'xhigh'])
+    expect(providers['provider-a'].models?.['model-no-effort']).toBeUndefined()
+    expect(providers['provider-a'].models?.['model-bad']).toBeUndefined()
+    expect(providers['provider-b'].models?.['model-x']?.effort).toEqual(['minimal', 'medium'])
+    // canonical models remain untouched (not in this payload)
+    expect(Object.keys(providers).sort()).toEqual(['provider-a', 'provider-b'])
   })
 
   it('returns null for a non-record top level and an empty record otherwise', () => {
@@ -211,21 +259,22 @@ describe('parseModelMetadataSnapshot / parseModelMetadataCache', () => {
     expect(parseModelMetadataSnapshot({ source: 'models.dev', fetchedAt: 1, models: {} })).toBeNull()
   })
 
-  it('parses the versioned v2 cache envelope and falls back to a bare snapshot', () => {
+  it('parses the versioned v3 cache envelope and falls back to a bare snapshot', () => {
     const snapshot = fullSnapshot()
-    const envelope = { version: 2, fetchedAt: 999, etag: '"abc"', snapshot }
+    const envelope = { version: 3, fetchedAt: 999, etag: '"abc"', snapshot }
     expect(parseModelMetadataCache(envelope)).toEqual({ snapshot, etag: '"abc"' })
     expect(parseModelMetadataCache(snapshot)).toEqual({ snapshot, etag: '"abc"' })
-    expect(parseModelMetadataCache({ version: 2 })).toBeNull()
+    expect(parseModelMetadataCache({ version: 3 })).toBeNull()
     expect(parseModelMetadataCache(null)).toBeNull()
   })
 
-  it('requires the literal current cache version (rejects v1 api.json caches)', () => {
+  it('requires the literal current cache version (rejects v1/v2 caches)', () => {
     const snapshot = fullSnapshot()
     expect(parseModelMetadataCache({ version: 1, fetchedAt: 999, snapshot })).toBeNull()
-    expect(parseModelMetadataCache({ version: 2, fetchedAt: 999, snapshot })).not.toBeNull()
-    expect(parseModelMetadataCache({ version: '2', fetchedAt: 999, snapshot })).toBeNull()
-    // A v1-shaped provider-mapped payload is not a v2 snapshot.
+    expect(parseModelMetadataCache({ version: 2, fetchedAt: 999, snapshot })).toBeNull()
+    expect(parseModelMetadataCache({ version: 3, fetchedAt: 999, snapshot })).not.toBeNull()
+    expect(parseModelMetadataCache({ version: '3', fetchedAt: 999, snapshot })).toBeNull()
+    // A v1-shaped provider-mapped payload is not a v3 snapshot.
     expect(
       parseModelMetadataCache({
         source: 'models.dev',

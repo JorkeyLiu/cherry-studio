@@ -2,41 +2,28 @@ import { defineTool, registerTool, TopicType } from '@renderer/pages/home/Inputb
 import type React from 'react'
 
 import MentionModelsButton from './components/MentionModelsButton'
-import MentionModelsQuickPanelManager from './components/MentionModelsQuickPanelManager'
 
-/**
- * Mention Models Tool
- *
- * Allows users to mention multiple AI models in their messages.
- * Uses @ trigger to open model selection panel.
- */
 const mentionModelsTool = defineTool({
   key: 'mention_models',
   label: (t) => t('assistants.presets.edit.model.select.title'),
-
   visibleInScopes: [TopicType.Chat],
   dependencies: {
     state: ['mentionedModels', 'files'] as const,
     actions: ['setMentionedModels', 'onTextChange'] as const
   },
-
   render: function MentionModelsToolRender(context) {
-    const { state, actions, quickPanel, quickPanelController } = context
+    const { state, actions } = context
     const { mentionedModels, files } = state
     const { setMentionedModels, onTextChange } = actions
-
     return (
       <MentionModelsButton
-        quickPanel={quickPanel}
-        quickPanelController={quickPanelController}
         mentionedModels={mentionedModels}
         setMentionedModels={setMentionedModels}
         files={files}
         setText={onTextChange as React.Dispatch<React.SetStateAction<string>>}
       />
     )
-  },
-  quickPanelManager: MentionModelsQuickPanelManager
+  }
 })
 
 registerTool(mentionModelsTool)

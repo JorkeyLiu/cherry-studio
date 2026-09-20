@@ -504,7 +504,7 @@ async function clearMentionedModels(page: Page, profile: ScaleProfile): Promise<
 /**
  * Drive the REAL mention-tool UI to select exactly the profile's models: first
  * deterministically clear any prior mention state (sample isolation), then
- * click the inputbar "Select Model" button (opens the production QuickPanel
+ * click the inputbar "Select Model" button (opens the production MentionModelsButton Popover
  * with the provider model list), click each model item (multiple-select mode
  * keeps the panel open), verify the mention chip appears inside the inputbar
  * after each selection, then close the panel with Escape. The selected models
@@ -517,27 +517,28 @@ async function selectMentionModels(page: Page, profile: ScaleProfile): Promise<v
   // pre-selected model would be toggled OFF by the first click.
   await clearMentionedModels(page, profile)
 
+  const ids = mentionModelIds(profile.mentionModelCount)
   const names = mentionModelNames(profile.mentionModelCount)
-  const mentionButton = page.locator('.inputbar').getByRole('button', { name: 'Select Model' }).first()
+  const mentionButton = page.getByTestId('mention-models-button')
   await mentionButton.waitFor({ state: 'visible', timeout: 15000 })
   await mentionButton.click()
 
-  const panel = page.locator('[data-testid="quick-panel"]')
+  const panel = page.getByTestId('mention-models-popover')
   await panel.waitFor({ state: 'visible', timeout: 15000 })
 
   // Assert the panel carries NO pre-selected model item before selecting the
   // N profile models — this asserts exactly the production state the send will
   // read (each click below must ADD, never toggle off).
-  await expect(panel.locator('[data-id].selected')).toHaveCount(0, { timeout: 5000 })
+  await expect(panel.locator('[data-testid^="mention-model-"][data-selected="true"]')).toHaveCount(0, { timeout: 5000 })
 
-  for (const name of names) {
-    const item = panel.locator('[data-id]').filter({ hasText: name }).first()
+  for (let i = 0; i < ids.length; i++) {
+    const item = panel.getByTestId(`mention-model-${ids[i]}`)
     await item.click()
     // The mention chip renders in the inputbar's topContent area (`#inputbar`),
-    // NOT inside the quick panel — scoping to `#inputbar` proves the mention
+    // NOT inside the mention popover — scoping to `#inputbar` proves the mention
     // was actually committed to the InputbarTools state, not just highlighted
     // in the panel.
-    await expect(page.locator('#inputbar')).toContainText(name, { timeout: 5000 })
+    await expect(page.locator('#inputbar')).toContainText(names[i]!, { timeout: 5000 })
   }
 
   await page.keyboard.press('Escape')

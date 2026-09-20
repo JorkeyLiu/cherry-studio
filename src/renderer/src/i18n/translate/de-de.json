@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Legen Sie die Token-Anzahl zum Denken fest"
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "Falten",
@@ -5496,17 +5497,6 @@
         "title": "Proxy-Modus"
       },
       "tip": "Unterstützt Fuzzy-Matching (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Zurück",
-      "close": "Schließen",
-      "confirm": "Bestätigen",
-      "forward": "Vorwärts",
-      "multiple": "Mehrfachauswahl",
-      "noResult": "Keine Ergebnisse gefunden",
-      "page": "Seite umblättern",
-      "select": "Auswählen",
-      "title": "Schnellmenü"
     },
     "scheduledTasks": {
       "description": "Verwalten Sie geplante Aufgaben über alle Agents hinweg. Aufgaben werden automatisch nach dem konfigurierten Zeitplan ausgeführt.",

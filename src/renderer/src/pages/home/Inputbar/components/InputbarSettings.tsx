@@ -5,7 +5,6 @@ import { SettingDivider, SettingRow, SettingRowTitle } from '@renderer/pages/set
 import { useAppDispatch } from '@renderer/store'
 import type { SendMessageShortcut } from '@renderer/store/settings'
 import {
-  setEnableQuickPanelTriggers,
   setPasteLongTextAsFile,
   setPasteLongTextThreshold,
   setRenderInputMessageAsMarkdown
@@ -17,19 +16,6 @@ import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
-/**
- * Input-settings popover: the input-toolbar divider + settings icon/button
- * opening an upward Popover containing, in order:
- *   1. paste long text as file
- *   2. threshold (conditionally, when paste-long-text is enabled)
- *   3. render input as Markdown
- *   4. enable '/' and '@' quick-menu triggers
- *   5. send shortcut
- * All changes apply immediately. These controls were previously part of the
- * removed quick-settings drawer. The Popover root owns the final visible width
- * (≈297px) and the content container fills it (width: 100%, border-box) instead
- * of forcing a fixed inner box; controls are unchanged.
- */
 const InputbarSettings: FC = () => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
@@ -38,7 +24,6 @@ const InputbarSettings: FC = () => {
     pasteLongTextAsFile,
     pasteLongTextThreshold,
     renderInputMessageAsMarkdown,
-    enableQuickPanelTriggers,
     sendMessageShortcut,
     setSendMessageShortcut
   } = useSettings()
@@ -81,15 +66,6 @@ const InputbarSettings: FC = () => {
       </SettingRow>
       <SettingDivider />
       <SettingRow>
-        <SettingRowTitle>{t('settings.messages.input.enable_quick_triggers')}</SettingRowTitle>
-        <Switch
-          size="small"
-          checked={enableQuickPanelTriggers}
-          onChange={(checked) => dispatch(setEnableQuickPanelTriggers(checked))}
-        />
-      </SettingRow>
-      <SettingDivider />
-      <SettingRow>
         <SettingRowTitle>{t('settings.messages.input.send_shortcuts')}</SettingRowTitle>
         <Selector
           size={14}
@@ -124,10 +100,6 @@ const InputbarSettings: FC = () => {
 }
 
 const PopoverContent = styled.div`
-  /* Fill the popover inner content (root width 297px minus antd inner
-     padding/border) instead of forcing a fixed 272px box that, together with
-     antd padding, produced the wider ~297px popup and overflowed into a
-     horizontal scrollbar. */
   width: 100%;
   box-sizing: border-box;
   padding: 4px 12px 12px;

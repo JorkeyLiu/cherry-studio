@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Definir o número de tokens para raciocínio"
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "Recolher",
@@ -5496,17 +5497,6 @@
         "title": "Modo de Proxy"
       },
       "tip": "suporte a correspondência fuzzy (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Voltar",
-      "close": "Fechar",
-      "confirm": "Confirmar",
-      "forward": "Avançar",
-      "multiple": "Múltipla Seleção",
-      "noResult": "Nenhum resultado encontrado",
-      "page": "Página",
-      "select": "Selecionar",
-      "title": "Menu de Atalho"
     },
     "scheduledTasks": {
       "description": "Gerencie tarefas agendadas em todos os agentes. As tarefas são executadas automaticamente conforme o agendamento configurado.",

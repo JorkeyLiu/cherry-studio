@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "设置思考的 Token 数"
           }
-        }
+        },
+        "show_all": "显示全部"
       },
       "tools": {
         "collapse": "折叠",
@@ -5496,17 +5497,6 @@
         "title": "代理模式"
       },
       "tip": "支持模糊匹配(*.test.com,192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "后退",
-      "close": "关闭",
-      "confirm": "确认",
-      "forward": "前进",
-      "multiple": "多选",
-      "noResult": "未找到结果",
-      "page": "翻页",
-      "select": "选择",
-      "title": "快捷菜单"
     },
     "scheduledTasks": {
       "description": "管理所有 Agent 的定时任务。任务将按照配置的时间计划自动运行。",

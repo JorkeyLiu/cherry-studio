@@ -1,5 +1,13 @@
 {
-  "tsDecorders": "legacy",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "paths": {
+      "@renderer/*": ["src/renderer/src/*"]
+    },
+    "useDefineForClassFields": true
+  },
   "files": [],
   "references": [
     {
@@ -15,13 +23,5 @@
       "path": "./tsconfig.e2e-utils.json"
     }
   ],
-  "compilerOptions": {
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-    "useDefineForClassFields": true,
-    "baseUrl": ".",
-    "paths": {
-      "@renderer/*": ["src/renderer/src/*"]
-    }
-  }
+  "tsDecorders": "legacy"
 }

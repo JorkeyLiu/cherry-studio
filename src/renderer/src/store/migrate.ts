@@ -1565,7 +1565,10 @@ const migrateConfig = {
   },
   '94': (state: RootState) => {
     try {
-      state.settings.enableQuickPanelTriggers = false
+      // enableQuickPanelTriggers removed with QuickPanel; clean up if present
+      if ('enableQuickPanelTriggers' in (state.settings as any)) {
+        delete (state.settings as any).enableQuickPanelTriggers
+      }
       return state
     } catch (error) {
       return state

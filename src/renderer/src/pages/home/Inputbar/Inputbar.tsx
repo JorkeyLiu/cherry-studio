@@ -154,7 +154,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
   const { assistant, addTopic, model, setModel, updateAssistant, updateAssistantSettings } = useAssistant(
     initialAssistant.id
   )
-  const { sendMessageShortcut, enableQuickPanelTriggers } = useSettings()
+  const { sendMessageShortcut } = useSettings()
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
@@ -211,14 +211,12 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assistant.id])
 
-  const placeholderText = enableQuickPanelTriggers
-    ? t('chat.input.placeholder', { key: getSendMessageShortcutLabel(sendMessageShortcut) })
-    : t('chat.input.placeholder_without_triggers', {
-        key: getSendMessageShortcutLabel(sendMessageShortcut),
-        defaultValue: t('chat.input.placeholder', {
-          key: getSendMessageShortcutLabel(sendMessageShortcut)
-        })
-      })
+  const placeholderText = t('chat.input.placeholder_without_triggers', {
+    key: getSendMessageShortcutLabel(sendMessageShortcut),
+    defaultValue: t('chat.input.placeholder', {
+      key: getSendMessageShortcutLabel(sendMessageShortcut)
+    })
+  })
 
   const sendMessage = useCallback(() => {
     // In-flight guard: a repeated activation while the first send is still

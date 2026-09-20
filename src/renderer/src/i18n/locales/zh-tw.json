@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "設定思考的 Token 數"
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "折疊",
@@ -5496,17 +5497,6 @@
         "title": "代理伺服器模式"
       },
       "tip": "支援模糊比對（*.test.com，192.168.0.0/16）"
-    },
-    "quickPanel": {
-      "back": "後退",
-      "close": "關閉",
-      "confirm": "確認",
-      "forward": "前進",
-      "multiple": "多選",
-      "noResult": "未找到結果",
-      "page": "翻頁",
-      "select": "選擇",
-      "title": "快捷選單"
     },
     "scheduledTasks": {
       "description": "管理所有代理的排程任務。任務將依設定好的排程自動執行。",

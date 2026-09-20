@@ -232,17 +232,18 @@ async function clearMentionedModels(page: Page, n: number): Promise<void> {
 /** Drive the REAL mention-tool UI to select exactly the profile's models. */
 async function selectMentionModels(page: Page, n: number): Promise<void> {
   await clearMentionedModels(page, n)
+  const ids = mentionModelIds(n)
   const names = mentionModelNames(n)
-  const mentionButton = page.locator('.inputbar').getByRole('button', { name: 'Select Model' }).first()
+  const mentionButton = page.getByTestId('mention-models-button')
   await mentionButton.waitFor({ state: 'visible', timeout: 15000 })
   await mentionButton.click()
-  const panel = page.locator('[data-testid="quick-panel"]')
+  const panel = page.getByTestId('mention-models-popover')
   await panel.waitFor({ state: 'visible', timeout: 15000 })
-  await expect(panel.locator('[data-id].selected')).toHaveCount(0, { timeout: 5000 })
-  for (const name of names) {
-    const item = panel.locator('[data-id]').filter({ hasText: name }).first()
+  await expect(panel.locator('[data-testid^="mention-model-"][data-selected="true"]')).toHaveCount(0, { timeout: 5000 })
+  for (let i = 0; i < ids.length; i++) {
+    const item = panel.getByTestId(`mention-model-${ids[i]}`)
     await item.click()
-    await expect(page.locator('#inputbar')).toContainText(name, { timeout: 5000 })
+    await expect(page.locator('#inputbar')).toContainText(names[i]!, { timeout: 5000 })
   }
   await page.keyboard.press('Escape')
   await expect(panel).not.toBeVisible({ timeout: 5000 })

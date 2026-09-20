@@ -1,24 +1,22 @@
 /**
  * Reasoning effort flow — deterministic chat E2E over the mock provider.
  *
- * Covers the unified reasoning resolver through real UI + real send path:
- *   - seed a heuristic reasoning model (grok-3-mini) on the mock provider.
- *     grok-3-mini is chosen deliberately: its resolved options are
- *     ['default','low','high'] and its `high` level maps to the generic
- *     `reasoningEffort` shape, which the pinned AI SDK openai-compatible
- *     provider deterministically serializes as `reasoning_effort` in the
- *     chat-completions HTTP body (thinking-token-only families such as Qwen
- *     emit a `thinking` providerOption the SDK lane does not serialize, so
- *     they cannot prove the request-shape class through the mock log).
- *   - real Thinking menu select of a sendable option (High)
- *   - assert assistant store/UI setting (two evidence classes: Redux state +
- *     rendered Thinking control state)
- *   - send via the mock provider and assert the captured outbound request
- *     shape (model + messages + reasoning_effort)
- *   - Unit B lazy execution: switching to the plain mock-model preserves the
- *     explicit user level (never auto-corrects to `none`/`default`) and the
- *     follow-up request still carries `reasoning_effort` when the generic
- *     endpoint can encode it (upstream decides).
+ * Covers the anchored Thinking Popover (ToolPopover):
+ *   - seed heuristic reasoning model (grok-3-mini) + plain mock-model on mock provider.
+ *     grok-3-mini is chosen deliberately: its resolved options include `high` and its
+ *     `high` level maps to generic `reasoningEffort` shape, which pinned AI SDK
+ *     serializes as `reasoning_effort` in chat-completions HTTP body.
+ *   - real Thinking Popover select via data-testid `thinking-option-*`
+ *   - assert assistant store/UI setting (Redux + rendered popover state)
+ *   - send via mock and assert captured outbound request shape
+ *   - per-model contract: A=grok-3-mini high does NOT leak to unset B=mock-model;
+ *     B's unset default (usually `default` for mock-model's generic resolver
+ *     ['default','none','low','medium','high']) is used and A high is not
+ *     incorrectly displayed; B selects low/none; switch back restores A high
+ *   - anchored popover: show-all per provider:modelId independent persistence,
+ *     toggle show-all does not change reasoning_effort,
+ *     switching model restores each one's setting
+ *   - restart persistence limitation is explicitly documented (no fake proof)
  *
  * LOCK-001: disposable profile. LOCK-002: mock endpoint only, no live APIs.
  */
@@ -31,68 +29,197 @@ import {
 } from '../../fixtures/electron.fixture'
 import { waitForAppReady } from '../../utils/wait-helpers'
 
-const REASONING_MODEL_ID = 'grok-3-mini'
+const MODEL_A_ID = 'grok-3-mini'
+const MODEL_B_ID = 'mock-model'
+const MODEL_C_ID = 'grok-3-mini-2'
+const MODEL_A_KEY = `mock-openai:${MODEL_A_ID}`
+const MODEL_B_KEY = `mock-openai:${MODEL_B_ID}`
+const MODEL_C_KEY = `mock-openai:${MODEL_C_ID}`
 const REASONING_TEXT = 'E2E reasoning effort verification'
+const REASONING_TEXT_B = 'E2E reasoning effort B low verification'
 
-async function seedReasoningModel(page: import('@playwright/test').Page): Promise<void> {
-  await page.evaluate((modelId: string) => {
-    const store = (window as any).store
-    const state = store.getState()
-    const provider = state.llm.providers.find((p: any) => p.id === 'mock-openai')
-    if (!provider) throw new Error('mock-openai provider missing')
-    if (!provider.models.some((m: any) => m.id === modelId)) {
+async function seedReasoningModels(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(
+    ({ modelA, modelC }: { modelA: string; modelC: string }) => {
+      const store = (window as any).store
+      const state = store.getState()
+      const provider = state.llm.providers.find((p: any) => p.id === 'mock-openai')
+      if (!provider) throw new Error('mock-openai provider missing')
+      const models = [...provider.models]
+      for (const id of [modelA, modelC]) {
+        if (!models.some((m: any) => m.id === id)) {
+          models.push({ id, provider: 'mock-openai', name: id, group: 'e2e', description: 'E2E reasoning model' })
+        }
+      }
       store.dispatch({
         type: 'llm/updateProvider',
         payload: {
           id: 'mock-openai',
-          models: [
-            ...provider.models,
-            { id: modelId, provider: 'mock-openai', name: modelId, group: 'e2e', description: 'E2E reasoning model' }
-          ]
+          models
         }
       })
-    }
-    const assistant = state.assistants.assistants[0]
-    if (!assistant) throw new Error('no assistant')
-    store.dispatch({
-      type: 'assistants/setModel',
-      payload: {
-        assistantId: assistant.id,
-        model: { id: modelId, provider: 'mock-openai', name: modelId, group: 'e2e' }
-      }
-    })
-    store.dispatch({
-      type: 'assistants/updateAssistantSettings',
-      payload: { assistantId: assistant.id, settings: { reasoning_effort: 'default' } }
-    })
-  }, REASONING_MODEL_ID)
+      const assistant = state.assistants.assistants[0]
+      if (!assistant) throw new Error('no assistant')
+      store.dispatch({
+        type: 'assistants/setModel',
+        payload: {
+          assistantId: assistant.id,
+          model: { id: modelA, provider: 'mock-openai', name: modelA, group: 'e2e' }
+        }
+      })
+      store.dispatch({
+        type: 'assistants/updateAssistantSettings',
+        payload: {
+          assistantId: assistant.id,
+          settings: {
+            reasoning_effort: 'default',
+            reasoning_effort_by_model: {},
+            reasoning_effort_show_all_by_model: {}
+          }
+        }
+      })
+    },
+    { modelA: MODEL_A_ID, modelC: MODEL_C_ID }
+  )
   await page.waitForFunction(
     ({ modelId }) => {
       const s = (window as any).store?.getState()
       const assistant = s?.assistants?.assistants?.[0]
-      return assistant?.model?.id === modelId
+      return (
+        assistant?.model?.id === modelId &&
+        (assistant?.settings?.reasoning_effort ?? 'default') === 'default' &&
+        Object.keys(assistant?.settings?.reasoning_effort_by_model ?? {}).length === 0 &&
+        Object.keys(assistant?.settings?.reasoning_effort_show_all_by_model ?? {}).length === 0
+      )
     },
-    { modelId: REASONING_MODEL_ID },
+    { modelId: MODEL_A_ID },
     { timeout: 15000 }
   )
 }
 
-async function getAssistantState(
-  page: import('@playwright/test').Page
-): Promise<{ id: string; effort: string; topicId: string }> {
+async function seedPerModelContractModels(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(
+    ({ modelA, modelB }: { modelA: string; modelB: string }) => {
+      const store = (window as any).store
+      const state = store.getState()
+      const provider = state.llm.providers.find((p: any) => p.id === 'mock-openai')
+      if (!provider) throw new Error('mock-openai provider missing')
+      const models = [...provider.models]
+      for (const id of [modelA, modelB]) {
+        if (!models.some((m: any) => m.id === id)) {
+          models.push({ id, provider: 'mock-openai', name: id, group: 'e2e', description: 'E2E reasoning model' })
+        }
+      }
+      store.dispatch({
+        type: 'llm/updateProvider',
+        payload: {
+          id: 'mock-openai',
+          models
+        }
+      })
+      const assistant = state.assistants.assistants[0]
+      if (!assistant) throw new Error('no assistant')
+      store.dispatch({
+        type: 'assistants/setModel',
+        payload: {
+          assistantId: assistant.id,
+          model: { id: modelA, provider: 'mock-openai', name: modelA, group: 'e2e' }
+        }
+      })
+      store.dispatch({
+        type: 'assistants/updateAssistantSettings',
+        payload: {
+          assistantId: assistant.id,
+          settings: {
+            reasoning_effort: 'default',
+            reasoning_effort_by_model: {},
+            reasoning_effort_show_all_by_model: {}
+          }
+        }
+      })
+    },
+    { modelA: MODEL_A_ID, modelB: MODEL_B_ID }
+  )
+  await page.waitForFunction(
+    ({ modelId }) => {
+      const s = (window as any).store?.getState()
+      const assistant = s?.assistants?.assistants?.[0]
+      return (
+        assistant?.model?.id === modelId &&
+        (assistant?.settings?.reasoning_effort ?? 'default') === 'default' &&
+        Object.keys(assistant?.settings?.reasoning_effort_by_model ?? {}).length === 0 &&
+        Object.keys(assistant?.settings?.reasoning_effort_show_all_by_model ?? {}).length === 0
+      )
+    },
+    { modelId: MODEL_A_ID },
+    { timeout: 15000 }
+  )
+}
+
+async function getAssistantState(page: import('@playwright/test').Page): Promise<{
+  id: string
+  effort: string
+  effortByModel: Record<string, string>
+  showAllByModel: Record<string, boolean>
+  modelId: string
+  topicId: string
+}> {
   return page.evaluate(() => {
     const s = (window as any).store.getState()
     const assistant = s.assistants.assistants[0]
     return {
       id: assistant.id,
       effort: assistant.settings?.reasoning_effort ?? 'default',
+      effortByModel: assistant.settings?.reasoning_effort_by_model ?? {},
+      showAllByModel: assistant.settings?.reasoning_effort_show_all_by_model ?? {},
+      modelId: assistant.model?.id ?? '',
       topicId: assistant.topics?.[0]?.id ?? ''
     }
   })
 }
 
+async function setModel(page: import('@playwright/test').Page, modelId: string): Promise<void> {
+  await page.evaluate((mid: string) => {
+    const store = (window as any).store
+    const assistant = store.getState().assistants.assistants[0]
+    store.dispatch({
+      type: 'assistants/setModel',
+      payload: {
+        assistantId: assistant.id,
+        model: { id: mid, provider: 'mock-openai', name: mid, group: 'e2e' }
+      }
+    })
+  }, modelId)
+  await page.waitForFunction(
+    (mid: string) => {
+      const s = (window as any).store?.getState()
+      return s?.assistants?.assistants?.[0]?.model?.id === mid
+    },
+    modelId,
+    { timeout: 15000 }
+  )
+}
+
+async function openThinkingPopover(page: import('@playwright/test').Page): Promise<void> {
+  const thinkingButton = page.getByRole('button', { name: /Reasoning effort|思维链长度|思維鏈長度/i }).first()
+  await expect(thinkingButton).toBeVisible({ timeout: 20000 })
+  const popover = page.getByTestId('thinking-popover')
+  await page.keyboard.press('Escape')
+  await expect(popover).toBeHidden({ timeout: 10000 })
+  await thinkingButton.click()
+  await expect(popover).toBeVisible({ timeout: 10000 })
+}
+
+async function closeThinkingPopover(page: import('@playwright/test').Page): Promise<void> {
+  const popover = page.getByTestId('thinking-popover')
+  await page.keyboard.press('Escape')
+  await expect(popover).toBeHidden({ timeout: 10000 })
+}
+
 /** Type into the real chat textarea and submit via Enter (production send path). */
 async function uiSendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
+  await closeThinkingPopover(page)
+  await expect(page.getByTestId('thinking-popover')).toBeHidden({ timeout: 10000 })
   const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
   await textarea.waitFor({ state: 'visible', timeout: 15000 })
   await textarea.click()
@@ -166,28 +293,22 @@ test.describe('Reasoning effort flow', () => {
     await waitForAppReady(mainWindow)
   })
 
-  test('real Thinking menu select + mock send asserts store/UI and request shape, switch preserves', async ({
+  test('per-model reasoning effort — A high independent from unset B default, B selection does not leak to A', async ({
     mainWindow
   }) => {
     const page = mainWindow
 
-    await test.step('seed heuristic reasoning model on mock provider', async () => {
-      await seedReasoningModel(page)
+    await test.step('seed A=grok-3-mini and B=mock-model', async () => {
+      await seedPerModelContractModels(page)
       const state = await getAssistantState(page)
+      expect(state.modelId).toBe(MODEL_A_ID)
       expect(state.effort).toBe('default')
+      expect(Object.keys(state.effortByModel).length).toBe(0)
     })
 
-    await test.step('real Thinking menu select High', async () => {
-      // Locale-independent Thinking button lookup: the accessible label is
-      // translated (Reasoning effort / 思维链长度 / 思維鏈長度).
-      const thinkingButton = page.getByRole('button', { name: /Reasoning effort|思维链长度|思維鏈長度/i }).first()
-      await expect(thinkingButton).toBeVisible({ timeout: 20000 })
-      await thinkingButton.click()
-      // QuickPanel opens with the resolver options; High is sendable for grok.
-      // Option labels are translated (High / 沉思 / 盡力思考). The panel
-      // container uses generated classes, so match the option text globally —
-      // it only appears in the open panel.
-      const highOption = page.getByText(/^(High|沉思|盡力思考)$/, { exact: true }).first()
+    await test.step('A selects high via real Thinking Popover', async () => {
+      await openThinkingPopover(page)
+      const highOption = page.getByTestId('thinking-option-high')
       await expect(highOption).toBeVisible({ timeout: 10000 })
       await highOption.click()
       await page.waitForFunction(
@@ -198,27 +319,21 @@ test.describe('Reasoning effort flow', () => {
         undefined,
         { timeout: 15000 }
       )
+      await expect(page.getByTestId('thinking-popover')).toBeHidden({ timeout: 10000 })
     })
 
-    await test.step('assert store and rendered Thinking control state', async () => {
+    await test.step('assert store and rendered Thinking control state high for A', async () => {
       const state = await getAssistantState(page)
       expect(state.effort).toBe('high')
-      // UI evidence: reopen the real Thinking menu and prove the High option
-      // renders the selected Check mark (QuickPanel item.isSelected).
-      const thinkingButton = page.getByRole('button', { name: /Reasoning effort|思维链长度|思維鏈長度/i }).first()
-      await thinkingButton.click()
-      const panel = page.getByTestId('quick-panel')
-      await expect(panel).toBeVisible({ timeout: 10000 })
-      const highLabel = panel.getByText(/^(High|沉思|盡力思考)$/, { exact: true }).first()
-      await expect(highLabel).toBeVisible({ timeout: 10000 })
-      const highRow = highLabel.locator('xpath=ancestor::div[@data-id][1]')
-      await expect(highRow.locator('svg.lucide-check')).toBeVisible({ timeout: 10000 })
-      // Dismiss the panel with Escape before sending.
-      await page.keyboard.press('Escape')
-      await expect(panel).not.toBeVisible({ timeout: 10000 })
+      expect(state.effortByModel[MODEL_A_KEY]).toBe('high')
+      await openThinkingPopover(page)
+      const highOption = page.getByTestId('thinking-option-high')
+      await expect(highOption).toBeVisible({ timeout: 10000 })
+      await expect(highOption).toHaveAttribute('data-selected', 'true')
+      await closeThinkingPopover(page)
     })
 
-    await test.step('send via mock and assert captured request shape', async () => {
+    await test.step('send via mock and assert captured request shape high for A', async () => {
       clearRequestLog()
       const before = getRequestSequence()
       const state = await getAssistantState(page)
@@ -238,44 +353,78 @@ test.describe('Reasoning effort flow', () => {
       expect(request!.method).toBe('POST')
       expect(request!.url).toBe('/v1/chat/completions')
       const parsed = request!.parsed as any
-      expect(parsed?.model).toBe(REASONING_MODEL_ID)
+      expect(parsed?.model).toBe(MODEL_A_ID)
       expect(parsed?.stream).toBe(true)
       const messages = parsed?.messages as Array<{ role: string; content: string }>
       expect(Array.isArray(messages)).toBe(true)
       expect(messages.filter((m) => m.role === 'user').at(-1)?.content).toBe(REASONING_TEXT)
-      // Reasoning signal: the generic lane emits `reasoningEffort`, which the
-      // pinned AI SDK openai-compatible provider serializes as the
-      // `reasoning_effort` chat-completions field.
       expect(parsed?.reasoning_effort).toBe('high')
     })
 
-    await test.step('model switch to plain mock-model preserves the explicit level', async () => {
-      await page.evaluate(() => {
-        const store = (window as any).store
-        const assistant = store.getState().assistants.assistants[0]
-        store.dispatch({
-          type: 'assistants/setModel',
-          payload: {
-            assistantId: assistant.id,
-            model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model', group: 'mock' }
-          }
-        })
-      })
-      // Unit B: user intent is never auto-corrected by model metadata.
+    await test.step('switch to B and verify B uses own unset default and A high not incorrectly displayed', async () => {
+      await setModel(page, MODEL_B_ID)
+      await page.waitForFunction(
+        ({ keyA, keyB }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return (
+            a?.settings?.reasoning_effort === 'default' && a?.settings?.reasoning_effort_by_model?.[keyA] === 'high'
+          )
+        },
+        { keyA: MODEL_A_KEY, keyB: MODEL_B_KEY },
+        { timeout: 15000 }
+      )
+      const stateB = await getAssistantState(page)
+      expect(stateB.modelId).toBe(MODEL_B_ID)
+      expect(stateB.effort).toBe('default')
+      expect(stateB.effortByModel[MODEL_A_KEY]).toBe('high')
+      expect(stateB.effortByModel[MODEL_B_KEY] ?? 'default').toBe('default')
+      await openThinkingPopover(page)
+      const defaultOption = page.getByTestId('thinking-option-default')
+      const highOption = page.getByTestId('thinking-option-high')
+      await expect(defaultOption).toBeVisible({ timeout: 10000 })
+      await expect(defaultOption).toHaveAttribute('data-selected', 'true')
+      await expect(highOption).toBeVisible({ timeout: 10000 })
+      await expect(highOption).not.toHaveAttribute('data-selected', 'true')
+      await closeThinkingPopover(page)
+    })
+
+    await test.step('B selects low and verify B choice', async () => {
+      await openThinkingPopover(page)
+      const lowOption = page.getByTestId('thinking-option-low')
+      await expect(lowOption).toBeVisible({ timeout: 10000 })
+      await lowOption.click()
       await page.waitForFunction(
         () => {
           const s = (window as any).store?.getState()
-          const assistant = s?.assistants?.assistants?.[0]
-          return assistant?.model?.id === 'mock-model' && assistant?.settings?.reasoning_effort === 'high'
+          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'low'
         },
         undefined,
         { timeout: 15000 }
       )
-      const preserved = await getAssistantState(page)
-      expect(preserved.effort).toBe('high')
+      await expect(page.getByTestId('thinking-popover')).toBeHidden({ timeout: 10000 })
+      await page.waitForFunction(
+        ({ keyB }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return a?.settings?.reasoning_effort === 'low' && a?.settings?.reasoning_effort_by_model?.[keyB] === 'low'
+        },
+        { keyB: MODEL_B_KEY },
+        { timeout: 15000 }
+      )
+      const after = await getAssistantState(page)
+      expect(after.modelId).toBe(MODEL_B_ID)
+      expect(after.effort).toBe('low')
+      expect(after.effortByModel[MODEL_B_KEY]).toBe('low')
+      expect(after.effortByModel[MODEL_A_KEY]).toBe('high')
+      await openThinkingPopover(page)
+      const lowSelected = page.getByTestId('thinking-option-low')
+      await expect(lowSelected).toBeVisible({ timeout: 10000 })
+      await expect(lowSelected).toHaveAttribute('data-selected', 'true')
+      await closeThinkingPopover(page)
     })
 
-    await test.step('preserved level still sends on the encodable endpoint', async () => {
+    await test.step('B low request shape verification', async () => {
       clearRequestLog()
       const before = getRequestSequence()
       const state = await getAssistantState(page)
@@ -288,13 +437,265 @@ test.describe('Reasoning effort flow', () => {
         }
         return count
       }, state.topicId)
-      await uiSendMessage(page, 'E2E preserved reasoning still sends')
+      await uiSendMessage(page, REASONING_TEXT_B)
       await waitForAssistantResponseComplete(page, state.topicId, prevAssistantCount)
       const request = findProductRequestAfter(before)
       expect(request).not.toBeNull()
+      expect(request!.method).toBe('POST')
+      expect(request!.url).toBe('/v1/chat/completions')
       const parsed = request!.parsed as any
-      expect(parsed?.model).toBe('mock-model')
-      expect(parsed?.reasoning_effort).toBe('high')
+      expect(parsed?.model).toBe(MODEL_B_ID)
+      expect(parsed?.reasoning_effort).toBe('low')
+    })
+
+    await test.step('switch back to A and verify A restores high', async () => {
+      await setModel(page, MODEL_A_ID)
+      await page.waitForFunction(
+        ({ keyA, keyB }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return (
+            a?.model?.id === keyA.split(':')[1] &&
+            a?.settings?.reasoning_effort === 'high' &&
+            a?.settings?.reasoning_effort_by_model?.[keyB] === 'low'
+          )
+        },
+        { keyA: MODEL_A_KEY, keyB: MODEL_B_KEY },
+        { timeout: 15000 }
+      )
+      const stateA = await getAssistantState(page)
+      expect(stateA.modelId).toBe(MODEL_A_ID)
+      expect(stateA.effort).toBe('high')
+      expect(stateA.effortByModel[MODEL_A_KEY]).toBe('high')
+      expect(stateA.effortByModel[MODEL_B_KEY]).toBe('low')
+      await openThinkingPopover(page)
+      const highOption = page.getByTestId('thinking-option-high')
+      await expect(highOption).toBeVisible({ timeout: 10000 })
+      await expect(highOption).toHaveAttribute('data-selected', 'true')
+      await closeThinkingPopover(page)
+    })
+  })
+
+  test('anchored thinking popover show-all per provider:modelId independent persistence, toggle does not change reasoning_effort, switch restores', async ({
+    mainWindow
+  }) => {
+    const page = mainWindow
+
+    await test.step('seed two reasoning models and reset state', async () => {
+      await seedReasoningModels(page)
+      const state = await getAssistantState(page)
+      expect(state.modelId).toBe(MODEL_A_ID)
+      expect(state.effort).toBe('default')
+      expect(Object.keys(state.showAllByModel).length).toBe(0)
+    })
+
+    await test.step('toggle show-all for model A does not change reasoning_effort and persists per key', async () => {
+      const before = await getAssistantState(page)
+      const beforeEffort = before.effort
+      await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-option-default')).toBeVisible({ timeout: 10000 })
+      await expect(page.getByTestId('thinking-option-low')).toBeVisible()
+      await expect(page.getByTestId('thinking-option-high')).toBeVisible()
+      await expect(page.getByTestId('thinking-option-xhigh')).toBeHidden({ timeout: 5000 })
+      const showAllSwitch = page.getByTestId('thinking-show-all-switch')
+      await expect(showAllSwitch).toBeVisible({ timeout: 10000 })
+      await expect(page.getByRole('switch').first()).toBeVisible({ timeout: 10000 })
+      await showAllSwitch.click()
+      await page.waitForFunction(
+        ({ key }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return a.settings?.reasoning_effort_show_all_by_model?.[key] === true
+        },
+        { key: MODEL_A_KEY },
+        { timeout: 15000 }
+      )
+      const after = await getAssistantState(page)
+      expect(after.showAllByModel[MODEL_A_KEY]).toBe(true)
+      expect(after.effort).toBe(beforeEffort)
+      await expect(page.getByTestId('thinking-popover')).toBeVisible({ timeout: 10000 })
+      for (const opt of ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'] as const) {
+        await expect(page.getByTestId(`thinking-option-${opt}`)).toBeVisible({ timeout: 10000 })
+      }
+      await closeThinkingPopover(page)
+    })
+
+    await test.step('switching to model C has independent show-all false and does not carry A state', async () => {
+      await setModel(page, MODEL_C_ID)
+      await page.waitForFunction(
+        ({ keyA }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return a?.settings?.reasoning_effort_show_all_by_model?.[keyA] === true
+        },
+        { keyA: MODEL_A_KEY },
+        { timeout: 15000 }
+      )
+      const stateB = await getAssistantState(page)
+      expect(stateB.modelId).toBe(MODEL_C_ID)
+      expect(stateB.showAllByModel[MODEL_C_KEY] ?? false).toBe(false)
+      expect(stateB.showAllByModel[MODEL_A_KEY]).toBe(true)
+      await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-show-all-switch')).toBeVisible()
+      await expect(page.getByTestId('thinking-option-xhigh')).toBeHidden({ timeout: 5000 })
+      await page.getByTestId('thinking-show-all-switch').click()
+      await page.waitForFunction(
+        ({ key }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return a.settings?.reasoning_effort_show_all_by_model?.[key] === true
+        },
+        { key: MODEL_C_KEY },
+        { timeout: 15000 }
+      )
+      const afterB = await getAssistantState(page)
+      expect(afterB.showAllByModel[MODEL_C_KEY]).toBe(true)
+      expect(afterB.showAllByModel[MODEL_A_KEY]).toBe(true)
+      expect(afterB.effort).toBe('default')
+      await expect(page.getByTestId('thinking-popover')).toBeVisible()
+      await closeThinkingPopover(page)
+    })
+
+    await test.step('toggle C back to false keeps A true', async () => {
+      await openThinkingPopover(page)
+      await page.getByTestId('thinking-show-all-switch').click()
+      await page.waitForFunction(
+        ({ key }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return a.settings?.reasoning_effort_show_all_by_model?.[key] === false
+        },
+        { key: MODEL_C_KEY },
+        { timeout: 15000 }
+      )
+      const after = await getAssistantState(page)
+      expect(after.showAllByModel[MODEL_C_KEY]).toBe(false)
+      expect(after.showAllByModel[MODEL_A_KEY]).toBe(true)
+      await closeThinkingPopover(page)
+    })
+
+    await test.step('switching back to model A restores its show-all and effort independently', async () => {
+      await openThinkingPopover(page)
+      await closeThinkingPopover(page)
+      await page.evaluate(
+        ({ keyC }) => {
+          const store = (window as any).store
+          const a = store.getState().assistants.assistants[0]
+          store.dispatch({
+            type: 'assistants/updateAssistantSettings',
+            payload: {
+              assistantId: a.id,
+              settings: {
+                reasoning_effort: 'low',
+                reasoning_effort_by_model: { ...a.settings.reasoning_effort_by_model, [keyC]: 'low' }
+              }
+            }
+          })
+        },
+        { keyC: MODEL_C_KEY }
+      )
+      await page.waitForFunction(
+        () => (window as any).store.getState().assistants.assistants[0].settings.reasoning_effort === 'low',
+        undefined,
+        { timeout: 10000 }
+      )
+      await setModel(page, MODEL_A_ID)
+      await page.evaluate(
+        ({ keyA }) => {
+          const store = (window as any).store
+          const a = store.getState().assistants.assistants[0]
+          store.dispatch({
+            type: 'assistants/updateAssistantSettings',
+            payload: {
+              assistantId: a.id,
+              settings: {
+                reasoning_effort: 'high',
+                reasoning_effort_by_model: { ...a.settings.reasoning_effort_by_model, [keyA]: 'high' }
+              }
+            }
+          })
+        },
+        { keyA: MODEL_A_KEY }
+      )
+      await page.waitForFunction(
+        () => (window as any).store.getState().assistants.assistants[0].settings.reasoning_effort === 'high',
+        undefined,
+        { timeout: 10000 }
+      )
+      await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-option-xhigh')).toBeVisible({ timeout: 10000 })
+      await expect(page.getByTestId('thinking-show-all-switch')).toBeVisible()
+      const showAllChecked = await page.evaluate(
+        ({ key }) => {
+          const s = (window as any).store.getState()
+          const a = s.assistants.assistants[0]
+          return s.assistants.assistants[0].settings.reasoning_effort_show_all_by_model[key]
+        },
+        { key: MODEL_A_KEY }
+      )
+      expect(showAllChecked).toBe(true)
+      await closeThinkingPopover(page)
+      await setModel(page, MODEL_C_ID)
+      await page.waitForFunction(
+        ({ keyC }) => {
+          const s = (window as any).store?.getState()
+          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'low'
+        },
+        { keyC: MODEL_C_KEY },
+        { timeout: 15000 }
+      )
+      const stateB2 = await getAssistantState(page)
+      expect(stateB2.effort).toBe('low')
+      expect(stateB2.showAllByModel[MODEL_C_KEY]).toBe(false)
+      await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-option-xhigh')).toBeHidden({ timeout: 5000 })
+      await closeThinkingPopover(page)
+      await setModel(page, MODEL_A_ID)
+      await page.waitForFunction(
+        () => {
+          const s = (window as any).store?.getState()
+          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'high'
+        },
+        undefined,
+        { timeout: 15000 }
+      )
+      const stateA2 = await getAssistantState(page)
+      expect(stateA2.effort).toBe('high')
+      expect(stateA2.showAllByModel[MODEL_A_KEY]).toBe(true)
+    })
+
+    await test.step('verify localStorage persistence for show-all (no fake restart proof)', async () => {
+      await page.waitForFunction(
+        ({ keyA, keyC }) => {
+          const wire = localStorage.getItem('persist:cherry-studio')
+          if (!wire) return false
+          try {
+            const outer = JSON.parse(wire)
+            const sliceStr = outer.assistants
+            if (typeof sliceStr !== 'string') return false
+            const slice = JSON.parse(sliceStr)
+            const a = slice.assistants?.[0]
+            return (
+              a?.settings?.reasoning_effort_show_all_by_model?.[keyA] === true &&
+              a?.settings?.reasoning_effort_show_all_by_model?.[keyC] === false
+            )
+          } catch {
+            return false
+          }
+        },
+        { keyA: MODEL_A_KEY, keyC: MODEL_C_KEY },
+        { timeout: 15000 }
+      )
+      const wire = await page.evaluate(() => localStorage.getItem('persist:cherry-studio'))
+      expect(wire).not.toBeNull()
+      const outer = JSON.parse(wire!)
+      const assistantsSliceStr = outer.assistants
+      expect(typeof assistantsSliceStr).toBe('string')
+      const assistantsSlice = JSON.parse(assistantsSliceStr)
+      const assistant = assistantsSlice.assistants?.[0]
+      expect(assistant?.settings?.reasoning_effort_show_all_by_model?.[MODEL_A_KEY]).toBe(true)
+      expect(assistant?.settings?.reasoning_effort_show_all_by_model?.[MODEL_C_KEY]).toBe(false)
+      console.log('[E2E] localStorage persist:cherry-studio proves show_all map durability')
     })
   })
 })

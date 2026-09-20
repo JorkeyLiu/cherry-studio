@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Set the number of thinking tokens to use."
           }
-        }
+        },
+        "show_all": "Show all"
       },
       "tools": {
         "collapse": "Collapse",
@@ -5496,17 +5497,6 @@
         "title": "Proxy Mode"
       },
       "tip": "Supports wildcard matching (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Back",
-      "close": "Close",
-      "confirm": "Confirm",
-      "forward": "Forward",
-      "multiple": "Multiple Select",
-      "noResult": "No results found",
-      "page": "Page",
-      "select": "Select",
-      "title": "Quick Menu"
     },
     "scheduledTasks": {
       "description": "Manage scheduled tasks across all agents. Tasks run automatically on the configured schedule.",

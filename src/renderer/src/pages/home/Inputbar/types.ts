@@ -1,9 +1,4 @@
 import { loggerService } from '@logger'
-import type {
-  QuickPanelContextType,
-  QuickPanelListItem,
-  QuickPanelReservedSymbol
-} from '@renderer/components/QuickPanel'
 import { type Assistant, type Model, TopicType } from '@renderer/types'
 import type { InputBarToolType } from '@renderer/types/chat'
 import type { TFunction } from 'i18next'
@@ -25,7 +20,6 @@ export interface InputbarScopeConfig {
   showTokenCount?: boolean
   showTools?: boolean
   toolsCollapsible?: boolean
-  enableQuickPanel?: boolean
   enableDragDrop?: boolean
 }
 
@@ -37,12 +31,8 @@ type ActionKeys<T> = {
   [K in keyof T]: T[K] extends (...args: any[]) => any ? K : never
 }[keyof T]
 
-// 工具按钮不应该访问这些内部 API
-type ExcludedStateKeys = never // 没有需要排除的 state
-type ExcludedActionKeys = 'toolsRegistry' | 'triggers' // 这些 API 由工具系统内部管理
-
-type ToolStateKeys = Exclude<ReadableKeys<InputbarToolsContextValue>, ExcludedStateKeys>
-type ToolActionKeys = Exclude<ActionKeys<InputbarToolsContextValue>, ExcludedActionKeys>
+type ToolStateKeys = Exclude<ReadableKeys<InputbarToolsContextValue>, never>
+type ToolActionKeys = Exclude<ActionKeys<InputbarToolsContextValue>, never>
 
 export type ToolStateMap = Pick<InputbarToolsContextValue, ToolStateKeys>
 export type ToolActionMap = Pick<InputbarToolsContextValue, ToolActionKeys>
@@ -66,71 +56,12 @@ export interface ToolContext {
 }
 
 /**
- * 工具 QuickPanel 注册 API（声明式注册菜单和触发器）
- */
-export interface ToolQuickPanelApi {
-  registerRootMenu: (entries: QuickPanelListItem[]) => () => void
-  registerTrigger: (symbol: QuickPanelReservedSymbol, handler: (payload?: unknown) => void) => () => void
-}
-
-/**
- * Runtime controller exposed给工具组件（完整 QuickPanel 能力）
- */
-export type ToolQuickPanelController = QuickPanelContextType
-
-/**
  * Tool render context with injected dependencies
  */
 export type ToolRenderContext<S extends readonly ToolStateKey[], A extends readonly ToolActionKey[]> = ToolContext & {
   state: Pick<ToolStateMap, S[number]>
   actions: Pick<ToolActionMap, A[number]>
-  quickPanel: ToolQuickPanelApi
-  quickPanelController: ToolQuickPanelController
   t: TFunction
-}
-
-/**
- * QuickPanel trigger configuration for a tool.
- * Allows tools to declaratively register trigger handlers.
- */
-export interface ToolQuickPanelTrigger<
-  S extends readonly ToolStateKey[] = readonly ToolStateKey[],
-  A extends readonly ToolActionKey[] = readonly ToolActionKey[]
-> {
-  /** Trigger symbol (e.g., '@', '/', '#') */
-  symbol: QuickPanelReservedSymbol
-
-  /**
-   * Factory function that creates the trigger handler.
-   * Receives the tool's render context to access state/actions.
-   */
-  createHandler: (context: ToolRenderContext<S, A>) => (payload?: unknown) => void
-}
-
-/**
- * Root menu configuration for a tool.
- * Allows tools to contribute menu items to the '/' root menu.
- */
-export interface ToolQuickPanelRootMenu<
-  S extends readonly ToolStateKey[] = readonly ToolStateKey[],
-  A extends readonly ToolActionKey[] = readonly ToolActionKey[]
-> {
-  /**
-   * Factory function that creates root menu items.
-   * Receives the tool's render context to access state/actions.
-   */
-  createMenuItems: (context: ToolRenderContext<S, A>) => QuickPanelListItem[]
-}
-
-export interface ToolQuickPanelCapabilities<
-  S extends readonly ToolStateKey[] = readonly ToolStateKey[],
-  A extends readonly ToolActionKey[] = readonly ToolActionKey[]
-> {
-  /** Root menu configuration (for '/' trigger) */
-  rootMenu?: ToolQuickPanelRootMenu<S, A>
-
-  /** Trigger configurations (for '@', '#', etc.) */
-  triggers?: ToolQuickPanelTrigger<S, A>[]
 }
 
 /**
@@ -154,19 +85,8 @@ export interface ToolDefinition<
     actions?: A
   }
 
-  // Quick panel integration metadata (declarative trigger registration)
-  quickPanel?: ToolQuickPanelCapabilities<S, A>
-
   // Render function (receives context with injected dependencies)
-  // If null, the tool is a pure menu contributor (no button)
   render: ((context: ToolRenderContext<S, A>) => React.ReactNode) | null
-
-  /**
-   * Optional companion component that manages quick panel lifecycle for tools
-   * that need hooks (data fetching, side effects) before registering entries.
-   * It receives the same ToolRenderContext as the render function.
-   */
-  quickPanelManager?: React.ComponentType<{ context: ToolRenderContext<S, A> }>
 }
 
 /**

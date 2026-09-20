@@ -35,7 +35,7 @@ import type { Assistant, Topic } from '@renderer/types'
 import type { ImportNavigationProjection, ProjectionRecoveredTopic, ProjectionTopic } from '@shared/chatImport/types'
 import { RECOVERED_SHELL_ASSISTANT_ID } from '@shared/chatImport/types'
 
-import { DEFAULT_ASSISTANT_SETTINGS } from './AssistantService'
+import { DEFAULT_ASSISTANT_SETTINGS } from './assistantDefaults'
 
 /**
  * Lazy logger accessor.

@@ -14,13 +14,12 @@ import type {
   AssistantSettings,
   Model,
   Provider,
-  Topic,
   TranslateAssistant,
   TranslateLanguage
 } from '@renderer/types'
 import { v4 as uuid } from 'uuid'
 
-import { DEFAULT_ASSISTANT_SETTINGS } from './assistantDefaults'
+import { DEFAULT_ASSISTANT_SETTINGS, getDefaultAssistant, getDefaultTopic } from './assistantDefaults'
 
 const logger = loggerService.withContext('AssistantService')
 
@@ -34,34 +33,7 @@ const logger = loggerService.withContext('AssistantService')
  * (parameterBuilder reads defaults from there without importing the
  * store/AssistantService chain); re-exported here for existing consumers.
  */
-export { DEFAULT_ASSISTANT_SETTINGS } from './assistantDefaults'
-
-/**
- * Creates a temporary default assistant instance.
- *
- * **Important**: This creates a NEW temporary assistant instance with DEFAULT_ASSISTANT_SETTINGS,
- * NOT the actual default assistant from Redux store. This is used as a template for creating
- * new assistants or as a fallback when no assistant is specified.
- *
- * To get the actual default assistant from Redux store (with current user settings), use:
- * ```typescript
- * const defaultAssistant = store.getState().assistants.defaultAssistant
- * ```
- *
- * @returns New temporary assistant instance with default settings
- */
-export function getDefaultAssistant(): Assistant {
-  return {
-    id: 'default',
-    name: i18n.t('chat.default.name'),
-    emoji: '😀',
-    prompt: '',
-    topics: [getDefaultTopic('default')],
-    messages: [],
-    type: 'assistant',
-    settings: DEFAULT_ASSISTANT_SETTINGS
-  }
-}
+export { DEFAULT_ASSISTANT_SETTINGS, getDefaultAssistant, getDefaultTopic } from './assistantDefaults'
 
 /**
  * Creates a default translate assistant.
@@ -133,18 +105,6 @@ export function getDefaultTranslateAssistant(
  */
 export function getDefaultAssistantSettings() {
   return store.getState().assistants.defaultAssistant.settings
-}
-
-export function getDefaultTopic(assistantId: string): Topic {
-  return {
-    id: uuid(),
-    assistantId,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    name: i18n.t('chat.default.topic.name'),
-    messages: [],
-    isNameManuallyEdited: false
-  }
 }
 
 export function getDefaultProvider() {

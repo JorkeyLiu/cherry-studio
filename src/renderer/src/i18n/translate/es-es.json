@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Establecer el número de tokens para el pensamiento"
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "Contraer",
@@ -5496,17 +5497,6 @@
         "title": "Modo de proxy"
       },
       "tip": "Admite coincidencia parcial (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Atrás",
-      "close": "Cerrar",
-      "confirm": "Confirmar",
-      "forward": "Adelante",
-      "multiple": "Selección múltiple",
-      "noResult": "No se encontraron resultados",
-      "page": "Página",
-      "select": "Seleccionar",
-      "title": "Menú de acceso rápido"
     },
     "scheduledTasks": {
       "description": "Administrar tareas programadas en todos los agentes. Las tareas se ejecutan automáticamente según el horario configurado.",

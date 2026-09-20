@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "思考のトークン数を設定します"
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "折りたたむ",
@@ -5496,17 +5497,6 @@
         "title": "プロキシモード"
       },
       "tip": "ワイルドカード一致をサポート (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "戻る",
-      "close": "閉じる",
-      "confirm": "確認",
-      "forward": "進む",
-      "multiple": "複数選択",
-      "noResult": "結果が見つかりません",
-      "page": "ページ",
-      "select": "選択",
-      "title": "クイックメニュー"
     },
     "scheduledTasks": {
       "description": "すべてのエージェントにわたるスケジュールされたタスクを管理します。タスクは設定されたスケジュールに従って自動的に実行されます。",

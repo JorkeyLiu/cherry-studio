@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Setează numărul de tokeni de gândire de utilizat."
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "Restrânge",
@@ -5496,17 +5497,6 @@
         "title": "Mod proxy"
       },
       "tip": "Acceptă potrivirea cu wildcard (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Înapoi",
-      "close": "Închide",
-      "confirm": "Confirmă",
-      "forward": "Înainte",
-      "multiple": "Selecție multiplă",
-      "noResult": "Niciun rezultat găsit",
-      "page": "Pagină",
-      "select": "Selectează",
-      "title": "Meniu rapid"
     },
     "scheduledTasks": {
       "description": "Gestionați sarcinile programate pentru toți agenții. Sarcinile rulează automat conform programului configurat.",

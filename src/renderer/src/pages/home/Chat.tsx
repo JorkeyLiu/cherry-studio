@@ -4,7 +4,6 @@ import { ContentSearch } from '@renderer/components/ContentSearch'
 import { HStack } from '@renderer/components/Layout'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
-import { QuickPanelProvider } from '@renderer/components/QuickPanel'
 import ResizableHandle from '@renderer/components/ResizableHandle'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
@@ -311,50 +310,48 @@ const Chat: FC<Props> = (props) => {
             flex={1}
             justify="space-between"
             style={{ height: mainHeight, width: '100%' }}>
-            <QuickPanelProvider>
-              <ChatNavbar activeAssistant={props.assistant} />
-              <div
-                className="flex flex-1 flex-col justify-between"
-                style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-                <Messages
-                  ref={messagesRef}
-                  assistant={assistant}
-                  topic={props.activeTopic}
-                  setActiveTopic={props.setActiveTopic}
-                  onComponentUpdate={messagesComponentUpdateHandler}
-                  onFirstUpdate={messagesComponentFirstUpdateHandler}
-                  sharedContextInfo={sharedContextInfo}
+            <ChatNavbar activeAssistant={props.assistant} />
+            <div
+              className="flex flex-1 flex-col justify-between"
+              style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
+              <Messages
+                ref={messagesRef}
+                assistant={assistant}
+                topic={props.activeTopic}
+                setActiveTopic={props.setActiveTopic}
+                onComponentUpdate={messagesComponentUpdateHandler}
+                onFirstUpdate={messagesComponentFirstUpdateHandler}
+                sharedContextInfo={sharedContextInfo}
+              />
+              {isContentSearchActive && (
+                <ContentSearch
+                  ref={contentSearchRef}
+                  searchTarget={mainRef as React.RefObject<HTMLElement>}
+                  filter={contentSearchFilter}
+                  includeUser={filterIncludeUser}
+                  onIncludeUserChange={userOutlinedItemClickHandler}
+                  initialText={pendingSearchText}
+                  onClose={disableContentSearch}
                 />
-                {isContentSearchActive && (
-                  <ContentSearch
-                    ref={contentSearchRef}
-                    searchTarget={mainRef as React.RefObject<HTMLElement>}
-                    filter={contentSearchFilter}
-                    includeUser={filterIncludeUser}
-                    onIncludeUserChange={userOutlinedItemClickHandler}
-                    initialText={pendingSearchText}
-                    onClose={disableContentSearch}
-                  />
-                )}
-                {messageNavigation && (
-                  <ChatNavigation
-                    containerId="messages"
-                    scrollToMessageById={(id) => messagesRef.current?.scrollToMessageById(id)}
-                    scrollToTop={() => messagesRef.current?.scrollToTop()}
-                    scrollToContextBoundary={() => messagesRef.current?.scrollToContextBoundary()}
-                    scrollToBottom={() => messagesRef.current?.scrollToBottom()}
-                    previousUserMessage={(id) => messagesRef.current?.previousUserMessage(id)}
-                    nextUserMessage={(id) => messagesRef.current?.nextUserMessage(id)}
-                  />
-                )}
-                <Inputbar
-                  assistant={assistant}
-                  setActiveTopic={props.setActiveTopic}
-                  topic={props.activeTopic}
-                  sharedContextInfo={sharedContextInfo}
+              )}
+              {messageNavigation && (
+                <ChatNavigation
+                  containerId="messages"
+                  scrollToMessageById={(id) => messagesRef.current?.scrollToMessageById(id)}
+                  scrollToTop={() => messagesRef.current?.scrollToTop()}
+                  scrollToContextBoundary={() => messagesRef.current?.scrollToContextBoundary()}
+                  scrollToBottom={() => messagesRef.current?.scrollToBottom()}
+                  previousUserMessage={(id) => messagesRef.current?.previousUserMessage(id)}
+                  nextUserMessage={(id) => messagesRef.current?.nextUserMessage(id)}
                 />
-              </div>
-            </QuickPanelProvider>
+              )}
+              <Inputbar
+                assistant={assistant}
+                setActiveTopic={props.setActiveTopic}
+                topic={props.activeTopic}
+                sharedContextInfo={sharedContextInfo}
+              />
+            </div>
           </Main>
         </motion.div>
         {showTopics && (

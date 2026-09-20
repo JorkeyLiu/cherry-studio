@@ -3,7 +3,6 @@ import { ActionIconButton } from '@renderer/components/Buttons'
 import CustomTag from '@renderer/components/Tags/CustomTag'
 import TranslateButton from '@renderer/components/TranslateButton'
 import { useSettings } from '@renderer/hooks/useSettings'
-import type { ToolQuickPanelApi } from '@renderer/pages/home/Inputbar/types'
 import FileManager from '@renderer/services/FileManager'
 import PasteService from '@renderer/services/PasteService'
 import type { FileMetadata } from '@renderer/types'
@@ -91,14 +90,6 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
   const { t } = useTranslation()
   const textareaRef = useRef<TextAreaRef>(null)
   const isUserMessage = message.role === 'user'
-
-  const noopQuickPanel = useMemo<ToolQuickPanelApi>(
-    () => ({
-      registerRootMenu: () => () => {},
-      registerTrigger: () => () => {}
-    }),
-    []
-  )
 
   // Unit B: edit attachments are never gated by vision metadata. All ordinary
   // attachment kinds stay selectable; endpoint/adapter encodability is decided
@@ -585,7 +576,6 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
             <ActionBarLeft>
               {isUserMessage && (
                 <AttachmentButton
-                  quickPanel={noopQuickPanel}
                   files={files}
                   setFiles={setFiles}
                   couldAddImageFile={couldAddImageFile}

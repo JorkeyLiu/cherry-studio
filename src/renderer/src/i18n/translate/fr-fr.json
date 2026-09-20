@@ -1096,7 +1096,8 @@
           "tokens": {
             "tip": "Définir le nombre de jetons pour la réflexion"
           }
-        }
+        },
+        "show_all": "[to be translated]:Show all"
       },
       "tools": {
         "collapse": "Réduire",
@@ -5496,17 +5497,6 @@
         "title": "Mode de proxy"
       },
       "tip": "Prise en charge de la correspondance floue (*.test.com, 192.168.0.0/16)"
-    },
-    "quickPanel": {
-      "back": "Назад",
-      "close": "Закрыть",
-      "confirm": "Подтвердить",
-      "forward": "Вперед",
-      "multiple": "Множественный выбор",
-      "noResult": "Aucun résultat trouvé",
-      "page": "Перелистнуть страницу",
-      "select": "Выбрать",
-      "title": "Быстрое меню"
     },
     "scheduledTasks": {
       "description": "Gérez les tâches planifiées sur tous les agents. Les tâches s'exécutent automatiquement selon le planning configuré.",

@@ -1,427 +1,73 @@
-import type {
-  Model,
-  Provider,
-  ReasoningEffortConfig,
-  ReasoningEffortOption,
-  ThinkingModelType,
-  ThinkingOptionConfig
-} from '@renderer/types'
+import type { Model, Provider, ReasoningEffortOption } from '@renderer/types'
 import { getLowerBaseModelName, isUserSelectedModelType } from '@renderer/utils'
 
 import { isEmbeddingModel, isRerankModel } from './embedding'
-import { resolveCapabilityWithOverride, resolveExternalReasoningSupport, strictProviderForModel } from './modelMetadata'
 import {
-  isGPT5FamilyModel,
-  isGPT5ProModel,
-  isGPT5SeriesModel,
-  isGPT51CodexMaxModel,
-  isGPT51SeriesModel,
-  isGPT52SeriesModel,
-  isOpenAIDeepResearchModel,
-  isOpenAIOpenWeightModel,
-  isOpenAIReasoningModel,
-  isSupportedReasoningEffortOpenAIModel
-} from './openai'
-import {
-  GEMINI_FLASH_MODEL_REGEX,
-  isClaude46SeriesModel,
-  isGemini3FlashModel,
-  isGemini3ProModel,
-  isGemini31FlashLiteModel,
-  isGemini31ProModel,
-  isKimi25OrNewerModel,
-  isSupportAdaptiveThinkingClaudeModel,
-  withModelIdAndNameAsId
-} from './utils'
+  resolveCapabilityWithOverride,
+  resolveExternalReasoningSupport,
+  resolveServingReasoningEffort
+} from './modelMetadata'
+import { isOpenAIReasoningModel, isSupportedReasoningEffortOpenAIModel } from './openai'
+import { isKimi25OrNewerModel, withModelIdAndNameAsId } from './utils'
 import { isTextToImageModel } from './vision'
 
 // Reasoning models
 export const REASONING_REGEX =
   /^(?!.*-non-reasoning\b)(o\d+(?:-[\w-]+)?|.*\b(?:reasoning|reasoner|thinking|think)\b.*|.*-[rR]\d+.*|.*\bqwq(?:-[\w-]+)?\b.*|.*\bhunyuan-t1(?:-[\w-]+)?\b.*|.*\bglm-zero-preview\b.*|.*\bgrok-(?:3-mini|4|4-fast|build)(?:-[\w-]+)?\b.*)$/i
 
-// 模型类型到支持的reasoning_effort的映射表
-// TODO: refactor this. too many identical options
-export const MODEL_SUPPORTED_REASONING_EFFORT = {
-  default: ['low', 'medium', 'high'] as const,
-  // Constrains effort on reasoning for reasoning models. Currently supported values are (none, minimal, low, medium, high, and xhigh).
-  // Reducing reasoning effort can result in faster responses and fewer tokens used on reasoning in a response.
-  // • (gpt-5.1) defaults to none, which does not perform reasoning.
-  //   The supported reasoning values for (gpt-5.1) are (none, low, medium, and high). Tool calls are supported for all reasoning values in (gpt-5.1).
-  // • All models before (gpt-5.1) default to medium reasoning effort, and do not support (none).
-  // • The (gpt-5-pro) model defaults to (and only supports) (high reasoning effort).
-  // • xhigh is supported for all models after (gpt-5.1-codex-max).
-  o: ['low', 'medium', 'high'] as const,
-  openai_deep_research: ['medium'] as const,
-  gpt5: ['minimal', 'low', 'medium', 'high'] as const,
-  gpt5_codex: ['low', 'medium', 'high'] as const,
-  gpt5_1: ['none', 'low', 'medium', 'high'] as const,
-  gpt5_1_codex: ['medium', 'high'] as const,
-  gpt5_1_codex_max: ['medium', 'high', 'xhigh'] as const,
-  gpt5_2_codex: ['low', 'medium', 'high', 'xhigh'] as const,
-  // Fallback for GPT-5.2+ base models and GPT-5.3+ codex models
-  gpt5_2: ['none', 'low', 'medium', 'high', 'xhigh'] as const,
-  gpt5pro: ['high'] as const,
-  // Fallback for GPT-5.2+ pro models
-  gpt52pro: ['medium', 'high', 'xhigh'] as const,
-  gpt_oss: ['low', 'medium', 'high'] as const,
-  grok: ['low', 'high'] as const,
-  grok4_fast: ['auto'] as const,
-  grok_4_3: ['none', 'low', 'medium', 'high'] as const,
-  gemini2_flash: ['low', 'medium', 'high', 'auto'] as const,
-  gemini2_pro: ['low', 'medium', 'high', 'auto'] as const,
-  // Also Gemini 3.1 Flash(-lite)
-  gemini3_flash: ['minimal', 'low', 'medium', 'high'] as const,
-  gemini3_pro: ['low', 'high'] as const,
-  gemini3_1_pro: ['low', 'medium', 'high'] as const,
-  // Google-hosted Gemma 4 documents `minimal` as the closest supported near-off
-  // setting for most requests, but does not guarantee thinking is fully disabled.
-  // Keep the formal UI options aligned with the API guarantee and omit `none`.
-  gemma4_hosted: ['minimal', 'high'] as const,
-  qwen: ['low', 'medium', 'high'] as const,
-  qwen_thinking: ['low', 'medium', 'high'] as const,
-  doubao: ['auto', 'high'] as const,
-  doubao_no_auto: ['high'] as const,
-  doubao_after_251015: ['minimal', 'low', 'medium', 'high'] as const,
-  hunyuan: ['auto'] as const,
-  mimo: ['auto'] as const,
-  zhipu: ['auto'] as const,
-  perplexity: ['low', 'medium', 'high'] as const,
-  deepseek_hybrid: ['auto'] as const,
-  deepseek_v4: ['high', 'xhigh'] as const,
-  kimi_k2_5: ['none', 'auto'] as const,
-  // Claude 3.7, 4.0, 4.5 reasoning models
-  claude: ['low', 'medium', 'high'] as const,
-  // Claude 4.6 supports low, medium, high, xhigh (xhigh is mapped to max in API)
-  claude46: ['low', 'medium', 'high', 'xhigh'] as const,
-  mistral: ['high'] as const
-} as const satisfies ReasoningEffortConfig
-
-// Model type to supported options mapping
-export const MODEL_SUPPORTED_OPTIONS: ThinkingOptionConfig = {
-  default: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.default] as const,
-  o: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.o] as const,
-  openai_deep_research: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.openai_deep_research] as const,
-  gpt5: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5] as const,
-  gpt5pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5pro] as const,
-  gpt5_codex: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5_codex] as const,
-  gpt5_1: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5_1] as const,
-  gpt5_1_codex: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5_1_codex] as const,
-  gpt5_2_codex: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5_2_codex] as const,
-  gpt5_2: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5_2] as const,
-  gpt5_1_codex_max: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt5_1_codex_max] as const,
-  gpt52pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt52pro] as const,
-  gpt_oss: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt_oss] as const,
-  grok: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.grok] as const,
-  grok4_fast: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.grok4_fast] as const,
-  grok_4_3: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.grok_4_3] as const,
-  gemini2_flash: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini2_flash] as const,
-  gemini2_pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini2_pro] as const,
-  gemini3_flash: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini3_flash] as const,
-  gemini3_pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini3_pro] as const,
-  gemini3_1_pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini3_1_pro] as const,
-  gemma4_hosted: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemma4_hosted] as const,
-  qwen: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.qwen] as const,
-  qwen_thinking: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.qwen_thinking] as const,
-  doubao: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.doubao] as const,
-  doubao_no_auto: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.doubao_no_auto] as const,
-  doubao_after_251015: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.doubao_after_251015] as const,
-  mimo: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.mimo] as const,
-  hunyuan: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.hunyuan] as const,
-  zhipu: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.zhipu] as const,
-  perplexity: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.perplexity] as const,
-  deepseek_hybrid: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.deepseek_hybrid] as const,
-  deepseek_v4: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.deepseek_v4] as const,
-  kimi_k2_5: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.kimi_k2_5] as const,
-  claude: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.claude] as const,
-  claude46: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.claude46] as const,
-  mistral: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.mistral] as const
-} as const
-
-// TODO: add ut
-const _getThinkModelType = (model: Model): ThinkingModelType => {
-  let thinkingModelType: ThinkingModelType = 'default'
-  const modelId = getLowerBaseModelName(model.id)
-  if (isClaudeReasoningModel(model)) {
-    thinkingModelType = 'claude'
-    // Opus 4.7+ reuses the 4.6 effort list (low/medium/high/xhigh); provider-level
-    // mapping still distinguishes them (Opus 4.7+ sends native 'xhigh', 4.6 sends 'max').
-    if (isClaude46SeriesModel(model) || isSupportAdaptiveThinkingClaudeModel(model)) {
-      thinkingModelType = 'claude46'
-    }
-  } else if (isOpenAIDeepResearchModel(model)) {
-    return 'openai_deep_research'
-  } else if (isGPT5FamilyModel(model)) {
-    if (isGPT51SeriesModel(model)) {
-      if (modelId.includes('codex')) {
-        thinkingModelType = 'gpt5_1_codex'
-        if (isGPT51CodexMaxModel(model)) {
-          thinkingModelType = 'gpt5_1_codex_max'
-        }
-      } else {
-        thinkingModelType = 'gpt5_1'
-      }
-    } else if (isGPT52SeriesModel(model) && modelId.includes('codex')) {
-      thinkingModelType = 'gpt5_2_codex'
-    } else if (isGPT5SeriesModel(model)) {
-      if (modelId.includes('codex')) {
-        thinkingModelType = 'gpt5_codex'
-      } else {
-        thinkingModelType = 'gpt5'
-        if (isGPT5ProModel(model)) {
-          thinkingModelType = 'gpt5pro'
-        }
-      }
-    } else {
-      // GPT-5.2+ non-codex models (also serves as fallback for unknown future sub-versions)
-      if (modelId.includes('-pro')) {
-        thinkingModelType = 'gpt52pro'
-      } else {
-        thinkingModelType = 'gpt5_2'
-      }
-    }
-  } else if (isOpenAIOpenWeightModel(model)) {
-    thinkingModelType = 'gpt_oss'
-  } else if (isSupportedReasoningEffortOpenAIModel(model)) {
-    thinkingModelType = 'o'
-  } else if (isGrok43Model(model)) {
-    thinkingModelType = 'grok_4_3'
-  } else if (isGrok4FastReasoningModel(model)) {
-    thinkingModelType = 'grok4_fast'
-  } else if (isSupportedThinkingTokenGeminiModel(model)) {
-    if (isHostedGemma4ThinkingModel(model)) {
-      thinkingModelType = 'gemma4_hosted'
-    } else if (isGemini3FlashModel(model) || isGemini31FlashLiteModel(model)) {
-      thinkingModelType = 'gemini3_flash'
-    } else if (isGemini3ProModel(model)) {
-      thinkingModelType = 'gemini3_pro'
-    } else if (isGemini31ProModel(model)) {
-      thinkingModelType = 'gemini3_1_pro'
-    } else if (GEMINI_FLASH_MODEL_REGEX.test(model.id)) {
-      thinkingModelType = 'gemini2_flash'
-    } else {
-      thinkingModelType = 'gemini2_pro'
-    }
-  } else if (isSupportedReasoningEffortGrokModel(model)) {
-    thinkingModelType = 'grok'
-  } else if (isSupportedThinkingTokenQwenModel(model)) {
-    if (isQwenAlwaysThinkModel(model)) {
-      thinkingModelType = 'qwen_thinking'
-    } else {
-      thinkingModelType = 'qwen'
-    }
-  } else if (isSupportedThinkingTokenDoubaoModel(model)) {
-    if (isDoubaoThinkingAutoModel(model)) {
-      thinkingModelType = 'doubao'
-    } else if (isDoubaoSeedAfter251015(model) || isDoubaoSeed18Model(model)) {
-      thinkingModelType = 'doubao_after_251015'
-    } else {
-      thinkingModelType = 'doubao_no_auto'
-    }
-  } else if (isSupportedThinkingTokenHunyuanModel(model)) {
-    thinkingModelType = 'hunyuan'
-  } else if (isSupportedReasoningEffortPerplexityModel(model)) {
-    thinkingModelType = 'perplexity'
-  } else if (isSupportedThinkingTokenZhipuModel(model)) {
-    thinkingModelType = 'zhipu'
-  } else if (isDeepSeekV4PlusModel(model)) {
-    thinkingModelType = 'deepseek_v4'
-  } else if (isDeepSeekHybridInferenceModel(model)) {
-    thinkingModelType = 'deepseek_hybrid'
-  } else if (isSupportedThinkingTokenMiMoModel(model)) {
-    thinkingModelType = 'mimo'
-  } else if (isSupportedThinkingTokenKimiModel(model)) {
-    thinkingModelType = 'kimi_k2_5'
-  } else if (isMistralReasoningModel(model)) {
-    thinkingModelType = 'mistral'
-  }
-  return thinkingModelType
-}
-
-export const getThinkModelType = (model: Model): ThinkingModelType => {
-  const { idResult, nameResult } = withModelIdAndNameAsId(model, _getThinkModelType)
-  if (idResult !== 'default') {
-    return idResult
-  } else {
-    return nameResult
-  }
-}
-
-const _getModelSupportedReasoningEffortOptions = (model: Model): ReasoningEffortOption[] | undefined => {
-  if (!isSupportedReasoningEffortModel(model) && !isSupportedThinkingTokenModel(model)) {
-    return undefined
-  }
-  // use private function to avoid redundant function calling
-  const thinkingType = _getThinkModelType(model)
-  return MODEL_SUPPORTED_OPTIONS[thinkingType]
-}
+// Provider/model-family protocol mapping for request encoding is retained
+// below (isSupported* helpers). UI whitelist tables and think-model-type
+// mapping have been removed: UI options are now metadata-driven only.
 
 /**
- * Gets the supported reasoning effort options for a given model.
+ * Single effective reasoning-options resolver (metadata-driven, UI only).
  *
- * This function determines which reasoning effort levels a model supports based on its type.
- * It works with models that support either `reasoning_effort` parameter (like OpenAI o-series)
- * or thinking token control (like Claude, Gemini, Qwen, etc.).
+ * Priority:
+ * - explicit user override `false` -> undefined (user disabled)
+ * - canonical `reasoning` === false -> ['default','none']
+ * - otherwise (true or unknown): if provider-specific serving metadata has
+ *   `effort.values` -> ['default','none', ...normalized values (`max` -> `xhigh`)]
+ *   else generic fallback ['default','none','low','medium','high']
  *
- * The function implements a fallback mechanism: it first checks the model's `id`, and if that
- * doesn't match any known patterns, it falls back to checking the model's `name`.
- *
- * @param model - The model to check for reasoning effort support. Can be undefined or null.
- * @returns An array of supported reasoning effort options, or undefined if:
- *          - The model is null/undefined
- *          - The model doesn't support reasoning effort or thinking tokens
- *
- *          All reasoning models support the 'default' option (always the first element),
- *          which represents no additional configuration for thinking behavior.
- *
- * @example
- * // OpenAI o-series models support default, low, medium, high
- * getModelSupportedReasoningEffortOptions({ id: 'o3-mini', ... })
- * // Returns: ['default', 'low', 'medium', 'high']
- * // 'default' = no additional configuration for thinking behavior
- *
- * @example
- * // GPT-5.1 models support default, none, low, medium, high
- * getModelSupportedReasoningEffortOptions({ id: 'gpt-5.1', ... })
- * // Returns: ['default', 'none', 'low', 'medium', 'high']
- * // 'default' = no additional configuration
- * // 'none' = explicitly disable reasoning
- *
- * @example
- * // Gemini Flash models support default, none, low, medium, high, auto
- * getModelSupportedReasoningEffortOptions({ id: 'gemini-2.5-flash-latest', ... })
- * // Returns: ['default', 'none', 'low', 'medium', 'high', 'auto']
- * // 'default' = no additional configuration
- * // 'auto' = let the model automatically decide
- *
- * @example
- * // Non-reasoning models return undefined
- * getModelSupportedReasoningEffortOptions({ id: 'gpt-4o', ... })
- * // Returns: undefined
- *
- * @example
- * // Name fallback when id doesn't match
- * getModelSupportedReasoningEffortOptions({ id: 'custom-id', name: 'gpt-5.1', ... })
- * // Returns: ['default', 'none', 'low', 'medium', 'high']
- */
-/**
- * Single effective reasoning-options resolver.
- *
- * Priority: explicit user override (only when actually present) -> exact
- * canonical model-id models.dev `reasoning` support -> model/family
- * heuristics (offline fallback) -> unknown.
- *
- * Canonical `models.json` publishes no reasoning options, so precise
- * external effort lists never apply: reasoning-known models use the
- * heuristic option lists, and unknown models stay undefined (no gating,
- * requests never blocked).
- *
- * The optional provider selects the active request lane for protocol
- * filtering. When omitted, the exact owning provider is resolved internally;
- * when the connection is unknown, no lane filtering applies (offline
- * fallback). Never branches on provider brand ids — only on
- * protocol/capability (`provider.type` + official-host check).
+ * `none` and `default` are product options, never sourced solely from
+ * serving data. Provider-specific `reasoning_options` never merge into
+ * canonical capabilities; serving lookup uses exact provider->source mapping
+ * and exact trimmed model-id match. Request layer stays lazy and never gates
+ * on these options.
  */
 export function getResolvedReasoningOptions(
   model: Model | undefined | null,
   provider?: Provider | null
 ): ReasoningEffortOption[] | undefined {
   if (!model) return undefined
-
   const override = isUserSelectedModelType(model, 'reasoning')
   if (override === false) return undefined
-
-  // Canonical models.json publishes no reasoning options: precise external
-  // effort lists never apply (unknown/absent, never filled from proxy
-  // records). Heuristics remain the option source.
-  const externalOptions: ReasoningEffortOption[] | undefined = undefined
-  const externalSupport = resolveExternalReasoningSupport(model, provider ?? undefined)
-
-  const heuristicOptions = (() => {
-    const { idResult, nameResult } = withModelIdAndNameAsId(model, _getModelSupportedReasoningEffortOptions)
-    return idResult ?? nameResult
-  })()
-
-  let base: ReasoningEffortOption[] | undefined
-  if (override === true) {
-    // User forces reasoning: heuristic options, degraded to fixed (`default`
-    // only) when the heuristics know no controls.
-    base = externalOptions ?? heuristicOptions ?? ['default']
-  } else {
-    // No user override: external false overrules a legacy true; otherwise
-    // heuristic (canonical metadata carries no effort controls to override
-    // with).
-    if (externalSupport === false) return undefined
-    if (externalSupport === true && externalOptions) {
-      base = externalOptions
-    } else {
-      base = heuristicOptions
-      if (!base) {
-        // Reasoning-supported but no controllable parameters in any lane:
-        // fixed reasoning model (no false strength menu). Unknown models
-        // stay undefined (no gating, requests never blocked).
-        if (isReasoningModel(model)) return ['default']
-        return undefined
+  const buildFromServing = (): ReasoningEffortOption[] | undefined => {
+    const serving = resolveServingReasoningEffort(model, provider === undefined ? undefined : provider)
+    if (serving && serving.length > 0) {
+      const result: ReasoningEffortOption[] = ['default', 'none']
+      const seen = new Set<string>(['default', 'none'])
+      for (const v of serving) {
+        const mapped = v === 'max' ? 'xhigh' : v
+        if (!seen.has(mapped)) {
+          seen.add(mapped)
+          result.push(mapped as ReasoningEffortOption)
+        }
       }
+      return result
     }
+    return undefined
   }
-
-  return filterReasoningOptionsByLane(base, model, provider ?? undefined)
-}
-
-function resolveReasoningLane(provider?: Provider | null): 'anthropic' | 'gemini' | 'openai' | 'generic' {
-  if (!provider) return 'generic'
-  if (provider.type === 'anthropic') return 'anthropic'
-  if (provider.type === 'gemini') return 'gemini'
-  if (provider.type === 'openai-response') return 'openai'
-  if (provider.type === 'openai') {
-    const host = (provider.apiHost ?? '').toLowerCase()
-    if (host.includes('api.openai.com')) return 'openai'
-    return 'generic'
+  if (override === true) {
+    return buildFromServing() ?? (['default', 'none', 'low', 'medium', 'high'] as ReasoningEffortOption[])
   }
-  return 'generic'
-}
-
-/**
- * Protocol-specific option filtering. Every lane preserves `default` (no
- * override) and only keeps controls it can explicitly emit — never invents
- * budget-as-effort and never adds a token-budget input.
- *
- * Current lanes can all emit `none` (disable/off), `auto` (on/auto), and
- * named effort levels via their protocol-standard shapes, except the Gemini
- * native lane, which only emits thinking controls for Gemini-family models.
- * Canonical reasoning support is deliberately provider-independent, so it
- * never counts as lane nativeness here. A Gemini-lane mismatch degrades to
- * fixed (`default` only) so no false strength menu appears.
- */
-function filterReasoningOptionsByLane(
-  base: ReasoningEffortOption[] | undefined,
-  model: Model,
-  provider?: Provider | null
-): ReasoningEffortOption[] | undefined {
-  if (!base) return undefined
-  if (provider === undefined) {
-    // No explicit connection: resolve the exact owning provider internally so
-    // UI/sync/request share one effective resolution. Unknown connections
-    // skip lane filtering (offline fallback preserves heuristic lists).
-    return filterReasoningOptionsByLane(base, model, strictProviderForModelSafe(model))
+  const external = resolveExternalReasoningSupport(model, provider === undefined ? undefined : provider)
+  if (external === false) {
+    return ['default', 'none']
   }
-  if (provider === null) return base
-  const lane = resolveReasoningLane(provider)
-  if (lane !== 'gemini') return base
-  const { idResult, nameResult } = withModelIdAndNameAsId(model, isSupportedThinkingTokenGeminiModel)
-  const isGeminiFamily = idResult || nameResult
-  if (isGeminiFamily) return base
-  // Reasoning resolved for another protocol but served via the Gemini native
-  // lane: no explicit emit shape here, so expose no false controls.
-  return ['default']
-}
-
-function strictProviderForModelSafe(model: Model): Provider | null {
-  try {
-    return strictProviderForModel(model)
-  } catch {
-    return null
-  }
+  const servingOpts = buildFromServing()
+  if (servingOpts) return servingOpts
+  return ['default', 'none', 'low', 'medium', 'high']
 }
 
 export const getModelSupportedReasoningEffortOptions = (
@@ -429,9 +75,6 @@ export const getModelSupportedReasoningEffortOptions = (
   provider?: Provider | null
 ): ReasoningEffortOption[] | undefined => {
   if (!model) return undefined
-  // Single resolver keeps UI, normalization, gating, and request mapping on
-  // one priority + lane-filtered source. The provider arg is optional for
-  // backward compatibility; omitted means current-connection resolution.
   if (provider === undefined) return getResolvedReasoningOptions(model)
   return getResolvedReasoningOptions(model, provider)
 }
@@ -1055,20 +698,13 @@ export const findTokenLimit = (modelId: string): { min: number; max: number } | 
 }
 
 /**
- * Determines if a model is a fixed reasoning model.
- *
- * A model is fixed reasoning when it is reasoning-supported but exposes no
- * controllable parameters in the active lane: the single resolver returns
- * `default` only (or nothing beyond `default`). Fixed models show no false
- * strength menu. Unknown/non-reasoning models are never fixed.
+ * Fixed reasoning UI has been removed: provider-specific serving metadata
+ * drives the strength menu and `default`/`none` are always product options.
+ * This helper is kept for backward compatibility for non-UI callers but
+ * always returns false. Request encoding retains its own provider/model-family
+ * protocol mapping elsewhere.
  */
-export const isFixedReasoningModel = (model: Model | undefined | null, provider?: Provider | null): boolean => {
-  if (!model || !isReasoningModel(model)) return false
-  const options =
-    provider === undefined ? getResolvedReasoningOptions(model) : getResolvedReasoningOptions(model, provider)
-  if (!options) return true
-  return options.filter((option) => option !== 'default').length === 0
-}
+export const isFixedReasoningModel = (_model: Model | undefined | null, _provider?: Provider | null): boolean => false
 
 // https://platform.minimaxi.com/docs/guides/text-m2-function-call#openai-sdk
 // https://docs.z.ai/guides/capabilities/thinking-mode
