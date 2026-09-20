@@ -5,7 +5,7 @@ import {
   MODALITY_LABEL_KEYS
 } from '@renderer/components/modelMetadataDisplay'
 import type { Model, Provider } from '@renderer/types'
-import { getSupportedInputModalities } from '@renderer/utils/inputModalities'
+import { getSupportedInputModalitiesForDisplay } from '@renderer/utils/inputModalities'
 import type { FC } from 'react'
 import { memo, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -26,12 +26,16 @@ interface ModelTagsProps {
 }
 
 /**
- * Compact model capability tags: precise models.dev `modalities.input`
- * only. Renders one neutral outline box per explicitly supported
- * Text/Image/Audio/Video/PDF value; unknown entries and unsupported values
- * render nothing, and Model Features / Free are never shown here. All
- * consumers (provider ModelList, ManageModelsList, SelectModelPopup,
- * @mention) share this component, so they stay consistent automatically.
+ * Compact model capability tags: precise `modalities.input` from the
+ * effective display metadata only (`getSupportedInputModalitiesForDisplay` →
+ * serving wins, canonical fills gaps, unknown → empty). Renders one neutral
+ * outline box per explicitly supported Text/Image/Audio/Video/PDF value;
+ * unknown entries and unsupported values render nothing, and Model Features /
+ * Free are never shown here. All consumers (provider ModelList,
+ * ManageModelsList, SelectModelPopup, @mention) share this component, so
+ * they stay consistent automatically. Shares the same effective resolver
+ * as the detail groups (ModelCapabilityGroups via ModelEditContent), so
+ * list and detail never diverge.
  *
  * Visual contract: no CustomTag, no pill, no filled background, no text,
  * no per-modality color. Each icon lives in a fixed 20px transparent
@@ -44,7 +48,7 @@ const ModelTagsWithLabel: FC<ModelTagsProps> = ({ model, provider, showTooltip =
   const { t } = useTranslation()
 
   const modalities = useMemo(
-    () => getSupportedInputModalities(model, provider),
+    () => getSupportedInputModalitiesForDisplay(model, provider),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- model identity is the unit; provider id pins attribution
     [model?.id, model?.provider, provider?.id]
   )

@@ -4,10 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useModelTagFilter } from '../filters'
 
-const mocks = vi.hoisted(() => ({ supportsInputModality: vi.fn() }))
+const mocks = vi.hoisted(() => ({ supportsInputModalityForDisplay: vi.fn() }))
 
 vi.mock('@renderer/utils/inputModalities', () => ({
-  supportsInputModality: mocks.supportsInputModality
+  supportsInputModalityForDisplay: mocks.supportsInputModalityForDisplay
 }))
 
 function createModel(overrides: Partial<Model> = {}): Model {
@@ -23,7 +23,7 @@ function createModel(overrides: Partial<Model> = {}): Model {
 describe('useModelTagFilter (five input modalities)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.supportsInputModality.mockReturnValue(false)
+    mocks.supportsInputModalityForDisplay.mockReturnValue(false)
   })
 
   it('should have all modalities unselected initially', () => {
@@ -68,7 +68,7 @@ describe('useModelTagFilter (five input modalities)', () => {
     const model = createModel()
     const passed = result.current.tagFilter(model)
     expect(passed).toBe(true)
-    expect(mocks.supportsInputModality).not.toHaveBeenCalled()
+    expect(mocks.supportsInputModalityForDisplay).not.toHaveBeenCalled()
   })
 
   it('tagFilter uses single selected modality predicate with provider', () => {
@@ -76,13 +76,13 @@ describe('useModelTagFilter (five input modalities)', () => {
     const model = createModel()
     const provider = { id: 'openai' } as never
 
-    mocks.supportsInputModality.mockReturnValueOnce(true)
+    mocks.supportsInputModalityForDisplay.mockReturnValueOnce(true)
     act(() => result.current.toggleTag('audio'))
 
     const ok = result.current.tagFilter(model, provider)
     expect(ok).toBe(true)
-    expect(mocks.supportsInputModality).toHaveBeenCalledTimes(1)
-    expect(mocks.supportsInputModality).toHaveBeenCalledWith(model, 'audio', provider)
+    expect(mocks.supportsInputModalityForDisplay).toHaveBeenCalledTimes(1)
+    expect(mocks.supportsInputModalityForDisplay).toHaveBeenCalledWith(model, 'audio', provider)
   })
 
   it('tagFilter requires all selected modalities to match (AND logic)', () => {
@@ -92,16 +92,16 @@ describe('useModelTagFilter (five input modalities)', () => {
     act(() => result.current.toggleTag('text'))
     act(() => result.current.toggleTag('image'))
 
-    mocks.supportsInputModality.mockReturnValueOnce(true).mockReturnValueOnce(false)
+    mocks.supportsInputModalityForDisplay.mockReturnValueOnce(true).mockReturnValueOnce(false)
     expect(result.current.tagFilter(model)).toBe(false)
 
-    mocks.supportsInputModality.mockReturnValueOnce(true).mockReturnValueOnce(true)
+    mocks.supportsInputModalityForDisplay.mockReturnValueOnce(true).mockReturnValueOnce(true)
     expect(result.current.tagFilter(model)).toBe(true)
   })
 
   it('tagFilter excludes unknown entries (predicate false)', () => {
     const { result } = renderHook(() => useModelTagFilter())
-    mocks.supportsInputModality.mockReturnValue(false)
+    mocks.supportsInputModalityForDisplay.mockReturnValue(false)
     act(() => result.current.toggleTag('video'))
     expect(result.current.tagFilter(createModel())).toBe(false)
   })

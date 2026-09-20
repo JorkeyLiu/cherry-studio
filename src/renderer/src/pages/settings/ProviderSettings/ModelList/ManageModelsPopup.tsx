@@ -6,7 +6,7 @@ import { useProvider } from '@renderer/hooks/useProvider'
 import { fetchModels } from '@renderer/services/ApiService'
 import type { Model, Provider } from '@renderer/types'
 import { filterModelsByKeywords, getFancyProviderName } from '@renderer/utils'
-import { INPUT_MODALITIES, type InputModality, supportsInputModality } from '@renderer/utils/inputModalities'
+import { INPUT_MODALITIES, type InputModality, supportsInputModalityForDisplay } from '@renderer/utils/inputModalities'
 import { getDuplicateModelNames } from '@renderer/utils/model'
 import { Button, Empty, Flex, Modal, Spin, Tabs, Tooltip } from 'antd'
 import Input from 'antd/es/input/Input'
@@ -92,7 +92,7 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
     () =>
       filterModelsByKeywords(filterSearchText, allModels).filter((model) => {
         if ((INPUT_MODALITY_TABS as ReadonlySet<string>).has(actualFilterType)) {
-          return supportsInputModality(model, actualFilterType as InputModality, provider)
+          return supportsInputModalityForDisplay(model, actualFilterType as InputModality, provider)
         }
         return true
       }),

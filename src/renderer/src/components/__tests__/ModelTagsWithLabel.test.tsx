@@ -4,10 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ModelTagsWithLabel from '../ModelTagsWithLabel'
 
-const mocks = vi.hoisted(() => ({ getSupportedInputModalities: vi.fn() }))
+const mocks = vi.hoisted(() => ({ getSupportedInputModalitiesForDisplay: vi.fn() }))
 
 vi.mock('@renderer/utils/inputModalities', () => ({
-  getSupportedInputModalities: mocks.getSupportedInputModalities
+  getSupportedInputModalitiesForDisplay: mocks.getSupportedInputModalitiesForDisplay
 }))
 
 vi.mock('react-i18next', () => ({
@@ -27,13 +27,16 @@ const FORBIDDEN_MODALITY_COLORS = ['#1677ff', '#00b96b', '#722ed1', '#eb2f96', '
 describe('ModelTagsWithLabel (models.dev input modalities)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.getSupportedInputModalities.mockReturnValue([])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue([])
   })
 
   it('renders zero tags when the entry is unknown', () => {
-    mocks.getSupportedInputModalities.mockReturnValue([])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue([])
     const { container } = render(<ModelTagsWithLabel model={createModel()} />)
-    expect(mocks.getSupportedInputModalities).toHaveBeenCalledWith(expect.objectContaining({ id: 'm1' }), undefined)
+    expect(mocks.getSupportedInputModalitiesForDisplay).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'm1' }),
+      undefined
+    )
     for (const modality of ['text', 'image', 'audio', 'video', 'pdf']) {
       expect(screen.queryByTestId(`modality-tag-${modality}`)).not.toBeInTheDocument()
     }
@@ -41,7 +44,7 @@ describe('ModelTagsWithLabel (models.dev input modalities)', () => {
   })
 
   it('renders only text and image for input=[text,image]', () => {
-    mocks.getSupportedInputModalities.mockReturnValue(['text', 'image'])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue(['text', 'image'])
     render(<ModelTagsWithLabel model={createModel()} />)
     expect(screen.getByTestId('modality-tag-text')).toBeInTheDocument()
     expect(screen.getByTestId('modality-tag-image')).toBeInTheDocument()
@@ -51,7 +54,7 @@ describe('ModelTagsWithLabel (models.dev input modalities)', () => {
   })
 
   it('renders audio/video/pdf when explicitly supported', () => {
-    mocks.getSupportedInputModalities.mockReturnValue(['audio', 'video', 'pdf'])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue(['audio', 'video', 'pdf'])
     render(<ModelTagsWithLabel model={createModel()} />)
     expect(screen.getByTestId('modality-tag-audio')).toBeInTheDocument()
     expect(screen.getByTestId('modality-tag-video')).toBeInTheDocument()
@@ -61,9 +64,12 @@ describe('ModelTagsWithLabel (models.dev input modalities)', () => {
   })
 
   it('passes the explicit provider through and never renders legacy capability tags', () => {
-    mocks.getSupportedInputModalities.mockReturnValue(['text'])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue(['text'])
     render(<ModelTagsWithLabel model={createModel()} provider={provider} />)
-    expect(mocks.getSupportedInputModalities).toHaveBeenCalledWith(expect.objectContaining({ id: 'm1' }), provider)
+    expect(mocks.getSupportedInputModalitiesForDisplay).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'm1' }),
+      provider
+    )
     // Legacy vision/reasoning/tool/embedding/rerank/free/websearch tags are gone from this component.
     for (const legacy of [
       'tag-vision',
@@ -80,7 +86,7 @@ describe('ModelTagsWithLabel (models.dev input modalities)', () => {
   })
 
   it('renders neutral outline boxes: transparent bg, 1px neutral border, 14px glyph, title + aria-label', () => {
-    mocks.getSupportedInputModalities.mockReturnValue(['text', 'image', 'audio', 'video', 'pdf'])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue(['text', 'image', 'audio', 'video', 'pdf'])
     const { container } = render(<ModelTagsWithLabel model={createModel()} provider={provider} />)
 
     // No CustomTag pill, no antd tooltip, no label text.
@@ -136,13 +142,13 @@ describe('ModelTagsWithLabel (models.dev input modalities)', () => {
     const src = mod.default.toString()
     expect(src).not.toContain('ResizeObserver')
     // The component API carries no showLabel: icons only, never text.
-    mocks.getSupportedInputModalities.mockReturnValue(['text'])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue(['text'])
     render(<ModelTagsWithLabel model={createModel()} provider={provider} />)
     expect(screen.getByTestId('modality-tag-text').textContent).toBe('')
   })
 
   it(' pdf uses FileText, distinct from text Type icon', async () => {
-    mocks.getSupportedInputModalities.mockReturnValue(['text', 'pdf'])
+    mocks.getSupportedInputModalitiesForDisplay.mockReturnValue(['text', 'pdf'])
     render(<ModelTagsWithLabel model={createModel()} />)
     const textSvg = screen.getByTestId('modality-tag-text').querySelector('svg')?.outerHTML ?? ''
     const pdfSvg = screen.getByTestId('modality-tag-pdf').querySelector('svg')?.outerHTML ?? ''

@@ -1,6 +1,6 @@
 import type { Model, Provider } from '@renderer/types'
 import { objectEntries } from '@renderer/types'
-import { type InputModalityFilter, supportsInputModality } from '@renderer/utils/inputModalities'
+import { type InputModalityFilter, supportsInputModalityForDisplay } from '@renderer/utils/inputModalities'
 import { useCallback, useMemo, useState } from 'react'
 
 type ModelPredict = (m: Model, provider?: Provider | null) => boolean
@@ -17,20 +17,23 @@ const initialTagSelection: Record<InputModalityFilter, boolean> = {
  * Input-modality filter hook (unit A).
  *
  * Replaces the retired vision/reasoning/tool/embedding/rerank/free tag
- * filter with the five precise models.dev input modalities. The vocabulary
- * is the local display-only `InputModalityFilter` — persisted
- * `ModelTag`/`ModelType` keys are untouched. Predicates are exact-only:
- * unknown entries never match, and callers with an owning provider pass it
- * for precise attribution (otherwise `strictProviderForModel` applies).
+ * filter with the five precise input modalities from the effective display
+ * metadata (serving wins, canonical fills gaps). The vocabulary is the
+ * local display-only `InputModalityFilter` — persisted `ModelTag`/`ModelType`
+ * keys are untouched. Predicates are exact-only via
+ * `supportsInputModalityForDisplay`: unknown entries never match, and
+ * callers with an owning provider pass it for precise attribution (otherwise
+ * `strictProviderForModel` applies). Shares the effective resolver with
+ * compact tags and detail groups.
  */
 export function useModelTagFilter() {
   const filterConfig: Record<InputModalityFilter, ModelPredict> = useMemo(
     () => ({
-      text: (m, p) => supportsInputModality(m, 'text', p),
-      image: (m, p) => supportsInputModality(m, 'image', p),
-      audio: (m, p) => supportsInputModality(m, 'audio', p),
-      video: (m, p) => supportsInputModality(m, 'video', p),
-      pdf: (m, p) => supportsInputModality(m, 'pdf', p)
+      text: (m, p) => supportsInputModalityForDisplay(m, 'text', p),
+      image: (m, p) => supportsInputModalityForDisplay(m, 'image', p),
+      audio: (m, p) => supportsInputModalityForDisplay(m, 'audio', p),
+      video: (m, p) => supportsInputModalityForDisplay(m, 'video', p),
+      pdf: (m, p) => supportsInputModalityForDisplay(m, 'pdf', p)
     }),
     []
   )

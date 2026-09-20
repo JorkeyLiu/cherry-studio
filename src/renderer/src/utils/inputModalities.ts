@@ -1,4 +1,4 @@
-import { getExternalModelEntry } from '@renderer/config/models/modelMetadata'
+import { getExternalModelEntry, getModelMetadataForDisplay } from '@renderer/config/models/modelMetadata'
 import type { Model, Provider } from '@renderer/types'
 import type { NormalizedModelMetadata } from '@shared/modelMetadata'
 
@@ -13,6 +13,11 @@ import type { NormalizedModelMetadata } from '@shared/modelMetadata'
  * (`resolveSupportedInputModalities`) and the edit-UI tri-state summary
  * (`EditModelPopup/ModelCapabilityGroups.resolveInputModalityStates`): both
  * read `entry.modalities.input` through `getNormalizedInputModalitySet`.
+ *
+ * Compact rows and detail groups share one effective display resolver:
+ * `getSupportedInputModalitiesForDisplay` → `getModelMetadataForDisplay(...).effective`
+ * → `resolveSupportedInputModalities`. Serving wins, canonical fills gaps,
+ * unknown renders empty; never writes back to Model.capabilities/type.
  */
 
 export const INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const
@@ -71,11 +76,12 @@ export function resolveSupportedInputModalities(entry: NormalizedModelMetadata |
 }
 
 /**
- * Precise supported input modalities for a model.
+ * Canonical-only supported input modalities for a model (canonical identity).
  *
- * Resolution is exact-only: the owning provider is the explicit argument when
- * given, otherwise `strictProviderForModel` (exact owning-provider match, no
- * provider-name guessing). No exact entry match means zero modalities.
+ * Resolution is exact-only via `getExternalModelEntry` (canonical models.dev
+ * id matching, provider arg ignored). Display code must NOT use this helper;
+ * use `getSupportedInputModalitiesForDisplay` which reads the effective
+ * serving+canonical merge. Unknown means zero modalities.
  */
 export function getSupportedInputModalities(
   model: Model | undefined | null,
@@ -85,13 +91,41 @@ export function getSupportedInputModalities(
   return resolveSupportedInputModalities(getExternalModelEntry(model, provider))
 }
 
-/** Exact supported check for one modality (unknown counts as false). */
+/**
+ * Display-layer supported input modalities for a model.
+ *
+ * Single display truth for all compact tags and filters: reads
+ * `getModelMetadataForDisplay(model, provider).effective` (serving wins,
+ * canonical fills gaps, unknown → empty) then `resolveSupportedInputModalities`.
+ * Compact rows (ModelTagsWithLabel) and detail groups (ModelCapabilityGroups
+ * via entry) share this effective resolver so list and detail never diverge.
+ * Never writes back to Model.capabilities/type/pricing; never merges serving
+ * into canonical snapshot.
+ */
+export function getSupportedInputModalitiesForDisplay(
+  model: Model | undefined | null,
+  provider?: Provider | null
+): InputModality[] {
+  if (!model) return []
+  return resolveSupportedInputModalities(getModelMetadataForDisplay(model, provider).effective)
+}
+
+/** Exact supported check for one modality (canonical-only, unknown → false). */
 export function supportsInputModality(
   model: Model | undefined | null,
   modality: InputModality,
   provider?: Provider | null
 ): boolean {
   return getSupportedInputModalities(model, provider).includes(modality)
+}
+
+/** Display-layer exact supported check (serving wins, unknown → false). */
+export function supportsInputModalityForDisplay(
+  model: Model | undefined | null,
+  modality: InputModality,
+  provider?: Provider | null
+): boolean {
+  return getSupportedInputModalitiesForDisplay(model, provider).includes(modality)
 }
 
 export type ModalityModelRef = Model | { model: Model; provider?: Provider | null }
@@ -106,8 +140,8 @@ function normalizeRef(ref: ModalityModelRef): { model: Model; provider?: Provide
 
 /**
  * Availability map over a mixed list of models/refs: true only for modalities
- * with at least one exact supported occurrence. Unknown-only lists yield all
- * false (zero tags / zero filter options).
+ * with at least one exact supported occurrence (display-layer: serving wins).
+ * Unknown-only lists yield all false (zero tags / zero filter options).
  */
 export function getInputModalityAvailability(items: ReadonlyArray<ModalityModelRef>): Record<InputModality, boolean> {
   const result: Record<InputModality, boolean> = { text: false, image: false, audio: false, video: false, pdf: false }
@@ -115,7 +149,7 @@ export function getInputModalityAvailability(items: ReadonlyArray<ModalityModelR
   for (const ref of items) {
     if (satisfied === INPUT_MODALITIES.length) break
     const { model, provider } = normalizeRef(ref)
-    for (const modality of getSupportedInputModalities(model, provider)) {
+    for (const modality of getSupportedInputModalitiesForDisplay(model, provider)) {
       if (!result[modality]) {
         result[modality] = true
         satisfied += 1
@@ -125,7 +159,10 @@ export function getInputModalityAvailability(items: ReadonlyArray<ModalityModelR
   return result
 }
 
-/** Provider-aware availability for popup-level tag filters (exact attribution per provider). */
+/**
+ * Provider-aware availability for popup-level tag filters (exact attribution per provider).
+ * Display-layer: serving wins per model/provider, canonical fills gaps.
+ */
 export function getInputModalityAvailabilityFromProviders(
   providers: ReadonlyArray<Provider>
 ): Record<InputModality, boolean> {
