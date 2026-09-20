@@ -27,6 +27,7 @@ import {
   getRequestSequence,
   test
 } from '../../fixtures/electron.fixture'
+import { REASONING_LEAK_MARKER } from '../../fixtures/mock-openai-server'
 import { waitForAppReady } from '../../utils/wait-helpers'
 
 const MODEL_A_ID = 'grok-3-mini'
@@ -37,6 +38,11 @@ const MODEL_B_KEY = `mock-openai:${MODEL_B_ID}`
 const MODEL_C_KEY = `mock-openai:${MODEL_C_ID}`
 const REASONING_TEXT = 'E2E reasoning effort verification'
 const REASONING_TEXT_B = 'E2E reasoning effort B low verification'
+
+const MODEL_D_ID = 'deepseek-v4'
+const MODEL_D_KEY = `mock-openai:${MODEL_D_ID}`
+const REASONING_TEXT_D_NONE = 'E2E deepseek v4 none wire verification'
+const REASONING_TEXT_D_LEAK = `E2E deepseek leak ${REASONING_LEAK_MARKER}`
 
 async function seedReasoningModels(page: import('@playwright/test').Page): Promise<void> {
   await page.evaluate(
@@ -152,6 +158,66 @@ async function seedPerModelContractModels(page: import('@playwright/test').Page)
       )
     },
     { modelId: MODEL_A_ID },
+    { timeout: 15000 }
+  )
+}
+
+async function seedDeepSeekV4Models(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(
+    ({ modelD }: { modelD: string }) => {
+      const store = (window as any).store
+      const state = store.getState()
+      const provider = state.llm.providers.find((p: any) => p.id === 'mock-openai')
+      if (!provider) throw new Error('mock-openai provider missing')
+      const models = [...provider.models]
+      if (!models.some((m: any) => m.id === modelD)) {
+        models.push({ id: modelD, provider: 'mock-openai', name: modelD, group: 'e2e', description: 'E2E deepseek v4' })
+      }
+      // keep mock-model as well for per-model isolation check
+      if (!models.some((m: any) => m.id === 'mock-model')) {
+        models.push({ id: 'mock-model', provider: 'mock-openai', name: 'mock-model', group: 'mock' })
+      }
+      store.dispatch({
+        type: 'llm/updateProvider',
+        payload: {
+          id: 'mock-openai',
+          models
+        }
+      })
+      const assistant = state.assistants.assistants[0]
+      if (!assistant) throw new Error('no assistant')
+      store.dispatch({
+        type: 'assistants/setModel',
+        payload: {
+          assistantId: assistant.id,
+          model: { id: modelD, provider: 'mock-openai', name: modelD, group: 'e2e' }
+        }
+      })
+      store.dispatch({
+        type: 'assistants/updateAssistantSettings',
+        payload: {
+          assistantId: assistant.id,
+          settings: {
+            reasoning_effort: 'default',
+            reasoning_effort_by_model: {},
+            reasoning_effort_show_all_by_model: {}
+          }
+        }
+      })
+    },
+    { modelD: MODEL_D_ID }
+  )
+  await page.waitForFunction(
+    ({ modelId }) => {
+      const s = (window as any).store?.getState()
+      const assistant = s?.assistants?.assistants?.[0]
+      return (
+        assistant?.model?.id === modelId &&
+        (assistant?.settings?.reasoning_effort ?? 'default') === 'default' &&
+        Object.keys(assistant?.settings?.reasoning_effort_by_model ?? {}).length === 0
+      )
+    },
+    { modelId: MODEL_D_ID },
     { timeout: 15000 }
   )
 }
@@ -696,6 +762,236 @@ test.describe('Reasoning effort flow', () => {
       expect(assistant?.settings?.reasoning_effort_show_all_by_model?.[MODEL_A_KEY]).toBe(true)
       expect(assistant?.settings?.reasoning_effort_show_all_by_model?.[MODEL_C_KEY]).toBe(false)
       console.log('[E2E] localStorage persist:cherry-studio proves show_all map durability')
+    })
+  })
+
+  test('DeepSeek V4 none via Thinking popover — default dialect reasoning_effort none and per-model persistence', async ({
+    mainWindow
+  }) => {
+    const page = mainWindow
+
+    await test.step('seed deepseek-v4 and reset state', async () => {
+      await seedDeepSeekV4Models(page)
+      const state = await getAssistantState(page)
+      expect(state.modelId).toBe(MODEL_D_ID)
+      expect(state.effort).toBe('default')
+      expect(Object.keys(state.effortByModel).length).toBe(0)
+    })
+
+    await test.step('select none via real Thinking Popover (anchor: mock provider deepseek-v4)', async () => {
+      await openThinkingPopover(page)
+      const noneOption = page.getByTestId('thinking-option-none')
+      await expect(noneOption).toBeVisible({ timeout: 10000 })
+      await noneOption.click()
+      await page.waitForFunction(
+        () => {
+          const s = (window as any).store?.getState()
+          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'none'
+        },
+        undefined,
+        { timeout: 15000 }
+      )
+      await expect(page.getByTestId('thinking-popover')).toBeHidden({ timeout: 10000 })
+    })
+
+    await test.step('assert store and popover selected none and per-model key', async () => {
+      const state = await getAssistantState(page)
+      expect(state.effort).toBe('none')
+      expect(state.effortByModel[MODEL_D_KEY]).toBe('none')
+      await openThinkingPopover(page)
+      const noneOption = page.getByTestId('thinking-option-none')
+      await expect(noneOption).toBeVisible({ timeout: 10000 })
+      await expect(noneOption).toHaveAttribute('data-selected', 'true')
+      await closeThinkingPopover(page)
+    })
+
+    await test.step('send via mock and assert default dialect wire reasoning_effort none (unknown/mock host)', async () => {
+      clearRequestLog()
+      const before = getRequestSequence()
+      const state = await getAssistantState(page)
+      const prevAssistantCount = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        let count = 0
+        for (const id of msgIds) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        return count
+      }, state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_D_NONE)
+      await waitForAssistantResponseComplete(page, state.topicId, prevAssistantCount)
+      const request = findProductRequestAfter(before)
+      expect(request).not.toBeNull()
+      expect(request!.method).toBe('POST')
+      expect(request!.url).toBe('/v1/chat/completions')
+      const parsed = request!.parsed as any
+      expect(parsed?.model).toBe(MODEL_D_ID)
+      // mock/unknown OpenAI-compatible default dialect: single field reasoning_effort:'none', no thinking/enable_thinking
+      expect(parsed?.reasoning_effort).toBe('none')
+      expect(parsed?.thinking).toBeUndefined()
+      expect(parsed?.enable_thinking).toBeUndefined()
+      // AI SDK camel key must not appear on wire
+      expect(parsed?.reasoningEffort).toBeUndefined()
+    })
+
+    await test.step('per-model persistence: none does not leak to mock-model, switch restores', async () => {
+      // switch to plain mock-model -> should be default (not none)
+      await setModel(page, MODEL_B_ID)
+      await page.waitForFunction(
+        ({ keyD }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return (
+            a?.settings?.reasoning_effort === 'default' && a?.settings?.reasoning_effort_by_model?.[keyD] === 'none'
+          )
+        },
+        { keyD: MODEL_D_KEY },
+        { timeout: 15000 }
+      )
+      const stateB = await getAssistantState(page)
+      expect(stateB.modelId).toBe(MODEL_B_ID)
+      expect(stateB.effort).toBe('default')
+      expect(stateB.effortByModel[MODEL_D_KEY]).toBe('none')
+      await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-option-default')).toHaveAttribute('data-selected', 'true')
+      await closeThinkingPopover(page)
+
+      // switch back to deepseek-v4 -> restores none
+      await setModel(page, MODEL_D_ID)
+      await page.waitForFunction(
+        () => {
+          const s = (window as any).store?.getState()
+          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'none'
+        },
+        undefined,
+        { timeout: 15000 }
+      )
+      const stateD2 = await getAssistantState(page)
+      expect(stateD2.modelId).toBe(MODEL_D_ID)
+      expect(stateD2.effort).toBe('none')
+      expect(stateD2.effortByModel[MODEL_D_KEY]).toBe('none')
+    })
+  })
+
+  test('thinking lifecycle leak: reasoning-start/delta without reasoning-end must not leave STREAMING and timer stabilizes', async ({
+    mainWindow
+  }) => {
+    const page = mainWindow
+
+    await test.step('seed deepseek-v4 and set high (thinking enabled) for leak', async () => {
+      await seedDeepSeekV4Models(page)
+      // ensure high is available via popover; toggle showAll if needed to expose high if filtered
+      const stateBefore = await getAssistantState(page)
+      if (stateBefore.effort !== 'high') {
+        await openThinkingPopover(page)
+        // if high hidden, toggle showAll
+        const highOpt = page.getByTestId('thinking-option-high')
+        const highVisible = await highOpt.isVisible().catch(() => false)
+        if (!highVisible) {
+          await page.getByTestId('thinking-show-all-switch').click()
+          await expect(page.getByTestId('thinking-option-high')).toBeVisible({ timeout: 10000 })
+        }
+        await page.getByTestId('thinking-option-high').click()
+        await page.waitForFunction(
+          () => {
+            const s = (window as any).store?.getState()
+            return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === 'high'
+          },
+          undefined,
+          { timeout: 15000 }
+        )
+        await expect(page.getByTestId('thinking-popover')).toBeHidden({ timeout: 10000 })
+      }
+    })
+
+    await test.step('send leak marker and wait for completion', async () => {
+      clearRequestLog()
+      const state = await getAssistantState(page)
+      const prevAssistantCount = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        let count = 0
+        for (const id of msgIds) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        return count
+      }, state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_D_LEAK)
+      await waitForAssistantResponseComplete(page, state.topicId, prevAssistantCount)
+      // also ensure at least one product request was captured (wire integrity)
+      const req = findProductRequestAfter(0)
+      expect(req).not.toBeNull()
+    })
+
+    await test.step('assert no STREAMING thinking block remains', async () => {
+      const streamingCount = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        const blocks = Object.values(s.messageBlocks.entities) as any[]
+        return blocks.filter((b) => b.type === 'thinking' && b.status === 'streaming').length
+      })
+      expect(streamingCount).toBe(0)
+
+      const statuses = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        const blocks = Object.values(s.messageBlocks.entities) as any[]
+        const thinking = blocks.filter((b) => b.type === 'thinking')
+        return thinking.map((b: any) => ({ id: b.id, status: b.status, millsec: b.thinking_millsec }))
+      })
+      // if a thinking block exists, it must be success (MessageBlockStatus.SUCCESS === 'success')
+      for (const th of statuses) {
+        expect(th.status).toBe('success')
+      }
+    })
+
+    await test.step('thinking timer stability: millsec and UI text not growing after SUCCESS', async () => {
+      // capture thinking_millsec twice with delay; must be identical after SUCCESS
+      const firstMillsec = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        const blocks = Object.values(s.messageBlocks.entities) as any[]
+        const thinking = [...blocks]
+          .filter((b: any) => b.type === 'thinking')
+          .sort((a: any, b: any) => (a.createdAt > b.createdAt ? 1 : -1))
+          .at(-1) as any
+        return thinking ? thinking.thinking_millsec : null
+      })
+
+      // also capture UI timer text if present
+      const firstText = await page
+        .locator('.message-thought-container')
+        .first()
+        .textContent()
+        .catch(() => null)
+
+      await page.waitForTimeout(800)
+
+      const secondMillsec = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        const blocks = Object.values(s.messageBlocks.entities) as any[]
+        const thinking = [...blocks]
+          .filter((b: any) => b.type === 'thinking')
+          .sort((a: any, b: any) => (a.createdAt > b.createdAt ? 1 : -1))
+          .at(-1) as any
+        return thinking ? thinking.thinking_millsec : null
+      })
+      const secondText = await page
+        .locator('.message-thought-container')
+        .first()
+        .textContent()
+        .catch(() => null)
+
+      if (firstMillsec !== null && secondMillsec !== null) {
+        expect(secondMillsec).toBe(firstMillsec)
+      }
+      if (firstText && secondText) {
+        expect(secondText).toBe(firstText)
+      }
+      // explicit invariant: no streaming after completion even after delay
+      const stillStreaming = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        const blocks = Object.values(s.messageBlocks.entities) as any[]
+        return blocks.filter((b: any) => b.type === 'thinking' && b.status === 'streaming').length
+      })
+      expect(stillStreaming).toBe(0)
     })
   })
 })

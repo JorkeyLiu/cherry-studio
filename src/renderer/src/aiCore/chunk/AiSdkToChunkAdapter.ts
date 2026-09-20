@@ -31,6 +31,7 @@ export class AiSdkToChunkAdapter {
   private firstTokenTimestamp: number | null = null
   private providerId?: string
   private idleTimeout?: IdleTimeoutHandle
+  private hasActiveReasoning = false
 
   constructor(
     private onChunk: (chunk: Chunk) => void,
@@ -56,6 +57,7 @@ export class AiSdkToChunkAdapter {
   private resetTimingState() {
     this.responseStartTimestamp = null
     this.firstTokenTimestamp = null
+    this.hasActiveReasoning = false
   }
 
   /**
@@ -136,17 +138,18 @@ export class AiSdkToChunkAdapter {
   }
 
   /**
-   * 如果有累积的思考内容，发送 THINKING_COMPLETE chunk 并清空
+   * 如果有累积的思考内容或活跃的 reasoning 会话，发送 THINKING_COMPLETE chunk 并清空
    * @param final 包含 reasoningContent 的状态对象
-   * @returns 是否发送了 THINKING_COMPLETE chunk
    */
   private emitThinkingCompleteIfNeeded(final: { reasoningContent: string; [key: string]: any }) {
-    if (final.reasoningContent) {
+    if (this.hasActiveReasoning || final.reasoningContent) {
       this.onChunk({
         type: ChunkType.THINKING_COMPLETE,
-        text: final.reasoningContent
+        text: final.reasoningContent || ''
       })
       final.reasoningContent = ''
+      this.hasActiveReasoning = false
+      final.reasoningId = ''
     }
   }
 
@@ -238,15 +241,15 @@ export class AiSdkToChunkAdapter {
         final.providerMetadata = undefined
         break
       case 'reasoning-start':
-        // if (final.reasoningId !== chunk.id) {
         final.reasoningId = chunk.id
+        this.hasActiveReasoning = true
         this.onChunk({
           type: ChunkType.THINKING_START
         })
-        // }
         break
       case 'reasoning-delta':
         final.reasoningContent += chunk.text || ''
+        this.hasActiveReasoning = true
         if (chunk.text) {
           this.markFirstTokenIfNeeded()
         }
@@ -284,6 +287,10 @@ export class AiSdkToChunkAdapter {
         break
 
       case 'finish-step': {
+        // 兜底：provider 未发 reasoning-end 且未触发 text-start 时，在 step 结束前完成 thinking
+        if (this.hasActiveReasoning || final.reasoningContent) {
+          this.emitThinkingCompleteIfNeeded(final)
+        }
         const { providerMetadata, finishReason } = chunk
         // googel web search
         if (providerMetadata?.google?.groundingMetadata) {
@@ -329,6 +336,10 @@ export class AiSdkToChunkAdapter {
       }
 
       case 'finish': {
+        // 最终兜底：正常完成前必须闭合遗留的 STREAMING thinking
+        if (this.hasActiveReasoning || final.reasoningContent) {
+          this.emitThinkingCompleteIfNeeded(final)
+        }
         const usage = {
           completion_tokens: chunk.totalUsage?.outputTokens || 0,
           prompt_tokens: chunk.totalUsage?.inputTokens || 0,

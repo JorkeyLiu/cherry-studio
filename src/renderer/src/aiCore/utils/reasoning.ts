@@ -2,37 +2,18 @@ import type { AnthropicProviderOptions } from '@ai-sdk/anthropic'
 import type { GoogleGenerativeAIProviderOptions } from '@ai-sdk/google'
 import type { OpenAIResponsesProviderOptions } from '@ai-sdk/openai'
 import type OpenAI from '@cherrystudio/openai'
-import { DEFAULT_MAX_TOKENS } from '@renderer/config/constant'
 import {
   findTokenLimit,
   GEMINI_FLASH_MODEL_REGEX,
-  getModelSupportedReasoningEffortOptions,
   isClaude46SeriesModel,
-  isDeepSeekHybridInferenceModel,
   isDeepSeekV4PlusModel,
-  isDoubaoSeed18Model,
-  isDoubaoSeedAfter251015,
-  isDoubaoThinkingAutoModel,
   isGemini3ThinkingTokenModel,
-  isGrok4FastReasoningModel,
   isHostedGemma4ThinkingModel,
-  isMiniMaxReasoningModel,
   isOpenAIDeepResearchModel,
   isOpenAIModel,
-  isQwenReasoningModel,
   isSupportAdaptiveThinkingClaudeModel,
-  isSupportedReasoningEffortModel,
   isSupportedReasoningEffortOpenAIModel,
-  isSupportedThinkingTokenClaudeModel,
-  isSupportedThinkingTokenDoubaoModel,
-  isSupportedThinkingTokenGeminiModel,
-  isSupportedThinkingTokenHunyuanModel,
-  isSupportedThinkingTokenKimiModel,
-  isSupportedThinkingTokenMiMoModel,
-  isSupportedThinkingTokenModel,
-  isSupportedThinkingTokenZhipuModel,
-  isSupportNoneReasoningEffortModel,
-  resolveExternalReasoningSupport
+  isSupportedThinkingTokenClaudeModel
 } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import { getAssistantSettings, getProviderByModel } from '@renderer/services/AssistantService'
@@ -53,276 +34,97 @@ type ReasoningEffortOptionalParams = {
   // `reasoning_effort` to undefined). Persisted/user `reasoning_effort`
   // settings and custom-parameter conversion stay snake_case; see options.ts.
   reasoningEffort?: OpenAIReasoningEffort
+  // Vendor toggle for the enable-thinking dialect (SiliconFlow / DashScope
+  // compatible-mode). Emitted only via apiHost dialect matching, never via
+  // model-name heuristics. Default dialect never emits this key.
+  enable_thinking?: boolean
   // Add any other potential reasoning-related keys here if they exist
 }
 
-// The function is only for generic provider. May extract some logics to independent provider
-// Unit B: user-intent lazy execution. No isReasoningModel gate here: `default`
-// still means no override; any concrete user level is encoded with the generic
-// protocol shapes the adapter supports. Unknown families fall back to generic
-// shapes instead of silently dropping the user's choice.
+// ---------------------------------------------------------------------------
+// OpenAI-compatible API dialect — single explicit shape per dialect, model-
+// name orthogonal. Two dialects currently:
+//   - 'default'        : { reasoningEffort } (xhigh -> max, lazy server support)
+//   - 'enable_thinking': { enable_thinking, reasoningEffort } for SiliconFlow /
+//                        DashScope compatible-mode hosts.
+// Host matching is exact hostname or subdomain (siliconflow.cn,
+// dashscope.aliyuncs.com), extracted via URL hostname only — query/path
+// substring or suffix-spoof never triggers. Invalid / empty apiHost falls
+// back to 'default'. No model-name routing; no mixing of thinking object.
+// ---------------------------------------------------------------------------
+export type OpenAICompatibleDialect = 'default' | 'enable_thinking'
+
+function getApiHostname(apiHost?: string): string | null {
+  if (!apiHost) return null
+  const trimmed = apiHost.trim()
+  if (!trimmed) return null
+  try {
+    const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`)
+    const host = url.hostname.trim().toLowerCase()
+    return host || null
+  } catch {
+    return null
+  }
+}
+
+function isSiliconFlowDialectHost(provider: { apiHost?: string }): boolean {
+  const hostname = getApiHostname(provider.apiHost)
+  if (!hostname) return false
+  return hostname === 'siliconflow.cn' || hostname.endsWith('.siliconflow.cn')
+}
+
+function isDashScopeDialectHost(provider: { apiHost?: string }): boolean {
+  const hostname = getApiHostname(provider.apiHost)
+  if (!hostname) return false
+  return hostname === 'dashscope.aliyuncs.com' || hostname.endsWith('.dashscope.aliyuncs.com')
+}
+
+export function resolveOpenAICompatibleDialect(provider: { apiHost?: string }): OpenAICompatibleDialect {
+  if (isSiliconFlowDialectHost(provider) || isDashScopeDialectHost(provider)) {
+    return 'enable_thinking'
+  }
+  return 'default'
+}
+
+function mapEffortForWire(effort: string): OpenAIReasoningEffort {
+  // Protocol-required max mapping: UI xhigh -> wire 'max'
+  if (effort === 'xhigh') return 'max' as OpenAIReasoningEffort
+  return effort as OpenAIReasoningEffort
+}
+
+export function encodeReasoningEffortForDialect(
+  dialect: OpenAICompatibleDialect,
+  effort: string
+): ReasoningEffortOptionalParams {
+  if (!effort || effort === 'default') return {}
+  if (effort === 'none') {
+    if (dialect === 'enable_thinking') return { enable_thinking: false }
+    return { reasoningEffort: 'none' }
+  }
+  const mapped = mapEffortForWire(effort)
+  if (dialect === 'enable_thinking') {
+    return { enable_thinking: true, reasoningEffort: mapped }
+  }
+  return { reasoningEffort: mapped }
+}
+
+// The function is only for the generic OpenAI-compatible lane. It
+// now encodes via the API dialect (hostname → single shape), model-name
+// orthogonal. No per-family or per-model branching, no mixing of multiple
+// close shapes. Server support is lazy: the wire shape is always emitted,
+// upstream decides. `default` means no override. Anthropic/Gemini/OpenAI
+// official lanes have their own independent builders and are untouched.
 export function getReasoningEffort(assistant: Assistant, model: Model): ReasoningEffortOptionalParams {
   const provider = getProviderByModel(model)
   if (!provider) {
-    // Unconfigured model/provider: fail explicitly before any provider/API
-    // invocation.
     throw new Error('Model provider is not configured')
   }
-  const modelId = getLowerBaseModelName(model.id)
   const reasoningEffort = assistant?.settings?.reasoning_effort
-
-  // No model-capability veto: user intent drives emission. `default`/unset
-  // means no override.
-  // reasoningEffort is not set, no extra reasoning setting
-  // Generally, for every model which supports reasoning control, the reasoning effort won't be undefined.
-  // It's for some reasoning models that don't support reasoning control, such as deepseek reasoner.
   if (!reasoningEffort || reasoningEffort === 'default') {
     return {}
   }
-
-  // MiniMax toggle-only lane: explicit off disables, any concrete on-level
-  // enables. `default` already returned above so no override is emitted.
-  if (isMiniMaxReasoningModel(model)) {
-    if (reasoningEffort === 'none') {
-      return { thinking: { type: 'disabled' } }
-    }
-    return { thinking: { type: 'enabled' } }
-  }
-
-  if (isOpenAIDeepResearchModel(model)) {
-    // Deep-research lane exposes only `medium` (MODEL_SUPPORTED_REASONING_EFFORT
-    // .openai_deep_research). Any other explicit level cannot be encoded here:
-    // throw instead of silently replacing it with `medium`.
-    if (reasoningEffort === 'medium') {
-      // Generic emits AI-SDK-supported camelCase only; snake_case is overwritten
-      // to undefined by the openai-compatible provider.
-      return {
-        reasoningEffort: 'medium'
-      }
-    }
-    throw reasoningNotEncodable(model, reasoningEffort, 'the deep-research lane only encodes "medium"')
-  }
-
-  // Handle 'none' reasoningEffort. It's explicitly off.
-  // Debranded: capability follows the model family only. Only generic
-  // protocol-standard shapes are emitted (`thinking`, `reasoningEffort`,
-  // `reasoning`); vendor private keys (`enable_thinking`,
-  // `chat_template_kwargs`, vendor-specific `extra_body`) are never derived
-  // from names/providers. Provider ids are opaque join keys.
-  // Capability-driven: each known family emits its explicit off-shape.
-  // External-only reasoning (exact metadata, no heuristic family) uses the
-  // generic disable shape. Unknown models fall through to {} so basic
-  // requests are never blocked.
-  if (reasoningEffort === 'none') {
-    // Models with an explicit none-effort level (GPT-5.x sub-versions,
-    // Mistral Small): use the generic effort shape.
-    if (isSupportNoneReasoningEffortModel(model) || modelId.includes('mistral-small-2603')) {
-      return { reasoningEffort: 'none' }
-    }
-
-    // Thinking-token families (Qwen, Doubao, Zhipu, MiMo, Kimi, Hunyuan,
-    // Gemini, Claude, DeepSeek V4+/hybrid, MiniMax handled above): generic
-    // disable shape.
-    if (
-      isSupportedThinkingTokenModel(model) ||
-      isDeepSeekV4PlusModel(model) ||
-      isDeepSeekHybridInferenceModel(model) ||
-      isQwenReasoningModel(model) ||
-      isSupportedThinkingTokenHunyuanModel(model)
-    ) {
-      return { thinking: { type: 'disabled' } }
-    }
-
-    // Effort families that publish a none level: generic effort shape;
-    // otherwise the generic disable representation.
-    if (isSupportedReasoningEffortModel(model)) {
-      const supportedOptions = getModelSupportedReasoningEffortOptions(model)?.filter((option) => option !== 'default')
-      if (supportedOptions?.includes('none')) {
-        return { reasoningEffort: 'none' }
-      }
-      return { reasoning: { enabled: false, exclude: true } }
-    }
-
-    // External-only resolved `none` (exact metadata override with no
-    // heuristic family): generic disable shape, the least-assumptive
-    // protocol-standard representation.
-    if (resolveExternalReasoningSupport(model) === true) {
-      return { thinking: { type: 'disabled' } }
-    }
-
-    throw reasoningNotEncodable(model, reasoningEffort, 'no generic disable shape applies to this lane')
-  }
-
-  // Positive effort path. Debranded: model family/name heuristics and
-  // external reasoning metadata only. No brand-id branches.
-  // Generic OpenAI-compatible
-  // emits only generic shapes (`thinking`, `reasoningEffort`, `reasoning`);
-  // snake_case `reasoning_effort` is never emitted here (AI SDK
-  // openai-compatible overwrites it to undefined) — user custom
-  // `reasoning_effort` params still convert via options.ts. Vendor private
-  // keys are never derived from names/providers. Unknown models without
-  // metadata fall through to {} so basic requests are never blocked.
-  // Capability-driven (not UI-list vetoed): the absence of explicit effort
-  // metadata never invalidates existing protocol-supported thinking
-  // controls. Only families with a closed level set reject unlisted levels
-  // with {} (never a silent change to an unrelated level, never a
-  // `supported[0]` guess). UI/normalization already restrict visible
-  // options to sendable ones via the single resolver.
-  const effortRatio = EFFORT_RATIO[reasoningEffort]
-  const tokenLimit = findTokenLimit(modelId)
-  let budgetTokens: number | undefined
-  if (tokenLimit) {
-    budgetTokens = Math.floor((tokenLimit.max - tokenLimit.min) * effortRatio + tokenLimit.min)
-  }
-
-  // Grok 4 Fast toggle-only: the lane emits only on/off. `auto` is the
-  // resolved on-level; any other explicit effort level cannot be encoded
-  // here and throws instead of silently dropping.
-  if (isGrok4FastReasoningModel(model)) {
-    if (reasoningEffort !== 'auto') {
-      throw reasoningNotEncodable(model, reasoningEffort, 'the Grok 4 Fast lane only encodes "auto"')
-    }
-    return {
-      reasoning: {
-        enabled: true
-      }
-    }
-  }
-
-  // DeepSeek V4+ models support reasoningEffort: "high" | "max" alongside thinking control
-  // UI uses "xhigh" (displayed as Max) which maps to API's "max" (protocol-required mapping).
-  // Generic emits AI-SDK-supported camelCase only. Unencodable levels throw.
-  if (isDeepSeekV4PlusModel(model)) {
-    if (reasoningEffort !== 'high' && reasoningEffort !== 'xhigh') {
-      throw reasoningNotEncodable(model, reasoningEffort, 'the DeepSeek V4+ lane only encodes "high"/"xhigh" (max)')
-    }
-    return {
-      thinking: { type: 'enabled' as const },
-      reasoningEffort: reasoningEffort === 'xhigh' ? ('max' as OpenAIReasoningEffort) : 'high'
-    }
-  }
-
-  // DeepSeek hybrid inference models (v3.1+): generic enabled shape.
-  // Former per-brand switches (dashscope/new-api/hunyuan/doubao/deepseek/
-  // aihubmix/sophnet/ppio/dmxapi/openrouter/together) collapsed: provider ids
-  // are opaque join keys, so every connection uses the least-assumptive
-  // generic representation.
-  if (isDeepSeekHybridInferenceModel(model)) {
-    return {
-      thinking: {
-        type: 'enabled' // auto is invalid
-      }
-    }
-  }
-
-  // Qwen reasoning families: generic enabled shape. Former
-  // enable_thinking/chat_template_kwargs vendor keys removed.
-  if (isQwenReasoningModel(model)) {
-    return {
-      thinking: { type: 'enabled' as const }
-    }
-  }
-
-  // Hunyuan thinking family: generic enabled shape.
-  if (isSupportedThinkingTokenHunyuanModel(model)) {
-    return {
-      thinking: { type: 'enabled' as const }
-    }
-  }
-
-  // Grok models/Perplexity models/OpenAI models, use reasoningEffort.
-  // Closed level set: unlisted selections throw (never supported[0], never
-  // silently mapped to an unrelated level).
-  if (isSupportedReasoningEffortModel(model)) {
-    const supportedOptions = getModelSupportedReasoningEffortOptions(model)?.filter((option) => option !== 'default')
-    if (supportedOptions?.includes(reasoningEffort)) {
-      return {
-        reasoningEffort
-      }
-    }
-    throw reasoningNotEncodable(
-      model,
-      reasoningEffort,
-      `supported levels here are ${(supportedOptions ?? []).join('/') || 'unknown'}`
-    )
-  }
-
-  // Mistral Small models use reasoningEffort with 'none' | 'high'.
-  // `none` is handled above; only `high` encodes here, others throw.
-  if (modelId.includes('mistral-small-2603')) {
-    if (reasoningEffort !== 'high') {
-      throw reasoningNotEncodable(model, reasoningEffort, 'the Mistral Small lane only encodes "high"')
-    }
-    return { reasoningEffort: 'high' }
-  }
-
-  // gemini series, openai compatible api: generic effort shape.
-  // Former vendor-specific extra_body.google.thinking_config removed; every
-  // Gemini thinking family uses the protocol-standard representation.
-  // https://ai.google.dev/gemini-api/docs/gemini-3?thinking=high#openai_compatibility
-  if (isSupportedThinkingTokenGeminiModel(model)) {
-    return {
-      reasoningEffort
-    }
-  }
-
-  // Claude models, openai compatible api
-  if (isSupportedThinkingTokenClaudeModel(model)) {
-    const maxTokens = assistant.settings?.maxTokens
-    return {
-      thinking: {
-        type: 'enabled',
-        budget_tokens: budgetTokens
-          ? Math.floor(Math.max(1024, Math.min(budgetTokens, (maxTokens || DEFAULT_MAX_TOKENS) * effortRatio)))
-          : undefined
-      }
-    }
-  }
-
-  // Use thinking, doubao, zhipu, etc.
-  if (isSupportedThinkingTokenDoubaoModel(model)) {
-    if (isDoubaoSeedAfter251015(model) || isDoubaoSeed18Model(model)) {
-      return { reasoningEffort }
-    }
-    if (reasoningEffort === 'high') {
-      return { thinking: { type: 'enabled' } }
-    }
-    if (reasoningEffort === 'auto' && isDoubaoThinkingAutoModel(model)) {
-      return { thinking: { type: 'auto' } }
-    }
-    // Other explicit levels cannot be encoded on this Doubao lane: throw
-    // instead of silently omitting the user's choice.
-    throw reasoningNotEncodable(model, reasoningEffort, 'the current Doubao lane cannot encode this level')
-  }
-  if (isSupportedThinkingTokenZhipuModel(model)) {
-    return { thinking: { type: 'enabled' } }
-  }
-
-  if (isSupportedThinkingTokenMiMoModel(model) || isSupportedThinkingTokenKimiModel(model)) {
-    return {
-      thinking: { type: 'enabled' }
-    }
-  }
-
-  // External-only resolved controls with no heuristic family: emit the
-  // least-assumptive generic shapes. Toggle `auto` maps to enabled (the
-  // lane's explicit on-shape); named effort levels map to generic
-  // `reasoningEffort`. Budget-only external resolves to fixed (`default`
-  // only) and never reaches an emit here. No budget-as-effort invention.
-  if (resolveExternalReasoningSupport(model) === true) {
-    if (reasoningEffort === 'auto') {
-      return { thinking: { type: 'enabled' as const } }
-    }
-    return { reasoningEffort }
-  }
-
-  // Unit B fallback: the adapter speaks the generic protocol, so an explicit
-  // user level is never silently dropped because the model name is unknown.
-  // `none` disables, `auto` enables, named levels use the generic effort shape.
-  if (reasoningEffort === 'auto') {
-    return { thinking: { type: 'enabled' as const } }
-  }
-  return { reasoningEffort }
+  const dialect = resolveOpenAICompatibleDialect(provider)
+  return encodeReasoningEffortForDialect(dialect, reasoningEffort)
 }
 
 /**

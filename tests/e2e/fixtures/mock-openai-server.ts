@@ -35,6 +35,9 @@ export interface MockRequestEntry {
 /** Opt-in marker for the slow/long streaming mode used by the streaming-responsiveness spec. */
 export const SLOW_STREAM_MARKER = '__E2E_SLOW_STREAM__'
 
+/** Opt-in marker for reasoning leak simulation: reasoning-start/delta without reasoning-end */
+export const REASONING_LEAK_MARKER = '__E2E_REASONING_LEAK__'
+
 /** Inter-chunk delay for the slow streaming mode. */
 const SLOW_STREAM_CHUNK_DELAY_MS = 60
 
@@ -234,6 +237,68 @@ function buildSlowChatCompletionChunks(model: string) {
   return { id, chunks }
 }
 
+function buildReasoningLeakChunks(model: string) {
+  const id = `chatcmpl-mock-${Date.now()}`
+  const created = Math.floor(Date.now() / 1000)
+  const chunks: Array<Record<string, unknown>> = []
+  // Two reasoning_content deltas WITHOUT a following reasoning-end, then direct text and finish
+  // This mimics a provider that sends reasoning-start/delta but misses reasoning-end.
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { reasoning_content: 'leak reasoning step 1: analyze ' },
+        finish_reason: null
+      }
+    ]
+  })
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { reasoning_content: 'leak reasoning step 2: conclude ' },
+        finish_reason: null
+      }
+    ]
+  })
+  // Direct text without explicit reasoning-end
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { role: 'assistant', content: `[Mock ${model}] You said: leaked reasoning finished` },
+        finish_reason: null
+      }
+    ]
+  })
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: 'stop'
+      }
+    ]
+  })
+  return { id, chunks }
+}
+
 function createMockServer(): Promise<MockServerPort> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
@@ -317,6 +382,8 @@ function createMockServer(): Promise<MockServerPort> {
               Connection: 'keep-alive'
             })
 
+            const reasoningLeak = typeof lastUserContent === 'string' && lastUserContent.includes(REASONING_LEAK_MARKER)
+
             if (slowStream) {
               const { chunks } = buildSlowChatCompletionChunks(model)
               let i = 0
@@ -334,6 +401,16 @@ function createMockServer(): Promise<MockServerPort> {
               // events).
               res.on('close', () => clearInterval(timer))
               res.on('error', () => clearInterval(timer))
+              return
+            }
+
+            if (reasoningLeak) {
+              const { chunks: leakChunks } = buildReasoningLeakChunks(model)
+              for (const chunk of leakChunks) {
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+              }
+              res.write('data: [DONE]\n\n')
+              res.end()
               return
             }
 

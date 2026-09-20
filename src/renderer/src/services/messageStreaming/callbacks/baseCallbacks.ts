@@ -479,9 +479,31 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // Final payload: keep every latest block in message order; force the
         // terminal target to SUCCESS in the COMMITTED payload only (Redux
         // still shows whatever quiesce left until the DB-first commit below
-        // succeeds). Other blocks keep their latest terminal state as-is.
+        // succeeds). Additionally converge any leftover STREAMING thinking
+        // blocks to SUCCESS (second-line defense if adapter fallback was missed
+        // or a provider sent reasoning without reasoning-end/text-start).
+        // Avoid double-completion: only mutate blocks still STREAMING.
+        // thinking_millsec comes from the single live clock in
+        // thinkingCallbacks (getCurrentThinkingInfo). When no trusted
+        // thinkingInfo is available and the block has thinking_millsec 0,
+        // keep 0 (or the existing value) — never fabricate with
+        // Date.now()-startTime which measures the whole response.
+        const thinkingInfoForFinal = getCurrentThinkingInfo?.()
         const finalBlocks: MessageBlock[] = referencedIds.map((blockId) => {
           const block = resolveFinalBlock(blockId) as MessageBlock
+          if (block.type === MessageBlockType.THINKING && block.status === MessageBlockStatus.STREAMING) {
+            const patch: Partial<ThinkingMessageBlock> = { status: MessageBlockStatus.SUCCESS }
+            if (
+              thinkingInfoForFinal != null &&
+              thinkingInfoForFinal.blockId === blockId &&
+              thinkingInfoForFinal.millsec > 0 &&
+              Number.isFinite(thinkingInfoForFinal.millsec)
+            ) {
+              patch.thinking_millsec = thinkingInfoForFinal.millsec
+            }
+            executionState.applyBlockPatch(blockId, patch)
+            return { ...block, ...patch } as MessageBlock
+          }
           if (blockId === possibleBlockId) {
             return { ...block, status: MessageBlockStatus.SUCCESS } as MessageBlock
           }
@@ -494,7 +516,18 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           blocks: referencedIds
         }
         executionState.applyMessagePatch(finalMessageUpdates as Partial<Message>)
-        executionState.applyBlockPatch(possibleBlockId, { status: MessageBlockStatus.SUCCESS })
+        // possibleBlockId already patched inside finalBlocks if it was a
+        // streaming thinking block; otherwise ensure it converges.
+        const possibleBlockForPatch = resolveFinalBlock(possibleBlockId)
+        if (
+          possibleBlockForPatch &&
+          !(
+            possibleBlockForPatch.type === MessageBlockType.THINKING &&
+            possibleBlockForPatch.status === MessageBlockStatus.STREAMING
+          )
+        ) {
+          executionState.applyBlockPatch(possibleBlockId, { status: MessageBlockStatus.SUCCESS })
+        }
         try {
           await saveFinalUpdatesAtomically(assistantMsgId, topicId, finalMessageUpdates, finalBlocks)
         } catch (error) {
@@ -502,14 +535,35 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           throw error
         }
         // Redux AFTER the successful commit (DB-first), only when still
-        // loaded: block first, then message. Detached executions never inject.
+        // loaded: converged thinking blocks + terminal block, then message.
+        // Detached executions never inject. Avoid double dispatch for the
+        // terminal block when it was already a converged thinking block.
         if (isLoaded()) {
-          dispatch(
-            withClosureTopics(
-              updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }),
-              topicId
+          const convergedThinkingIds = finalBlocks
+            .filter(
+              (b) =>
+                b.type === MessageBlockType.THINKING &&
+                b.status === MessageBlockStatus.SUCCESS &&
+                (latestState.messageBlocks.entities[b.id] as ThinkingMessageBlock | undefined)?.status ===
+                  MessageBlockStatus.STREAMING
             )
-          )
+            .map((b) => b.id)
+          for (const tid of convergedThinkingIds) {
+            const committed = finalBlocks.find((b) => b.id === tid) as ThinkingMessageBlock
+            const changes: Partial<ThinkingMessageBlock> = { status: MessageBlockStatus.SUCCESS }
+            if (committed.thinking_millsec != null) {
+              changes.thinking_millsec = committed.thinking_millsec
+            }
+            dispatch(withClosureTopics(updateOneBlock({ id: tid, changes }), topicId))
+          }
+          if (!convergedThinkingIds.includes(possibleBlockId)) {
+            dispatch(
+              withClosureTopics(
+                updateOneBlock({ id: possibleBlockId, changes: { status: MessageBlockStatus.SUCCESS } }),
+                topicId
+              )
+            )
+          }
           dispatch(
             newMessagesActions.updateMessage({
               topicId,

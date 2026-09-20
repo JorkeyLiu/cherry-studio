@@ -181,7 +181,7 @@ describe('reasoning utils', () => {
       expect(() => getReasoningEffort(makeAssistant('high'), makeModel())).toThrow('Model provider is not configured')
     })
 
-    it('should yield identical results for different provider ids with same type/model/options', async () => {
+    it('should yield identical results for different provider ids with same type/model/options (dialect orthogonal, model/provider id does not affect default dialect)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isQwenReasoningModel).mockReturnValue(true)
@@ -197,13 +197,14 @@ describe('reasoning utils', () => {
       for (const r of results.slice(1)) {
         expect(r).toEqual(results[0])
       }
-      expect(results[0]).toEqual({ thinking: { type: 'enabled' } })
+      expect(results[0]).toEqual({ reasoningEffort: 'high' })
       expect(results[0]).not.toHaveProperty('enable_thinking')
+      expect(results[0]).not.toHaveProperty('thinking')
       expect(results[0]).not.toHaveProperty('chat_template_kwargs')
       expect(results[0]).not.toHaveProperty('extra_body')
     })
 
-    it('should disable thinking generically when effort is none (no vendor keys)', async () => {
+    it('should encode none as reasoningEffort none on default dialect (no thinking object, no vendor keys)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isQwenReasoningModel).mockReturnValue(true)
@@ -211,7 +212,7 @@ describe('reasoning utils', () => {
       const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
       vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      expect(getReasoningEffort(makeAssistant('none'), makeModel())).toEqual({ thinking: { type: 'disabled' } })
+      expect(getReasoningEffort(makeAssistant('none'), makeModel())).toEqual({ reasoningEffort: 'none' })
     })
 
     it('should use generic reasoningEffort none for none-capable effort models', async () => {
@@ -231,7 +232,7 @@ describe('reasoning utils', () => {
       })
     })
 
-    it('should enable DeepSeek hybrid generically on any connection', async () => {
+    it('should forward DeepSeek hybrid effort identically via dialect on any connection (model-name orthogonal, no thinking object)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isDeepSeekHybridInferenceModel).mockReturnValue(true)
@@ -244,11 +245,11 @@ describe('reasoning utils', () => {
       const ra = getReasoningEffort(assistant, makeModel({ id: 'deepseek-chat', provider: 'brand-a' }))
       vi.mocked(gpm).mockReturnValue({ id: 'brand-b', name: 'B', type: 'openai' } as any)
       const rb = getReasoningEffort(assistant, makeModel({ id: 'deepseek-chat', provider: 'brand-b' }))
-      expect(ra).toEqual({ thinking: { type: 'enabled' } })
+      expect(ra).toEqual({ reasoningEffort: 'high' })
       expect(rb).toEqual(ra)
     })
 
-    it('should use generic reasoningEffort for effort families with supported-option fallback', async () => {
+    it('should forward explicit levels regardless of local supported-option list (no veto, dialect encodes lazily; xhigh->max)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isDeepSeekV4PlusModel).mockReturnValue(false)
@@ -264,10 +265,10 @@ describe('reasoning utils', () => {
       expect(getReasoningEffort(makeAssistant('medium'), makeModel({ id: 'grok-3-mini' }))).toEqual({
         reasoningEffort: 'medium'
       })
-      // Unsupported selection throws with the explicit level (never supported[0], never an unrelated level).
-      expect(() => getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toThrow(
-        /xhigh.*cannot be encoded/
-      )
+      // Generic OpenAI-compatible does not reject by local supported options; xhigh maps to max via dialect.
+      expect(getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-3-mini' }))).toEqual({
+        reasoningEffort: 'max'
+      })
     })
 
     it('should use generic reasoningEffort for Gemini thinking families (no extra_body)', async () => {
@@ -332,7 +333,7 @@ describe('reasoning utils', () => {
       }
     })
 
-    it('should emit camelCase reasoningEffort for deep-research models (never snake_case)', async () => {
+    it('should encode deep-research-named models via same dialect (model-name orthogonal, never snake_case)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(true)
@@ -345,12 +346,15 @@ describe('reasoning utils', () => {
       )
       expect(result).toEqual({ reasoningEffort: 'medium' })
       expect(result).not.toHaveProperty('reasoning_effort')
-      expect(() =>
+      // Generic dialect does not restrict deep-research to medium; high forwards as high (model-name orthogonal).
+      expect(
         getReasoningEffort(makeAssistant('high'), makeModel({ id: 'o3-deep-research', provider: 'custom-a' }))
-      ).toThrow(/only encodes "medium"/)
+      ).toEqual({
+        reasoningEffort: 'high'
+      })
     })
 
-    it('should emit camelCase reasoningEffort for DeepSeek V4+ models (never snake_case)', async () => {
+    it('should encode DeepSeek V4+ models via same dialect as single reasoningEffort (never snake_case, no thinking object)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isReasoningModel).mockReturnValue(true)
       vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
@@ -364,15 +368,17 @@ describe('reasoning utils', () => {
         makeAssistant('high'),
         makeModel({ id: 'deepseek-v4', provider: 'custom-a' })
       )
-      expect(high).toEqual({ thinking: { type: 'enabled' }, reasoningEffort: 'high' })
+      expect(high).toEqual({ reasoningEffort: 'high' })
       expect(high).not.toHaveProperty('reasoning_effort')
+      expect(high).not.toHaveProperty('thinking')
 
       const xhigh: any = getReasoningEffort(
         makeAssistant('xhigh' as any),
         makeModel({ id: 'deepseek-v4', provider: 'custom-a' })
       )
-      expect(xhigh).toEqual({ thinking: { type: 'enabled' }, reasoningEffort: 'max' })
+      expect(xhigh).toEqual({ reasoningEffort: 'max' })
       expect(xhigh).not.toHaveProperty('reasoning_effort')
+      expect(xhigh).not.toHaveProperty('thinking')
     })
   })
 
@@ -1651,7 +1657,7 @@ describe('reasoning utils', () => {
     const makeAssistant = (reasoning_effort?: any): Assistant =>
       ({ id: 't', name: 'T', settings: { reasoning_effort } }) as Assistant
 
-    it('generic deep-research lane only encodes medium', async () => {
+    it('generic dialect forwards any explicit level even for deep-research-named models (model-name orthogonal)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(true)
       const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
@@ -1660,12 +1666,12 @@ describe('reasoning utils', () => {
       expect(getReasoningEffort(makeAssistant('medium'), makeModel({ id: 'o3-deep-research' }))).toEqual({
         reasoningEffort: 'medium'
       })
-      expect(() => getReasoningEffort(makeAssistant('high'), makeModel({ id: 'o3-deep-research' }))).toThrow(
-        /deep-research.*only encodes "medium"/
-      )
+      expect(getReasoningEffort(makeAssistant('high'), makeModel({ id: 'o3-deep-research' }))).toEqual({
+        reasoningEffort: 'high'
+      })
     })
 
-    it('generic Grok 4 Fast lane only encodes auto', async () => {
+    it('generic dialect forwards any explicit level even for Grok-named models (model-name orthogonal, xhigh->max, auto->auto)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
       vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(true)
@@ -1673,14 +1679,17 @@ describe('reasoning utils', () => {
       vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
       expect(getReasoningEffort(makeAssistant('auto'), makeModel({ id: 'grok-4-fast' }))).toEqual({
-        reasoning: { enabled: true }
+        reasoningEffort: 'auto'
       })
-      expect(() => getReasoningEffort(makeAssistant('high'), makeModel({ id: 'grok-4-fast' }))).toThrow(
-        /Grok 4 Fast.*only encodes "auto"/
-      )
+      expect(getReasoningEffort(makeAssistant('high'), makeModel({ id: 'grok-4-fast' }))).toEqual({
+        reasoningEffort: 'high'
+      })
+      expect(getReasoningEffort(makeAssistant('xhigh' as any), makeModel({ id: 'grok-4-fast' }))).toEqual({
+        reasoningEffort: 'max'
+      })
     })
 
-    it('generic none without an encodable lane shape throws', async () => {
+    it('generic dialect always has a disable shape for none (default dialect -> reasoningEffort none, no throw)', async () => {
       const models = await import('@renderer/config/models')
       vi.mocked(models.isOpenAIDeepResearchModel).mockReturnValue(false)
       vi.mocked(models.isGrok4FastReasoningModel).mockReturnValue(false)
@@ -1695,9 +1704,9 @@ describe('reasoning utils', () => {
       const { getProviderByModel: gpm } = await import('@renderer/services/AssistantService')
       vi.mocked(gpm).mockReturnValue({ id: 'custom-a', name: 'A', type: 'openai' } as any)
 
-      expect(() => getReasoningEffort(makeAssistant('none'), makeModel({ id: 'unknown-plain-model' }))).toThrow(
-        /no generic disable shape/
-      )
+      expect(getReasoningEffort(makeAssistant('none'), makeModel({ id: 'unknown-plain-model' }))).toEqual({
+        reasoningEffort: 'none'
+      })
     })
 
     it('OpenAI lane auto throws instead of mapping to medium', async () => {
