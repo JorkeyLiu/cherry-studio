@@ -24,9 +24,6 @@ const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant,
   const { addAssistant } = useAssistants()
   const { defaultAssistant } = useDefaultAssistant()
 
-  const borderStyle = '0.5px solid var(--color-border)'
-  const border =
-    position === 'left' ? { borderRight: borderStyle } : { borderLeft: borderStyle, borderTopLeftRadius: 0 }
   const tabsWidthStyle = {
     '--tabs-width': position === 'right' ? 'var(--topic-list-width, 275px)' : 'var(--assistants-width, 275px)'
   } as CSSProperties
@@ -48,7 +45,7 @@ const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant,
 
   return (
     <Container
-      style={{ ...border, ...tabsWidthStyle, ...style }}
+      style={{ ...tabsWidthStyle, ...style }}
       className={classNames('home-tabs', { right: position === 'right' })}>
       <TabContent className="home-tabs-content">
         {position === 'left' ? (

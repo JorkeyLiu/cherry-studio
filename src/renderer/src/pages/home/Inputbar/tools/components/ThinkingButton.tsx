@@ -14,10 +14,10 @@ import { useAssistant } from '@renderer/hooks/useAssistant'
 import ToolPopover from '@renderer/pages/home/Inputbar/components/ToolPopover'
 import type { Model, ThinkingOption } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
-import { Divider, Switch, Tooltip } from 'antd'
-import { Check } from 'lucide-react'
+import { Divider, Tooltip } from 'antd'
+import { Check, Eye, EyeOff } from 'lucide-react'
 import type { FC, ReactElement } from 'react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
@@ -32,6 +32,8 @@ const ThinkingButton: FC<Props> = ({ model, assistantId }): ReactElement => {
   const { t } = useTranslation()
   const { assistant, updateAssistantSettings } = useAssistant(assistantId)
   const [open, setOpen] = useState(false)
+  const [lockedRootHeight, setLockedRootHeight] = useState<number | null>(null)
+  const popoverInnerRef = useRef<HTMLDivElement>(null)
 
   const currentReasoningEffort: ThinkingOption = useMemo(() => {
     return (assistant.settings?.reasoning_effort as ThinkingOption) || 'default'
@@ -63,6 +65,13 @@ const ThinkingButton: FC<Props> = ({ model, assistantId }): ReactElement => {
     return base
   }, [showAll, resolvedOptions, currentReasoningEffort])
 
+  // Clear temporary root height when popover closes so reopening gets natural height
+  useEffect(() => {
+    if (!open) {
+      setLockedRootHeight(null)
+    }
+  }, [open])
+
   const onThinkingChange = useCallback(
     (option: ThinkingOption) => {
       const thinkModeEnabled = option !== 'none' && option !== 'default'
@@ -79,18 +88,32 @@ const ThinkingButton: FC<Props> = ({ model, assistantId }): ReactElement => {
     [updateAssistantSettings, assistant.settings?.reasoning_effort_by_model, model]
   )
 
-  const handleShowAllToggle = useCallback(
-    (checked: boolean) => {
-      const key = getModelReasoningEffortKey(model)
-      if (!key) return
-      const currentMap = assistant.settings?.reasoning_effort_show_all_by_model ?? {}
-      updateAssistantSettings({
-        reasoning_effort_show_all_by_model: { ...currentMap, [key]: checked }
-      })
-      // must not change reasoning_effort
-    },
-    [model, assistant.settings?.reasoning_effort_show_all_by_model, updateAssistantSettings]
-  )
+  const handleShowAllToggle = useCallback(() => {
+    // upon first show-all toggle while open, lock the FULL POPOVER ROOT height
+    // to the pre-toggle rendered root content height such that top-placement
+    // popover's top edge remains fixed, while options list uses internal scrolling
+    if (open && lockedRootHeight === null && popoverInnerRef.current) {
+      const h = popoverInnerRef.current.getBoundingClientRect().height
+      if (h > 0) {
+        setLockedRootHeight(h)
+      }
+    }
+    const key = getModelReasoningEffortKey(model)
+    if (!key) return
+    const currentMap = assistant.settings?.reasoning_effort_show_all_by_model ?? {}
+    const next = !showAll
+    updateAssistantSettings({
+      reasoning_effort_show_all_by_model: { ...currentMap, [key]: next }
+    })
+    // must not change reasoning_effort
+  }, [
+    open,
+    lockedRootHeight,
+    showAll,
+    model,
+    assistant.settings?.reasoning_effort_show_all_by_model,
+    updateAssistantSettings
+  ])
 
   const reasoningEffortOptionLabelMap = {
     default: t('assistants.settings.reasoning_effort.default'),
@@ -116,23 +139,34 @@ const ThinkingButton: FC<Props> = ({ model, assistantId }): ReactElement => {
 
   const isThinkingEnabled = currentReasoningEffort !== 'none' && currentReasoningEffort !== 'default'
 
+  const showAllLabel = t('chat.input.thinking.show_all', 'Show all')
+
   const popoverContent = (
-    <ThinkingPopoverInner data-testid="thinking-popover">
+    <ThinkingPopoverInner
+      ref={popoverInnerRef}
+      data-testid="thinking-popover"
+      $lockedHeight={lockedRootHeight}
+      style={lockedRootHeight ? { height: lockedRootHeight } : undefined}>
       <PopoverHeaderRow>
         <span>{t('assistants.settings.reasoning_effort.label')}</span>
+        <Tooltip title={showAllLabel} mouseLeaveDelay={0}>
+          <EyeToggleButton
+            type="button"
+            aria-label={showAllLabel}
+            aria-pressed={showAll}
+            data-testid="thinking-show-all-switch"
+            data-toggle-testid="thinking-show-all-toggle"
+            onClick={(e) => {
+              e.stopPropagation()
+              handleShowAllToggle()
+            }}
+            onMouseDown={(e) => e.stopPropagation()}>
+            {showAll ? <Eye size={14} /> : <EyeOff size={14} />}
+          </EyeToggleButton>
+        </Tooltip>
       </PopoverHeaderRow>
-      <SwitchRow onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
-        <span>{t('chat.input.thinking.show_all', 'Show all')}</span>
-        <Switch
-          size="small"
-          checked={showAll}
-          onChange={handleShowAllToggle}
-          onClick={(_: boolean, e: any) => e?.stopPropagation?.()}
-          data-testid="thinking-show-all-switch"
-        />
-      </SwitchRow>
-      <Divider style={{ margin: '8px 0' }} />
-      <OptionsList>
+      <Divider style={{ margin: '8px 0', flexShrink: 0 } as any} />
+      <OptionsList $locked={lockedRootHeight !== null} data-testid="thinking-options-list">
         {displayOptions.map((option) => {
           const isSelected = currentReasoningEffort === option
           return (
@@ -207,29 +241,58 @@ const ThinkingIcon = (props: { option?: ThinkingOption }) => {
   return <IconComponent className="icon" width={18} height={18} style={{ marginTop: -2 }} />
 }
 
-const ThinkingPopoverInner = styled.div`
+const ThinkingPopoverInner = styled.div<{ $lockedHeight?: number | null }>`
   width: 100%;
+  ${(p) => (p.$lockedHeight ? `height: ${p.$lockedHeight}px; display: flex; flex-direction: column; overflow: hidden;` : '')}
 `
 
 const PopoverHeaderRow = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   font-weight: 600;
   font-size: 13px;
   margin-bottom: 8px;
 `
 
-const SwitchRow = styled.div`
-  display: flex;
+const EyeToggleButton = styled.button`
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  font-size: 12px;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-3);
+  cursor: pointer;
+  padding: 0;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  &:hover {
+    background: var(--color-background-soft);
+    color: var(--color-text-1);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 1px;
+  }
 `
 
-const OptionsList = styled.div`
+const OptionsList = styled.div<{ $locked?: boolean }>`
   display: flex;
   flex-direction: column;
   gap: 2px;
   max-height: 260px;
   overflow-y: auto;
+  ${(p) =>
+    p.$locked
+      ? `
+    flex: 1;
+    max-height: none;
+    min-height: 0;
+    overflow-y: auto;
+  `
+      : ''}
 `
 
 const OptionItem = styled.div<{ $selected?: boolean }>`

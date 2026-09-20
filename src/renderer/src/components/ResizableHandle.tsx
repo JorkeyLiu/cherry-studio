@@ -17,7 +17,6 @@ interface ResizableHandleProps {
 }
 
 const HANDLE_WIDTH = 6
-const HANDLE_HOVER_WIDTH = 8
 
 const ResizableHandle = ({
   cssVar,
@@ -102,38 +101,40 @@ const Handle = styled.div<{ $isActive: boolean; $side: 'left' | 'right' }>`
   z-index: 10;
   flex-shrink: 0;
   align-self: stretch;
-  transition: width 0.15s ease, background-color 0.15s ease;
+  background: transparent;
+  transition: background-color 0.15s ease;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -4px;
+    right: -4px;
+    background: transparent;
+  }
 
   &::after {
     content: '';
     position: absolute;
     top: 0;
     bottom: 0;
-    ${({ $side }) => ($side === 'left' ? 'right: -2px;' : 'left: -2px;')}
-    width: 2px;
-    background: transparent;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 1px;
+    background: var(--color-border, #e0e0e0);
     transition: background-color 0.15s ease;
   }
 
-  &:hover {
-    width: ${HANDLE_HOVER_WIDTH}px;
-    min-width: ${HANDLE_HOVER_WIDTH}px;
-
-    &::after {
-      background: var(--color-border, #e0e0e0);
-    }
+  &:hover::after {
+    background: var(--color-border, #e0e0e0);
   }
 
   ${({ $isActive }) =>
     $isActive &&
     `
-    width: ${HANDLE_HOVER_WIDTH}px;
-    min-width: ${HANDLE_HOVER_WIDTH}px;
-    background: transparent;
-
     &::after {
       background: var(--color-primary, #00b96b);
-      width: 2px;
     }
   `}
 `

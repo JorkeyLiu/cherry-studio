@@ -96,6 +96,17 @@ const ApiOptionsSettings = ({ providerId }: Props) => {
   const options = useMemo(() => {
     const items: OptionType[] = [
       {
+        key: 'require_api_key',
+        label: t('settings.provider.require_api_key.label'),
+        tip: t('settings.provider.require_api_key.tip'),
+        checked: provider.apiOptions?.requiresApiKey !== false,
+        onChange: (checked: boolean) => {
+          updateProviderTransition({
+            apiOptions: { ...provider.apiOptions, requiresApiKey: checked }
+          })
+        }
+      },
+      {
         key: 'openai_array_content',
         label: t('settings.provider.api.options.array_content.label'),
         tip: t('settings.provider.api.options.array_content.help'),

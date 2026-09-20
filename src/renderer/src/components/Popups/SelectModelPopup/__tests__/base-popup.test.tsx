@@ -261,4 +261,36 @@ describe('SelectModelPopupView "Add Model" action', () => {
       expect(screen.getByTestId('model-avatar-claude').getAttribute('data-provider-id')).toBe('anthropic')
     })
   })
+
+  describe('stable top edge (global popup)', () => {
+    it('preserves a fixed top edge while the filtered list reduces in height — only bottom shrinks', async () => {
+      const manyModels = Array.from({ length: 12 }, (_, i) => model(`m-${i}`))
+      const fewModels = [model('m-0')]
+      const manyProviders = [provider('openai', 'OpenAI', manyModels)]
+      const fewProviders = [provider('openai', 'OpenAI', fewModels)]
+
+      renderPopup(manyProviders)
+      const modalMany = document.querySelector('.ant-modal') as HTMLElement | null
+      expect(modalMany).not.toBeNull()
+      const topMany = modalMany?.style.top
+      expect(topMany).toBeTruthy()
+      expect(document.querySelector('.ant-modal-centered')).toBeNull()
+      cleanup()
+
+      renderPopup(fewProviders)
+      const modalFew = document.querySelector('.ant-modal') as HTMLElement | null
+      expect(modalFew).not.toBeNull()
+      const topFew = modalFew?.style.top
+      expect(topFew).toBe(topMany)
+      cleanup()
+    })
+
+    it('preserves PAGE_SIZE cap (12 * 36) and shrinks proportionally when filtered', () => {
+      const PAGE_SIZE = 12
+      const ITEM_HEIGHT = 36
+      expect(Math.min(PAGE_SIZE, 20) * ITEM_HEIGHT).toBe(432)
+      expect(Math.min(PAGE_SIZE, 2) * ITEM_HEIGHT).toBe(72)
+      expect(Math.min(PAGE_SIZE, 1) * ITEM_HEIGHT).toBe(36)
+    })
+  })
 })

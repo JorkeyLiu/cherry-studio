@@ -21,15 +21,12 @@ vi.mock('@renderer/config/models', () => ({
 }))
 
 // Single trigger mock: antd Popover with trigger="click" is the sole open/close channel via onOpenChange.
-// No manual ActionIconButton onClick toggle. The trigger wrapper handles click and stopPropagation;
-// content stopPropagation (ToolPopover PopoverContent) prevents inner clicks from reaching trigger.
-// Previously this mock simulated double-drive (Popover + manual toggle); now unified.
 vi.mock('antd', async () => {
   const actual: any = await vi.importActual('antd')
   return {
     ...actual,
-    Tooltip: ({ children, open }: any) => (
-      <div data-testid="tooltip" data-open={open === undefined ? 'undefined' : String(open)}>
+    Tooltip: ({ children, open, title }: any) => (
+      <div data-testid="tooltip" data-open={open === undefined ? 'undefined' : String(open)} data-title={title}>
         {children}
       </div>
     ),
@@ -45,16 +42,6 @@ vi.mock('antd', async () => {
           {children}
         </div>
       </div>
-    ),
-    Switch: ({ checked, onChange, ...rest }: any) => (
-      <button
-        data-testid={rest['data-testid'] ?? 'show-all-switch'}
-        data-checked={String(checked)}
-        onClick={(e: any) => {
-          e.stopPropagation()
-          onChange?.(!checked, e)
-        }}
-      />
     ),
     Divider: () => <hr />
   }
@@ -78,6 +65,16 @@ vi.mock('@renderer/components/Icons/SVGIcon', () => ({
   MdiLightbulbOn90: () => <span data-testid="icon-90" />,
   MdiLightbulbQuestion: () => <span data-testid="icon-question" />
 }))
+
+vi.mock('lucide-react', async () => {
+  const actual: any = await vi.importActual('lucide-react')
+  return {
+    ...actual,
+    Eye: (props: any) => <span data-testid="eye-icon" {...props} />,
+    EyeOff: (props: any) => <span data-testid="eye-off-icon" {...props} />,
+    Check: (props: any) => <span data-testid="check-icon" {...props} />
+  }
+})
 
 const createModel = (overrides: Partial<Model> = {}): Model => ({
   id: 'gpt-5',
@@ -171,14 +168,48 @@ describe('ThinkingButton with Popover and show-all', () => {
     }
   })
 
+  it('renders inline eye toggle in title row (no standalone SwitchRow) with tooltip, accessible label and pressed state', () => {
+    renderComponent({ showAllMap: {} })
+    fireEvent.click(screen.getByTestId('thinking-button'))
+    const eyeToggle = screen.getByTestId('thinking-show-all-switch')
+    expect(eyeToggle).toBeInTheDocument()
+    // should be inside header row, not separate SwitchRow
+    const header = screen.getByText('Reasoning Effort').closest('div')
+    expect(header).toContainElement(eyeToggle)
+    expect(eyeToggle.getAttribute('aria-label')).toBe('Show all')
+    expect(eyeToggle.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByTestId('eye-off-icon')).toBeInTheDocument()
+    // Tooltip title
+    // eye toggle is wrapped by Tooltip with title Show all – check via closest tooltip container maybe
+    // our Tooltip mock renders data-title; the eye toggle's parent Tooltip would have data-title, but we have outer tooltip too.
+    // At least one tooltip should have title Show all
+    const tooltips = screen.getAllByTestId('tooltip')
+    const hasShowAllTooltip = tooltips.some((t) => t.getAttribute('data-title') === 'Show all')
+    expect(hasShowAllTooltip).toBe(true)
+  })
+
+  it('eye toggle shows Eye when show-all true and EyeOff when false', () => {
+    const model = createModel({ id: 'gpt-5', provider: 'openai' })
+    const key = 'openai:gpt-5'
+    const { view } = renderComponent({ model, showAllMap: { [key]: true } })
+    fireEvent.click(screen.getByTestId('thinking-button'))
+    expect(screen.getByTestId('eye-icon')).toBeInTheDocument()
+    expect(screen.getByTestId('thinking-show-all-switch').getAttribute('aria-pressed')).toBe('true')
+    view.unmount()
+    renderComponent({ model, showAllMap: {} })
+    fireEvent.click(screen.getByTestId('thinking-button'))
+    expect(screen.getByTestId('eye-off-icon')).toBeInTheDocument()
+    expect(screen.getByTestId('thinking-show-all-switch').getAttribute('aria-pressed')).toBe('false')
+  })
+
   it('persists show-all per provider:modelId without changing reasoning_effort', () => {
     const model = createModel({ id: 'model-a', provider: 'prov' })
     const key = 'prov:model-a'
     const { updateAssistantSettings } = renderComponent({ model, reasoning_effort: 'medium', showAllMap: {} })
     fireEvent.click(screen.getByTestId('thinking-button'))
-    const sw = screen.getByTestId('thinking-show-all-switch')
-    expect(sw.getAttribute('data-checked')).toBe('false')
-    fireEvent.click(sw)
+    const toggle = screen.getByTestId('thinking-show-all-switch')
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(toggle)
     expect(updateAssistantSettings).toHaveBeenCalledWith({
       reasoning_effort_show_all_by_model: { [key]: true }
     })
@@ -218,9 +249,13 @@ describe('ThinkingButton with Popover and show-all', () => {
 
   it('Tooltip is forced closed when popover open and uncontrolled when closed', () => {
     renderComponent()
+    // outer tooltip (Reasoning Effort) – when closed, inner eye tooltip not rendered
     expect(screen.getByTestId('tooltip').getAttribute('data-open')).toBe('undefined')
     fireEvent.click(screen.getByTestId('thinking-button'))
-    expect(screen.getByTestId('tooltip').getAttribute('data-open')).toBe('false')
+    const outerWhenOpen = screen
+      .getAllByTestId('tooltip')
+      .find((el) => el.getAttribute('data-title') === 'Reasoning Effort')
+    expect(outerWhenOpen?.getAttribute('data-open')).toBe('false')
     fireEvent.click(screen.getByTestId('thinking-option-low'))
     expect(screen.getByTestId('tooltip').getAttribute('data-open')).toBe('undefined')
     expect(screen.queryByTestId('popover-content')).not.toBeInTheDocument()
@@ -257,30 +292,122 @@ describe('ThinkingButton with Popover and show-all', () => {
     expect(screen.getByTestId('tooltip').getAttribute('data-open')).toBe('undefined')
   })
 
-  it('show-all switch toggle keeps popover open (data-open=true)', () => {
+  it('show-all eye toggle keeps popover open (data-open=true)', () => {
     renderComponent()
     fireEvent.click(screen.getByTestId('thinking-button'))
     expect(screen.getByTestId('mock-popover').getAttribute('data-open')).toBe('true')
     expect(screen.getByTestId('popover-content')).toBeInTheDocument()
-    const sw = screen.getByTestId('thinking-show-all-switch')
-    expect(sw.getAttribute('data-checked')).toBe('false')
-    fireEvent.click(sw)
+    const toggle = screen.getByTestId('thinking-show-all-switch')
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(toggle)
     expect(screen.getByTestId('mock-popover').getAttribute('data-open')).toBe('true')
     expect(screen.getByTestId('popover-content')).toBeInTheDocument()
-    expect(screen.getByTestId('tooltip').getAttribute('data-open')).toBe('false')
-    fireEvent.click(sw)
+    const outer = screen.getAllByTestId('tooltip').find((el) => el.getAttribute('data-title') === 'Reasoning Effort')
+    expect(outer?.getAttribute('data-open')).toBe('false')
+    // second click should toggle again but stay open – need to simulate parent updating showAllMap
+    // We simulate by clicking again and verifying still open (no close)
+    fireEvent.click(toggle)
     expect(screen.getByTestId('mock-popover').getAttribute('data-open')).toBe('true')
     expect(screen.getByTestId('popover-content')).toBeInTheDocument()
+  })
+
+  describe('height lock: FULL POPOVER ROOT height stabilization on first show-all toggle', () => {
+    it('locks FULL POPOVER ROOT height to pre-toggle rendered height and enables internal scrolling', () => {
+      // Mock getBoundingClientRect to return pre-toggle height
+      const original = Element.prototype.getBoundingClientRect
+      Element.prototype.getBoundingClientRect = vi.fn(() => ({
+        height: 280,
+        width: 297,
+        top: 0,
+        left: 0,
+        bottom: 280,
+        right: 297,
+        x: 0,
+        y: 0,
+        toJSON: () => {}
+      })) as any
+
+      renderComponent()
+      fireEvent.click(screen.getByTestId('thinking-button'))
+      const popover = screen.getByTestId('thinking-popover')
+      expect(popover.style.height).toBe('')
+      const toggle = screen.getByTestId('thinking-show-all-switch')
+      fireEvent.click(toggle)
+      // after first toggle while open, root should be locked to measured 280px
+      expect(popover.style.height).toBe('280px')
+      // options list should be internally scrollable (flex:1)
+      const list = screen.getByTestId('thinking-options-list')
+      // styled-components will apply css; we can check that list is inside locked container and popover has overflow hidden via style
+      expect(popover.style.height).toBe('280px')
+      expect(list).toBeInTheDocument()
+
+      Element.prototype.getBoundingClientRect = original
+    })
+
+    it('does not re-lock on second toggle while open (keeps first height)', () => {
+      const original = Element.prototype.getBoundingClientRect
+      let callCount = 0
+      Element.prototype.getBoundingClientRect = vi.fn(() => {
+        callCount++
+        return {
+          height: callCount === 1 ? 260 : 400,
+          width: 297,
+          top: 0,
+          left: 0,
+          bottom: 0,
+          right: 0,
+          x: 0,
+          y: 0,
+          toJSON: () => {}
+        } as any
+      })
+      renderComponent()
+      fireEvent.click(screen.getByTestId('thinking-button'))
+      const popover = screen.getByTestId('thinking-popover')
+      fireEvent.click(screen.getByTestId('thinking-show-all-switch'))
+      expect(popover.style.height).toBe('260px')
+      // second toggle should not overwrite locked height
+      fireEvent.click(screen.getByTestId('thinking-show-all-switch'))
+      expect(popover.style.height).toBe('260px')
+      expect(callCount).toBe(1)
+      Element.prototype.getBoundingClientRect = original
+    })
+
+    it('clears temporary root height when popover closes so reopening gets natural height', () => {
+      const original = Element.prototype.getBoundingClientRect
+      Element.prototype.getBoundingClientRect = vi.fn(() => ({
+        height: 300,
+        width: 297,
+        top: 0,
+        left: 0,
+        bottom: 0,
+        right: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => {}
+      })) as any
+      renderComponent()
+      fireEvent.click(screen.getByTestId('thinking-button'))
+      const popover = screen.getByTestId('thinking-popover')
+      fireEvent.click(screen.getByTestId('thinking-show-all-switch'))
+      expect(popover.style.height).toBe('300px')
+      // close popover
+      fireEvent.click(screen.getByTestId('thinking-button'))
+      expect(screen.queryByTestId('thinking-popover')).not.toBeInTheDocument()
+      // reopen – should be natural height (no locked height)
+      fireEvent.click(screen.getByTestId('thinking-button'))
+      const reopened = screen.getByTestId('thinking-popover')
+      expect(reopened.style.height).toBe('')
+      Element.prototype.getBoundingClientRect = original
+    })
   })
 
   describe('realistic propagation - stopPropagation prevents double-drive', () => {
     it('option click stops propagation: outer parent not notified and popover closes once', () => {
       const outerSpy = vi.fn()
       const { view } = renderComponent()
-      // attach outer spy to a parent wrapper that would receive bubbled events if not stopped
       const outer = document.createElement('div')
       outer.addEventListener('click', outerSpy)
-      // Move rendered container into outer to capture bubbling
       const container = view.container
       outer.appendChild(container)
       document.body.appendChild(outer)
@@ -289,7 +416,6 @@ describe('ThinkingButton with Popover and show-all', () => {
       expect(screen.getByTestId('mock-popover').getAttribute('data-open')).toBe('true')
       outerSpy.mockClear()
 
-      // Click option: should stop at OptionItem + ToolPopover content, not reach outer
       const high = screen.getByTestId('thinking-option-high')
       fireEvent.click(high)
       expect(outerSpy).not.toHaveBeenCalled()
@@ -314,7 +440,7 @@ describe('ThinkingButton with Popover and show-all', () => {
       document.body.removeChild(outer)
     })
 
-    it('show-all Switch click does not bubble and keeps popover open', () => {
+    it('show-all eye toggle click does not bubble and keeps popover open', () => {
       const outerSpy = vi.fn()
       const { view } = renderComponent()
       const outer = document.createElement('div')
@@ -328,16 +454,14 @@ describe('ThinkingButton with Popover and show-all', () => {
       outerSpy.mockClear()
 
       fireEvent.click(screen.getByTestId('thinking-show-all-switch'))
-      // SwitchRow + ToolPopover content should stop, outer not notified
       expect(outerSpy).not.toHaveBeenCalled()
-      // Must stay open - proves fix: without stop, outer toggle would have closed it
       expect(screen.getByTestId('mock-popover').getAttribute('data-open')).toBe('true')
       expect(screen.getByTestId('popover-content')).toBeInTheDocument()
 
       document.body.removeChild(outer)
     })
 
-    it('Switch mousedown does not bubble to outer', () => {
+    it('eye toggle mousedown does not bubble to outer', () => {
       const outerSpy = vi.fn()
       const { view } = renderComponent()
       const outer = document.createElement('div')

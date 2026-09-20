@@ -361,9 +361,14 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
                 alignItems: 'center',
                 justifyContent: 'space-between'
               }}>
-              {t('settings.provider.api_key.label')}
+              <span>{t('settings.provider.api_key.label')}</span>
               <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
-                <Button type="text" onClick={openApiKeyList} icon={<Settings2 size={16} />} />
+                <Button
+                  type="text"
+                  onClick={openApiKeyList}
+                  icon={<Settings2 size={16} />}
+                  aria-label={t('settings.provider.api.key.list.open')}
+                />
               </Tooltip>
             </SettingSubtitle>
             <Space.Compact style={{ width: '100%', marginTop: 5 }}>
@@ -372,7 +377,13 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
                 placeholder={t('settings.provider.api_key.label')}
                 onChange={(e) => setLocalApiKey(e.target.value)}
                 spellCheck={false}
-                autoFocus={provider.enabled && provider.apiKey === '' && !isProviderSupportAuth(provider)}
+                disabled={provider.apiOptions?.requiresApiKey === false}
+                autoFocus={
+                  provider.enabled &&
+                  provider.apiKey === '' &&
+                  !isProviderSupportAuth(provider) &&
+                  provider.apiOptions?.requiresApiKey !== false
+                }
                 suffix={renderStatusIndicator()}
               />
               <Button
@@ -467,17 +478,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
           </>
         </>
       )}
-      <SettingSubtitle style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
-        {t('settings.provider.require_api_key.label')}
-        <Switch
-          size="small"
-          checked={provider.apiOptions?.requiresApiKey !== false}
-          onChange={(checked) => updateProvider({ apiOptions: { ...provider.apiOptions, requiresApiKey: checked } })}
-        />
-      </SettingSubtitle>
-      <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
-        <SettingHelpText>{t('settings.provider.require_api_key.tip')}</SettingHelpText>
-      </SettingHelpTextRow>
       <ModelList providerId={provider.id} />
     </SettingContainer>
   )

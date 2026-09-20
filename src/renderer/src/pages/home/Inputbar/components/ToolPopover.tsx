@@ -48,10 +48,21 @@ const ToolPopover: FC<ToolPopoverProps> = ({ open, onOpenChange, content, childr
         </PopoverContent>
       }
       styles={{ root: { width } }}>
-      <span>{children}</span>
+      <Trigger>{children}</Trigger>
     </Popover>
   )
 }
+
+const Trigger = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  vertical-align: middle;
+  line-height: 0;
+  flex-shrink: 0;
+`
 
 const PopoverContent = styled.div`
   width: 100%;

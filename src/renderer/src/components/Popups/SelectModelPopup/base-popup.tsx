@@ -465,11 +465,11 @@ const SelectModelPopupView: React.FC<Props> = ({
 
   return (
     <Modal
-      centered
       open={open}
       onCancel={onCancel}
       afterClose={onAfterClose}
       width={600}
+      style={{ top: 100 }}
       transitionName="animation-move-down"
       styles={{
         content: {
