@@ -79,7 +79,7 @@ export class ConfigManager {
   }
 
   getTray(): boolean {
-    return !!this.get(ConfigKeys.Tray, true)
+    return !!this.get(ConfigKeys.Tray, false)
   }
 
   setTray(value: boolean) {
@@ -87,7 +87,7 @@ export class ConfigManager {
   }
 
   getTrayOnClose(): boolean {
-    return !!this.get(ConfigKeys.TrayOnClose, true)
+    return !!this.get(ConfigKeys.TrayOnClose, false)
   }
 
   setTrayOnClose(value: boolean) {

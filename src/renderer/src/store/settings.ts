@@ -262,8 +262,8 @@ export const initialState: SettingsState = {
   showMessageDivider: true,
   launchOnBoot: false,
   launchToTray: false,
-  trayOnClose: true,
-  tray: true,
+  trayOnClose: false,
+  tray: false,
   theme: ThemeMode.system,
   userTheme: {
     colorPrimary: '#00b96b',
