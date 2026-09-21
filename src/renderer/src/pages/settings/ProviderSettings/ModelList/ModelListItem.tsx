@@ -7,6 +7,7 @@ import type { Model, Provider } from '@renderer/types'
 import type { ModelWithStatus } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { maskApiKey } from '@renderer/utils/api'
+import { shouldShowModelId } from '@renderer/utils/modelDisplayName'
 import { Button, Tooltip } from 'antd'
 import { Bolt, Minus } from 'lucide-react'
 import React, { memo, useCallback, useMemo } from 'react'
@@ -35,6 +36,12 @@ const ModelListItem: React.FC<ModelListItemProps> = ({
   onEdit,
   onRemove
 }) => {
+  // Provider Settings list panel shows `display name + serving ID` when trimmed
+  // name and id differ, matching the ModelSelector presentation intent.
+  // Duplicate-name disambiguation is no longer needed because the id is always
+  // visible when it differs from the display name; when equal we show once.
+  void showIdentifier
+  const effectiveShowIdentifier = shouldShowModelId(model.name, model.id)
   const { t } = useTranslation()
   const isChecking = modelStatus?.checking === true
 
@@ -76,7 +83,7 @@ const ModelListItem: React.FC<ModelListItemProps> = ({
           <ModelIdWithTags
             model={model}
             provider={provider}
-            showIdentifier={showIdentifier}
+            showIdentifier={effectiveShowIdentifier}
             style={{
               flex: 1,
               width: 0,

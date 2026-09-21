@@ -14,6 +14,8 @@ interface ModelOption {
   label: React.ReactNode
   title: string
   value: string
+  /** Explicit search keywords decoupled from visible title: display name + exact id + provider name/id */
+  keywords: string
 }
 
 interface GroupedModelOption {
@@ -54,45 +56,28 @@ const ModelSelector = ({
 }: ModelSelectorProps & { ref?: React.Ref<BaseSelectRef> | null }) => {
   const { t } = useTranslation()
 
-  // 单个 provider 的模型选项 — when serving id differs from display name,
-  // show the muted monospace id and ensure title/tooltip also carries it so
-  // the exact serving id is always discoverable (selected + current model).
+  // 单个 provider 的模型选项 — name-only rendering (no inline ID, no tooltip ID).
+  // Search is decoupled via explicit keywords containing display name + exact id + provider name/id.
   const getModelOptions = useCallback(
     (p: Provider, fancyName: string) => {
       const suffix = showSuffix ? <span style={{ opacity: 0.45 }}>{` | ${fancyName}`}</span> : null
       return sortBy(p.models, 'name')
         .filter((model) => predicate?.(model) ?? true)
         .map((m) => {
-          const servingIdVisible = (m.id?.trim() ?? '') !== (m.name?.trim() ?? '')
+          const keywords = `${m.name} ${m.id} ${p.name} ${p.id} ${fancyName}`
           return {
             label: (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {showAvatar && <ModelAvatar model={m} size={18} />}
-                <span>
-                  {m.name}
-                  {servingIdVisible && (
-                    <span
-                      style={{
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                        opacity: 0.55,
-                        marginLeft: 6,
-                        maxWidth: 220,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        verticalAlign: 'middle'
-                      }}
-                      title={m.id}>
-                      {m.id}
-                    </span>
-                  )}
+                <span style={{ display: 'inline-flex', alignItems: 'center', minWidth: 0 }}>
+                  <span className="min-w-0 truncate">{m.name}</span>
                   {suffix}
                 </span>
               </div>
             ),
-            title: servingIdVisible ? `${m.name} (${m.id}) | ${fancyName}` : `${m.name} | ${fancyName}`,
-            value: getModelUniqId(m)
+            title: showSuffix ? `${m.name} | ${fancyName}` : m.name,
+            value: getModelUniqId(m),
+            keywords
           }
         })
     },
@@ -154,15 +139,20 @@ export default memo(ModelSelector)
 
 /**
  * 用于 antd Select 组件的 filterOption，统一搜索行为：
- * - 优先使用 title 匹配
- * - 其次使用 label 匹配
- * - 最后使用 value 匹配
+ * - 优先使用显式 keywords（display name + exact id + provider name/id）
+ * - 其次使用 title
+ * - 最后使用 value
+ * Visible title is name-only; search remains ID-aware via keywords.
  *
  * @param input 用户输入的搜索字符串
- * @param option Select 选项对象，包含 label 或 value
+ * @param option Select 选项对象，包含 keywords/title/value
  * @returns 是否匹配
  */
 export function modelSelectFilter(input: string, option: any): boolean {
+  const keywords = typeof option?.keywords === 'string' ? option.keywords : undefined
+  if (keywords !== undefined) {
+    return matchKeywordsInString(input, keywords)
+  }
   const target =
     typeof option?.title === 'string'
       ? option.title

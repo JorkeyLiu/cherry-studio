@@ -3,6 +3,7 @@ import { isNotSupportTextDeltaModel } from '@renderer/config/models'
 import { useProvider } from '@renderer/hooks/useProvider'
 import type { Model, Provider } from '@renderer/types'
 import { getDefaultGroupName } from '@renderer/utils'
+import { resolveManualAddModelName } from '@renderer/utils/modelDisplayName'
 import type { FormProps } from 'antd'
 import { Button, Flex, Form, Input, Modal } from 'antd'
 import { find } from 'lodash'
@@ -51,10 +52,12 @@ const PopupContainer: React.FC<Props> = ({ title, provider, resolve }) => {
       return
     }
 
+    const resolvedName = resolveManualAddModelName(id, values.name, provider)
+
     const model: Model = {
       id,
       provider: provider.id,
-      name: values.name ? values.name : id.toUpperCase(),
+      name: resolvedName,
       group: values.group ?? getDefaultGroupName(id)
     }
 

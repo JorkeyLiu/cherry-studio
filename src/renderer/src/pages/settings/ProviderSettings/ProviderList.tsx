@@ -394,14 +394,7 @@ const ProviderList: FC<ProviderListProps> = () => {
                 <DragHandle>
                   <GripVertical size={12} />
                 </DragHandle>
-                <ProviderAvatar
-                  style={{
-                    width: 24,
-                    height: 24
-                  }}
-                  provider={provider}
-                  customLogos={providerLogos}
-                />
+                <ProviderAvatar size={32} provider={provider} customLogos={providerLogos} />
                 <ProviderItemName className="text-nowrap">{getFancyProviderName(provider)}</ProviderItemName>
                 {provider.enabled && (
                   <Tag color="green" style={{ marginLeft: 'auto', marginRight: 0, borderRadius: 16 }}>

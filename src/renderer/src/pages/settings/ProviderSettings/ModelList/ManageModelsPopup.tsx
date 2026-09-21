@@ -2,12 +2,17 @@ import { loggerService } from '@logger'
 import { LoadingIcon } from '@renderer/components/Icons'
 import { HStack } from '@renderer/components/Layout'
 import { TopView } from '@renderer/components/TopView'
+import { useModelMetadataStatus } from '@renderer/hooks/useModelMetadataStatus'
 import { useProvider } from '@renderer/hooks/useProvider'
 import { fetchModels } from '@renderer/services/ApiService'
 import type { Model, Provider } from '@renderer/types'
-import { filterModelsByKeywords, getFancyProviderName } from '@renderer/utils'
-import { INPUT_MODALITIES, type InputModality, supportsInputModalityForDisplay } from '@renderer/utils/inputModalities'
+import { getFancyProviderName } from '@renderer/utils'
+import { INPUT_MODALITIES, type InputModality } from '@renderer/utils/inputModalities'
+import { getNormalizedInputModalitySet } from '@renderer/utils/inputModalities'
+import { includeKeywords } from '@renderer/utils/match'
 import { getDuplicateModelNames } from '@renderer/utils/model'
+import { getModelMetadataDisplayName, isDefaultModelName } from '@renderer/utils/modelDisplayName'
+import { getModelPresentation } from '@renderer/utils/modelPresentation'
 import { Button, Empty, Flex, Modal, Spin, Tabs, Tooltip } from 'antd'
 import Input from 'antd/es/input/Input'
 import { groupBy, isEmpty, uniqBy } from 'lodash'
@@ -82,23 +87,61 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
   const allModels = useMemo(() => uniqBy([...listModels, ...models], 'id'), [listModels, models])
   const duplicateModelNames = useMemo(() => getDuplicateModelNames(allModels), [allModels])
 
+  // Subscribe to metadata status so late snapshot arrival updates the open popup.
+  const metadataStatus = useModelMetadataStatus()
+
+  // Derive readonly presentation views from projection; do not mutate raw fetched state.
+  // Single metadata call per model drives both displayName and effective modalities/tags.
+  const presentationMap = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getModelPresentation>>()
+    for (const m of allModels) {
+      map.set(m.id, getModelPresentation(m, provider))
+    }
+    return map
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- provider identity pins attribution; metadataStatus triggers re-render on snapshot change
+  }, [allModels, provider?.id, metadataStatus])
+
+  const viewModels = useMemo(() => {
+    return allModels.map((m) => {
+      const p = presentationMap.get(m.id)
+      if (p && p.displayName !== m.name) {
+        return { ...m, name: p.displayName }
+      }
+      return m
+    })
+  }, [allModels, presentationMap])
+
   const isLoading = useMemo(
     () => loadingModels || isFilterTypePending || isSearchPending,
     [loadingModels, isFilterTypePending, isSearchPending]
   )
 
   // 管理页签只提供五个精确输入模态（unknown 永不出现）。
-  const list = useMemo(
-    () =>
-      filterModelsByKeywords(filterSearchText, allModels).filter((model) => {
-        if ((INPUT_MODALITY_TABS as ReadonlySet<string>).has(actualFilterType)) {
-          return supportsInputModalityForDisplay(model, actualFilterType as InputModality, provider)
-        }
-        return true
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- provider identity pins attribution; full object would over-trigger
-    [filterSearchText, actualFilterType, allModels, provider?.id]
-  )
+  // Filtering uses the same presentation effective for modalities so list/tags never diverge.
+  const list = useMemo(() => {
+    let filtered = viewModels
+    if (filterSearchText.trim()) {
+      const kw = filterSearchText.toLowerCase().split(/\s+/).filter(Boolean)
+      filtered = filtered.filter((model) => {
+        const p = presentationMap.get(model.id)
+        const displayName = p?.displayName ?? model.name
+        // ID-aware search: displayName + exact id + provider name/id (decoupled from rendered name)
+        const searchText = `${displayName} ${model.id} ${provider ? `${provider.name} ${provider.id}` : ''}`
+        return includeKeywords(searchText, kw)
+      })
+    }
+    if ((INPUT_MODALITY_TABS as ReadonlySet<string>).has(actualFilterType)) {
+      const modality = actualFilterType as InputModality
+      filtered = filtered.filter((model) => {
+        const p = presentationMap.get(model.id)
+        const effective = p?.effective
+        if (!effective) return false
+        const present = getNormalizedInputModalitySet(effective)
+        return present.has(modality)
+      })
+    }
+    return filtered
+  }, [filterSearchText, actualFilterType, viewModels, presentationMap, provider])
 
   // Generic grouping for all connections; no brand-specific paths.
   const modelGroups = useMemo(() => groupBy(list, 'group'), [list])
@@ -111,12 +154,32 @@ const PopupContainer: React.FC<Props> = ({ providerId, resolve }) => {
 
   const onAddModel = useCallback(
     (model: Model) => {
-      // Generic add flow for all approved protocols.
-      if (!isEmpty(model.name)) {
-        addModel(model)
+      // Generic add flow for all approved protocols. Re-resolve from the
+      // current snapshot at add time (not fetch time) and only replace when
+      // the fetched name is a fallback (trimmed name === trimmed id) so real
+      // provider display names (e.g. Gemini) are preserved. Metadata is
+      // enrichment-only: absence/unknown never blocks add. Preserve exact ID/group.
+      if (isEmpty(model.name)) {
+        return
       }
+      // Use raw fetched state for fallback detection, not the presented viewModel name.
+      const raw = allModels.find((m) => m.id === model.id) ?? model
+      const isFallbackIdName = isDefaultModelName(raw.name, raw.id)
+      let finalModel = model
+      if (isFallbackIdName) {
+        const metaName = getModelMetadataDisplayName(raw, provider)
+        if (metaName) {
+          finalModel = { ...raw, name: metaName, group: raw.group, id: raw.id, provider: raw.provider }
+        } else {
+          finalModel = raw
+        }
+      } else {
+        // Real provider display name wins — preserve exact ID/group/provider.
+        finalModel = raw
+      }
+      addModel(finalModel)
     },
-    [addModel]
+    [addModel, provider, allModels]
   )
 
   const onRemoveModel = useCallback((model: Model) => removeModel(model), [removeModel])

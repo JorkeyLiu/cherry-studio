@@ -82,9 +82,13 @@ describe('ModelSelector', () => {
       const cohere = screen.getByText('embed-english-v3.0')
       expect(ada).toBeInTheDocument()
       expect(cohere).toBeInTheDocument()
-      // Check suffix is present by default
-      expect(ada.textContent).toContain(' | OpenAI')
-      expect(cohere.textContent).toContain(' | Cohere')
+      // Check suffix is present by default (name-only, suffix remains)
+      expect(ada.closest('.ant-select-item-option')?.textContent).toContain(' | OpenAI')
+      expect(cohere.closest('.ant-select-item-option')?.textContent).toContain(' | Cohere')
+      // name-only: no inline ID
+      expect(screen.queryByText('gpt-4.1')).not.toBeInTheDocument()
+      // no primitive
+      expect(document.querySelector('[data-testid="model-name-with-id"]')).toBeNull()
 
       // Check that filtered models are not present
       expect(screen.queryByText('GPT-4.1')).not.toBeInTheDocument()
@@ -102,8 +106,9 @@ describe('ModelSelector', () => {
       )
 
       const ada = screen.getByText('text-embedding-ada-002')
-      expect(ada.textContent).toBe('text-embedding-ada-002')
-      expect(ada.textContent).not.toContain(' | OpenAI')
+      expect(ada.closest('.ant-select-item-option')?.textContent).toContain('text-embedding-ada-002')
+      expect(ada.closest('.ant-select-item-option')?.textContent).not.toContain(' | OpenAI')
+      expect(document.querySelector('[data-testid="model-name-with-id"]')).toBeNull()
     })
 
     it('should hide avatar when showAvatar is false', () => {
@@ -138,8 +143,8 @@ describe('ModelSelector', () => {
       expect(ada).toBeInTheDocument()
       expect(cohere).toBeInTheDocument()
       // Check suffix is present by default
-      expect(ada.textContent).toContain(' | OpenAI')
-      expect(cohere.textContent).toContain(' | Cohere')
+      expect(ada.closest('.ant-select-item-option')?.textContent).toContain(' | OpenAI')
+      expect(cohere.closest('.ant-select-item-option')?.textContent).toContain(' | Cohere')
 
       // Check that filtered models are not present
       expect(screen.queryByText('GPT-4.1')).not.toBeInTheDocument()
@@ -150,10 +155,12 @@ describe('ModelSelector', () => {
       render(<ModelSelector providers={mockProviders} grouped={false} showSuffix={false} open />)
 
       const gpt4 = screen.getByText('GPT-4.1')
-      // serving id (model.id) is shown whenever id != name, even when suffix is hidden
-      expect(gpt4.textContent).toContain('GPT-4.1')
-      expect(gpt4.textContent).toContain('gpt-4.1')
-      expect(gpt4.textContent).not.toContain(' | OpenAI')
+      const container = gpt4.closest('.ant-select-item-option')
+      // name-only: no inline ID even when suffix hidden
+      expect(container?.textContent).toContain('GPT-4.1')
+      expect(container?.textContent).not.toContain('gpt-4.1')
+      expect(container?.textContent).not.toContain(' | OpenAI')
+      expect(container?.querySelector('[data-testid="model-name-with-id"]')).toBeNull()
     })
   })
 
@@ -225,8 +232,8 @@ describe('ModelSelector', () => {
     })
   })
 
-  describe('serving id visibility and title (trim-based)', () => {
-    it('shows serving id inline and in title when trimmed id != trimmed name', () => {
+  describe('name-only rendering with ID-aware search (trim-based title decoupled)', () => {
+    it('renders name-only inline and title without ID, but keywords contain ID for search', () => {
       const providers: Provider[] = [
         {
           id: 'openai',
@@ -238,15 +245,24 @@ describe('ModelSelector', () => {
         }
       ]
       render(<ModelSelector providers={providers} open />)
-      // inline id visible
-      expect(screen.getByText('gpt-4o-2024-08-06')).toBeInTheDocument()
-      // title via aria or option title — search combobox options have title attribute in DOM
-      // Check that at least one option carries title with id
-      const option = document.querySelector('[title*="gpt-4o-2024-08-06"]')
-      expect(option).not.toBeNull()
+      // name visible, ID not inline
+      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
+      expect(screen.queryByText('gpt-4o-2024-08-06')).toBeNull()
+      // title is name-only (with suffix, without ID)
+      const option = document.querySelector('.ant-select-item-option')
+      expect(option?.getAttribute('title')).toBe('GPT-4o | OpenAI')
+      expect(option?.getAttribute('title')).not.toContain('gpt-4o-2024-08-06')
+      // but filter via keywords still finds by ID
+      const mockOption = {
+        title: 'GPT-4o | OpenAI',
+        keywords: 'GPT-4o gpt-4o-2024-08-06 OpenAI openai OpenAI',
+        value: 'openai-gpt-4o-2024-08-06'
+      }
+      expect(modelSelectFilter('gpt-4o-2024-08-06', mockOption)).toBe(true)
+      expect(modelSelectFilter('openai', mockOption)).toBe(true)
     })
 
-    it('distinguishes same name different id (both ids visible)', () => {
+    it('name-only distinguishes same name different id via provider suffix only (no ID inline)', () => {
       const providers: Provider[] = [
         {
           id: 'openai',
@@ -261,11 +277,18 @@ describe('ModelSelector', () => {
         }
       ]
       render(<ModelSelector providers={providers} open />)
-      expect(screen.getByText('gpt-4o-a')).toBeInTheDocument()
-      expect(screen.getByText('gpt-4o-b')).toBeInTheDocument()
+      const els = screen.getAllByText('GPT-4o')
+      expect(els.length).toBe(2)
+      // no inline IDs
+      expect(screen.queryByText('gpt-4o-a')).toBeNull()
+      expect(screen.queryByText('gpt-4o-b')).toBeNull()
+      // but search still finds via keywords
+      expect(
+        modelSelectFilter('gpt-4o-a', { keywords: 'GPT-4o gpt-4o-a OpenAI openai', title: 'GPT-4o | OpenAI' })
+      ).toBe(true)
     })
 
-    it('does not show duplicate id when trimmed id == trimmed name', () => {
+    it('does not show duplicate id when trimmed id == trimmed name (name-only always)', () => {
       const providers: Provider[] = [
         {
           id: 'openai',
@@ -277,13 +300,15 @@ describe('ModelSelector', () => {
         }
       ]
       render(<ModelSelector providers={providers} open />)
-      // name appears but no second id element duplicate
-      const text = screen.getByText('gpt-4o').textContent
-      // should be just name (+ maybe suffix), not name + id duplicate
-      expect(text).toBe('gpt-4o | OpenAI')
+      const el = screen.getByText('gpt-4o')
+      const containerText = el.closest('.ant-select-item-option')?.textContent ?? ''
+      expect(containerText).toContain('gpt-4o | OpenAI')
+      expect((containerText.match(/gpt-4o/g) || []).length).toBe(1)
+      const opt = document.querySelector('.ant-select-item-option')
+      expect(opt?.getAttribute('title')).toBe('gpt-4o | OpenAI')
     })
 
-    it('whitespace-trimmed equality hides id, whitespace difference shows id', () => {
+    it('name-only: whitespace trimmed title remains name-only', () => {
       const providersTrimSame: Provider[] = [
         {
           id: 'openai',
@@ -296,6 +321,8 @@ describe('ModelSelector', () => {
       ]
       const { unmount } = render(<ModelSelector providers={providersTrimSame} open />)
       expect(screen.queryByText('  gpt-4o  ')).toBeNull()
+      const opt = document.querySelector('.ant-select-item-option')
+      expect(opt?.getAttribute('title')).toBe('gpt-4o | OpenAI')
       unmount()
 
       const providersDiff: Provider[] = [
@@ -309,11 +336,13 @@ describe('ModelSelector', () => {
         }
       ]
       render(<ModelSelector providers={providersDiff} open />)
-      const el = document.querySelector('[title=" gpt-4o-1 "]')
-      expect(el).not.toBeNull()
+      const el2 = document.querySelector('.ant-select-item-option')
+      // title is name with spaces preserved? but should be name-only
+      expect(el2?.getAttribute('title')).toBe(' GPT-4o  | OpenAI')
+      expect(el2?.getAttribute('title')).not.toContain('gpt-4o-1')
     })
 
-    it('case difference shows id (case-sensitive trim)', () => {
+    it('case difference still name-only (case-sensitive)', () => {
       const providers: Provider[] = [
         {
           id: 'openai',
@@ -325,7 +354,23 @@ describe('ModelSelector', () => {
         }
       ]
       render(<ModelSelector providers={providers} open />)
-      expect(screen.getByText('gpt-4o')).toBeInTheDocument()
+      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
+      expect(screen.queryByText('gpt-4o')).toBeNull()
+    })
+
+    it('keywords enable provider id/name search even when title name-only', () => {
+      expect(
+        modelSelectFilter('cohere', {
+          title: 'embed-english-v3.0 | Cohere',
+          keywords: 'embed-english-v3.0 embed-english-v3.0 Cohere cohere Cohere'
+        })
+      ).toBe(true)
+      expect(
+        modelSelectFilter('cohere', {
+          title: 'embed-english-v3.0 | Cohere',
+          keywords: 'embed-english-v3.0 embed-english-v3.0 Cohere cohere Cohere'
+        })
+      ).toBe(true)
     })
   })
 })

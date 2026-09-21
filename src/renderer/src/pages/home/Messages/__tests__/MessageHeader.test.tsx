@@ -109,19 +109,19 @@ describe('MessageHeader', () => {
     expect(avatar.getAttribute('data-model-id')).toBe('gpt-4o')
   })
 
-  it('title includes serving id when trimmed id != trimmed name', () => {
+  it('title is name-only when trimmed id != trimmed name (no ID in tooltip)', () => {
     const model = { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)
     render(<MessageHeader assistant={assistant} model={model} message={message} topic={topic} />)
-    // find the UserName span with title containing id
-    const titleEl = Array.from(document.querySelectorAll('[title]')).find((el) =>
-      (el as HTMLElement).getAttribute('title')?.includes('gpt-4o-2024-08-06')
+    const titleEl = Array.from(document.querySelectorAll('[title]')).find(
+      (el) => (el as HTMLElement).getAttribute('title') === 'GPT-4o'
     ) as HTMLElement | null
     expect(titleEl).not.toBeNull()
-    expect(titleEl?.getAttribute('title')).toBe('GPT-4o (gpt-4o-2024-08-06)')
+    expect(titleEl?.getAttribute('title')).toBe('GPT-4o')
+    expect(titleEl?.getAttribute('title')).not.toContain('gpt-4o-2024-08-06')
   })
 
-  it('does not duplicate id when trimmed id == trimmed name', () => {
+  it('does not duplicate id when trimmed id == trimmed name (name-only)', () => {
     const model = { id: 'gpt-4o', name: 'gpt-4o', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)
     render(<MessageHeader assistant={assistant} model={model} message={message} topic={topic} />)
@@ -129,12 +129,11 @@ describe('MessageHeader', () => {
       (el as HTMLElement).getAttribute('title')?.includes('gpt-4o')
     ) as HTMLElement | null
     expect(titleEl).not.toBeNull()
-    // should be just name without parentheses duplication
     expect(titleEl?.getAttribute('title')).toBe('gpt-4o')
-    expect(titleEl?.getAttribute('title')).not.toContain('(gpt-4o) (gpt-4o)')
+    expect(titleEl?.getAttribute('title')).not.toContain('(')
   })
 
-  it('trims whitespace for comparison: " gpt-4o " vs "gpt-4o" does not show id', () => {
+  it('trims whitespace for comparison: name-only still trims', () => {
     const model = { id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)
     render(<MessageHeader assistant={assistant} model={model} message={message} topic={topic} />)
@@ -144,14 +143,15 @@ describe('MessageHeader', () => {
     expect(titleEl).not.toBeNull()
   })
 
-  it('trims whitespace for comparison: different after trim shows id', () => {
+  it('different after trim still name-only (no ID)', () => {
     const model = { id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)
     render(<MessageHeader assistant={assistant} model={model} message={message} topic={topic} />)
-    const titleEl = Array.from(document.querySelectorAll('[title]')).find((el) =>
-      (el as HTMLElement).getAttribute('title')?.includes('gpt-4o-1')
+    const titleEl = Array.from(document.querySelectorAll('[title]')).find(
+      (el) => (el as HTMLElement).getAttribute('title') === 'GPT-4o'
     ) as HTMLElement | null
     expect(titleEl).not.toBeNull()
+    expect(titleEl?.getAttribute('title')).not.toContain('gpt-4o-1')
   })
 
   it('falls back to assistant Avatar when no model (assistant message, non-local)', () => {
@@ -162,13 +162,14 @@ describe('MessageHeader', () => {
     expect(document.body.textContent).toContain('J')
   })
 
-  it('case-sensitive: "GPT-4o" vs "gpt-4o" considered different and shows id', () => {
+  it('case-sensitive: "GPT-4o" vs "gpt-4o" still name-only', () => {
     const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)
     render(<MessageHeader assistant={assistant} model={model} message={message} topic={topic} />)
     const titleEl = Array.from(document.querySelectorAll('[title]')).find(
-      (el) => (el as HTMLElement).getAttribute('title') === 'GPT-4o (gpt-4o)'
+      (el) => (el as HTMLElement).getAttribute('title') === 'GPT-4o'
     )
     expect(titleEl).not.toBeNull()
+    expect(titleEl?.getAttribute('title')).not.toContain('gpt-4o')
   })
 })

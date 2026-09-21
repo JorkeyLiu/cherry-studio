@@ -43,6 +43,7 @@ const ManageModelsList: React.FC<ManageModelsListProps> = ({
   onAddModel,
   onRemoveModel
 }) => {
+  void duplicateModelNames
   const { t } = useTranslation()
   const [collapsedGroups, setCollapsedGroups] = useState(new Set<string>())
 
@@ -160,7 +161,7 @@ const ManageModelsList: React.FC<ManageModelsListProps> = ({
           <ModelListItem
             last={row.last}
             model={row.model}
-            showIdentifier={duplicateModelNames.has(row.model.name)}
+            showIdentifier={true}
             provider={provider}
             onAddModel={onAddModel}
             onRemoveModel={onRemoveModel}

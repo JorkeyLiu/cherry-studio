@@ -105,6 +105,8 @@ describe('ModelEditContent', () => {
     document.body.innerHTML = ''
   })
 
+  const getPlaceholderInput = (placeholder: string) => screen.getByPlaceholderText(placeholder) as HTMLInputElement
+
   it('shows only groups with data above the model data, in DOM order', () => {
     installEntry('gpt-4o', {
       modalities: { input: ['text', 'image'], output: ['text'] },
@@ -489,5 +491,100 @@ describe('ModelEditContent', () => {
       output_per_million_tokens: 2,
       currencySymbol: '$'
     })
+  })
+
+  it('uses metadata display name initially when persisted name is blank or mirrors serving id', async () => {
+    installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash' })
+    const blankModel = makeModel({ id: 'deepseek-flash', name: '', group: 'MyGroup' })
+    const { onUpdateModel: onUpdateBlank, unmount } = (() => {
+      const onUpdateModel = vi.fn()
+      const onOk = vi.fn()
+      const onCancel = vi.fn()
+      const rendered = render(
+        <ModelEditContent
+          provider={openaiProvider}
+          model={blankModel}
+          open
+          onOk={onOk}
+          onCancel={onCancel}
+          onUpdateModel={onUpdateModel}
+        />
+      )
+      return { onUpdateModel, unmount: rendered.unmount }
+    })()
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('DeepSeek V4.1 Flash')
+    expect(getPlaceholderInput('settings.models.add.group_name.placeholder').value).toBe('MyGroup')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'common.save' }))
+    await waitFor(() => expect(onUpdateBlank).toHaveBeenCalledTimes(1))
+    const savedBlank = onUpdateBlank.mock.calls[0][0] as Model
+    expect(savedBlank.name).toBe('DeepSeek V4.1 Flash')
+    expect(savedBlank.group).toBe('MyGroup')
+    unmount()
+    document.body.innerHTML = ''
+
+    // Mirroring id case: name exactly equals serving id should be replaced.
+    installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash' })
+    const mirroredModel = makeModel({ id: 'deepseek-flash', name: 'deepseek-flash', group: 'MyGroup' })
+    renderEditor(mirroredModel)
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('DeepSeek V4.1 Flash')
+  })
+
+  it('updates name asynchronously when metadata arrives and form is still default-like', async () => {
+    const model = makeModel({ id: 'deepseek-flash', name: 'deepseek-flash', group: 'MyGroup' })
+    renderEditor(model)
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('deepseek-flash')
+    act(() => {
+      installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash' })
+    })
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('DeepSeek V4.1 Flash')
+    // Group stays exactly unchanged; no lab/family mapping.
+    expect(getPlaceholderInput('settings.models.add.group_name.placeholder').value).toBe('MyGroup')
+  })
+
+  it('preserves custom persisted name even when metadata name is available', async () => {
+    installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash' })
+    const customModel = makeModel({ id: 'deepseek-flash', name: 'My Custom Name', group: 'MyGroup' })
+    const { onUpdateModel } = renderEditor(customModel)
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('My Custom Name')
+    // Async refresh with same metadata must not overwrite custom name.
+    act(() => {
+      installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash', limits: { context: 1000 } })
+    })
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('My Custom Name')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'common.save' }))
+    await waitFor(() => expect(onUpdateModel).toHaveBeenCalledTimes(1))
+    expect((onUpdateModel.mock.calls[0][0] as Model).name).toBe('My Custom Name')
+  })
+
+  it('does not overwrite user-edited name when metadata arrives asynchronously', async () => {
+    const model = makeModel({ id: 'deepseek-flash', name: 'deepseek-flash', group: 'MyGroup' })
+    renderEditor(model)
+    const nameInput = screen.getByPlaceholderText('settings.models.add.model_name.placeholder') as HTMLInputElement
+    // Simulate user typing before metadata arrives.
+    fireEvent.change(nameInput, { target: { value: 'User Edited' } })
+    expect(nameInput.value).toBe('User Edited')
+    act(() => {
+      installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash' })
+    })
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('User Edited')
+  })
+
+  it('keeps group unchanged when metadata display name is applied', async () => {
+    installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash', family: 'deepseek' })
+    const model = makeModel({ id: 'deepseek-flash', name: '', group: 'OriginalGroup' })
+    renderEditor(model)
+    expect(getPlaceholderInput('settings.models.add.model_name.placeholder').value).toBe('DeepSeek V4.1 Flash')
+    expect(getPlaceholderInput('settings.models.add.group_name.placeholder').value).toBe('OriginalGroup')
+    // Async arrival must also not touch group.
+    document.body.innerHTML = ''
+    setModelMetadataSnapshotForTests(null)
+    const model2 = makeModel({ id: 'deepseek-flash', name: 'deepseek-flash', group: 'PersistedGroup' })
+    renderEditor(model2)
+    act(() => {
+      installEntry('deepseek-flash', { name: 'DeepSeek V4.1 Flash' })
+    })
+    expect(getPlaceholderInput('settings.models.add.group_name.placeholder').value).toBe('PersistedGroup')
   })
 })

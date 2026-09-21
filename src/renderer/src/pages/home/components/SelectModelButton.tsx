@@ -62,10 +62,7 @@ const SelectModelButton: FC<Props> = ({ assistant }) => {
   // so pass it explicitly instead of letting the avatar re-resolve.
   const owningProvider = model ? (allProviders.find((p) => p.id === model.provider) ?? null) : null
 
-  const modelTitle =
-    model && (model.id?.trim() ?? '') !== (model.name?.trim() ?? '')
-      ? `${model.name} (${model.id})`
-      : (model?.name ?? '')
+  const modelTitle = model?.name ?? ''
   return (
     <DropdownButton size="small" type="text" onClick={onSelectModel} title={modelTitle || undefined}>
       <ButtonContent>

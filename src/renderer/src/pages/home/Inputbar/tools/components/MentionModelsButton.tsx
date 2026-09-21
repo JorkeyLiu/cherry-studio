@@ -73,9 +73,10 @@ const MentionModelsButton: FC<Props> = ({ mentionedModels, setMentionedModels })
                   data-selected={isSelected}>
                   <Left>
                     <ModelAvatar model={model} provider={provider} size={20} />
-                    <div>
-                      <Label>
-                        {getFancyProviderName(provider)} | {model.name}
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <Label className="flex min-w-0 items-center gap-1">
+                        <span className="shrink-0">{getFancyProviderName(provider)} |</span>
+                        <span className="min-w-0 truncate">{model.name}</span>
                       </Label>
                       <ModelTagsWithLabel model={model} provider={provider} size={10} style={{ opacity: 0.8 }} />
                     </div>

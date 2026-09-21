@@ -121,14 +121,11 @@ const SelectModelPopupView: React.FC<Props> = ({
     [searchText]
   )
 
-  // 创建模型列表项 — serving id visibility: whenever trimmed serving id
-  // differs from trimmed display name, show the muted monospace id inline.
-  // Duplicate-name gating was removed (see review findings).
+  // 创建模型列表项 — name-only rendering; ID-aware search preserved via filterModelsByKeywords.
   const createModelItem = useCallback(
     (model: Model, provider: Provider, isPinned: boolean): FlatListModel => {
       const modelId = getModelUniqId(model)
       const groupName = getFancyProviderName(provider)
-      const showServingId = (model.id?.trim() ?? '') !== (model.name?.trim() ?? '')
 
       return {
         key: isPinned ? `${modelId}_pinned` : modelId,
@@ -137,13 +134,6 @@ const SelectModelPopupView: React.FC<Props> = ({
           <ModelName>
             <div className="flex min-w-0 flex-1 items-center gap-1.5">
               <span className="min-w-0 truncate">{model.name}</span>
-              {showServingId && (
-                <span
-                  className="min-w-0 max-w-[45%] shrink truncate font-mono text-[12px] text-[var(--color-text-3)]"
-                  title={model.id}>
-                  {model.id}
-                </span>
-              )}
               {isPinned && <span className="whitespace-nowrap text-[var(--color-text-3)]">| {groupName}</span>}
             </div>
           </ModelName>

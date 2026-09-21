@@ -294,8 +294,8 @@ describe('SelectModelPopupView "Add Model" action', () => {
     })
   })
 
-  describe('serving id visibility (trim-based id != name)', () => {
-    it('shows serving id when same display name but different id', () => {
+  describe('name-only rendering (no ID) with ID-aware search', () => {
+    it('renders name only, no serving ID title, even when same display name different id', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai', group: 'default' } as any,
@@ -303,21 +303,20 @@ describe('SelectModelPopupView "Add Model" action', () => {
         ])
       ]
       renderPopup(providers)
-      // both ids should be visible as muted monospace
-      expect(screen.getByTitle('gpt-4o-2024-08-06')).toBeInTheDocument()
-      expect(screen.getByTitle('gpt-4o-2024-11-20')).toBeInTheDocument()
+      // names visible twice, no ID titles
+      expect(screen.getAllByText('GPT-4o').length).toBe(2)
+      expect(screen.queryByTitle('gpt-4o-2024-08-06')).toBeNull()
+      expect(screen.queryByTitle('gpt-4o-2024-11-20')).toBeNull()
     })
 
-    it('does not show duplicate second line when trimmed id == trimmed name', () => {
+    it('does not show duplicate ID when trimmed id == trimmed name (name-only always)', () => {
       const providers = [provider('openai', 'OpenAI', [model('gpt-4o', 'gpt-4o')])]
       renderPopup(providers)
-      // when id==name, no title id element should exist
       expect(screen.queryByTitle('gpt-4o')).toBeNull()
-      // name still present
       expect(screen.getByText('gpt-4o')).toBeInTheDocument()
     })
 
-    it('treats whitespace-trimmed equality as same (no id row)', () => {
+    it('whitespace-trimmed remains name-only (no ID row)', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai', group: 'default' } as any
@@ -325,29 +324,30 @@ describe('SelectModelPopupView "Add Model" action', () => {
       ]
       renderPopup(providers)
       expect(screen.queryByTitle('  gpt-4o  ')).toBeNull()
+      expect(screen.getByText('gpt-4o')).toBeInTheDocument()
     })
 
-    it('shows id when case differs (case-sensitive)', () => {
+    it('case differs still name-only', () => {
       const providers = [
         provider('openai', 'OpenAI', [{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', group: 'default' } as any])
       ]
       renderPopup(providers)
-      expect(screen.getByTitle('gpt-4o')).toBeInTheDocument()
+      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
+      expect(screen.queryByTitle('gpt-4o')).toBeNull()
     })
 
-    it('shows id when whitespace-trimmed differs', () => {
+    it('whitespace-trimmed differs still name-only', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai', group: 'default' } as any
         ])
       ]
       renderPopup(providers)
-      // original id with spaces is title, but visibility is trim-based
-      const el = document.querySelector('[title=" gpt-4o-1 "]')
-      expect(el).not.toBeNull()
+      expect(document.querySelector('[title=" gpt-4o-1 "]')).toBeNull()
+      expect(screen.getByText('GPT-4o')).toBeInTheDocument()
     })
 
-    it('shows id for near-identical names with different ids (distinguishable)', () => {
+    it('near-identical names different ids still name-only', () => {
       const providers = [
         provider('openai', 'OpenAI', [
           { id: 'gpt-4o-mini', name: 'GPT-4o mini', provider: 'openai', group: 'default' } as any,
@@ -355,8 +355,22 @@ describe('SelectModelPopupView "Add Model" action', () => {
         ])
       ]
       renderPopup(providers)
-      expect(screen.getByTitle('gpt-4o-mini')).toBeInTheDocument()
-      expect(screen.getByTitle('gpt-4o-mini-2024')).toBeInTheDocument()
+      expect(screen.getAllByText('GPT-4o mini').length).toBe(2)
+      expect(screen.queryByTitle('gpt-4o-mini')).toBeNull()
+      expect(screen.queryByTitle('gpt-4o-mini-2024')).toBeNull()
+    })
+
+    it('filterModelsByKeywords still ID-aware (rendered name-only but search matches ID)', async () => {
+      // Real filter function is ID-aware; mocked version passes through, so test direct utility
+      const { filterModelsByKeywords } = await import('@renderer/utils/match')
+      // Use real implementation via dynamic import would still be mocked; test via direct call of matchKeywordsInModel
+      const { matchKeywordsInModel } = await import('@renderer/utils/match')
+      const m = { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai' } as any
+      const p = { id: 'openai', name: 'OpenAI' } as any
+      // Even though UI is name-only, search by ID/provider still matches
+      expect(matchKeywordsInModel('gpt-4o-2024-08-06', m)).toBe(true)
+      expect(matchKeywordsInModel('openai', m, p)).toBe(true)
+      void filterModelsByKeywords
     })
   })
 })

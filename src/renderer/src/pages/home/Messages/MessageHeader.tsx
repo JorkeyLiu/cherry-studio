@@ -67,12 +67,8 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
 
   const avatarName = useMemo(() => firstLetter(assistant?.name).toUpperCase(), [assistant?.name])
   const username = useMemo(() => removeLeadingEmoji(getUserName()), [getUserName])
-  const displayModelId = model?.id?.trim()
   const displayModelName = model?.name?.trim()
-  const modelTitle =
-    model && displayModelId && displayModelName && displayModelId !== displayModelName
-      ? `${displayModelName} (${displayModelId})`
-      : (displayModelName ?? displayModelId ?? username)
+  const modelTitle = displayModelName ?? model?.id?.trim() ?? username
 
   const userNameJustifyContent = useMemo(() => {
     if (!isBubbleStyle) return 'flex-start'

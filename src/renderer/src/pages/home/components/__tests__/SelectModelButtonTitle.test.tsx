@@ -41,46 +41,48 @@ function renderWithModel(model: any) {
   return container
 }
 
-describe('SelectModelButton title (trim-based)', () => {
-  it('title includes id when trimmed id != trimmed name', () => {
+describe('SelectModelButton title (name-only)', () => {
+  it('title is name-only even when trimmed id != trimmed name', () => {
     const model = { id: 'gpt-4o-2024-08-06', name: 'GPT-4o', provider: 'openai' } as any
     const container = renderWithModel(model)
     const btn = container.querySelector('button') as HTMLElement | null
-    expect(btn?.getAttribute('title')).toBe('GPT-4o (gpt-4o-2024-08-06)')
-    // ModelName span also has title
+    expect(btn?.getAttribute('title')).toBe('GPT-4o')
     const nameSpan = container.querySelector('span[title]') as HTMLElement | null
-    expect(nameSpan?.getAttribute('title')).toBe('GPT-4o (gpt-4o-2024-08-06)')
+    expect(nameSpan?.getAttribute('title')).toBe('GPT-4o')
+    expect(btn?.getAttribute('title')).not.toContain('gpt-4o-2024-08-06')
   })
 
-  it('does not duplicate when trimmed equal', () => {
+  it('does not duplicate when trimmed equal (name-only)', () => {
     const model = { id: 'gpt-4o', name: 'gpt-4o', provider: 'openai' } as any
     const container = renderWithModel(model)
     const btn = container.querySelector('button') as HTMLElement | null
     expect(btn?.getAttribute('title')).toBe('gpt-4o')
   })
 
-  it('trims whitespace correctly', () => {
+  it('trims whitespace correctly but remains name-only', () => {
     const same = { id: '  gpt-4o  ', name: 'gpt-4o', provider: 'openai' } as any
     const c1 = renderWithModel(same)
     expect(c1.querySelector('button')?.getAttribute('title')).toBe('gpt-4o')
 
     const diff = { id: ' gpt-4o-1 ', name: ' GPT-4o ', provider: 'openai' } as any
     const c2 = renderWithModel(diff)
-    expect(c2.querySelector('button')?.getAttribute('title')).toContain('gpt-4o-1')
+    expect(c2.querySelector('button')?.getAttribute('title')).toBe(' GPT-4o ')
+    expect(c2.querySelector('button')?.getAttribute('title')).not.toContain('gpt-4o-1')
   })
 
-  it('case-sensitive distinction shows id', () => {
+  it('case-sensitive still name-only', () => {
     const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
     const container = renderWithModel(model)
-    expect(container.querySelector('button')?.getAttribute('title')).toBe('GPT-4o (gpt-4o)')
+    expect(container.querySelector('button')?.getAttribute('title')).toBe('GPT-4o')
+    expect(container.querySelector('button')?.getAttribute('title')).not.toContain('gpt-4o')
   })
 
-  it('same display name different ids are distinguishable via title', () => {
+  it('same display name different ids share same name-only title', () => {
     const a = { id: 'gpt-4o-a', name: 'GPT-4o', provider: 'openai' } as any
     const b = { id: 'gpt-4o-b', name: 'GPT-4o', provider: 'openai' } as any
     const ca = renderWithModel(a)
     const cb = renderWithModel(b)
-    expect(ca.querySelector('button')?.getAttribute('title')).toContain('gpt-4o-a')
-    expect(cb.querySelector('button')?.getAttribute('title')).toContain('gpt-4o-b')
+    expect(ca.querySelector('button')?.getAttribute('title')).toBe('GPT-4o')
+    expect(cb.querySelector('button')?.getAttribute('title')).toBe('GPT-4o')
   })
 })

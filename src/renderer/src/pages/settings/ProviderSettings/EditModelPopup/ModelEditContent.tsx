@@ -3,16 +3,19 @@ import { getModelMetadataForDisplay } from '@renderer/config/models/modelMetadat
 import { useModelMetadataStatus } from '@renderer/hooks/useModelMetadataStatus'
 import type { Model, Provider } from '@renderer/types'
 import { getDefaultGroupName } from '@renderer/utils'
+import { getModelMetadataDisplayName, isDefaultModelNameForEdit } from '@renderer/utils/modelDisplayName'
 import type { ModalProps } from 'antd'
 import { Button, Flex, Form, Input, message, Modal } from 'antd'
 import { SaveIcon } from 'lucide-react'
 import type { FC } from 'react'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
 import ModelCapabilityGroups, { hasKnownFeatures, hasKnownInputModalities } from './ModelCapabilityGroups'
 import ModelMetadataReference, { hasConcreteModelData } from './ModelMetadataReference'
+
+export { isDefaultModelNameForEdit }
 
 interface ModelEditContentProps {
   provider: Provider
@@ -45,6 +48,36 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
     [model, provider, metadataStatus]
   )
   const entry = display.effective
+  const metadataName = useMemo(
+    () => getModelMetadataDisplayName(model, provider),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [model, provider, metadataStatus, display.effective?.name]
+  )
+
+  // Enrichment-only: metadata may update only form state, never Redux/Model
+  // directly. Track user edits to avoid overwriting typing.
+  const nameDirtyRef = useRef(false)
+  useEffect(() => {
+    // Reset dirty when the edited model identity changes (popup reused).
+    nameDirtyRef.current = false
+  }, [model.id])
+
+  // Async enrichment: when metadata arrives while the popup is open, update
+  // the name only if the form has not been user-modified and still qualifies
+  // as a default ID-like name. Reuses the already resolved display name
+  // rather than adding identity heuristics.
+  useEffect(() => {
+    if (!metadataName) return
+    if (nameDirtyRef.current) return
+    const current = form.getFieldValue('name') as string | undefined
+    // Fallback to persisted value before form init completes.
+    const curName = current !== undefined ? current : model.name
+    if (isDefaultModelNameForEdit(curName, model.id)) {
+      if ((curName ?? '').trim() !== metadataName) {
+        form.setFieldsValue({ name: metadataName })
+      }
+    }
+  }, [metadataName, model.id, model.name, form])
 
   // All three metadata groups empty: one status line, never per-group hints.
   // A cached snapshot means ready even for an unknown model id.
@@ -89,10 +122,15 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
         style={{ marginTop: 15 }}
         initialValues={{
           id: model.id,
-          name: model.name,
+          name: isDefaultModelNameForEdit(model.name, model.id) && metadataName ? metadataName : model.name,
           group: model.group
         }}
-        onFinish={onFinish}>
+        onFinish={onFinish}
+        onValuesChange={(changed) => {
+          if (changed && typeof changed === 'object' && 'name' in changed) {
+            nameDirtyRef.current = true
+          }
+        }}>
         <Form.Item name="id" label={t('settings.models.add.model_id.label')} rules={[{ required: true }]}>
           <Flex justify="space-between" gap={5}>
             <Input
