@@ -1017,7 +1017,7 @@ const Messages = ({
             void Promise.resolve(autoRenameTopic(assistant, newTopic.id)).catch((error: unknown) =>
               logger.error('autoRenameTopic failed', error as Error)
             )
-            // Branch inheritance (docs/context-window.md §9) via the authority
+            // Branch inheritance (docs/adr/context-window.md §9) via the authority
             // resolver: one metadata-only `chatdb:resolve-context-closure`
             // (intent `inherit`, `detail: 'anchor'`) call maps the parent's
             // persisted anchor by index into the new branch with clamp,

@@ -17,7 +17,7 @@
  */
 
 // ---------------------------------------------------------------------------
-// Dimensions — one-to-one with docs/sqlite-migration.md Phase 4.3 ①–⑭
+// Dimensions — one-to-one with docs/archived/sqlite-migration.md Phase 4.3 ①–⑭
 // ---------------------------------------------------------------------------
 
 /**

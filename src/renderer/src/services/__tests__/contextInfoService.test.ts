@@ -4,7 +4,7 @@
  * messages in a single pipeline.
  *
  * There is exactly ONE context window model: stable anchor-to-topic-end
- * (docs/context-window.md).
+ * (docs/adr/context-window.md).
  * A valid persisted anchor (`contextWindowAnchor[topicId]`) fixes the window
  * start and the window grows as the topic grows. Without a valid persisted
  * anchor (empty / uninitialized / invalid legacy state) the start falls back to

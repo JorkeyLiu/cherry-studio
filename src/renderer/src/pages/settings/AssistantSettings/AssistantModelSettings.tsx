@@ -220,7 +220,7 @@ const AssistantModelSettings: FC<Props> = ({ assistant, updateAssistant, updateA
     setCustomParameters(DEFAULT_ASSISTANT_SETTINGS.customParameters)
     setMaxToolCalls(DEFAULT_ASSISTANT_SETTINGS.maxToolCalls)
     // Generic settings reset changes defaults, never topic anchors
-    // (docs/context-window.md CW-1): the per-topic anchor map is preserved.
+    // (docs/adr/context-window.md CW-1): the per-topic anchor map is preserved.
     updateAssistantSettings(buildSettingsResetPatch(assistant.settings, DEFAULT_ASSISTANT_SETTINGS))
   }
   const modelFilter = (model: Model) => !isEmbeddingModel(model) && !isRerankModel(model)

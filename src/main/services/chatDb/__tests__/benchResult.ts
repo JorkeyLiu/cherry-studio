@@ -46,7 +46,7 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-/** PERF-001 result artifact schema version. Bump only with the documented contract (docs/performance-measurement.md §3). */
+/** PERF-001 result artifact schema version. Bump only with the documented contract (docs/archived/performance-measurement.md §3). */
 export const BENCH_RESULT_SCHEMA_VERSION = 1 as const
 
 /** Default gitignored repository-local artifact directory (relative to the run cwd). */

@@ -1,12 +1,12 @@
 /**
  * Anchor establishment + compatibility-repair hooks in the message thunks.
  *
- * First establishment (docs/context-window.md §6): ordinary `sendMessage`
+ * First establishment (docs/adr/context-window.md §6): ordinary `sendMessage`
  * persists the topic anchor idempotently AFTER the user message is persisted
  * and added to Redux and BEFORE the assistant response is queued, so the first
  * request resolves the same position.
  *
- * Compatibility repair (docs/context-window.md §10): `loadTopicMessagesThunk`
+ * Compatibility repair (docs/adr/context-window.md §10): `loadTopicMessagesThunk`
  * initializes a missing/unresolvable anchor exactly once AFTER a successful
  * load into Redux — on BOTH the fetch path (after `messagesReceived`) and the
  * cached path (a non-empty cached topic, e.g. a fresh branch pre-populated by

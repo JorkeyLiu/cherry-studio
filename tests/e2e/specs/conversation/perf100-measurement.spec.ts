@@ -1,7 +1,7 @@
 /**
  * PERF-100 post-fix batch measurement (production-build Playwright E2E).
  *
- * Purpose (completed production outcome, docs/performance-workstreams.md §3):
+ * Purpose (completed production outcome, docs/archived/performance-workstreams.md §3):
  *   Deterministic, bounded, correctness-first measurements for the three
  *   PERF-100 message-interaction paths, run against a FRESH production build
  *   via the standard shared E2E fixture:
@@ -15,7 +15,7 @@
  *   (src/main/services/chatDb/__tests__/benchResult.ts) written to the
  *   gitignored `test-results/bench-results/` directory AFTER the test passes.
  *
- * Scale profiles (S0 middle-list scale-curve parameterization, docs/performance-measurement.md §5):
+ * Scale profiles (S0 middle-list scale-curve parameterization, docs/archived/performance-measurement.md §5):
  *   - The DEFAULT profile (no `PERF100_SCALE` env) is the quick fixture: the
  *     original workload/metrics/sample counts/artifact id (`perf100-measurement`)
  *     unchanged — edit 5 samples over 8 messages, paste 3 samples over 10
@@ -45,15 +45,15 @@
  *     (`paste.loadedMiddleGeometry`, `answerTab.loadedTopicGeometry`) are
  *     additive for all profiles.
  *
- * Evidence classification (PERF-LOCK-003 / docs/performance-measurement.md §2):
+ * Evidence classification (PERF-LOCK-003 / docs/archived/performance-measurement.md §2):
  *   - Deterministic L1 regression evidence when run on a fresh build with the
  *     standard fixture; the numeric metrics remain provisional (L3-style
- *     values) until re-measured per docs/performance-measurement.md §7 — no approved thresholds are asserted
+ *     values) until re-measured per docs/archived/performance-measurement.md §7 — no approved thresholds are asserted
  *     here (only the committed cold-open <500ms gate exists; PERF-100 has
- *     none, PERF-LOCK-005 / docs/performance-measurement.md §7).
+ *     none, PERF-LOCK-005 / docs/archived/performance-measurement.md §7).
  *   - `pnpm ui:observe` is diagnostic only and is NOT a substitute (LOCK-005).
  *
- * Instrumentation boundary (PERF-LOCK-006/008, docs/performance-program.md §1.2 non-goals):
+ * Instrumentation boundary (PERF-LOCK-006/008, docs/archived/performance-program.md §1.2 non-goals):
  *   - All instrumentation is installed and removed inside the test page
  *     context only: `store.subscribe` listeners, a MutationObserver, a
  *     temporary `Element.prototype.scrollIntoView` wrapper, and synthetic DOM
@@ -102,7 +102,7 @@
  * Correctness-first and privacy:
  *   - Every sample asserts its correctness gates BEFORE its timing is
  *     recorded; any failure aborts the test, which means the artifact is only
- *     ever written after the full pass (audit F1-style gate, docs/performance-measurement.md §3).
+ *     ever written after the full pass (audit F1-style gate, docs/archived/performance-measurement.md §3).
  *   - No message contents, credentials, attachments, user paths, raw DB
  *     sizes, profile data, model IDs, ask IDs or other sensitive identifiers
  *     enter the metrics/gates/scale — only numbers and fixed non-sensitive

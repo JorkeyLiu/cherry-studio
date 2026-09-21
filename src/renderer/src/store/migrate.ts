@@ -4058,7 +4058,7 @@ const migrateConfig = {
   },
   '220': (state: RootState) => {
     try {
-      // Stable context-window anchor model (docs/context-window.md):
+      // Stable context-window anchor model (docs/adr/context-window.md):
       //  - Rename the persisted per-topic context-window anchor field
       //    `contextStartOverride` → `contextWindowAnchor`. The persisted value
       //    is the STABLE topic context start (CW-2), not an override/projection.

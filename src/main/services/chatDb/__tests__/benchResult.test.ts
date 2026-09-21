@@ -195,7 +195,7 @@ describe('collectGitMetadata', () => {
   it('marks dirty=true when porcelain lists changes', () => {
     const runner = (args: string[]): string => {
       if (args[0] === 'rev-parse') return 'abc123'
-      if (args[0] === 'status') return ' M docs/performance-program.md\n'
+      if (args[0] === 'status') return ' M docs/archived/performance-program.md\n'
       throw new Error(`unexpected args: ${args.join(' ')}`)
     }
     expect(collectGitMetadata(runner)).toEqual({ commit: 'abc123', dirty: true })

@@ -82,8 +82,7 @@ export default defineConfig([
         process.env.CI ? 'error' : 'warn',
         {
           selector: 'CallExpression[callee.object.name="console"]',
-          message:
-            '❗CherryStudio uses unified LoggerService: 📖 docs/en/guides/logging.md\n❗CherryStudio 使用统一的日志服务：📖 docs/zh/guides/logging.md\n\n'
+          message: '❗CherryStudio uses unified LoggerService — see AGENTS.md Logging and docs/architecture/architecture.md\n'
         }
       ]
     }

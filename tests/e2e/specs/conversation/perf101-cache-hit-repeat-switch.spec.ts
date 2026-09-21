@@ -1,13 +1,13 @@
 /**
  * PERF-101 cache-hit repeat-switch measurement (production-build Playwright E2E).
  *
- * Purpose (docs/performance-workstreams.md, PERF-TOPIC-SWITCH measurement slice):
+ * Purpose (docs/archived/performance-workstreams.md, PERF-TOPIC-SWITCH measurement slice):
  *   Deterministic, bounded, correctness-first measurements that COMPARE the
  *   cache-miss first-open path with the cache-hit repeat-switch path —
  *   switching away from a previously hydrated topic and then back — exposing
  *   the missing repeat-switch endpoint. This slice is MEASUREMENT-ONLY:
  *   no runtime optimization, no threshold, and no fix direction is implied
- *   (LOCK-001, docs/performance-workstreams.md §4).
+ *   (LOCK-001, docs/archived/performance-workstreams.md §4).
  *
  * Default-off (LOCK-002):
  *   This spec is skipped unless PERF101_CACHE_HIT=1 is set in the runner

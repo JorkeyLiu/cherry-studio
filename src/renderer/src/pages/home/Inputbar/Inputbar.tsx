@@ -331,7 +331,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     setActiveTopic(newTopic)
 
     // A new topic starts empty and anchorless (empty topics have no anchor,
-    // docs/context-window.md I-1). The persisted anchor is established exactly
+    // docs/adr/context-window.md I-1). The persisted anchor is established exactly
     // once when the first user message makes the topic non-empty, at the
     // default window position — it is never derived dynamically per render.
 

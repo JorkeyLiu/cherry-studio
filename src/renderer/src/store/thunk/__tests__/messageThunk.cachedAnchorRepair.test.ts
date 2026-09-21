@@ -1,6 +1,6 @@
 /**
  * Cached-path compatibility repair via the authority resolver
- * (docs/context-window.md §10).
+ * (docs/adr/context-window.md §10).
  *
  * `loadTopicMessagesThunk` must schedule compatibility repair for a NON-EMPTY
  * cached topic (messages already in Redux, e.g. a fresh branch pre-populated

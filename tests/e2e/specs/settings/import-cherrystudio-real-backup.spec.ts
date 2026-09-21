@@ -16,7 +16,7 @@
  * - Zero user content, assistant/topic IDs/names, file paths, or message text
  *   in logs, matcher messages, or reports — only aggregate counts, booleans,
  *   durations, and an 8-hex SHA-256 prefix (house docs style precedent:
- *   `docs/sqlite-migration.md` hash prefixes).
+ *   `docs/archived/sqlite-migration.md` hash prefixes).
  * - Assertions are aggregate: candidate counts from status events; after the
  *   projection apply the synthetic pre-import marker is gone, assistant/topic
  *   counts are coherent, at least one imported active topic is visible and

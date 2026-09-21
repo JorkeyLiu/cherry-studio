@@ -2,7 +2,7 @@
  * PERF-STREAM-ATTR-001 — streaming persistence Main/IPC/SQLite attribution
  * (production-build Playwright E2E).
  *
- * Purpose (docs/performance-workstreams.md §2.2 PERF-STREAMING; slice
+ * Purpose (docs/archived/performance-workstreams.md §2.2 PERF-STREAMING; slice
  * PERF-STREAM-ATTR-001, LOCK-STREAM-ATTR-001..006): measure, end to end
  * against a FRESH production build + the standard shared E2E fixture, the
  * real streaming-persistence write path that a deterministic slow stream

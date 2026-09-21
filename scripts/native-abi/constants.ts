@@ -6,8 +6,8 @@
  * This module is the single source of truth for the supported versions and
  * ABIs. Any upgrade to Node / Electron / better-sqlite3 must update these
  * constants together with the docs that carry the ABI contract
- * (`AGENTS.md`, `docs/en/guides/development.md`, `docs/zh/guides/development.md`,
- * `tests/e2e/README.md`, `docs/sqlite-migration.md`).
+ * (`AGENTS.md` Environment, Commands, and Native ABI, `tests/e2e/README.md`,
+ * `docs/architecture/architecture.md`).
  */
 
 /** The only native module whose ABI the repository manages. */

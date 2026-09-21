@@ -2,7 +2,7 @@
  * PERF-STREAM-ATTR-002 renderer-attribution derivation helpers (pure, E2E-only).
  *
  * Measurement-only helper module for the production-build E2E slice
- * `perf-stream-render-attr.spec.ts` (docs/performance-workstreams.md §2.2
+ * `perf-stream-render-attr.spec.ts` (docs/archived/performance-workstreams.md §2.2
  * PERF-STREAMING). It holds ONLY the pure derivation logic that the slice's
  * per-sample correctness gates and metric aggregation rely on — profile
  * resolution, the steady-state cutoff, the next-DOM/monotonic Redux→DOM pairing

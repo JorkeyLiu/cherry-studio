@@ -218,7 +218,7 @@ export type AssistantSettings = {
    * is the group key of the start turn of the topic's context window; a
    * non-empty initialized topic has exactly one anchor (CW-2/CW-3). Changing
    * `contextCount` never moves an existing anchor; the anchor moves only
-   * through the explicit transitions listed in `docs/context-window.md`.
+   * through the explicit transitions listed in `docs/adr/context-window.md`.
    */
   contextWindowAnchor?: Record<string, ContextWindowAnchor | undefined> // { [topicId]: ContextWindowAnchor }
 }

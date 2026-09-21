@@ -2,7 +2,7 @@
  * Stable Context-Window Contract — focused aggregate Electron E2E
  *
  * Binds the historically drifting integrated user behavior to the approved
- * stable anchor-to-topic-end semantics (`docs/context-window.md`):
+ * stable anchor-to-topic-end semantics (`docs/adr/context-window.md`):
  *   - `contextWindowAnchor[topicId]` is the persisted STABLE topic context
  *     start (the start turn's group key). A non-empty initialized topic has
  *     exactly one anchor; the context window is anchor-to-topic-end.

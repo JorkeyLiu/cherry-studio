@@ -1,5 +1,3 @@
-[中文](docs/zh/guides/contributing.md) | [English](CONTRIBUTING.md)
-
 # Cherry Studio Contributor Guide
 
 Welcome to the Cherry Studio contributor community! We are committed to making Cherry Studio a project that provides long-term value and hope to invite more developers to join us. Whether you are an experienced developer or a beginner just starting out, your contributions will help us better serve users and improve software quality.
@@ -28,9 +26,7 @@ Please make sure you have read the [Code of Conduct](CODE_OF_CONDUCT.md) and the
 
 ## Setting Up Your Development Environment
 
-Please refer to the [Developer Guide](docs/en/guides/development.md) for instructions on setting up your local development environment, including prerequisites, installation steps, and available commands.
-
-For a comprehensive overview of the project architecture, tech stack, conventions, and available commands, see [`AGENTS.md`](AGENTS.md). For the detailed architecture reference, see [`docs/architecture.md`](docs/architecture.md).
+Please refer to [`AGENTS.md`](AGENTS.md) for the always-on repository contract, toolchain, and available commands. For the detailed architecture reference, see [`docs/architecture/architecture.md`](docs/architecture/architecture.md) and the documentation index at [`docs/README.md`](docs/README.md).
 
 ## Getting Started
 
@@ -38,7 +34,7 @@ To help you get familiar with the codebase, we recommend tackling issues tagged 
 
 ### Testing
 
-Features without tests are considered non-existent. To ensure code is truly effective, relevant processes should be covered by unit tests and functional tests. Therefore, when considering contributions, please also consider testability. All tests can be run locally without dependency on CI. Please refer to the "Testing" section in the [Developer Guide](docs/zh/guides/development.md).
+Features without tests are considered non-existent. To ensure code is truly effective, relevant processes should be covered by unit tests and functional tests. Therefore, when considering contributions, please also consider testability. All tests can be run locally without dependency on CI. Please refer to the testing and validation gates described in [`AGENTS.md`](AGENTS.md).
 
 ### Automated Testing for Pull Requests
 
@@ -63,10 +59,6 @@ git commit --signoff -m "Your commit message"
 ### Getting Code Reviewed/Merged
 
 Maintainers are here to help you implement your use case within a reasonable timeframe. They will do their best to review your code and provide constructive feedback promptly. However, if you get stuck during the review process or feel your Pull Request is not receiving the attention it deserves, please contact us via comments in the Issue or through the [Community](README.md#-community).
-
-### Participating in the Test Plan
-
-The Test Plan aims to provide users with a more stable application experience and faster iteration speed. For details, please refer to the [Test Plan](docs/en/guides/test-plan.md).
 
 ### Other Suggestions
 

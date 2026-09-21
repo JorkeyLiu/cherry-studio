@@ -34,7 +34,7 @@
   </a>
 </h1>
 
-<p align="center">English | <a href="./docs/zh/README.md">中文</a> | <a href="./docs/en/guides/development.md">Development</a><br></p>
+<p align="center">English | <a href="./docs/README.md">Docs</a> | <a href="./AGENTS.md">AGENTS</a><br></p>
 
 <div align="center">
 
@@ -66,7 +66,7 @@ Cherry Studio is a desktop client that supports multiple LLM providers, availabl
 
 👏 Join [Telegram Group](https://t.me/CherryStudioAI)｜[Discord](https://discord.gg/wez8HtpxqQ) | [QQ Group(575014769)](https://qm.qq.com/q/lo0D4qVZKi)
 
-❤️ Like Cherry Studio? Give it a star 🌟 or [Sponsor](docs/zh/guides/sponsor.md) to support the development!
+❤️ Like Cherry Studio? Give it a star 🌟 to support the development!
 
 # 🌠 Screenshot
 
@@ -174,7 +174,7 @@ We welcome contributions to Cherry Studio! Here are some ways you can contribute
 6. **Community Engagement**: Join discussions and help users.
 7. **Promote Usage**: Spread the word about Cherry Studio.
 
-Refer to the [Branching Strategy](docs/en/guides/branching-strategy.md) for contribution guidelines
+Refer to [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for contribution guidelines
 
 ## Getting Started
 
@@ -316,4 +316,4 @@ Should you require a commercial license that provides an exemption from the AGPL
 [commercial-shield]: https://img.shields.io/badge/License-Contact-white.svg?logoColor=white&logo=telegram&color=blue
 [commercial-link]: https://github.com/CherryHQ/cherry-studio/discussions
 [sponsor-shield]: https://img.shields.io/badge/Sponsor-FF6699.svg?logo=githubsponsors&logoColor=white
-[sponsor-link]: https://github.com/CherryHQ/cherry-studio/blob/main/docs/sponsor.md
+[sponsor-link]: https://github.com/sponsors/CherryHQ

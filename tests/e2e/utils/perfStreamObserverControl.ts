@@ -2,7 +2,7 @@
  * PERF-STREAM-ATTR-003 — observer load control treatment resolver (E2E-only).
  *
  * Measurement-only helper module for the production-build E2E control slice
- * `perf-stream-render-observer-control.spec.ts` (docs/performance-workstreams.md
+ * `perf-stream-render-observer-control.spec.ts` (docs/archived/performance-workstreams.md
  * §2.2 PERF-STREAMING; slice PERF-STREAM-ATTR-003). It holds the observer mode
  * resolution (scan vs noscan treatment) and the combined profile-key derivation
  * used by the spec's skip gate, correctness gates, and artifact identity.

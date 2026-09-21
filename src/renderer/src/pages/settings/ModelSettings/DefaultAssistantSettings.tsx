@@ -100,7 +100,7 @@ const AssistantSettings: FC = () => {
     setEnableTopP(false)
     setToolUseMode('function')
     // Generic settings reset changes defaults, never topic anchors
-    // (docs/context-window.md CW-1): the per-topic anchor map is preserved.
+    // (docs/adr/context-window.md CW-1): the per-topic anchor map is preserved.
     updateDefaultAssistant({
       ...defaultAssistant,
       settings: buildSettingsResetPatch(defaultAssistant.settings, DEFAULT_ASSISTANT_SETTINGS)

@@ -497,7 +497,7 @@ const dispatchMultiModelResponses = async (
  * override — that must survive into the actual request. `freshAssistant` is
  * the assistant re-read from the store, carrying the just-persisted settings
  * surface (`contextWindowAnchor`, `contextCount`) that the first request must
- * resolve (docs/context-window.md CW-6).
+ * resolve (docs/adr/context-window.md CW-6).
  *
  * The merge retains every caller request field and replaces ONLY the
  * Redux-owned settings surface with the fresh values, so the first request
@@ -570,14 +570,14 @@ const fetchAndProcessAssistantResponseImpl = async (
   // snapshot that predates the first-establishment anchor dispatch in
   // `sendMessage`. Using the fresh settings guarantees the first request,
   // TokenCount, and divider all resolve the same just-persisted anchor
-  // (docs/context-window.md CW-6). Falls back to the captured assistant when
+  // (docs/adr/context-window.md CW-6). Falls back to the captured assistant when
   // the id is not in the store (default-assistant edge cases).
   const freshAssistant = getState().assistants.assistants.find((asst) => asst.id === origAssistant.id) ?? origAssistant
   // The request snapshot is a narrow merge: every caller request field
   // (multi-model mention, append-model, grouped resend/regenerate model
   // overrides) is retained from `origAssistant`, while only the Redux-owned
   // settings surface is refreshed with the fresh store values (the
-  // just-persisted anchor, docs/context-window.md CW-6). The result is an
+  // just-persisted anchor, docs/adr/context-window.md CW-6). The result is an
   // independently writable top-level object — never the frozen Redux one.
   const assistant = mergeRequestAssistantSnapshot(origAssistant, freshAssistant, topicId)
   const assistantMsgId = assistantMessage.id
@@ -795,7 +795,7 @@ export const sendMessage =
 
       // First establishment: after the user message is persisted and added to
       // Redux, idempotently persist the topic anchor when it is absent or
-      // unresolvable (docs/context-window.md §6). A valid anchor is never
+      // unresolvable (docs/adr/context-window.md §6). A valid anchor is never
       // recalculated; an empty topic never receives an anchor. This runs
       // BEFORE the assistant response is queued so the first request resolves
       // the same persisted anchor even though its captured assistant snapshot

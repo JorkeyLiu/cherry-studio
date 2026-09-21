@@ -38,7 +38,7 @@ export function resolveGroupKey(message: Pick<Message, 'role' | 'id' | 'askId'>)
  * 状态机：消息删除后转移 topic 锚点（`contextWindowAnchor[topicId]`）。
  * oldGroupList = 删除前的 buildGroupList
  * newGroupList = 删除后的 buildGroupList
- * 规则（docs/context-window.md §9，确定性契约）：
+ * 规则（docs/adr/context-window.md §9，确定性契约）：
  *   - 若锚点不是 active，返回原值
  *   - 若锚点 groupKey 仍在 newGroupList 中，返回原 active（不动）
  *   - 若锚点 groupKey 已被删除：
@@ -149,7 +149,7 @@ export function transferAnchorsAfterDeletion(
 }
 
 /**
- * Branch anchor inheritance (docs/context-window.md §9, CW-4 · 分支继承):
+ * Branch anchor inheritance (docs/adr/context-window.md §9, CW-4 · 分支继承):
  * deterministically maps the parent topic's persisted anchor into a new
  * branch by position (group-list index transfer), never by recomputing from
  * `contextCount`.

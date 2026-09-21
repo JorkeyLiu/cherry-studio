@@ -2,7 +2,7 @@
  * Cherry Chat personal sync relay — Docker first-start initialization.
  *
  * Minimal deployment initializer for the Linux Docker Compose relay
- * deployment (see deploy/sync-relay/ and docs/multi-device-sync.md). It
+ * deployment (see deploy/sync-relay/ and docs/work/multi-device-sync.md). It
  * prepares the persistent relay state, then the entrypoint `exec`s the
  * unchanged relay CLI (`scripts/sync-relay/server.ts`), which keeps its own
  * startup order (token/TLS validation before DB open/listen) and graceful

@@ -2,7 +2,7 @@
  * PERF-STREAM-ATTR-002 — steady renderer amplification attribution
  * (production-build Playwright E2E).
  *
- * Purpose (docs/performance-workstreams.md §2.2 PERF-STREAMING; slice
+ * Purpose (docs/archived/performance-workstreams.md §2.2 PERF-STREAMING; slice
  * PERF-STREAM-ATTR-002, LOCK-STREAM-RENDER-001..006): measure, end to end
  * against a FRESH production build + the standard shared E2E fixture, the
  * steady RENDERER amplification caused by N concurrent multi-model streams on
@@ -88,7 +88,7 @@
  *
  * Evidence classification: deterministic L1 regression evidence on a fresh
  * build + standard fixture; all numeric metrics are L3 non-threshold (dirty-
- * state artifacts are non-baseline L3, docs/performance-measurement.md §7).
+ * state artifacts are non-baseline L3, docs/archived/performance-measurement.md §7).
  */
 import type { Page } from '@playwright/test'
 import * as fs from 'fs'

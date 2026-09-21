@@ -35,7 +35,7 @@ import type { FetchContextClosureResponse } from '@shared/chatDb'
  * as a turn count (not a message count).
  *
  * There is exactly ONE context window model: stable anchor-to-topic-end
- * (`docs/context-window.md`).
+ * (`docs/adr/context-window.md`).
  *   - A valid persisted anchor (`settings.contextWindowAnchor[topicId]`) fixes
  *     the window start; the window then grows as the topic grows.
  *   - With no (valid) persisted anchor — an empty topic, an uninitialized

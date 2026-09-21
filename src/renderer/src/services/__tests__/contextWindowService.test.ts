@@ -1,6 +1,6 @@
 /**
  * Tests for the pure context-window helpers
- * (single stable anchor-to-topic-end model, docs/context-window.md):
+ * (single stable anchor-to-topic-end model, docs/adr/context-window.md):
  *   - resolveDefaultAnchorIndex: default window start from contextCount
  *   - deriveDefaultAnchorKey: default window position as a turn group key
  *   - isResolvableAnchor: persisted anchor validity against real turns

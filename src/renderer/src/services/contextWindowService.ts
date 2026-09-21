@@ -8,7 +8,7 @@ import type { AssistantSettings, ContextWindowAnchor } from '@renderer/types'
  * compatibility repair), and focused tests.
  *
  * There is exactly one context window model: stable anchor-to-topic-end
- * (`docs/context-window.md`). The persisted per-topic anchor
+ * (`docs/adr/context-window.md`). The persisted per-topic anchor
  * (`contextWindowAnchor[topicId]`) is the start turn's group key. A
  * non-empty initialized topic has exactly one anchor; the window is the
  * anchor turn through the topic end. `contextCount` is the assistant default /
@@ -226,7 +226,7 @@ export function sliderValueToContextCount(value: number): number | null {
 
 /**
  * Settings patch for a GENERIC assistant-settings reset that PRESERVES the
- * per-topic anchor map (docs/context-window.md CW-1): reset changes defaults
+ * per-topic anchor map (docs/adr/context-window.md CW-1): reset changes defaults
  * (`contextCount`, temperature, ...), never topic anchors.
  *
  * The default template's `contextWindowAnchor` is the empty map — spreading

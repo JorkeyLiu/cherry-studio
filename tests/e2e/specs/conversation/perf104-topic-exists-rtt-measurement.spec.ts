@@ -3,7 +3,7 @@
  * (production-build Playwright E2E).
  *
  * Purpose (completed legacy measurement asset — PERF-104 page-side `topicExists` RTT slice,
- * measurement scope closed; evidence L1/L3 semantics per docs/performance-measurement.md §2,
+ * measurement scope closed; evidence L1/L3 semantics per docs/archived/performance-measurement.md §2,
  * schema v1 contract per §3 — this asset claims no current hot-path budget inventory):
  *   Deterministic, bounded, correctness-first measurements of the renderer
  *   PAGE-SIDE AGGREGATE `window.api.chatDb.topicExists` round trip for two
@@ -73,10 +73,10 @@
  *     and summarized timings) plus the artifact file BASENAME — never IDs
  *     and never absolute paths.
  *
- * Evidence classification (PERF-LOCK-003 / docs/performance-measurement.md §2):
+ * Evidence classification (PERF-LOCK-003 / docs/archived/performance-measurement.md §2):
  *   - Deterministic L1 regression evidence when run on a fresh build with
  *     the standard fixture; the numeric metrics remain provisional L3 values
- *     until re-measured per docs/performance-measurement.md §7.
+ *     until re-measured per docs/archived/performance-measurement.md §7.
  *
  * Instrumentation boundary (PERF-LOCK-006/008):
  *   - The measurement lives entirely in the test page context (one

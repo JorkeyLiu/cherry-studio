@@ -8,7 +8,7 @@
  *     A non-empty user-led topic has exactly one highlighted anchor button.
  *   - Clicking the button writes ONLY the persisted `contextWindowAnchor`
  *     through `chatdb:resolve-context-closure` authority calls
- *     (docs/context-window.md §8): a first `move` (`messageId`) call is the
+ *     (docs/adr/context-window.md §8): a first `move` (`messageId`) call is the
  *     authority determination with no loaded-turn inference; an echo of the
  *     still-current persisted key issues a second `reanchor-default` call
  *     (current `contextCount` + current target anchor baseline). No

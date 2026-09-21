@@ -198,7 +198,7 @@ const MessageMenubar: FC<Props> = (props) => {
   const { updateAssistantSettings } = useAssistant(assistant.id)
 
   // Context-window anchor control for the single stable anchor-to-end model
-  // (docs/context-window.md §8). Clicking a message anchor is an explicit
+  // (docs/adr/context-window.md §8). Clicking a message anchor is an explicit
   // move resolved by metadata-only `chatdb:resolve-context-closure`
   // (`detail: 'anchor'`) point/bounded reads in Main — no full-topic closure
   // materialization, no `selectLoadedMessagesForTopic` / `buildContextTurns`

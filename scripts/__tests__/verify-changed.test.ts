@@ -57,7 +57,7 @@ describe('classifyPath', () => {
   })
 
   test('docs paths', () => {
-    expect(classifyPath('docs/architecture.md')).toBe('docs')
+    expect(classifyPath('docs/architecture/architecture.md')).toBe('docs')
     expect(classifyPath('README.md')).toBe('docs')
     expect(classifyPath('.agents/skills/foo/SKILL.md')).toBe('docs')
   })
@@ -121,10 +121,10 @@ describe('classifyChangedSet', () => {
   })
 
   test('renderer+docs is still renderer-only', () => {
-    const r = classifyChangedSet(['src/renderer/src/foo.ts', 'docs/architecture.md'], [])
+    const r = classifyChangedSet(['src/renderer/src/foo.ts', 'docs/architecture/architecture.md'], [])
     expect(r.verdict).toBe('renderer-only')
     expect(r.rendererPaths).toEqual(['src/renderer/src/foo.ts'])
-    expect(r.docsPaths).toEqual(['docs/architecture.md'])
+    expect(r.docsPaths).toEqual(['docs/architecture/architecture.md'])
   })
 
   test('shared => unsafe', () => {
@@ -160,7 +160,7 @@ describe('classifyChangedSet', () => {
   })
 
   test('docs-only', () => {
-    const r = classifyChangedSet(['docs/architecture.md', 'README.md'], [])
+    const r = classifyChangedSet(['docs/architecture/architecture.md', 'README.md'], [])
     expect(r.verdict).toBe('docs-only')
   })
 

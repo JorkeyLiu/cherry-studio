@@ -2,7 +2,7 @@
  * PERF-STREAM-ATTR-003 — observer load control measurement
  * (production-build Playwright E2E).
  *
- * Purpose (docs/performance-workstreams.md §2.2 PERF-STREAMING; slice
+ * Purpose (docs/archived/performance-workstreams.md §2.2 PERF-STREAMING; slice
  * PERF-STREAM-ATTR-003, LOCK-OBSERVER-001..006): using the same production
  * build and deterministic N=1/2/3 multi-model workload as ATTR-002, compare
  * the ATTR-002 page-context harness with full DOM scanning versus a
