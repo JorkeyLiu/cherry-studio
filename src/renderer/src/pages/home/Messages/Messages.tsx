@@ -610,54 +610,74 @@ const Messages = ({
     [selectAnswer, topic.id]
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     // S3.1: Topic change detection is now owned by useTopicTransition.
     // This effect handles only window application for the current topic:
     //   Scenario 1: First load (empty viewport → apply latest window)
     //   Scenario 2: Reconcile existing window against updated messages
+    // Layout-phase reconciliation: guarantees the viewport render projection
+    // (displayMessages/displayGroups) is reconciled with the current loaded
+    // projection before the browser can paint. Without this, a passive
+    // effect would allow one paint where the stale group still selects the
+    // deleted variant (now blockless) and fold CSS hides the survivor,
+    // producing a blank interval. Paired delete retains resident projection
+    // and must not reload/reset; only this local window reconciliation moves.
+    // previousMessagesRef is co-located here (updated in the same layout
+    // commit) so correctness does not depend on distant hook order; the
+    // snapshot used for reconciliation is always the previous commit's
+    // messages, and the ref is advanced synchronously before paint for the
+    // next reconcilation.
 
-    // Scenario 1: First load — authoritative completeness retained from validated latest response
-    if (!viewportStateRef.current.window?.displayMessages.length) {
+    try {
+      // Scenario 1: First load — authoritative completeness retained from validated latest response
+      if (!viewportStateRef.current.window?.displayMessages.length) {
+        const active = currentPhaseCorrelation()
+        const startedAt = active ? performance.now() : 0
+        const completeness = getLatestWindowCompleteness(topic.id)
+        const authoritative =
+          completeness !== undefined
+            ? { hasMoreBefore: completeness.hasMoreBefore, hasMoreAfter: completeness.hasMoreAfter }
+            : undefined
+        applyMessageWindow(createLatestMessageWindow(messages, displayCount, authoritative))
+        if (active) {
+          recordPhaseDurationForCorrelation(
+            active.correlationId,
+            active.path,
+            active.path === 'echo' ? 'echo.windowCreate' : 'topic.windowApply',
+            performance.now() - startedAt
+          )
+        }
+        return
+      }
+
+      // Scenario 2: Reconcile the existing fixed window against the latest
+      // message objects. Only a window that previously touched the latest edge
+      // follows newly appended messages, retaining its prior group capacity.
+      const currentWindow = viewportStateRef.current.window
+      if (!currentWindow) return
+      const currentDisplayMessages = currentWindow.displayMessages
       const active = currentPhaseCorrelation()
       const startedAt = active ? performance.now() : 0
-      const completeness = getLatestWindowCompleteness(topic.id)
-      const authoritative =
-        completeness !== undefined
-          ? { hasMoreBefore: completeness.hasMoreBefore, hasMoreAfter: completeness.hasMoreAfter }
-          : undefined
-      applyMessageWindow(createLatestMessageWindow(messages, displayCount, authoritative))
+      const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
       if (active) {
         recordPhaseDurationForCorrelation(
           active.correlationId,
           active.path,
-          active.path === 'echo' ? 'echo.windowCreate' : 'topic.windowApply',
+          active.path === 'echo' ? 'echo.windowReconcile' : 'topic.windowReconcile',
           performance.now() - startedAt
         )
       }
-      return
-    }
+      const newDisplayMessages = reconciledWindow.displayMessages
 
-    // Scenario 2: Reconcile the existing fixed window against the latest
-    // message objects. Only a window that previously touched the latest edge
-    // follows newly appended messages, retaining its prior group capacity.
-    const currentWindow = viewportStateRef.current.window
-    if (!currentWindow) return
-    const currentDisplayMessages = currentWindow.displayMessages
-    const active = currentPhaseCorrelation()
-    const startedAt = active ? performance.now() : 0
-    const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
-    if (active) {
-      recordPhaseDurationForCorrelation(
-        active.correlationId,
-        active.path,
-        active.path === 'echo' ? 'echo.windowReconcile' : 'topic.windowReconcile',
-        performance.now() - startedAt
-      )
-    }
-    const newDisplayMessages = reconciledWindow.displayMessages
-
-    if (!areMessageArraysIdentical(currentDisplayMessages, newDisplayMessages) || currentWindow !== reconciledWindow) {
-      applyMessageWindow(reconciledWindow)
+      if (
+        !areMessageArraysIdentical(currentDisplayMessages, newDisplayMessages) ||
+        currentWindow !== reconciledWindow
+      ) {
+        applyMessageWindow(reconciledWindow)
+      }
+    } finally {
+      // Advance previous snapshot synchronously in the same layout phase.
+      previousMessagesRef.current = messages
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, displayCount])
@@ -667,10 +687,6 @@ const Messages = ({
     const active = currentPhaseCorrelation()
     if (active) recordPhaseEndpoint(active.path === 'echo' ? 'echo.domEndpoint' : 'topic.domEndpoint')
   }, [displayMessages])
-
-  useEffect(() => {
-    previousMessagesRef.current = messages
-  }, [messages])
 
   /**
    * Check the DOM status of a message element.

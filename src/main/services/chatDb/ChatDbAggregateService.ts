@@ -2257,6 +2257,7 @@ export class ChatDbAggregateService {
             for (const block of blockDataList) {
               block.messageId = messageData.id
             }
+            this.assignAuthoritativeBlockOrder(entry.message, blockDataList)
             const patch = wireToMessagePatch(entry.message)
             delete patch.id
             delete patch.topicId
@@ -2645,6 +2646,7 @@ export class ChatDbAggregateService {
               for (const block of blockDataList) {
                 block.messageId = messageData.id
               }
+              this.assignAuthoritativeBlockOrder(entry.message, blockDataList)
               const mid = messageData.id
               if (typeof mid !== 'string' || mid.length === 0) {
                 throw new ChatDbValidationError(`groups[${gi}] entry message must carry a non-empty id`)
@@ -6228,6 +6230,7 @@ export class ChatDbAggregateService {
             for (const block of blockDataList) {
               block.messageId = messageData.id
             }
+            this.assignAuthoritativeBlockOrder(entry.message, blockDataList)
 
             const patch = wireToMessagePatch(entry.message)
             delete patch.id
@@ -7448,6 +7451,7 @@ export class ChatDbAggregateService {
             for (const block of blockDataList) {
               block.messageId = messageData.id
             }
+            this.assignAuthoritativeBlockOrder(entry.message, blockDataList)
 
             const patch = wireToMessagePatch(entry.message)
             delete patch.id

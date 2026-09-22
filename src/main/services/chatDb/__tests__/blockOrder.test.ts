@@ -297,4 +297,115 @@ describe('blockOrder — bounded persistence/order fix', () => {
     const fetched = okValue(agg.fetchMessages(topicId))
     expect(fetched.messages[0].blocks).toEqual([b1Id, b2Id])
   })
+
+  // --- Bounded batch reconstruct invariant: four paths materialize authoritative order ---
+  function assertMaterializedAuthoritativeOrder(topicId: string, messageId: string, expected: string[]): void {
+    const fetched = okValue(agg.fetchMessages(topicId))
+    const msg = fetched.messages.find((m: any) => m.id === messageId) as any
+    expect(msg).toBeDefined()
+    expect(msg.blocks).toEqual(expected)
+    // persisted/raw order is materialized, not tied: sort_order distinct and matches authoritative index
+    const rows = sqlite
+      .prepare(
+        'SELECT id, sort_order as sortOrder FROM message_blocks WHERE message_id = ? ORDER BY sort_order ASC, id ASC'
+      )
+      .all(messageId) as Array<{ id: string; sortOrder: number }>
+    expect(rows.map((r) => r.id)).toEqual(expected)
+    expect(rows.map((r) => r.sortOrder)).toEqual(expected.map((_, i) => i))
+    expect(new Set(rows.map((r) => r.sortOrder)).size).toBe(rows.length)
+  }
+
+  it('pasteMessagesToTopic preserves authoritative complete order despite lex-inverted IDs and materializes sortOrder', () => {
+    const topicId = 't-paste-order'
+    const thinkingId = 'b-zzz-thinking'
+    const mainId = 'b-aaa-main'
+    const msgId = 'm-paste-1'
+    const msgJson: any = { id: msgId, topicId, role: 'assistant', status: 'success', blocks: [thinkingId, mainId] }
+    const tBlk: any = {
+      id: thinkingId,
+      messageId: msgId,
+      type: 'thinking',
+      content: 't',
+      status: 'success',
+      sortOrder: 0
+    }
+    const mBlk: any = { id: mainId, messageId: msgId, type: 'main_text', content: 'm', status: 'success', sortOrder: 0 }
+    const res = agg.pasteMessagesToTopic(topicId, [{ message: msgJson, blocks: [tBlk, mBlk] }])
+    expect(res.ok).toBe(true)
+    assertMaterializedAuthoritativeOrder(topicId, msgId, [thinkingId, mainId])
+  })
+
+  it('cloneMessagesToTopic preserves authoritative complete order despite lex-inverted IDs and materializes sortOrder', () => {
+    const targetTopicId = 't-clone-order'
+    const thinkingId = 'b-zzz-thinking'
+    const mainId = 'b-aaa-main'
+    const msgId = 'm-clone-1'
+    const msgJson: any = {
+      id: msgId,
+      topicId: targetTopicId,
+      role: 'assistant',
+      status: 'success',
+      blocks: [thinkingId, mainId]
+    }
+    const tBlk: any = {
+      id: thinkingId,
+      messageId: msgId,
+      type: 'thinking',
+      content: 't',
+      status: 'success',
+      sortOrder: 0
+    }
+    const mBlk: any = { id: mainId, messageId: msgId, type: 'main_text', content: 'm', status: 'success', sortOrder: 0 }
+    const res = agg.cloneMessagesToTopic(targetTopicId, [{ message: msgJson, blocks: [tBlk, mBlk] }])
+    expect(res.ok).toBe(true)
+    assertMaterializedAuthoritativeOrder(targetTopicId, msgId, [thinkingId, mainId])
+  })
+
+  it('insertMessagesAfterAnchor preserves authoritative complete order despite lex-inverted IDs and materializes sortOrder', () => {
+    const topicId = 't-anchor-order'
+    const anchorId = 'm-anchor-1'
+    const anchorMsg: any = { id: anchorId, topicId, role: 'user', status: 'success', blocks: [] }
+    expect(agg.appendMessage(topicId, anchorMsg, []).ok).toBe(true)
+    const thinkingId = 'b-zzz-thinking'
+    const mainId = 'b-aaa-main'
+    const msgId = 'm-anchor-insert-1'
+    const msgJson: any = { id: msgId, topicId, role: 'assistant', status: 'success', blocks: [thinkingId, mainId] }
+    const tBlk: any = {
+      id: thinkingId,
+      messageId: msgId,
+      type: 'thinking',
+      content: 't',
+      status: 'success',
+      sortOrder: 0
+    }
+    const mBlk: any = { id: mainId, messageId: msgId, type: 'main_text', content: 'm', status: 'success', sortOrder: 0 }
+    const res = agg.insertMessagesAfterAnchor(topicId, anchorId, [{ message: msgJson, blocks: [tBlk, mBlk] }])
+    expect(res.ok).toBe(true)
+    assertMaterializedAuthoritativeOrder(topicId, msgId, [thinkingId, mainId])
+  })
+
+  it('insertMessageGroups preserves authoritative complete order despite lex-inverted IDs and materializes sortOrder', () => {
+    const topicId = 't-groups-order'
+    const seedId = 'm-seed-1'
+    const seedMsg: any = { id: seedId, topicId, role: 'user', status: 'success', blocks: [] }
+    expect(agg.appendMessage(topicId, seedMsg, []).ok).toBe(true)
+    const thinkingId = 'b-zzz-thinking'
+    const mainId = 'b-aaa-main'
+    const msgId = 'm-groups-1'
+    const msgJson: any = { id: msgId, topicId, role: 'assistant', status: 'success', blocks: [thinkingId, mainId] }
+    const tBlk: any = {
+      id: thinkingId,
+      messageId: msgId,
+      type: 'thinking',
+      content: 't',
+      status: 'success',
+      sortOrder: 0
+    }
+    const mBlk: any = { id: mainId, messageId: msgId, type: 'main_text', content: 'm', status: 'success', sortOrder: 0 }
+    const res = agg.insertMessageGroups(topicId, [
+      { entries: [{ message: msgJson, blocks: [tBlk, mBlk] }], intent: { kind: 'topic-tail' } as any }
+    ])
+    expect(res.ok).toBe(true)
+    assertMaterializedAuthoritativeOrder(topicId, msgId, [thinkingId, mainId])
+  })
 })
