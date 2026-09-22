@@ -106,20 +106,16 @@ const EditModeActionBar = () => {
 }
 
 const Container = styled.div`
-  position: sticky;
+  position: absolute;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 10;
   display: flex;
   justify-content: center;
   align-items: center;
   padding: 8px 16px;
-  /*
-   * The parent MessagesContainer is a column-reverse flex + scroll container, so this bar
-   * renders at the visual top. Keeping it a direct child lets sticky travel the full scroll
-   * range, while the negative margin collapses the height it would otherwise reserve in the
-   * flow (which showed up as blank space above the Prompt). The bar overlays content instead.
-   */
-  margin-top: -100%;
+  pointer-events: none;
 `
 
 const ActionBar = styled.div`
@@ -132,6 +128,7 @@ const ActionBar = styled.div`
   box-shadow: 0px 2px 8px 0px rgb(128 128 128 / 20%);
   border: 0.5px solid var(--color-border);
   gap: 16px;
+  pointer-events: auto;
 `
 
 const ActionButtons = styled.div`

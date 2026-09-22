@@ -214,7 +214,15 @@ vi.mock('@renderer/pages/home/Messages/anchorGroupContext', () => ({
   )
 }))
 vi.mock('@renderer/components/EditModeActionBar', () => ({
-  default: vi.fn(() => <div data-testid="edit-mode-action-bar" />)
+  default: vi.fn(() => (
+    <div
+      data-testid="edit-mode-action-bar"
+      style={{ position: 'absolute', top: '0px', left: '0px', right: '0px', zIndex: 10, pointerEvents: 'none' }}>
+      <div data-testid="edit-bar-pill" style={{ pointerEvents: 'auto' }}>
+        selected
+      </div>
+    </div>
+  ))
 }))
 vi.mock('@renderer/components/Icons', () => ({ LoadingIcon: vi.fn(() => <div data-testid="loading-icon" />) }))
 vi.mock('@renderer/components/Scrollbar', () => ({
@@ -466,5 +474,155 @@ describe('Messages edit-mode host regression', () => {
     const host2 = document.getElementById('messages')
     expect(host2).toBe(host1)
     expect(host2!.scrollTop).toBe(-9000)
+  })
+})
+
+describe('Messages edit-mode overlay regression', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.topicMessages = [] as any
+    ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
+  })
+
+  it('overlay contract: EditModeActionBar is absolute sibling outside #messages and #messages host is not rebuilt on selection', async () => {
+    const topic = makeTopic('topic-1')
+    const assistant = makeAssistant()
+    const store = makeStore(false)
+
+    const { rerender } = render(
+      <Provider store={store}>
+        <Messages
+          assistant={assistant}
+          topic={topic}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      </Provider>
+    )
+
+    const hostBefore = document.getElementById('messages')
+    expect(hostBefore).not.toBeNull()
+    Object.defineProperty(hostBefore!, 'scrollHeight', { value: 20000, configurable: true })
+    Object.defineProperty(hostBefore!, 'clientHeight', { value: 800, configurable: true })
+    hostBefore!.scrollTop = -11435
+    mocks.scrollContainerRef.current = hostBefore as unknown as HTMLElement
+
+    expect(document.querySelector('[data-testid="edit-mode-action-bar"]')).toBeNull()
+
+    await act(async () => {
+      store.dispatch({ type: 'editMode/toggleEditMode', payload: true } as any)
+    })
+    await act(async () => {
+      store.dispatch({ type: 'editMode/setSelectedGroupIds', payload: ['g1'] } as any)
+    })
+    await act(async () => {
+      rerender(
+        <Provider store={store}>
+          <Messages
+            assistant={assistant}
+            topic={topic}
+            setActiveTopic={vi.fn()}
+            sharedContextInfo={defaultSharedContextInfo}
+          />
+        </Provider>
+      )
+    })
+
+    const hostAfter = document.getElementById('messages')
+    expect(hostAfter).not.toBeNull()
+    expect(hostAfter).toBe(hostBefore)
+    expect(hostAfter!.isConnected).toBe(true)
+    expect(hostAfter!.scrollTop).toBe(-11435)
+    expect(mocks.scrollContainerRef.current).toBe(hostBefore as unknown as HTMLElement)
+
+    const bar = document.querySelector('[data-testid="edit-mode-action-bar"]') as HTMLElement | null
+    expect(bar).not.toBeNull()
+
+    // 1) located inside MessagesWrapper but not inside #messages
+    const messagesEl = document.getElementById('messages') as HTMLElement
+    const wrapper = messagesEl.parentElement as HTMLElement
+    expect(wrapper).not.toBeNull()
+    expect(wrapper.contains(bar)).toBe(true)
+    expect(messagesEl.contains(bar)).toBe(false)
+    expect(bar!.parentElement).toBe(wrapper)
+    // sibling order: bar before messages inside wrapper
+    const wrapperChildren = Array.from(wrapper.children)
+    const barIndex = wrapperChildren.indexOf(bar!)
+    const msgIndex = wrapperChildren.indexOf(messagesEl)
+    expect(barIndex).toBeGreaterThanOrEqual(0)
+    expect(msgIndex).toBeGreaterThanOrEqual(0)
+    expect(barIndex).toBeLessThan(msgIndex)
+
+    // 2) position absolute (verifiable via inline style in mock or computed style for real)
+    const computedPosition = window.getComputedStyle(bar!).position || (bar as HTMLElement).style.position
+    expect(computedPosition).toBe('absolute')
+    // top/left/right via inline style (mock) or computed
+    const cs = window.getComputedStyle(bar!)
+    const top = cs.top || (bar as HTMLElement).style.top
+    const left = cs.left || (bar as HTMLElement).style.left
+    const right = cs.right || (bar as HTMLElement).style.right
+    expect(top).toBe('0px')
+    expect(left).toBe('0px')
+    expect(right).toBe('0px')
+    // wrapper is positioning context
+    const wrapperPos = window.getComputedStyle(wrapper).position || (wrapper as any).style?.position
+    // jsdom with styled-components may compute via stylesheet; accept relative or fallback to checking source contract via style tag
+    if (wrapperPos && wrapperPos !== '') {
+      expect(wrapperPos).toBe('relative')
+    } else {
+      // fallback: verify MessagesWrapper CSS contains position relative via importActual
+      const actual = (await vi.importActual('@renderer/pages/home/Messages/shared')) as any
+      const rules: string = (actual.MessagesWrapper?.componentStyle?.rules?.join('') ?? '') as string
+      expect(rules).toContain('position: relative')
+    }
+
+    // scrollHeight/clientHeight unchanged by overlay
+    expect(hostAfter!.scrollHeight).toBe(20000)
+    expect(hostAfter!.clientHeight).toBe(800)
+
+    // exit edit mode -> bar disappears but host still stable (mock is unconditional on selection, real checks selected; exit covers both)
+    await act(async () => {
+      store.dispatch({ type: 'editMode/toggleEditMode', payload: false } as any)
+    })
+    await act(async () => {
+      rerender(
+        <Provider store={store}>
+          <Messages
+            assistant={assistant}
+            topic={topic}
+            setActiveTopic={vi.fn()}
+            sharedContextInfo={defaultSharedContextInfo}
+          />
+        </Provider>
+      )
+    })
+    expect(document.querySelector('[data-testid="edit-mode-action-bar"]')).toBeNull()
+    const hostAfterClear = document.getElementById('messages') as HTMLElement
+    expect(hostAfterClear).toBe(hostBefore)
+    expect(hostAfterClear.scrollTop).toBe(-11435)
+    expect(hostAfterClear.scrollHeight).toBe(20000)
+    expect(hostAfterClear.clientHeight).toBe(800)
+  })
+
+  it('real EditModeActionBar and MessagesWrapper styled contracts contain expected overlay CSS', async () => {
+    const actualShared = (await vi.importActual('@renderer/pages/home/Messages/shared')) as any
+    const wrapperRules: string = (actualShared.MessagesWrapper?.componentStyle?.rules?.join('') ?? '') as string
+    expect(wrapperRules).toContain('position: relative')
+    expect(wrapperRules).toContain('overflow: hidden')
+    expect(wrapperRules).toContain('flex: 1')
+
+    const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string
+    expect(containerRules).toContain('flex: 1')
+
+    // Verify real EditModeActionBar source declares absolute overlay (enrichment-proof)
+    const fs = await import('node:fs')
+    const content = fs.readFileSync('src/renderer/src/components/EditModeActionBar.tsx', 'utf-8')
+    expect(content).toContain('position: absolute')
+    expect(content).toContain('left: 0')
+    expect(content).toContain('right: 0')
+    expect(content).toContain('pointer-events: none')
+    // Container must be absolute with z-index 10, not sticky with negative margin
+    expect(content).not.toContain('position: sticky')
+    expect(content).not.toContain('margin-top: -100%')
   })
 })

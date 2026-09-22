@@ -115,7 +115,7 @@ import MessageContextMenu from './MessageContextMenu'
 import MessageGroup from './MessageGroup'
 import { buildRenderLayers, buildRenderSegments, deriveStableGroupId } from './messageRenderLayers'
 import Prompt from './Prompt'
-import { MessagesContainer, ScrollContainer } from './shared'
+import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
 import { createViewportCommitWaiter } from './viewportCommitWaiter'
 
@@ -298,42 +298,44 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   }
 
   return (
-    <MessagesContainer
-      id="messages"
-      className="messages-container"
-      ref={scrollContainerRef}
-      onScroll={handleScrollPosition}>
-      <div style={{ display: 'flex', flexDirection: 'column-reverse' }}>
-        <InfiniteScroll
-          dataLength={displayMessages.length}
-          next={loadMoreMessages}
-          hasMore={hasMore}
-          loader={null}
-          scrollableTarget="messages"
-          inverse
-          style={{ overflow: 'visible' }}>
-          <MessageContextMenu topicId={topic.id}>
-            <ScrollContainer>
-              {isLoadingNewer && (
-                <LoaderContainer>
-                  <LoadingIcon color="var(--color-text-2)" />
-                </LoaderContainer>
-              )}
-              {renderMessageSegments()}
-              {isLoadingMore && (
-                <LoaderContainer>
-                  <LoadingIcon color="var(--color-text-2)" />
-                </LoaderContainer>
-              )}
-            </ScrollContainer>
-          </MessageContextMenu>
-        </InfiniteScroll>
-
-        {/* Prompts always render; the persisted showPrompt setting is inert. */}
-        <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
-      </div>
+    <MessagesWrapper>
       {isEditMode && <EditModeActionBar />}
-    </MessagesContainer>
+      <MessagesContainer
+        id="messages"
+        className="messages-container"
+        ref={scrollContainerRef}
+        onScroll={handleScrollPosition}>
+        <div style={{ display: 'flex', flexDirection: 'column-reverse' }}>
+          <InfiniteScroll
+            dataLength={displayMessages.length}
+            next={loadMoreMessages}
+            hasMore={hasMore}
+            loader={null}
+            scrollableTarget="messages"
+            inverse
+            style={{ overflow: 'visible' }}>
+            <MessageContextMenu topicId={topic.id}>
+              <ScrollContainer>
+                {isLoadingNewer && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
+                {renderMessageSegments()}
+                {isLoadingMore && (
+                  <LoaderContainer>
+                    <LoadingIcon color="var(--color-text-2)" />
+                  </LoaderContainer>
+                )}
+              </ScrollContainer>
+            </MessageContextMenu>
+          </InfiniteScroll>
+
+          {/* Prompts always render; the persisted showPrompt setting is inert. */}
+          <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
+        </div>
+      </MessagesContainer>
+    </MessagesWrapper>
   )
 }
 

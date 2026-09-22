@@ -14,10 +14,21 @@ interface ContainerProps {
   $right?: boolean
 }
 
+export const MessagesWrapper = styled.div`
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+`
+
 export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   display: flex;
   flex-direction: column-reverse;
   overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
   z-index: 1;
   position: relative;
 `
