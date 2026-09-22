@@ -257,7 +257,8 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
   if (action?.type === 'topicSegments/replaceSegmentsForTopic') {
     const isFromSync = !!action?.meta?.fromSync
     const isJointFollowUp = !!action?.meta?.isJointFollowUp
-    if (isFromSync || isJointFollowUp) {
+    const isDeletePairedFollowUp = !!action?.meta?.isDeletePairedFollowUp
+    if (isFromSync || isJointFollowUp || isDeletePairedFollowUp) {
       const tid = action?.payload?.topicId
       const incoming = action?.payload?.segments
       if (typeof tid === 'string' && Array.isArray(incoming) && areJointSegmentsIdentical(state, tid, incoming)) {
@@ -355,8 +356,11 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
   if (typeof action?.type === 'string' && action.type.startsWith('topicSegments/')) {
     const isFromSync = !!action?.meta?.fromSync
     const isJointFollowUp = !!action?.meta?.isJointFollowUp
+    const isDeletePairedFollowUp = !!action?.meta?.isDeletePairedFollowUp
     const isLocalPairedReplaceFollowUp =
-      !isFromSync && isJointFollowUp && action.type === 'topicSegments/replaceSegmentsForTopic'
+      !isFromSync &&
+      (isJointFollowUp || isDeletePairedFollowUp) &&
+      action.type === 'topicSegments/replaceSegmentsForTopic'
     if (isLocalPairedReplaceFollowUp) {
       // exact exemption: only local paired replaceSegmentsForTopic follow-up
       segmentAffected = []

@@ -32,6 +32,7 @@ export class AiSdkToChunkAdapter {
   private providerId?: string
   private idleTimeout?: IdleTimeoutHandle
   private hasActiveReasoning = false
+  private hasActiveText = false
 
   constructor(
     private onChunk: (chunk: Chunk) => void,
@@ -58,6 +59,7 @@ export class AiSdkToChunkAdapter {
     this.responseStartTimestamp = null
     this.firstTokenTimestamp = null
     this.hasActiveReasoning = false
+    this.hasActiveText = false
   }
 
   /**
@@ -174,11 +176,24 @@ export class AiSdkToChunkAdapter {
         // 如果有未完成的思考内容，先生成 THINKING_COMPLETE
         // 这处理了某些提供商不发送 reasoning-end 事件的情况
         this.emitThinkingCompleteIfNeeded(final)
-        this.onChunk({
-          type: ChunkType.TEXT_START
-        })
+        if (!this.hasActiveText) {
+          this.onChunk({
+            type: ChunkType.TEXT_START
+          })
+          this.hasActiveText = true
+        }
         break
       case 'text-delta': {
+        // Bare text-delta without TEXT_START must close active reasoning and emit canonical TEXT_START once
+        if (this.hasActiveReasoning || final.reasoningContent) {
+          this.emitThinkingCompleteIfNeeded(final)
+        }
+        if (!this.hasActiveText) {
+          this.onChunk({
+            type: ChunkType.TEXT_START
+          })
+          this.hasActiveText = true
+        }
         const processedText = chunk.text || ''
         let finalText: string
 
@@ -239,6 +254,7 @@ export class AiSdkToChunkAdapter {
         final.text = ''
         // Clear providerMetadata for next text block
         final.providerMetadata = undefined
+        this.hasActiveText = false
         break
       case 'reasoning-start':
         final.reasoningId = chunk.id
@@ -291,6 +307,7 @@ export class AiSdkToChunkAdapter {
         if (this.hasActiveReasoning || final.reasoningContent) {
           this.emitThinkingCompleteIfNeeded(final)
         }
+        this.hasActiveText = false
         const { providerMetadata, finishReason } = chunk
         // googel web search
         if (providerMetadata?.google?.groundingMetadata) {

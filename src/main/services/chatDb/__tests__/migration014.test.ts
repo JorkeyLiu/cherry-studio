@@ -4,7 +4,7 @@
  *   1..256, topic/ask identity, safe reset_timestamp, and strict JSON
  *   removed_block_ids_json plus a topic_id index (SYNC-DATA-055 intent slice)
  * - No backfill: messages never reset have no row
- * - Registry count 14, idempotent, strict CHECKs, restart durable
+ * - Registry count 15, idempotent, strict CHECKs, restart durable
  */
 import * as realFs from 'node:fs'
 import * as realOs from 'node:os'
@@ -51,7 +51,7 @@ afterEach(() => {
 
 describe('014_sync_resend_attempt', () => {
   it('is registered as 14th migration with correct DDL and no backfill', () => {
-    expect(MIGRATIONS.length).toBe(14)
+    expect(MIGRATIONS.length).toBe(15)
     expect(MIGRATIONS[13].key).toBe('014_sync_resend_attempt')
     const joined = MIGRATIONS[13].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS sync_resend_attempt')
@@ -67,10 +67,10 @@ describe('014_sync_resend_attempt', () => {
     expect(MIGRATIONS[12].key).toBe('013_sync_stable_replace_register')
   })
 
-  it('fresh database creates an empty intent table (14 migrations)', () => {
+  it('fresh database creates an empty intent table (15 migrations)', () => {
     const db = drizzle(sqlite, {})
     const applied = runMigrations(db as never, sqlite)
-    expect(applied).toBe(14)
+    expect(applied).toBe(15)
     const tbl = sqlite
       .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_resend_attempt'`)
       .get() as { sql: string }

@@ -955,12 +955,13 @@ export const executeDeleteMessagesWithDependents = async (
   if (response.deletedBlockIds.length > 0) {
     dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
   }
-  dispatch(
-    replaceSegmentsForTopic({
+  dispatch({
+    ...replaceSegmentsForTopic({
       topicId,
       segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
-    })
-  )
+    }),
+    meta: { isDeletePairedFollowUp: true }
+  } as any)
 
   // Renderer-owned anchor transfer from authoritative group keys.
   transferAnchorsWithAuthorityGroupKeys(

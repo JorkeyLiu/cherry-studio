@@ -239,7 +239,7 @@ describe('ThinkingBlock', () => {
 
     it('should handle extreme thinking times correctly', () => {
       const testCases = [
-        { thinking_millsec: 0, expectedTime: '0.1s' }, // New logic: values < 1000ms display as 0.1s
+        { thinking_millsec: 0, expectedTime: '0.0s' }, // natural 0.0s with no minimum floor
         { thinking_millsec: 86400000, expectedTime: '86400.0s' }, // 1 day
         { thinking_millsec: 259200000, expectedTime: '259200.0s' } // 3 days
       ]
@@ -255,7 +255,7 @@ describe('ThinkingBlock', () => {
       })
     })
 
-    it('should clamp invalid thinking times to a safe default', () => {
+    it('should handle invalid thinking times as 0.0s', () => {
       const testCases = [undefined, Number.NaN, Number.POSITIVE_INFINITY]
 
       testCases.forEach((thinking_millsec) => {
@@ -264,7 +264,7 @@ describe('ThinkingBlock', () => {
           status: MessageBlockStatus.SUCCESS
         })
         const { unmount } = renderThinkingBlock(block)
-        expect(getThinkingTimeText()).toHaveTextContent('0.1s')
+        expect(getThinkingTimeText()).toHaveTextContent('0.0s')
         unmount()
       })
     })

@@ -302,7 +302,6 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       id="messages"
       className="messages-container"
       ref={scrollContainerRef}
-      key={assistant.id}
       onScroll={handleScrollPosition}>
       <div style={{ display: 'flex', flexDirection: 'column-reverse' }}>
         <InfiniteScroll

@@ -1,4 +1,4 @@
-import { createContext, use, useCallback, useEffect, useMemo } from 'react'
+import { createContext, use, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 
 import { useCreateEditMode } from '../hooks/useEditMode'
 import { useAppDispatch, useAppSelector } from '../store'
@@ -15,15 +15,19 @@ interface EditModeProviderProps {
   visibleGroupIds?: Set<string>
 }
 
-function HeavyEditModeProvider({ children, topicId, scrollToGroup, visibleGroupIds }: EditModeProviderProps) {
-  const heavy = useCreateEditMode(topicId, scrollToGroup, visibleGroupIds)
-  return (
-    <EditModeContext value={heavy}>
-      {children}
-      {/* S3.5 marker: heavy subscription graph is active only while enabled */}
-      <span data-testid="edit-heavy-active" style={{ display: 'none' }} />
-    </EditModeContext>
-  )
+type EditModeHeavyBridgeProps = Omit<EditModeProviderProps, 'children'> & {
+  onValue: (v: EditModeContextType | null) => void
+}
+
+function EditModeHeavyBridge({ topicId, scrollToGroup, visibleGroupIds, onValue }: EditModeHeavyBridgeProps) {
+  const heavyValue = useCreateEditMode(topicId, scrollToGroup, visibleGroupIds)
+  useLayoutEffect(() => {
+    onValue(heavyValue)
+  }, [heavyValue, onValue])
+  useEffect(() => {
+    return () => onValue(null)
+  }, [onValue])
+  return null
 }
 
 export function EditModeProvider({ children, topicId, scrollToGroup, visibleGroupIds }: EditModeProviderProps) {
@@ -31,7 +35,7 @@ export function EditModeProvider({ children, topicId, scrollToGroup, visibleGrou
   const dispatch = useAppDispatch()
   const toggleEditMode = useCallback((enabled: boolean) => dispatch(toggleEditModeAction(enabled)), [dispatch])
 
-  // S3.5: Clear selection on topic change even while disabled (light path). Heavy path also clears via its own effect — idempotent.
+  // S3.5: Clear selection on topic change even while disabled. Heavy hook also clears via its own effect — idempotent.
   useEffect(() => {
     dispatch(clearSelection())
   }, [dispatch, topicId])
@@ -63,19 +67,35 @@ export function EditModeProvider({ children, topicId, scrollToGroup, visibleGrou
     [toggleEditMode, handleClearSelection]
   )
 
-  if (!isEnabled) {
-    return (
-      <EditModeContext value={lightValue}>
-        {children}
-        <span data-testid="edit-heavy-inactive" style={{ display: 'none' }} />
-      </EditModeContext>
-    )
-  }
+  const [heavyValue, setHeavyValue] = useState<EditModeContextType | null>(null)
+  const handleHeavyValue = useCallback((v: EditModeContextType | null) => {
+    setHeavyValue(v)
+  }, [])
+
+  const value = useMemo(() => {
+    if (!isEnabled) return lightValue
+    if (heavyValue) return heavyValue
+    // Transitional one-frame while heavy bridge mounts: preserve isEnabled true with light fields
+    return { ...lightValue, isEnabled: true } as EditModeContextType
+  }, [isEnabled, heavyValue, lightValue])
 
   return (
-    <HeavyEditModeProvider topicId={topicId} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
+    <EditModeContext value={value}>
+      {isEnabled && (
+        <EditModeHeavyBridge
+          topicId={topicId}
+          scrollToGroup={scrollToGroup}
+          visibleGroupIds={visibleGroupIds}
+          onValue={handleHeavyValue}
+        />
+      )}
       {children}
-    </HeavyEditModeProvider>
+      {isEnabled ? (
+        <span data-testid="edit-heavy-active" style={{ display: 'none' }} />
+      ) : (
+        <span data-testid="edit-heavy-inactive" style={{ display: 'none' }} />
+      )}
+    </EditModeContext>
   )
 }
 

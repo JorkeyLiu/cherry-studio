@@ -1174,6 +1174,41 @@ export const MIGRATIONS: MigrationEntry[] = [
       )`,
       `CREATE INDEX IF NOT EXISTS sync_resend_attempt_topic_id_idx ON sync_resend_attempt(topic_id)`
     ]
+  },
+  {
+    key: '015_thinking_block_order_repair',
+    description:
+      'Additive compatibility repair for inverted THINKING/MAIN_TEXT order: for assistant messages with exactly two blocks consisting of one thinking and one main_text, canonical order is thinking then main_text; repair only rows whose current authoritative order (sort_order ASC, id ASC) is main_text then thinking',
+    sql: [
+      `WITH candidate AS (
+        SELECT mb.message_id
+        FROM message_blocks mb
+        JOIN messages m ON m.id = mb.message_id
+        WHERE m.role = 'assistant'
+        GROUP BY mb.message_id
+        HAVING COUNT(*) = 2
+          AND SUM(CASE WHEN type = 'thinking' THEN 1 ELSE 0 END) = 1
+          AND SUM(CASE WHEN type = 'main_text' THEN 1 ELSE 0 END) = 1
+      ),
+      ranked AS (
+        SELECT id, message_id, type, sort_order,
+               ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY sort_order ASC, id ASC) AS rn
+        FROM message_blocks
+        WHERE message_id IN (SELECT message_id FROM candidate)
+      ),
+      inverted AS (
+        SELECT r1.message_id, r1.id AS main_id, r2.id AS thinking_id
+        FROM ranked r1
+        JOIN ranked r2 ON r1.message_id = r2.message_id
+        WHERE r1.rn = 1 AND r2.rn = 2 AND r1.type = 'main_text' AND r2.type = 'thinking'
+      )
+      UPDATE message_blocks SET sort_order = CASE
+        WHEN id IN (SELECT thinking_id FROM inverted) THEN 0
+        WHEN id IN (SELECT main_id FROM inverted) THEN 1
+        ELSE sort_order
+      END
+      WHERE id IN (SELECT thinking_id FROM inverted UNION ALL SELECT main_id FROM inverted)`
+    ]
   }
 ]
 

@@ -231,7 +231,25 @@ export class BlockManager {
       localAfter = this.exec.getBlock(blockId)
     }
     const isBlockTypeChanged = this._lastBlockType !== null && this._lastBlockType !== blockType
-    if (isBlockTypeChanged || isComplete) {
+    // Safely narrow existing MessageBlock and incoming changes to THINKING/content-bearing shapes before reading content
+    const isExistingThinkingEmpty = (() => {
+      if (!existing || existing.type !== MessageBlockType.THINKING) return false
+      const thinkingBlock = existing
+      const existingContent = thinkingBlock.content
+      return existingContent == null || (typeof existingContent === 'string' && existingContent.trim() === '')
+    })()
+    const hasIncomingContentString = (c: Partial<MessageBlock>): c is Partial<MessageBlock> & { content: string } => {
+      return 'content' in c && typeof (c as { content?: unknown }).content === 'string'
+    }
+    const isIncomingNonEmpty = hasIncomingContentString(changes) && changes.content.trim() !== ''
+    const isFirstThinkingChunk =
+      blockType === MessageBlockType.THINKING &&
+      isExistingThinkingEmpty &&
+      isIncomingNonEmpty &&
+      this._lastBlockType === blockType &&
+      !isBlockTypeChanged &&
+      !isComplete
+    if (isBlockTypeChanged || isComplete || isFirstThinkingChunk) {
       // 如果块类型改变，则排空上一个块的节流更新（保留最后状态）
       if (isBlockTypeChanged && this._activeBlockInfo) {
         this.flushBlock(this._activeBlockInfo.id)

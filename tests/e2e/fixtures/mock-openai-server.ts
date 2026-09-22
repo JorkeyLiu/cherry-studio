@@ -38,6 +38,12 @@ export const SLOW_STREAM_MARKER = '__E2E_SLOW_STREAM__'
 /** Opt-in marker for reasoning leak simulation: reasoning-start/delta without reasoning-end */
 export const REASONING_LEAK_MARKER = '__E2E_REASONING_LEAK__'
 
+/** Opt-in marker for combined thinking E2E: interval reasoning + bare text deltas */
+export const THINKING_COMBINED_MARKER = '__E2E_THINKING_COMBINED__'
+
+/** Inter-chunk delay for thinking combined streaming mode. */
+const THINKING_COMBINED_CHUNK_DELAY_MS = 80
+
 /** Inter-chunk delay for the slow streaming mode. */
 const SLOW_STREAM_CHUNK_DELAY_MS = 60
 
@@ -299,6 +305,93 @@ function buildReasoningLeakChunks(model: string) {
   return { id, chunks }
 }
 
+function buildThinkingCombinedChunks(model: string) {
+  const id = `chatcmpl-mock-${Date.now()}`
+  const created = Math.floor(Date.now() / 1000)
+  const chunks: Array<Record<string, unknown>> = []
+  // Interval reasoning deltas — each will become THINKING_DELTA via reasoning plugin
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { reasoning_content: 'Combined thinking line 1\n' },
+        finish_reason: null
+      }
+    ]
+  })
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { reasoning_content: 'Combined thinking line 2\n' },
+        finish_reason: null
+      }
+    ]
+  })
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { reasoning_content: 'Combined thinking line 3\n' },
+        finish_reason: null
+      }
+    ]
+  })
+  // Bare text deltas without explicit text-start — adapter must close reasoning and emit TEXT_START once
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { content: 'Answer start: combined verified\n' },
+        finish_reason: null
+      }
+    ]
+  })
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { content: 'continued answer tail-END' },
+        finish_reason: null
+      }
+    ]
+  })
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: 'stop'
+      }
+    ]
+  })
+  return { id, chunks }
+}
+
 function createMockServer(): Promise<MockServerPort> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
@@ -411,6 +504,25 @@ function createMockServer(): Promise<MockServerPort> {
               }
               res.write('data: [DONE]\n\n')
               res.end()
+              return
+            }
+
+            const thinkingCombined =
+              typeof lastUserContent === 'string' && lastUserContent.includes(THINKING_COMBINED_MARKER)
+            if (thinkingCombined) {
+              const { chunks: combinedChunks } = buildThinkingCombinedChunks(model)
+              let i = 0
+              const timer = setInterval(() => {
+                res.write(`data: ${JSON.stringify(combinedChunks[i])}\n\n`)
+                i += 1
+                if (i >= combinedChunks.length) {
+                  clearInterval(timer)
+                  res.write('data: [DONE]\n\n')
+                  res.end()
+                }
+              }, THINKING_COMBINED_CHUNK_DELAY_MS)
+              res.on('close', () => clearInterval(timer))
+              res.on('error', () => clearInterval(timer))
               return
             }
 

@@ -66,7 +66,7 @@ import { elapsedMs, MAX_APPEND_DIAGNOSTIC_LOGS } from '@shared/diagnostics/sendT
 import { isStableBlockStatus, isStableMessageStatus, isUnsupportedBlockForSync } from '@shared/sync'
 import { applyTopicSyncDefaults } from '@shared/sync'
 import type Database from 'better-sqlite3'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { logMainDiagnostic } from '../diagnostics'
@@ -774,6 +774,71 @@ export class ChatDbAggregateService {
   private shouldCaptureMessageCreate(data: MessageData): boolean {
     if (data.role !== 'assistant') return true
     return isStableMessageStatus(data.status)
+  }
+
+  // -------------------------------------------------------------------------
+  // Block order helpers — deterministic thinking/main_text ordering
+  //
+  // Every block persisted/upserted with an authoritative message.blocks order
+  // must receive explicit sortOrder matching that array BEFORE repository
+  // normalization, so THINKING remains above MAIN_TEXT across DB reloads,
+  // variant switching, and deletion/reload. Writes without an authoritative
+  // ordered list retain existing behavior.
+  // -------------------------------------------------------------------------
+
+  private getAuthoritativeBlockIds(messageJson: JsonObject | null | undefined): string[] | null {
+    if (!messageJson || typeof messageJson !== 'object') return null
+    const raw = (messageJson as Record<string, unknown>).blocks
+    if (!Array.isArray(raw) || raw.length === 0) return null
+    const ids: string[] = []
+    for (const v of raw) {
+      if (typeof v !== 'string' || v.length === 0) return null
+      ids.push(v)
+    }
+    return ids
+  }
+
+  private assignAuthoritativeBlockOrder(messageJson: JsonObject | null | undefined, blocks: MessageBlockData[]): void {
+    const ids = this.getAuthoritativeBlockIds(messageJson)
+    if (!ids) return
+    const orderMap = new Map<string, number>()
+    ids.forEach((id, idx) => {
+      if (!orderMap.has(id)) orderMap.set(id, idx)
+    })
+    if (orderMap.size === 0) return
+    for (const b of blocks) {
+      const idx = orderMap.get(b.id)
+      if (idx !== undefined) {
+        b.sortOrder = idx
+      }
+    }
+  }
+
+  private updateSurvivingBlockOrdersInTx(
+    tx: unknown,
+    messageId: string,
+    authoritativeIds: string[] | null,
+    upsertedIds: ReadonlySet<string>,
+    deletedIds: ReadonlySet<string>
+  ): void {
+    if (!authoritativeIds || authoritativeIds.length === 0) return
+    const orderMap = new Map<string, number>()
+    authoritativeIds.forEach((id, idx) => {
+      if (!orderMap.has(id)) orderMap.set(id, idx)
+    })
+    const dbTx = tx as BetterSQLite3Database<typeof schema>
+    for (let idx = 0; idx < authoritativeIds.length; idx++) {
+      const id = authoritativeIds[idx]
+      if (upsertedIds.has(id)) continue
+      if (deletedIds.has(id)) continue
+      // Direct Drizzle update ensures the authoritative order survives variant/delete/reload
+      // even for blocks not included in the current upsert batch. Missing rows are no-ops.
+      dbTx
+        .update(schema.messageBlocks)
+        .set({ sortOrder: idx })
+        .where(and(eq(schema.messageBlocks.id, id), eq(schema.messageBlocks.messageId, messageId)))
+        .run()
+    }
   }
 
   // =========================================================================
@@ -2959,6 +3024,9 @@ export class ChatDbAggregateService {
         for (const block of blockDataList) {
           block.messageId = messageData.id // Enforce consistency
         }
+        // Deterministic block order: assign explicit sortOrder from complete
+        // authoritative message.blocks order before repository normalization
+        this.assignAuthoritativeBlockOrder(messageJson, blockDataList)
         convertDurationMs = elapsedMs(tConvert)
 
         const tTx = performance.now()
@@ -3508,6 +3576,10 @@ export class ChatDbAggregateService {
       delete messagePatch.sortOrder
 
       const blockDataList = blocksToUpdateJson.map(wireToBlock)
+      // Deterministic block order: assign explicit sortOrder from complete
+      // authoritative message.blocks order before repository normalization;
+      // writes without authoritative ordered list retain behavior.
+      this.assignAuthoritativeBlockOrder(messageUpdatesJson, blockDataList)
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens
       // (best-effort delete-parent resolution; authoritative check is in-tx).
@@ -3639,6 +3711,18 @@ export class ChatDbAggregateService {
 
             // Sync file references
             this.syncFileReferences(repos, blockDataList)
+          }
+
+          // Deterministic block order for non-upserted survivors (same transaction):
+          // ensures supplied authoritative order survives variant/delete/reload.
+          // Writes without authoritative ordered list retain behavior.
+          {
+            const authoritativeIds = this.getAuthoritativeBlockIds(messageUpdatesJson)
+            if (authoritativeIds) {
+              const upsertedIds = new Set(blockDataList.map((b) => b.id))
+              const deletedIds = new Set(blockIdsToDelete)
+              this.updateSurvivingBlockOrdersInTx(tx, messageId, authoritativeIds, upsertedIds, deletedIds)
+            }
           }
 
           // Transaction-bound sync intent (same atomic boundary).

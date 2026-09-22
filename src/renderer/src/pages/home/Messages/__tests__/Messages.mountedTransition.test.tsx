@@ -297,8 +297,16 @@ vi.mock('@renderer/services/phaseTimingDiagnostics', () => ({
 }))
 
 vi.mock('@renderer/store', () => ({
-  default: { getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} } })) },
-  useAppDispatch: () => (mocks as any).dispatchMock
+  default: {
+    getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} }, editMode: { enabled: false } })),
+    subscribe: vi.fn(() => vi.fn())
+  },
+  useAppDispatch: () => (mocks as any).dispatchMock,
+  useAppSelector: (selector: any) => selector({ editMode: { enabled: false } } as any),
+  useAppStore: () => ({
+    getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} }, editMode: { enabled: false } })),
+    subscribe: vi.fn(() => vi.fn())
+  })
 }))
 
 vi.mock('@renderer/store/messageBlock', () => ({

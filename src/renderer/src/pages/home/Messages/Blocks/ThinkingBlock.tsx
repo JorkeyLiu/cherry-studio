@@ -48,7 +48,7 @@ const ThinkingBlock: React.FC<Props> = ({ block }) => {
     }
   }, [block.content, setCopied, t])
 
-  if (!block.content) {
+  if (!block.content && block.status !== MessageBlockStatus.STREAMING) {
     return null
   }
 
@@ -112,40 +112,62 @@ const splitThinkingLabel = (label: string) => {
 const ThinkingTimeSeconds = memo(
   ({ blockThinkingTime, isThinking }: { blockThinkingTime: number; isThinking: boolean }) => {
     const { t } = useTranslation()
-    // Initialize to 0 so the local timer always starts fresh when thinking begins.
-    // The actual blockThinkingTime is only applied once thinking completes (isThinking = false),
-    // which prevents a race condition from inflating the initial display value.
-    const [displayTime, setDisplayTime] = useState(isThinking ? 0 : normalizeThinkingTime(blockThinkingTime))
+    const anchorRef = useRef<number | null>(null)
+    const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const [tick, setTick] = useState(0)
 
-    const timer = useRef<NodeJS.Timeout | null>(null)
-
+    // Capture natural wall-clock anchor once per STREAMING session; rapid prop updates must not reset
     useEffect(() => {
       if (isThinking) {
-        if (!timer.current) {
-          timer.current = setInterval(() => {
-            setDisplayTime((prev) => prev + 100)
-          }, 100)
+        if (anchorRef.current === null) {
+          anchorRef.current = performance.now() - normalizeThinkingTime(blockThinkingTime)
+        }
+        if (intervalRef.current === null) {
+          intervalRef.current = setInterval(() => setTick((v) => v + 1), 100)
         }
       } else {
-        if (timer.current) {
-          clearInterval(timer.current)
-          timer.current = null
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
         }
-        setDisplayTime(normalizeThinkingTime(blockThinkingTime))
+        anchorRef.current = null
       }
-
       return () => {
-        if (timer.current) {
-          clearInterval(timer.current)
-          timer.current = null
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current)
+          intervalRef.current = null
         }
       }
     }, [isThinking, blockThinkingTime])
 
+    // Synchronously ensure anchor exists on first STREAMING render before effect runs (for fake timers)
+    if (isThinking && anchorRef.current === null) {
+      anchorRef.current = performance.now() - normalizeThinkingTime(blockThinkingTime)
+    }
+    if (!isThinking && anchorRef.current !== null) {
+      anchorRef.current = null
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+        intervalRef.current = null
+      }
+    }
+
+    const displayMs = useMemo(() => {
+      const authoritative = normalizeThinkingTime(blockThinkingTime)
+      if (!isThinking) {
+        return authoritative
+      }
+      // trigger recompute on tick
+      void tick
+      const elapsed = anchorRef.current !== null ? performance.now() - anchorRef.current : 0
+      // authoritative baseline is live max between wall-clock and chunk-provided value
+      return Math.max(authoritative, elapsed)
+    }, [isThinking, blockThinkingTime, tick])
+
     const thinkingTimeSeconds = useMemo(() => {
-      const safeTime = normalizeThinkingTime(displayTime)
-      return ((safeTime < 1000 ? 100 : safeTime) / 1000).toFixed(1)
-    }, [displayTime])
+      const safeTime = normalizeThinkingTime(displayMs)
+      return (safeTime / 1000).toFixed(1)
+    }, [displayMs])
 
     const label = isThinking
       ? t('chat.thinking', {

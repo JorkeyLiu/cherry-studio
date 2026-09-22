@@ -22,9 +22,24 @@ import type { AISDKWebSearchResult, Citation, WebSearchProviderResponse } from '
 import { WEB_SEARCH_SOURCE } from '@renderer/types'
 import type { CitationMessageBlock, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import { MessageBlockStatus } from '@renderer/types/newMessage'
 
 import type { RootState } from './index' // 确认 RootState 从 store/index.ts 导出
 import { publishResidentComplete, retentionEvict } from './residentRegistry'
+
+const TERMINAL_STATUSES = new Set<string>([MessageBlockStatus.SUCCESS, MessageBlockStatus.ERROR])
+const STALE_STATUSES = new Set<string>([
+  MessageBlockStatus.PENDING,
+  MessageBlockStatus.PROCESSING,
+  MessageBlockStatus.STREAMING,
+  MessageBlockStatus.PAUSED
+])
+function isStaleTransition(existingStatus: string | undefined, incomingStatus: string | undefined): boolean {
+  if (!existingStatus || !incomingStatus) return false
+  if (!TERMINAL_STATUSES.has(existingStatus)) return false
+  if (STALE_STATUSES.has(incomingStatus)) return true
+  return false
+}
 
 // Create a simplified type for the entity adapter to avoid circular type issues
 type MessageBlockEntity = MessageBlock
@@ -49,11 +64,37 @@ export const messageBlocksSlice = createSlice({
     // 使用适配器的 reducer 助手进行 CRUD 操作。
     // 这些 reducer 会自动处理规范化的状态结构。
 
-    /** 添加或更新单个块 (Upsert)。 */
-    upsertOneBlock: messageBlocksAdapter.upsertOne, // 期望 MessageBlock 作为 payload
+    /** 添加或更新单个块 (Upsert) — terminal SUCCESS/ERROR rejects stale PENDING/PROCESSING/STREAMING/PAUSED. */
+    upsertOneBlock: (state, action: PayloadAction<MessageBlock>) => {
+      const incoming = action.payload as unknown as MessageBlock & { status?: string }
+      const existing = (state.entities as Record<string, any>)[(incoming as any).id]
+      if (existing && isStaleTransition(existing.status, (incoming as any).status)) {
+        return
+      }
+      messageBlocksAdapter.upsertOne(state as any, action as any)
+    },
 
-    /** 添加或更新多个块。用于加载消息。 */
-    upsertManyBlocks: messageBlocksAdapter.upsertMany, // 期望 MessageBlock[] 作为 payload
+    /** 添加或更新多个块 — per-entity stale filter with intra-batch tracking. */
+    upsertManyBlocks: (state, action: PayloadAction<MessageBlock[]>) => {
+      const incoming = action.payload as unknown as MessageBlock[]
+      if (!Array.isArray(incoming) || incoming.length === 0) return
+      const entities = state.entities as Record<string, any>
+      const seen = new Map<string, any>()
+      const filtered: MessageBlock[] = []
+      for (const block of incoming) {
+        const id = (block as any).id as string
+        const existing = seen.has(id) ? seen.get(id) : entities[id]
+        if (existing && isStaleTransition(existing.status, (block as any).status)) {
+          continue
+        }
+        filtered.push(block)
+        const merged = existing ? { ...existing, ...block } : { ...(block as any) }
+        seen.set(id, merged)
+      }
+      if (filtered.length > 0) {
+        messageBlocksAdapter.upsertMany(state as any, filtered as any)
+      }
+    },
 
     /** 根据 ID 移除单个块。 */
     removeOneBlock: messageBlocksAdapter.removeOne, // 期望 EntityId (string) 作为 payload
@@ -73,15 +114,42 @@ export const messageBlocksSlice = createSlice({
       state.loadingState = 'failed'
       state.error = action.payload
     },
-    // 注意：如果只想更新现有块，也可以使用 `updateOne`
-    updateOneBlock: messageBlocksAdapter.updateOne // 期望 { id: EntityId, changes: Partial<MessageBlock> }
+    // 注意：如果只想更新现有块，也可以使用 `updateOne` — stale status patch rejected, content-only allowed
+    updateOneBlock: (state, action: PayloadAction<{ id: string; changes: Partial<MessageBlock> }>) => {
+      const { id, changes } = action.payload as any
+      const existing = (state.entities as Record<string, any>)[id]
+      if (
+        existing &&
+        changes &&
+        typeof changes.status === 'string' &&
+        isStaleTransition(existing.status, changes.status)
+      ) {
+        return
+      }
+      messageBlocksAdapter.updateOne(state as any, action as any)
+    }
   },
   extraReducers: (builder) => {
     builder.addCase(publishResidentComplete, (state, action) => {
       const { windowResponse } = action.payload
       const blocks = windowResponse.blocks as unknown as MessageBlock[]
       if (blocks.length > 0) {
-        messageBlocksAdapter.upsertMany(state as any, blocks as any)
+        const entities = state.entities as Record<string, any>
+        const seen = new Map<string, any>()
+        const filtered: MessageBlock[] = []
+        for (const block of blocks) {
+          const id = (block as any).id as string
+          const existing = seen.has(id) ? seen.get(id) : entities[id]
+          if (existing && isStaleTransition(existing.status, (block as any).status)) {
+            continue
+          }
+          filtered.push(block as unknown as MessageBlock)
+          const merged = existing ? { ...existing, ...(block as any) } : { ...(block as any) }
+          seen.set(id, merged)
+        }
+        if (filtered.length > 0) {
+          messageBlocksAdapter.upsertMany(state as any, filtered as any)
+        }
       }
     })
     // Exclusive block removal is handled atomically in rootReducer with full cross-slice visibility

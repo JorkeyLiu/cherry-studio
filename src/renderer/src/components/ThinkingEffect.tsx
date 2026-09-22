@@ -14,9 +14,8 @@ interface Props {
 const ThinkingEffect: React.FC<Props> = ({ isThinking, thinkingTimeText, content, expanded }) => {
   const messages = useMemo(() => {
     const allLines = (content || '').split('\n')
-    const newMessages = isThinking ? allLines.slice(0, -1) : allLines
-    return newMessages.filter((line) => line.trim() !== '')
-  }, [content, isThinking])
+    return allLines.filter((line) => line.trim() !== '')
+  }, [content])
 
   const showThinking = useMemo(() => {
     return isThinking && !expanded
