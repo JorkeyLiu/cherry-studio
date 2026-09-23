@@ -2745,6 +2745,7 @@
       "no_data": "暂无模型元数据",
       "output": "输出",
       "output_audio": "音频输出",
+      "output_limit": "输出长度",
       "per_million_tokens": "/ 百万 Token",
       "reasoning": "推理",
       "reasoning_controls": "推理控制",

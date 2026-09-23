@@ -1,4 +1,8 @@
-import { MODEL_METADATA_SOURCE, type NormalizedModelMetadata } from '@shared/modelMetadata'
+import {
+  MODEL_METADATA_SOURCE,
+  type NormalizedModelMetadata,
+  type NormalizedProviderServingCost
+} from '@shared/modelMetadata'
 import { Divider, Flex } from 'antd'
 import type { FC } from 'react'
 import { useMemo } from 'react'
@@ -13,23 +17,62 @@ function isDisplayText(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+/** USD per-million reference price, rendered deterministically for tests. */
+export function formatReferencePrice(value: number): string {
+  return `$${String(value)}`
+}
+
 /** Token limits render with en-US grouping (e.g. 200000 -> 200,000). */
 export function formatLimitTokens(value: number): string {
   return value.toLocaleString('en-US')
 }
 
 /**
- * Whether the entry carries any concrete Model Data row (context limit,
- * dates). Canonical `models.json` publishes no provider-specific pricing or
- * reasoning options, so those rows never render: they read as unknown/absent
- * (never filled from proxy-serving records). Reasoning effort alone never
- * counts: features already show in the icon group above. Exported so the
- * Edit Model empty-state can detect "all three groups empty".
+ * Reasoning effort display from published serving `effort` only.
+ * Only the normalized effort array is shown (e.g. low, high, xhigh via
+ * join(', ')). Empty/missing effort is unknown, so the row hides: it never
+ * renders a Not supported placeholder and never triggers section visibility
+ * alone. Accepts either a raw effort array or a legacy `{effort}` wrapper.
  */
-export function hasConcreteModelData(entry: NormalizedModelMetadata | undefined | null): boolean {
+export function formatReasoningControls(effortOrWrapper: unknown): { text: string; known: boolean } {
+  const rawEffort = Array.isArray(effortOrWrapper)
+    ? effortOrWrapper
+    : isRecord(effortOrWrapper) && Array.isArray((effortOrWrapper as { effort?: unknown }).effort)
+      ? (effortOrWrapper as { effort: unknown[] }).effort
+      : undefined
+  const effort = Array.isArray(rawEffort) ? rawEffort.map((v) => String(v).trim()).filter((v) => v.length > 0) : []
+  if (effort.length > 0) return { text: effort.join(', '), known: true }
+  return { text: '', known: false }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export type EffectiveModelMetadataEntry = NormalizedModelMetadata & {
+  cost?: NormalizedProviderServingCost
+  effort?: string[]
+}
+
+/**
+ * Whether the entry carries any concrete Model Data row (pricing via cost,
+ * context/output limits, dates). Reasoning effort alone never counts: features
+ * already show in the icon group above. Exported so the Edit Model
+ * empty-state can detect "all three groups empty".
+ */
+export function hasConcreteModelData(
+  entry: EffectiveModelMetadataEntry | NormalizedModelMetadata | undefined | null
+): boolean {
   if (!entry || typeof entry !== 'object') return false
   if (entry.limits && typeof entry.limits === 'object') {
     if (typeof entry.limits.context === 'number' && Number.isFinite(entry.limits.context)) return true
+    if (typeof entry.limits.output === 'number' && Number.isFinite(entry.limits.output)) return true
+  }
+  const cost = (entry as EffectiveModelMetadataEntry).cost
+  if (cost && typeof cost === 'object') {
+    for (const value of [cost.input, cost.output, cost.cacheRead, cost.cacheWrite]) {
+      if (typeof value === 'number' && Number.isFinite(value)) return true
+    }
   }
   if (typeof entry.releaseDate === 'string' && entry.releaseDate.trim().length > 0) return true
   if (typeof entry.knowledgeCutoff === 'string' && entry.knowledgeCutoff.trim().length > 0) return true
@@ -43,7 +86,7 @@ interface ReferenceRow {
   testId: string
   /** Whether the row carries a known value. */
   known: boolean
-  /** Concrete rows (limits/dates) gate section visibility. */
+  /** Concrete rows (pricing/limits/dates) gate section visibility. */
   concrete: boolean
 }
 
@@ -54,18 +97,55 @@ interface ReferenceRow {
  * subscribes to the registry status): this component never looks the entry up
  * itself, so async snapshot resolution always flows into the open popup for
  * both capability icons and model data together. Never writes, never applies,
- * never edits: it only displays published canonical metadata. Capability
- * icons live in ModelCapabilityGroups; this section keeps context limit and
- * dates. Pricing and reasoning-option rows never render: canonical
- * `models.json` does not publish them, so they read as unknown/absent.
+ * never edits: it only displays published metadata. Capability icons live in
+ * ModelCapabilityGroups; this section keeps pricing (via effective.cost),
+ * context/output limits, dates, and effort-only reasoning controls. Serving
+ * wins, canonical fills only missing fields (resolved upstream via
+ * getModelMetadataForDisplay); this view only reads the effective result.
+ * Family/status/description/lastUpdated/limits.input/tiering/button are
+ * intentionally not restored.
  */
-const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = ({ entry }) => {
+const ModelMetadataReference: FC<{ entry?: EffectiveModelMetadataEntry | null }> = ({ entry }) => {
   const { t } = useTranslation()
 
   const rows = useMemo<ReferenceRow[]>(() => {
     if (!entry || typeof entry !== 'object') return []
     const out: ReferenceRow[] = []
     const limits = entry.limits
+    const cost = entry.cost
+    const effort = entry.effort
+    const unit = t('models.reference.per_million_tokens')
+
+    if (cost && typeof cost === 'object') {
+      const priced: Array<{ key: string; labelKey: string; value: unknown; testId: string }> = [
+        { key: 'input', labelKey: 'models.reference.input', value: cost.input, testId: 'ref-price-input' },
+        { key: 'output', labelKey: 'models.reference.output', value: cost.output, testId: 'ref-price-output' },
+        {
+          key: 'cacheRead',
+          labelKey: 'models.reference.cache_read',
+          value: cost.cacheRead,
+          testId: 'ref-price-cache-read'
+        },
+        {
+          key: 'cacheWrite',
+          labelKey: 'models.reference.cache_write',
+          value: cost.cacheWrite,
+          testId: 'ref-price-cache-write'
+        }
+      ]
+      for (const item of priced) {
+        if (isDisplayNumber(item.value)) {
+          out.push({
+            key: `cost.${item.key}`,
+            label: t(item.labelKey),
+            value: `${formatReferencePrice(item.value)} ${unit}`,
+            testId: item.testId,
+            known: true,
+            concrete: true
+          })
+        }
+      }
+    }
 
     if (limits && typeof limits === 'object') {
       if (isDisplayNumber(limits.context)) {
@@ -74,6 +154,16 @@ const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = (
           label: t('models.reference.context_limit'),
           value: formatLimitTokens(limits.context),
           testId: 'ref-limit-context',
+          known: true,
+          concrete: true
+        })
+      }
+      if (isDisplayNumber(limits.output)) {
+        out.push({
+          key: 'limits.output',
+          label: t('models.reference.output_limit'),
+          value: formatLimitTokens(limits.output),
+          testId: 'ref-limit-output',
           known: true,
           concrete: true
         })
@@ -101,12 +191,25 @@ const ModelMetadataReference: FC<{ entry?: NormalizedModelMetadata | null }> = (
       })
     }
 
+    const effortFormatted = formatReasoningControls(effort)
+    if (effortFormatted.known) {
+      out.push({
+        key: 'reasoningControls',
+        label: t('models.reference.reasoning_controls'),
+        value: effortFormatted.text,
+        testId: 'ref-reasoning-controls',
+        known: true,
+        concrete: false
+      })
+    }
+
     return out
   }, [entry, t])
 
-  // The section shows only when concrete model data exists (context limit,
-  // dates). A features-only entry stays hidden because features already show
-  // in the icon group above.
+  // The section shows only when concrete model data exists (pricing via cost,
+  // context/output limits, dates). The effort-only row never triggers
+  // visibility alone, so a features-only or effort-only entry stays hidden
+  // because features already show in the icon group above.
   const hasConcreteValue = rows.some((row) => row.known && row.concrete)
   if (!entry || !hasConcreteValue) return null
   const visibleRows = rows.filter((row) => row.known)

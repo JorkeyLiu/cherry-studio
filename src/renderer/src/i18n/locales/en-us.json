@@ -2745,6 +2745,7 @@
       "no_data": "No model metadata available",
       "output": "Output",
       "output_audio": "Output audio",
+      "output_limit": "Output limit",
       "per_million_tokens": "/ M tokens",
       "reasoning": "Reasoning",
       "reasoning_controls": "Reasoning controls",
