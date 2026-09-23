@@ -33,6 +33,8 @@ export class AiSdkToChunkAdapter {
   private idleTimeout?: IdleTimeoutHandle
   private hasActiveReasoning = false
   private hasActiveText = false
+  private thinkingStarted = false
+  private hasTerminalChunk = false
 
   constructor(
     private onChunk: (chunk: Chunk) => void,
@@ -60,6 +62,11 @@ export class AiSdkToChunkAdapter {
     this.firstTokenTimestamp = null
     this.hasActiveReasoning = false
     this.hasActiveText = false
+    this.thinkingStarted = false
+  }
+
+  private static hasVisibleText(value: string | undefined | null): boolean {
+    return typeof value === 'string' && /\S/.test(value)
   }
 
   /**
@@ -102,6 +109,7 @@ export class AiSdkToChunkAdapter {
       providerMetadata: undefined as ProviderMetadata | undefined
     }
     this.resetTimingState()
+    this.hasTerminalChunk = false
     this.responseStartTimestamp = Date.now()
     // Reset state at the start of stream
     this.isFirstChunk = true
@@ -125,6 +133,14 @@ export class AiSdkToChunkAdapter {
               })
             }
           }
+          // Normal EOF without an explicit finish: converge exactly once.
+          // Error/abort chunks already marked a terminal and must never be
+          // overwritten with SUCCESS; thrown read errors skip this path.
+          if (!this.hasTerminalChunk) {
+            this.hasTerminalChunk = true
+            this.emitThinkingCompleteIfNeeded(final)
+            this.emitBlockCompletion(final, undefined)
+          }
           break
         }
 
@@ -140,19 +156,61 @@ export class AiSdkToChunkAdapter {
   }
 
   /**
-   * 如果有累积的思考内容或活跃的 reasoning 会话，发送 THINKING_COMPLETE chunk 并清空
+   * 如果已发出可见 thinking（THINKING_START），发送 THINKING_COMPLETE chunk 并清空。
+   * 仅 start/空白 delta 的挂起 reasoning 在此静默丢弃，不创建空 thinking block。
    * @param final 包含 reasoningContent 的状态对象
    */
   private emitThinkingCompleteIfNeeded(final: { reasoningContent: string; [key: string]: any }) {
-    if (this.hasActiveReasoning || final.reasoningContent) {
+    if (this.thinkingStarted) {
       this.onChunk({
         type: ChunkType.THINKING_COMPLETE,
         text: final.reasoningContent || ''
       })
       final.reasoningContent = ''
       this.hasActiveReasoning = false
+      this.thinkingStarted = false
+      final.reasoningId = ''
+    } else if (this.hasActiveReasoning || final.reasoningContent) {
+      // No visible thinking was ever emitted: drop pending id/content silently.
+      final.reasoningContent = ''
+      this.hasActiveReasoning = false
+      this.thinkingStarted = false
       final.reasoningId = ''
     }
+  }
+
+  private emitBlockCompletion(
+    final: { text: string; reasoningContent: string },
+    totalUsage?: { inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }
+  ) {
+    const usage = {
+      completion_tokens: totalUsage?.outputTokens || 0,
+      prompt_tokens: totalUsage?.inputTokens || 0,
+      total_tokens: totalUsage?.totalTokens || 0
+    }
+    const metrics = this.buildMetrics(totalUsage)
+    const baseResponse = {
+      text: final.text || '',
+      reasoning_content: final.reasoningContent || ''
+    }
+
+    this.onChunk({
+      type: ChunkType.BLOCK_COMPLETE,
+      response: {
+        ...baseResponse,
+        usage: { ...usage },
+        metrics: metrics ? { ...metrics } : undefined
+      }
+    })
+    this.onChunk({
+      type: ChunkType.LLM_RESPONSE_COMPLETE,
+      response: {
+        ...baseResponse,
+        usage: { ...usage },
+        metrics: metrics ? { ...metrics } : undefined
+      }
+    })
+    this.resetTimingState()
   }
 
   /**
@@ -258,15 +316,25 @@ export class AiSdkToChunkAdapter {
         break
       case 'reasoning-start':
         final.reasoningId = chunk.id
+        // Delay THINKING_START until the first visible delta so empty
+        // Responses reasoning items never create an empty thinking block.
         this.hasActiveReasoning = true
-        this.onChunk({
-          type: ChunkType.THINKING_START
-        })
         break
-      case 'reasoning-delta':
+      case 'reasoning-delta': {
+        // Preserve raw text (including leading whitespace) but only start
+        // the visible thinking lifecycle once non-whitespace appears.
         final.reasoningContent += chunk.text || ''
         this.hasActiveReasoning = true
-        if (chunk.text) {
+        if (!AiSdkToChunkAdapter.hasVisibleText(final.reasoningContent)) {
+          break
+        }
+        if (!this.thinkingStarted) {
+          this.thinkingStarted = true
+          this.onChunk({
+            type: ChunkType.THINKING_START
+          })
+        }
+        if (AiSdkToChunkAdapter.hasVisibleText(chunk.text)) {
           this.markFirstTokenIfNeeded()
         }
         this.onChunk({
@@ -274,6 +342,7 @@ export class AiSdkToChunkAdapter {
           text: final.reasoningContent || ''
         })
         break
+      }
       case 'reasoning-end':
         this.emitThinkingCompleteIfNeeded(final)
         break
@@ -353,38 +422,11 @@ export class AiSdkToChunkAdapter {
       }
 
       case 'finish': {
-        // 最终兜底：正常完成前必须闭合遗留的 STREAMING thinking
-        if (this.hasActiveReasoning || final.reasoningContent) {
-          this.emitThinkingCompleteIfNeeded(final)
-        }
-        const usage = {
-          completion_tokens: chunk.totalUsage?.outputTokens || 0,
-          prompt_tokens: chunk.totalUsage?.inputTokens || 0,
-          total_tokens: chunk.totalUsage?.totalTokens || 0
-        }
-        const metrics = this.buildMetrics(chunk.totalUsage)
-        const baseResponse = {
-          text: final.text || '',
-          reasoning_content: final.reasoningContent || ''
-        }
-
-        this.onChunk({
-          type: ChunkType.BLOCK_COMPLETE,
-          response: {
-            ...baseResponse,
-            usage: { ...usage },
-            metrics: metrics ? { ...metrics } : undefined
-          }
-        })
-        this.onChunk({
-          type: ChunkType.LLM_RESPONSE_COMPLETE,
-          response: {
-            ...baseResponse,
-            usage: { ...usage },
-            metrics: metrics ? { ...metrics } : undefined
-          }
-        })
-        this.resetTimingState()
+        // 最终兜底：正常完成前必须闭合已开始的可见 thinking；
+        // 仅 start/空白的挂起 reasoning 在此静默丢弃。
+        this.emitThinkingCompleteIfNeeded(final)
+        this.hasTerminalChunk = true
+        this.emitBlockCompletion(final, chunk.totalUsage)
         break
       }
 
@@ -407,12 +449,14 @@ export class AiSdkToChunkAdapter {
         })
         break
       case 'abort':
+        this.hasTerminalChunk = true
         this.onChunk({
           type: ChunkType.ERROR,
           error: new DOMException('Request was aborted', 'AbortError')
         })
         break
       case 'error':
+        this.hasTerminalChunk = true
         this.onChunk({
           type: ChunkType.ERROR,
           error: AISDKError.isInstance(chunk.error)

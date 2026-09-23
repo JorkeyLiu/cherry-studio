@@ -195,9 +195,9 @@ describe('ThinkingBlock timer monotonic formatting (root repair)', () => {
     expect(screen.getByTestId('thinking-time-text').textContent).toContain('1.2s')
   })
 
-  it('STREAMING re-entry/remount anchors safely with empty shell', async () => {
+  it('STREAMING re-entry/remount anchors safely with visible shell', async () => {
     const { rerender, unmount } = render(
-      <ThinkingBlock block={mk({ status: MessageBlockStatus.STREAMING, thinking_millsec: 0, content: '' })} />
+      <ThinkingBlock block={mk({ status: MessageBlockStatus.STREAMING, thinking_millsec: 0, content: 'thinking' })} />
     )
     expect(screen.getByTestId('thinking-time-text').textContent).toContain('0.0s')
     await act(async () => {
@@ -220,12 +220,23 @@ describe('ThinkingBlock timer monotonic formatting (root repair)', () => {
     })
     expect(screen.getByTestId('thinking-time-text').textContent).toContain('0.1s')
     unmount()
-    // fresh remount empty STREAMING shell
+    // fresh remount visible STREAMING shell
     render(
       <ThinkingBlock
-        block={mk({ id: 'tb99', content: '', status: MessageBlockStatus.STREAMING, thinking_millsec: 0 })}
+        block={mk({ id: 'tb99', content: 'thinking', status: MessageBlockStatus.STREAMING, thinking_millsec: 0 })}
       />
     )
     expect(screen.getByTestId('thinking-time-text').textContent).toContain('0.0s')
+  })
+
+  it('empty or whitespace-only STREAMING renders no shell and no timer', async () => {
+    const { container, rerender } = render(
+      <ThinkingBlock block={mk({ status: MessageBlockStatus.STREAMING, thinking_millsec: 0, content: '' })} />
+    )
+    expect(container.firstChild).toBeNull()
+    rerender(
+      <ThinkingBlock block={mk({ status: MessageBlockStatus.STREAMING, thinking_millsec: 0, content: '   \n' })} />
+    )
+    expect(container.firstChild).toBeNull()
   })
 })

@@ -48,7 +48,10 @@ const ThinkingBlock: React.FC<Props> = ({ block }) => {
     }
   }, [block.content, setCopied, t])
 
-  if (!block.content && block.status !== MessageBlockStatus.STREAMING) {
+  // Empty or whitespace-only reasoning never renders a shell: without visible
+  // text there is no thinking to show and no timer to run. Visible thinking
+  // renders in both STREAMING and terminal states.
+  if (!/\S/.test(block.content || '')) {
     return null
   }
 

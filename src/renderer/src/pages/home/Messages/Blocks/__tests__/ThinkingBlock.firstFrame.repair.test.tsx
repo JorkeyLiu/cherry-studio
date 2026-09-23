@@ -74,10 +74,24 @@ describe('ThinkingBlock first-frame/half-collapsed repair', () => {
     vi.clearAllMocks()
   })
 
-  it('renders empty STREAMING shell (collapsed thinking shell appears as soon as THINKING_START)', () => {
+  it('hides empty STREAMING shell (no shell or timer without visible reasoning)', () => {
     const { container } = render(<ThinkingBlock block={mk({ content: '', status: MessageBlockStatus.STREAMING })} />)
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('hides whitespace-only STREAMING shell', () => {
+    const { container } = render(
+      <ThinkingBlock block={mk({ content: '   \n\t  ', status: MessageBlockStatus.STREAMING })} />
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('renders visible STREAMING shell on first real reasoning text', () => {
+    const { container } = render(
+      <ThinkingBlock block={mk({ content: 'hello thinking', status: MessageBlockStatus.STREAMING })} />
+    )
     expect(container.firstChild).not.toBeNull()
-    // shell should contain ThinkingEffect even with empty content
+    // shell should contain ThinkingEffect once visible content arrives
     const effect = container.querySelector('[data-testid="thinking-effect"]')
     expect(effect).not.toBeNull()
     expect(effect?.getAttribute('data-is-thinking')).toBe('true')

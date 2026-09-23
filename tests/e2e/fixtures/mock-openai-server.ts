@@ -41,6 +41,20 @@ export const REASONING_LEAK_MARKER = '__E2E_REASONING_LEAK__'
 /** Opt-in marker for combined thinking E2E: interval reasoning + bare text deltas */
 export const THINKING_COMBINED_MARKER = '__E2E_THINKING_COMBINED__'
 
+/**
+ * Opt-in marker for empty-Responses-reasoning E2E: a reasoning item with no
+ * summary text (reasoning start/end only), followed by the answer.
+ *
+ * Transport: this marker is served on the real Responses wire
+ * (`POST /v1/responses` SSE, `provider.type=openai-response` → the pinned
+ * `@ai-sdk/openai` 3.0.53 Responses language model). The SSE emits
+ * `response.output_item.added[type=reasoning]` → reasoning-start, zero
+ * `response.reasoning_summary_text.delta`, `output_item.done[type=reasoning]`
+ * → reasoning-end, then the message item + `response.output_text.delta`
+ * answer and `response.completed`. See the spec header.
+ */
+export const RESPONSES_EMPTY_REASONING_MARKER = '__E2E_RESPONSES_EMPTY_REASONING__'
+
 /** Inter-chunk delay for thinking combined streaming mode. */
 const THINKING_COMBINED_CHUNK_DELAY_MS = 80
 
@@ -110,6 +124,39 @@ export function findProductRequestAfter(afterSequence: number): MockRequestEntry
  */
 export function getRequestSequence(): number {
   return requestLog.getSequence()
+}
+
+/**
+ * Returns the first product-originated Responses request
+ * (POST /v1/responses or POST /responses) with sequence >= afterSequence.
+ */
+export function findResponsesRequestAfter(afterSequence: number): MockRequestEntry | null {
+  return (
+    requestLog
+      .getEntries()
+      .find(
+        (entry) =>
+          entry.method === 'POST' &&
+          (entry.url === '/v1/responses' || entry.url === '/responses') &&
+          entry.sequence >= afterSequence
+      ) ?? null
+  )
+}
+
+/**
+ * Returns chat-completion requests (POST /v1/chat/completions or
+ * POST /chat/completions) with sequence >= afterSequence. Used to prove a
+ * Responses-lane spec sent no chat/completions request for its marker turn.
+ */
+export function findChatRequestsAfter(afterSequence: number): MockRequestEntry[] {
+  return requestLog
+    .getEntries()
+    .filter(
+      (entry) =>
+        entry.method === 'POST' &&
+        (entry.url === '/v1/chat/completions' || entry.url === '/chat/completions') &&
+        entry.sequence >= afterSequence
+    )
 }
 
 function buildChatCompletion(body: Record<string, unknown>) {
@@ -392,6 +439,96 @@ function buildThinkingCombinedChunks(model: string) {
   return { id, chunks }
 }
 
+/**
+ * Summary-less reasoning item + answer (RESPONSES_EMPTY_REASONING_MARKER).
+ *
+ * Real Responses wire for the pinned `@ai-sdk/openai` 3.0.53 streaming
+ * parser (`openai-responses-language-model.ts` + `openai-responses-api.ts`
+ * chunk schema): `response.output_item.added[type=reasoning]` emits
+ * `reasoning-start`, zero `response.reasoning_summary_text.delta` (no
+ * summary text), `response.output_item.done[type=reasoning]` emits
+ * `reasoning-end`, then the message item + `response.output_text.delta`
+ * answer and `response.completed`. The adapter must silently drop the
+ * pending reasoning (no THINKING_START/DELTA/COMPLETE) so no thinking block,
+ * no empty shell, and no running timer ever appear — only the answer.
+ *
+ * Minimal required fields per the pinned zod schema: added/done items carry
+ * `output_index` + `item.{type,id}`; text deltas carry `item_id` + `delta`;
+ * `response.completed` carries `response.usage{input_tokens,output_tokens}`.
+ * `response.created` is included for response-metadata realism.
+ */
+export const RESPONSES_EMPTY_REASONING_ANSWER = 'Empty-reasoning answer verified-END'
+
+/** Inter-event delay for the Responses empty-reasoning SSE (mid-stream assertion window). */
+const RESPONSES_EMPTY_REASONING_EVENT_DELAY_MS = 120
+
+function buildResponsesEvents(model: string): Array<Record<string, unknown>> {
+  const now = Math.floor(Date.now() / 1000)
+  const responseId = `resp-mock-${Date.now()}`
+  const reasoningId = `rs-mock-empty-${Date.now()}`
+  const messageId = `msg-mock-${Date.now()}`
+  return [
+    {
+      type: 'response.created',
+      response: { id: responseId, created_at: now, model }
+    },
+    {
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: { type: 'reasoning', id: reasoningId }
+    },
+    {
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'reasoning', id: reasoningId }
+    },
+    {
+      type: 'response.output_item.added',
+      output_index: 1,
+      item: { type: 'message', id: messageId }
+    },
+    {
+      type: 'response.output_text.delta',
+      item_id: messageId,
+      delta: 'Empty-reasoning answer '
+    },
+    {
+      type: 'response.output_text.delta',
+      item_id: messageId,
+      delta: 'verified-END'
+    },
+    {
+      type: 'response.output_item.done',
+      output_index: 1,
+      item: { type: 'message', id: messageId }
+    },
+    {
+      type: 'response.completed',
+      response: {
+        usage: { input_tokens: 10, output_tokens: 20 }
+      }
+    }
+  ]
+}
+
+function buildResponsesNonStreamingBody(model: string): Record<string, unknown> {
+  const messageId = `msg-mock-${Date.now()}`
+  return {
+    id: `resp-mock-${Date.now()}`,
+    created_at: Math.floor(Date.now() / 1000),
+    model,
+    output: [
+      {
+        type: 'message',
+        role: 'assistant',
+        id: messageId,
+        content: [{ type: 'output_text', text: RESPONSES_EMPTY_REASONING_ANSWER, annotations: [] }]
+      }
+    ],
+    usage: { input_tokens: 10, output_tokens: 20 }
+  }
+}
+
 function createMockServer(): Promise<MockServerPort> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
@@ -536,6 +673,58 @@ function createMockServer(): Promise<MockServerPort> {
             // Non-streaming JSON response
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(buildChatCompletion(parsed)))
+          }
+          return
+        }
+
+        // Responses API — real wire for provider.type=openai-response
+        // (pinned @ai-sdk/openai Responses language model, POST {baseURL}/responses).
+        if (url === '/v1/responses' || url === '/responses') {
+          if (!parsed) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: { message: 'Invalid JSON', type: 'invalid_request_error' } }))
+            return
+          }
+          const model = (parsed.model as string) || 'mock-model'
+          // The Responses `input` carries the user turn as input_text items;
+          // match the marker against the raw body so no input-shape assumption
+          // can silently miss it.
+          const markerHit = body.includes(RESPONSES_EMPTY_REASONING_MARKER)
+          if (!markerHit) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                error: {
+                  message: 'Responses mock serves the empty-reasoning marker only',
+                  type: 'invalid_request_error'
+                }
+              })
+            )
+            return
+          }
+
+          if (parsed.stream) {
+            const events = buildResponsesEvents(model)
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              Connection: 'keep-alive'
+            })
+            let i = 0
+            const timer = setInterval(() => {
+              res.write(`data: ${JSON.stringify(events[i])}\n\n`)
+              i += 1
+              if (i >= events.length) {
+                clearInterval(timer)
+                res.write('data: [DONE]\n\n')
+                res.end()
+              }
+            }, RESPONSES_EMPTY_REASONING_EVENT_DELAY_MS)
+            res.on('close', () => clearInterval(timer))
+            res.on('error', () => clearInterval(timer))
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(buildResponsesNonStreamingBody(model)))
           }
           return
         }

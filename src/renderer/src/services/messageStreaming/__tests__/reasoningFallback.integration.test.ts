@@ -149,6 +149,24 @@ describe('reasoning fallback integration: normal completion must not leave STREA
     expect(blocks.find((b) => b.type === MessageBlockType.MAIN_TEXT)?.status).toBe(MessageBlockStatus.SUCCESS)
   })
 
+  it('empty reasoning (no visible thinking chunks) creates no thinking block on SUCCESS', async () => {
+    const { processor, callbacks } = createHarness()
+    // Adapter now suppresses THINKING_START/DELTA/COMPLETE for empty reasoning:
+    // only lifecycle + completion reach the processor.
+    processor({ type: ChunkType.LLM_RESPONSE_CREATED })
+    processor({ type: ChunkType.TEXT_START })
+    processor({ type: ChunkType.TEXT_DELTA, text: 'answer only' })
+    processor({ type: ChunkType.TEXT_COMPLETE, text: 'answer only' })
+    await callbacks.onComplete(AssistantMessageStatus.SUCCESS, {
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      metrics: { completion_tokens: 5, time_completion_millsec: 100 }
+    } as any)
+
+    const blocks = Object.values(getState().messageBlocks.entities) as any[]
+    expect(blocks.filter((b) => b.type === MessageBlockType.THINKING)).toHaveLength(0)
+    expect(blocks.filter((b) => b.status === MessageBlockStatus.STREAMING)).toHaveLength(0)
+  })
+
   it('legacy STREAMING thinking with 0 and no trusted clock keeps 0 (no fake elapsed)', async () => {
     const { callbacks, blockManager } = createHarness()
     // Inject a legacy thinking block directly via BlockManager, bypassing thinkingCallbacks clock
