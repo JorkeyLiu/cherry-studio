@@ -20,9 +20,7 @@ export class ChatPage extends BasePage {
   constructor(page: Page) {
     super(page)
     this.chatContainer = page.locator('#chat, [class*="Chat"]')
-    this.inputArea = page.locator(
-      '[class*="Inputbar"] textarea, [class*="InputBar"] textarea, [contenteditable="true"]'
-    )
+    this.inputArea = page.locator('.inputbar textarea, textarea[placeholder]')
     this.sendButton = page.locator(
       '[class*="SendMessageButton"], [class*="send-button"], button[aria-label*="send"], button[title*="send"]'
     )

@@ -66,6 +66,7 @@ const Sidebar: FC = () => {
         </Tooltip>
         <Tooltip title={t('settings.title')} mouseEnterDelay={0.8} placement="right">
           <StyledLink
+            data-testid="sidebar-nav-settings"
             onClick={async () => {
               await to('/settings/provider')
             }}>
@@ -110,6 +111,7 @@ const MainMenus: FC = () => {
     return (
       <Tooltip key={icon} title={getSidebarIconLabel(icon)} mouseEnterDelay={0.8} placement="right">
         <StyledLink
+          data-testid={`sidebar-nav-${icon}`}
           onClick={async () => {
             await modelGenerating()
             navigate(path)

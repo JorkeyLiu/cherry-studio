@@ -20,7 +20,7 @@ export class HomePage extends BasePage {
     super(page)
     this.homePage = page.locator('#home-page, [class*="HomePage"], [class*="Home"]')
     this.chatContainer = page.locator('#chat, [class*="Chat"]')
-    this.inputBar = page.locator('[class*="Inputbar"], [class*="InputBar"], [class*="input-bar"]')
+    this.inputBar = page.locator('.inputbar, .inputbar-container')
     this.messagesList = page.locator('#messages, [class*="Messages"], [class*="MessageList"]')
     this.sendButton = page.locator('[class*="SendMessageButton"], [class*="send-button"], button[type="submit"]')
     this.newTopicButton = page.locator('[class*="NewTopicButton"], [class*="new-topic"]')
@@ -50,9 +50,7 @@ export class HomePage extends BasePage {
    * Type a message in the input area.
    */
   async typeMessage(message: string): Promise<void> {
-    const input = this.page.locator(
-      '[class*="Inputbar"] textarea, [class*="Inputbar"] [contenteditable], [class*="InputBar"] textarea'
-    )
+    const input = this.page.locator('.inputbar textarea, textarea[placeholder]')
     await input.first().fill(message)
   }
 
@@ -104,7 +102,7 @@ export class HomePage extends BasePage {
    * Get the placeholder text of the input field.
    */
   async getInputPlaceholder(): Promise<string | null> {
-    const input = this.page.locator('[class*="Inputbar"] textarea, [class*="InputBar"] textarea')
+    const input = this.page.locator('.inputbar textarea, textarea[placeholder]')
     return input.first().getAttribute('placeholder')
   }
 }

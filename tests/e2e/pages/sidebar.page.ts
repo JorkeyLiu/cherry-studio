@@ -19,11 +19,12 @@ export class SidebarPage extends BasePage {
   constructor(page: Page) {
     super(page)
     this.sidebar = page.locator('[class*="Sidebar"], nav, aside')
-    this.homeLink = page.locator('a[href="#/"], a[href="#!/"]').first()
+    // Stable production testids (Sidebar.tsx); legacy href locators kept as fallback.
+    this.homeLink = page.locator('[data-testid="sidebar-nav-assistants"], a[href="#/"], a[href="#!/"]').first()
     this.storeLink = page.locator('a[href*="/store"]')
-    this.knowledgeLink = page.locator('a[href*="/knowledge"]')
-    this.filesLink = page.locator('a[href*="/files"]')
-    this.settingsLink = page.locator('a[href*="/settings"]')
+    this.knowledgeLink = page.locator('[data-testid="sidebar-nav-knowledge"], a[href*="/knowledge"]')
+    this.filesLink = page.locator('[data-testid="sidebar-nav-files"], a[href*="/files"]')
+    this.settingsLink = page.locator('[data-testid="sidebar-nav-settings"], a[href*="/settings"]')
     this.appsLink = page.locator('a[href*="/apps"]')
     this.translateLink = page.locator('a[href*="/translate"]')
   }
