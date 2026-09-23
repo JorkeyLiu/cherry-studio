@@ -610,9 +610,15 @@ describe('Messages edit-mode overlay regression', () => {
     expect(wrapperRules).toContain('position: relative')
     expect(wrapperRules).toContain('overflow: hidden')
     expect(wrapperRules).toContain('flex: 1')
+    expect(wrapperRules).toContain('min-height: 0')
 
     const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string
-    expect(containerRules).toContain('flex: 1')
+    // Short-content contract: container must not force full fill with `flex: 1`.
+    // It sizes to content (flex:0 1 auto) and stays shrinkable inside the wrapper
+    // (min-height:0) with its own overflow-y:auto scroll for long content.
+    expect(containerRules).not.toMatch(/flex:\s*1\s*;/)
+    expect(containerRules).toContain('flex: 0 1 auto')
+    expect(containerRules).toContain('min-height: 0')
 
     // Verify real EditModeActionBar source declares absolute overlay (enrichment-proof)
     const fs = await import('node:fs')
@@ -624,5 +630,42 @@ describe('Messages edit-mode overlay regression', () => {
     // Container must be absolute with z-index 10, not sticky with negative margin
     expect(content).not.toContain('position: sticky')
     expect(content).not.toContain('margin-top: -100%')
+  })
+
+  it('short-content layout contract: container sizes to content, wrapper stays the height boundary, scroll stays on #messages', async () => {
+    // jsdom has no real flex geometry, so this asserts the CSS contract that
+    // prevents the short-content regression (1/2/3 messages left blank above
+    // Prompt when the container was forced full-height with `flex: 1`):
+    // wrapper keeps flex:1/min-height:0 as positioning + height boundary,
+    // container uses flex:0 1 auto (grow off, shrink on, basis content) with
+    // min-height:0 so short content takes content height while long content
+    // shrinks inside the wrapper and scrolls via its own overflow-y:auto.
+    const actualShared = (await vi.importActual('@renderer/pages/home/Messages/shared')) as any
+    const wrapperRules: string = (actualShared.MessagesWrapper?.componentStyle?.rules?.join('') ?? '') as string
+    const containerRules: string = (actualShared.MessagesContainer?.componentStyle?.rules?.join('') ?? '') as string
+
+    // Wrapper: positioning context + available-height boundary (unchanged).
+    expect(wrapperRules).toContain('position: relative')
+    expect(wrapperRules).toContain('flex: 1')
+    expect(wrapperRules).toContain('min-height: 0')
+    expect(wrapperRules).toContain('overflow: hidden')
+
+    // Container: no forced fill; shrinkable scroll host.
+    expect(containerRules).not.toMatch(/flex:\s*1\s*;/)
+    expect(containerRules).toContain('flex: 0 1 auto')
+    expect(containerRules).toContain('min-height: 0')
+    expect(containerRules).toContain('column-reverse')
+
+    // Scroll stays on #messages: overflow-y:auto comes from the Scrollbar base
+    // (MessagesContainer only overrides overflow-x). Verify the base contract
+    // from source instead of asserting fake jsdom geometry.
+    const fs = await import('node:fs')
+    const scrollbarSource = fs.readFileSync('src/renderer/src/components/Scrollbar/index.tsx', 'utf-8')
+    expect(scrollbarSource).toContain('overflow-y: auto')
+
+    // scrollableTarget contract: Messages still targets #messages for InfiniteScroll.
+    const messagesSource = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf-8')
+    expect(messagesSource).toContain('scrollableTarget="messages"')
+    expect(messagesSource).toContain('id="messages"')
   })
 })

@@ -27,7 +27,12 @@ export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   display: flex;
   flex-direction: column-reverse;
   overflow-x: hidden;
-  flex: 1;
+  // Short content sizes to content height instead of stretching the full
+  // wrapper height (flex:1 forced full fill, pushing the column-reverse
+  // content to the visual bottom and leaving blank above Prompt).
+  // flex:0 1 auto keeps shrink-to-wrapper + own overflow-y:auto scroll
+  // for long content. Wrapper stays the flex:1/min-height:0 height boundary.
+  flex: 0 1 auto;
   min-height: 0;
   z-index: 1;
   position: relative;
