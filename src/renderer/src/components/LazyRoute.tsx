@@ -1,53 +1,39 @@
-import React, { lazy, Suspense, useCallback, useMemo, useState } from 'react'
+import React, { Suspense, useCallback, useMemo, useState } from 'react'
 import { ErrorBoundary } from 'react-error-boundary'
 
-import { RouteChunkLoadError } from './RouteChunkLoadError'
 import RouteErrorFallback from './RouteErrorFallback'
 import RouteLoadingFallback from './RouteLoadingFallback'
-
-type RouteImporter = () => Promise<{ default: React.ComponentType<any> }>
+import type { RouteImporter } from './routeResource'
+import { getRouteResource } from './routeResource'
 
 interface LazyRouteProps {
   importer: RouteImporter
 }
 
-// Stable lazy identity per importer: the route fallback must appear only for
-// the actual first module resolution. Without this cache every LazyRoute mount
-// (each Chat -> Settings -> Chat navigation) creates a fresh lazy() identity
-// that suspends again and flashes the fallback even though the chunk already
-// resolved. The importer promise itself stays lazy (per-route bundle splitting
-// unchanged); only the resolved React identity is reused across mounts. The
-// cache is keyed on the original importer prop (stable module-level functions
-// in Router), never on a per-mount wrapper.
-const lazyComponentCache = new WeakMap<RouteImporter, React.LazyExoticComponent<React.ComponentType<any>>>()
-
-const getCachedLazyComponent = (importer: RouteImporter): React.LazyExoticComponent<React.ComponentType<any>> => {
-  let component = lazyComponentCache.get(importer)
-  if (!component) {
-    const wrappedImporter: RouteImporter = () =>
-      importer().catch((error: unknown) => {
-        if (error instanceof RouteChunkLoadError) {
-          throw error
-        }
-        const message = error instanceof Error ? error.message : String(error)
-        throw new RouteChunkLoadError(message || 'Failed to load chunk', { cause: error })
-      })
-    component = lazy(wrappedImporter)
-    lazyComponentCache.set(importer, component)
-  }
-  return component
-}
+// Route-resource rendering: preload and render share one loading state per
+// importer. A successfully preloaded module renders synchronously without
+// entering the Suspense fallback; ordinary mounts reuse the same lazy
+// identity so the fallback appears only for the actual first resolution.
+// The importer promise itself stays lazy (per-route bundle splitting
+// unchanged). Preload-only failures are dropped silently by the resource so
+// later navigation retries fresh; render failures keep the rejected identity
+// until retry explicitly resets for a fresh load.
 
 export const LazyRoute: React.FC<LazyRouteProps> = ({ importer }) => {
   const [retryKey, setRetryKey] = useState(0)
 
-  const LazyComponent = useMemo(() => {
+  const { ResolvedComponent, LazyComponent } = useMemo(() => {
+    const resource = getRouteResource(importer)
     if (retryKey > 0) {
       // Retry after a chunk failure must attempt a fresh resolution, so drop
       // the stale (rejected) identity; ordinary mounts reuse the cache.
-      lazyComponentCache.delete(importer)
+      resource.reset()
     }
-    return getCachedLazyComponent(importer)
+    const resolved = resource.getResolvedComponent()
+    if (resolved) {
+      return { ResolvedComponent: resolved, LazyComponent: null }
+    }
+    return { ResolvedComponent: null, LazyComponent: resource.getLazyComponent() }
   }, [importer, retryKey])
 
   const handleReset = useCallback(() => {
@@ -57,7 +43,7 @@ export const LazyRoute: React.FC<LazyRouteProps> = ({ importer }) => {
   return (
     <ErrorBoundary FallbackComponent={RouteErrorFallback} onReset={handleReset} resetKeys={[retryKey]}>
       <Suspense fallback={<RouteLoadingFallback />} key={retryKey}>
-        <LazyComponent />
+        {ResolvedComponent ? <ResolvedComponent /> : LazyComponent ? <LazyComponent /> : null}
       </Suspense>
     </ErrorBoundary>
   )

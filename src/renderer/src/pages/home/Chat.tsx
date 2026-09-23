@@ -5,6 +5,8 @@ import { HStack } from '@renderer/components/Layout'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import { SelectChatModelPopup } from '@renderer/components/Popups/SelectModelPopup'
 import ResizableHandle from '@renderer/components/ResizableHandle'
+import { importSettingsPage } from '@renderer/components/routeImporters'
+import { useRouteIdlePreload } from '@renderer/components/useRouteIdlePreload'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useContextClosure } from '@renderer/hooks/useContextClosure'
@@ -69,16 +71,38 @@ const Chat: FC<Props> = (props) => {
   }, [isContentSearchActive])
 
   const firstUpdateCompletedRef = React.useRef(false)
+  const [chatStableForIdlePreload, setChatStableForIdlePreload] = useState(false)
   const userToggleRaf1Ref = React.useRef<number | null>(null)
   const userToggleRaf2Ref = React.useRef<number | null>(null)
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
 
-  // Reset first-update flag when topic switches; cancel any pending first-update debounce/timer.
-  React.useEffect(() => {
+  // Reset first-update stability when the real topic id changes; cancel any
+  // pending first-update timer. First mount is not a switch, so it never
+  // clears. Layout timing matters: Messages fires onFirstUpdate in a passive
+  // effect, so this parent reset runs first (layout before passive) — a real
+  // switch clears the previous topic timer before the new topic schedules
+  // its own, instead of dropping the just-scheduled timer.
+  const prevTopicIdForStableResetRef = React.useRef<string | null>(null)
+  React.useLayoutEffect(() => {
+    if (prevTopicIdForStableResetRef.current === null) {
+      prevTopicIdForStableResetRef.current = props.activeTopic.id
+      return
+    }
+    if (prevTopicIdForStableResetRef.current === props.activeTopic.id) {
+      return
+    }
+    prevTopicIdForStableResetRef.current = props.activeTopic.id
     firstUpdateCompletedRef.current = false
+    setChatStableForIdlePreload(false)
     // Clear pending firstUpdate timer if any (owned via useTimer)
     clearTimeoutTimer('messagesComponentFirstUpdateHandler')
   }, [props.activeTopic.id, clearTimeoutTimer])
+
+  // Single-level idle preload: only the Settings JS module, scheduled in a
+  // cancellable browser idle task after the existing first-update stability
+  // window. Never mounts Settings, never touches Redux/bootstrap, never
+  // blocks the startup path; unmount or topic switch cancels a pending task.
+  useRouteIdlePreload(importSettingsPage, chatStableForIdlePreload)
 
   // --- Shared context projection (Phase 2B) ---
   // Both Messages and Inputbar previously computed computeContextInfo independently
@@ -287,6 +311,7 @@ const Chat: FC<Props> = (props) => {
       'messagesComponentFirstUpdateHandler',
       () => {
         firstUpdateCompletedRef.current = true
+        setChatStableForIdlePreload(true)
       },
       300
     )

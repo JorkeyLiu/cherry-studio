@@ -7,6 +7,7 @@ import { HashRouter, Route, Routes, useLocation } from 'react-router-dom'
 import Sidebar from './components/app/Sidebar'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { LazyRoute } from './components/LazyRoute'
+import { importSettingsPage } from './components/routeImporters'
 import NavigationHandler from './handler/NavigationHandler'
 import HomePage from './pages/home/HomePage'
 
@@ -16,7 +17,6 @@ import HomePage from './pages/home/HomePage'
 const importFilesPage = () => import('./pages/files/FilesPage')
 const importNotesPage = () => import('./pages/notes/NotesPage')
 const importKnowledgePage = () => import('./pages/knowledge/KnowledgePage')
-const importSettingsPage = () => import('./pages/settings/SettingsPage')
 const importLaunchpadPage = () => import('./pages/launchpad/LaunchpadPage')
 
 // Bounded Chat session workspace: after Chat (Home) has mounted, its component
