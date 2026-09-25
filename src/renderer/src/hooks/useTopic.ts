@@ -13,7 +13,7 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { createSnapshotBlockMap, getMainTextSnapshotContent } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { truncateText } from '@renderer/utils/naming'
 import { find, isEmpty } from 'lodash'
-import { type Dispatch, type SetStateAction, useEffect, useState } from 'react'
+import { type Dispatch, type SetStateAction, useEffect, useRef, useState } from 'react'
 
 import { useAssistant } from './useAssistant'
 import { getStoreSetting } from './useSettings'
@@ -28,8 +28,20 @@ export function useActiveTopic(assistantId: string, topic?: Topic) {
   _activeTopic = activeTopic
   _setActiveTopic = setActiveTopic
 
+  const prevActiveTopicIdRef = useRef<string | undefined>(undefined)
   useEffect(() => {
     if (activeTopic) {
+      // Actual topic switch (ID change — not a metadata refresh of the same
+      // topic): restore the logical topic's previously active branch instead
+      // of resetting to main. `activeBranchIdByTopic` is persisted; the
+      // stored branch is kept as-is here and `loadTopicMessagesThunk`
+      // resolves the active route at read time. Catalog refresh/deletion
+      // (`branchesReceived`) invalidates stale IDs back to main, and the
+      // same-profile relaunch rehydrates the valid selection the same way.
+      // Sidebar remains logical-topic-only.
+      if (prevActiveTopicIdRef.current !== activeTopic.id) {
+        prevActiveTopicIdRef.current = activeTopic.id
+      }
       void store.dispatch(loadTopicMessagesThunk(activeTopic.id))
       void EventEmitter.emit(EVENT_NAMES.CHANGE_TOPIC, activeTopic)
     }
@@ -104,7 +116,7 @@ export const finishTopicRenaming = (topicId: string) => {
 
 const topicRenamingLocks = new Set<string>()
 
-export const autoRenameTopic = async (assistant: Assistant, topicId: string) => {
+export const autoRenameTopic = async (assistant: Assistant, topicId: string, branchId?: string | null) => {
   if (topicRenamingLocks.has(topicId)) {
     return
   }
@@ -122,7 +134,7 @@ export const autoRenameTopic = async (assistant: Assistant, topicId: string) => 
       blocks: MessageBlock[]
     }
     try {
-      namingContext = await dbService.fetchTopicNamingContext(topicId)
+      namingContext = await dbService.fetchTopicNamingContext(topicId, branchId ?? null)
     } catch {
       return
     }

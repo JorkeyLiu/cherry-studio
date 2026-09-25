@@ -351,6 +351,7 @@ describe('ensureTopicAnchorEstablished', () => {
     await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
     expect(resolveContextClosureMock).toHaveBeenCalledWith({
       topicId,
+      branchId: null,
       intent: 'establish',
       contextCount: 2,
       currentAnchorGroupKey: null,
@@ -365,6 +366,7 @@ describe('ensureTopicAnchorEstablished', () => {
     await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
     expect(resolveContextClosureMock).toHaveBeenCalledWith({
       topicId,
+      branchId: null,
       intent: 'establish',
       contextCount: 2,
       currentAnchorGroupKey: null,
@@ -386,6 +388,7 @@ describe('ensureTopicAnchorEstablished', () => {
     await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
     expect(resolveContextClosureMock).toHaveBeenCalledWith({
       topicId,
+      branchId: null,
       intent: 'establish',
       contextCount: 2,
       currentAnchorGroupKey: 'u1',
@@ -509,6 +512,7 @@ describe('ensureTopicAnchorEstablished', () => {
     await ensureTopicAnchorEstablished(dispatch, getState, 'asst-1', topicId)
     expect(resolveContextClosureMock).toHaveBeenCalledWith({
       topicId,
+      branchId: null,
       intent: 'establish',
       contextCount: 2,
       currentAnchorGroupKey: 'msg-00000',

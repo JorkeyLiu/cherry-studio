@@ -31,6 +31,8 @@ import type {
   MessageBlockRow,
   MessageData,
   MessageRow,
+  TopicBranchData,
+  TopicBranchRow,
   TopicData,
   TopicRow,
   TopicSegmentData,
@@ -84,9 +86,20 @@ const TOPIC_FIELDS: ReadonlyArray<[string, string]> = [
   ['deletedAt', 'deleted_at']
 ]
 
+const TOPIC_BRANCH_FIELDS: ReadonlyArray<[string, string]> = [
+  ['id', 'id'],
+  ['topicId', 'topic_id'],
+  ['parentBranchId', 'parent_branch_id'],
+  ['anchorMessageId', 'anchor_message_id'],
+  ['name', 'name'],
+  ['createdAt', 'created_at'],
+  ['updatedAt', 'updated_at']
+]
+
 const MESSAGE_FIELDS: ReadonlyArray<[string, string]> = [
   ['id', 'id'],
   ['topicId', 'topic_id'],
+  ['branchId', 'branch_id'],
   ['role', 'role'],
   ['content', 'content'],
   ['status', 'status'],
@@ -280,6 +293,22 @@ export function messageToRow(data: MessageData): MessageRow {
 
 export function messageToRowPatch(patch: EntityPatchInput<MessageData>): RowPatchResult<MessageRow> {
   return mapToRowPatch(patch as Record<string, unknown>, MESSAGE_FIELDS)
+}
+
+// ============================================================================
+// TopicBranch
+// ============================================================================
+
+export function topicBranchFromRow(row: TopicBranchRow): TopicBranchData {
+  return mapFromRow(row as unknown as Record<string, unknown>, TOPIC_BRANCH_FIELDS, 'topic_branches', row.id)
+}
+
+export function topicBranchToRow(data: TopicBranchData): TopicBranchRow {
+  return mapToRow(data, TOPIC_BRANCH_FIELDS)
+}
+
+export function topicBranchToRowPatch(patch: EntityPatchInput<TopicBranchData>): RowPatchResult<TopicBranchRow> {
+  return mapToRowPatch(patch as Record<string, unknown>, TOPIC_BRANCH_FIELDS)
 }
 
 // ============================================================================

@@ -621,12 +621,13 @@ describe('CandidateVerifier', () => {
   })
 
   it('fails sample_reads when read-path index corruption hides rows that all digests still match', async () => {
-    // Silent truncation of messages_topic_id_sort_order_idx: the keyset
-    // scans walk primary keys, so dimensions ①–⑩ all still pass — only the
-    // application read path (listByTopic) goes through the truncated index
-    // and returns zero messages. Sample reads (⑬) are the dimension that
-    // catches this class of corruption; integrity_check (⑪) corroborates.
-    corruptIndexToEmptyPage(dbPath, 'messages_topic_id_sort_order_idx')
+    // Silent truncation of messages_topic_id_branch_id_sort_order_idx: the
+    // keyset scans walk primary keys, so dimensions ①–⑩ all still pass —
+    // only the application read path (listByTopic, route-owner scoped since
+    // migration 016) goes through the truncated index and returns zero
+    // messages. Sample reads (⑬) are the dimension that catches this class
+    // of corruption; integrity_check (⑪) corroborates.
+    corruptIndexToEmptyPage(dbPath, 'messages_topic_id_branch_id_sort_order_idx')
     const report = await verify(dbPath, manifest, { sampleCount: 10 })
 
     expect(report.status).toBe('fail')

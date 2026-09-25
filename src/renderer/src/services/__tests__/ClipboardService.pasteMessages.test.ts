@@ -162,6 +162,11 @@ interface StoreState {
   messageBlocks: {
     entities: Record<string, MessageBlock>
   }
+  topicBranch?: {
+    branchesByTopic: Record<string, unknown[]>
+    activeBranchIdByTopic: Record<string, string>
+    routeGenerationByTopic: Record<string, number>
+  }
 }
 
 let storeState: StoreState
@@ -286,17 +291,21 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(count).toBe(1)
     // ONE stable data-source call with after-group-tail intent; no numeric paste call.
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
-    expect(mocks.insertMessageGroups).toHaveBeenCalledWith('topic-1', [
-      {
-        entries: [
-          {
-            message: expect.objectContaining({ id: expect.any(String), topicId: 'topic-1' }),
-            blocks: [expect.objectContaining({ messageId: expect.any(String), content: 'copied' })]
-          }
-        ],
-        intent: { kind: 'after-group-tail', messageId: 'm1' }
-      }
-    ])
+    expect(mocks.insertMessageGroups).toHaveBeenCalledWith(
+      'topic-1',
+      [
+        {
+          entries: [
+            {
+              message: expect.objectContaining({ id: expect.any(String), topicId: 'topic-1' }),
+              blocks: [expect.objectContaining({ messageId: expect.any(String), content: 'copied' })]
+            }
+          ],
+          intent: { kind: 'after-group-tail', messageId: 'm1' }
+        }
+      ],
+      null
+    )
     expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     // ONE projection commit; the regenerated ID lands exactly between m1 and m2.
     expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
@@ -363,12 +372,16 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'outside-id')
 
     // Stable ID travels unchanged even though it is absent from loaded.
-    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', [
-      {
-        entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
-        intent: { kind: 'after-group-tail', messageId: 'outside-id' }
-      }
-    ])
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith(
+      'topic-1',
+      [
+        {
+          entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+          intent: { kind: 'after-group-tail', messageId: 'outside-id' }
+        }
+      ],
+      null
+    )
     expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     // Bounded projection: no outside-window injection, loaded list untouched.
     expect(mocks.messagesReceived).not.toHaveBeenCalled()
@@ -392,12 +405,16 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     const { pasteMessages } = await import('../ClipboardService')
     await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', '')
 
-    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', [
-      {
-        entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
-        intent: { kind: 'topic-tail' }
-      }
-    ])
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith(
+      'topic-1',
+      [
+        {
+          entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+          intent: { kind: 'topic-tail' }
+        }
+      ],
+      null
+    )
     expect(mocks.pasteMessagesToTopic).not.toHaveBeenCalled()
     expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
     const receivedIds = mocks.messagesReceived.mock.calls[0][0].messages.map((m) => m.id)
@@ -687,12 +704,16 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', user.id)
 
     expect(count).toBe(1)
-    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', [
-      {
-        entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
-        intent: { kind: 'after-group-tail', messageId: user.id }
-      }
-    ])
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith(
+      'topic-1',
+      [
+        {
+          entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+          intent: { kind: 'after-group-tail', messageId: user.id }
+        }
+      ],
+      null
+    )
     expect(mocks.messagesReceived).toHaveBeenCalledTimes(1)
     const receivedIds = mocks.messagesReceived.mock.calls[0][0].messages.map((m) => m.id)
     // Local order matches Main intent: pasted row lands after a2, not after a1.
@@ -702,5 +723,34 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(receivedIds[4]).not.toBe('a1')
     expect(receivedIds[4]).not.toBe(mid.id)
     expect(receivedIds[4]).not.toBe('a2')
+  })
+
+  it('passes the active branch route to Main while keeping the stable intent', async () => {
+    const copied = createUserMessage({ id: 'c0' })
+    storeState.clipboard = {
+      mode: 'copy',
+      items: [makeClipboardItem(copied, [], 1)],
+      sourceTopicId: null,
+      segmentSnapshots: []
+    }
+    storeState.topicBranch = {
+      branchesByTopic: {},
+      activeBranchIdByTopic: { 'topic-1': 'branch-7' },
+      routeGenerationByTopic: {}
+    }
+
+    const { pasteMessages } = await import('../ClipboardService')
+    await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith(
+      'topic-1',
+      [
+        {
+          entries: [expect.objectContaining({ message: expect.objectContaining({ topicId: 'topic-1' }) })],
+          intent: { kind: 'after-group-tail', messageId: 'm1' }
+        }
+      ],
+      'branch-7'
+    )
   })
 })

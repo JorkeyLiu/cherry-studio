@@ -15,6 +15,7 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
+import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
@@ -23,6 +24,7 @@ import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@ren
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { setTopicListWidth } from '@renderer/store/settings'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
 import { debounce } from 'lodash'
@@ -129,7 +131,11 @@ const Chat: FC<Props> = (props) => {
   const loadedTopicMessages = useLoadedTopicMessages(props.activeTopic.id)
   const topicMessages = useMemo(() => (loadedTopicMessages ?? []) as any, [loadedTopicMessages])
   const topicBlocks = useLoadedTopicReferencedBlocks(props.activeTopic.id)
-  const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[props.activeTopic.id]?.groupKey ?? null
+  // Route-scoped anchor key: branch routes anchor under their own route key
+  // (anchorKeyForRoute returns the plain topicId for the main route).
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, props.activeTopic.id))
+  const anchorRouteKey = anchorKeyForRoute(props.activeTopic.id, activeBranchId)
+  const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey]?.groupKey ?? null
   const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey)
   // R-06: authoritative closure supplies message lists and full-topic metadata; fallback preserves bounded behavior
   const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages), [topicMessages])
@@ -335,7 +341,11 @@ const Chat: FC<Props> = (props) => {
             flex={1}
             justify="space-between"
             style={{ height: mainHeight, width: '100%' }}>
-            <ChatNavbar activeAssistant={props.assistant} />
+            <ChatNavbar
+              activeAssistant={props.assistant}
+              activeTopic={props.activeTopic}
+              setActiveTopic={props.setActiveTopic}
+            />
             <div
               className="flex flex-1 flex-col justify-between"
               style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>

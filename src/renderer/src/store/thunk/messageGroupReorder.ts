@@ -2,6 +2,7 @@ import { dbService } from '@renderer/services/db'
 
 import type { AppDispatch, RootState } from '../index'
 import { newMessagesActions } from '../newMessage'
+import { selectActiveBranchId } from '../topicBranch'
 
 /**
  * Answer-group authority reorder (renderer thin client).
@@ -25,7 +26,12 @@ export const reorderMessageGroupThunk =
       return
     }
     const anchorMessageId = orderedGroupIds[0]
-    const response = await dbService.reorderAnswerGroup(topicId, anchorMessageId, orderedGroupIds)
+    const response = await dbService.reorderAnswerGroup(
+      topicId,
+      anchorMessageId,
+      orderedGroupIds,
+      selectActiveBranchId(getState(), topicId)
+    )
 
     const state = getState()
     const loadedIds: string[] = state.messages.messageIdsByTopic[topicId] || []

@@ -32,10 +32,10 @@ describe('semantic resend/regenerate contracts', () => {
     expect(chatDbContracts['chatdb:resend-user-messages']).toBeDefined()
     expect(chatDbContracts['chatdb:regenerate-assistant-message']).toBeDefined()
     expect([...chatDbContracts['chatdb:resend-user-messages'].allowedKeys].sort()).toEqual(
-      ['assistantId', 'currentModel', 'topicId', 'userMessageId'].sort()
+      ['assistantId', 'branchId', 'currentModel', 'topicId', 'userMessageId'].sort()
     )
     expect([...chatDbContracts['chatdb:regenerate-assistant-message'].allowedKeys].sort()).toEqual(
-      ['assistantId', 'assistantMessageId', 'currentModel', 'topicId'].sort()
+      ['assistantId', 'assistantMessageId', 'branchId', 'currentModel', 'topicId'].sort()
     )
   })
 
@@ -112,6 +112,29 @@ describe('semantic resend/regenerate contracts', () => {
     // Resend keeps currentModel required.
     const resendNoModel = { topicId: 't-1', userMessageId: 'u-1', assistantId: 'a-1' }
     expect(() => validateChatDbRequest('chatdb:resend-user-messages', resendNoModel)).toThrow()
+  })
+
+  it('branchId is optional route: absent/null/valid accept, empty rejects', () => {
+    const resendBase = validResendRequest()
+    const regenBase = validRegenRequest()
+    // Absent addresses the main route.
+    expect(() => validateChatDbRequest('chatdb:resend-user-messages', resendBase)).not.toThrow()
+    expect(() => validateChatDbRequest('chatdb:regenerate-assistant-message', regenBase)).not.toThrow()
+    // Explicit null also addresses the main route; an explicit undefined own
+    // prop fails closed via JSON safety.
+    expect(() => validateChatDbRequest('chatdb:resend-user-messages', { ...resendBase, branchId: undefined })).toThrow()
+    expect(() => validateChatDbRequest('chatdb:resend-user-messages', { ...resendBase, branchId: null })).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:regenerate-assistant-message', { ...regenBase, branchId: null })
+    ).not.toThrow()
+    // Non-empty branch node id is a valid explicit route.
+    expect(() => validateChatDbRequest('chatdb:resend-user-messages', { ...resendBase, branchId: 'b-1' })).not.toThrow()
+    expect(() =>
+      validateChatDbRequest('chatdb:regenerate-assistant-message', { ...regenBase, branchId: 'b-1' })
+    ).not.toThrow()
+    // Empty string is never a valid route.
+    expect(() => validateChatDbRequest('chatdb:resend-user-messages', { ...resendBase, branchId: '' })).toThrow()
+    expect(() => validateChatDbRequest('chatdb:regenerate-assistant-message', { ...regenBase, branchId: '' })).toThrow()
   })
 
   it('strict snapshot: id-only and partial currentModel reject, full+extra accept', () => {

@@ -129,13 +129,14 @@ describe('delete thunk — narrow paired follow-up retains residency', () => {
     expect(after.messages.messageIdsByTopic[topicId].length).toBe(2)
     // Authority segments consumed
     expect(after.topicSegments.segments.entities['seg-1'].messageIds).toEqual(['m1', 'm3'])
-    // Anchors called with authority group keys
+    // Anchors called with authority group keys on the main (null) route
     expect(mocks.transferAnchorsWithAuthorityGroupKeys).toHaveBeenCalledWith(
       expect.any(Function),
       expect.any(Function),
       topicId,
       ['m1'],
-      ['m1', 'm3']
+      ['m1', 'm3'],
+      null
     )
 
     // Additionally prove the dispatched replaceSegmentsForTopic action carried the narrow meta

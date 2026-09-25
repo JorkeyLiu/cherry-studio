@@ -194,13 +194,32 @@ describe('selectAnswerMessageThunk — cross-process authority selection', () =>
     await selectAnswerMessageThunk(topicId, selectedMessageId)(dispatch, getState)
 
     expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledTimes(1)
-    expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledWith(topicId, selectedMessageId)
+    expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledWith(topicId, selectedMessageId, null)
 
     const dbIdx = callOrder.findIndex((c) => c.startsWith('db-'))
     const reduxIdx = callOrder.findIndex((c) => c.startsWith('redux-'))
     expect(dbIdx).toBeGreaterThanOrEqual(0)
     expect(reduxIdx).toBeGreaterThanOrEqual(0)
     expect(dbIdx).toBeLessThan(reduxIdx)
+  })
+
+  it('passes the active branch route to the atomic DB command', async () => {
+    getState.mockReturnValue({
+      messages: {
+        entities: { 'a-1': { id: 'a-1' }, 'a-2': { id: 'a-2' } },
+        messageIdsByTopic: { [topicId]: ['a-1', 'a-2'] }
+      },
+      topicBranch: {
+        branchesByTopic: {},
+        activeBranchIdByTopic: { [topicId]: 'branch-7' },
+        routeGenerationByTopic: {}
+      }
+    })
+
+    await selectAnswerMessageThunk(topicId, selectedMessageId)(dispatch, getState)
+
+    expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledTimes(1)
+    expect(mocks.dbSelectAnswerMessage).toHaveBeenCalledWith(topicId, selectedMessageId, 'branch-7')
   })
 
   it('performs EXACTLY ONE plural Redux dispatch for the loaded intersection', async () => {

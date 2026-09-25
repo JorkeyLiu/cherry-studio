@@ -1150,6 +1150,10 @@
       }
     },
     "message": {
+      "copy_topic": {
+        "created": "[to be translated]:Topic copied",
+        "label": "[to be translated]:Copy Topic"
+      },
       "insert": {
         "label": "插入訊息",
         "newAssistantMessage": "新助手訊息",
@@ -1168,6 +1172,10 @@
         "model": "切換模型"
       },
       "set_context_anchor": "設為上下文起始位置",
+      "true_branch": {
+        "created": "[to be translated]:Branch created",
+        "label": "[to be translated]:Create Branch"
+      },
       "useful": {
         "label": "設為上下文",
         "tip": "在這組訊息中，該訊息將被選擇加入上下文"
@@ -1335,6 +1343,20 @@
     "thinking": "思考中（用時 {{seconds}} 秒）",
     "topics": {
       "auto_rename": "自動重新命名",
+      "branch": {
+        "ancestors": "[to be translated]:Ancestors",
+        "children": "[to be translated]:Branches",
+        "children_here": "[to be translated]:{{count}} branches here",
+        "collapse": "[to be translated]:Collapse branch",
+        "current": "[to be translated]:Current",
+        "default_name": "[to be translated]:New Branch",
+        "delete": "[to be translated]:Delete Branch",
+        "delete_confirm": "[to be translated]:Delete this branch and all its descendant branches? This cannot be undone.",
+        "deleted": "[to be translated]:Branch deleted",
+        "expand": "[to be translated]:Expand branch",
+        "rename": "[to be translated]:Rename Branch",
+        "tag": "[to be translated]:Branch"
+      },
       "copy": {
         "image": "複製為圖片",
         "md": "複製為 Markdown",
@@ -2592,6 +2614,9 @@
     },
     "topic": {
       "added": "新話題已新增"
+    },
+    "true_branch": {
+      "error": "[to be translated]:True branch creation failed"
     },
     "upgrade": {
       "success": {

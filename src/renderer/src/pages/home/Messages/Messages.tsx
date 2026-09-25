@@ -58,6 +58,7 @@ import type { computeContextInfo } from '@renderer/services/contextInfoService'
 import { dbService } from '@renderer/services/db/DbService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
+import type { TopicBranchWire } from '@renderer/services/db/types'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
 import {
@@ -76,11 +77,12 @@ import {
   subscribeDeletionGeneration
 } from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse, isWindowCovering } from '@renderer/services/windowCoverage'
-import store, { useAppDispatch } from '@renderer/store'
+import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions } from '@renderer/store/newMessage'
-import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
+import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
+import { activeBranchSet, selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import type { MessageBlock } from '@renderer/types/newMessage'
 import { type Message, MessageBlockType } from '@renderer/types/newMessage'
@@ -111,12 +113,43 @@ import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
 
 import { AnchorGroupProvider } from './anchorGroupContext'
+import { findAnchorsWithChildren, ForkDivider, takenChildAtAnchor } from './BranchDividers'
+
+/** Group one anchor's direct children by their parent route (null = main route). */
+function groupForkChildrenByParent(children: readonly TopicBranchWire[]): {
+  parentBranchId: string | null
+  children: TopicBranchWire[]
+}[] {
+  const byParent = new Map<string | null, TopicBranchWire[]>()
+  for (const c of children) {
+    const key = c.parentBranchId ?? null
+    const list = byParent.get(key) ?? []
+    list.push(c)
+    byParent.set(key, list)
+  }
+  const out: { parentBranchId: string | null; children: TopicBranchWire[] }[] = []
+  for (const [parentBranchId, list] of byParent) {
+    list.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id))
+    out.push({ parentBranchId, children: list })
+  }
+  // Deterministic group order: main-route forks first, then by first child.
+  out.sort((a, b) => {
+    if ((a.parentBranchId === null) !== (b.parentBranchId === null)) return a.parentBranchId === null ? -1 : 1
+    const aid = a.children[0]?.id ?? ''
+    const bid = b.children[0]?.id ?? ''
+    return aid.localeCompare(bid)
+  })
+  return out
+}
 import MessageContextMenu from './MessageContextMenu'
 import MessageGroup from './MessageGroup'
+import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
 import { buildRenderLayers, buildRenderSegments, deriveStableGroupId } from './messageRenderLayers'
+import { createTargetMessageWindow } from './messageWindow'
 import Prompt from './Prompt'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
+import { requestTopicBranches, useBranchTree } from './useBranchTree'
 import { createViewportCommitWaiter } from './viewportCommitWaiter'
 
 interface MessagesProps {
@@ -153,7 +186,13 @@ interface MessagesContentProps {
   isLoadingMore: boolean
   isLoadingNewer: boolean
   loadMoreMessages: () => void
-  registerMessageElement: (id: string, element: HTMLElement | null) => void
+  registerMessageElement: (messageId: string, element: HTMLElement | null) => void
+  /**
+   * Fork-divider route switch (shared-anchor navigation, never bottom).
+   * `branchId` null = parent/original route at the fork, non-null = child
+   * branch. The topic stays fixed; only the active route changes.
+   */
+  onSelectRoute: (branchId: string | null, anchorMessageId: string) => void
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -168,13 +207,25 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   isLoadingMore,
   isLoadingNewer,
   loadMoreMessages,
-  registerMessageElement
+  registerMessageElement,
+  onSelectRoute
 }) => {
   const { t } = useTranslation()
 
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
+
+  // Branch fork dividers for the active route: catalog for the logical
+  // topic, breadcrumb path, and direct children across the addressed route
+  // grouped by anchor. Sidebar stays flat logical topics.
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+  const branchTree = useBranchTree(topic.id, activeBranchId)
+  const forkAnchorIds = useMemo(
+    () => findAnchorsWithChildren(displayMessages, branchTree.childrenByAnchor),
+    [displayMessages, branchTree.childrenByAnchor]
+  )
+  const topicDisplayName = topic.name && topic.name.length > 0 ? topic.name : topic.id
 
   // Canonical viewport projection (S6.2a): displayGroups are precomputed
   // canonical groups (consecutive assistant messages sharing a non-empty askId
@@ -241,9 +292,42 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           const lastMsg = groupMessages[groupMessages.length - 1]
           const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
           const stableGroupId = deriveStableGroupId(groupMessages as readonly Message[])
-
+          // Fork-divider placement (DOM order is newest→oldest under
+          // column-reverse): the divider renders BEFORE the anchor group
+          // (visually directly below the anchor). One divider per
+          // (anchor, parent-route) fork: taken forks (the viewed route
+          // passes through a child here) render the selected branch name
+          // as the switcher; untaken forks render the branch-count form
+          // whose menu includes the current route plus children.
+          const groupIdSet = new Set(groupMessages.map((m) => (m as Message).id))
+          const forkAnchorHere = forkAnchorIds.find((id) => groupIdSet.has(id))
+          const forkGroupsHere =
+            forkAnchorHere !== undefined
+              ? groupForkChildrenByParent(branchTree.childrenByAnchor.get(forkAnchorHere) ?? [])
+              : []
           return (
             <Fragment key={stableGroupId}>
+              {forkGroupsHere.map((group) => {
+                const takenHere = takenChildAtAnchor(branchTree.path, forkAnchorHere as string, group.children)
+                const parentLabel =
+                  group.parentBranchId === null
+                    ? topicDisplayName
+                    : (branchTree.branches.find((b) => b.id === group.parentBranchId)?.name ?? group.parentBranchId)
+                return (
+                  <ForkDivider
+                    key={`branch-fork-${forkAnchorHere}-${group.parentBranchId ?? 'main'}`}
+                    topicId={topic.id}
+                    anchorMessageId={forkAnchorHere as string}
+                    taken={takenHere}
+                    children={group.children}
+                    parentBranchId={group.parentBranchId}
+                    parentLabel={parentLabel}
+                    activeBranchId={activeBranchId}
+                    countLabel={t('chat.topics.branch.children_here', { count: group.children.length })}
+                    onSelectRoute={onSelectRoute}
+                  />
+                )
+              })}
               <div
                 style={{ position: 'relative' }}
                 data-layer-kind={kind}
@@ -348,12 +432,36 @@ const Messages = ({
   onFirstUpdate,
   sharedContextInfo
 }: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
+  // Active route of this logical topic (null = main route). Switching
+  // branches never changes the active topic, sidebar selection, or topic
+  // ordering — only this route plus the loaded/viewport projection.
+  // Declared before the scroll hook so the route-keyed snapshot key can
+  // include it.
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
+  // Route-keyed scroll snapshots: each branch route keeps its own browsing
+  // position under `topic-<id>::<branch|main>`. The legacy topic-only key
+  // (`topic-<id>`) is the main-route fallback when no route snapshot exists.
   const {
     containerRef: scrollContainerRef,
     handleScroll: handleScrollPosition,
     getSavedPosition,
     savePosition
-  } = useScrollPosition(`topic-${topic.id}`)
+  } = useScrollPosition(`topic-${topic.id}::${activeBranchId ?? 'main'}`)
+  const getRouteSavedPosition = getSavedPosition
+  const getLegacyMainSavedPosition = useCallback(() => {
+    try {
+      const saved = window.keyv.get(`scroll:topic-${topic.id}`)
+      if (saved && typeof saved === 'object' && 'scrollTop' in saved) {
+        return saved as { scrollTop: number; anchorId: string | null; isAtBottom: boolean }
+      }
+      if (typeof saved === 'number') {
+        return { scrollTop: saved, anchorId: null, isAtBottom: false }
+      }
+    } catch {
+      // fail-closed: no legacy fallback
+    }
+    return null
+  }, [topic.id])
   const [viewportState, reduceViewport] = useReducer(messageViewportReducer, null, createMessageViewportState)
   const displayMessages = useMemo(() => viewportState.window?.displayMessages ?? [], [viewportState.window])
   const displayGroups = useMemo(() => viewportState.window?.displayGroups ?? [], [viewportState.window])
@@ -371,7 +479,7 @@ const Messages = ({
   const loadedMessages = useLoadedTopicMessages(topic.id)
   const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
   const isTopicLoading = useTopicLoading(topic)
-  const { displayCount, createTopicBranchByAnchor } = useMessageOperations(topic)
+  const { displayCount, createTopicBranchByAnchor, createBranch } = useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
   const phaseAtRender = currentPhaseCorrelation()
@@ -386,6 +494,22 @@ const Messages = ({
   // always read the current topic, never a closure-fixed `topic.id`.
   const topicIdRef = useRef(topic.id)
   topicIdRef.current = topic.id
+  // Live active-route ref: pagination and navigation window reads address
+  // the current route (topic + branch), never a closure-fixed branch.
+  const routeRef = useRef<string | null>(activeBranchId)
+  routeRef.current = activeBranchId
+  // Route loaded into the viewport projection (mirrors activeBranchId for
+  // locally initiated switches; diverges when the route changes externally —
+  // branch deleted elsewhere, delete-fallback, catalog prune).
+  const loadedRouteRef = useRef<string | null>(activeBranchId)
+  // Topic transitions own the projection reset (useTopicTransition); rebase
+  // the loaded-route marker so a stale route from the previous topic never
+  // triggers an invalidation reload for the new topic.
+  const lastTopicForRouteRef = useRef(topic.id)
+  if (lastTopicForRouteRef.current !== topic.id) {
+    lastTopicForRouteRef.current = topic.id
+    loadedRouteRef.current = activeBranchId
+  }
   // Live translation ref so `navigate` stays stable across renders (production
   // `t` is stable; test mocks return a new closure per render).
   const tRef = useRef(t)
@@ -839,16 +963,20 @@ const Messages = ({
           return false
         }
 
+        const routeAtStart = routeRef.current
         const ensured = await ensureMessageLoaded(topicIdAtStart, targetId, {
           getExistingMessages: () => messagesRef.current,
           readAroundWindow: async (request) => {
             const { dbService } = await import('@renderer/services/db')
+            // Navigation reads address the current route (never main by
+            // default when a branch is active).
+            const routedRequest: FetchMessagesWindowRequest = { ...request, branchId: routeAtStart }
             return (await runTopicWindowRead(topicIdAtStart, 'around', () =>
-              dbService.fetchMessagesWindow(request)
+              dbService.fetchMessagesWindow(routedRequest)
             )) as unknown as FetchMessagesWindowResponse
           },
-          isStaleBeforeFetch: isStale,
-          isStaleAfterFetch: isStale
+          isStaleBeforeFetch: () => isStale() || routeRef.current !== routeAtStart,
+          isStaleAfterFetch: () => isStale() || routeRef.current !== routeAtStart
         })
 
         if (ensured.status === 'cancelled') return 'cancelled' as const
@@ -1053,7 +1181,13 @@ const Messages = ({
                   }
                 })()
                 const latestSettings = getAssistantSettings(latestAssistant)
-                const sourceAnchor = latestSettings.contextWindowAnchor?.[topic.id]
+                // In-chat Copy Topic clones the active route's effective
+                // prefix: the source anchor is read under the route key and
+                // resolved as that route's source branch.
+                const sourceRoute = routeRef.current
+                const sourceAnchorKey =
+                  typeof sourceRoute === 'string' && sourceRoute.length > 0 ? `${topic.id}:${sourceRoute}` : topic.id
+                const sourceAnchor = latestSettings.contextWindowAnchor?.[sourceAnchorKey]
                 const sourceKey =
                   sourceAnchor && (sourceAnchor as { kind: string; groupKey: string }).kind === 'active'
                     ? (sourceAnchor as { kind: string; groupKey: string }).groupKey
@@ -1062,6 +1196,7 @@ const Messages = ({
                   topicId: newTopic.id,
                   intent: 'inherit',
                   sourceTopicId: topic.id,
+                  sourceBranchId: sourceRoute,
                   sourceAnchorGroupKey: sourceKey,
                   contextCount: latestSettings.contextCount ?? null,
                   currentAnchorGroupKey: null,
@@ -1105,11 +1240,48 @@ const Messages = ({
               }
             })()
 
-            window.toast.success(t('chat.message.new.branch.created'))
+            window.toast.success(t('chat.message.copy_topic.created'))
           },
           onFailure: () => {
             logger.error(`[NEW_BRANCH] Failed to create topic branch for topic ${newTopic.id}`)
             window.toast.error(t('message.branch.error'))
+          }
+        })
+      }),
+      // Distinct TRUE branch creation (the ONLY true-branch creation method).
+      // Forks one internal branch node at the anchor message of the ACTIVE
+      // route (which may itself be inherited) with no prefix cloning and no
+      // sync intent. New branches default to the localized New Branch name;
+      // no auto-rename (the name is the branch identity shown on its fork
+      // divider and the top breadcrumb). No edit-and-branch. Creating a
+      // branch immediately selects it; the topic stays fixed (never
+      // addTopic/setActiveTopic — branches are not topics).
+      EventEmitter.on(EVENT_NAMES.NEW_TRUE_BRANCH, async (messageId: string) => {
+        const defaultName = t('chat.topics.branch.default_name')
+        const parentRoute = routeRef.current
+
+        await branchFromAnchorMessage(messagesRef.current, messageId, {
+          createBranchByAnchor: async (anchorId) => {
+            const created = await createBranch(topic.id, parentRoute, anchorId, defaultName)
+            if (created === null) return false
+            // Immediately select the new route on the same logical topic,
+            // then load its (empty-suffix) effective route. Claimed locally
+            // so the external-invalidation effect stays out of this path.
+            loadedRouteRef.current = created.branchId
+            dispatch(activeBranchSet({ topicId: topic.id, branchId: created.branchId }))
+            requestTopicBranches(dispatch, topic.id)
+            await dispatch(loadRouteMessagesThunk(topic.id, created.branchId))
+            return true
+          },
+          onMessageNotFound: () => {
+            logger.error(`[NEW_TRUE_BRANCH] Message not found: ${messageId}`)
+          },
+          onSuccess: () => {
+            window.toast.success(t('chat.message.true_branch.created'))
+          },
+          onFailure: () => {
+            logger.error(`[NEW_TRUE_BRANCH] Failed to create branch in topic ${topic.id}`)
+            window.toast.error(t('message.true_branch.error'))
           }
         })
       }),
@@ -1272,6 +1444,8 @@ const Messages = ({
     const loadToken = {}
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
+    const routeAtStart = routeRef.current
+    const routeCacheKey = `${topicIdAtStart}::${routeAtStart ?? ''}`
     const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
     const capturedResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
     viewportDispatch({ type: 'load/start', direction: 'older', token: loadToken })
@@ -1284,6 +1458,7 @@ const Messages = ({
     const request: FetchMessagesWindowRequest = {
       kind: 'around',
       topicId: topicIdAtStart,
+      branchId: routeAtStart,
       anchorMessageId: anchorId,
       before,
       after
@@ -1292,9 +1467,9 @@ const Messages = ({
     // S6.1 coverage check — fail-closed: only reuse cached window if it fully covers the request for current topic/generation
     // Topic-deletion epoch check at local join boundary: discarding cached window if deleted during lifetime
     if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
-      windowCacheRef.current.delete(topicIdAtStart)
+      windowCacheRef.current.delete(routeCacheKey)
     }
-    const cachedWindow = windowCacheRef.current.get(topicIdAtStart)
+    const cachedWindow = windowCacheRef.current.get(routeCacheKey)
     if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
       logger.silly('[loadMoreMessages] coverage hit, still fetching for authoritative window' as never)
     }
@@ -1314,8 +1489,12 @@ const Messages = ({
             dbService.fetchMessagesWindow(request)
           )
 
-          // stale discard — topic changed, generation advanced, or deleted during fetch, or resident generation advanced
+          // stale discard — topic/route changed, generation advanced, or deleted during fetch, or resident generation advanced
           if (topic.id !== topicIdAtStart) {
+            viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
+            return
+          }
+          if (routeRef.current !== routeAtStart) {
             viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             return
           }
@@ -1349,7 +1528,7 @@ const Messages = ({
           }
 
           // atomic staged publication: validate first, then merge
-          windowCacheRef.current.set(topicIdAtStart, response as unknown as FetchMessagesWindowResponse)
+          windowCacheRef.current.set(routeCacheKey, response as unknown as FetchMessagesWindowResponse)
           const blocks = response.blocks as unknown as MessageBlock[]
           const incoming = response.messages as unknown as Message[]
           const existing = messagesRef.current
@@ -1425,6 +1604,8 @@ const Messages = ({
     const loadToken = {}
     const topicGeneration = currentState.topicGeneration
     const topicIdAtStart = topic.id
+    const routeAtStart = routeRef.current
+    const routeCacheKey = `${topicIdAtStart}::${routeAtStart ?? ''}`
     const deletionGenAtStart = captureDeletionGeneration(topicIdAtStart)
     const capturedResidentGen = captureResidentGeneration(() => store.getState(), topicIdAtStart)
     viewportDispatch({ type: 'load/start', direction: 'newer', token: loadToken })
@@ -1437,15 +1618,16 @@ const Messages = ({
     const request: FetchMessagesWindowRequest = {
       kind: 'around',
       topicId: topicIdAtStart,
+      branchId: routeAtStart,
       anchorMessageId: anchorId,
       before,
       after
     }
 
     if (isDeletionStale(topicIdAtStart, deletionGenAtStart)) {
-      windowCacheRef.current.delete(topicIdAtStart)
+      windowCacheRef.current.delete(routeCacheKey)
     }
-    const cachedWindow = windowCacheRef.current.get(topicIdAtStart)
+    const cachedWindow = windowCacheRef.current.get(routeCacheKey)
     if (cachedWindow && isWindowCovering(cachedWindow, request, topicIdAtStart)) {
       logger.silly('[loadNewerMessages] coverage hit' as never)
     }
@@ -1466,6 +1648,10 @@ const Messages = ({
           )
 
           if (topic.id !== topicIdAtStart) {
+            viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
+            return
+          }
+          if (routeRef.current !== routeAtStart) {
             viewportDispatch({ type: 'load/cancel', direction: 'newer', token: loadToken, topicGeneration })
             return
           }
@@ -1497,7 +1683,7 @@ const Messages = ({
             return
           }
 
-          windowCacheRef.current.set(topicIdAtStart, response as unknown as FetchMessagesWindowResponse)
+          windowCacheRef.current.set(routeCacheKey, response as unknown as FetchMessagesWindowResponse)
           const blocks = response.blocks as unknown as MessageBlock[]
           const incoming = response.messages as unknown as Message[]
           const existing = messagesRef.current
@@ -1602,6 +1788,206 @@ const Messages = ({
     // signal that may fire independently.
   }, [onComponentUpdate])
 
+  // Divider route switch: switch activeBranchId while the topic stays fixed
+  // with Main-authoritative route read + stale safety, preserving the current
+  // visual reference exactly as far as practical. Never sets pending anchor
+  // navigation nor dispatches NAVIGATE_TO_MESSAGE. Snapshots the first
+  // visible stable message element + viewport offset before reload; after the
+  // effective-route render, if that same shared message exists, compensates
+  // scroll so its viewport offset is unchanged. Otherwise preserves raw
+  // scroll as the nearest stable fallback. The old route's browsing position
+  // is preserved via savePosition (route-keyed).
+  const handleSelectRoute = useCallback(
+    async (branchId: string | null, anchorMessageId: string) => {
+      const topicId = topic.id
+      if (branchId === routeRef.current) return
+      const topicIdAtStart = topicId
+      const routeAtStart = routeRef.current
+      // Visual-anchor snapshot before route reload.
+      const container = scrollContainerRef.current
+      const containerRect = container?.getBoundingClientRect() ?? null
+      const visual = findFirstVisibleMessage(container, messageElements.current)
+      const visualId = visual ? visual.element.id.replace(/^message-/, '') : null
+      const visualOffset = visual && containerRect ? visual.rect.top - containerRect.top : null
+      const rawScrollTop = container ? container.scrollTop : null
+      loadedRouteRef.current = branchId
+      savePosition()
+      cancelActiveLoads()
+      viewportDispatch({ type: 'topic/reset' })
+      windowCacheRef.current.clear()
+      dispatch(activeBranchSet({ topicId, branchId }))
+      try {
+        await dispatch(loadRouteMessagesThunk(topicId, branchId))
+      } catch (error) {
+        logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
+        window.toast.error(t('message.true_branch.error'))
+        return
+      }
+      if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) return
+      // Rebuild the viewport window around the shared fork anchor when it
+      // exists in the new route, else the visual anchor, else keep the
+      // loaded tail window. Never a bottom jump.
+      try {
+        const loaded = (selectLoadedMessagesForTopic(store.getState(), topicId) ?? []) as Message[]
+        if (loaded.length === 0) return
+        const loadedIds = new Set(loaded.map((m) => m.id))
+        const windowAnchor =
+          (loadedIds.has(anchorMessageId) ? anchorMessageId : null) ??
+          (visualId && loadedIds.has(visualId) ? visualId : null) ??
+          loaded[loaded.length - 1]?.id
+        if (!windowAnchor) return
+        const targetWindow = createTargetMessageWindow(
+          loaded,
+          windowAnchor,
+          NAVIGATION_VISUALLY_OLDER_GROUPS,
+          NAVIGATION_VISUALLY_NEWER_GROUPS
+        )
+        if (targetWindow) {
+          viewportDispatch({ type: 'window/apply', window: targetWindow })
+        }
+      } catch (error) {
+        logger.error(`[handleSelectRoute] Failed to rebuild viewport window:`, error as Error)
+        return
+      }
+      void routeAtStart
+      // Visual-anchor compensation after the effective-route render: same
+      // shared message keeps its viewport offset; otherwise raw scroll.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) return
+          const live = scrollContainerRef.current
+          if (!live) return
+          try {
+            if (visualId !== null && visualOffset !== null) {
+              const escId =
+                typeof CSS !== 'undefined' && (CSS as unknown as { escape?: (v: string) => string }).escape
+                  ? (CSS as unknown as { escape: (v: string) => string }).escape(visualId)
+                  : visualId
+              const el = document.getElementById(`message-${escId}`)
+              const rect = live.getBoundingClientRect()
+              if (el && el.isConnected) {
+                const newOffset = el.getBoundingClientRect().top - rect.top
+                const delta = newOffset - visualOffset
+                if (Math.abs(delta) > 1) {
+                  void (async () => {
+                    const scrollToken = {}
+                    if (!(await beginScroll('anchoring', scrollToken))) return
+                    if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) {
+                      viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                      return
+                    }
+                    if (!el.isConnected) {
+                      viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                      return
+                    }
+                    live.scrollTop += delta
+                    requestAnimationFrame(() => {
+                      viewportDispatch({ type: 'scroll/end', token: scrollToken })
+                    })
+                  })()
+                  return
+                }
+                return
+              }
+            }
+            if (rawScrollTop !== null && Math.abs(live.scrollTop - rawScrollTop) > 1) {
+              live.scrollTop = rawScrollTop
+            }
+          } catch {
+            // fail-closed: keep the rebuilt window position
+          }
+        })
+      })
+    },
+    [beginScroll, cancelActiveLoads, dispatch, savePosition, t, topic.id, viewportDispatch]
+  )
+
+  // Top-selector route switch + external route invalidation (branch deleted
+  // elsewhere, delete-fallback after subtree removal, catalog prune, topic
+  // switch restore): the active route changed without a divider switch, so
+  // the loaded projection is stale. The old route's position was already
+  // snapshotted route-keyed (scroll throttle flush on key change) — never
+  // overwrite the NEW route's snapshot here. Reload the route, restore the
+  // new route's previously saved browsing position naturally when one exists
+  // (route-keyed snapshot; legacy topic-only key as main-route fallback),
+  // else a deterministic vicinity fallback (first still-present loaded
+  // message, else route tail). Never a bottom jump, never a topic
+  // transition. Divider-initiated switches claim loadedRouteRef first and
+  // never enter this path.
+  useEffect(() => {
+    if (topic.id !== topicIdRef.current) return
+    if (activeBranchId === loadedRouteRef.current) return
+    loadedRouteRef.current = activeBranchId
+    const topicIdAtEffect = topic.id
+    const routeAtEffect = activeBranchId
+    const vicinityIds = messagesRef.current.map((m) => m.id)
+    cancelActiveLoads()
+    viewportDispatch({ type: 'topic/reset' })
+    windowCacheRef.current.clear()
+    void (async () => {
+      try {
+        await dispatch(loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect))
+      } catch (error) {
+        logger.error('[routeInvalidation] Failed to reload route after external change:', error as Error)
+        return
+      }
+      if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) return
+      try {
+        const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtEffect) ?? []) as Message[]
+        if (loaded.length === 0) return
+        const loadedIds = new Set(loaded.map((m) => m.id))
+        const anchor = vicinityIds.find((id) => loadedIds.has(id)) ?? loaded[loaded.length - 1]?.id
+        if (!anchor) return
+        const targetWindow = createTargetMessageWindow(
+          loaded,
+          anchor,
+          NAVIGATION_VISUALLY_OLDER_GROUPS,
+          NAVIGATION_VISUALLY_NEWER_GROUPS
+        )
+        if (targetWindow) {
+          viewportDispatch({ type: 'window/apply', window: targetWindow })
+        }
+        // Natural saved-position restore for the new route (top-switch
+        // semantics). No forced anchor positioning beyond the saved
+        // snapshot; the vicinity window above is the deterministic fallback
+        // when no saved position exists.
+        try {
+          const saved = getRouteSavedPosition() ?? (routeAtEffect === null ? getLegacyMainSavedPosition() : null)
+          if (saved?.isAtBottom) {
+            void navigate({ kind: 'bottom', source: 'imperative' })
+          } else if (saved?.anchorId && loadedIds.has(saved.anchorId)) {
+            void navigate({ kind: 'message', targetId: saved.anchorId, source: 'imperative' })
+          } else if (saved && typeof saved.scrollTop === 'number') {
+            const live = scrollContainerRef.current
+            if (live) {
+              requestAnimationFrame(() => {
+                if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) return
+                try {
+                  live.scrollTop = saved.scrollTop
+                } catch {
+                  // fail-closed: keep the vicinity window position
+                }
+              })
+            }
+          }
+        } catch {
+          // fail-closed: keep the vicinity window position
+        }
+      } catch (error) {
+        logger.error('[routeInvalidation] Failed to rebuild viewport window:', error as Error)
+      }
+    })()
+  }, [
+    activeBranchId,
+    cancelActiveLoads,
+    dispatch,
+    getLegacyMainSavedPosition,
+    getRouteSavedPosition,
+    navigate,
+    topic.id,
+    viewportDispatch
+  ])
+
   return (
     <EditModeProvider topicId={topic.id} scrollToGroup={scrollToGroup} visibleGroupIds={visibleGroupIds}>
       <AnchorGroupProvider anchorGroupKey={anchorGroupKey}>
@@ -1618,6 +2004,7 @@ const Messages = ({
           isLoadingNewer={isLoadingNewer}
           loadMoreMessages={loadMoreMessages}
           registerMessageElement={registerMessageElement}
+          onSelectRoute={handleSelectRoute}
         />
         <SelectionBox
           isMultiSelectMode={isMultiSelectMode}

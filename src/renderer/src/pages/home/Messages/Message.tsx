@@ -133,9 +133,10 @@ const MessageItem: FC<Props> = ({
   const isAssistantMessage = message.role === 'assistant'
   const isProcessing = isMessageProcessing(message)
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
-  // LOCK-105: message style is always bubble; the footer reverses for the
-  // last assistant message.
-  const shouldReverseFooter = isLastMessage && isAssistantMessage
+  // LOCK-105: message style is always bubble; every assistant-message
+  // toolbar sits on the LEFT side (not only the last assistant message).
+  // User-message positioning is unchanged.
+  const shouldReverseFooter = isAssistantMessage
 
   // 编辑模式下点击消息内容区域触发组选择
   const handleMessageClick = useCallback(

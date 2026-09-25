@@ -83,9 +83,22 @@ export interface ChatDbError {
 // aggregate maps these to MessageData/MessageBlockData.
 // ---------------------------------------------------------------------------
 
+/**
+ * Route context for branch-aware authority.
+ *
+ * Every branch-aware authoritative read and write addresses one logical
+ * topic plus one route: `branchId` absent/null is the main route, non-null
+ * is that branch's effective route (ancestors through each anchor plus owned
+ * suffix, stable IDs). Main resolves the route; the renderer never splices
+ * authority.
+ */
+export type BranchRouteId = string | null | undefined
+
 /** @see IpcChannel.ChatDb_FetchMessages */
 export interface FetchMessagesRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
 }
 
 /** @see IpcChannel.ChatDb_GetRawTopic */
@@ -142,6 +155,8 @@ export interface ResendAttemptMapping {
 /** @see IpcChannel.ChatDb_AppendMessage */
 export interface AppendMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Full message entity as JSON. Must contain at least `id`. */
   message: JsonObject
   /** Full block entities as JSON. Each must contain at least `id` and `messageId`. */
@@ -155,6 +170,8 @@ export interface AppendMessageRequest extends ResendAttemptIdCarrier {
 /** @see IpcChannel.ChatDb_UpdateMessage */
 export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   messageId: string
   /**
    * Partial message patch. Absent keys are unchanged.
@@ -167,6 +184,8 @@ export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
 /** @see IpcChannel.ChatDb_UpdateMessageAndBlocks */
 export interface UpdateMessageAndBlocksRequest extends ResendAttemptIdCarrier {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /**
    * Partial message patch with required `id` field.
    * Must NOT change id or topicId.
@@ -192,6 +211,8 @@ export interface UpdateMessageAndBlocksRequest extends ResendAttemptIdCarrier {
  */
 export interface SelectAnswerMessageRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** The message to select (`foldSelected=true`). Main resolves its group. */
   selectedMessageId: string
 }
@@ -213,12 +234,16 @@ export interface SelectAnswerMessageResponse {
 /** @see IpcChannel.ChatDb_DeleteMessage */
 export interface DeleteMessageRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   messageId: string
 }
 
 /** @see IpcChannel.ChatDb_DeleteMessages */
 export interface DeleteMessagesRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   messageIds: string[]
 }
 
@@ -293,6 +318,8 @@ export type DeleteBlocksResponse = FileCleanupResult
 export interface FetchMessagesLatestWindowRequest {
   kind: 'latest'
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Number of latest viewport groups to return. Caller-provided, bounded 1..100. */
   limit: number
 }
@@ -306,6 +333,8 @@ export interface FetchMessagesLatestWindowRequest {
 export interface FetchMessagesAroundWindowRequest {
   kind: 'around'
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Stable anchor message ID. */
   anchorMessageId: string
   /** Viewport groups before the anchor's group. Caller-provided, bounded 1..100. */
@@ -359,6 +388,8 @@ export interface FetchMessagesWindowResponse {
 /** @see IpcChannel.ChatDb_FetchAnswerGroup — additive READ for authoritative answer-group. */
 export interface FetchAnswerGroupRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   anchorMessageId: string
 }
 
@@ -383,6 +414,8 @@ export interface FetchAnswerGroupResponse {
 /** @see IpcChannel.ChatDb_FetchContextClosure — additive READ for authoritative context closure. */
 export interface FetchContextClosureRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Renderer-owned persisted ContextWindowAnchor groupKey. */
   anchorGroupKey: string
 }
@@ -455,12 +488,16 @@ export type ResolveContextClosureDetail = 'closure' | 'anchor'
 
 export interface ResolveContextClosureRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   intent: ResolveContextClosureIntent
   contextCount?: number | null
   currentAnchorGroupKey?: string | null
   messageId?: string
   groupKey?: string
   sourceTopicId?: string
+  /** Route owner of the inherit source topic (absent/null = main route). */
+  sourceBranchId?: BranchRouteId
   sourceAnchorGroupKey?: string | null
   detail?: ResolveContextClosureDetail
 }
@@ -538,6 +575,8 @@ export type ResolveContextClosureResult = ResolveContextClosureResponse | Resolv
  */
 export interface FetchClipboardGroupsRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Stable clipboard group keys (same values as UI `selectedGroupIds`). */
   groupIds: string[]
 }
@@ -585,6 +624,8 @@ export interface FetchClipboardGroupsResponse {
 /** @see IpcChannel.ChatDb_FetchWholeTopicSnapshot — additive READ for explicit whole-topic snapshot. */
 export interface FetchWholeTopicSnapshotRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
 }
 
 /** Typed whole-topic snapshot metadata — distinct from window/answer-group/context-closure completeness. */
@@ -615,6 +656,8 @@ export interface FetchWholeTopicSnapshotResponse {
 /** @see IpcChannel.ChatDb_FetchTopicNamingContext — additive bounded READ for topic naming. */
 export interface FetchTopicNamingContextRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
 }
 
 /** Authority topic naming metadata carried by the naming-context read. */
@@ -655,6 +698,8 @@ export interface FetchTopicNamingContextResponse {
 /** @see IpcChannel.ChatDb_FetchTopicActivity — additive bounded READ for rate-limit checks. */
 export interface FetchTopicActivityRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
 }
 
 /** Typed activity metadata — distinct from every message-carrying completeness. */
@@ -725,6 +770,8 @@ export type ListSegmentsResponse = SegmentWire[]
 export interface UpsertSegmentRequest {
   segmentId: string
   topicId: string
+  /** Route validation context: absent/null = main route; membership must resolve inside this route. */
+  branchId?: BranchRouteId
   name?: string | null
   /** Ordered message IDs for this segment. */
   messageIds: string[]
@@ -753,6 +800,8 @@ export interface DeleteSegmentRequest {
 
 /** @see IpcChannel.ChatDb_ReplaceSegmentMembership */
 export interface ReplaceSegmentMembershipRequest {
+  /** Route validation context: absent/null = main route; membership must resolve inside this route. */
+  branchId?: BranchRouteId
   segmentId: string
   /** Complete ordered message ID list. Empty deletes the segment per repo semantics. */
   messageIds: string[]
@@ -768,7 +817,9 @@ export type ReplaceSegmentMembershipResponse = SegmentWire | null
 /** @see IpcChannel.ChatDb_ReorderMessages */
 export interface ReorderMessagesRequest {
   topicId: string
-  /** Complete ordered message ID list for the topic. */
+  /** Route owner: absent/null = main route reorder; non-null = that branch's owned-suffix reorder. */
+  branchId?: BranchRouteId
+  /** Complete ordered message ID list for the addressed route owner. */
   messageIds: string[]
 }
 
@@ -784,6 +835,8 @@ export interface ReorderMessagesRequest {
  */
 export interface ReorderAnswerGroupRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Stable anchor belonging to the answer group (must be in orderedMessageIds). */
   anchorMessageId: string
   /** Desired complete ordered answer-group message IDs. */
@@ -994,6 +1047,8 @@ export interface ResetAssistantTopicsResponse {
 /** @see IpcChannel.ChatDb_BranchMessagesToTopic — Main-authoritative branch by stable anchor */
 export interface BranchMessagesToTopicRequest {
   sourceTopicId: string
+  /** Source route: absent/null = main route (sidebar Copy Topic); non-null = explicitly used in-chat branch route. */
+  branchId?: BranchRouteId
   targetTopicId: string
   anchorMessageId: string
   assistantId?: string
@@ -1003,6 +1058,101 @@ export interface BranchMessagesToTopicRequest {
 export interface BranchMessagesToTopicResponse {
   messages: JsonObject[]
   blocks: JsonObject[]
+}
+
+// ---------------------------------------------------------------------------
+// Topic-internal branches (local-only, no prefix cloning)
+// ---------------------------------------------------------------------------
+//
+// `topics` contains only logical sidebar topics. `topic_branches` contains
+// internal branch nodes inside one logical topic; `messages` stays owned by
+// the logical topic_id with nullable branch_id (null = main route). A
+// root/main route is addressed by `branchId = null` — no fake root row.
+// Branch names live on the branch row; Topic.name stays the logical name.
+// This creation path is the ONLY true-branch creation method; the legacy
+// clone-prefix `branchMessagesToTopic` (Copy Topic) is unchanged.
+
+/** Wire shape of one topic-internal branch node. */
+export interface TopicBranchWire {
+  id: string
+  topicId: string
+  /** Null for level-1 branches (parent route = main route). */
+  parentBranchId: string | null
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_CreateBranch — create one internal branch node.
+ *
+ * The anchor must belong to the parent route's current effective route
+ * (branch-from-inherited-anchor allowed). Multi-level branches supported.
+ * Returns the created node plus the effective wire of the new (empty-suffix)
+ * route for projection.
+ */
+export interface CreateBranchRequest {
+  topicId: string
+  /** Parent route: absent/null = main route, non-null = that branch's route. */
+  parentBranchId?: BranchRouteId
+  anchorMessageId: string
+  name?: string
+}
+
+/** @see IpcChannel.ChatDb_CreateBranch */
+export interface CreateBranchResponse {
+  branch: TopicBranchWire
+  /** Effective wire messages of the new route (shared prefix + empty suffix). */
+  messages: JsonObject[]
+  blocks: JsonObject[]
+}
+
+/** @see IpcChannel.ChatDb_ListBranches */
+export interface ListBranchesRequest {
+  topicId: string
+}
+
+/** @see IpcChannel.ChatDb_ListBranches */
+export interface ListBranchesResponse {
+  topicId: string
+  /** All branch nodes of the topic in (createdAt, id) order. Empty when never branched. */
+  branches: TopicBranchWire[]
+}
+
+/** @see IpcChannel.ChatDb_RenameBranch */
+export interface RenameBranchRequest {
+  topicId: string
+  branchId: string
+  name: string
+}
+
+/** @see IpcChannel.ChatDb_RenameBranch */
+export interface RenameBranchResponse {
+  branch: TopicBranchWire
+}
+
+/**
+ * @see IpcChannel.ChatDb_DeleteBranch — delete one branch subtree.
+ *
+ * Deletes the selected branch, all descendant branches, and only the
+ * messages/blocks/file references owned by those branch IDs. Shared prefixes
+ * and sibling branches survive. After deleting the last branch the topic is
+ * indistinguishable from a never-branched topic.
+ */
+export interface DeleteBranchRequest {
+  topicId: string
+  branchId: string
+}
+
+/** @see IpcChannel.ChatDb_DeleteBranch */
+export interface DeleteBranchResponse extends FileCleanupResult {
+  /** Deleted branch IDs, subtree-root first. */
+  deletedBranchIds: string[]
+  /** Deleted owned message IDs. */
+  deletedMessageIds: string[]
+  /** Deleted owned block IDs. */
+  deletedBlockIds: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1172,8 @@ export interface BranchMessagesToTopicResponse {
  */
 export interface InsertMessagesAfterAnchorRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   afterMessageId: string
   /** Ordered entries to insert. Inserted after anchor/group tail in array order. */
   entries: MessageBlockEntry[]
@@ -1045,6 +1197,8 @@ export interface MessageBlockEntry {
 /** @see IpcChannel.ChatDb_CloneMessagesToTopic */
 export interface CloneMessagesToTopicRequest {
   targetTopicId: string
+  /** Route owner inside the target topic: absent/null = main route. */
+  branchId?: BranchRouteId
   assistantId?: string
   /** Ordered entries to insert. Messages are appended in array order. */
   entries: MessageBlockEntry[]
@@ -1056,6 +1210,8 @@ export type CloneMessagesToTopicResponse = null
 /** @see IpcChannel.ChatDb_ResetMessagesForResend */
 export interface ResetMessagesForResendRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Complete message payloads to reset or insert. */
   messages: MessageBlockEntry[]
   /** Block IDs to delete as part of the reset. */
@@ -1092,6 +1248,8 @@ export interface SemanticModelSnapshot extends JsonObject {
  */
 export interface ResendUserMessagesRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Stable user message being resent. */
   userMessageId: string
   /** Owning assistant for newly created group members. */
@@ -1112,6 +1270,8 @@ export interface ResendUserMessagesRequest {
  */
 export interface RegenerateAssistantMessageRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Stable assistant message to regenerate. */
   assistantMessageId: string
   /** Owning assistant (used only when selected has no truthy `modelId`). */
@@ -1165,6 +1325,8 @@ export interface ResetMessagesForResendResponse extends FileCleanupResult {
 /** @see IpcChannel.ChatDb_DeleteMessagesWithSegments */
 export interface DeleteMessagesWithSegmentsRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   messageIds: string[]
 }
 
@@ -1174,6 +1336,8 @@ export type DeleteMessagesWithSegmentsResponse = FileCleanupResult
 /** @see IpcChannel.ChatDb_DeleteMessagesWithDependents */
 export interface DeleteMessagesWithDependentsRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Stable root message IDs; non-empty, unique. Main expands user dependents. */
   messageIds: string[]
 }
@@ -1234,6 +1398,8 @@ export interface DeleteMessagesWithDependentsResponse extends FileCleanupResult 
 /** @see IpcChannel.ChatDb_PasteMessagesToTopic */
 export interface PasteMessagesToTopicRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Ordered entries to insert. Inserted at insertIndex in array order. */
   entries: MessageBlockEntry[]
   /** Position to insert at (zero-based). Absent = append at end. */
@@ -1276,6 +1442,8 @@ export interface InsertMessageGroup {
 /** @see IpcChannel.ChatDb_InsertMessageGroups */
 export interface InsertMessageGroupsRequest {
   topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
   /** Ordered groups to insert atomically in array order. */
   groups: InsertMessageGroup[]
 }
@@ -1398,6 +1566,23 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:branch-messages-to-topic': {
     request: BranchMessagesToTopicRequest
     response: BranchMessagesToTopicResponse
+  }
+  // Topic-internal branches (local-only, no prefix cloning)
+  'chatdb:create-branch': {
+    request: CreateBranchRequest
+    response: CreateBranchResponse
+  }
+  'chatdb:list-branches': {
+    request: ListBranchesRequest
+    response: ListBranchesResponse
+  }
+  'chatdb:rename-branch': {
+    request: RenameBranchRequest
+    response: RenameBranchResponse
+  }
+  'chatdb:delete-branch': {
+    request: DeleteBranchRequest
+    response: DeleteBranchResponse
   }
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': {

@@ -367,6 +367,7 @@ describe('MessageMenubar context-anchor button', () => {
     expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(1)
     expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
       topicId: 'topic-1',
+      branchId: null,
       intent: 'move',
       messageId: 'u3',
       currentAnchorGroupKey: 'u1',
@@ -394,6 +395,7 @@ describe('MessageMenubar context-anchor button', () => {
     expect(mocks.resolveContextClosure).toHaveBeenCalledTimes(2)
     expect(mocks.resolveContextClosure).toHaveBeenNthCalledWith(1, {
       topicId: 'topic-1',
+      branchId: null,
       intent: 'move',
       messageId: 'u3',
       currentAnchorGroupKey: 'u3',
@@ -401,6 +403,7 @@ describe('MessageMenubar context-anchor button', () => {
     })
     expect(mocks.resolveContextClosure).toHaveBeenNthCalledWith(2, {
       topicId: 'topic-1',
+      branchId: null,
       intent: 'reanchor-default',
       contextCount: 2,
       currentAnchorGroupKey: 'u3',
@@ -540,6 +543,7 @@ describe('MessageMenubar context-anchor button', () => {
 
     expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
       topicId: 'topic-1',
+      branchId: null,
       intent: 'move',
       messageId: 'u9',
       currentAnchorGroupKey: 'u1',
@@ -565,6 +569,7 @@ describe('MessageMenubar context-anchor button', () => {
 
     expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
       topicId: 'topic-1',
+      branchId: null,
       intent: 'move',
       messageId: 'u3',
       currentAnchorGroupKey: 'u1',

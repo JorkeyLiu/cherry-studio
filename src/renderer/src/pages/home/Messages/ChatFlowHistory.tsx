@@ -420,6 +420,11 @@ const ChatFlowHistory: FC<ChatFlowHistoryProps> = ({ conversationId }) => {
 
   const topicId = conversationId
 
+  // In-chat flow view follows the active route of the logical topic.
+  const activeBranchId = useSelector((state: RootState) =>
+    topicId ? (state.topicBranch?.activeBranchIdByTopic?.[topicId] ?? null) : null
+  )
+
   // 获取用户头像
   const userAvatar = useAvatar()
 
@@ -434,6 +439,8 @@ const ChatFlowHistory: FC<ChatFlowHistoryProps> = ({ conversationId }) => {
 
   const generationRef = useRef(0)
   const activeTopicRef = useRef<string | undefined>(topicId)
+  const activeBranchIdRef = useRef<string | null>(activeBranchId)
+  activeBranchIdRef.current = activeBranchId
   const mountedRef = useRef(true)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const lastUpdatedAtRef = useRef<string | undefined>(undefined)
@@ -456,7 +463,7 @@ const ChatFlowHistory: FC<ChatFlowHistoryProps> = ({ conversationId }) => {
 
   const fetchSnapshot = useCallback(async (targetTopicId: string, gen: number) => {
     try {
-      const snap = await loadWholeTopicSnapshot(targetTopicId)
+      const snap = await loadWholeTopicSnapshot(targetTopicId, activeBranchIdRef.current)
       if (!mountedRef.current || gen !== generationRef.current || targetTopicId !== activeTopicRef.current) return
       hasSnapshotRef.current = true
       setSnapshot(snap)
@@ -519,7 +526,7 @@ const ChatFlowHistory: FC<ChatFlowHistoryProps> = ({ conversationId }) => {
     setLoading(true)
     void fetchSnapshot(topicId, gen)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topicId, fetchSnapshot])
+  }, [topicId, activeBranchId, fetchSnapshot])
 
   // 2) authority mutation metadata: refetch when the current topic's updatedAt
   // changes. Baseline is established on mount/topic change (whose immediate

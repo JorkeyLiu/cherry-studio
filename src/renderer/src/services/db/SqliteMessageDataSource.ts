@@ -34,8 +34,12 @@ import type {
   CloneMessagesToTopicResponse,
   CountFileRefsByFileRequest,
   CountFileRefsByFileResponse,
+  CreateBranchRequest,
+  CreateBranchResponse,
   DeleteBlocksRequest,
   DeleteBlocksResponse,
+  DeleteBranchRequest,
+  DeleteBranchResponse,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -75,6 +79,8 @@ import type {
   JsonObject,
   ListBlocksByFileRequest,
   ListBlocksByFileResponse,
+  ListBranchesRequest,
+  ListBranchesResponse,
   ListFileRefsByFileRequest,
   ListFileRefsByFileResponse,
   ListSegmentsRequest,
@@ -87,6 +93,8 @@ import type {
   PurgeExpiredTopicsRequest,
   PurgeExpiredTopicsResponse,
   RegenerateAssistantMessageRequest,
+  RenameBranchRequest,
+  RenameBranchResponse,
   ReorderAnswerGroupRequest,
   ReorderAnswerGroupResponse,
   ReorderMessagesRequest,
@@ -109,6 +117,7 @@ import type {
   SemanticResendResponse,
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
+  TopicBranchWire,
   TopicExistsRequest,
   TopicWire,
   UpdateBlocksRequest,
@@ -150,6 +159,10 @@ export interface ChatDbApi {
   ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
   fetchTopicActivity?(request: FetchTopicActivityRequest): Promise<ChatDbResult<FetchTopicActivityResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
+  createBranch?(request: CreateBranchRequest): Promise<ChatDbResult<CreateBranchResponse>>
+  listBranches?(request: ListBranchesRequest): Promise<ChatDbResult<ListBranchesResponse>>
+  renameBranch?(request: RenameBranchRequest): Promise<ChatDbResult<RenameBranchResponse>>
+  deleteBranch?(request: DeleteBranchRequest): Promise<ChatDbResult<DeleteBranchResponse>>
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
   ): Promise<ChatDbResult<InsertMessagesAfterAnchorResponse>>
@@ -325,12 +338,13 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async fetchMessages(
     topicId: string,
-    forceReload?: boolean
+    forceReload?: boolean,
+    branchId?: string | null
   ): Promise<{ messages: Message[]; blocks: MessageBlock[] }> {
     // forceReload is accepted per the MessageDataSource interface but never
     // sent over the wire — SQLite reads are always fresh (no renderer cache).
     void forceReload
-    const request: FetchMessagesRequest = cloneForWire({ topicId })
+    const request: FetchMessagesRequest = cloneForWire({ topicId, branchId: branchId ?? null })
     const result = unwrap(await this.api.fetchMessages(request))
     return {
       messages: result.messages as unknown as Message[],
@@ -357,7 +371,8 @@ export class SqliteMessageDataSource implements MessageDataSource {
     blocks: MessageBlock[],
     insertIndex?: number,
     sendContext?: SendDiagnosticsContext,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    branchId?: string | null
   ): Promise<void> {
     // LOCK-004: when this append belongs to the ordinary send path, consume
     // the ordinal from the CALLER'S OWN send context so renderer + main logs
@@ -373,6 +388,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     const sanitizedIndex = sanitizeInsertIndex(insertIndex)
     const request: AppendMessageRequest = {
       topicId,
+      branchId: branchId ?? null,
       message: cloneForWire(message as unknown as JsonObject),
       blocks: cloneForWire(blocks as unknown as JsonObject[]),
       ...(sanitizedIndex !== undefined && { insertIndex: sanitizedIndex }),
@@ -439,10 +455,12 @@ export class SqliteMessageDataSource implements MessageDataSource {
     topicId: string,
     messageId: string,
     updates: Partial<Message>,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    branchId?: string | null
   ): Promise<void> {
     const request: UpdateMessageRequest = {
       topicId,
+      branchId: branchId ?? null,
       messageId,
       updates: cloneForWire(updates as unknown as JsonObject),
       ...(resendAttemptId !== undefined && { resendAttemptId })
@@ -456,15 +474,18 @@ export class SqliteMessageDataSource implements MessageDataSource {
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
     blocksToUpdate: MessageBlock[],
     blockIdsToDelete: string[] = [],
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    branchId?: string | null
   ): Promise<FileCleanupResult> {
     // Clone and strip redundant identity/order fields for Dexie-compatible semantics
     const clonedUpdates = cloneForWire(messageUpdates as unknown as JsonObject) as Record<string, unknown>
     delete clonedUpdates.topicId
+    delete clonedUpdates.branchId
     delete clonedUpdates.sortOrder
 
     const request: UpdateMessageAndBlocksRequest = {
       topicId,
+      branchId: branchId ?? null,
       messageUpdates: clonedUpdates as JsonObject,
       blocksToUpdate: cloneForWire(blocksToUpdate as unknown as JsonObject[]),
       blockIdsToDelete: cloneForWire(blockIdsToDelete),
@@ -486,21 +507,25 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * no fallback. Dispatches `updateTopicUpdatedAt` exactly once after
    * success — the calling thunk must NOT dispatch it again.
    */
-  async selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse> {
-    const request: SelectAnswerMessageRequest = cloneForWire({ topicId, selectedMessageId })
+  async selectAnswerMessage(
+    topicId: string,
+    selectedMessageId: string,
+    branchId?: string | null
+  ): Promise<SelectAnswerMessageResponse> {
+    const request: SelectAnswerMessageRequest = cloneForWire({ topicId, branchId: branchId ?? null, selectedMessageId })
     const response = unwrap(await this.api.selectAnswerMessage(request))
     dispatchTopicUpdatedAt(topicId)
     return response
   }
 
-  async deleteMessage(topicId: string, messageId: string): Promise<void> {
-    const request: DeleteMessageRequest = cloneForWire({ topicId, messageId })
+  async deleteMessage(topicId: string, messageId: string, branchId?: string | null): Promise<void> {
+    const request: DeleteMessageRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageId })
     unwrap(await this.api.deleteMessage(request))
     dispatchTopicUpdatedAt(topicId)
   }
 
-  async deleteMessages(topicId: string, messageIds: string[]): Promise<void> {
-    const request: DeleteMessagesRequest = cloneForWire({ topicId, messageIds })
+  async deleteMessages(topicId: string, messageIds: string[], branchId?: string | null): Promise<void> {
+    const request: DeleteMessagesRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageIds })
     unwrap(await this.api.deleteMessages(request))
     dispatchTopicUpdatedAt(topicId)
   }
@@ -719,9 +744,17 @@ export class SqliteMessageDataSource implements MessageDataSource {
     topicId: string,
     name: string | null | undefined,
     messageIds: string[],
-    color?: string | null
+    color?: string | null,
+    branchId?: string | null
   ): Promise<UpsertSegmentResponse> {
-    const request: UpsertSegmentRequest = cloneForWire({ segmentId, topicId, name, messageIds, color })
+    const request: UpsertSegmentRequest = cloneForWire({
+      segmentId,
+      topicId,
+      branchId: branchId ?? null,
+      name,
+      messageIds,
+      color
+    })
     return unwrap(await this.api.upsertSegment(request))
   }
 
@@ -739,15 +772,23 @@ export class SqliteMessageDataSource implements MessageDataSource {
     unwrap(await this.api.deleteSegment(request))
   }
 
-  async replaceSegmentMembership(segmentId: string, messageIds: string[]): Promise<ReplaceSegmentMembershipResponse> {
-    const request: ReplaceSegmentMembershipRequest = cloneForWire({ segmentId, messageIds })
+  async replaceSegmentMembership(
+    segmentId: string,
+    messageIds: string[],
+    branchId?: string | null
+  ): Promise<ReplaceSegmentMembershipResponse> {
+    const request: ReplaceSegmentMembershipRequest = cloneForWire({
+      segmentId,
+      branchId: branchId ?? null,
+      messageIds
+    })
     return unwrap(await this.api.replaceSegmentMembership(request))
   }
 
   // ============ Message Reorder (Phase 5.1A) ============
 
-  async reorderMessages(topicId: string, messageIds: string[]): Promise<void> {
-    const request: ReorderMessagesRequest = cloneForWire({ topicId, messageIds })
+  async reorderMessages(topicId: string, messageIds: string[], branchId?: string | null): Promise<void> {
+    const request: ReorderMessagesRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageIds })
     unwrap(await this.api.reorderMessages(request))
   }
 
@@ -763,9 +804,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async reorderAnswerGroup(
     topicId: string,
     anchorMessageId: string,
-    orderedMessageIds: string[]
+    orderedMessageIds: string[],
+    branchId?: string | null
   ): Promise<ReorderAnswerGroupResponse> {
-    const request: ReorderAnswerGroupRequest = cloneForWire({ topicId, anchorMessageId, orderedMessageIds })
+    const request: ReorderAnswerGroupRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      anchorMessageId,
+      orderedMessageIds
+    })
     const response = unwrap(await this.api.reorderAnswerGroup(request))
     dispatchTopicUpdatedAt(topicId)
     return response
@@ -876,13 +923,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
     sourceTopicId: string,
     targetTopicId: string,
     anchorMessageId: string,
-    assistantId?: string
+    assistantId?: string,
+    sourceBranchId?: string | null
   ): Promise<{ messages: Message[]; blocks: MessageBlock[] }> {
     if (!this.api.branchMessagesToTopic) {
       throw new Error('ChatDb API unavailable: branchMessagesToTopic not exposed')
     }
     const request: BranchMessagesToTopicRequest = cloneForWire({
       sourceTopicId,
+      branchId: sourceBranchId ?? null,
       targetTopicId,
       anchorMessageId,
       assistantId
@@ -893,6 +942,64 @@ export class SqliteMessageDataSource implements MessageDataSource {
       messages: result.messages as unknown as Message[],
       blocks: result.blocks as unknown as MessageBlock[]
     }
+  }
+
+  // ============ Topic-internal branches (local-only, no prefix cloning) ============
+
+  async createBranch(
+    topicId: string,
+    parentBranchId: string | null | undefined,
+    anchorMessageId: string,
+    name?: string
+  ): Promise<{
+    branch: TopicBranchWire
+    messages: Message[]
+    blocks: MessageBlock[]
+  }> {
+    if (!this.api.createBranch) {
+      throw new Error('ChatDb API unavailable: createBranch not exposed')
+    }
+    const request: CreateBranchRequest = cloneForWire({
+      topicId,
+      parentBranchId: parentBranchId ?? null,
+      anchorMessageId,
+      name
+    })
+    const result = unwrap(await this.api.createBranch(request))
+    dispatchTopicUpdatedAt(topicId)
+    return {
+      branch: result.branch,
+      messages: result.messages as unknown as Message[],
+      blocks: result.blocks as unknown as MessageBlock[]
+    }
+  }
+
+  async listBranches(topicId: string): Promise<ListBranchesResponse> {
+    if (!this.api.listBranches) {
+      throw new Error('ChatDb API unavailable: listBranches not exposed')
+    }
+    const request: ListBranchesRequest = cloneForWire({ topicId })
+    return unwrap(await this.api.listBranches(request))
+  }
+
+  async renameBranch(topicId: string, branchId: string, name: string): Promise<RenameBranchResponse> {
+    if (!this.api.renameBranch) {
+      throw new Error('ChatDb API unavailable: renameBranch not exposed')
+    }
+    const request: RenameBranchRequest = cloneForWire({ topicId, branchId, name })
+    const result = unwrap(await this.api.renameBranch(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async deleteBranch(topicId: string, branchId: string): Promise<DeleteBranchResponse> {
+    if (!this.api.deleteBranch) {
+      throw new Error('ChatDb API unavailable: deleteBranch not exposed')
+    }
+    const request: DeleteBranchRequest = cloneForWire({ topicId, branchId })
+    const result = unwrap(await this.api.deleteBranch(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
   }
 
   // ============ S6.2c-2: Insert after stable anchor (additive, Main-authoritative) ============
@@ -909,12 +1016,18 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async insertMessagesAfterAnchor(
     topicId: string,
     afterMessageId: string,
-    entries: MessageBlockEntry[]
+    entries: MessageBlockEntry[],
+    branchId?: string | null
   ): Promise<FileCleanupResult> {
     if (!this.api.insertMessagesAfterAnchor) {
       throw new Error('ChatDb API unavailable: insertMessagesAfterAnchor not exposed')
     }
-    const request: InsertMessagesAfterAnchorRequest = cloneForWire({ topicId, afterMessageId, entries })
+    const request: InsertMessagesAfterAnchorRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      afterMessageId,
+      entries
+    })
     const result = unwrap(await this.api.insertMessagesAfterAnchor(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -925,9 +1038,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async resetMessagesForResend(
     topicId: string,
     messages: MessageBlockEntry[],
-    blockIdsToDelete: string[]
+    blockIdsToDelete: string[],
+    branchId?: string | null
   ): Promise<ResetMessagesForResendResponse> {
-    const request: ResetMessagesForResendRequest = cloneForWire({ topicId, messages, blockIdsToDelete })
+    const request: ResetMessagesForResendRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      messages,
+      blockIdsToDelete
+    })
     const result = unwrap(await this.api.resetMessagesForResend(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -957,8 +1076,16 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return result
   }
 
-  async deleteMessagesWithSegments(topicId: string, messageIds: string[]): Promise<FileCleanupResult> {
-    const request: DeleteMessagesWithSegmentsRequest = cloneForWire({ topicId, messageIds })
+  async deleteMessagesWithSegments(
+    topicId: string,
+    messageIds: string[],
+    branchId?: string | null
+  ): Promise<FileCleanupResult> {
+    const request: DeleteMessagesWithSegmentsRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      messageIds
+    })
     const result = unwrap(await this.api.deleteMessagesWithSegments(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -966,12 +1093,17 @@ export class SqliteMessageDataSource implements MessageDataSource {
 
   async deleteMessagesWithDependents(
     topicId: string,
-    messageIds: string[]
+    messageIds: string[],
+    branchId?: string | null
   ): Promise<DeleteMessagesWithDependentsResponse> {
     if (!this.api.deleteMessagesWithDependents) {
       throw new Error('ChatDb API unavailable: semantic delete not exposed')
     }
-    const request: DeleteMessagesWithDependentsRequest = cloneForWire({ topicId, messageIds })
+    const request: DeleteMessagesWithDependentsRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      messageIds
+    })
     const result = unwrap(await this.api.deleteMessagesWithDependents(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -980,19 +1112,29 @@ export class SqliteMessageDataSource implements MessageDataSource {
   async pasteMessagesToTopic(
     topicId: string,
     entries: MessageBlockEntry[],
-    insertIndex?: number
+    insertIndex?: number,
+    branchId?: string | null
   ): Promise<FileCleanupResult> {
-    const request: PasteMessagesToTopicRequest = cloneForWire({ topicId, entries, insertIndex })
+    const request: PasteMessagesToTopicRequest = cloneForWire({
+      topicId,
+      branchId: branchId ?? null,
+      entries,
+      insertIndex
+    })
     const result = unwrap(await this.api.pasteMessagesToTopic(request))
     dispatchTopicUpdatedAt(topicId)
     return result
   }
 
-  async insertMessageGroups(topicId: string, groups: InsertMessageGroup[]): Promise<FileCleanupResult> {
+  async insertMessageGroups(
+    topicId: string,
+    groups: InsertMessageGroup[],
+    branchId?: string | null
+  ): Promise<FileCleanupResult> {
     if (!this.api.insertMessageGroups) {
       throw new Error('ChatDb API unavailable: insertMessageGroups not exposed')
     }
-    const request: InsertMessageGroupsRequest = cloneForWire({ topicId, groups })
+    const request: InsertMessageGroupsRequest = cloneForWire({ topicId, branchId: branchId ?? null, groups })
     const result = unwrap(await this.api.insertMessageGroups(request))
     dispatchTopicUpdatedAt(topicId)
     return result
@@ -1023,11 +1165,15 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * No mutation, no timestamp dispatch, no fallback. Structured failure
    * throws ChatDbResultError; transport rejection propagates unchanged.
    */
-  async fetchAnswerGroup(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse> {
+  async fetchAnswerGroup(
+    topicId: string,
+    anchorMessageId: string,
+    branchId?: string | null
+  ): Promise<FetchAnswerGroupResponse> {
     if (!this.api.fetchAnswerGroup) {
       throw new Error('ChatDb API unavailable: answer-group read not exposed')
     }
-    const request: FetchAnswerGroupRequest = cloneForWire({ topicId, anchorMessageId })
+    const request: FetchAnswerGroupRequest = cloneForWire({ topicId, branchId: branchId ?? null, anchorMessageId })
     return unwrap(await this.api.fetchAnswerGroup(request))
   }
 
@@ -1098,7 +1244,10 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * published to Redux. Missing topic throws ChatDbResultError (NOT_FOUND);
    * transport rejection propagates unchanged.
    */
-  async fetchWholeTopicSnapshot(topicId: string): Promise<{
+  async fetchWholeTopicSnapshot(
+    topicId: string,
+    branchId?: string | null
+  ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]
     snapshot: FetchWholeTopicSnapshotResponse['snapshot']
@@ -1106,7 +1255,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     if (!this.api.fetchWholeTopicSnapshot) {
       throw new Error('ChatDb API unavailable: whole-topic snapshot read not exposed')
     }
-    const request: FetchWholeTopicSnapshotRequest = cloneForWire({ topicId })
+    const request: FetchWholeTopicSnapshotRequest = cloneForWire({ topicId, branchId: branchId ?? null })
     const result = unwrap(await this.api.fetchWholeTopicSnapshot(request))
     return {
       messages: result.messages as unknown as Message[],
@@ -1154,7 +1303,10 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * Missing topic throws ChatDbResultError (NOT_FOUND); transport rejection
    * propagates unchanged.
    */
-  async fetchTopicNamingContext(topicId: string): Promise<{
+  async fetchTopicNamingContext(
+    topicId: string,
+    branchId?: string | null
+  ): Promise<{
     topic: FetchTopicNamingContextResponse['topic']
     messageCount: number
     firstMessage: Message | null
@@ -1165,7 +1317,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     if (!this.api.fetchTopicNamingContext) {
       throw new Error('ChatDb API unavailable: naming-context read not exposed')
     }
-    const request: FetchTopicNamingContextRequest = cloneForWire({ topicId })
+    const request: FetchTopicNamingContextRequest = cloneForWire({ topicId, branchId: branchId ?? null })
     const result = unwrap(await this.api.fetchTopicNamingContext(request))
     return {
       topic: result.topic,
@@ -1185,11 +1337,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
    * Dispatches nothing. Missing topic throws ChatDbResultError (NOT_FOUND);
    * transport rejection propagates unchanged.
    */
-  async fetchTopicActivity(topicId: string): Promise<FetchTopicActivityResponse> {
+  async fetchTopicActivity(topicId: string, branchId?: string | null): Promise<FetchTopicActivityResponse> {
     if (!this.api.fetchTopicActivity) {
       throw new Error('ChatDb API unavailable: topic-activity read not exposed')
     }
-    const request: FetchTopicActivityRequest = cloneForWire({ topicId })
+    const request: FetchTopicActivityRequest = cloneForWire({ topicId, branchId: branchId ?? null })
     return unwrap(await this.api.fetchTopicActivity(request))
   }
 

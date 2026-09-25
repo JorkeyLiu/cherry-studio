@@ -34,6 +34,7 @@ import {
   invalidateForDeletion as invalidateResidentForDeletion,
   resetAllResidentRegistry
 } from '@renderer/store/residentRegistry'
+import { branchesRemoved } from '@renderer/store/topicBranch'
 import { clearSegmentsForTopic } from '@renderer/store/topicSegment'
 
 const deletionGenerations = new Map<string, number>()
@@ -145,6 +146,13 @@ export function invalidateTopicsDeletion(topicIds: string[]): void {
     bumpDeletionGeneration(id)
   }
   purgeResidentProjectionsForTopics(valid)
+  // Drop branch catalogs + active routes for hard-deleted topics (branches
+  // never exist independently; a deleted topic leaves no branch state).
+  try {
+    store.dispatch(branchesRemoved({ topicIds: valid }))
+  } catch {
+    // best-effort; never break deletion convergence
+  }
   // Reclaim retention metadata for all hard-deleted topics via handler.
   for (const id of valid) {
     clearRetentionForTopicIfAvailable(id)

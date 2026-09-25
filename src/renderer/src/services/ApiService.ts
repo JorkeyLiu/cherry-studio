@@ -179,6 +179,7 @@ export async function transformMessagesAndFetch(
     assistantMsgId: string
     callbacks: StreamProcessorCallbacks
     topicId?: string // 添加 topicId 用于 trace
+    branchId?: string | null
     allowedTools?: string[]
     authorityUser?: AuthorityUserSnapshot
     options: {
@@ -196,7 +197,8 @@ export async function transformMessagesAndFetch(
       messages,
       assistant,
       topicId,
-      request.authorityUser
+      request.authorityUser,
+      request.branchId
     )
 
     // replace prompt variables

@@ -16,11 +16,16 @@ import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { act, render } from '@testing-library/react'
-import { Profiler, type ProfilerOnRenderCallback } from 'react'
+import { Profiler, type ProfilerOnRenderCallback, type ReactNode } from 'react'
 import { Provider } from 'react-redux'
 import { describe, expect, it, vi } from 'vitest'
 
 // ── Mocks (hoisted) ─────────────────────────────────────────────────────────
+
+const { abortMocks, dropdownCapture } = vi.hoisted(() => ({
+  abortMocks: { abortCompletion: vi.fn() },
+  dropdownCapture: { items: [] as any[] }
+}))
 
 vi.mock('@logger', () => ({
   loggerService: {
@@ -138,7 +143,7 @@ vi.mock('@renderer/utils', () => ({
 }))
 
 vi.mock('@renderer/utils/abortController', () => ({
-  abortCompletion: vi.fn()
+  abortCompletion: abortMocks.abortCompletion
 }))
 
 vi.mock('@renderer/utils/copy', () => ({
@@ -181,10 +186,27 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('./messageBranch', () => ({
-  emitNewBranch: vi.fn()
+  emitNewBranch: vi.fn(),
+  emitTrueBranch: vi.fn()
 }))
 
 vi.mock('./MessageTokens', () => ({ default: () => null }))
+
+// Capture the More-menu Dropdown items (repo pattern: prove overflow entries
+// and drive their callbacks without depending on antd overlay internals).
+// The visible `translate` renderer is overflow-unlisted, so every captured
+// menu belongs to the More menu. Popconfirm/Tooltip render children inline.
+vi.mock('antd', () => ({
+  Dropdown: (props: {
+    children?: ReactNode
+    menu?: { items?: Array<{ key?: string; label?: unknown; onClick?: () => void }> }
+  }) => {
+    dropdownCapture.items = props.menu?.items ?? []
+    return <>{props.children}</>
+  },
+  Popconfirm: (props: { children?: ReactNode }) => <>{props.children}</>,
+  Tooltip: (props: { children?: ReactNode }) => <>{props.children}</>
+}))
 
 // ── Import real MessageMenubar (after mocks) ─────────────────────────────────
 const { AnchorGroupProvider } = await import('../anchorGroupContext')
@@ -371,24 +393,40 @@ describe('MessageMenubar fan-out (block subscription)', () => {
 
     const mountA = commits.a
 
-    // ── Semantic assertion: STREAMING state shows stop/pause control ──
-    // When the translation block is STREAMING, isTranslating is true and
-    // the translate button renders CirclePause (stop/processing semantics),
-    // not Languages (normal translate semantics).
-    expect(container.querySelector('.lucide-circle-pause')).toBeTruthy()
+    // ── Intended UI: translate is overflow-only (More menu), never a visible
+    // toolbar button — in either translation state. The More affordance itself
+    // stays visible.
+    expect(container.querySelector('[data-testid="message-more-menu-btn"]')).toBeTruthy()
+    expect(container.querySelector('.lucide-circle-pause')).toBeNull()
     expect(container.querySelector('.lucide-languages')).toBeNull()
+
+    // While streaming, the More menu offers the stop action in the `translate`
+    // slot (stop testid) and driving it aborts this message's translation.
+    const stopItem = dropdownCapture.items.find((item) => item?.key === 'translate')
+    expect(stopItem).toBeDefined()
+    expect((stopItem?.label as { props?: { 'data-testid'?: string } })?.props?.['data-testid']).toBe(
+      'message-translate-stop-menu-btn'
+    )
+    act(() => {
+      stopItem?.onClick?.()
+    })
+    expect(abortMocks.abortCompletion).toHaveBeenCalledWith('translation-abort-key:msg-a')
 
     // Translation completes — the block transitions from STREAMING to SUCCESS.
     act(() => {
       store.dispatch(updateOneBlock({ id: 'tr-a', changes: { status: MessageBlockStatus.SUCCESS, content: 'done' } }))
     })
 
-    // ── Semantic assertion: SUCCESS state shows normal translate control ──
-    // When the translation block is SUCCESS, isTranslating is false and
-    // the translate button renders Languages (normal translate semantics),
-    // not CirclePause (stop semantics).
-    expect(container.querySelector('.lucide-languages')).toBeTruthy()
+    // ── Intended UI: idle state keeps translate in the More menu (language
+    // submenu entry), still with no visible toolbar affordance.
+    expect(container.querySelector('[data-testid="message-more-menu-btn"]')).toBeTruthy()
     expect(container.querySelector('.lucide-circle-pause')).toBeNull()
+    expect(container.querySelector('.lucide-languages')).toBeNull()
+    const idleItem = dropdownCapture.items.find((item) => item?.key === 'translate')
+    expect(idleItem).toBeDefined()
+    expect((idleItem?.label as { props?: { 'data-testid'?: string } })?.props?.['data-testid']).toBe(
+      'message-translate-menu-btn'
+    )
 
     // The owning menubar re-renders (at least once more) because its own
     // translation block changed. React 19 + react-redux 9 may fire a

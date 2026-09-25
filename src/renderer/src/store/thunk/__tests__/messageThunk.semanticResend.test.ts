@@ -126,6 +126,7 @@ describe('semantic resend/regenerate renderer', () => {
     )
     expect(mocks.resendUserMessages).toHaveBeenCalledWith({
       topicId: 't-1',
+      branchId: null,
       userMessageId: 'u-1',
       assistantId: 'as-1',
       currentModel: { ...FULL_MODEL }
@@ -317,6 +318,7 @@ describe('semantic resend/regenerate renderer', () => {
     )
     expect(mocks.resendUserMessages).toHaveBeenCalledWith({
       topicId: 't-1',
+      branchId: null,
       userMessageId: 'u-1',
       assistantId: 'as-1',
       currentModel: extra
@@ -396,6 +398,7 @@ describe('semantic resend/regenerate renderer', () => {
     } as never)(dispatch, () => st as never)
     expect(mocks.regenerateAssistantMessage).toHaveBeenCalledWith({
       topicId: 't-1',
+      branchId: null,
       assistantMessageId: 'a-1',
       assistantId: 'as-1',
       currentModel: { ...FULL_MODEL }

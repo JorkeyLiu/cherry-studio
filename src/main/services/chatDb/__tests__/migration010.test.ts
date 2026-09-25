@@ -36,7 +36,7 @@ afterEach(() => {
 
 describe('010_sync_parent_order_frame', () => {
   it('is registered with correct additive DDL and registry count', () => {
-    expect(MIGRATIONS.length).toBe(15)
+    expect(MIGRATIONS.length).toBe(16)
     expect(MIGRATIONS[9].key).toBe('010_sync_parent_order_frame')
     expect(MIGRATIONS[10].key).toBe('011_sync_parent_order_frame_parent_id_unbounded')
     expect(MIGRATIONS[11].key).toBe('012_sync_frame_high_water')

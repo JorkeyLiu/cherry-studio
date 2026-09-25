@@ -193,6 +193,13 @@ export type Message = {
   role: 'user' | 'assistant' | 'system'
   assistantId: string
   topicId: string
+  /**
+   * Owner route of this message (Main-authoritative): null/undefined = main
+   * route, non-null = created by that branch. Stable IDs are shared across
+   * routes — an inherited (shared-prefix) message carries its owner's
+   * branchId and is immutable through descendant routes.
+   */
+  branchId?: string | null
   createdAt: string
   updatedAt?: string
   status: UserMessageStatus | AssistantMessageStatus

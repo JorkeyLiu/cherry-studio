@@ -381,6 +381,21 @@ export function validateNonEmptyString(value: unknown, path: string): void {
 }
 
 /**
+ * Validate an optional route branch ID (topic-internal branch model).
+ *
+ * Absent/undefined/null addresses the main route (always valid). A present
+ * value must be a non-empty string (the branch node ID).
+ *
+ * @param value  The value to validate.
+ * @param path   Dot-separated path for error messages.
+ * @throws {ValidationError} If a present value is not a non-empty string.
+ */
+export function validateOptionalBranchId(value: unknown, path: string): void {
+  if (value === undefined || value === null) return
+  validateNonEmptyString(value, path)
+}
+
+/**
  * Validate that a string is a canonical ISO 8601 / RFC 3339 timestamp.
  *
  * Accepted format: `YYYY-MM-DDTHH:mm:ss.sssZ` (UTC, Z suffix, millisecond

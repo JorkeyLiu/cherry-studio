@@ -42,10 +42,11 @@ import {
   fromDrizzleResult,
   type GetResult,
   insertAtId,
-  inspectDenseZeroBasedOrder,
-  loadOrderedIds,
+  inspectOwnerDenseOrder,
+  loadOwnerOrderedIds,
   moveId,
   notFound,
+  ownerPredicate,
   toInsertValues,
   toUpdateValues,
   validatePageLimit
@@ -54,6 +55,7 @@ import {
 const COLUMN_MAP = buildColumnMap([
   ['id', 'id'],
   ['topicId', 'topic_id'],
+  ['branchId', 'branch_id'],
   ['role', 'role'],
   ['content', 'content'],
   ['status', 'status'],
@@ -75,11 +77,12 @@ export class MessagesRepository {
   }
 
   /**
-   * Normalize all sibling sort_order values within a topic to dense zero-based.
-   * Phase 2: uses central loadOrderedIds + assignDenseOrders.
+   * Normalize sort_order values within ONE route owner (topic + branch) to
+   * dense zero-based. Ordering is per route owner — main and branch suffix
+   * rows must never be normalized together (that would interleave routes).
    */
-  private normalizeOrdersInTx(tx: any, topicId: string): void {
-    const ids = loadOrderedIds(tx, messages, messages.topicId, topicId)
+  private normalizeOrdersInTx(tx: any, topicId: string, branchId: string | null = null): void {
+    const ids = loadOwnerOrderedIds(tx, messages, messages.topicId, messages.branchId, topicId, branchId)
     assignDenseOrders(tx, messages, ids)
   }
 
@@ -156,7 +159,39 @@ export class MessagesRepository {
       .map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
   }
 
-  listByTopic(topicId: string): MessageData[] {
+  /**
+   * Route-owner read: messages owned by one (topic, branch) route owner in
+   * deterministic order. `branchId = null` is the main route. Ordinary
+   * callers omit branchId and observe exactly the pre-branch main-route
+   * behavior; branch suffix rows never leak into main-route reads.
+   */
+  listByTopic(topicId: string, branchId: string | null = null): MessageData[] {
+    return this.db
+      .select()
+      .from(messages)
+      .where(ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId))
+      .orderBy(asc(messages.sortOrder), asc(messages.id))
+      .all()
+      .map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
+  }
+
+  /** Main-route read (branch_id IS NULL), explicit alias of listByTopic(topicId, null). */
+  listMainRoute(topicId: string): MessageData[] {
+    return this.listByTopic(topicId, null)
+  }
+
+  /** Explicit owner read, same contract as listByTopic with an explicit branch. */
+  listByOwner(topicId: string, branchId: string | null): MessageData[] {
+    return this.listByTopic(topicId, branchId)
+  }
+
+  /**
+   * Topic-wide read across ALL route owners (main + every branch), in
+   * deterministic owner-then-order sequence. Reserved for topic-cascade
+   * operations (hard-delete file cleanup, topic exports of the full logical
+   * topic) — never for route projection.
+   */
+  listAllByTopic(topicId: string): MessageData[] {
     return this.db
       .select()
       .from(messages)
@@ -170,9 +205,9 @@ export class MessagesRepository {
    * List messages in a topic with keyset pagination.
    * Phase 2: uses typed numeric-order cursor.
    */
-  listByTopicPage(topicId: string, page: PageCursor): PageResult<MessageData> {
+  listByTopicPage(topicId: string, page: PageCursor, branchId: string | null = null): PageResult<MessageData> {
     const limit = validatePageLimit(page.limit)
-    const conditions = [eq(messages.topicId, topicId)]
+    const conditions = [ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId)]
     if (page.cursor) {
       const decoded = decodeNumericOrderCursor(page.cursor)
       if (page.direction === 'desc') {
@@ -207,7 +242,18 @@ export class MessagesRepository {
     }
   }
 
-  countByTopic(topicId: string): number {
+  /** Route-owner count (`branchId = null` = main route). */
+  countByTopic(topicId: string, branchId: string | null = null): number {
+    const result = this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(messages)
+      .where(ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId))
+      .get()
+    return result?.count ?? 0
+  }
+
+  /** Topic-wide count across all route owners (cascade operations only). */
+  countAllByTopic(topicId: string): number {
     const result = this.db
       .select({ count: sql<number>`count(*)` })
       .from(messages)
@@ -223,12 +269,18 @@ export class MessagesRepository {
    * Single indexed existence probe for the canonical 3-step anchor match
    * (step 2: assistant askId). One row max, never materializes the topic.
    */
-  hasAssistantWithAskId(topicId: string, askId: string): boolean {
+  hasAssistantWithAskId(topicId: string, askId: string, branchId: string | null = null): boolean {
     if (askId.length === 0) return false
     const row = this.db
       .select({ id: messages.id })
       .from(messages)
-      .where(and(eq(messages.topicId, topicId), eq(messages.askId, askId), eq(messages.role, 'assistant')))
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          eq(messages.askId, askId),
+          eq(messages.role, 'assistant')
+        )
+      )
       .limit(1)
       .get()
     return !!row
@@ -243,12 +295,18 @@ export class MessagesRepository {
    * over the existing authority ordering (sort_order ASC, id ASC). Empty
    * askId returns [] (assistant-without-askId forms no clipboard group).
    */
-  listAssistantsByAskId(topicId: string, askId: string): MessageData[] {
+  listAssistantsByAskId(topicId: string, askId: string, branchId: string | null = null): MessageData[] {
     if (askId.length === 0) return []
     return this.db
       .select()
       .from(messages)
-      .where(and(eq(messages.topicId, topicId), eq(messages.askId, askId), eq(messages.role, 'assistant')))
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          eq(messages.askId, askId),
+          eq(messages.role, 'assistant')
+        )
+      )
       .orderBy(asc(messages.sortOrder), asc(messages.id))
       .all()
       .map((r) => fromDrizzleResult<MessageData>(r, 'messages', (r as any).id))
@@ -262,12 +320,23 @@ export class MessagesRepository {
    * reverses so callers observe authority ASC order. Never materializes the
    * whole topic; each call reads at most `limit` rows plus the index seek.
    */
-  listBefore(topicId: string, sortOrder: number, id: string, limit: number): MessageData[] {
+  listBefore(
+    topicId: string,
+    sortOrder: number,
+    id: string,
+    limit: number,
+    branchId: string | null = null
+  ): MessageData[] {
     if (!Number.isInteger(limit) || limit <= 0) return []
     const rows = this.db
       .select()
       .from(messages)
-      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) < (${sortOrder}, ${id})`))
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          sql`(${messages.sortOrder}, ${messages.id}) < (${sortOrder}, ${id})`
+        )
+      )
       .orderBy(desc(messages.sortOrder), desc(messages.id))
       .limit(limit)
       .all()
@@ -281,12 +350,23 @@ export class MessagesRepository {
    * existing authority ordering, already ASC. Never materializes the whole
    * topic; each call reads at most `limit` rows plus the index seek.
    */
-  listAfter(topicId: string, sortOrder: number, id: string, limit: number): MessageData[] {
+  listAfter(
+    topicId: string,
+    sortOrder: number,
+    id: string,
+    limit: number,
+    branchId: string | null = null
+  ): MessageData[] {
     if (!Number.isInteger(limit) || limit <= 0) return []
     const rows = this.db
       .select()
       .from(messages)
-      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) > (${sortOrder}, ${id})`))
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          sql`(${messages.sortOrder}, ${messages.id}) > (${sortOrder}, ${id})`
+        )
+      )
       .orderBy(asc(messages.sortOrder), asc(messages.id))
       .limit(limit)
       .all()
@@ -300,11 +380,16 @@ export class MessagesRepository {
    * anything exists before a row AND whether the oldest fetched group is
    * truncated (same semantic key continues). One indexed seek, one row max.
    */
-  findPredecessor(topicId: string, sortOrder: number, id: string): MessageData | null {
+  findPredecessor(topicId: string, sortOrder: number, id: string, branchId: string | null = null): MessageData | null {
     const row = this.db
       .select()
       .from(messages)
-      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) < (${sortOrder}, ${id})`))
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          sql`(${messages.sortOrder}, ${messages.id}) < (${sortOrder}, ${id})`
+        )
+      )
       .orderBy(desc(messages.sortOrder), desc(messages.id))
       .limit(1)
       .get()
@@ -318,11 +403,16 @@ export class MessagesRepository {
    * Mirror of {@link findPredecessor} for the after edge. One indexed seek,
    * one row max.
    */
-  findSuccessor(topicId: string, sortOrder: number, id: string): MessageData | null {
+  findSuccessor(topicId: string, sortOrder: number, id: string, branchId: string | null = null): MessageData | null {
     const row = this.db
       .select()
       .from(messages)
-      .where(and(eq(messages.topicId, topicId), sql`(${messages.sortOrder}, ${messages.id}) > (${sortOrder}, ${id})`))
+      .where(
+        and(
+          ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId),
+          sql`(${messages.sortOrder}, ${messages.id}) > (${sortOrder}, ${id})`
+        )
+      )
       .orderBy(asc(messages.sortOrder), asc(messages.id))
       .limit(1)
       .get()
@@ -337,11 +427,11 @@ export class MessagesRepository {
    * (sort_order ASC, id ASC) with a single-row limit. Never materializes
    * the whole topic.
    */
-  getFirstByTopic(topicId: string): MessageData | null {
+  getFirstByTopic(topicId: string, branchId: string | null = null): MessageData | null {
     const row = this.db
       .select()
       .from(messages)
-      .where(eq(messages.topicId, topicId))
+      .where(ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId))
       .orderBy(asc(messages.sortOrder), asc(messages.id))
       .limit(1)
       .get()
@@ -356,12 +446,12 @@ export class MessagesRepository {
    * topic_id/sort_order authority ordering, then reverses to ASC so callers
    * observe authority order without a whole-topic scan into memory.
    */
-  getLatestByTopic(topicId: string, limit: number): MessageData[] {
+  getLatestByTopic(topicId: string, limit: number, branchId: string | null = null): MessageData[] {
     if (!Number.isInteger(limit) || limit <= 0) return []
     const rows = this.db
       .select()
       .from(messages)
-      .where(eq(messages.topicId, topicId))
+      .where(ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId))
       .orderBy(desc(messages.sortOrder), desc(messages.id))
       .limit(limit)
       .all()
@@ -383,47 +473,61 @@ export class MessagesRepository {
   appendMany(items: MessageData[]): MessageData[] {
     if (items.length === 0) return []
     return this.db.transaction((tx) => {
-      // Group by topic first so each topic's base order + density is read
-      // exactly once (audit F5): topic existence is asserted once per
-      // DISTINCT topic, not per item, keeping the same first-failure
-      // behavior as before (the first distinct missing topic throws).
-      const byTopic = new Map<string, MessageData[]>()
+      // Group by route owner (topic + branch) first so each owner's base
+      // order + density is read exactly once (audit F5): topic existence is
+      // asserted once per DISTINCT topic, not per item, keeping the same
+      // first-failure behavior as before (the first distinct missing topic
+      // throws). Ordering never crosses route owners.
+      const byOwner = new Map<string, { topicId: string; branchId: string | null; items: MessageData[] }>()
       for (const item of items) {
-        const list = byTopic.get(item.topicId)
-        if (list) {
-          list.push(item)
+        const branchId = item.branchId ?? null
+        const key = `${item.topicId} ${branchId ?? ''}`
+        const group = byOwner.get(key)
+        if (group) {
+          group.items.push(item)
         } else {
-          byTopic.set(item.topicId, [item])
+          byOwner.set(key, { topicId: item.topicId, branchId, items: [item] })
         }
       }
-      for (const topicId of byTopic.keys()) {
-        this.assertTopicExists(topicId)
+      const seenTopics = new Set<string>()
+      for (const group of byOwner.values()) {
+        if (!seenTopics.has(group.topicId)) {
+          seenTopics.add(group.topicId)
+          this.assertTopicExists(group.topicId)
+        }
       }
-      const topicStates = new Map<string, { maxOrder: number; dense: boolean }>()
-      for (const topicId of byTopic.keys()) {
+      const ownerStates = new Map<string, { maxOrder: number; dense: boolean }>()
+      for (const [key, group] of byOwner) {
         // LOCK-002 + audit F4: ONE aggregate query both proves pre-insert
         // density and yields MAX(sort_order), so appendMany never runs a
-        // standalone MAX query next to the density proof. Dense topics
-        // append at MAX+1 with zero sibling UPDATEs; corrupt/sparse topics
+        // standalone MAX query next to the density proof. Dense owners
+        // append at MAX+1 with zero sibling UPDATEs; corrupt/sparse owners
         // keep the legacy single normalization repair below.
-        const { maxOrder, dense } = inspectDenseZeroBasedOrder(tx, messages, messages.topicId, topicId)
-        topicStates.set(topicId, { maxOrder, dense })
+        const { maxOrder, dense } = inspectOwnerDenseOrder(
+          tx,
+          messages,
+          messages.topicId,
+          messages.branchId,
+          group.topicId,
+          group.branchId
+        )
+        ownerStates.set(key, { maxOrder, dense })
       }
-      for (const [topicId, topicItems] of byTopic) {
-        let next = topicStates.get(topicId)!.maxOrder + 1
-        for (const item of topicItems) {
-          const values = toInsertValues({ ...item, sortOrder: next })
+      for (const [key, group] of byOwner) {
+        let next = ownerStates.get(key)!.maxOrder + 1
+        for (const item of group.items) {
+          const values = toInsertValues({ ...item, branchId: item.branchId ?? null, sortOrder: next })
           tx.insert(messages)
             .values(values as any)
             .run()
           next++
         }
       }
-      // Normalize ONLY topics that were not already dense (LOCK-002: corrupt
+      // Normalize ONLY owners that were not already dense (LOCK-002: corrupt
       // order is repaired; healthy order is never rewritten).
-      for (const [topicId, state] of topicStates) {
-        if (!state.dense) {
-          this.normalizeOrdersInTx(tx, topicId)
+      for (const [key, group] of byOwner) {
+        if (!ownerStates.get(key)!.dense) {
+          this.normalizeOrdersInTx(tx, group.topicId, group.branchId)
         }
       }
       return items.map((item) =>
@@ -442,11 +546,11 @@ export class MessagesRepository {
   create(data: MessageData): MessageData {
     this.assertTopicExists(data.topicId)
     return this.db.transaction((tx) => {
-      const values = toInsertValues(data)
+      const values = toInsertValues({ ...data, branchId: data.branchId ?? null })
       tx.insert(messages)
         .values(values as any)
         .run()
-      this.normalizeOrdersInTx(tx, data.topicId)
+      this.normalizeOrdersInTx(tx, data.topicId, data.branchId ?? null)
       return fromDrizzleResult<MessageData>(
         tx.select().from(messages).where(eq(messages.id, data.id)).get() ?? ({} as any),
         'messages',
@@ -469,17 +573,25 @@ export class MessagesRepository {
    */
   append(data: MessageData): MessageData {
     this.assertTopicExists(data.topicId)
+    const branchId = data.branchId ?? null
     return this.db.transaction((tx) => {
-      const { dense, maxOrder } = inspectDenseZeroBasedOrder(tx, messages, messages.topicId, data.topicId)
+      const { dense, maxOrder } = inspectOwnerDenseOrder(
+        tx,
+        messages,
+        messages.topicId,
+        messages.branchId,
+        data.topicId,
+        branchId
+      )
       const newOrder = maxOrder + 1
-      const values = toInsertValues({ ...data, sortOrder: newOrder })
+      const values = toInsertValues({ ...data, branchId, sortOrder: newOrder })
       tx.insert(messages)
         .values(values as any)
         .run()
       // LOCK-002: prove pre-insert density; skip normalization on healthy
-      // tail appends (zero sibling UPDATEs), repair sparse/corrupt topics.
+      // tail appends (zero sibling UPDATEs), repair sparse/corrupt owners.
       if (!dense) {
-        this.normalizeOrdersInTx(tx, data.topicId)
+        this.normalizeOrdersInTx(tx, data.topicId, branchId)
       }
       return fromDrizzleResult<MessageData>(
         tx.select().from(messages).where(eq(messages.id, data.id)).get() ?? ({} as any),
@@ -490,18 +602,25 @@ export class MessagesRepository {
   }
 
   insertAt(data: MessageData, index: number): MessageData {
-    const count = this.countByTopic(data.topicId)
+    const branchId = data.branchId ?? null
+    const count = this.countByTopic(data.topicId, branchId)
     index = clampIndex(index, count)
     this.assertTopicExists(data.topicId)
     return this.db.transaction((tx) => {
-      tx.run(
-        sql`UPDATE ${messages} SET sort_order = sort_order + 1 WHERE ${messages.topicId} = ${data.topicId} AND ${messages.sortOrder} >= ${index}`
-      )
-      const values = toInsertValues({ ...data, sortOrder: index })
+      if (branchId === null) {
+        tx.run(
+          sql`UPDATE ${messages} SET sort_order = sort_order + 1 WHERE ${messages.topicId} = ${data.topicId} AND ${messages.branchId} IS NULL AND ${messages.sortOrder} >= ${index}`
+        )
+      } else {
+        tx.run(
+          sql`UPDATE ${messages} SET sort_order = sort_order + 1 WHERE ${messages.topicId} = ${data.topicId} AND ${messages.branchId} = ${branchId} AND ${messages.sortOrder} >= ${index}`
+        )
+      }
+      const values = toInsertValues({ ...data, branchId, sortOrder: index })
       tx.insert(messages)
         .values(values as any)
         .run()
-      this.normalizeOrdersInTx(tx, data.topicId)
+      this.normalizeOrdersInTx(tx, data.topicId, branchId)
       return fromDrizzleResult<MessageData>(
         tx.select().from(messages).where(eq(messages.id, data.id)).get() ?? ({} as any),
         'messages',
@@ -552,51 +671,73 @@ export class MessagesRepository {
   insertManyAt(items: MessageData[], index: number): MessageData[] {
     if (items.length === 0) return []
     return this.db.transaction((tx) => {
-      // Group by topic first so each topic's density + count are read exactly
-      // once (audit F5): topic existence is asserted once per DISTINCT topic.
-      const byTopic = new Map<string, MessageData[]>()
+      // Group by route owner first so each owner's density + count are read
+      // exactly once (audit F5): topic existence is asserted once per
+      // DISTINCT topic. Ordering never crosses route owners.
+      const byOwner = new Map<string, { topicId: string; branchId: string | null; items: MessageData[] }>()
       for (const item of items) {
-        const list = byTopic.get(item.topicId)
-        if (list) {
-          list.push(item)
+        const branchId = item.branchId ?? null
+        const key = `${item.topicId} ${branchId ?? ''}`
+        const group = byOwner.get(key)
+        if (group) {
+          group.items.push(item)
         } else {
-          byTopic.set(item.topicId, [item])
+          byOwner.set(key, { topicId: item.topicId, branchId, items: [item] })
         }
       }
-      for (const topicId of byTopic.keys()) {
-        this.assertTopicExists(topicId)
+      const seenTopics = new Set<string>()
+      for (const group of byOwner.values()) {
+        if (!seenTopics.has(group.topicId)) {
+          seenTopics.add(group.topicId)
+          this.assertTopicExists(group.topicId)
+        }
       }
       // LOCK-002 + audit F4: ONE aggregate query proves pre-insert density
       // and yields both MAX(sort_order) and the row count, so the batch never
       // runs a standalone MAX/count query next to the density proof.
-      const topicStates = new Map<string, { count: number; dense: boolean }>()
-      for (const topicId of byTopic.keys()) {
-        const { dense, count } = inspectDenseZeroBasedOrder(tx, messages, messages.topicId, topicId)
-        topicStates.set(topicId, { count, dense })
+      const ownerStates = new Map<string, { count: number; dense: boolean }>()
+      for (const [key, group] of byOwner) {
+        const { dense, count } = inspectOwnerDenseOrder(
+          tx,
+          messages,
+          messages.topicId,
+          messages.branchId,
+          group.topicId,
+          group.branchId
+        )
+        ownerStates.set(key, { count, dense })
       }
-      for (const [topicId, topicItems] of byTopic) {
-        const state = topicStates.get(topicId)!
+      for (const [key, group] of byOwner) {
+        const state = ownerStates.get(key)!
         const clamped = clampIndex(index, state.count)
-        const batchSize = topicItems.length
+        const batchSize = group.items.length
         // Sparse/corrupt legacy order (audit F1): capture the renderer's
         // pre-batch ordered list (sort_order ASC, id ASC) BEFORE any write so
         // the repair below can reproduce the renderer's pre-batch splice —
         // prefix + new entries in input order + suffix. Relying on the shifted
         // sort_order values instead would let duplicate legacy ties straddling
         // the insert boundary re-sort new/existing rows together by id.
-        const preSpliceIds = state.dense ? null : loadOrderedIds(tx, messages, messages.topicId, topicId)
+        const preSpliceIds = state.dense
+          ? null
+          : loadOwnerOrderedIds(tx, messages, messages.topicId, messages.branchId, group.topicId, group.branchId)
         if (state.dense) {
           // ONE sibling shift-by-count: every existing sibling at/after the
           // clamped index moves down by exactly the batch size. On a healthy
-          // dense topic this leaves orders `index..index+M-1` free for the new
+          // dense owner this leaves orders `index..index+M-1` free for the new
           // rows and preserves density with zero per-row UPDATE logic.
-          tx.run(
-            sql`UPDATE ${messages} SET sort_order = sort_order + ${batchSize} WHERE ${messages.topicId} = ${topicId} AND ${messages.sortOrder} >= ${clamped}`
-          )
+          if (group.branchId === null) {
+            tx.run(
+              sql`UPDATE ${messages} SET sort_order = sort_order + ${batchSize} WHERE ${messages.topicId} = ${group.topicId} AND ${messages.branchId} IS NULL AND ${messages.sortOrder} >= ${clamped}`
+            )
+          } else {
+            tx.run(
+              sql`UPDATE ${messages} SET sort_order = sort_order + ${batchSize} WHERE ${messages.topicId} = ${group.topicId} AND ${messages.branchId} = ${group.branchId} AND ${messages.sortOrder} >= ${clamped}`
+            )
+          }
         }
         let next = clamped
-        for (const item of topicItems) {
-          const values = toInsertValues({ ...item, sortOrder: next })
+        for (const item of group.items) {
+          const values = toInsertValues({ ...item, branchId: item.branchId ?? null, sortOrder: next })
           tx.insert(messages)
             .values(values as any)
             .run()
@@ -609,7 +750,7 @@ export class MessagesRepository {
         // order matches the renderer's ordered-list splice.
         if (preSpliceIds) {
           const expectedIds = [...preSpliceIds]
-          expectedIds.splice(clamped, 0, ...topicItems.map((item) => item.id))
+          expectedIds.splice(clamped, 0, ...group.items.map((item) => item.id))
           assignDenseOrders(tx, messages, expectedIds)
         }
       }
@@ -631,16 +772,20 @@ export class MessagesRepository {
    */
   upsertAt(data: MessageData, index: number): MessageData {
     this.assertTopicExists(data.topicId)
+    const branchId = data.branchId ?? null
     return this.db.transaction((tx) => {
       const existing = tx.select().from(messages).where(eq(messages.id, data.id)).get()
-      const currentIds = loadOrderedIds(tx, messages, messages.topicId, data.topicId)
+      const currentIds = loadOwnerOrderedIds(tx, messages, messages.topicId, messages.branchId, data.topicId, branchId)
 
       if (existing) {
-        // Reject cross-topic reparenting
+        // Reject cross-topic AND cross-route reparenting
         if ((existing as any).topicId !== data.topicId) {
           throw new Error(
             `Message ${data.id} belongs to topic ${(existing as any).topicId}, cannot reparent to ${data.topicId}`
           )
+        }
+        if (((existing as any).branchId ?? null) !== branchId) {
+          throw new Error(`Message ${data.id} belongs to another route and cannot be reparented across routes`)
         }
         // Move in the list
         const clampedIndex = clampIndex(index, currentIds.length - 1)
@@ -657,7 +802,7 @@ export class MessagesRepository {
         const clampedIndex = clampIndex(index, currentIds.length)
         const newIds = insertAtId(currentIds, data.id, clampedIndex)
 
-        const values = toInsertValues(data)
+        const values = toInsertValues({ ...data, branchId })
         tx.insert(messages)
           .values(values as any)
           .run()
@@ -679,18 +824,19 @@ export class MessagesRepository {
   createMany(items: MessageData[]): MessageData[] {
     if (items.length === 0) return []
     return this.db.transaction((tx) => {
-      const affectedTopics = new Set<string>()
+      const affectedOwners = new Map<string, { topicId: string; branchId: string | null }>()
       for (const item of items) {
         this.assertTopicExists(item.topicId)
-        affectedTopics.add(item.topicId)
-        const values = toInsertValues(item)
+        const branchId = item.branchId ?? null
+        affectedOwners.set(`${item.topicId} ${branchId ?? ''}`, { topicId: item.topicId, branchId })
+        const values = toInsertValues({ ...item, branchId })
         tx.insert(messages)
           .values(values as any)
           .run()
       }
-      // Normalize all affected topics
-      for (const topicId of affectedTopics) {
-        this.normalizeOrdersInTx(tx, topicId)
+      // Normalize all affected route owners (never across owners)
+      for (const owner of affectedOwners.values()) {
+        this.normalizeOrdersInTx(tx, owner.topicId, owner.branchId)
       }
       return items.map((item) =>
         fromDrizzleResult<MessageData>(
@@ -709,17 +855,21 @@ export class MessagesRepository {
   upsertMany(items: MessageData[]): MessageData[] {
     if (items.length === 0) return []
     return this.db.transaction((tx) => {
-      const affectedTopics = new Set<string>()
+      const affectedOwners = new Map<string, { topicId: string; branchId: string | null }>()
       for (const item of items) {
         this.assertTopicExists(item.topicId)
-        affectedTopics.add(item.topicId)
+        const branchId = item.branchId ?? null
+        affectedOwners.set(`${item.topicId} ${branchId ?? ''}`, { topicId: item.topicId, branchId })
         const existing = tx.select().from(messages).where(eq(messages.id, item.id)).get()
         if (existing) {
-          // Phase 2: reject topicId change
+          // Phase 2: reject topicId change; branches: reject route change too
           if ((existing as any).topicId !== item.topicId) {
             throw new Error(
               `Message ${item.id} belongs to topic ${(existing as any).topicId}, cannot reparent to ${item.topicId}`
             )
+          }
+          if (((existing as any).branchId ?? null) !== branchId) {
+            throw new Error(`Message ${item.id} belongs to another route and cannot be reparented across routes`)
           }
           const rowPatch = messageToRowPatch(item)
           const values = toUpdateValues((existing as any).extra, rowPatch, COLUMN_MAP)
@@ -728,15 +878,15 @@ export class MessagesRepository {
             .where(eq(messages.id, item.id))
             .run()
         } else {
-          const values = toInsertValues(item)
+          const values = toInsertValues({ ...item, branchId })
           tx.insert(messages)
             .values(values as any)
             .run()
         }
       }
-      // Normalize all affected topics
-      for (const topicId of affectedTopics) {
-        this.normalizeOrdersInTx(tx, topicId)
+      // Normalize all affected route owners (never across owners)
+      for (const owner of affectedOwners.values()) {
+        this.normalizeOrdersInTx(tx, owner.topicId, owner.branchId)
       }
       return items.map((item) =>
         fromDrizzleResult<MessageData>(
@@ -753,7 +903,6 @@ export class MessagesRepository {
    * Phase 2: rejects identity AND sortOrder changes.
    */
   update(topicId: string, messageId: string, patch: EntityPatchInput<MessageData>): AffectedCount {
-    assertNoIdentityChange(patch as Record<string, unknown>, 'messages', { id: messageId, topicId })
     assertNoSortOrderChange(patch as Record<string, unknown>)
     const current = this.db
       .select()
@@ -761,6 +910,11 @@ export class MessagesRepository {
       .where(and(eq(messages.id, messageId), eq(messages.topicId, topicId)))
       .get()
     if (!current) return { affected: 0 }
+    assertNoIdentityChange(patch as Record<string, unknown>, 'messages', {
+      id: messageId,
+      topicId,
+      branchId: (current as any).branchId ?? null
+    })
     const rowPatch = messageToRowPatch(patch)
     const values = toUpdateValues((current as any).extra, rowPatch, COLUMN_MAP)
     this.db
@@ -777,11 +931,15 @@ export class MessagesRepository {
    */
   delete(id: string): AffectedCount {
     return this.db.transaction((tx) => {
-      // Find topic before deleting (for normalization + cleanup)
-      const msg = tx.select({ topicId: messages.topicId }).from(messages).where(eq(messages.id, id)).get()
+      // Find owner before deleting (for per-owner normalization + cleanup)
+      const msg = tx
+        .select({ topicId: messages.topicId, branchId: messages.branchId })
+        .from(messages)
+        .where(eq(messages.id, id))
+        .get()
       const result = tx.delete(messages).where(eq(messages.id, id)).run()
       if (result.changes > 0 && msg) {
-        this.normalizeOrdersInTx(tx, msg.topicId)
+        this.normalizeOrdersInTx(tx, msg.topicId, msg.branchId ?? null)
         this.cleanupEmptySegmentsInTx(tx, msg.topicId)
       }
       return { affected: result.changes }
@@ -795,17 +953,28 @@ export class MessagesRepository {
   deleteMany(ids: string[]): AffectedCount {
     if (ids.length === 0) return { affected: 0 }
     return this.db.transaction((tx) => {
-      // Collect affected topics before deletion
+      // Collect affected route owners + topics before deletion
+      const affectedOwners = new Map<string, { topicId: string; branchId: string | null }>()
       const affectedTopics = new Set<string>()
       for (const id of ids) {
-        const msg = tx.select({ topicId: messages.topicId }).from(messages).where(eq(messages.id, id)).get()
-        if (msg) affectedTopics.add(msg.topicId)
+        const msg = tx
+          .select({ topicId: messages.topicId, branchId: messages.branchId })
+          .from(messages)
+          .where(eq(messages.id, id))
+          .get()
+        if (msg) {
+          const branchId = msg.branchId ?? null
+          affectedOwners.set(`${msg.topicId} ${branchId ?? ''}`, { topicId: msg.topicId, branchId })
+          affectedTopics.add(msg.topicId)
+        }
       }
       let total = 0
       for (const id of ids) total += tx.delete(messages).where(eq(messages.id, id)).run().changes
-      // Normalize and clean up per affected topic
+      // Normalize per affected route owner (never across owners)
+      for (const owner of affectedOwners.values()) {
+        this.normalizeOrdersInTx(tx, owner.topicId, owner.branchId)
+      }
       for (const topicId of affectedTopics) {
-        this.normalizeOrdersInTx(tx, topicId)
         this.cleanupEmptySegmentsInTx(tx, topicId)
       }
       return { affected: total }
@@ -813,16 +982,19 @@ export class MessagesRepository {
   }
 
   /**
-   * Replace the order of all messages in a topic.
+   * Replace the order of all messages in ONE route owner.
    * Phase 2: uses assignDenseOrders for direct sequential assignment.
+   * `branchId = null` addresses the main route. Cross-route reordering is
+   * rejected: every ID must belong to the addressed owner, and the list must
+   * be complete for that owner.
    */
-  replaceOrder(topicId: string, orderedIds: string[]): AffectedCount {
+  replaceOrder(topicId: string, orderedIds: string[], branchId: string | null = null): AffectedCount {
     const uniqueIds = new Set(orderedIds)
     if (uniqueIds.size !== orderedIds.length) throw new Error('Duplicate message IDs in orderedIds')
     const existing = this.db
       .select({ id: messages.id })
       .from(messages)
-      .where(eq(messages.topicId, topicId))
+      .where(ownerPredicate(messages, messages.topicId, messages.branchId, topicId, branchId))
       .all()
       .map((r) => r.id)
     const existingSet = new Set(existing)

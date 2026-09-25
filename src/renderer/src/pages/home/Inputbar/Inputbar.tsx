@@ -23,8 +23,9 @@ import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesServi
 import { spanManagerService } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
 import WebSearchService from '@renderer/services/WebSearchService'
-import { useAppDispatch } from '@renderer/store'
+import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import {
   type Assistant,
   type FileMetadata,
@@ -155,6 +156,8 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     initialAssistant.id
   )
   const { sendMessageShortcut } = useSettings()
+  // In-chat send path addresses the active route of the logical topic.
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topic.id))
 
   const { t } = useTranslation()
   const { pauseMessages } = useMessageOperations(topic)
@@ -227,7 +230,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     // after dispatch initiation); the dispatch below is fire-and-forget so
     // the guard never spans the assistant streaming lifecycle.
     return runSend(async () => {
-      if (await checkRateLimit(assistant, topic.id)) {
+      if (await checkRateLimit(assistant, topic.id, activeBranchId)) {
         return
       }
 

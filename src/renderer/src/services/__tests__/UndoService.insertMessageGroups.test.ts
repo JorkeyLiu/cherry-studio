@@ -144,16 +144,20 @@ describe('UndoService stable restore (insert-message-groups)', () => {
     await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
 
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
-    expect(mocks.insertMessageGroups).toHaveBeenCalledWith('topic-1', [
-      {
-        entries: [{ message: g1Msg, blocks: [] }],
-        intent: { kind: 'before-message', messageId: 'survivor' }
-      },
-      {
-        entries: [{ message: g2Msg, blocks: [] }],
-        intent: { kind: 'topic-tail' }
-      }
-    ])
+    expect(mocks.insertMessageGroups).toHaveBeenCalledWith(
+      'topic-1',
+      [
+        {
+          entries: [{ message: g1Msg, blocks: [] }],
+          intent: { kind: 'before-message', messageId: 'survivor' }
+        },
+        {
+          entries: [{ message: g2Msg, blocks: [] }],
+          intent: { kind: 'topic-tail' }
+        }
+      ],
+      null
+    )
     expect(mocks.saveMessageAndBlocksToDB).not.toHaveBeenCalled()
     // Bounded projection: both visible groups inserted (tail appends, anchor inserts).
     expect(mocks.newMessagesActions.insertMessageAtIndex).toHaveBeenCalledTimes(2)

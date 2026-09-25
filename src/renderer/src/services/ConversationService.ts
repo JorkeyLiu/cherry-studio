@@ -29,7 +29,8 @@ export class ConversationService {
     messages: Message[],
     assistant: Assistant,
     topicId?: string,
-    authorityUser?: AuthorityUserSnapshot
+    authorityUser?: AuthorityUserSnapshot,
+    branchId?: string | null
   ): Promise<{ modelMessages: ModelMessage[]; uiMessages: Message[] }> {
     let effectiveMessages = messages
     let overlay: BlockOverlay | undefined
@@ -55,7 +56,8 @@ export class ConversationService {
     // request-local authority user.
     let contextMessages: Message[] = effectiveMessages
     if (topicId && !authorityUser) {
-      const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
+      const anchorKey = typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
+      const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorKey]?.groupKey ?? null
       if (anchorGroupKey) {
         const currentFp = computeClosureFingerprint(effectiveMessages as any)
         const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp)

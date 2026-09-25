@@ -207,7 +207,7 @@ describe('SqliteMessageDataSource', () => {
       api.fetchMessages.mockResolvedValue(successResult({ messages: [], blocks: [] }))
       await ds.fetchMessages('topic-1')
       expect(api.fetchMessages).toHaveBeenCalledOnce()
-      expect(api.fetchMessages).toHaveBeenCalledWith({ topicId: 'topic-1' })
+      expect(api.fetchMessages).toHaveBeenCalledWith({ topicId: 'topic-1', branchId: null })
     })
 
     it('getRawTopic calls api.getRawTopic with topicId', async () => {
@@ -271,7 +271,11 @@ describe('SqliteMessageDataSource', () => {
       api.selectAnswerMessage.mockResolvedValue(successResult(response))
       const result = await ds.selectAnswerMessage('topic-1', 'a-2')
       expect(api.selectAnswerMessage).toHaveBeenCalledOnce()
-      expect(api.selectAnswerMessage).toHaveBeenCalledWith({ topicId: 'topic-1', selectedMessageId: 'a-2' })
+      expect(api.selectAnswerMessage).toHaveBeenCalledWith({
+        topicId: 'topic-1',
+        branchId: null,
+        selectedMessageId: 'a-2'
+      })
       expect(result).toEqual(response)
     })
 
@@ -294,20 +298,28 @@ describe('SqliteMessageDataSource', () => {
       }
       ;(api as any).deleteMessagesWithDependents = vi.fn().mockResolvedValue(successResult(response))
       const result = await ds.deleteMessagesWithDependents('t-1', ['u1'])
-      expect((api as any).deleteMessagesWithDependents).toHaveBeenCalledWith({ topicId: 't-1', messageIds: ['u1'] })
+      expect((api as any).deleteMessagesWithDependents).toHaveBeenCalledWith({
+        topicId: 't-1',
+        branchId: null,
+        messageIds: ['u1']
+      })
       expect(result).toEqual(response)
     })
 
     it('deleteMessage calls api.deleteMessage', async () => {
       api.deleteMessage.mockResolvedValue(successResult(null))
       await ds.deleteMessage('topic-1', 'msg-1')
-      expect(api.deleteMessage).toHaveBeenCalledWith({ topicId: 'topic-1', messageId: 'msg-1' })
+      expect(api.deleteMessage).toHaveBeenCalledWith({ topicId: 'topic-1', branchId: null, messageId: 'msg-1' })
     })
 
     it('deleteMessages calls api.deleteMessages', async () => {
       api.deleteMessages.mockResolvedValue(successResult(null))
       await ds.deleteMessages('topic-1', ['m-1', 'm-2'])
-      expect(api.deleteMessages).toHaveBeenCalledWith({ topicId: 'topic-1', messageIds: ['m-1', 'm-2'] })
+      expect(api.deleteMessages).toHaveBeenCalledWith({
+        topicId: 'topic-1',
+        branchId: null,
+        messageIds: ['m-1', 'm-2']
+      })
     })
 
     it('updateBlocks calls api.updateBlocks', async () => {
@@ -470,6 +482,7 @@ describe('SqliteMessageDataSource', () => {
       expect(api.reorderAnswerGroup).toHaveBeenCalledOnce()
       expect(api.reorderAnswerGroup).toHaveBeenCalledWith({
         topicId: 'topic-1',
+        branchId: null,
         anchorMessageId: 'a-1',
         orderedMessageIds: ['a-2', 'a-1']
       })
@@ -515,7 +528,7 @@ describe('SqliteMessageDataSource', () => {
       api.fetchMessages.mockResolvedValue(successResult({ messages: [], blocks: [] }))
       await ds.fetchMessages('topic-1', true)
       const req = api.fetchMessages.mock.calls[0][0]
-      expect(req).toEqual({ topicId: 'topic-1' })
+      expect(req).toEqual({ topicId: 'topic-1', branchId: null })
       expect((req as any).forceReload).toBeUndefined()
     })
   })
@@ -855,10 +868,15 @@ describe('SqliteMessageDataSource', () => {
       const result = await ds.hardDeleteTopic('t-1')
       expect(api.hardDeleteTopic).toHaveBeenCalledOnce()
       // Intentional resident-registry deletion lifecycle dispatches + topic updatedAt dispatch
-      expect(mockDispatch).toHaveBeenCalledTimes(2)
+      // + branch-route reset for the deleted logical topic (local-only branch state).
+      expect(mockDispatch).toHaveBeenCalledTimes(3)
       const callTypes = mockDispatch.mock.calls.map((c: any[]) => c[0]?.type)
       expect(callTypes).toEqual(
-        expect.arrayContaining(['residentRegistry/invalidateForDeletion', 'assistants/updateTopicUpdatedAt'])
+        expect.arrayContaining([
+          'residentRegistry/invalidateForDeletion',
+          'assistants/updateTopicUpdatedAt',
+          'topicBranch/branchesRemoved'
+        ])
       )
       expect(result.affectedFileIds).toEqual(['f1'])
       expect(result.deletedTopicIds).toEqual(['t-1'])
@@ -928,12 +946,14 @@ describe('SqliteMessageDataSource', () => {
       await ds.updateMessage('t-1', 'm-1', { content: 'x' } as never)
       expect(api.updateMessage).toHaveBeenLastCalledWith({
         topicId: 't-1',
+        branchId: null,
         messageId: 'm-1',
         updates: expect.anything()
       })
       await ds.updateMessage('t-1', 'm-1', { content: 'y' } as never, 'attempt-1')
       expect(api.updateMessage).toHaveBeenLastCalledWith({
         topicId: 't-1',
+        branchId: null,
         messageId: 'm-1',
         updates: expect.anything(),
         resendAttemptId: 'attempt-1'
@@ -1075,7 +1095,11 @@ describe('SqliteMessageDataSource', () => {
       ;(api as any).fetchAnswerGroup = vi.fn().mockResolvedValue(successResult(answerGroupResponse))
       await ds.fetchAnswerGroup('t1', 'a2')
       expect((api as any).fetchAnswerGroup).toHaveBeenCalledOnce()
-      expect((api as any).fetchAnswerGroup).toHaveBeenCalledWith({ topicId: 't1', anchorMessageId: 'a2' })
+      expect((api as any).fetchAnswerGroup).toHaveBeenCalledWith({
+        topicId: 't1',
+        branchId: null,
+        anchorMessageId: 'a2'
+      })
     })
 
     it('returns the unwrapped response value', async () => {
@@ -1390,7 +1414,7 @@ describe('SqliteMessageDataSource', () => {
       windowApi.fetchMessages.mockResolvedValue(successResult({ messages: [], blocks: [] }))
       await ds.fetchMessages('t-1')
       expect(windowApi.fetchMessages).toHaveBeenCalledOnce()
-      expect(windowApi.fetchMessages).toHaveBeenCalledWith({ topicId: 't-1' })
+      expect(windowApi.fetchMessages).toHaveBeenCalledWith({ topicId: 't-1', branchId: null })
     })
 
     it('prefers the injected API over window.api.chatDb', async () => {

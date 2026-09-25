@@ -249,7 +249,7 @@ const DEFAULT_SAMPLE_COUNT = 5
 
 const TOPIC_COLUMNS = 'id, assistant_id, name, created_at, updated_at, deleted_at, extra'
 const MESSAGE_COLUMNS =
-  'id, topic_id, role, content, status, ask_id, model, model_id, assistant_id, created_at, updated_at, sort_order, extra'
+  'id, topic_id, branch_id, role, content, status, ask_id, model, model_id, assistant_id, created_at, updated_at, sort_order, extra'
 const BLOCK_COLUMNS = 'id, message_id, type, content, status, created_at, updated_at, sort_order, extra'
 const SEGMENT_COLUMNS = 'id, topic_id, name, created_at, updated_at, sort_order, extra'
 const FILE_REFERENCE_COLUMNS = 'id, block_id, file_id, file_name, file_path, file_type, count, extra'

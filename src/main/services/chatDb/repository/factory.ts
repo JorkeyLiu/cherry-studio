@@ -13,13 +13,14 @@
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { BlocksRepository } from './BlocksRepository'
+import { BranchesRepository } from './BranchesRepository'
 import { FileReferencesRepository } from './FileReferencesRepository'
 import { MessagesRepository } from './MessagesRepository'
 import { TopicSegmentsRepository } from './TopicSegmentsRepository'
 import { TopicsRepository } from './TopicsRepository'
 
 /**
- * Aggregate of all five chat DB repositories bound to a single
+ * Aggregate of all chat DB repositories bound to a single
  * Drizzle database or transaction executor.
  */
 export interface ChatDbRepositories {
@@ -28,13 +29,14 @@ export interface ChatDbRepositories {
   blocks: BlocksRepository
   segments: TopicSegmentsRepository
   fileRefs: FileReferencesRepository
+  branches: BranchesRepository
 }
 
 /**
- * Create all five repositories bound to the given Drizzle database.
+ * Create all repositories bound to the given Drizzle database.
  *
  * @param db  Drizzle database instance (root or transaction-scoped).
- * @returns   Aggregate of all five repositories.
+ * @returns   Aggregate of all repositories.
  */
 export function createRepositories(db: BetterSQLite3Database<any>): ChatDbRepositories {
   return {
@@ -42,6 +44,7 @@ export function createRepositories(db: BetterSQLite3Database<any>): ChatDbReposi
     messages: new MessagesRepository(db),
     blocks: new BlocksRepository(db),
     segments: new TopicSegmentsRepository(db),
-    fileRefs: new FileReferencesRepository(db)
+    fileRefs: new FileReferencesRepository(db),
+    branches: new BranchesRepository(db)
   }
 }

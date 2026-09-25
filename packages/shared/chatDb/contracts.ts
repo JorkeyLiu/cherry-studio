@@ -20,7 +20,9 @@ import type {
   ChatDbChannel,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
+  CreateBranchRequest,
   DeleteBlocksRequest,
+  DeleteBranchRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -42,12 +44,14 @@ import type {
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
+  ListBranchesRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
+  RenameBranchRequest,
   ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
@@ -81,6 +85,7 @@ import {
   validateNoIdentityFields,
   validateNonEmptyString,
   validateNonNegativeInteger,
+  validateOptionalBranchId,
   validateRequest,
   validateResultEnvelope,
   validateStringArray,
@@ -153,11 +158,12 @@ const GET_RAW_TOPIC_VALUE_KEYS = new Set(['id', 'messages'])
 // ---------------------------------------------------------------------------
 
 const fetchMessagesContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
+  allowedKeys: keySet('topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, fetchMessagesContract.allowedKeys)
     const req = value as FetchMessagesRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult(result: unknown): void {
     // LOCK-LB-5: the success value is validated per-array below — message
@@ -261,11 +267,12 @@ const ensureTopicContract: ChatDbContract = {
 }
 
 const appendMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'message', 'blocks', 'insertIndex', 'diagnostics', 'resendAttemptId'),
+  allowedKeys: keySet('topicId', 'branchId', 'message', 'blocks', 'insertIndex', 'diagnostics', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, appendMessageContract.allowedKeys)
     const req = value as AppendMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateJsonObject(req.message, 'request.message')
     validateIdField(req.message, 'request.message')
     // Validate blocks is a proper array before iteration (prevents TypeError on malformed payloads)
@@ -327,16 +334,17 @@ const appendMessageContract: ChatDbContract = {
 }
 
 const updateMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageId', 'updates', 'resendAttemptId'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageId', 'updates', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageContract.allowedKeys)
     const req = value as UpdateMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.messageId, 'request.messageId')
     validateResendAttemptId(req.resendAttemptId)
     validateJsonObject(req.updates, 'request.updates')
     // Reject identity/reparenting fields at the shared request boundary
-    validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'sortOrder']), 'request.updates')
+    validateNoIdentityFields(req.updates, new Set(['id', 'topicId', 'branchId', 'sortOrder']), 'request.updates')
   },
   validateResult: voidResult('chatdb:update-message')
 }
@@ -355,11 +363,12 @@ const updateMessageContract: ChatDbContract = {
 const SELECT_ANSWER_VALUE_KEYS = new Set(['topicId', 'askId', 'selectedMessageId', 'messageIds'])
 
 const selectAnswerMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'selectedMessageId'),
+  allowedKeys: keySet('topicId', 'branchId', 'selectedMessageId'),
   validate(value: unknown): void {
     validateRequest(value, selectAnswerMessageContract.allowedKeys)
     const req = value as SelectAnswerMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.selectedMessageId, 'request.selectedMessageId')
   },
   validateResult(result: unknown): void {
@@ -428,17 +437,18 @@ const selectAnswerMessageContract: ChatDbContract = {
 }
 
 const updateMessageAndBlocksContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete', 'resendAttemptId'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete', 'resendAttemptId'),
   validate(value: unknown): void {
     validateRequest(value, updateMessageAndBlocksContract.allowedKeys)
     const req = value as UpdateMessageAndBlocksRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateResendAttemptId(req.resendAttemptId)
     if (req.blockIdsToDelete !== undefined) validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
     validateJsonObject(req.messageUpdates, 'request.messageUpdates')
     validateIdField(req.messageUpdates, 'request.messageUpdates')
     // Reject identity/reparenting fields at the shared request boundary
-    validateNoIdentityFields(req.messageUpdates, new Set(['topicId']), 'request.messageUpdates')
+    validateNoIdentityFields(req.messageUpdates, new Set(['topicId', 'branchId']), 'request.messageUpdates')
     // Validate blocksToUpdate is a proper array before iteration
     const blocks = validateJsonObjectArray(req.blocksToUpdate, 'request.blocksToUpdate')
     for (let i = 0; i < blocks.length; i++) {
@@ -457,22 +467,24 @@ const updateMessageAndBlocksContract: ChatDbContract = {
 }
 
 const deleteMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageId'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageId'),
   validate(value: unknown): void {
     validateRequest(value, deleteMessageContract.allowedKeys)
     const req = value as DeleteMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.messageId, 'request.messageId')
   },
   validateResult: voidResult('chatdb:delete-message')
 }
 
 const deleteMessagesContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageIds'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageIds'),
   validate(value: unknown): void {
     validateRequest(value, deleteMessagesContract.allowedKeys)
     const req = value as DeleteMessagesRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateStringArray(req.messageIds, 'request.messageIds')
   },
   validateResult: voidResult('chatdb:delete-messages')
@@ -758,12 +770,13 @@ function validateSegmentResult(channel: string): (result: unknown) => void {
 }
 
 const upsertSegmentContract: ChatDbContract = {
-  allowedKeys: keySet('segmentId', 'topicId', 'name', 'messageIds', 'color'),
+  allowedKeys: keySet('segmentId', 'topicId', 'branchId', 'name', 'messageIds', 'color'),
   validate(value: unknown): void {
     validateRequest(value, upsertSegmentContract.allowedKeys)
     const req = value as UpsertSegmentRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (req.name !== undefined && req.name !== null) {
       validateNonEmptyString(req.name, 'request.name')
     }
@@ -800,11 +813,12 @@ const deleteSegmentContract: ChatDbContract = {
 }
 
 const replaceSegmentMembershipContract: ChatDbContract = {
-  allowedKeys: keySet('segmentId', 'messageIds'),
+  allowedKeys: keySet('segmentId', 'branchId', 'messageIds'),
   validate(value: unknown): void {
     validateRequest(value, replaceSegmentMembershipContract.allowedKeys)
     const req = value as ReplaceSegmentMembershipRequest
     validateNonEmptyString(req.segmentId, 'request.segmentId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (!Array.isArray(req.messageIds)) {
       throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
     }
@@ -828,11 +842,12 @@ const replaceSegmentMembershipContract: ChatDbContract = {
 // ---------------------------------------------------------------------------
 
 const reorderMessagesContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageIds'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageIds'),
   validate(value: unknown): void {
     validateRequest(value, reorderMessagesContract.allowedKeys)
     const req = value as ReorderMessagesRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (!Array.isArray(req.messageIds)) {
       throw new ValidationError('request.messageIds', 'Expected an array of message IDs')
     }
@@ -852,11 +867,12 @@ const reorderMessagesContract: ChatDbContract = {
 const REORDER_ANSWER_GROUP_VALUE_KEYS = new Set(['topicId', 'askId', 'anchorMessageId', 'orderedMessageIds'])
 
 const reorderAnswerGroupContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'anchorMessageId', 'orderedMessageIds'),
+  allowedKeys: keySet('topicId', 'branchId', 'anchorMessageId', 'orderedMessageIds'),
   validate(value: unknown): void {
     validateRequest(value, reorderAnswerGroupContract.allowedKeys)
     const req = value as ReorderAnswerGroupRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
     if (!Array.isArray(req.orderedMessageIds)) {
       throw new ValidationError('request.orderedMessageIds', 'Expected an array of message IDs')
@@ -1389,11 +1405,12 @@ function validateEntries(entries: unknown, path: string): void {
 }
 
 const cloneMessagesToTopicContract: ChatDbContract = {
-  allowedKeys: keySet('targetTopicId', 'assistantId', 'entries'),
+  allowedKeys: keySet('targetTopicId', 'branchId', 'assistantId', 'entries'),
   validate(value: unknown): void {
     validateRequest(value, cloneMessagesToTopicContract.allowedKeys)
     const req = value as CloneMessagesToTopicRequest
     validateNonEmptyString(req.targetTopicId, 'request.targetTopicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (req.assistantId !== undefined) {
       validateNonEmptyString(req.assistantId, 'request.assistantId')
     }
@@ -1403,11 +1420,12 @@ const cloneMessagesToTopicContract: ChatDbContract = {
 }
 
 const branchMessagesToTopicContract: ChatDbContract = {
-  allowedKeys: keySet('sourceTopicId', 'targetTopicId', 'anchorMessageId', 'assistantId'),
+  allowedKeys: keySet('sourceTopicId', 'branchId', 'targetTopicId', 'anchorMessageId', 'assistantId'),
   validate(value: unknown): void {
     validateRequest(value, branchMessagesToTopicContract.allowedKeys)
     const req = value as BranchMessagesToTopicRequest
     validateNonEmptyString(req.sourceTopicId, 'request.sourceTopicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.targetTopicId, 'request.targetTopicId')
     validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
     if (req.assistantId !== undefined) {
@@ -1444,6 +1462,215 @@ const branchMessagesToTopicContract: ChatDbContract = {
       }
       validateJsonObjectArray(v.messages, 'result.value.messages')
       validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+    }
+  }
+}
+
+/**
+ * Topic-internal branch wire validators (migration 016 model).
+ *
+ * A branch wire is a plain object with exactly the TopicBranchWire keys:
+ * id/topicId/parentBranchId(null allowed)/anchorMessageId/name(null
+ * allowed)/createdAt(null allowed)/updatedAt(null allowed).
+ */
+const TOPIC_BRANCH_WIRE_KEYS = new Set([
+  'id',
+  'topicId',
+  'parentBranchId',
+  'anchorMessageId',
+  'name',
+  'createdAt',
+  'updatedAt'
+])
+
+function validateTopicBranchWire(value: unknown, path: string, channel: string): void {
+  validateJsonObject(value, path)
+  const v = value as Record<string, unknown>
+  for (const key of Object.keys(v)) {
+    if (!TOPIC_BRANCH_WIRE_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in branch wire: "${key}"`)
+    }
+  }
+  validateNonEmptyString(v.id, `${path}.id`)
+  validateNonEmptyString(v.topicId, `${path}.topicId`)
+  if (v.parentBranchId !== null) {
+    validateNonEmptyString(v.parentBranchId, `${path}.parentBranchId`)
+  }
+  validateNonEmptyString(v.anchorMessageId, `${path}.anchorMessageId`)
+  if (v.name !== null) {
+    validateNonEmptyString(v.name, `${path}.name`)
+  }
+  if (v.createdAt !== null && v.createdAt !== undefined) {
+    validateNonEmptyString(v.createdAt, `${path}.createdAt`)
+  }
+  if (v.updatedAt !== null && v.updatedAt !== undefined) {
+    validateNonEmptyString(v.updatedAt, `${path}.updatedAt`)
+  }
+}
+
+const CREATE_BRANCH_VALUE_KEYS = new Set(['branch', 'messages', 'blocks'])
+
+const createBranchContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'parentBranchId', 'anchorMessageId', 'name'),
+  validate(value: unknown): void {
+    validateRequest(value, createBranchContract.allowedKeys)
+    const req = value as CreateBranchRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.parentBranchId, 'request.parentBranchId')
+    validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
+    if (req.name !== undefined) {
+      validateNonEmptyString(req.name, 'request.name')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:create-branch', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:create-branch] Expected object with branch and effective messages/blocks'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:create-branch] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!CREATE_BRANCH_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:create-branch] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateTopicBranchWire(v.branch, 'result.value.branch', 'chatdb:create-branch')
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
+    }
+  }
+}
+
+const LIST_BRANCHES_VALUE_KEYS = new Set(['topicId', 'branches'])
+
+const listBranchesContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, listBranchesContract.allowedKeys)
+    const req = value as ListBranchesRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:list-branches', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:list-branches] Expected branches object')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:list-branches] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!LIST_BRANCHES_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:list-branches] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      if (!Array.isArray(v.branches)) {
+        throw new ValidationError('result.value.branches', '[chatdb:list-branches] Expected branches array')
+      }
+      for (let i = 0; i < (v.branches as unknown[]).length; i++) {
+        validateTopicBranchWire((v.branches as unknown[])[i], `result.value.branches[${i}]`, 'chatdb:list-branches')
+      }
+    }
+  }
+}
+
+const RENAME_BRANCH_VALUE_KEYS = new Set(['branch'])
+
+const renameBranchContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'branchId', 'name'),
+  validate(value: unknown): void {
+    validateRequest(value, renameBranchContract.allowedKeys)
+    const req = value as RenameBranchRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.branchId, 'request.branchId')
+    validateNonEmptyString(req.name, 'request.name')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:rename-branch', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:rename-branch] Expected object with branch')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:rename-branch] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!RENAME_BRANCH_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:rename-branch] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateTopicBranchWire(v.branch, 'result.value.branch', 'chatdb:rename-branch')
+    }
+  }
+}
+
+const DELETE_BRANCH_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'deletedBranchIds',
+  'deletedMessageIds',
+  'deletedBlockIds'
+])
+
+const deleteBranchContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'branchId'),
+  validate(value: unknown): void {
+    validateRequest(value, deleteBranchContract.allowedKeys)
+    const req = value as DeleteBranchRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateNonEmptyString(req.branchId, 'request.branchId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:delete-branch', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:delete-branch] Expected delete-branch result object')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:delete-branch] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!DELETE_BRANCH_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:delete-branch] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateStringArray(v.deletedBranchIds, 'result.value.deletedBranchIds')
+      validateStringArray(v.deletedMessageIds, 'result.value.deletedMessageIds')
+      validateStringArray(v.deletedBlockIds, 'result.value.deletedBlockIds')
     }
   }
 }
@@ -1584,11 +1811,12 @@ function validateSemanticResendResult(channel: string): (result: unknown) => voi
 }
 
 const resendUserMessagesContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'userMessageId', 'assistantId', 'currentModel'),
+  allowedKeys: keySet('topicId', 'branchId', 'userMessageId', 'assistantId', 'currentModel'),
   validate(value: unknown): void {
     validateRequest(value, resendUserMessagesContract.allowedKeys)
     const req = value as ResendUserMessagesRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.userMessageId, 'request.userMessageId')
     validateNonEmptyString(req.assistantId, 'request.assistantId')
     validateSemanticModelSnapshot(req.currentModel, 'request.currentModel')
@@ -1597,11 +1825,12 @@ const resendUserMessagesContract: ChatDbContract = {
 }
 
 const regenerateAssistantMessageContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'assistantMessageId', 'assistantId', 'currentModel'),
+  allowedKeys: keySet('topicId', 'branchId', 'assistantMessageId', 'assistantId', 'currentModel'),
   validate(value: unknown): void {
     validateRequest(value, regenerateAssistantMessageContract.allowedKeys)
     const req = value as RegenerateAssistantMessageRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.assistantMessageId, 'request.assistantMessageId')
     validateNonEmptyString(req.assistantId, 'request.assistantId')
     // Optional absence is legal (self-modelId path); when present it must be
@@ -1614,11 +1843,12 @@ const regenerateAssistantMessageContract: ChatDbContract = {
 }
 
 const resetMessagesForResendContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messages', 'blockIdsToDelete'),
+  allowedKeys: keySet('topicId', 'branchId', 'messages', 'blockIdsToDelete'),
   validate(value: unknown): void {
     validateRequest(value, resetMessagesForResendContract.allowedKeys)
     const req = value as ResetMessagesForResendRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateEntries(req.messages, 'request.messages')
     validateStringArray(req.blockIdsToDelete, 'request.blockIdsToDelete')
   },
@@ -1712,11 +1942,12 @@ const resetMessagesForResendContract: ChatDbContract = {
 }
 
 const deleteMessagesWithSegmentsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageIds'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageIds'),
   validate(value: unknown): void {
     validateRequest(value, deleteMessagesWithSegmentsContract.allowedKeys)
     const req = value as DeleteMessagesWithSegmentsRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateStringArray(req.messageIds, 'request.messageIds')
   },
   validateResult: fileCleanupResultValidator('chatdb:delete-messages-with-segments')
@@ -1762,11 +1993,12 @@ function validateDependentsSegmentWire(seg: unknown, path: string): string {
 }
 
 const deleteMessagesWithDependentsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'messageIds'),
+  allowedKeys: keySet('topicId', 'branchId', 'messageIds'),
   validate(value: unknown): void {
     validateRequest(value, deleteMessagesWithDependentsContract.allowedKeys)
     const req = value as DeleteMessagesWithDependentsRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (!Array.isArray(req.messageIds) || req.messageIds.length === 0) {
       throw new ValidationError('request.messageIds', 'Expected a non-empty array of stable root message IDs')
     }
@@ -2040,11 +2272,12 @@ const deleteMessagesWithDependentsContract: ChatDbContract = {
 }
 
 const pasteMessagesToTopicContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'entries', 'insertIndex'),
+  allowedKeys: keySet('topicId', 'branchId', 'entries', 'insertIndex'),
   validate(value: unknown): void {
     validateRequest(value, pasteMessagesToTopicContract.allowedKeys)
     const req = value as PasteMessagesToTopicRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateEntries(req.entries, 'request.entries')
     if (req.insertIndex !== undefined) {
       validateIndex(req.insertIndex, 'request.insertIndex')
@@ -2248,7 +2481,7 @@ const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
 const FETCH_MESSAGES_WINDOW_REQUESTED_KEYS = new Set(['limit', 'before', 'after'])
 
 const fetchMessagesWindowContract: ChatDbContract = {
-  allowedKeys: keySet('kind', 'topicId', 'limit', 'anchorMessageId', 'before', 'after'),
+  allowedKeys: keySet('kind', 'topicId', 'branchId', 'limit', 'anchorMessageId', 'before', 'after'),
   validate(value: unknown): void {
     validateRequest(value, fetchMessagesWindowContract.allowedKeys)
     const req = value as FetchMessagesWindowRequest & Record<string, unknown>
@@ -2256,6 +2489,7 @@ const fetchMessagesWindowContract: ChatDbContract = {
       throw new ValidationError('request.kind', 'Expected "latest" or "around"')
     }
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (req.kind === 'latest') {
       if ('anchorMessageId' in req || 'before' in req || 'after' in req) {
         throw new ValidationError('request', 'Latest window must not contain anchorMessageId, before, or after')
@@ -2452,11 +2686,12 @@ const fetchMessagesWindowContract: ChatDbContract = {
 const FETCH_ANSWER_GROUP_VALUE_KEYS = new Set(['completeness', 'topicId', 'anchorMessageId', 'askId', 'messageIds'])
 
 const fetchAnswerGroupContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'anchorMessageId'),
+  allowedKeys: keySet('topicId', 'branchId', 'anchorMessageId'),
   validate(value: unknown): void {
     validateRequest(value, fetchAnswerGroupContract.allowedKeys)
     const req = value as FetchAnswerGroupRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.anchorMessageId, 'request.anchorMessageId')
   },
   validateResult(result: unknown): void {
@@ -2542,11 +2777,12 @@ const FETCH_CONTEXT_CLOSURE_CLOSURE_KEYS = new Set([
 ])
 
 const fetchContextClosureContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'anchorGroupKey'),
+  allowedKeys: keySet('topicId', 'branchId', 'anchorGroupKey'),
   validate(value: unknown): void {
     validateRequest(value, fetchContextClosureContract.allowedKeys)
     const req = value as FetchContextClosureRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.anchorGroupKey, 'request.anchorGroupKey')
   },
   validateResult(result: unknown): void {
@@ -2753,12 +2989,14 @@ function validateOptionalContextCount(value: unknown, path: string): void {
 const resolveContextClosureContract: ChatDbContract = {
   allowedKeys: keySet(
     'topicId',
+    'branchId',
     'intent',
     'contextCount',
     'currentAnchorGroupKey',
     'messageId',
     'groupKey',
     'sourceTopicId',
+    'sourceBranchId',
     'sourceAnchorGroupKey',
     'detail'
   ),
@@ -2766,6 +3004,7 @@ const resolveContextClosureContract: ChatDbContract = {
     validateRequest(value, resolveContextClosureContract.allowedKeys)
     const req = value as ResolveContextClosureRequest & Record<string, unknown>
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (typeof req.intent !== 'string' || !RESOLVE_CONTEXT_CLOSURE_INTENTS.has(req.intent)) {
       throw new ValidationError(
         'request.intent',
@@ -2784,6 +3023,7 @@ const resolveContextClosureContract: ChatDbContract = {
     const hasGroupKey = req.groupKey !== undefined
     const hasContextCount = (req as Record<string, unknown>).contextCount !== undefined
     const hasSourceTopicId = req.sourceTopicId !== undefined
+    const hasSourceBranch = (req as Record<string, unknown>).sourceBranchId !== undefined
     const hasSourceAnchor = (req as Record<string, unknown>).sourceAnchorGroupKey !== undefined
     if (req.intent === 'establish' || req.intent === 'reanchor-default') {
       if (!hasContextCount) {
@@ -2792,17 +3032,17 @@ const resolveContextClosureContract: ChatDbContract = {
           '[chatdb:resolve-context-closure] contextCount is required for establish/reanchor-default'
         )
       }
-      if (hasMessageId || hasGroupKey || hasSourceTopicId || hasSourceAnchor) {
+      if (hasMessageId || hasGroupKey || hasSourceTopicId || hasSourceBranch || hasSourceAnchor) {
         throw new ValidationError(
           'request',
-          '[chatdb:resolve-context-closure] establish/reanchor-default forbids messageId/groupKey/sourceTopicId/sourceAnchorGroupKey'
+          '[chatdb:resolve-context-closure] establish/reanchor-default forbids messageId/groupKey/sourceTopicId/sourceBranchId/sourceAnchorGroupKey'
         )
       }
     } else if (req.intent === 'move') {
-      if (hasContextCount || hasSourceTopicId || hasSourceAnchor) {
+      if (hasContextCount || hasSourceTopicId || hasSourceBranch || hasSourceAnchor) {
         throw new ValidationError(
           'request',
-          '[chatdb:resolve-context-closure] move forbids contextCount/sourceTopicId/sourceAnchorGroupKey'
+          '[chatdb:resolve-context-closure] move forbids contextCount/sourceTopicId/sourceBranchId/sourceAnchorGroupKey'
         )
       }
       if ((hasMessageId ? 1 : 0) + (hasGroupKey ? 1 : 0) !== 1) {
@@ -2825,6 +3065,7 @@ const resolveContextClosureContract: ChatDbContract = {
         )
       }
       validateNonEmptyString(req.sourceTopicId, 'request.sourceTopicId')
+      validateOptionalBranchId(req.sourceBranchId, 'request.sourceBranchId')
       validateOptionalAnchorKey(req.sourceAnchorGroupKey, 'request.sourceAnchorGroupKey')
       if (!hasContextCount) {
         throw new ValidationError(
@@ -3084,11 +3325,12 @@ const FETCH_WHOLE_TOPIC_SNAPSHOT_META_KEYS = new Set([
 ])
 
 const fetchWholeTopicSnapshotContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
+  allowedKeys: keySet('topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, fetchWholeTopicSnapshotContract.allowedKeys)
     const req = value as FetchWholeTopicSnapshotRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:fetch-whole-topic-snapshot', { skipValueValidation: true })
@@ -3223,11 +3465,12 @@ const FETCH_CLIPBOARD_GROUPS_META_KEYS = new Set([
 const FETCH_CLIPBOARD_GROUPS_CHANNEL = 'chatdb:fetch-clipboard-groups'
 
 const fetchClipboardGroupsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'groupIds'),
+  allowedKeys: keySet('topicId', 'branchId', 'groupIds'),
   validate(value: unknown): void {
     validateRequest(value, fetchClipboardGroupsContract.allowedKeys)
     const req = value as FetchClipboardGroupsRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (!Array.isArray(req.groupIds) || req.groupIds.length === 0) {
       throw new ValidationError(
         'request.groupIds',
@@ -3466,11 +3709,12 @@ const FETCH_TOPIC_NAMING_CONTEXT_META_KEYS = new Set([
 ])
 
 const fetchTopicNamingContextContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
+  allowedKeys: keySet('topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, fetchTopicNamingContextContract.allowedKeys)
     const req = value as FetchTopicNamingContextRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:fetch-topic-naming-context', { skipValueValidation: true })
@@ -3666,11 +3910,12 @@ const FETCH_TOPIC_ACTIVITY_VALUE_KEYS = new Set([
 const FETCH_TOPIC_ACTIVITY_META_KEYS = new Set(['completeness', 'topicId'])
 
 const fetchTopicActivityContract: ChatDbContract = {
-  allowedKeys: keySet('topicId'),
+  allowedKeys: keySet('topicId', 'branchId'),
   validate(value: unknown): void {
     validateRequest(value, fetchTopicActivityContract.allowedKeys)
     const req = value as FetchTopicActivityRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
   },
   validateResult(result: unknown): void {
     validateResultEnvelope(result, 'chatdb:fetch-topic-activity')
@@ -3801,11 +4046,12 @@ function validateInsertMessageGroupIntent(value: unknown, path: string): void {
 }
 
 const insertMessageGroupsContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'groups'),
+  allowedKeys: keySet('topicId', 'branchId', 'groups'),
   validate(value: unknown): void {
     validateRequest(value, insertMessageGroupsContract.allowedKeys)
     const req = value as InsertMessageGroupsRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     if (!Array.isArray(req.groups) || req.groups.length === 0) {
       throw new ValidationError('request.groups', `[${INSERT_MESSAGE_GROUPS_CHANNEL}] groups must be a non-empty array`)
     }
@@ -3862,11 +4108,12 @@ const insertMessageGroupsContract: ChatDbContract = {
 // ---------------------------------------------------------------------------
 
 const insertMessagesAfterAnchorContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'afterMessageId', 'entries'),
+  allowedKeys: keySet('topicId', 'branchId', 'afterMessageId', 'entries'),
   validate(value: unknown): void {
     validateRequest(value, insertMessagesAfterAnchorContract.allowedKeys)
     const req = value as InsertMessagesAfterAnchorRequest
     validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
     validateNonEmptyString(req.afterMessageId, 'request.afterMessageId')
     validateEntries(req.entries, 'request.entries')
     if (req.entries.length === 0) {
@@ -3928,6 +4175,11 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:reset-assistant-topics': resetAssistantTopicsContract,
   // S6.2c-1: branch by stable anchor (additive, keeps old clone path intact)
   'chatdb:branch-messages-to-topic': branchMessagesToTopicContract,
+  // Topic-internal branches (local-only, no prefix cloning)
+  'chatdb:create-branch': createBranchContract,
+  'chatdb:list-branches': listBranchesContract,
+  'chatdb:rename-branch': renameBranchContract,
+  'chatdb:delete-branch': deleteBranchContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,

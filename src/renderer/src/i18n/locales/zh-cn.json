@@ -1150,6 +1150,10 @@
       }
     },
     "message": {
+      "copy_topic": {
+        "created": "话题已复制",
+        "label": "复制话题"
+      },
       "insert": {
         "label": "插入消息",
         "newAssistantMessage": "新助手消息",
@@ -1168,6 +1172,10 @@
         "model": "切换模型"
       },
       "set_context_anchor": "设为上下文起始位置",
+      "true_branch": {
+        "created": "分支已创建",
+        "label": "创建分支"
+      },
       "useful": {
         "label": "设置为上下文",
         "tip": "在这组消息中，该消息将被选择加入上下文"
@@ -1335,6 +1343,20 @@
     "thinking": "思考中（用时 {{seconds}} 秒）",
     "topics": {
       "auto_rename": "生成话题名",
+      "branch": {
+        "ancestors": "祖先话题",
+        "children": "分支",
+        "children_here": "此处有 {{count}} 条分支",
+        "collapse": "收起分支",
+        "current": "当前",
+        "default_name": "新建分支",
+        "delete": "删除分支",
+        "delete_confirm": "删除此分支及其所有子分支？此操作无法撤销。",
+        "deleted": "分支已删除",
+        "expand": "展开分支",
+        "rename": "重命名分支",
+        "tag": "分支"
+      },
       "copy": {
         "image": "复制为图片",
         "md": "复制为 Markdown",
@@ -2592,6 +2614,9 @@
     },
     "topic": {
       "added": "话题添加成功"
+    },
+    "true_branch": {
+      "error": "创建分支失败"
     },
     "upgrade": {
       "success": {

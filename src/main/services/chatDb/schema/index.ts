@@ -36,6 +36,10 @@ export const messages = sqliteTable(
     topicId: text('topic_id')
       .notNull()
       .references(() => topics.id, { onDelete: 'cascade' }),
+    // Nullable owner branch: NULL = main route, non-NULL = created by that
+    // branch (topic-internal node). CASCADE so branch subtree deletes remove
+    // only owned suffix rows; shared prefixes survive. See migration 016.
+    branchId: text('branch_id').references(() => topicBranches.id, { onDelete: 'cascade' }),
     role: text('role'),
     content: text('content'),
     status: text('status'),
@@ -50,7 +54,9 @@ export const messages = sqliteTable(
   },
   (table) => [
     index('messages_topic_id_sort_order_idx').on(table.topicId, table.sortOrder),
-    index('messages_assistant_id_idx').on(table.assistantId)
+    index('messages_assistant_id_idx').on(table.assistantId),
+    index('messages_branch_id_idx').on(table.branchId),
+    index('messages_topic_id_branch_id_sort_order_idx').on(table.topicId, table.branchId, table.sortOrder)
   ]
 )
 
@@ -136,6 +142,48 @@ export const fileReferences = sqliteTable(
     index('file_references_block_id_idx').on(table.blockId),
     index('file_references_file_id_idx').on(table.fileId),
     uniqueIndex('file_references_block_id_file_id_uniq').on(table.blockId, table.fileId)
+  ]
+)
+
+// ---------------------------------------------------------------------------
+// topic-internal branch nodes — additive, isolated (016)
+//
+// One row per internal branch node inside a single logical topic:
+// - `id` is the stable branch identity (`branchId = null` = main route; no
+//   fake root row is ever created).
+// - `topicId` is the owning logical topic (CASCADE: topic delete covers all
+//   branches/messages by topic).
+// - `parentBranchId` is NULL for level-1 branches (parent route = main
+//   route), otherwise the parent branch node (self-CASCADE: deleting a
+//   branch deletes its descendant subtree rows; owned messages follow via
+//   messages.branch_id CASCADE).
+// - `anchorMessageId` is the fork point inside the parent effective route
+//   (branch-from-inherited allowed), so no FK to messages — validated in
+//   code against the effective route.
+// - `name` is the branch display name (Topic.name stays the logical name).
+//
+// Branches never appear in sidebar/trash/pin/move/search/restore: those
+// operate on topics only. Branch rows are local-only (excluded from sync).
+// See migration 016.
+// ---------------------------------------------------------------------------
+export const topicBranches = sqliteTable(
+  'topic_branches',
+  {
+    id: text('id').primaryKey(),
+    topicId: text('topic_id')
+      .notNull()
+      .references(() => topics.id, { onDelete: 'cascade' }),
+    parentBranchId: text('parent_branch_id').references(() => topicBranches.id, { onDelete: 'cascade' }),
+    anchorMessageId: text('anchor_message_id').notNull(),
+    name: text('name'),
+    createdAt: text('created_at'),
+    updatedAt: text('updated_at'),
+    extra: text('extra')
+  },
+  (table) => [
+    index('topic_branches_topic_id_idx').on(table.topicId),
+    index('topic_branches_parent_branch_id_idx').on(table.parentBranchId),
+    index('topic_branches_anchor_message_id_idx').on(table.anchorMessageId)
   ]
 )
 

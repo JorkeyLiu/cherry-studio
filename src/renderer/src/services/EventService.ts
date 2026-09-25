@@ -15,6 +15,10 @@ export const EVENT_NAMES = {
   SHOW_TOPIC_SIDEBAR: 'SHOW_TOPIC_SIDEBAR',
   SWITCH_TOPIC_SIDEBAR: 'SWITCH_TOPIC_SIDEBAR',
   NEW_BRANCH: 'NEW_BRANCH',
+  // True topic branches: distinct creation event for the toolbar button (the
+  // ONLY true-branch creation method). NEW_BRANCH keeps its legacy Copy Topic
+  // (clone-prefix) semantics for the assistant overflow menu.
+  NEW_TRUE_BRANCH: 'NEW_TRUE_BRANCH',
   COPY_TOPIC_IMAGE: 'COPY_TOPIC_IMAGE',
   EXPORT_TOPIC_IMAGE: 'EXPORT_TOPIC_IMAGE',
   LOCATE_MESSAGE: 'LOCATE_MESSAGE',

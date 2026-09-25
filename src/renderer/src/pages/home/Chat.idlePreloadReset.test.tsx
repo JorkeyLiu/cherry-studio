@@ -22,7 +22,8 @@ const preloadCalls = vi.hoisted(() => ({
 }))
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en-US' } })
+  useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en-US' } }),
+  initReactI18next: { type: '3rdParty', init: vi.fn() }
 }))
 
 vi.mock('react-hotkeys-hook', () => ({

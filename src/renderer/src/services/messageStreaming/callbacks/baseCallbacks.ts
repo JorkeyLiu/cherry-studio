@@ -7,10 +7,12 @@ import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
+import store from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { updateOneBlock } from '@renderer/store/messageBlock'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { newMessagesActions } from '@renderer/store/newMessage'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant } from '@renderer/types'
 import { ERROR_I18N_KEY_REQUEST_TIMEOUT, ERROR_I18N_KEY_STREAM_PAUSED } from '@renderer/types/error'
 import type {
@@ -576,9 +578,9 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // 成功终态命名：仅在最终原子持久化成功且已加载 Redux 终态提交之后
         // 触发（仍在 MESSAGE_COMPLETE 之前）。失败/非 success/持久化失败分支
         // 永不触发；fire-and-forget，保留 catch 日志，不 await，不重复调用。
-        void Promise.resolve(autoRenameTopic(assistant, topicId)).catch((error: unknown) =>
-          logger.error('autoRenameTopic failed', error as Error)
-        )
+        void Promise.resolve(
+          autoRenameTopic(assistant, topicId, selectActiveBranchId(store.getState(), topicId))
+        ).catch((error: unknown) => logger.error('autoRenameTopic failed', error as Error))
 
         void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
         logger.debug('onComplete finished')

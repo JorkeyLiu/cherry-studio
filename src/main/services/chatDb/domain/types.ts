@@ -30,6 +30,7 @@ export interface TopicRow {
 export interface MessageRow {
   id: string
   topic_id: string
+  branch_id: string | null
   role: string | null
   content: string | null
   status: string | null
@@ -40,6 +41,17 @@ export interface MessageRow {
   created_at: string | null
   updated_at: string | null
   sort_order: number
+  extra: string | null
+}
+
+export interface TopicBranchRow {
+  id: string
+  topic_id: string
+  parent_branch_id: string | null
+  anchor_message_id: string
+  name: string | null
+  created_at: string | null
+  updated_at: string | null
   extra: string | null
 }
 
@@ -116,6 +128,13 @@ export interface TopicData {
 export interface MessageData {
   id: string
   topicId: string
+  /**
+   * Owner branch of this message: null/undefined = main route, non-null =
+   * created by that branch. Ownership is set by Main from the typed
+   * (topicId, branchId) write context — never from wire payloads — and is
+   * immutable afterwards (identity, like topicId).
+   */
+  branchId?: string | null
   role: string | null
   content: string | null
   status: string | null
@@ -126,6 +145,26 @@ export interface MessageData {
   createdAt: string | null
   updatedAt: string | null
   sortOrder: number
+  overflow: Record<string, unknown>
+}
+
+/**
+ * Topic-internal branch node (migration 016).
+ *
+ * `id` is the stable branch identity; `branchId = null` on reads/writes
+ * addresses the main route (no fake root row). `parentBranchId = null`
+ * means the parent route is the main route. `name` is the branch display
+ * name; the logical topic name stays on topics.
+ */
+export interface TopicBranchData {
+  id: string
+  topicId: string
+  parentBranchId: string | null
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  /** Overflow fields decoded from extra JSON (unknown keys preserved) */
   overflow: Record<string, unknown>
 }
 

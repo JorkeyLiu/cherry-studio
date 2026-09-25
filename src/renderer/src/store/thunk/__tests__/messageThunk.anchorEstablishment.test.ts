@@ -174,6 +174,11 @@ interface StoreState {
     fulfilledByTopic: Record<string, boolean>
     currentTopicId: string | null
   }
+  topicBranch?: {
+    branchesByTopic: Record<string, unknown[]>
+    activeBranchIdByTopic: Record<string, string>
+    routeGenerationByTopic: Record<string, number>
+  }
 }
 
 let storeState: StoreState
@@ -268,13 +273,37 @@ describe('messageThunk anchor hooks', () => {
           expect.any(Function),
           expect.any(Function),
           'asst-1',
-          'topic-1'
+          'topic-1',
+          null
         )
 
         // Response is queued (not started) after establishment.
         expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
       }
     )
+
+    it('passes the active branch route to anchor establishment', { timeout: 60_000 }, async () => {
+      mocks.appendMessage.mockResolvedValue(undefined)
+      ;(storeState as StoreState & { topicBranch?: unknown }).topicBranch = {
+        branchesByTopic: {},
+        activeBranchIdByTopic: { 'topic-1': 'branch-7' },
+        routeGenerationByTopic: {}
+      }
+
+      const { sendMessage } = await import('../messageThunk')
+      const dispatch = vi.fn()
+      const getState = () => storeState as never
+
+      await sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
+
+      expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.any(Function),
+        'asst-1',
+        'topic-1',
+        'branch-7'
+      )
+    })
   })
 
   describe('first-send frozen assistant snapshot (writable, fresh anchor, caller model override)', () => {
@@ -683,7 +712,8 @@ describe('messageThunk anchor hooks', () => {
         expect.any(Function),
         expect.any(Function),
         'asst-1',
-        'topic-1'
+        'topic-1',
+        null
       )
       // Joint publication now loads segments atomically; no separate fire-and-forget segment load
       expect(mocks.loadTopicSegmentsThunk).not.toHaveBeenCalled()
@@ -705,7 +735,8 @@ describe('messageThunk anchor hooks', () => {
         expect.any(Function),
         expect.any(Function),
         'asst-1',
-        'topic-1'
+        'topic-1',
+        null
       )
     })
 

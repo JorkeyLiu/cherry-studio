@@ -41,7 +41,7 @@ describe('SqliteMessageDataSource.insertMessageGroups', () => {
     ] as any
     const result = await ds.insertMessageGroups('t-1', groups)
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
-    expect(mocks.insertMessageGroups).toHaveBeenCalledWith({ topicId: 't-1', groups })
+    expect(mocks.insertMessageGroups).toHaveBeenCalledWith({ topicId: 't-1', branchId: null, groups })
     expect(result).toEqual({ affectedFileIds: [], remainingReferenceCounts: {} })
     expect(store.dispatch).toHaveBeenCalledTimes(1)
     expect(mocks.updateTopicUpdatedAt).toHaveBeenCalledExactlyOnceWith({ topicId: 't-1' })

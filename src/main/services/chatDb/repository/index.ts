@@ -6,6 +6,7 @@
  */
 
 export { BlocksRepository } from './BlocksRepository'
+export { BranchesRepository, MAX_BRANCH_DEPTH } from './BranchesRepository'
 export { FileReferencesRepository } from './FileReferencesRepository'
 export type { AffectedCount, GetResult } from './helpers'
 export { ChatImportWriter, createImportWriter } from './ImportWriter'

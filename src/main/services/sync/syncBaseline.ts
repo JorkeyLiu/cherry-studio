@@ -460,12 +460,12 @@ export function captureLocalSyncBaselineCandidate(db: BaselineTx): LocalSyncBase
 function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   // Materialize every input inside the single read transaction.
   const topicRows = tx.select().from(schema.topics).all()
-  const messageRows = tx.select().from(schema.messages).all()
-  const blockRows = tx.select().from(schema.messageBlocks).all()
-  const syncStateRows = tx.select().from(schema.syncState).all()
-  const entityClockRows = tx.select().from(schema.syncEntityClock).all()
-  const fieldClockRows = tx.select().from(schema.syncFieldClock).all()
-  const membershipRows = tx.select().from(schema.syncMembershipClock).all()
+  let messageRows = tx.select().from(schema.messages).all()
+  let blockRows = tx.select().from(schema.messageBlocks).all()
+  let syncStateRows = tx.select().from(schema.syncState).all()
+  let entityClockRows = tx.select().from(schema.syncEntityClock).all()
+  let fieldClockRows = tx.select().from(schema.syncFieldClock).all()
+  let membershipRows = tx.select().from(schema.syncMembershipClock).all()
   // Frame snapshot in same read transaction
   let frameRows: (typeof schema.syncParentOrderFrame.$inferSelect)[] = []
   try {
@@ -553,6 +553,114 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     }
   }
   const pendingOutboxCount = tx.select({ id: schema.syncOutbox.id }).from(schema.syncOutbox).all().length
+
+  // Topic-internal branches are local-only (never wire, never digest):
+  // exclude branch-owned messages/blocks (messages.branch_id NOT NULL) and
+  // every associated clock, frame, tombstone, and register from this
+  // candidate within existing local boundaries — no wire contract change.
+  // Topics (always logical) and main-route rows, clocks, and frames are
+  // unaffected. Exclusion is deterministic (same DB → same candidate) and
+  // out-of-domain like segments/attachments, so it carries no partial
+  // counter. Unknown ownership (pre-016 rows without the column) stays
+  // syncable — only proven branch ownership excludes.
+  {
+    const branchMessageIds = new Set<string>()
+    for (const row of messageRows) {
+      const branchId = (row as { branchId?: unknown }).branchId
+      if (typeof row.id === 'string' && typeof branchId === 'string' && branchId.length > 0) {
+        branchMessageIds.add(row.id)
+      }
+    }
+    if (branchMessageIds.size > 0) {
+      const messageBranchById = new Map<string, boolean>()
+      for (const row of messageRows) {
+        if (typeof row.id === 'string') {
+          const branchId = (row as { branchId?: unknown }).branchId
+          messageBranchById.set(row.id, typeof branchId === 'string' && branchId.length > 0)
+        }
+      }
+      const blockBranchById = new Map<string, boolean>()
+      for (const row of blockRows) {
+        if (typeof row.id === 'string' && typeof row.messageId === 'string') {
+          blockBranchById.set(row.id, messageBranchById.get(row.messageId) ?? false)
+        }
+      }
+      const isBranchMessage = (id: string): boolean => messageBranchById.get(id) ?? false
+      const isBranchBlock = (id: string): boolean => blockBranchById.get(id) ?? false
+      messageRows = messageRows.filter((row) => !isBranchMessage(row.id))
+      blockRows = blockRows.filter((row) => {
+        const parentBranch =
+          typeof (row as { messageId?: unknown }).messageId === 'string'
+            ? messageBranchById.get((row as { messageId: string }).messageId)
+            : undefined
+        return parentBranch === undefined || !parentBranch
+      })
+      syncStateRows = syncStateRows.filter((row) => {
+        const key = (row as { key?: unknown }).key
+        if (typeof key !== 'string' || !key.startsWith('tombstone:')) return true
+        if (key.startsWith(TOMBSTONE_TOPIC_PREFIX)) return true
+        if (key.startsWith(TOMBSTONE_MESSAGE_PREFIX)) {
+          return !isBranchMessage(key.slice(TOMBSTONE_MESSAGE_PREFIX.length))
+        }
+        if (key.startsWith(TOMBSTONE_BLOCK_PREFIX)) {
+          return !isBranchBlock(key.slice(TOMBSTONE_BLOCK_PREFIX.length))
+        }
+        return true
+      })
+      entityClockRows = entityClockRows.filter((row) => {
+        const t = (row as { entityType?: unknown; entityId?: unknown }).entityType
+        const id = (row as { entityId?: unknown }).entityId
+        if (typeof id !== 'string') return true
+        if (t === 'message') return !isBranchMessage(id)
+        if (t === 'message_block') return !isBranchBlock(id)
+        return true
+      })
+      fieldClockRows = fieldClockRows.filter((row) => {
+        const t = (row as { entityType?: unknown }).entityType
+        const id = (row as { entityId?: unknown }).entityId
+        if (typeof id !== 'string') return true
+        if (t === 'message') return !isBranchMessage(id)
+        if (t === 'message_block') return !isBranchBlock(id)
+        return true
+      })
+      membershipRows = membershipRows.filter((row) => {
+        const t = (row as { childEntityType?: unknown }).childEntityType
+        const id = (row as { childEntityId?: unknown }).childEntityId
+        if (typeof id !== 'string') return true
+        if (t === 'message') return !isBranchMessage(id)
+        if (t === 'message_block') return !isBranchBlock(id)
+        return true
+      })
+      frameRows = frameRows.filter((row) => {
+        const kind = (row as { kind?: unknown }).kind
+        const parentId = (row as { parentId?: unknown }).parentId
+        if (typeof parentId !== 'string') return true
+        if (kind === 'topicMessage') return true
+        if (kind === 'messageBlock') {
+          return !isBranchMessage(parentId)
+        }
+        return true
+      })
+      // Strip branch-owned children from surviving topicMessage frames so a
+      // stale frame can never reference excluded inventory.
+      frameRows = frameRows.map((row) => {
+        if ((row as { kind?: unknown }).kind !== 'topicMessage') return row
+        const raw = (row as unknown as { orderedChildIdsJson?: unknown }).orderedChildIdsJson
+        if (typeof raw !== 'string') return row
+        let ids: unknown
+        try {
+          ids = JSON.parse(raw)
+        } catch {
+          return row
+        }
+        if (!Array.isArray(ids)) return row
+        const stripped = ids.filter((id) => typeof id !== 'string' || !isBranchMessage(id))
+        if (stripped.length === ids.length) return row
+        return { ...row, orderedChildIdsJson: JSON.stringify(stripped) }
+      })
+      replacementRegisters = replacementRegisters.filter((reg) => !isBranchMessage(reg.messageId))
+    }
+  }
 
   const entityClockByKey = new Map<string, LocalSyncBaselineEntityClock>()
   for (const row of entityClockRows) {

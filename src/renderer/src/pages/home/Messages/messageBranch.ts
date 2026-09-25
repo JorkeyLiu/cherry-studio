@@ -18,6 +18,17 @@ export const emitNewBranch = async (messageId: string): Promise<void> => {
   await EventEmitter.emit(EVENT_NAMES.NEW_BRANCH, messageId)
 }
 
+/**
+ * Emit the NEW_TRUE_BRANCH event for distinct TRUE branch creation.
+ *
+ * Same ID-based contract as NEW_BRANCH: the payload MUST be the source
+ * message's string ID (the fork/anchor message). Only the assistant-message
+ * toolbar button emits this; there is no edit-and-branch path.
+ */
+export const emitTrueBranch = async (messageId: string): Promise<void> => {
+  await EventEmitter.emit(EVENT_NAMES.NEW_TRUE_BRANCH, messageId)
+}
+
 export interface BranchFromMessageCallbacks {
   /** Perform the actual branch creation for the resolved endpoint. (legacy, window-relative) */
   createBranch: (branchEndpoint: number) => Promise<boolean>

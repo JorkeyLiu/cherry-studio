@@ -128,6 +128,137 @@ function getBlockRow(blockId: string): any | null {
 }
 
 /**
+ * Topic-internal branches are local-only (never wire): post-commit fallback
+ * capture must not emit branch operations or branch-owned suffix
+ * messages/blocks. Ownership is the message `branch_id` column (null = main
+ * route, syncable). Pre-016 databases (no column) report main-route.
+ * Infrastructure failures throw fail-closed (durable capture failure
+ * upstream); a missing column/table is proven-absent ownership (null).
+ */
+function routeOfMessage(messageId: string): { topicId: string; branchId: string | null } | null {
+  try {
+    const row = getMessageRow(messageId)
+    if (!row) return null
+    const tid = (row as { topicId?: unknown } | null)?.topicId
+    if (typeof tid !== 'string') return null
+    const bid = (row as { branchId?: unknown } | null)?.branchId
+    return { topicId: tid, branchId: typeof bid === 'string' && bid.length > 0 ? bid : null }
+  } catch (e) {
+    if (e instanceof Error && /no such column/i.test(e.message)) {
+      try {
+        const row = getMessageRow(messageId)
+        const tid = (row as { topicId?: unknown } | null)?.topicId
+        return typeof tid === 'string' ? { topicId: tid, branchId: null } : null
+      } catch {
+        return null
+      }
+    }
+    throw e
+  }
+}
+
+/** Owner route of a block's parent message (null when unprovable). */
+function routeOfBlock(blockId: string): { topicId: string; branchId: string | null } | null {
+  try {
+    const row = getBlockRow(blockId)
+    const mid = (row as { messageId?: unknown } | null)?.messageId
+    if (typeof mid !== 'string') return null
+    return routeOfMessage(mid)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Block-write channels whose requests carry no authoritative topic: owner
+ * topics resolve per block. Used for the fail-closed request gate below.
+ */
+function isBlockWriteChannel(channel: string): boolean {
+  return (
+    channel === IpcChannel.ChatDb_UpdateBlocks ||
+    channel === IpcChannel.ChatDb_UpdateSingleBlock ||
+    channel === IpcChannel.ChatDb_BulkAddBlocks ||
+    channel === IpcChannel.ChatDb_DeleteBlocks
+  )
+}
+
+/**
+ * Post-commit owner-route resolution for a single block (fail-closed
+ * fallback gate): the committed block row's parent wins, the wire parent is
+ * the fallback. Null when the owner cannot be proven (missing rows).
+ */
+function blockOwnerRouteForHook(
+  blockId: string,
+  wireMessageId?: string | null
+): { topicId: string; branchId: string | null } | null {
+  const committed = routeOfBlock(blockId)
+  if (committed !== null) return committed
+  if (typeof wireMessageId === 'string' && wireMessageId.length > 0) {
+    return routeOfMessage(wireMessageId)
+  }
+  return null
+}
+
+/**
+ * Branch-local request gate for the post-commit fallback: true when the
+ * request's primary entity is branch-owned (local-only, skip capture).
+ * Branch channels are always local-only. Route-aware topic requests check
+ * the request branchId (non-null = branch route); message/block requests
+ * check owner routes (all-resolvable-and-branch-owned verdict).
+ * Block-write channels with no resolvable owner fail closed as branch-local
+ * (pre-first-chunk unknown must never capture); all other channels preserve
+ * existing behavior for unresolvable targets (their per-entity handlers skip
+ * or record durable failures).
+ */
+function isBranchLocalRequest(channel: string, request: any): boolean {
+  if (
+    channel === IpcChannel.ChatDb_CreateBranch ||
+    channel === IpcChannel.ChatDb_ListBranches ||
+    channel === IpcChannel.ChatDb_RenameBranch ||
+    channel === IpcChannel.ChatDb_DeleteBranch
+  ) {
+    return true
+  }
+  const topicId = safeString(request?.topicId) ?? safeString(request?.targetTopicId)
+  if (topicId) {
+    const branchId = safeString(request?.branchId)
+    if (branchId) return true
+    // Topics are never branch-local under the internal model; only an
+    // explicit branch route is. Main-route rows remain syncable.
+    return false
+  }
+  const candidates: string[] = []
+  const pushId = (v: unknown): void => {
+    if (typeof v === 'string' && v.length > 0) candidates.push(v)
+  }
+  pushId(request?.messageId)
+  pushId(request?.blockId)
+  pushId((request?.message as Record<string, unknown> | undefined)?.id)
+  const blocks = request?.blocks
+  if (Array.isArray(blocks)) {
+    for (const b of blocks) pushId((b as Record<string, unknown> | undefined)?.id)
+  }
+  const blockIds = request?.blockIds
+  if (Array.isArray(blockIds)) {
+    for (const b of blockIds) pushId(b)
+  }
+  if (candidates.length === 0) return false
+  let resolved = 0
+  for (const id of candidates) {
+    const route = routeOfMessage(id) ?? routeOfBlock(id)
+    if (route === null) continue
+    resolved++
+    try {
+      if (route.branchId === null) return false
+    } catch {
+      return false
+    }
+  }
+  if (resolved === 0) return isBlockWriteChannel(channel)
+  return resolved > 0
+}
+
+/**
  * Stable-promotion descendant backfill for the post-commit fallback path
  * (LOCK-PERSONAL-004): capture every committed stable block of a
  * never-tracked message parent-first (baseTs + index offsets), skipping
@@ -408,6 +539,24 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
   }
 
   const ts = Date.now()
+  // True-branch local-only gate: branch topics, their owned suffix
+  // messages/blocks, and lineage operations never enter the outbox via the
+  // post-commit fallback (aggregate in-tx capture is already suppressed).
+  try {
+    if (isBranchLocalRequest(channel, request)) {
+      logger.info(`[handleChatDbSuccessForSync] ${channel} branch-local, skip capture (local-only lineage)`)
+      return
+    }
+  } catch (e) {
+    try {
+      syncService.recordCaptureFailure(channel, e)
+    } catch (secondary) {
+      const detail = secondary instanceof Error ? secondary.message : String(secondary)
+      logger.error(`[handleChatDbSuccessForSync] ${channel} capture-error persistence failed: ${detail}`)
+      throw secondary instanceof Error ? secondary : new Error(String(secondary))
+    }
+    return
+  }
   try {
     switch (channel) {
       case IpcChannel.ChatDb_EnsureTopic: {
@@ -654,6 +803,14 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
               continue
             }
           }
+          // Fail-closed: branch-owned blocks never capture via the fallback.
+          {
+            const ownerForGate = blockOwnerRouteForHook(bid)
+            if (ownerForGate !== null && ownerForGate.branchId !== null) {
+              logger.info(`[handleChatDbSuccessForSync] block ${bid} branch-local, skip`)
+              continue
+            }
+          }
           // Stable checkpoint only: intermediate block statuses are transient.
           if (!isStableBlockRow(brow)) {
             logger.info(`[handleChatDbSuccessForSync] block ${bid} transient status, skip`)
@@ -706,6 +863,14 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
             logger.info(`[handleChatDbSuccessForSync] UpdateBlocks block ${bid} missing, skip (no-op)`)
             continue
           }
+          // Fail-closed: branch-owned blocks never capture via the fallback.
+          {
+            const ownerForGate = blockOwnerRouteForHook(bid)
+            if (ownerForGate !== null && ownerForGate.branchId !== null) {
+              logger.info(`[handleChatDbSuccessForSync] UpdateBlocks block ${bid} branch-local, skip`)
+              continue
+            }
+          }
           if (brow && !isStableBlockRow(brow)) {
             logger.info(`[handleChatDbSuccessForSync] UpdateBlocks block ${bid} transient status, skip`)
             continue
@@ -738,6 +903,14 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
         if (!brow) {
           logger.info(`[handleChatDbSuccessForSync] UpdateSingleBlock ${bid} missing, skip (no-op)`)
           return
+        }
+        // Fail-closed: branch-owned blocks never capture via the fallback.
+        {
+          const ownerForGate = blockOwnerRouteForHook(bid)
+          if (ownerForGate !== null && ownerForGate.branchId !== null) {
+            logger.info(`[handleChatDbSuccessForSync] UpdateSingleBlock ${bid} branch-local, skip`)
+            return
+          }
         }
         if (brow && !isStableBlockRow(brow)) {
           logger.info(`[handleChatDbSuccessForSync] UpdateSingleBlock ${bid} transient status, skip`)
@@ -775,6 +948,14 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
             logger.info(`[handleChatDbSuccessForSync] bulkAddBlocks ${bid} missing, skip (no-op)`)
             continue
           }
+          // Fail-closed: branch-owned blocks never capture via the fallback.
+          {
+            const ownerForGate = blockOwnerRouteForHook(bid)
+            if (ownerForGate !== null && ownerForGate.branchId !== null) {
+              logger.info(`[handleChatDbSuccessForSync] bulkAddBlocks ${bid} branch-local, skip`)
+              continue
+            }
+          }
           if (browGate && !isStableBlockRow(browGate)) {
             logger.info(`[handleChatDbSuccessForSync] bulkAddBlocks ${bid} transient status, skip`)
             continue
@@ -802,6 +983,9 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
             logger.info(`[handleChatDbSuccessForSync] deleteBlocks ${bid} no-op (row survives), skip`)
             continue
           }
+          // Branch-owned deletes are already excluded in-transaction
+          // (pre-delete owner resolution) and branch blocks are never
+          // tracked, so the known-entity gate below is the delete fallback.
           if (!syncService.isKnownEntity('message_block', bid)) {
             logger.info(`[handleChatDbSuccessForSync] deleteBlocks ${bid} unknown locally, skip`)
             continue
@@ -923,6 +1107,10 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
       case IpcChannel.ChatDb_PasteMessagesToTopic:
       case IpcChannel.ChatDb_CloneMessagesToTopic:
       case IpcChannel.ChatDb_BranchMessagesToTopic:
+      case IpcChannel.ChatDb_CreateBranch:
+      case IpcChannel.ChatDb_ListBranches:
+      case IpcChannel.ChatDb_RenameBranch:
+      case IpcChannel.ChatDb_DeleteBranch:
       case IpcChannel.ChatDb_InsertMessagesAfterAnchor:
       case IpcChannel.ChatDb_SelectAnswerMessage:
         // Compound/multi-message mutations + reorder: not in supported sync

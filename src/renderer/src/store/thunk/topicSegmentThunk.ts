@@ -8,9 +8,20 @@ import type { TopicSegment } from '@renderer/types/topicSegment'
 import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 
-import type { AppDispatch, RootState } from '../index'
+import store, { type AppDispatch, type RootState } from '../index'
+import { selectActiveBranchId } from '../topicBranch'
 
 const logger = loggerService.withContext('topicSegmentThunk')
+
+/** Active route of a logical topic for segment writes (null = main route). */
+const routeOfTopic = (topicId: string, getState?: () => RootState): string | null => {
+  try {
+    const gs = getState ?? store.getState
+    return selectActiveBranchId(gs(), topicId)
+  } catch {
+    return null
+  }
+}
 
 export const syncSegmentsAfterMessageDeletion = async (
   dispatch: AppDispatch,
@@ -29,7 +40,7 @@ export const syncSegmentsAfterMessageDeletion = async (
       dispatch(removeSegment(segId))
     } else if (newMessageIds.length !== segment.messageIds.length) {
       // DB-first enriched: converge from the Main wire authority fields.
-      const wire = await dbService.replaceSegmentMembership(segId, newMessageIds)
+      const wire = await dbService.replaceSegmentMembership(segId, newMessageIds, routeOfTopic(topicId, getState))
       if (wire === null) {
         dispatch(removeSegment(segId))
       } else {
@@ -105,7 +116,14 @@ export const loadTopicSegmentsThunk = createAsyncThunk<void, string, { dispatch:
 export const saveTopicSegmentThunk = createAsyncThunk<void, TopicSegment>(
   'topicSegments/save',
   async (segment: TopicSegment) => {
-    await dbService.upsertSegment(segment.id, segment.topicId, segment.name, segment.messageIds, segment.color)
+    await dbService.upsertSegment(
+      segment.id,
+      segment.topicId,
+      segment.name,
+      segment.messageIds,
+      segment.color,
+      routeOfTopic(segment.topicId)
+    )
   }
 )
 
@@ -135,7 +153,7 @@ export const removeMessageFromSegmentsThunk = createAsyncThunk<
         await dbService.deleteSegment(segId)
         dispatch(removeSegment(segId))
       } else {
-        const wire = await dbService.replaceSegmentMembership(segId, newMessageIds)
+        const wire = await dbService.replaceSegmentMembership(segId, newMessageIds, routeOfTopic(topicId, getState))
         if (wire === null) {
           dispatch(removeSegment(segId))
         } else {
@@ -211,7 +229,11 @@ export const restoreSegmentsAfterUndo = async (
 
     if (existingSegment) {
       // Segment still exists — restore original messageIds.
-      const wire = await dbService.replaceSegmentMembership(snap.id, snap.messageIds)
+      const wire = await dbService.replaceSegmentMembership(
+        snap.id,
+        snap.messageIds,
+        routeOfTopic(snap.topicId, getState)
+      )
       if (wire === null) {
         fallbackRemoves.push({ topicId: snap.topicId, id: snap.id })
       } else {
@@ -231,7 +253,14 @@ export const restoreSegmentsAfterUndo = async (
     } else {
       // Segment was removed (all messages were deleted) — recreate from snapshot.
       // Authority order/boundaries come from Main, not the snapshot guess.
-      const wire = await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color)
+      const wire = await dbService.upsertSegment(
+        snap.id,
+        snap.topicId,
+        snap.name,
+        snap.messageIds,
+        snap.color,
+        routeOfTopic(snap.topicId, getState)
+      )
       const restoredSegment = mapSegmentWireToTopicSegment(wire)
       // Preserve snapshot createdAt when Main carries none (fallback path only;
       // the converged list carries authority createdAt on success).
@@ -312,7 +341,14 @@ export const restoreTargetSegments = async (dispatch: AppDispatch, snapshots: To
   const fallbackAdds: { segment: TopicSegment; topicId: string }[] = []
   for (const snap of snapshots) {
     affectedTopics.add(snap.topicId)
-    const wire = await dbService.upsertSegment(snap.id, snap.topicId, snap.name, snap.messageIds, snap.color)
+    const wire = await dbService.upsertSegment(
+      snap.id,
+      snap.topicId,
+      snap.name,
+      snap.messageIds,
+      snap.color,
+      routeOfTopic(snap.topicId)
+    )
     const restored = mapSegmentWireToTopicSegment(wire)
     if (wire.createdAt == null) restored.createdAt = snap.createdAt
     if (wire.name == null) restored.name = snap.name

@@ -378,6 +378,12 @@ export enum IpcChannel {
   // S6.2c-1 — Main-authoritative branch by stable anchor
   ChatDb_BranchMessagesToTopic = 'chatdb:branch-messages-to-topic',
 
+  // Topic-internal branches — local-only, no prefix cloning (only creation method)
+  ChatDb_CreateBranch = 'chatdb:create-branch',
+  ChatDb_ListBranches = 'chatdb:list-branches',
+  ChatDb_RenameBranch = 'chatdb:rename-branch',
+  ChatDb_DeleteBranch = 'chatdb:delete-branch',
+
   // S6.2c-2 — Main-authoritative insert after stable anchor
   ChatDb_InsertMessagesAfterAnchor = 'chatdb:insert-messages-after-anchor',
 

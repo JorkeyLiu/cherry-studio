@@ -58,6 +58,7 @@ import type {
   SemanticModelSnapshot,
   SemanticResendResponse,
   StreamWriteDiagnostics,
+  TopicBranchWire,
   TopicWire
 } from '@shared/chatDb'
 import type { ChatDbResult } from '@shared/chatDb'
@@ -80,7 +81,7 @@ import {
   type StoredResendAttempt
 } from '../sync/syncResendAttempt'
 import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
-import type { FileReferenceData, MessageBlockData, MessageData, TopicData } from './domain/types'
+import type { FileReferenceData, MessageBlockData, MessageData, TopicBranchData, TopicData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
@@ -855,7 +856,7 @@ export class ChatDbAggregateService {
    * hidden local topic without sync intent. Explicit creation stays on
    * ensureTopic (transactional outbox); appendMessage ensures its parent.
    */
-  fetchMessages(topicId: string): ChatDbResult<FetchMessagesResult> {
+  fetchMessages(topicId: string, branchId?: string | null): ChatDbResult<FetchMessagesResult> {
     return wrapResult(() => {
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
@@ -866,7 +867,11 @@ export class ChatDbAggregateService {
           return { messages: [], blocks: [] }
         }
 
-        const messageData = repos.messages.listByTopic(topicId)
+        // Route projection: the main route reads owned rows; a branch route
+        // resolves the shared prefix through each anchor plus the owned
+        // suffix. Stable IDs preserved; renderer never splices authority.
+        const route = this.normalizeBranchId(branchId)
+        const messageData = this.resolveRouteMessagesInTx(repos, topicId, route).messages
         const messageIds = messageData.map((m) => m.id)
         const blockDataMap = repos.blocks.listByMessages(messageIds)
 
@@ -982,6 +987,65 @@ export class ChatDbAggregateService {
               hasMoreAfter: meta.hasMoreAfter
             }
           }
+        }
+
+        // Branch-route window path: the effective route (shared prefix
+        // through each anchor + owned suffix) is resolved once, then
+        // windowed in memory with identical group semantics and completeness
+        // contracts. Stable IDs preserved; no renderer splicing. Main routes
+        // keep the SQL-level path below.
+        const windowBranchId = this.normalizeBranchId(request.branchId)
+        if (windowBranchId !== null) {
+          const effective = this.resolveRouteMessagesInTx(repos, request.topicId, windowBranchId).messages
+          if (request.kind === 'latest') {
+            if (effective.length === 0) {
+              return buildWindowResponse([], {
+                kind: 'latest',
+                anchorMessageId: null,
+                requested: { limit: request.limit },
+                hasMoreBefore: false,
+                hasMoreAfter: false
+              })
+            }
+            const groups = computeGroups(effective)
+            const startGroupIdx = request.limit >= groups.length ? 0 : groups.length - request.limit
+            const windowMessages = effective.slice(groups[startGroupIdx].start)
+            return buildWindowResponse(windowMessages, {
+              kind: 'latest',
+              anchorMessageId: null,
+              requested: { limit: request.limit },
+              hasMoreBefore: startGroupIdx > 0,
+              hasMoreAfter: false
+            })
+          }
+          const anchorIdx = effective.findIndex((m) => m.id === request.anchorMessageId)
+          if (anchorIdx === -1) {
+            throw new ChatDbNotFoundError(
+              `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
+            )
+          }
+          const anchorMsg = effective[anchorIdx]
+          const anchorKey = keyFor(anchorMsg)
+          const backSlice = effective.slice(0, anchorIdx)
+          const fwdSlice = effective.slice(anchorIdx + 1)
+          const backGroups = computeGroups(backSlice)
+          const backMerged = backGroups.length > 0 && backGroups[backGroups.length - 1].semanticKey === anchorKey
+          const backBeyond = backMerged ? backGroups.slice(0, -1) : backGroups
+          const backStartGroupIdx = Math.max(0, backBeyond.length - request.before)
+          const backStartMsgIdx = backBeyond.length === 0 ? backSlice.length : backBeyond[backStartGroupIdx].start
+          const fwdGroups = computeGroups(fwdSlice)
+          const fwdMerged = fwdGroups.length > 0 && fwdGroups[0].semanticKey === anchorKey
+          const fwdBeyond = fwdMerged ? fwdGroups.slice(1) : fwdGroups
+          const fwdEndGroupIdx = Math.min(fwdBeyond.length - 1, request.after - 1)
+          const fwdEndExclusive = fwdBeyond.length === 0 ? 0 : fwdBeyond[fwdEndGroupIdx].end + 1
+          const windowMessages = [...backSlice.slice(backStartMsgIdx), anchorMsg, ...fwdSlice.slice(0, fwdEndExclusive)]
+          return buildWindowResponse(windowMessages, {
+            kind: 'around',
+            anchorMessageId: request.anchorMessageId,
+            requested: { before: request.before, after: request.after },
+            hasMoreBefore: backStartMsgIdx > 0,
+            hasMoreAfter: fwdEndExclusive < fwdSlice.length
+          })
         }
 
         if (request.kind === 'latest') {
@@ -1209,6 +1273,10 @@ export class ChatDbAggregateService {
    *   assistant with non-empty askId — all fail as NOT_FOUND (no actionable group).
    * - Resolves complete group: all same-topic assistant messages with equal
    *   askId in deterministic sort_order ASC, id ASC.
+   * - True-branch topics resolve against the branch's effective route
+   *   (shared prefix through the fork anchor plus the branch-owned suffix,
+   *   stable IDs), so inherited anchors and askId groups spanning the fork
+   *   boundary stay actionable; ordinary topics keep the topic-bound path.
    * - Returns completeness:'answer-group', echoes topicId/anchorMessageId,
    *   includes askId and ordered messageIds. No mutation, no size/cursor fields.
    */
@@ -1220,17 +1288,18 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const anchor = repos.messages.getInTopic(request.anchorMessageId, request.topicId)
-        if (!anchor.found) {
+        const groupBranchId = this.normalizeBranchId(request.branchId)
+        const allMessages = this.resolveRouteMessagesInTx(repos, request.topicId, groupBranchId).messages
+        const anchor = allMessages.find((m) => m.id === request.anchorMessageId)
+        if (!anchor) {
           throw new ChatDbNotFoundError(
             `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
           )
         }
-        const askId = anchor.data.askId
-        if (anchor.data.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+        const askId = anchor.askId
+        if (anchor.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
           throw new ChatDbNotFoundError(`Anchor message ${request.anchorMessageId} has no actionable answer group`)
         }
-        const allMessages = repos.messages.listByTopic(request.topicId)
         const groupIds = allMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
         if (!groupIds.includes(request.anchorMessageId)) {
           throw new ChatDbNotFoundError(`Anchor message ${request.anchorMessageId} has no actionable answer group`)
@@ -1480,6 +1549,111 @@ export class ChatDbAggregateService {
             idx = turns.findIndex((t) => t.messages.some((m) => m.role !== 'user' && m.id === groupKey))
             return idx
           }
+          // Branch routes resolve `detail:'anchor'` against the route's
+          // effective messages (shared prefix through each anchor plus the
+          // branch-owned suffix, stable IDs) in memory. The bounded-scan
+          // fast path below only observes main-route rows, so a fresh
+          // branch with an empty own suffix would report a null anchor and
+          // inherited/default/reanchor/move/inherit semantics would diverge
+          // from the full closure path. Ordinary topics keep the bounded
+          // scans below untouched.
+          const anchorRouteBranchId = this.normalizeBranchId(request.branchId)
+          if (anchorRouteBranchId !== null) {
+            const effectiveForAnchor = this.resolveRouteMessagesInTx(
+              repos,
+              request.topicId,
+              anchorRouteBranchId
+            ).messages
+            const anchorTurns = buildAnchorTurns(effectiveForAnchor)
+            const resolveEffectiveDefault = (
+              contextCount: number | null | undefined,
+              cur: string | null
+            ): { resolvedAnchorGroupKey: string | null; changed: boolean } => {
+              if (anchorTurns.length === 0) {
+                return { resolvedAnchorGroupKey: null, changed: cur !== null }
+              }
+              if (contextCount === null || contextCount === undefined) {
+                const resolved = anchorTurns[0].key
+                return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
+              }
+              const n = Math.max(1, Math.floor(contextCount))
+              const resolved = anchorTurns[Math.max(0, anchorTurns.length - n)].key
+              return { resolvedAnchorGroupKey: resolved, changed: resolved !== cur }
+            }
+            if (request.intent === 'establish') {
+              if (anchorTurns.length === 0) {
+                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+              }
+              if (currentKey !== null) {
+                const idx = resolveAnchorIndexOf(anchorTurns, currentKey)
+                if (idx !== -1) {
+                  const resolved = anchorTurns[idx].key
+                  return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+                }
+              }
+              return resolveEffectiveDefault(request.contextCount ?? null, currentKey)
+            }
+            if (request.intent === 'reanchor-default') {
+              return resolveEffectiveDefault(request.contextCount ?? null, currentKey)
+            }
+            if (request.intent === 'move') {
+              if (typeof request.messageId === 'string') {
+                const target = effectiveForAnchor.find((m) => m.id === request.messageId)
+                if (!target) {
+                  throw new ChatDbNotFoundError(
+                    `Message ${request.messageId} does not belong to topic ${request.topicId}`
+                  )
+                }
+                const role = target.role
+                if (role !== 'user' && role !== 'assistant' && role !== 'system') {
+                  throw new ChatDbValidationError(
+                    `Message ${request.messageId} has an ignored role and cannot anchor a context turn`
+                  )
+                }
+                const resolved = role === 'assistant' ? (target.askId ? target.askId : target.id) : target.id
+                return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+              }
+              if (typeof request.groupKey === 'string') {
+                const idx = resolveAnchorIndexOf(anchorTurns, request.groupKey)
+                if (idx === -1) {
+                  throw new ChatDbNotFoundError(
+                    `Anchor groupKey ${request.groupKey} does not belong to topic ${request.topicId}`
+                  )
+                }
+                const resolved = anchorTurns[idx].key
+                return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+              }
+              throw new ChatDbValidationError('move requires messageId or groupKey')
+            }
+            // inherit: valid source index maps to the target by index with
+            // clamp to the last target turn; invalid source falls back to the
+            // target default. Both sides use effective routes.
+            if (typeof request.sourceTopicId !== 'string' || request.sourceTopicId.length === 0) {
+              throw new ChatDbValidationError('inherit requires sourceTopicId')
+            }
+            const anchorSourceId = request.sourceTopicId
+            const anchorSourceTopic = repos.topics.getById(anchorSourceId)
+            if (!anchorSourceTopic.found) {
+              throw new ChatDbNotFoundError(`Topic ${anchorSourceId} does not exist`)
+            }
+            const sourceEffective = this.resolveRouteMessagesInTx(
+              repos,
+              anchorSourceId,
+              this.normalizeBranchId(request.sourceBranchId)
+            ).messages
+            const sourceTurns = buildAnchorTurns(sourceEffective)
+            const anchorSourceKey =
+              typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
+            const sourceIdx = anchorSourceKey !== null ? resolveAnchorIndexOf(sourceTurns, anchorSourceKey) : -1
+            if (sourceIdx !== -1) {
+              if (anchorTurns.length === 0) {
+                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+              }
+              const resolved = anchorTurns[Math.min(sourceIdx, anchorTurns.length - 1)].key
+              return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
+            }
+            return resolveEffectiveDefault(request.contextCount ?? null, currentKey)
+          }
           // Authority default position via bounded scans only:
           // null => first turn (head scan); finite N => max(0,total-max(1,floor(N)))
           // via tail expansion. Never listByTopic, never blocks.
@@ -1719,7 +1893,10 @@ export class ChatDbAggregateService {
           return Math.max(0, total - n)
         }
 
-        const allMessages = repos.messages.listByTopic(request.topicId)
+        const closureBranchId = this.normalizeBranchId(request.branchId)
+        const resolveEffectiveForClosure = (tid: string, bid: string | null): MessageData[] =>
+          this.resolveRouteMessagesInTx(repos, tid, bid).messages
+        const allMessages = resolveEffectiveForClosure(request.topicId, closureBranchId)
         const turns = buildTurns(allMessages)
         const total = turns.length
         const currentKey: string | null =
@@ -1790,7 +1967,7 @@ export class ChatDbAggregateService {
           if (!sourceTopic.found) {
             throw new ChatDbNotFoundError(`Topic ${sourceId} does not exist`)
           }
-          const sourceMessages = repos.messages.listByTopic(sourceId)
+          const sourceMessages = resolveEffectiveForClosure(sourceId, this.normalizeBranchId(request.sourceBranchId))
           const sourceTurns = buildTurns(sourceMessages)
           const sourceKey = typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
           const sourceIdx = sourceKey !== null ? resolveAnchorIndex(sourceTurns, sourceKey) : -1
@@ -1865,7 +2042,14 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const allMessages = repos.messages.listByTopic(request.topicId)
+        // Effective route for the addressed route (main route reads owned
+        // rows; a branch route resolves the shared prefix through each
+        // anchor plus the owned suffix). Stable IDs, deterministic order.
+        const allMessages = this.resolveRouteMessagesInTx(
+          repos,
+          request.topicId,
+          this.normalizeBranchId(request.branchId)
+        ).messages
         const messageIds = allMessages.map((m) => m.id)
         const blockDataMap = repos.blocks.listByMessages(messageIds)
         const allBlocks: MessageBlockData[] = []
@@ -1938,6 +2122,81 @@ export class ChatDbAggregateService {
           }
           type ResolvedGroup = { groupId: string; rows: MessageData[] }
           const resolved: ResolvedGroup[] = []
+          // Branch-route clipboard path: resolve groups from the effective
+          // route (shared prefix through each anchor + owned suffix,
+          // deterministic order) instead of topic-bound rows, so inherited
+          // groups copy from the branch view. Main routes keep the
+          // topic-bound path below (already main-route scoped).
+          const clipboardBranchId = this.normalizeBranchId(request.branchId)
+          if (clipboardBranchId !== null) {
+            const effectiveForClipboard = this.resolveRouteMessagesInTx(
+              repos,
+              request.topicId,
+              clipboardBranchId
+            ).messages
+            const byId = new Map(effectiveForClipboard.map((m) => [m.id, m]))
+            const assistantsByAskId = new Map<string, MessageData[]>()
+            for (const m of effectiveForClipboard) {
+              const askId = (m as unknown as { askId: string | null }).askId
+              if (m.role === 'assistant' && typeof askId === 'string' && askId.length > 0) {
+                const list = assistantsByAskId.get(askId) ?? []
+                list.push(m)
+                assistantsByAskId.set(askId, list)
+              }
+            }
+            for (const gid of requested) {
+              const row = byId.get(gid)
+              if (row && row.role === 'user') {
+                resolved.push({ groupId: gid, rows: [row, ...(assistantsByAskId.get(gid) ?? [])] })
+                continue
+              }
+              const assistants = assistantsByAskId.get(gid) ?? []
+              if (assistants.length > 0) {
+                resolved.push({ groupId: gid, rows: [...assistants] })
+                continue
+              }
+              if (row && row.role === 'system') {
+                resolved.push({ groupId: gid, rows: [row] })
+              }
+            }
+            resolved.sort((a, b) => {
+              const ar = a.rows[0]
+              const br = b.rows[0]
+              if (ar.sortOrder !== br.sortOrder) return ar.sortOrder - br.sortOrder
+              return ar.id < br.id ? -1 : ar.id > br.id ? 1 : 0
+            })
+            const orderedRows = resolved.flatMap((g) => g.rows)
+            const orderedIds = orderedRows.map((r) => r.id)
+            const blockMap = repos.blocks.listByMessages(orderedIds)
+            const allBlocks: MessageBlockData[] = []
+            for (const id of orderedIds) {
+              allBlocks.push(...(blockMap.get(id) ?? []))
+            }
+            const wireMessages = messagesToWire(orderedRows)
+            const wireBlocks = blocksToWire(allBlocks)
+            const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+            const groups = resolved.map((g) => ({
+              groupId: g.groupId,
+              messageIds: g.rows.map((r) => r.id),
+              positionIndex: g.rows[0].sortOrder
+            }))
+            const firstMessageId = orderedRows.length > 0 ? orderedRows[0].id : null
+            const lastMessageId = orderedRows.length > 0 ? orderedRows[orderedRows.length - 1].id : null
+            return {
+              messages: messagesWithBlocks,
+              blocks: wireBlocks,
+              groups,
+              clipboard: {
+                completeness: 'clipboard-groups' as const,
+                topicId: request.topicId,
+                requestedCount: requested.length,
+                returnedCount: groups.length,
+                returnedMessageCount: orderedRows.length,
+                firstMessageId,
+                lastMessageId
+              }
+            }
+          }
           for (const gid of requested) {
             // Step 1: user row keys its group (user + same-askId assistants).
             const inTopic = repos.messages.getInTopic(gid, request.topicId)
@@ -2025,7 +2284,78 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const messageCount = repos.messages.countByTopic(request.topicId)
+        const namingBranchId = this.normalizeBranchId(request.branchId)
+        const messageCount =
+          namingBranchId === null
+            ? repos.messages.countByTopic(request.topicId)
+            : this.resolveRouteMessagesInTx(repos, request.topicId, namingBranchId).messages.length
+        // Branch routes name from the effective route (shared prefix through
+        // each anchor + owned suffix, stable IDs, deterministic order).
+        if (namingBranchId !== null) {
+          const effectiveForNaming = this.resolveRouteMessagesInTx(repos, request.topicId, namingBranchId).messages
+          const rawFlagForBranch = (topic.data.overflow as Record<string, unknown> | undefined)?.isNameManuallyEdited
+          if (effectiveForNaming.length === 0) {
+            return {
+              topic: {
+                id: topic.data.id,
+                name: topic.data.name ?? null,
+                isNameManuallyEdited: typeof rawFlagForBranch === 'boolean' ? rawFlagForBranch : null
+              },
+              messageCount: 0,
+              firstMessage: null,
+              latestMessages: [],
+              blocks: [],
+              naming: {
+                completeness: 'naming-context' as const,
+                topicId: request.topicId,
+                firstMessageId: null,
+                lastMessageId: null,
+                returnedLatestCount: 0
+              }
+            }
+          }
+          const firstForBranch = effectiveForNaming[0]
+          const latestForBranch = effectiveForNaming.slice(-5)
+          const returnedIdsForBranch: string[] = []
+          const seenIdsForBranch = new Set<string>()
+          for (const m of [firstForBranch, ...latestForBranch]) {
+            if (!seenIdsForBranch.has(m.id)) {
+              seenIdsForBranch.add(m.id)
+              returnedIdsForBranch.push(m.id)
+            }
+          }
+          const blockDataMapForBranch = repos.blocks.listByMessages(returnedIdsForBranch)
+          const orderedBlocksForBranch: MessageBlockData[] = []
+          for (const id of returnedIdsForBranch) {
+            orderedBlocksForBranch.push(...(blockDataMapForBranch.get(id) ?? []))
+          }
+          const wireFirstListForBranch = reconstructMessageBlockRelations(
+            messagesToWire([firstForBranch]),
+            blocksToWire(blockDataMapForBranch.get(firstForBranch.id) ?? [])
+          )
+          const wireLatestForBranch = reconstructMessageBlockRelations(
+            messagesToWire(latestForBranch),
+            blocksToWire(latestForBranch.flatMap((m) => blockDataMapForBranch.get(m.id) ?? []))
+          )
+          return {
+            topic: {
+              id: topic.data.id,
+              name: topic.data.name ?? null,
+              isNameManuallyEdited: typeof rawFlagForBranch === 'boolean' ? rawFlagForBranch : null
+            },
+            messageCount: effectiveForNaming.length,
+            firstMessage: wireFirstListForBranch[0] ?? null,
+            latestMessages: wireLatestForBranch,
+            blocks: blocksToWire(orderedBlocksForBranch),
+            naming: {
+              completeness: 'naming-context' as const,
+              topicId: request.topicId,
+              firstMessageId: firstForBranch.id,
+              lastMessageId: latestForBranch[latestForBranch.length - 1].id,
+              returnedLatestCount: latestForBranch.length
+            }
+          }
+        }
         if (messageCount === 0) {
           const rawFlag = (topic.data.overflow as Record<string, unknown> | undefined)?.isNameManuallyEdited
           return {
@@ -2117,7 +2447,36 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const messageCount = repos.messages.countByTopic(request.topicId)
+        const activityBranchId = this.normalizeBranchId(request.branchId)
+        const messageCount =
+          activityBranchId === null
+            ? repos.messages.countByTopic(request.topicId)
+            : this.resolveRouteMessagesInTx(repos, request.topicId, activityBranchId).messages.length
+        // Branch routes report activity over the effective route.
+        if (activityBranchId !== null) {
+          const effectiveForActivity = this.resolveRouteMessagesInTx(repos, request.topicId, activityBranchId).messages
+          if (effectiveForActivity.length === 0) {
+            return {
+              messageCount: 0,
+              latestMessageId: null,
+              latestMessageCreatedAt: null,
+              activity: {
+                completeness: 'topic-activity' as const,
+                topicId: request.topicId
+              }
+            }
+          }
+          const latestRowForBranch = effectiveForActivity[effectiveForActivity.length - 1]
+          return {
+            messageCount: effectiveForActivity.length,
+            latestMessageId: latestRowForBranch.id,
+            latestMessageCreatedAt: latestRowForBranch.createdAt ?? null,
+            activity: {
+              completeness: 'topic-activity' as const,
+              topicId: request.topicId
+            }
+          }
+        }
         if (messageCount === 0) {
           return {
             messageCount: 0,
@@ -2193,10 +2552,12 @@ export class ChatDbAggregateService {
   insertMessagesAfterAnchor(
     topicId: string,
     afterMessageId: string,
-    entries: Array<{ message: JsonObject; blocks: JsonObject[] }>
+    entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,
+    branchId?: string | null
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('insertMessagesAfterAnchor')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('insertMessagesAfterAnchor', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
       let result: FileCleanupResult
@@ -2210,16 +2571,20 @@ export class ChatDbAggregateService {
           if (!topic.found) {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
-          // Validate anchor membership
-          const anchorRes = repos.messages.getInTopic(afterMessageId, topicId)
-          if (!anchorRes.found) {
+          // Validate anchor membership inside the addressed route (an
+          // inherited anchor is valid: new rows land in the route owner's
+          // suffix). Ordered authority snapshot is the route owner's rows —
+          // ordering never crosses route owners.
+          const routeMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          const anchorData = routeMessages.find((m) => m.id === afterMessageId)
+          if (!anchorData) {
             throw new ChatDbNotFoundError(`Anchor message ${afterMessageId} does not belong to topic ${topicId}`)
           }
-          const anchorData = anchorRes.data
-
-          // Ordered authority snapshot + group-tail resolution (single transaction, no second read)
-          const orderedMessages = repos.messages.listByTopic(topicId)
-          const resolvedInsertIndex = this.resolveInsertIndexAfterAnchor(orderedMessages, anchorData)
+          const ownerMessages = repos.messages.listByTopic(topicId, route)
+          const anchorOwned = (anchorData.branchId ?? null) === route
+          const resolvedInsertIndex = anchorOwned
+            ? this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData)
+            : ownerMessages.length
 
           // Phase 1 — convert every entry, enforce block ownership, classify new vs existing
           // (DB-existence classification preserved exactly for chat writes).
@@ -2253,6 +2618,7 @@ export class ChatDbAggregateService {
           for (const entry of entries) {
             const messageData = wireToMessage(entry.message)
             messageData.topicId = topicId
+            messageData.branchId = route
             const blockDataList = entry.blocks.map(wireToBlock)
             for (const block of blockDataList) {
               block.messageId = messageData.id
@@ -2261,6 +2627,7 @@ export class ChatDbAggregateService {
             const patch = wireToMessagePatch(entry.message)
             delete patch.id
             delete patch.topicId
+            delete patch.branchId
             delete patch.sortOrder
 
             const existing = repos.messages.getById(messageData.id)
@@ -2270,6 +2637,15 @@ export class ChatDbAggregateService {
                   `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot insert into topic ${topicId}`
                 )
               }
+              // Route immutability: patching an inherited/shared row through
+              // this route rejects (no copy-on-write).
+              this.assertMutableMessageInTx(
+                repos,
+                tx as unknown as BetterSQLite3Database<typeof schema>,
+                topicId,
+                route,
+                messageData.id
+              )
               existingPlans.push({ id: messageData.id, patch })
               phase4Plans.push({ blocks: blockDataList, harvest: true })
             } else if (newMessageIds.has(messageData.id)) {
@@ -2565,10 +2941,12 @@ export class ChatDbAggregateService {
    */
   insertMessageGroups(
     topicId: string,
-    groups: Array<{ entries: Array<{ message: JsonObject; blocks: JsonObject[] }>; intent: JsonObject }>
+    groups: Array<{ entries: Array<{ message: JsonObject; blocks: JsonObject[] }>; intent: JsonObject }>,
+    branchId?: string | null
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('insertMessageGroups')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('insertMessageGroups', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
       let result: FileCleanupResult
@@ -2582,11 +2960,16 @@ export class ChatDbAggregateService {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
 
-          const orderedStart = repos.messages.listByTopic(topicId)
-          const indexById = new Map<string, number>()
-          for (let i = 0; i < orderedStart.length; i++) indexById.set(orderedStart[i].id, i)
+          // Route-owner start order: intent anchors resolve inside the
+          // addressed route (inherited anchors valid); insertion indexes are
+          // planned against the owner's rows — never across owners. An
+          // inherited anchor lands at the owner tail.
+          const routeStart = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          const ownerStart = repos.messages.listByTopic(topicId, route)
+          const ownerIndexById = new Map<string, number>()
+          for (let i = 0; i < ownerStart.length; i++) ownerIndexById.set(ownerStart[i].id, i)
           const anchorById = new Map<string, MessageData>()
-          for (const m of orderedStart) anchorById.set(m.id, m)
+          for (const m of routeStart) anchorById.set(m.id, m)
 
           if (!Array.isArray(groups) || groups.length === 0) {
             throw new ChatDbValidationError('groups must be a non-empty array')
@@ -2619,7 +3002,7 @@ export class ChatDbAggregateService {
 
             let baseIndex: number
             if (kind === 'topic-tail') {
-              baseIndex = orderedStart.length
+              baseIndex = ownerStart.length
             } else {
               const messageId = intent?.messageId
               if (typeof messageId !== 'string' || messageId.length === 0) {
@@ -2629,10 +3012,13 @@ export class ChatDbAggregateService {
               if (!anchor) {
                 throw new ChatDbNotFoundError(`Anchor message ${messageId} does not belong to topic ${topicId}`)
               }
-              if (kind === 'before-message') {
-                baseIndex = indexById.get(messageId) as number
+              if ((anchor.branchId ?? null) !== route) {
+                // Inherited anchor: land at the owner tail (suffix append).
+                baseIndex = ownerStart.length
+              } else if (kind === 'before-message') {
+                baseIndex = ownerIndexById.get(messageId) as number
               } else {
-                baseIndex = this.resolveAfterGroupTailFullIndex(orderedStart, anchor)
+                baseIndex = this.resolveAfterGroupTailFullIndex(ownerStart, anchor)
               }
             }
 
@@ -2642,6 +3028,7 @@ export class ChatDbAggregateService {
             for (const entry of entries) {
               const messageData = wireToMessage(entry.message)
               messageData.topicId = topicId
+              messageData.branchId = route
               const blockDataList = entry.blocks.map(wireToBlock)
               for (const block of blockDataList) {
                 block.messageId = messageData.id
@@ -2901,14 +3288,15 @@ export class ChatDbAggregateService {
    * Get raw topic with ordered messages and relational block IDs.
    * Returns null if topic does not exist.
    */
-  getRawTopic(topicId: string): ChatDbResult<GetRawTopicResult> {
+  getRawTopic(topicId: string, branchId?: string | null): ChatDbResult<GetRawTopicResult> {
     return wrapResult(() => {
       const { topics, messages: msgRepo, blocks } = this.repos()
 
       const topic = topics.getById(topicId)
       if (!topic.found) return null
 
-      const messageData = msgRepo.listByTopic(topicId)
+      const route = this.normalizeBranchId(branchId)
+      const messageData = msgRepo.listByTopic(topicId, route)
       const messageIds = messageData.map((m) => m.id)
       const blockDataMap = blocks.listByMessages(messageIds)
 
@@ -3003,7 +3391,7 @@ export class ChatDbAggregateService {
     blocksJson: JsonObject[],
     insertIndex?: number,
     diagnostics?: AppendDiagnostics,
-    options?: { resendAttemptId?: string }
+    options?: { resendAttemptId?: string; branchId?: string | null }
   ): ChatDbResult<null> {
     const correlationId = diagnostics?.correlationId
     const ordinal = diagnostics?.ordinal
@@ -3016,10 +3404,13 @@ export class ChatDbAggregateService {
 
     const result = wrapResult(() => {
       try {
-        // Convert wire → domain
+        // Convert wire → domain. Ownership is stamped by Main from the
+        // typed route context — wire branchId (if any) is never trusted.
+        const route = this.normalizeBranchId(options?.branchId)
         const tConvert = performance.now()
         const messageData = wireToMessage(messageJson)
         messageData.topicId = topicId // Ensure consistency
+        messageData.branchId = route
         const blockDataList = blocksJson.map(wireToBlock)
 
         // Validate block ownership: all blocks must reference this message
@@ -3036,7 +3427,7 @@ export class ChatDbAggregateService {
         // Stale-attempt fail-closed before any SQLite write transaction
         // opens (existing-id overwrites of a resend message).
         this.assertResendAttemptPreTx([messageData.id, ...this.blockParentIdsPreTx(blocksJson)], resendAttemptId)
-        const syncCtx = this.syncCtx('appendMessage')
+        const syncCtx = this.syncCtxForTopic('appendMessage', topicId, route)
         let syncNotify = false
         const unsupportedBlockIds: string[] = []
         let txResult: null
@@ -3062,19 +3453,26 @@ export class ChatDbAggregateService {
 
             if (existing.found) {
               // Authoritative ownership guard (sync F1): an existing message ID
-              // owned by another topic must not be mutated and must not emit
-              // sync capture. Reject before any message/block processing so the
-              // transaction aborts with zero entity mutation; the IPC hook only
-              // captures on success, so no outbox capture is emitted.
+              // owned by another topic or another route must not be mutated
+              // and must not emit sync capture. Reject before any
+              // message/block processing so the transaction aborts with zero
+              // entity mutation; the IPC hook only captures on success, so no
+              // outbox capture is emitted.
               if (existing.data.topicId !== topicId) {
                 throw new ChatDbConflictError(
                   `Message ${messageData.id} belongs to topic ${existing.data.topicId}, cannot reparent to ${topicId}`
+                )
+              }
+              if ((existing.data.branchId ?? null) !== route) {
+                throw new ChatDbValidationError(
+                  `Message ${messageData.id} belongs to another route and is immutable through this route`
                 )
               }
               // Existing ID: preserve current position (update metadata only)
               const patch = wireToMessagePatch(messageJson)
               delete patch.id
               delete patch.topicId
+              delete patch.branchId
               delete patch.sortOrder
               if (Object.keys(patch).length > 0) {
                 repos.messages.update(topicId, messageData.id, patch)
@@ -3356,20 +3754,22 @@ export class ChatDbAggregateService {
     topicId: string,
     messageId: string,
     updatesJson: JsonObject,
-    options?: { resendAttemptId?: string }
+    options?: { resendAttemptId?: string; branchId?: string | null }
   ): ChatDbResult<null> {
     return wrapResult(() => {
+      const route = this.normalizeBranchId(options?.branchId)
       const patch = wireToMessagePatch(updatesJson)
       // Strip identity fields (defense in depth — contract already rejects)
       delete patch.id
       delete patch.topicId
+      delete patch.branchId
       delete patch.sortOrder
 
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx([messageId], resendAttemptId)
 
-      const ctx = this.syncCtx('updateMessage')
+      const ctx = this.syncCtxForTopic('updateMessage', topicId, route)
       // Empty patch (no mutable keys): no mutation intent; keep read-only.
       if (Object.keys(patch).filter((k) => k !== 'overflow').length === 0 && !patch.overflow) {
         const { messages } = this.repos()
@@ -3383,6 +3783,17 @@ export class ChatDbAggregateService {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+          // Route immutability (missing rows keep existing no-op
+          // semantics): a row owned by another topic/route is an
+          // inherited shared row and rejects; an owned row included in
+          // any live descendant effective prefix rejects (no copy-on-write).
+          this.assertMutableMessageInTx(
+            repos,
+            tx as unknown as BetterSQLite3Database<typeof schema>,
+            topicId,
+            route,
+            messageId
+          )
           // Resend intent (SYNC-DATA-055): authoritative stale check first —
           // a mismatch (including post-issuance duplicates proven by the
           // register) rolls back before any mutation commits; a covered
@@ -3568,13 +3979,15 @@ export class ChatDbAggregateService {
     messageUpdatesJson: JsonObject,
     blocksToUpdateJson: JsonObject[],
     blockIdsToDelete: string[] = [],
-    options?: { resendAttemptId?: string }
+    options?: { resendAttemptId?: string; branchId?: string | null }
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
+      const route = this.normalizeBranchId(options?.branchId)
       const messageId = messageUpdatesJson.id as string
       const messagePatch = wireToMessagePatch(messageUpdatesJson)
       delete messagePatch.id
       delete messagePatch.topicId
+      delete messagePatch.branchId
       delete messagePatch.sortOrder
 
       const blockDataList = blocksToUpdateJson.map(wireToBlock)
@@ -3598,7 +4011,7 @@ export class ChatDbAggregateService {
         [messageId, ...this.blockParentIdsPreTx(blocksToUpdateJson), ...deleteParentsPreTx],
         resendAttemptId
       )
-      const syncCtx = this.syncCtx('updateMessageAndBlocks')
+      const syncCtx = this.syncCtxForTopic('updateMessageAndBlocks', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
 
@@ -3612,6 +4025,18 @@ export class ChatDbAggregateService {
           // a mismatch rolls back before any mutation commits; a covered
           // message stays local-only (mutations commit, sync suppressed).
           const messageCovered = this.checkResendAttemptInTx(stx, messageId, resendAttemptId)
+          // Route immutability: inherited/shared messages and their
+          // blocks reject; missing rows keep existing no-op semantics.
+          {
+            const dbForGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            this.assertMutableMessageInTx(repos, dbForGuard, topicId, route, messageId)
+            for (const block of blockDataList) {
+              this.assertMutableBlockInTx(repos, dbForGuard, topicId, route, block.id, block.messageId)
+            }
+            for (const bid of blockIdsToDelete) {
+              this.assertMutableBlockInTx(repos, dbForGuard, topicId, route, bid)
+            }
+          }
 
           // Check message exists
           const existing = repos.messages.getInTopic(messageId, topicId)
@@ -4024,27 +4449,48 @@ export class ChatDbAggregateService {
    * high-water are preserved with zero sync ops, and no missing frame is
    * synthesized.
    */
-  selectAnswerMessage(topicId: string, selectedMessageId: string): ChatDbResult<SelectAnswerMessageResponse> {
+  selectAnswerMessage(
+    topicId: string,
+    selectedMessageId: string,
+    branchId?: string | null
+  ): ChatDbResult<SelectAnswerMessageResponse> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('selectAnswerMessage')
+      const route = this.normalizeBranchId(branchId)
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const topic = repos.topics.getById(topicId)
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
         }
-        const selected = repos.messages.getInTopic(selectedMessageId, topicId)
-        if (!selected.found) {
+        const routeMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+        const selected = routeMessages.find((m) => m.id === selectedMessageId)
+        if (!selected) {
           throw new ChatDbNotFoundError(`Message ${selectedMessageId} does not belong to topic ${topicId}`)
         }
-        const askId = selected.data.askId
-        if (selected.data.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+        const askId = selected.askId
+        if (selected.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
           throw new ChatDbNotFoundError(`Message ${selectedMessageId} has no actionable answer group`)
         }
-        const allMessages = repos.messages.listByTopic(topicId)
-        const groupIds = allMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
+        const groupIds = routeMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
         if (!groupIds.includes(selectedMessageId) || groupIds.length === 0) {
           throw new ChatDbNotFoundError(`Message ${selectedMessageId} has no actionable answer group`)
+        }
+        // Route answer groups: the selection flips every group member
+        // atomically, so a group spanning inherited messages rejects instead
+        // of half-flipping shared state (no copy-on-write).
+        {
+          const dbForSelectGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+          for (const m of routeMessages) {
+            if (m.role === 'assistant' && m.askId === askId && (m.branchId ?? null) !== route) {
+              throw new ChatDbValidationError(
+                `Message ${m.id} is shared with another route and its answer group is immutable through this route`
+              )
+            }
+          }
+          for (const id of groupIds) {
+            this.assertNoLiveDescendantIncludesInTx(repos, dbForSelectGuard, topicId, route, id)
+          }
         }
         for (const id of groupIds) {
           repos.messages.update(topicId, id, { overflow: { foldSelected: id === selectedMessageId } })
@@ -4064,15 +4510,27 @@ export class ChatDbAggregateService {
    * Missing/foreign IDs: no-op. Delete intent commits atomically in the
    * same tx (known entities only — unknown ids never emit remotely).
    */
-  deleteMessage(topicId: string, messageId: string): ChatDbResult<null> {
+  deleteMessage(topicId: string, messageId: string, branchId?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('deleteMessage')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('deleteMessage', topicId, route)
       let notify = false
       let result: null
       try {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+          // Route immutability: deleting an inherited shared message
+          // through another route rejects; a shared owned message included
+          // in any live descendant prefix rejects. Missing rows keep no-op
+          // semantics.
+          this.assertMutableMessageInTx(
+            repos,
+            tx as unknown as BetterSQLite3Database<typeof schema>,
+            topicId,
+            route,
+            messageId
+          )
           // Verify ownership before delete
           const existing = repos.messages.getInTopic(messageId, topicId)
           if (!existing.found) return null // no-op for missing/foreign IDs
@@ -4112,20 +4570,29 @@ export class ChatDbAggregateService {
    * Delete multiple messages. Only deletes messages owned by the specified topic.
    * Missing/foreign IDs: no-op. Delete intents commit atomically in the same tx.
    */
-  deleteMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
+  deleteMessages(topicId: string, messageIds: string[], branchId?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('deleteMessages')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('deleteMessages', topicId, route)
       let notify = false
       let result: null
       try {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
-          // Filter to messages actually owned by this topic
+          // Route immutability: inherited IDs reject instead of being
+          // silently skipped; missing IDs keep existing skip semantics.
+          {
+            const dbForDeleteGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const id of messageIds) {
+              this.assertMutableMessageInTx(repos, dbForDeleteGuard, topicId, route, id)
+            }
+          }
+          // Filter to messages actually owned by this route
           const ownedIds: string[] = []
           for (const id of messageIds) {
             const existing = repos.messages.getInTopic(id, topicId)
-            if (existing.found) ownedIds.push(id)
+            if (existing.found && (existing.data.branchId ?? null) === route) ownedIds.push(id)
           }
           const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
           if (ownedIds.length > 0) {
@@ -4226,7 +4693,12 @@ export class ChatDbAggregateService {
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
-      const syncCtx = this.syncCtx('updateBlocks')
+      const blockOwnerRoute = this.resolveBlockOwnerRoute(blocksJson)
+      const syncCtx = this.syncCtxForTopic(
+        'updateBlocks',
+        blockOwnerRoute?.topicId ?? '',
+        blockOwnerRoute?.branchId ?? null
+      )
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
       const ordinaryPromotionParents = new Set<string>()
@@ -4234,6 +4706,14 @@ export class ChatDbAggregateService {
         this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+          // Route immutability: blocks under inherited/shared parents
+          // reject (no copy-on-write); missing rows keep existing semantics.
+          {
+            const dbForBlockGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const block of blockDataList) {
+              this.assertMutableBlockInTx(repos, dbForBlockGuard, null, null, block.id, block.messageId)
+            }
+          }
           // Pre-state snapshot for field-patch diffing (same tx, pre-write).
           const preRows = new Map<string, MessageBlockData>()
           if (syncCtx) {
@@ -4256,6 +4736,19 @@ export class ChatDbAggregateService {
             for (const block of blockDataList) {
               const post = repos.blocks.getById(block.id)
               if (!post.found) continue
+              // F3 fail-closed: branch-owned or owner-unknown blocks never
+              // emit sync intent (outbox/membership/frames); the upsert above
+              // still commits.
+              if (
+                this.isBlockSyncSuppressedInTx(
+                  repos,
+                  tx as unknown as BetterSQLite3Database<typeof schema>,
+                  block.id,
+                  block.messageId
+                )
+              ) {
+                continue
+              }
               if (!isStableBlockStatus(post.data.status)) continue
               if (this.isUnsupportedBlock(post.data)) {
                 unsupportedBlockIds.push(block.id)
@@ -4371,6 +4864,18 @@ export class ChatDbAggregateService {
               const pre = preRows.get(b.id) ?? null
               const postRow = repos.blocks.getById(b.id)
               if (!postRow.found) continue
+              // F3 fail-closed: suppressed (branch-owned/unknown) blocks mint
+              // no frame intent either.
+              if (
+                this.isBlockSyncSuppressedInTx(
+                  repos,
+                  tx as unknown as BetterSQLite3Database<typeof schema>,
+                  b.id,
+                  b.messageId
+                )
+              ) {
+                continue
+              }
               if (!pre) {
                 if (isStableBlockStatus(postRow.data.status) && !this.isUnsupportedBlock(postRow.data)) {
                   affectedParentsStrict.add(postRow.data.messageId)
@@ -4495,7 +5000,12 @@ export class ChatDbAggregateService {
       // Stale-attempt fail-closed before any SQLite write transaction opens
       // (best-effort parent resolution; authoritative check is in-tx).
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx([{ id: blockId } as JsonObject]), resendAttemptId)
-      const syncCtx = this.syncCtx('updateSingleBlock')
+      const singleOwnerRoute = this.resolveBlockOwnerRouteByIds([blockId])
+      const syncCtx = this.syncCtxForTopic(
+        'updateSingleBlock',
+        singleOwnerRoute?.topicId ?? '',
+        singleOwnerRoute?.branchId ?? null
+      )
       let syncNotify = false
       let singlePromotionTriggered = false
       const unsupportedBlockIds: string[] = []
@@ -4506,6 +5016,8 @@ export class ChatDbAggregateService {
 
           const existing = repos.blocks.getById(blockId)
           if (!existing.found) return // no-op for missing
+          // Route immutability: blocks under shared parents reject.
+          this.assertMutableBlockInTx(repos, tx as unknown as BetterSQLite3Database<typeof schema>, null, null, blockId)
 
           // Apply patch to the existing block to get the merged result
           const merged: Record<string, unknown> = { ...existing.data }
@@ -4551,7 +5063,17 @@ export class ChatDbAggregateService {
           // structured/attachment rows skip without a partial shell.
           // Resend intent (SYNC-DATA-055): stale attempt throws (rolls back);
           // a covered parent stays local-only (before parent closure).
-          if (syncCtx) {
+          // F3 fail-closed: a branch-owned or owner-unknown block emits no
+          // sync intent at all (the patch above still commits).
+          const singleSuppressed = syncCtx
+            ? this.isBlockSyncSuppressedInTx(
+                repos,
+                tx as unknown as BetterSQLite3Database<typeof schema>,
+                blockId,
+                existing.data.messageId
+              )
+            : false
+          if (syncCtx && !singleSuppressed) {
             const post = repos.blocks.getById(blockId)
             if (post.found && !this.checkResendAttemptInTx(stx, post.data.messageId, resendAttemptId)) {
               if (isStableBlockStatus(post.data.status)) {
@@ -4643,7 +5165,8 @@ export class ChatDbAggregateService {
           // the wire). Ordinary included→included content edits mint nothing.
           // Resend-covered parents (SYNC-DATA-055) stay local-only: no frame
           // work here (a stale attempt would already have thrown above).
-          if (syncCtx && !getResendAttemptInTx(stx, existing.data.messageId)) {
+          // F3 fail-closed: suppressed blocks mint no frame intent either.
+          if (syncCtx && !singleSuppressed && !getResendAttemptInTx(stx, existing.data.messageId)) {
             const postRow2 = repos.blocks.getById(blockId)
             if (postRow2.found) {
               const preIncluded = isStableBlockStatus(existing.data.status) && !this.isUnsupportedBlock(existing.data)
@@ -4723,7 +5246,12 @@ export class ChatDbAggregateService {
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
-      const syncCtx = this.syncCtx('bulkAddBlocks')
+      const bulkOwnerRoute = this.resolveBlockOwnerRoute(blocksJson)
+      const syncCtx = this.syncCtxForTopic(
+        'bulkAddBlocks',
+        bulkOwnerRoute?.topicId ?? '',
+        bulkOwnerRoute?.branchId ?? null
+      )
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
 
@@ -4739,6 +5267,15 @@ export class ChatDbAggregateService {
               throw new ChatDbConflictError(`Duplicate block ID in batch: ${block.id}`)
             }
             seenIds.add(block.id)
+          }
+
+          // Route immutability: blocks under inherited/shared parents
+          // reject (no copy-on-write); missing parents keep existing behavior.
+          {
+            const dbForBulkGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const block of blockDataList) {
+              this.assertMutableBlockInTx(repos, dbForBulkGuard, null, null, block.id, block.messageId)
+            }
           }
 
           // Insert only (not upsert) — createMany will throw on existing IDs
@@ -4758,6 +5295,19 @@ export class ChatDbAggregateService {
               const childTs = syncCtx.ts + i
               const brow = repos.blocks.getById(bid)
               if (!brow.found) throw new Error(`bulkAddBlocks block ${bid} missing in transaction`)
+              // F3 fail-closed: branch-owned or owner-unknown blocks never
+              // emit sync intent (outbox/membership/frames); the insert above
+              // still commits.
+              if (
+                this.isBlockSyncSuppressedInTx(
+                  repos,
+                  tx as unknown as BetterSQLite3Database<typeof schema>,
+                  bid,
+                  blockDataList[i].messageId
+                )
+              ) {
+                continue
+              }
               if (!isStableBlockStatus(brow.data.status)) continue
               if (this.isUnsupportedBlock(brow.data)) {
                 unsupportedBlockIds.push(bid)
@@ -4788,6 +5338,18 @@ export class ChatDbAggregateService {
             const affectedParents = new Set<string>()
             for (const b of blockDataList) {
               const brow = repos.blocks.getById(b.id)
+              // F3 fail-closed: suppressed (branch-owned/unknown) blocks mint
+              // no frame intent either.
+              if (
+                this.isBlockSyncSuppressedInTx(
+                  repos,
+                  tx as unknown as BetterSQLite3Database<typeof schema>,
+                  b.id,
+                  b.messageId
+                )
+              ) {
+                continue
+              }
               if (brow.found && isStableBlockStatus(brow.data.status) && !this.isUnsupportedBlock(brow.data)) {
                 affectedParents.add(brow.data.messageId)
               }
@@ -4822,7 +5384,12 @@ export class ChatDbAggregateService {
    */
   deleteBlocks(blockIds: string[]): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      const syncCtx = this.syncCtx('deleteBlocks')
+      const deleteOwnerRoute = this.resolveBlockOwnerRouteByIds(blockIds)
+      const syncCtx = this.syncCtxForTopic(
+        'deleteBlocks',
+        deleteOwnerRoute?.topicId ?? '',
+        deleteOwnerRoute?.branchId ?? null
+      )
       let syncNotify = false
       let result: FileCleanupResult
       try {
@@ -4835,12 +5402,37 @@ export class ChatDbAggregateService {
                   typeof bid === 'string' && bid.length > 0 && syncService.isKnownEntityInTx(stx, 'message_block', bid)
               )
             : []
+          // F3 fail-closed: branch-owned (or owner-unprovable) blocks present
+          // pre-delete never emit a remote delete and mint no frame intent.
+          // Row-missing ids keep the existing known-entity gate (nothing to
+          // prove an owner from).
+          const suppressedDeleteIds = new Set<string>()
+          if (syncCtx) {
+            const dbForDeleteGate = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const bid of blockIds) {
+              if (typeof bid !== 'string' || bid.length === 0) continue
+              const blk = repos.blocks.getById(bid)
+              if (!blk.found) continue
+              if (this.isBlockSyncSuppressedInTx(repos, dbForDeleteGate, bid, blk.data.messageId)) {
+                suppressedDeleteIds.add(bid)
+              }
+            }
+          }
           // Collect affected parent messageIds before deletion, but only when
           // the deleted row was previously inventory-included
           // (stable + supported). Transient/unsupported deletes never mint:
           // they only invalidate via the try helper's excluded check.
           const affectedParentIds = new Set<string>()
+          // Route immutability: deleting blocks under shared parents
+          // rejects; missing rows keep existing no-op semantics.
+          {
+            const dbForDeleteBlockGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const bid of blockIds) {
+              this.assertMutableBlockInTx(repos, dbForDeleteBlockGuard, null, null, bid)
+            }
+          }
           for (const bid of blockIds) {
+            if (suppressedDeleteIds.has(bid)) continue
             const blk = repos.blocks.getById(bid)
             if (blk.found && isStableBlockStatus(blk.data.status) && !this.isUnsupportedBlock(blk.data)) {
               affectedParentIds.add(blk.data.messageId)
@@ -4854,6 +5446,7 @@ export class ChatDbAggregateService {
           repos.blocks.deleteMany(blockIds)
           if (syncCtx) {
             for (const bid of knownIds) {
+              if (suppressedDeleteIds.has(bid)) continue
               if (repos.blocks.getById(bid).found) continue // surviving row = no-op, never a remote delete
               syncService.enqueueDeleteInTx(stx, 'message_block', bid, syncCtx.ts, syncCtx.deviceId)
               syncNotify = true
@@ -4911,15 +5504,40 @@ export class ChatDbAggregateService {
     topicId: string,
     name: string | null | undefined,
     messageIds: string[],
-    color: string | null | undefined
+    color: string | null | undefined,
+    branchId?: string | null
   ): ChatDbResult<SegmentWire> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('upsertSegment')
+      const route = this.normalizeBranchId(branchId)
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
 
         // Ensure topic exists
         repos.topics.ensure(topicId)
+
+        // Route-scoped segments: every member must resolve inside the
+        // addressed route — inherited/shared messages from another route
+        // reject (no copy-on-write); otherwise legacy validation applies.
+        // Members owned by this route but included in a live descendant
+        // prefix also reject.
+        const routeMessageIds = new Set(this.resolveRouteMessagesInTx(repos, topicId, route).messages.map((m) => m.id))
+        for (const mid of messageIds) {
+          const ownerRow = repos.messages.getById(mid)
+          if (ownerRow.found && ownerRow.data.topicId === topicId && (ownerRow.data.branchId ?? null) === route) {
+            const dbForSegmentGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            this.assertNoLiveDescendantIncludesInTx(repos, dbForSegmentGuard, topicId, route, mid)
+            continue
+          }
+          if (!routeMessageIds.has(mid)) {
+            throw new ChatDbValidationError(
+              `Message ${mid} does not belong to the addressed route of topic ${topicId} and cannot join its segment`
+            )
+          }
+          throw new ChatDbValidationError(
+            `Message ${mid} is shared with another route and cannot join a segment of this route`
+          )
+        }
 
         // Build segment data
         const overflow: Record<string, unknown> = {}
@@ -4959,9 +5577,9 @@ export class ChatDbAggregateService {
           }
           // Deterministic conversation-position placement: insert the new
           // segment according to its authority first message position in the
-          // complete topic order; existing segments retain relative order.
+          // addressed route order; existing segments retain relative order.
           // No global recompute of imported/existing catalog.
-          const orderedMessages = repos.messages.listByTopic(topicId)
+          const orderedMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
           const positionByMessageId = new Map<string, number>()
           orderedMessages.forEach((m, idx) => positionByMessageId.set(m.id, idx))
           // Same-transaction authority validation: every requested membership
@@ -5092,18 +5710,52 @@ export class ChatDbAggregateService {
    * Empty membership deletes the segment per repository semantics.
    * Returns the updated segment wire, or null if segment was deleted.
    */
-  replaceSegmentMembership(segmentId: string, messageIds: string[]): ChatDbResult<SegmentWire | null> {
+  replaceSegmentMembership(
+    segmentId: string,
+    messageIds: string[],
+    branchId?: string | null
+  ): ChatDbResult<SegmentWire | null> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('replaceSegmentMembership')
+      const route = this.normalizeBranchId(branchId)
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
+        const segment = repos.segments.getById(segmentId)
+        // Route-scoped segments: every member must resolve inside the
+        // addressed route of the segment's topic; shared/inherited rows and
+        // rows pinned by a live descendant reject (no copy-on-write).
+        if (segment.found) {
+          const dbForReplaceGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+          const routeMessageIds = new Set(
+            this.resolveRouteMessagesInTx(repos, segment.data.topicId, route).messages.map((m) => m.id)
+          )
+          for (const mid of messageIds) {
+            const ownerRow = repos.messages.getById(mid)
+            if (
+              ownerRow.found &&
+              ownerRow.data.topicId === segment.data.topicId &&
+              (ownerRow.data.branchId ?? null) === route
+            ) {
+              this.assertNoLiveDescendantIncludesInTx(repos, dbForReplaceGuard, segment.data.topicId, route, mid)
+              continue
+            }
+            if (!routeMessageIds.has(mid)) {
+              throw new ChatDbValidationError(
+                `Message ${mid} does not belong to the addressed route of topic ${segment.data.topicId} and cannot join its segment`
+              )
+            }
+            throw new ChatDbValidationError(
+              `Message ${mid} is shared with another route and cannot join a segment of this route`
+            )
+          }
+        }
         repos.segments.replaceMessageIds(segmentId, messageIds)
 
-        const segment = repos.segments.getById(segmentId)
-        if (!segment.found) return null
+        const updated = repos.segments.getById(segmentId)
+        if (!updated.found) return null
 
         const finalMessageIds = repos.segments.getMessageIds(segmentId)
-        return segmentToWire(segment.data, finalMessageIds)
+        return segmentToWire(updated.data, finalMessageIds)
       })
     }, `replaceSegmentMembership(${segmentId})`)
   }
@@ -5118,15 +5770,25 @@ export class ChatDbAggregateService {
    * Unsupported structural path (010): truthful invalidation inside same transaction — delete stale
    * topicMessage frame rather than leave stale valid-looking state. Do not mint clocks or outbox.
    */
-  reorderMessages(topicId: string, messageIds: string[]): ChatDbResult<null> {
+  reorderMessages(topicId: string, messageIds: string[], branchId?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('reorderMessages')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('reorderMessages', topicId, route)
       let notify = false
       let result: null
       try {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
-          repos.messages.replaceOrder(topicId, messageIds)
+          // Route immutability: reorder of inherited/shared messages
+          // rejects; every reordered ID must be owned by the addressed
+          // route and unshared.
+          {
+            const dbForReorderGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const id of messageIds) {
+              this.assertMutableMessageInTx(repos, dbForReorderGuard, topicId, route, id)
+            }
+          }
+          repos.messages.replaceOrder(topicId, messageIds, route)
           // Incremental order_frame issuance (SYNC-DATA-048): with complete
           // stored membership, mint/persist the winning frame and enqueue the
           // matching order_frame reusing that clock (same tx). With missing
@@ -5177,10 +5839,12 @@ export class ChatDbAggregateService {
   reorderAnswerGroup(
     topicId: string,
     anchorMessageId: string,
-    orderedMessageIds: string[]
+    orderedMessageIds: string[],
+    branchId?: string | null
   ): ChatDbResult<ReorderAnswerGroupResponse> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('reorderAnswerGroup')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('reorderAnswerGroup', topicId, route)
       let notify = false
       let result: ReorderAnswerGroupResponse
       try {
@@ -5190,15 +5854,15 @@ export class ChatDbAggregateService {
           if (!topic.found) {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
-          const anchor = repos.messages.getInTopic(anchorMessageId, topicId)
-          if (!anchor.found) {
+          const allMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          const anchor = allMessages.find((m) => m.id === anchorMessageId)
+          if (!anchor) {
             throw new ChatDbNotFoundError(`Message ${anchorMessageId} does not belong to topic ${topicId}`)
           }
-          const askId = anchor.data.askId
-          if (anchor.data.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+          const askId = anchor.askId
+          if (anchor.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
             throw new ChatDbNotFoundError(`Message ${anchorMessageId} has no actionable answer group`)
           }
-          const allMessages = repos.messages.listByTopic(topicId)
           const groupIds = allMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
           if (groupIds.length === 0 || !groupIds.includes(anchorMessageId)) {
             throw new ChatDbNotFoundError(`Message ${anchorMessageId} has no actionable answer group`)
@@ -5225,29 +5889,45 @@ export class ChatDbAggregateService {
             )
           }
           const groupSet = new Set(groupIds)
+          // Route immutability: answer groups spanning inherited/shared
+          // messages reject (slots cannot permute across route owners
+          // without mutating shared prefixes); owned members included in
+          // any live descendant prefix reject. Slot permutation persists
+          // within the addressed route owner's rows only.
+          const dbForAnswerGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+          const ownerRows = repos.messages.listByTopic(topicId, route)
+          const ownedSet = new Set(ownerRows.map((m) => m.id))
+          for (const id of groupIds) {
+            if (!ownedSet.has(id)) {
+              throw new ChatDbValidationError(
+                `Message ${id} is shared with another route and its answer group is immutable through this route`
+              )
+            }
+            this.assertNoLiveDescendantIncludesInTx(repos, dbForAnswerGuard, topicId, route, id)
+          }
           for (const id of orderedMessageIds) {
             if (!groupSet.has(id)) {
               // Cross-topic/foreign-sourced IDs surface here: not a group member.
               throw new ChatDbNotFoundError(`Message ${id} does not belong to the answer group`)
             }
             const owned = repos.messages.getInTopic(id, topicId)
-            if (!owned.found) {
+            if (!owned.found || (owned.data.branchId ?? null) !== route) {
               throw new ChatDbNotFoundError(`Message ${id} does not belong to topic ${topicId}`)
             }
           }
-          const fullOrder = allMessages.map((m) => m.id)
+          const ownerOrder = ownerRows.map((m) => m.id)
           const groupPositions: number[] = []
-          for (let i = 0; i < fullOrder.length; i++) {
-            if (groupSet.has(fullOrder[i])) groupPositions.push(i)
+          for (let i = 0; i < ownerOrder.length; i++) {
+            if (groupSet.has(ownerOrder[i])) groupPositions.push(i)
           }
           if (groupPositions.length !== groupIds.length) {
             throw new ChatDbConflictError('Answer-group slot resolution mismatch')
           }
-          const nextFullOrder = [...fullOrder]
+          const nextOwnerOrder = [...ownerOrder]
           for (let i = 0; i < groupPositions.length; i++) {
-            nextFullOrder[groupPositions[i]] = orderedMessageIds[i]
+            nextOwnerOrder[groupPositions[i]] = orderedMessageIds[i]
           }
-          repos.messages.replaceOrder(topicId, nextFullOrder)
+          repos.messages.replaceOrder(topicId, nextOwnerOrder, route)
           if (ctx) {
             const outcome = syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(
               tx as unknown as SyncTxExecutor,
@@ -5330,7 +6010,7 @@ export class ChatDbAggregateService {
     isNameManuallyEdited?: boolean | null
   ): ChatDbResult<JsonObject> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('updateTopicMetadata')
+      const ctx = this.syncCtxForTopic('updateTopicMetadata', topicId)
       let notify = false
       let result: JsonObject
       try {
@@ -5417,12 +6097,14 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Soft-delete a topic by setting deletedAt.
+   * Soft-delete one logical topic by setting deletedAt. Topic delete is one
+   * logical operation covering all branches/messages by topic cascade —
+   * branches never appear in trash independently.
    * Missing topic: no-op (returns success). Intent commits atomically.
    */
   softDeleteTopic(topicId: string, name?: string | null): ChatDbResult<null> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('softDeleteTopic')
+      const ctx = this.syncCtxForTopic('softDeleteTopic', topicId)
       let notify = false
       let result: null
       try {
@@ -5452,15 +6134,17 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Atomically restore a soft-deleted topic and return the restored wire
-   * entity (LOCK-532). Returns null when no soft-deleted row exists for the
+   * Atomically restore a soft-deleted logical topic and return the restored
+   * wire entity (LOCK-532). One logical restore covers the whole topic
+   * (branches included, by cascade — branches never restore independently).
+   * Returns null when no soft-deleted row exists for the
    * ID at command time (missing topic, or topic not in trash) — in that
    * case NO mutation occurs. Callers must dispatch only the returned row,
    * never a separately listed snapshot. Intent commits atomically.
    */
   restoreTopic(topicId: string): ChatDbResult<JsonObject | null> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('restoreTopic')
+      const ctx = this.syncCtxForTopic('restoreTopic', topicId)
       let notify = false
       let result: JsonObject | null
       try {
@@ -5523,11 +6207,15 @@ export class ChatDbAggregateService {
   }
 
   /**
-   * Hard-delete a topic with full FK cascade (messages → blocks →
-   * file_references, segments → memberships). Returns file cleanup facts.
+   * Hard-delete one logical topic with full FK cascade (messages →
+   * blocks → file_references, segments → memberships, branches → owned
+   * messages). Topic delete is one logical operation covering all
+   * branches/messages by topic cascade. One transaction; file cleanup
+   * preserves bytes still referenced by other live rows. Sync tombstone
+   * enqueues for the known topic. Returns file cleanup facts.
    *
    * Uses root transaction: collect affected file IDs before cascade,
-   * then delete topic, then compute remaining counts.
+   * then delete the topic, then compute remaining counts.
    *
    * Missing topic: no-op with empty cleanup result.
    */
@@ -5535,7 +6223,7 @@ export class ChatDbAggregateService {
     return wrapResult(() => {
       // LOCK-004: exact deleted topic IDs are collected inside the transaction.
       const deletedTopicIds: string[] = []
-      const ctx = this.syncCtx('hardDeleteTopic')
+      const ctx = this.syncCtxForTopic('hardDeleteTopic', topicId)
       let syncNotify = false
       let cleanup: { affectedFileIds: string[]; remainingReferenceCounts: Record<string, number> }
       try {
@@ -5551,21 +6239,23 @@ export class ChatDbAggregateService {
           const known = ctx ? syncService.isKnownEntityInTx(stx, 'topic', topicId) : false
           deletedTopicIds.push(topicId)
 
-          // Collect affected file IDs and descendant message IDs before cascade for frame invalidation
-          const messages = repos.messages.listByTopic(topicId)
+          // Collect affected file IDs and message IDs before cascade for
+          // frame invalidation — across ALL route owners of the topic.
+          const messages = repos.messages.listAllByTopic(topicId)
           const messageIds = messages.map((m) => m.id)
           const refsBeforeDelete = repos.fileRefs.listByMessages(messageIds)
-          const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+          const allAffectedFileIds = collectAffectedFileIds(refsBeforeDelete)
 
-          // Local parent order frame (010): atomically invalidate topicMessage frame plus every descendant messageBlock frame before cascade.
-          // Collect descendant message IDs before cascade and invalidate frames inside same transaction, no clock mint.
+          // Local parent order frame (010): atomically invalidate topicMessage frame plus every messageBlock frame before cascade.
+          // Collect message IDs before cascade and invalidate frames inside same transaction, no clock mint.
           for (const mid of messageIds) {
             syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
           }
           syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
 
-          // FK cascade: topic → messages → blocks → file_references
-          // Also topic → topic_segments → topic_segment_messages
+          // FK cascade: topic → messages → blocks → file_references;
+          // topic → topic_segments → topic_segment_messages;
+          // topic → topic_branches → owned messages (branch_id CASCADE).
           repos.topics.hardDelete(topicId)
           // Resend intent (SYNC-DATA-055): the wiped topic carries no
           // unfinished attempt — clear in the same transaction.
@@ -5579,7 +6269,7 @@ export class ChatDbAggregateService {
           }
 
           // Compute remaining counts after cascade
-          return buildFileCleanupResult(repos, affectedFileIds)
+          return buildFileCleanupResult(repos, allAffectedFileIds)
         })
       } catch (e) {
         this.recordSyncTxFailure('hardDeleteTopic', ctx, e)
@@ -5683,7 +6373,9 @@ export class ChatDbAggregateService {
             if (decision.effectiveStartMs >= cutoffMs) continue
 
             // Collect affected file IDs and descendant frames before cascade
-            const messages = repos.messages.listByTopic(topic.id)
+            // — across ALL route owners of the topic (branch-owned rows die
+            // by cascade with the topic).
+            const messages = repos.messages.listAllByTopic(topic.id)
             const messageIds = messages.map((m) => m.id)
             const refs = repos.fileRefs.listByMessages(messageIds)
             const ids = collectAffectedFileIds(refs)
@@ -5767,7 +6459,8 @@ export class ChatDbAggregateService {
 
           for (const topic of page.items) {
             // Collect affected file IDs and descendant frames before cascade
-            const messages = repos.messages.listByTopic(topic.id)
+            // — across ALL route owners of the topic.
+            const messages = repos.messages.listAllByTopic(topic.id)
             const messageIds = messages.map((m) => m.id)
             const refs = repos.fileRefs.listByMessages(messageIds)
             allAffectedFileIds.push(...collectAffectedFileIds(refs))
@@ -5815,7 +6508,7 @@ export class ChatDbAggregateService {
         const topic = repos.topics.getById(topicId)
         if (!topic.found) throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
         repos.topics.updatePatch(topicId, { assistantId } as any)
-        for (const message of repos.messages.listByTopic(topicId)) {
+        for (const message of repos.messages.listAllByTopic(topicId)) {
           repos.messages.update(topicId, message.id, { assistantId } as any)
         }
       })
@@ -5846,7 +6539,7 @@ export class ChatDbAggregateService {
             : { items: [], nextCursor: undefined, hasMore: false }
           for (const topic of [...activePage.items, ...trashPage.items]) {
             if (topic.assistantId !== assistantId || topic.id === replacementTopicId) continue
-            const messageIds = repos.messages.listByTopic(topic.id).map((message) => message.id)
+            const messageIds = repos.messages.listAllByTopic(topic.id).map((message) => message.id)
             affectedFileIds.push(...collectAffectedFileIds(repos.fileRefs.listByMessages(messageIds)))
             deletedTopicIds.push(topic.id)
             // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
@@ -5885,30 +6578,426 @@ export class ChatDbAggregateService {
   }
 
   // =========================================================================
-  // Phase 5.1B: Compound mutations
+  // Topic-internal branches — local-only, no prefix cloning (016)
+  // =========================================================================
+  //
+  // `topics` holds only logical sidebar topics. `topic_branches` holds one
+  // row per internal branch node: (topic_id, nullable parent_branch_id,
+  // anchor_message_id, name). `messages` stays owned by the logical topic_id
+  // with nullable branch_id (null = main route). The main route is addressed
+  // by `branchId = null` — no fake root row is ever created.
+  //
+  // An effective route recursively takes each ancestor route only through
+  // the child anchor, then appends messages owned by the current branch.
+  // Stable message IDs are shared; no prefix cloning.
+  //
+  // Local-only: branch rows, branch-owned messages/blocks, and branch
+  // operations never enter the sync outbox, membership/frame clocks, or the
+  // baseline candidate (suppressed within existing sync boundaries — no wire
+  // contract change). Main-route rows remain syncable.
+  //
+  // Immutability: shared/inherited prefixes are immutable while a live
+  // descendant branch includes them — inherited messages reject
+  // edit/delete/reorder/segment mutations from a descendant route, and an
+  // owned message included in any live descendant effective prefix rejects
+  // mutation (no copy-on-write). Branch-owned suffixes stay mutable.
   // =========================================================================
 
   /**
-   * Atomically ensure/create a target topic and insert ordered
-   * messages+blocks. Each entry is a message with its blocks, appended
-   * in array order. File references are synced for all file/image blocks.
-   *
-   * Rejects any existing message ID that is owned by a different topic.
-   *
-   * Linear batch semantics (LOCK-002): all NEW messages are converted and
-   * classified first, then inserted in ONE `appendMany` batch with a single
-   * final dense-order normalization per topic — never one per-message
-   * full-topic normalization. Existing (same-topic) entries preserve their
-   * position and only receive a metadata patch, exactly as before.
-   *
-   * Phase-4 block side effects (block upserts + file-reference syncs) run
-   * in the ORIGINAL request entry order (audit F1): the new/existing
-   * classification never reorders them into new-before-existing, so rare
-   * cross-entry block-ID collisions keep the same last-writer as the legacy
-   * per-entry loop.
-   *
-   * Atomicity: one root SQLite transaction (LOCK-001).
+   * Normalize a wire branch ID to a route owner: non-empty string stays,
+   * absent/undefined/null/empty becomes null (main route).
    */
+  private normalizeBranchId(branchId: string | null | undefined): string | null {
+    return typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+  }
+
+  /** Domain branch node → wire (exact TopicBranchWire keys, null-preserving). */
+  private branchToWire(branch: TopicBranchData): TopicBranchWire {
+    return {
+      id: branch.id,
+      topicId: branch.topicId,
+      parentBranchId: branch.parentBranchId,
+      anchorMessageId: branch.anchorMessageId,
+      name: branch.name,
+      createdAt: branch.createdAt,
+      updatedAt: branch.updatedAt
+    }
+  }
+
+  /**
+   * Require a branch node of this logical topic. Unknown IDs, cross-topic
+   * IDs, and (for writes) trashed topics fail closed. Pre-016 databases
+   * without the table report no branch (fail open as main route for reads).
+   */
+  private requireBranchInTx(repos: ChatDbRepositories, topicId: string, branchId: string): TopicBranchData {
+    let found: { found: boolean; data?: TopicBranchData }
+    try {
+      found = repos.branches.getById(branchId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        throw new ChatDbNotFoundError(`Branch ${branchId} does not exist in topic ${topicId}`)
+      }
+      throw e
+    }
+    if (!found.found || found.data!.topicId !== topicId) {
+      throw new ChatDbNotFoundError(`Branch ${branchId} does not exist in topic ${topicId}`)
+    }
+    return found.data!
+  }
+
+  /** True when the topic owns at least one branch node (tolerates pre-016). */
+  private topicHasBranchesInTx(db: BetterSQLite3Database<typeof schema>, topicId: string): boolean {
+    try {
+      const row = db
+        .select({ id: schema.topicBranches.id })
+        .from(schema.topicBranches)
+        .where(eq(schema.topicBranches.topicId, topicId))
+        .limit(1)
+        .get()
+      return row !== undefined
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return false
+      throw e
+    }
+  }
+
+  /**
+   * Per-route sync context: enforces the publish barrier identically to
+   * syncCtx(), then suppresses capture for branch routes (local-only) by
+   * returning null. Main routes keep the real context.
+   */
+  private syncCtxForTopic(
+    channel: string,
+    _topicId: string,
+    branchId?: string | null
+  ): { deviceId: string; ts: number } | null {
+    const ctx = this.syncCtx(channel)
+    if (!ctx) return null
+    if (this.normalizeBranchId(branchId) !== null) return null
+    return ctx
+  }
+
+  /**
+   * Best-effort pre-tx owner-route resolution for block payloads: the single
+   * owning (topicId, branchId) route when every resolvable parent agrees,
+   * otherwise null (preserve existing capture behavior — the in-tx
+   * fail-closed gate decides per block). Used only to suppress sync capture
+   * for branch-owned streaming writes; never an authority decision.
+   */
+  private resolveBlockOwnerRoute(blocksJson: JsonObject[]): { topicId: string; branchId: string | null } | null {
+    let repos: ChatDbRepositories | null = null
+    try {
+      repos = this.repos()
+    } catch {
+      return null
+    }
+    const owners = new Set<string>()
+    let resolved = 0
+    let winner: { topicId: string; branchId: string | null } | null = null
+    for (const raw of blocksJson) {
+      if (!raw || typeof raw !== 'object') continue
+      const rec = raw as Record<string, unknown>
+      const parents = new Set<string>()
+      const wireParent = rec.messageId
+      if (typeof wireParent === 'string' && wireParent.length > 0) parents.add(wireParent)
+      const bid = rec.id
+      if (typeof bid === 'string' && bid.length > 0 && repos) {
+        try {
+          const found = repos.blocks.getById(bid)
+          if (found.found) parents.add(found.data.messageId)
+        } catch {
+          // Best effort only.
+        }
+      }
+      for (const mid of parents) {
+        try {
+          const msg = repos.messages.getById(mid)
+          if (msg.found) {
+            const branchId = msg.data.branchId ?? null
+            owners.add(`${msg.data.topicId} ${branchId ?? ''}`)
+            winner = { topicId: msg.data.topicId, branchId }
+            resolved++
+          }
+        } catch {
+          // Best effort only.
+        }
+      }
+    }
+    if (resolved === 0 || owners.size !== 1) return null
+    return winner
+  }
+
+  /**
+   * Best-effort pre-tx owner-route resolution for block ID lists (deletes).
+   * Same single-agreement contract as resolveBlockOwnerRoute.
+   */
+  private resolveBlockOwnerRouteByIds(blockIds: string[]): { topicId: string; branchId: string | null } | null {
+    let repos: ChatDbRepositories | null = null
+    try {
+      repos = this.repos()
+    } catch {
+      return null
+    }
+    const owners = new Set<string>()
+    let resolved = 0
+    let winner: { topicId: string; branchId: string | null } | null = null
+    for (const bid of blockIds) {
+      if (typeof bid !== 'string' || bid.length === 0) continue
+      try {
+        const found = repos.blocks.getById(bid)
+        if (!found.found) continue
+        const msg = repos.messages.getById(found.data.messageId)
+        if (msg.found) {
+          const branchId = msg.data.branchId ?? null
+          owners.add(`${msg.data.topicId} ${branchId ?? ''}`)
+          winner = { topicId: msg.data.topicId, branchId }
+          resolved++
+        }
+      } catch {
+        // Best effort only.
+      }
+    }
+    if (resolved === 0 || owners.size !== 1) return null
+    return winner
+  }
+
+  /**
+   * Authoritative in-transaction owner-route resolution for a single block
+   * (fail-closed sync gate): the committed block row's parent wins, the
+   * wire parent is the fallback for not-yet-written rows. Returns null when
+   * the owner cannot be proven in-transaction (pre-first-chunk unknown).
+   * Never throws: infrastructure uncertainty resolves to null (suppressed).
+   */
+  private blockOwnerRouteInTx(
+    repos: ChatDbRepositories,
+    blockId: string,
+    wireMessageId?: string | null
+  ): { topicId: string; branchId: string | null } | null {
+    let messageId: string | null = null
+    try {
+      const brow = repos.blocks.getById(blockId)
+      if (brow.found) messageId = brow.data.messageId
+    } catch {
+      return null
+    }
+    if (!messageId && typeof wireMessageId === 'string' && wireMessageId.length > 0) {
+      messageId = wireMessageId
+    }
+    if (!messageId) return null
+    try {
+      const mrow = repos.messages.getById(messageId)
+      if (!mrow.found) return null
+      return { topicId: mrow.data.topicId, branchId: mrow.data.branchId ?? null }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Fail-closed branch suppression for block sync intent: true when the
+   * block's parent message is branch-owned (local-only) or its owner cannot
+   * be proven in-transaction (pre-first-chunk unknown). Callers skip sync
+   * intent (outbox, membership, frames) for suppressed blocks while the chat
+   * mutation itself still commits. Ordinary main-route writes still capture.
+   */
+  private isBlockSyncSuppressedInTx(
+    repos: ChatDbRepositories,
+    _db: BetterSQLite3Database<typeof schema>,
+    blockId: string,
+    wireMessageId?: string | null
+  ): boolean {
+    const owner = this.blockOwnerRouteInTx(repos, blockId, wireMessageId)
+    if (!owner) return true
+    return owner.branchId !== null
+  }
+
+  /**
+   * Direct child branches of one parent route in deterministic order
+   * (createdAt ASC, id ASC). `parentBranchId = null` addresses the level-1
+   * branches forked from the main route. Tolerates pre-016 databases.
+   */
+  /**
+   * Breadcrumb path for a route: root-first branch nodes from the level-1
+   * ancestor down to the addressed branch. [] for the main route.
+   * Cycle/depth-guarded (MAX_BRANCH_DEPTH); a repeated node stops the walk.
+   */
+  private branchPathInTx(repos: ChatDbRepositories, branchId: string | null): TopicBranchData[] {
+    if (branchId === null) return []
+    try {
+      return repos.branches.pathFor(branchId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        throw new ChatDbNotFoundError(`Branch ${branchId} does not exist`)
+      }
+      throw e
+    }
+  }
+
+  /**
+   * Transitive descendant branch IDs under one route (self excluded).
+   * `branchId = null` addresses every branch of the topic. BFS with cycle
+   * guard. Tolerates pre-016 databases (no descendants).
+   */
+  private collectBranchSubtreeIdsInTx(repos: ChatDbRepositories, topicId: string, branchId: string | null): string[] {
+    try {
+      if (branchId === null) {
+        return repos.branches.listByTopic(topicId).map((b) => b.id)
+      }
+      return repos.branches.collectSubtreeIds(branchId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return []
+      throw e
+    }
+  }
+
+  /**
+   * Resolve the effective ordered messages for one route: recursively take
+   * each ancestor route only through the child anchor, then append messages
+   * owned by the current branch. Deterministic sort_order ASC, id ASC order
+   * at every level. Stable message IDs are shared; nothing is cloned.
+   *
+   * `branchId = null` is the main route (owned rows only). A missing anchor
+   * in any parent route fails closed (NOT_FOUND) — the route is broken and
+   * must not silently truncate.
+   */
+  private resolveRouteMessagesInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    branchId: string | null
+  ): { messages: MessageData[]; forkBoundaryIndex: number } {
+    const owner = this.normalizeBranchId(branchId)
+    if (owner === null) {
+      const main = repos.messages.listByTopic(topicId, null)
+      return { messages: main, forkBoundaryIndex: main.length }
+    }
+    const path = this.branchPathInTx(repos, owner)
+    const leaf = path.length > 0 ? path[path.length - 1] : null
+    if (!leaf || leaf.topicId !== topicId) {
+      throw new ChatDbNotFoundError(`Branch ${owner} does not exist in topic ${topicId}`)
+    }
+    let effective: MessageData[] = [...repos.messages.listByTopic(topicId, null)]
+    for (const node of path) {
+      const anchorIdx = effective.findIndex((m) => m.id === node.anchorMessageId)
+      if (anchorIdx === -1) {
+        throw new ChatDbNotFoundError(
+          `Anchor message ${node.anchorMessageId} is not in the parent route of branch ${node.id}`
+        )
+      }
+      effective = [...effective.slice(0, anchorIdx + 1), ...repos.messages.listByTopic(topicId, node.id)]
+    }
+    const ownCount = repos.messages.listByTopic(topicId, owner).length
+    return { messages: effective, forkBoundaryIndex: effective.length - ownCount }
+  }
+
+  /**
+   * Reject mutation of a route-owned message while any live descendant
+   * branch route includes it in its effective prefix. Precise inclusion
+   * (not whole-topic locking): only messages covered by at least one live
+   * descendant effective route reject. Trashed topics have no live routes.
+   */
+  private assertNoLiveDescendantIncludesInTx(
+    repos: ChatDbRepositories,
+    _db: BetterSQLite3Database<typeof schema>,
+    ownerTopicId: string,
+    ownerBranchId: string | null,
+    messageId: string
+  ): void {
+    const topic = repos.topics.getById(ownerTopicId)
+    if (!topic.found || topic.data.deletedAt != null) return
+    let descendants: string[]
+    try {
+      descendants = this.collectBranchSubtreeIdsInTx(repos, ownerTopicId, ownerBranchId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return
+      throw e
+    }
+    for (const descendant of descendants) {
+      const branchRow = repos.branches.getById(descendant)
+      if (!branchRow.found) continue
+      // The descendant pins exactly its effective prefix: the parent route
+      // through the child anchor (inclusive). Sibling suffixes and
+      // post-anchor main-route messages are NOT shared and stay mutable.
+      // A null parent addresses the main route (still sliced at the anchor).
+      const parentRoute = this.resolveRouteMessagesInTx(repos, ownerTopicId, branchRow.data.parentBranchId)
+      const anchorIdx = parentRoute.messages.findIndex((m) => m.id === branchRow.data.anchorMessageId)
+      if (anchorIdx === -1) continue
+      if (parentRoute.messages.slice(0, anchorIdx + 1).some((m) => m.id === messageId)) {
+        throw new ChatDbValidationError(
+          `Message ${messageId} is shared with live branch ${descendant} and is immutable until the branch is deleted`
+        )
+      }
+    }
+  }
+
+  /**
+   * Missing-tolerant mutability guard for message writes through one route.
+   *
+   * - Missing rows keep existing no-op semantics (returns false).
+   * - Cross-topic references keep legacy skip semantics (returns false)
+   *   unless branch lineage is involved (addressed route is a branch, the
+   *   row is branch-owned, or the owner topic has branches) — then reject.
+   * - Same-topic rows owned by another route (inherited/shared) reject:
+   *   descendant routes never mutate shared prefixes (no copy-on-write).
+   * - Owned rows included in any live descendant effective prefix reject.
+   *
+   * Returns true when the caller may proceed.
+   */
+  private assertMutableMessageInTx(
+    repos: ChatDbRepositories,
+    db: BetterSQLite3Database<typeof schema>,
+    topicId: string,
+    branchId: string | null,
+    messageId: string
+  ): boolean {
+    const route = this.normalizeBranchId(branchId)
+    const ownerRow = repos.messages.getById(messageId)
+    if (!ownerRow.found) return false
+    const row = ownerRow.data
+    if (row.topicId !== topicId) {
+      if (route !== null || (row.branchId ?? null) !== null || this.topicHasBranchesInTx(db, row.topicId)) {
+        throw new ChatDbValidationError(
+          `Message ${messageId} belongs to topic ${row.topicId} and is immutable through topic ${topicId}`
+        )
+      }
+      this.assertNoLiveDescendantIncludesInTx(repos, db, row.topicId, row.branchId ?? null, messageId)
+      return false
+    }
+    if ((row.branchId ?? null) !== route) {
+      throw new ChatDbValidationError(
+        `Message ${messageId} is shared with another route and is immutable through this route`
+      )
+    }
+    this.assertNoLiveDescendantIncludesInTx(repos, db, topicId, route, messageId)
+    return true
+  }
+
+  /**
+   * Missing-tolerant mutability guard for block writes via the parent
+   * message. Missing blocks/parents keep existing no-op semantics (returns
+   * false). When an explicit route is addressed, the parent must belong to
+   * exactly that route; block channels without a topic resolve the route
+   * from the committed parent (streaming writes under a branch-owned parent
+   * stay mutable through their own route).
+   */
+  private assertMutableBlockInTx(
+    repos: ChatDbRepositories,
+    db: BetterSQLite3Database<typeof schema>,
+    topicId: string | null,
+    branchId: string | null,
+    blockId: string,
+    wireMessageId?: string
+  ): boolean {
+    const existing = repos.blocks.getById(blockId)
+    const parentId = existing.found ? existing.data.messageId : wireMessageId
+    if (!parentId) return false
+    const parent = repos.messages.getById(parentId)
+    if (!parent.found) return false
+    if (topicId !== null) {
+      return this.assertMutableMessageInTx(repos, db, topicId, branchId, parentId)
+    }
+    return this.assertMutableMessageInTx(repos, db, parent.data.topicId, parent.data.branchId ?? null, parentId)
+  }
+
   /**
    * S6.2c-1: Main-authoritative branch by stable message anchor.
    *
@@ -5930,10 +7019,12 @@ export class ChatDbAggregateService {
     sourceTopicId: string,
     targetTopicId: string,
     anchorMessageId: string,
-    assistantId?: string
+    assistantId?: string,
+    sourceBranchId?: string | null
   ): ChatDbResult<{ messages: JsonObject[]; blocks: JsonObject[] }> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('branchMessagesToTopic')
+      const sourceRoute = this.normalizeBranchId(sourceBranchId)
+      const ctx = this.syncCtxForTopic('branchMessagesToTopic', targetTopicId)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
       let result: { messages: JsonObject[]; blocks: JsonObject[] }
@@ -5956,14 +7047,14 @@ export class ChatDbAggregateService {
           const topicExistedBefore = repos.topics.getById(targetTopicId).found
           repos.topics.ensure(targetTopicId, assistantId)
 
-          // Validate anchor belongs to source
-          const anchor = repos.messages.getInTopic(anchorMessageId, sourceTopicId)
-          if (!anchor.found) {
+          // Validate anchor belongs to the source ROUTE (sidebar Copy Topic
+          // uses the main route; an explicitly used in-chat branch route
+          // clones its effective prefix instead).
+          const allMessages = this.resolveRouteMessagesInTx(repos, sourceTopicId, sourceRoute).messages
+          const anchor = allMessages.find((m) => m.id === anchorMessageId)
+          if (!anchor) {
             throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
           }
-
-          // Load source ordered deterministic
-          const allMessages = repos.messages.listByTopic(sourceTopicId)
           const anchorIdx = allMessages.findIndex((m) => m.id === anchorMessageId)
           if (anchorIdx === -1) {
             throw new ChatDbNotFoundError(`Anchor message ${anchorMessageId} does not belong to topic ${sourceTopicId}`)
@@ -5998,11 +7089,14 @@ export class ChatDbAggregateService {
               // But if original had askId and is assistant case already handled
             }
 
-            // Clone message data: shallow copy, replace id/topicId/askId, preserve overflow and all columns except sortOrder (appendMany reassigns)
+            // Clone message data: shallow copy, replace id/topicId/askId, reset
+            // branchId to the target main route, preserve overflow and all
+            // columns except sortOrder (appendMany reassigns)
             const cloned: MessageData = {
               ...oldMsg,
               id: newId,
               topicId: targetTopicId,
+              branchId: null,
               askId: oldMsg.role === 'assistant' ? newAskId : (oldMsg.askId ?? null)
             }
             // Preserve overflow object reference safety: ensure overflow is cloned
@@ -6143,13 +7237,241 @@ export class ChatDbAggregateService {
     }, `branchMessagesToTopic(${sourceTopicId} -> ${targetTopicId}, anchor=${anchorMessageId})`)
   }
 
+  /**
+   * Create one topic-internal branch node (the ONLY true-branch creation
+   * method).
+   *
+   * Local-only, no prefix cloning, no wire capture:
+   * - validates the logical topic exists (trash rejects) and the parent
+   *   route exists (null = main route, otherwise a branch of this topic);
+   * - validates the anchor belongs to the parent route's current effective
+   *   route (branch-from-inherited-anchor allowed);
+   * - inserts exactly one `topic_branches` row with the requested name
+   *   (default applied by the renderer; Main stores verbatim);
+   * - emits NO sync outbox/frame/membership intent and touches no parent
+   *   frames, so the branch stays local-only within existing sync
+   *   boundaries (no wire contract change);
+   * - returns the created node plus the effective wire (shared prefix +
+   *   empty suffix) for the renderer projection — a read projection only,
+   *   never stored rows. Creating the branch immediately selects it
+   *   renderer-side; no topics are created, sidebar untouched.
+   *
+   * Parent routes, shared messages, and topic state are untouched.
+   */
+  createBranch(
+    topicId: string,
+    parentBranchId: string | null | undefined,
+    anchorMessageId: string,
+    name?: string
+  ): ChatDbResult<{ branch: TopicBranchWire; messages: JsonObject[]; blocks: JsonObject[] }> {
+    return wrapResult(
+      () => {
+        // Publish-barrier quiescence still enforced for branch writes; capture
+        // itself is always suppressed (local-only) below.
+        syncService.throwIfPublishBarrierHeld('createBranch')
+        const parentRoute = this.normalizeBranchId(parentBranchId)
+        if (!topicId || !anchorMessageId) {
+          throw new ChatDbValidationError('createBranch requires topicId and anchorMessageId')
+        }
+        const result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+          if (topic.data.deletedAt != null) {
+            throw new ChatDbValidationError(`Topic ${topicId} is in trash and cannot fork a branch`)
+          }
+          if (parentRoute !== null) {
+            this.requireBranchInTx(repos, topicId, parentRoute)
+          }
+          // Anchor must resolve inside the parent route's effective route.
+          const parentEffective = this.resolveRouteMessagesInTx(repos, topicId, parentRoute).messages
+          if (!parentEffective.some((m) => m.id === anchorMessageId)) {
+            throw new ChatDbNotFoundError(
+              `Anchor message ${anchorMessageId} does not belong to the parent route of topic ${topicId}`
+            )
+          }
+          const now = new Date().toISOString()
+          const created = repos.branches.create({
+            id: randomUUID(),
+            topicId,
+            parentBranchId: parentRoute,
+            anchorMessageId,
+            name: typeof name === 'string' && name.length > 0 ? name : null,
+            createdAt: now,
+            updatedAt: now,
+            overflow: {}
+          })
+          // Effective projection for the new route (shared prefix, empty suffix).
+          const resolved = this.resolveRouteMessagesInTx(repos, topicId, created.id).messages
+          const messageIds = resolved.map((m) => m.id)
+          const blockDataMap = repos.blocks.listByMessages(messageIds)
+          const allBlocks: MessageBlockData[] = []
+          for (const id of messageIds) {
+            allBlocks.push(...(blockDataMap.get(id) ?? []))
+          }
+          const wireMessages = messagesToWire(resolved)
+          const wireBlocks = blocksToWire(allBlocks)
+          return {
+            branch: this.branchToWire(created),
+            messages: reconstructMessageBlockRelations(wireMessages, wireBlocks),
+            blocks: wireBlocks
+          }
+        })
+        return result
+      },
+      `createBranch(${topicId}, parent=${this.normalizeBranchId(parentBranchId) ?? 'main'}, anchor=${anchorMessageId})`
+    )
+  }
+
+  /**
+   * List all branch nodes of one logical topic in (createdAt, id) order.
+   * Pure read; missing topic fails. Empty when never branched.
+   */
+  listBranches(topicId: string): ChatDbResult<{ topicId: string; branches: TopicBranchWire[] }> {
+    return wrapResult(() => {
+      const repos = this.repos()
+      const topic = repos.topics.getById(topicId)
+      if (!topic.found) {
+        throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+      }
+      let rows: TopicBranchData[]
+      try {
+        rows = repos.branches.listByTopic(topicId)
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) rows = []
+        else throw e
+      }
+      return { topicId, branches: rows.map((b) => this.branchToWire(b)) }
+    }, `listBranches(${topicId})`)
+  }
+
+  /**
+   * Rename a branch node (name-only; identity columns immutable). Branch
+   * names live on the branch row — topic rename stays logical and separate.
+   * Local-only: no sync intent. Missing branch fails closed.
+   */
+  renameBranch(topicId: string, branchId: string, name: string): ChatDbResult<{ branch: TopicBranchWire }> {
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('renameBranch')
+      if (!topicId || !branchId || !name) {
+        throw new ChatDbValidationError('renameBranch requires topicId, branchId, and a non-empty name')
+      }
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        this.requireBranchInTx(repos, topicId, branchId)
+        repos.branches.rename(branchId, name)
+        const updated = repos.branches.getById(branchId)
+        if (!updated.found) {
+          throw new ChatDbNotFoundError(`Branch ${branchId} does not exist in topic ${topicId}`)
+        }
+        return { branch: this.branchToWire(updated.data) }
+      })
+    }, `renameBranch(${topicId}, ${branchId})`)
+  }
+
+  /**
+   * Delete one branch subtree: the selected branch, all descendant
+   * branches, and ONLY the messages/blocks/file references owned by those
+   * branch IDs. Shared prefixes and sibling branches survive. Local-only:
+   * no sync intent (branch rows never carried clocks); main-route frames
+   * are untouched. After deleting the last branch the topic is
+   * indistinguishable from a never-branched topic.
+   */
+  deleteBranch(
+    topicId: string,
+    branchId: string
+  ): ChatDbResult<{
+    affectedFileIds: string[]
+    remainingReferenceCounts: Record<string, number>
+    deletedBranchIds: string[]
+    deletedMessageIds: string[]
+    deletedBlockIds: string[]
+  }> {
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('deleteBranch')
+      if (!topicId || !branchId) {
+        throw new ChatDbValidationError('deleteBranch requires topicId and branchId')
+      }
+      const result = this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        const root = this.requireBranchInTx(repos, topicId, branchId)
+        void root
+        const subtreeIds = [branchId, ...repos.branches.collectSubtreeIds(branchId)]
+        // Owned rows only (main route + sibling subtrees untouched).
+        const ownedMessages = subtreeIds.flatMap((bid) => repos.messages.listByTopic(topicId, bid))
+        const ownedMessageIds = ownedMessages.map((m) => m.id)
+        const blockMap = repos.blocks.listByMessages(ownedMessageIds)
+        const ownedBlockIds: string[] = []
+        for (const id of ownedMessageIds) {
+          for (const b of blockMap.get(id) ?? []) ownedBlockIds.push(b.id)
+        }
+        const refsBeforeDelete = repos.fileRefs.listByMessages(ownedMessageIds)
+        const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+        // Delete owned messages (FK cascade removes blocks → file refs;
+        // per-owner order normalization keeps surviving owners dense).
+        if (ownedMessageIds.length > 0) {
+          repos.messages.deleteMany(ownedMessageIds)
+        }
+        // Delete the branch rows subtree-root first (self-CASCADE backstop;
+        // explicit for determinism and pre-016 tolerance).
+        repos.branches.deleteSubtreeRows(subtreeIds)
+        const cleanup = buildFileCleanupResult(repos, affectedFileIds)
+        return {
+          affectedFileIds: cleanup.affectedFileIds,
+          remainingReferenceCounts: cleanup.remainingReferenceCounts,
+          deletedBranchIds: subtreeIds,
+          deletedMessageIds: ownedMessageIds,
+          deletedBlockIds: ownedBlockIds
+        }
+      })
+      return result
+    }, `deleteBranch(${topicId}, ${branchId})`)
+  }
+
+  // =========================================================================
+  // Phase 5.1B: Compound mutations
+  // =========================================================================
+
+  /**
+   * Atomically ensure/create a target topic and insert ordered
+   * messages+blocks. Each entry is a message with its blocks, appended
+   * in array order. File references are synced for all file/image blocks.
+   *
+   * Rejects any existing message ID that is owned by a different topic.
+   *
+   * Linear batch semantics (LOCK-002): all NEW messages are converted and
+   * classified first, then inserted in ONE `appendMany` batch with a single
+   * final dense-order normalization per topic — never one per-message
+   * full-topic normalization. Existing (same-topic) entries preserve their
+   * position and only receive a metadata patch, exactly as before.
+   *
+   * Phase-4 block side effects (block upserts + file-reference syncs) run
+   * in the ORIGINAL request entry order (audit F1): the new/existing
+   * classification never reorders them into new-before-existing, so rare
+   * cross-entry block-ID collisions keep the same last-writer as the legacy
+   * per-entry loop.
+   *
+   * Atomicity: one root SQLite transaction (LOCK-001).
+   */
   cloneMessagesToTopic(
     targetTopicId: string,
     entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,
-    assistantId?: string
+    assistantId?: string,
+    branchId?: string | null
   ): ChatDbResult<null> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('cloneMessagesToTopic')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('cloneMessagesToTopic', targetTopicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
       try {
@@ -6224,6 +7546,7 @@ export class ChatDbAggregateService {
           for (const entry of entries) {
             const messageData = wireToMessage(entry.message)
             messageData.topicId = targetTopicId
+            messageData.branchId = route
             const blockDataList = entry.blocks.map(wireToBlock)
 
             // Enforce block ownership
@@ -6235,6 +7558,7 @@ export class ChatDbAggregateService {
             const patch = wireToMessagePatch(entry.message)
             delete patch.id
             delete patch.topicId
+            delete patch.branchId
             delete patch.sortOrder
 
             // Check if message already exists
@@ -6248,6 +7572,14 @@ export class ChatDbAggregateService {
                     `cannot clone into topic ${targetTopicId}`
                 )
               }
+              // Route immutability: patching an inherited/shared row rejects.
+              this.assertMutableMessageInTx(
+                repos,
+                tx as unknown as BetterSQLite3Database<typeof schema>,
+                targetTopicId,
+                route,
+                messageData.id
+              )
               // Same topic: preserve position, update metadata only
               existingPlans.push({ message: messageData, blocks: blockDataList, patch })
             } else if (newMessageIds.has(messageData.id)) {
@@ -6538,10 +7870,31 @@ export class ChatDbAggregateService {
     stx: SyncTxExecutor,
     topicId: string,
     messages: Array<{ message: JsonObject; blocks: JsonObject[] }> | string[],
-    blockIdsToDelete: string[]
+    blockIdsToDelete: string[],
+    branchId?: string | null
   ): { cleanup: FileCleanupResult; attempts: ResendAttemptMapping[]; removedBlockIds: string[] } {
+    const route = this.normalizeBranchId(branchId)
     // Phase 1: Resolve every block through its parent message and verify ownership.
-    // Reject any block whose parent message does not belong to request topic.
+    // Reject any block whose parent message does not belong to the addressed route.
+    // Route immutability: existing inherited/shared rows reject when route
+    // lineage is involved (missing rows are new suffix appends and proceed;
+    // ordinary cross-topic rows keep legacy Conflict semantics below).
+    {
+      const dbForResetGuard = _tx as BetterSQLite3Database<typeof schema>
+      const candidateIds = new Set<string>()
+      for (const item of messages) {
+        const mid = typeof item === 'string' ? item : ((item as { message: JsonObject }).message?.id as string)
+        if (typeof mid === 'string' && mid.length > 0) candidateIds.add(mid)
+      }
+      for (const bid of blockIdsToDelete) {
+        if (typeof bid !== 'string' || bid.length === 0) continue
+        const blk = repos.blocks.getById(bid)
+        if (blk.found) candidateIds.add(blk.data.messageId)
+      }
+      for (const mid of candidateIds) {
+        this.assertMutableMessageInTx(repos, dbForResetGuard, topicId, route, mid)
+      }
+    }
     const ownedBlockIds: string[] = []
     if (blockIdsToDelete.length > 0) {
       for (const blockId of blockIdsToDelete) {
@@ -6549,9 +7902,9 @@ export class ChatDbAggregateService {
         if (!block.found) {
           throw new ChatDbConflictError(`Block ${blockId} does not exist`)
         }
-        // Resolve block → message → topic ownership
+        // Resolve block → message → route ownership
         const msg = repos.messages.getInTopic(block.data.messageId, topicId)
-        if (!msg.found) {
+        if (!msg.found || (msg.data.branchId ?? null) !== route) {
           throw new ChatDbConflictError(
             `Block ${blockId} belongs to message ${block.data.messageId} which is not in topic ${topicId}`
           )
@@ -6588,10 +7941,13 @@ export class ChatDbAggregateService {
     }
 
     // Phase 3: Persist complete reset payloads, preserving existing identity.
+    // Ownership is stamped by Main from the route context (wire branchId
+    // never trusted); appends land in the route owner's suffix.
     for (const item of messages) {
       const entry = typeof item === 'string' ? { message: { id: item, status: null, blocks: [] }, blocks: [] } : item
       const messageData = wireToMessage(entry.message)
       messageData.topicId = topicId
+      messageData.branchId = route
       const blockDataList = entry.blocks.map(wireToBlock)
       for (const block of blockDataList) block.messageId = messageData.id
       const existing = repos.messages.getInTopic(messageData.id, topicId)
@@ -6601,6 +7957,7 @@ export class ChatDbAggregateService {
         const patch = wireToMessagePatch(entry.message)
         delete patch.id
         delete patch.topicId
+        delete patch.branchId
         delete patch.sortOrder
         repos.messages.update(topicId, messageData.id, patch)
       }
@@ -6610,10 +7967,12 @@ export class ChatDbAggregateService {
       }
     }
 
-    // Phase 4: Normalize message orders after changes
+    // Phase 4: Normalize the route owner's orders after changes (never
+    // across owners).
     repos.messages.replaceOrder(
       topicId,
-      repos.messages.listByTopic(topicId).map((m) => m.id)
+      repos.messages.listByTopic(topicId, route).map((m) => m.id),
+      route
     )
 
     // Unsupported structural path (010) — truthful invalidation inside same transaction, no clock mint
@@ -6674,14 +8033,23 @@ export class ChatDbAggregateService {
   resetMessagesForResend(
     topicId: string,
     messages: Array<{ message: JsonObject; blocks: JsonObject[] }> | string[],
-    blockIdsToDelete: string[]
+    blockIdsToDelete: string[],
+    branchId?: string | null
   ): ChatDbResult<ResetMessagesForResendResponse> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('resetMessagesForResend')
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const stx = tx as unknown as SyncTxExecutor
-        const { cleanup, attempts } = this.resetMessagesCoreInTx(tx, repos, stx, topicId, messages, blockIdsToDelete)
+        const { cleanup, attempts } = this.resetMessagesCoreInTx(
+          tx,
+          repos,
+          stx,
+          topicId,
+          messages,
+          blockIdsToDelete,
+          branchId
+        )
         return { ...cleanup, attempts }
       })
     }, `resetMessagesForResend(${topicId}, ${messages.length} msgs)`)
@@ -6839,7 +8207,8 @@ export class ChatDbAggregateService {
     topicId: string,
     userMessageId: string,
     assistantId: string,
-    currentModel: SemanticModelSnapshot
+    currentModel: SemanticModelSnapshot,
+    branchId?: string | null
   ): ChatDbResult<SemanticResendResponse> {
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('resendUserMessages')
@@ -6847,6 +8216,7 @@ export class ChatDbAggregateService {
       // direct callers must also fail closed rather than writing an id-only
       // model into a new/override execution message.
       this.assertFullSemanticSnapshot(currentModel, 'currentModel')
+      const route = this.normalizeBranchId(branchId)
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const stx = tx as unknown as SyncTxExecutor
@@ -6855,7 +8225,7 @@ export class ChatDbAggregateService {
           throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
         }
         const userRow = repos.messages.getInTopic(userMessageId, topicId)
-        if (!userRow.found || userRow.data.role !== 'user') {
+        if (!userRow.found || userRow.data.role !== 'user' || (userRow.data.branchId ?? null) !== route) {
           throw new ChatDbNotFoundError(`User message ${userMessageId} does not belong to topic ${topicId}`)
         }
         const userWireBefore = messageToWire(userRow.data)
@@ -6866,7 +8236,7 @@ export class ChatDbAggregateService {
             ? ((userRow.data.overflow.traceId ?? (userWireBefore as Record<string, unknown>).traceId) as string)
             : null
 
-        const ordered = repos.messages.listByTopic(topicId)
+        const ordered = this.resolveRouteMessagesInTx(repos, topicId, route).messages
         const existing = ordered.filter((m) => m.role === 'assistant' && m.askId === userMessageId)
         const existingWires = existing.map((m) => messageToWire(m))
         const mentions = this.mentionSnapshotsFromUserWire(userWithBlocks)
@@ -6934,12 +8304,12 @@ export class ChatDbAggregateService {
           }
         }
 
-        const core = this.resetMessagesCoreInTx(tx, repos, stx, topicId, entries, blockIdsToDelete)
+        const core = this.resetMessagesCoreInTx(tx, repos, stx, topicId, entries, blockIdsToDelete, route)
         const execMessages: MessageBlockEntry[] = []
         for (const e of entries) {
           const mid = (e.message as Record<string, unknown>).id as string
           const row = repos.messages.getInTopic(mid, topicId)
-          if (!row.found) {
+          if (!row.found || (row.data.branchId ?? null) !== route) {
             throw new ChatDbConflictError(`Semantic resend message ${mid} missing after write`)
           }
           const wire = messageToWire(row.data)
@@ -6971,11 +8341,13 @@ export class ChatDbAggregateService {
     topicId: string,
     assistantMessageId: string,
     assistantId: string,
-    currentModel?: SemanticModelSnapshot
+    currentModel?: SemanticModelSnapshot,
+    branchId?: string | null
   ): ChatDbResult<SemanticResendResponse> {
     void assistantId
     return wrapResult(() => {
       syncService.throwIfPublishBarrierHeld('regenerateAssistantMessage')
+      const route = this.normalizeBranchId(branchId)
       return this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const stx = tx as unknown as SyncTxExecutor
@@ -6984,7 +8356,7 @@ export class ChatDbAggregateService {
           throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
         }
         const selected = repos.messages.getInTopic(assistantMessageId, topicId)
-        if (!selected.found || selected.data.role !== 'assistant') {
+        if (!selected.found || selected.data.role !== 'assistant' || (selected.data.branchId ?? null) !== route) {
           throw new ChatDbNotFoundError(`Assistant message ${assistantMessageId} does not belong to topic ${topicId}`)
         }
         const askId = selected.data.askId
@@ -7020,9 +8392,9 @@ export class ChatDbAggregateService {
         const blks = repos.blocks.listByMessage(assistantMessageId)
         const blockIdsToDelete = blks.map((b) => b.id)
 
-        const core = this.resetMessagesCoreInTx(tx, repos, stx, topicId, [entry], blockIdsToDelete)
+        const core = this.resetMessagesCoreInTx(tx, repos, stx, topicId, [entry], blockIdsToDelete, route)
         const row = repos.messages.getInTopic(assistantMessageId, topicId)
-        if (!row.found) {
+        if (!row.found || (row.data.branchId ?? null) !== route) {
           throw new ChatDbConflictError(`Semantic regenerate message ${assistantMessageId} missing after write`)
         }
         const wire = messageToWire(row.data)
@@ -7119,9 +8491,14 @@ export class ChatDbAggregateService {
     return affectedFileIds
   }
 
-  deleteMessagesWithSegments(topicId: string, messageIds: string[]): ChatDbResult<FileCleanupResult> {
+  deleteMessagesWithSegments(
+    topicId: string,
+    messageIds: string[],
+    branchId?: string | null
+  ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('deleteMessagesWithSegments')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('deleteMessagesWithSegments', topicId, route)
       let notify = false
       let result: FileCleanupResult
       try {
@@ -7130,11 +8507,26 @@ export class ChatDbAggregateService {
           const stx = tx as unknown as SyncTxExecutor
           const notifyRef = { value: false }
 
-          // Phase 1: Filter to owned messages BEFORE collecting refs
+          // Phase 1: Filter to route-owned messages BEFORE collecting refs.
+          // Inherited/shared rows reject when route lineage is involved;
+          // otherwise they keep legacy silent-skip semantics.
           const ownedIds: string[] = []
           for (const id of messageIds) {
             const existing = repos.messages.getInTopic(id, topicId)
-            if (existing.found) ownedIds.push(id)
+            if (existing.found && (existing.data.branchId ?? null) === route) {
+              ownedIds.push(id)
+            } else {
+              const dbForSegFilterGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+              this.assertMutableMessageInTx(repos, dbForSegFilterGuard, topicId, route, id)
+            }
+          }
+          // Route immutability: shared owned messages included in any
+          // live descendant prefix reject.
+          {
+            const dbForSegDeleteGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const id of ownedIds) {
+              this.assertNoLiveDescendantIncludesInTx(repos, dbForSegDeleteGuard, topicId, route, id)
+            }
           }
 
           const affectedFileIds = this.deleteOwnedMessagesCoreInTx(tx, repos, stx, ctx, topicId, ownedIds, notifyRef)
@@ -7175,10 +8567,12 @@ export class ChatDbAggregateService {
    */
   deleteMessagesWithDependents(
     topicId: string,
-    messageIds: string[]
+    messageIds: string[],
+    branchId?: string | null
   ): ChatDbResult<DeleteMessagesWithDependentsResponse> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('deleteMessagesWithDependents')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('deleteMessagesWithDependents', topicId, route)
       let notify = false
       let result: DeleteMessagesWithDependentsResponse
       try {
@@ -7196,17 +8590,39 @@ export class ChatDbAggregateService {
           if (!topic.found) {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
-          // Fail-closed ownership: EVERY root must belong to the topic.
+          // Fail-closed ownership: EVERY root must belong to the addressed route.
           const rootRows = new Map<string, MessageData>()
           for (const rootId of messageIds) {
             const existing = repos.messages.getInTopic(rootId, topicId)
-            if (!existing.found) {
+            if (!existing.found || (existing.data.branchId ?? null) !== route) {
               throw new ChatDbNotFoundError(`Message ${rootId} does not belong to topic ${topicId}`)
             }
             rootRows.set(rootId, existing.data)
           }
-          const ordered = repos.messages.listByTopic(topicId)
+          // Dependent expansion and authority order resolve inside the
+          // addressed route (dependents never cross route owners).
+          const ordered = this.resolveRouteMessagesInTx(repos, topicId, route).messages
           const previousUserMessageIds = ordered.filter((m) => m.role === 'user').map((m) => m.id)
+          // Route immutability: user-root expansion over the effective
+          // route must not cover inherited assistants, and owned victims
+          // included in any live descendant prefix reject.
+          {
+            const dbForDependentsGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            const ownedIdSet = new Set(repos.messages.listByTopic(topicId, route).map((m) => m.id))
+            for (const rootId of messageIds) {
+              const row = rootRows.get(rootId)!
+              if (row.role === 'user') {
+                for (const m of ordered) {
+                  if (m.role === 'assistant' && m.askId === rootId && !ownedIdSet.has(m.id)) {
+                    throw new ChatDbValidationError(
+                      `Message ${m.id} is shared with another route and the dependent set of ${rootId} is immutable through this route`
+                    )
+                  }
+                }
+              }
+              this.assertNoLiveDescendantIncludesInTx(repos, dbForDependentsGuard, topicId, route, rootId)
+            }
+          }
           // Expand user dependents; dedupe overlapping expansions.
           const ownedSet = new Set<string>()
           for (const rootId of messageIds) {
@@ -7219,6 +8635,13 @@ export class ChatDbAggregateService {
             }
           }
           const ownedIds = ordered.filter((m) => ownedSet.has(m.id)).map((m) => m.id)
+          // Expanded owned victims included in any live descendant prefix reject.
+          {
+            const dbForVictimGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            for (const oid of ownedIds) {
+              this.assertNoLiveDescendantIncludesInTx(repos, dbForVictimGuard, topicId, route, oid)
+            }
+          }
 
           // Authority undo snapshot BEFORE any write: wires, groups, segments.
           const blockMap = repos.blocks.listByMessages(ownedIds)
@@ -7368,10 +8791,12 @@ export class ChatDbAggregateService {
   pasteMessagesToTopic(
     topicId: string,
     entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,
-    insertIndex?: number
+    insertIndex?: number,
+    branchId?: string | null
   ): ChatDbResult<FileCleanupResult> {
     return wrapResult(() => {
-      const ctx = this.syncCtx('pasteMessagesToTopic')
+      const route = this.normalizeBranchId(branchId)
+      const ctx = this.syncCtxForTopic('pasteMessagesToTopic', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
       let result: FileCleanupResult
@@ -7401,9 +8826,10 @@ export class ChatDbAggregateService {
             syncNotify = true
           }
 
-          // Compute the starting insert position (append at end when absent)
+          // Compute the starting insert position within the route owner's
+          // rows (append at owner end when absent).
           const resolvedInsertIndex =
-            insertIndex !== undefined ? insertIndex : repos.messages.listByTopic(topicId).length
+            insertIndex !== undefined ? insertIndex : repos.messages.listByTopic(topicId, route).length
 
           // Phase 1 — convert every entry, enforce block ownership, and
           // classify as new vs existing. Cross-topic ownership and duplicate
@@ -7445,6 +8871,7 @@ export class ChatDbAggregateService {
           for (const entry of entries) {
             const messageData = wireToMessage(entry.message)
             messageData.topicId = topicId
+            messageData.branchId = route
             const blockDataList = entry.blocks.map(wireToBlock)
 
             // Enforce block ownership
@@ -7456,6 +8883,7 @@ export class ChatDbAggregateService {
             const patch = wireToMessagePatch(entry.message)
             delete patch.id
             delete patch.topicId
+            delete patch.branchId
             delete patch.sortOrder
 
             // Check if message already exists
@@ -7469,6 +8897,14 @@ export class ChatDbAggregateService {
                     `cannot paste into topic ${topicId}`
                 )
               }
+              // Route immutability: patching an inherited/shared row rejects.
+              this.assertMutableMessageInTx(
+                repos,
+                tx as unknown as BetterSQLite3Database<typeof schema>,
+                topicId,
+                route,
+                messageData.id
+              )
               // Existing: preserve position, update metadata only
               existingPlans.push({ id: messageData.id, patch })
               phase4Plans.push({ blocks: blockDataList, harvest: true })

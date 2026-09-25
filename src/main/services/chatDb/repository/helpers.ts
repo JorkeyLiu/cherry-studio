@@ -7,7 +7,7 @@
  * Phase 2: central ordered-list algorithm + sortOrder patch rejection.
  */
 
-import { asc, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, isNull, sql } from 'drizzle-orm'
 
 import { decodeJson, encodeJson } from '../domain/codec'
 import { applyOverflowPatch, type RowPatchResult } from '../domain/mappers'
@@ -148,9 +148,12 @@ export function buildColumnMap(fields: ReadonlyArray<[string, string]>): Record<
  */
 export const IDENTITY_FIELDS: Record<string, ReadonlySet<string>> = {
   topics: new Set(['id']),
-  messages: new Set(['id', 'topicId']),
+  // branchId is set once by Main from the typed write context and is
+  // immutable afterwards (same identity class as topicId).
+  messages: new Set(['id', 'topicId', 'branchId']),
   messageBlocks: new Set(['id', 'messageId']),
   topicSegments: new Set(['id', 'topicId']),
+  topicBranches: new Set(['id', 'topicId', 'parentBranchId', 'anchorMessageId']),
   fileReferences: new Set(['id', 'blockId', 'fileId'])
 }
 
@@ -309,6 +312,72 @@ export function inspectDenseZeroBasedOrder(
     })
     .from(table)
     .where(eq(parentCol, parentId))
+    .get()
+  if (!row) return { dense: true, maxOrder: -1, count: 0 }
+  return {
+    dense: row.cnt === row.distinctCnt && row.minOrder === 0 && row.maxOrder === row.cnt - 1,
+    maxOrder: row.maxOrder,
+    count: row.cnt
+  }
+}
+
+/**
+ * Owner predicate for route-scoped message siblings: one logical topic plus
+ * one route owner (`branchId = null` = main route, otherwise that branch).
+ * sort_order density is per route owner — never across main/branch rows.
+ */
+export function ownerPredicate(_table: any, topicCol: any, branchCol: any, topicId: string, branchId: string | null) {
+  return branchId === null
+    ? and(eq(topicCol, topicId), isNull(branchCol))
+    : and(eq(topicCol, topicId), eq(branchCol, branchId))
+}
+
+/**
+ * Load route-owner sibling IDs in deterministic order (sort_order ASC, id ASC).
+ * Must be called inside a transaction.
+ */
+export function loadOwnerOrderedIds(
+  tx: any,
+  table: any,
+  topicCol: any,
+  branchCol: any,
+  topicId: string,
+  branchId: string | null
+): string[] {
+  return tx
+    .select({ id: table.id })
+    .from(table)
+    .where(ownerPredicate(table, topicCol, branchCol, topicId, branchId))
+    .orderBy(asc(table.sortOrder), asc(table.id))
+    .all()
+    .map((r: any) => r.id as string)
+}
+
+/**
+ * Owner-scoped dense-zero-based inspection: same single-aggregate contract
+ * as {@link inspectDenseZeroBasedOrder}, but bounded to one route owner so
+ * main and branch suffix rows never interleave.
+ *
+ * Must be called inside a transaction.
+ */
+export function inspectOwnerDenseOrder(
+  tx: any,
+  table: any,
+  topicCol: any,
+  branchCol: any,
+  topicId: string,
+  branchId: string | null
+): DenseOrderInspection {
+  const where = ownerPredicate(table, topicCol, branchCol, topicId, branchId)
+  const row = tx
+    .select({
+      cnt: sql<number>`count(*)`,
+      distinctCnt: sql<number>`count(distinct ${table.sortOrder})`,
+      maxOrder: sql<number>`coalesce(max(${table.sortOrder}), -1)`,
+      minOrder: sql<number>`coalesce(min(${table.sortOrder}), 0)`
+    })
+    .from(table)
+    .where(where)
     .get()
   if (!row) return { dense: true, maxOrder: -1, count: 0 }
   return {

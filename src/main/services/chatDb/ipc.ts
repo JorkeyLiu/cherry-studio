@@ -32,7 +32,9 @@ import type {
   ChatDbResult,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
+  CreateBranchRequest,
   DeleteBlocksRequest,
+  DeleteBranchRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -53,12 +55,14 @@ import type {
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
+  ListBranchesRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
+  RenameBranchRequest,
   ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
@@ -371,7 +375,7 @@ export function registerChatDbIpc(): () => void {
 
   // 1. fetch-messages
   handleCommand(IpcChannel.ChatDb_FetchMessages, (agg, req: FetchMessagesRequest) => {
-    return agg.fetchMessages(req.topicId)
+    return agg.fetchMessages(req.topicId, req.branchId)
   })
 
   // 1b. fetch-messages-window (S6.1 R-02/R-03 typed window)
@@ -432,19 +436,24 @@ export function registerChatDbIpc(): () => void {
   // 5. append-message
   handleCommand(IpcChannel.ChatDb_AppendMessage, (agg, req: AppendMessageRequest) => {
     return agg.appendMessage(req.topicId, req.message, req.blocks, req.insertIndex, req.diagnostics, {
-      resendAttemptId: req.resendAttemptId
+      resendAttemptId: req.resendAttemptId,
+      branchId: req.branchId
     })
   })
 
   // 6. update-message
   handleCommand(IpcChannel.ChatDb_UpdateMessage, (agg, req: UpdateMessageRequest) => {
-    return agg.updateMessage(req.topicId, req.messageId, req.updates, { resendAttemptId: req.resendAttemptId })
+    return agg.updateMessage(req.topicId, req.messageId, req.updates, {
+      resendAttemptId: req.resendAttemptId,
+      branchId: req.branchId
+    })
   })
 
   // 7. update-message-and-blocks
   handleCommand(IpcChannel.ChatDb_UpdateMessageAndBlocks, (agg, req: UpdateMessageAndBlocksRequest) => {
     return agg.updateMessageAndBlocks(req.topicId, req.messageUpdates, req.blocksToUpdate, req.blockIdsToDelete, {
-      resendAttemptId: req.resendAttemptId
+      resendAttemptId: req.resendAttemptId,
+      branchId: req.branchId
     })
   })
 
@@ -452,17 +461,17 @@ export function registerChatDbIpc(): () => void {
   // resolves the complete answer group from the selected ID and persists
   // exactly one foldSelected=true in one Main transaction.
   handleCommand(IpcChannel.ChatDb_SelectAnswerMessage, (agg, req: SelectAnswerMessageRequest) => {
-    return agg.selectAnswerMessage(req.topicId, req.selectedMessageId)
+    return agg.selectAnswerMessage(req.topicId, req.selectedMessageId, req.branchId)
   })
 
   // 8. delete-message
   handleCommand(IpcChannel.ChatDb_DeleteMessage, (agg, req: DeleteMessageRequest) => {
-    return agg.deleteMessage(req.topicId, req.messageId)
+    return agg.deleteMessage(req.topicId, req.messageId, req.branchId)
   })
 
   // 9. delete-messages
   handleCommand(IpcChannel.ChatDb_DeleteMessages, (agg, req: DeleteMessagesRequest) => {
-    return agg.deleteMessages(req.topicId, req.messageIds)
+    return agg.deleteMessages(req.topicId, req.messageIds, req.branchId)
   })
 
   // 10. update-blocks
@@ -494,7 +503,7 @@ export function registerChatDbIpc(): () => void {
 
   // 15. upsert-segment (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_UpsertSegment, (agg, req: UpsertSegmentRequest) => {
-    return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color)
+    return agg.upsertSegment(req.segmentId, req.topicId, req.name, req.messageIds, req.color, req.branchId)
   })
 
   // 16. update-segment-metadata (Phase 5.1A)
@@ -509,17 +518,17 @@ export function registerChatDbIpc(): () => void {
 
   // 18. replace-segment-membership (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ReplaceSegmentMembership, (agg, req: ReplaceSegmentMembershipRequest) => {
-    return agg.replaceSegmentMembership(req.segmentId, req.messageIds)
+    return agg.replaceSegmentMembership(req.segmentId, req.messageIds, req.branchId)
   })
 
   // 19. reorder-messages (Phase 5.1A)
   handleCommand(IpcChannel.ChatDb_ReorderMessages, (agg, req: ReorderMessagesRequest) => {
-    return agg.reorderMessages(req.topicId, req.messageIds)
+    return agg.reorderMessages(req.topicId, req.messageIds, req.branchId)
   })
 
   // 19b. reorder-answer-group (additive semantic command, keeps reorder-messages intact)
   handleCommand(IpcChannel.ChatDb_ReorderAnswerGroup, (agg, req: ReorderAnswerGroupRequest) => {
-    return agg.reorderAnswerGroup(req.topicId, req.anchorMessageId, req.orderedMessageIds)
+    return agg.reorderAnswerGroup(req.topicId, req.anchorMessageId, req.orderedMessageIds, req.branchId)
   })
 
   // 20. list-file-refs-by-file (Phase 5.1A, read-only)
@@ -569,52 +578,81 @@ export function registerChatDbIpc(): () => void {
 
   // 29b. branch-messages-to-topic (S6.2c-1): stable anchor, atomic prefix clone
   handleCommand(IpcChannel.ChatDb_BranchMessagesToTopic, (agg, req: BranchMessagesToTopicRequest) => {
-    return agg.branchMessagesToTopic(req.sourceTopicId, req.targetTopicId, req.anchorMessageId, req.assistantId)
+    return agg.branchMessagesToTopic(
+      req.sourceTopicId,
+      req.targetTopicId,
+      req.anchorMessageId,
+      req.assistantId,
+      req.branchId
+    )
+  })
+
+  // 29c. topic-internal branches (016): local-only, no prefix cloning
+  handleCommand(IpcChannel.ChatDb_CreateBranch, (agg, req: CreateBranchRequest) => {
+    return agg.createBranch(req.topicId, req.parentBranchId, req.anchorMessageId, req.name)
+  })
+
+  handleCommand(IpcChannel.ChatDb_ListBranches, (agg, req: ListBranchesRequest) => {
+    return agg.listBranches(req.topicId)
+  })
+
+  handleCommand(IpcChannel.ChatDb_RenameBranch, (agg, req: RenameBranchRequest) => {
+    return agg.renameBranch(req.topicId, req.branchId, req.name)
+  })
+
+  handleCommand(IpcChannel.ChatDb_DeleteBranch, (agg, req: DeleteBranchRequest) => {
+    return agg.deleteBranch(req.topicId, req.branchId)
   })
 
   // 29. clone-messages-to-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_CloneMessagesToTopic, (agg, req: CloneMessagesToTopicRequest) => {
-    return agg.cloneMessagesToTopic(req.targetTopicId, req.entries, req.assistantId)
+    return agg.cloneMessagesToTopic(req.targetTopicId, req.entries, req.assistantId, req.branchId)
   })
 
   // 30. reset-messages-for-resend (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_ResetMessagesForResend, (agg, req: ResetMessagesForResendRequest) => {
-    return agg.resetMessagesForResend(req.topicId, req.messages, req.blockIdsToDelete)
+    return agg.resetMessagesForResend(req.topicId, req.messages, req.blockIdsToDelete, req.branchId)
   })
 
   // 30b. resend-user-messages: semantic resend by stable user ID (authority group resolve)
   handleCommand(IpcChannel.ChatDb_ResendUserMessages, (agg, req: ResendUserMessagesRequest) => {
-    return agg.resendUserMessages(req.topicId, req.userMessageId, req.assistantId, req.currentModel)
+    return agg.resendUserMessages(req.topicId, req.userMessageId, req.assistantId, req.currentModel, req.branchId)
   })
 
   // 30c. regenerate-assistant-message: semantic regenerate by stable assistant ID
   handleCommand(IpcChannel.ChatDb_RegenerateAssistantMessage, (agg, req: RegenerateAssistantMessageRequest) => {
-    return agg.regenerateAssistantMessage(req.topicId, req.assistantMessageId, req.assistantId, req.currentModel)
+    return agg.regenerateAssistantMessage(
+      req.topicId,
+      req.assistantMessageId,
+      req.assistantId,
+      req.currentModel,
+      req.branchId
+    )
   })
 
   // 31. delete-messages-with-segments (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_DeleteMessagesWithSegments, (agg, req: DeleteMessagesWithSegmentsRequest) => {
-    return agg.deleteMessagesWithSegments(req.topicId, req.messageIds)
+    return agg.deleteMessagesWithSegments(req.topicId, req.messageIds, req.branchId)
   })
 
   // 31b. delete-messages-with-dependents: semantic plural delete with Main-resolved cascade + authority undo snapshot
   handleCommand(IpcChannel.ChatDb_DeleteMessagesWithDependents, (agg, req: DeleteMessagesWithDependentsRequest) => {
-    return agg.deleteMessagesWithDependents(req.topicId, req.messageIds)
+    return agg.deleteMessagesWithDependents(req.topicId, req.messageIds, req.branchId)
   })
 
   // 32. paste-messages-to-topic (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_PasteMessagesToTopic, (agg, req: PasteMessagesToTopicRequest) => {
-    return agg.pasteMessagesToTopic(req.topicId, req.entries, req.insertIndex)
+    return agg.pasteMessagesToTopic(req.topicId, req.entries, req.insertIndex, req.branchId)
   })
 
   // 32b. insert-messages-after-anchor (S6.2c-2): stable anchor, atomic insert
   handleCommand(IpcChannel.ChatDb_InsertMessagesAfterAnchor, (agg, req: InsertMessagesAfterAnchorRequest) => {
-    return agg.insertMessagesAfterAnchor(req.topicId, req.afterMessageId, req.entries)
+    return agg.insertMessagesAfterAnchor(req.topicId, req.afterMessageId, req.entries, req.branchId)
   })
 
   // 32c. insert-message-groups: stable intents, atomic multi-group insert
   handleCommand(IpcChannel.ChatDb_InsertMessageGroups, (agg, req: InsertMessageGroupsRequest) => {
-    return agg.insertMessageGroups(req.topicId, req.groups as any)
+    return agg.insertMessageGroups(req.topicId, req.groups as any, req.branchId)
   })
 
   // 33. search-messages (Phase 5.1B-2)

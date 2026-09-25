@@ -1150,6 +1150,10 @@
       }
     },
     "message": {
+      "copy_topic": {
+        "created": "Topic copied",
+        "label": "Copy Topic"
+      },
       "insert": {
         "label": "Insert Messages",
         "newAssistantMessage": "New assistant message",
@@ -1168,6 +1172,10 @@
         "model": "Switch Model"
       },
       "set_context_anchor": "Mark as Context Start",
+      "true_branch": {
+        "created": "Branch created",
+        "label": "Create Branch"
+      },
       "useful": {
         "label": "Set as context",
         "tip": "In this group of messages, this message will be selected to join the context"
@@ -1335,6 +1343,20 @@
     "thinking": "Thinking ({{seconds}} seconds)",
     "topics": {
       "auto_rename": "Auto Rename",
+      "branch": {
+        "ancestors": "Ancestors",
+        "children": "Branches",
+        "children_here": "{{count}} branches here",
+        "collapse": "Collapse branch",
+        "current": "Current",
+        "default_name": "New Branch",
+        "delete": "Delete Branch",
+        "delete_confirm": "Delete this branch and all its descendant branches? This cannot be undone.",
+        "deleted": "Branch deleted",
+        "expand": "Expand branch",
+        "rename": "Rename Branch",
+        "tag": "Branch"
+      },
       "copy": {
         "image": "Copy as image",
         "md": "Copy as markdown",
@@ -2592,6 +2614,9 @@
     },
     "topic": {
       "added": "New topic added"
+    },
+    "true_branch": {
+      "error": "True branch creation failed"
     },
     "upgrade": {
       "success": {

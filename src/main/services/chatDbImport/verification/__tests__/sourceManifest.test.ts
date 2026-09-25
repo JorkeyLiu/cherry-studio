@@ -31,6 +31,9 @@ function messageDto(id: string, topicId: string, sortOrder: number, overflow: Re
   return {
     id,
     topicId,
+    // Route owner column (016): NULL = main route, explicitly present in
+    // the canonical framing (LOCK-4302).
+    branchId: null,
     role: 'user',
     content: null,
     status: 'success',

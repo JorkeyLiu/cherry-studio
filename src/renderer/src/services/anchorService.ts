@@ -101,9 +101,10 @@ export function transferAnchorsWithAuthorityGroupKeys(
   getState: () => RootState,
   topicId: string,
   previousUserMessageIds: string[],
-  remainingUserMessageIds: string[]
+  remainingUserMessageIds: string[],
+  branchId?: string | null
 ): void {
-  transferAnchorsAfterDeletion(dispatch, getState, topicId, previousUserMessageIds, remainingUserMessageIds)
+  transferAnchorsAfterDeletion(dispatch, getState, topicId, previousUserMessageIds, remainingUserMessageIds, branchId)
 }
 
 /**
@@ -118,13 +119,15 @@ export function transferAnchorsAfterDeletion(
   getState: () => RootState,
   topicId: string,
   oldGroupList: string[],
-  newGroupList: string[]
+  newGroupList: string[],
+  branchId?: string | null
 ): void {
   const state = getState()
   const allAssistants = state.assistants.assistants
+  const anchorKey = anchorKeyForRoute(topicId, branchId)
 
   for (const asst of allAssistants) {
-    const oldAnchor = asst.settings?.contextWindowAnchor?.[topicId]
+    const oldAnchor = asst.settings?.contextWindowAnchor?.[anchorKey]
     if (!oldAnchor || oldAnchor.kind !== 'active') continue
 
     const newAnchor = transferAnchorOnDeletion(oldAnchor, oldGroupList, newGroupList)
@@ -132,9 +135,9 @@ export function transferAnchorsAfterDeletion(
 
     const updatedAnchors: ContextWindowAnchorMap = { ...asst.settings?.contextWindowAnchor }
     if (newAnchor) {
-      updatedAnchors[topicId] = newAnchor
+      updatedAnchors[anchorKey] = newAnchor
     } else {
-      delete updatedAnchors[topicId]
+      delete updatedAnchors[anchorKey]
     }
 
     dispatch(
@@ -266,13 +269,26 @@ async function awaitE2EAnchorGateIfArmed(topicId: string): Promise<void> {
   })
 }
 
+/**
+ * Deterministic persisted key for a route's context-window anchor.
+ *
+ * Main-route keys stay exactly `topicId` (persisted compatibility); branch
+ * routes use `topicId:branchId` so anchors never collide under one topic.
+ */
+export function anchorKeyForRoute(topicId: string, branchId?: string | null): string {
+  return typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
+}
+
 export async function ensureTopicAnchorEstablished(
   dispatch: (action: { type: string; payload?: unknown }) => void,
   getState: () => RootState,
   assistantId: string,
-  topicId: string
+  topicId: string,
+  branchId?: string | null
 ): Promise<void> {
-  const key = `${assistantId}:${topicId}`
+  const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+  const anchorKey = anchorKeyForRoute(topicId, route)
+  const key = `${assistantId}:${anchorKey}`
   const existing = inFlightRepairs.get(key)
   if (existing) {
     return existing
@@ -284,7 +300,7 @@ export async function ensureTopicAnchorEstablished(
       return
     }
     const settings = getAssistantSettings(assistant)
-    const preAnchor = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    const preAnchor = settings.contextWindowAnchor?.[anchorKey] as unknown as ContextWindowAnchor | undefined
     const preKey = preAnchor?.kind === 'active' ? preAnchor.groupKey : null
     const contextCount = settings.contextCount ?? null
     let resolved: string | null | undefined
@@ -292,6 +308,7 @@ export async function ensureTopicAnchorEstablished(
       await awaitE2EAnchorGateIfArmed(topicId)
       const response = await dbService.resolveContextClosure({
         topicId,
+        branchId: route,
         intent: 'establish',
         contextCount,
         currentAnchorGroupKey: preKey,
@@ -312,7 +329,7 @@ export async function ensureTopicAnchorEstablished(
       return
     }
     const freshSettings = getAssistantSettings(freshAssistant)
-    const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    const freshAnchor = freshSettings.contextWindowAnchor?.[anchorKey] as unknown as ContextWindowAnchor | undefined
     const freshKey = freshAnchor?.kind === 'active' ? freshAnchor.groupKey : null
     if (freshKey !== preKey) {
       return
@@ -322,14 +339,14 @@ export async function ensureTopicAnchorEstablished(
     }
     const updatedAnchors: ContextWindowAnchorMap = { ...freshSettings.contextWindowAnchor }
     if (resolved === null || resolved === undefined) {
-      delete updatedAnchors[topicId]
+      delete updatedAnchors[anchorKey]
       // Removing a key when nothing was persisted is a no-op shape change;
       // dispatch only when a key actually existed.
       if (freshAnchor === undefined) {
         return
       }
     } else {
-      updatedAnchors[topicId] = { kind: 'active', groupKey: resolved }
+      updatedAnchors[anchorKey] = { kind: 'active', groupKey: resolved }
     }
     dispatch(
       updateAssistantSettings({

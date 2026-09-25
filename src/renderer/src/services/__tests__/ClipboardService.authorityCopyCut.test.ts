@@ -248,7 +248,11 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const count = await copyMessages(dispatch, 'topic-1', ['u1'])
 
     expect(count).toBe(3)
-    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['u1'] })
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
+      topicId: 'topic-1',
+      branchId: null,
+      groupIds: ['u1']
+    })
     // Production path never touches the whole-topic snapshot or loaded projection.
     expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
@@ -291,7 +295,11 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const count = await copyMessages(dispatch, 'topic-1', ['u2', 'u1'])
 
     expect(count).toBe(4)
-    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['u2', 'u1'] })
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
+      topicId: 'topic-1',
+      branchId: null,
+      groupIds: ['u2', 'u1']
+    })
     expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     const items = dispatch.mock.calls[0][0].payload.items
     expect(items.map((i) => i.originalAskId)).toEqual(['u1', 'u2'])
@@ -312,7 +320,11 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const count = await cutMessages(dispatch, 'topic-1', ['u1'])
 
     expect(count).toBe(3)
-    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['u1'] })
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
+      topicId: 'topic-1',
+      branchId: null,
+      groupIds: ['u1']
+    })
     expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     expect(dispatch).toHaveBeenCalledTimes(1)
     const payload = dispatch.mock.calls[0][0].payload
@@ -332,7 +344,11 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
 
     const count = await copyMessages(dispatch, 'topic-1', ['s1', 't1'])
 
-    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['s1', 't1'] })
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
+      topicId: 'topic-1',
+      branchId: null,
+      groupIds: ['s1', 't1']
+    })
     expect(count).toBe(1)
     const items = dispatch.mock.calls[0][0].payload.items
     expect(items).toHaveLength(1)
@@ -432,7 +448,11 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const count = await copyMessages(dispatch, 'topic-1', ['um'])
 
     expect(count).toBe(1)
-    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({ topicId: 'topic-1', groupIds: ['um'] })
+    expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
+      topicId: 'topic-1',
+      branchId: null,
+      groupIds: ['um']
+    })
     expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()
     const item = dispatch.mock.calls[0][0].payload.items[0]
     expect(item.originalAskId).toBe('um')
@@ -463,6 +483,7 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     expect(await copyMessages(dispatch, 'topic-1', ['missing-group', 't1'])).toBe(0)
     expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
       topicId: 'topic-1',
+      branchId: null,
       groupIds: ['missing-group', 't1']
     })
     expect(mocks.fetchWholeTopicSnapshot).not.toHaveBeenCalled()

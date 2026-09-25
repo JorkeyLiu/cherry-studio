@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { addSegment, removeSegment, updateSegment } from '@renderer/store/topicSegment'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import { uuid } from '@renderer/utils'
@@ -31,6 +32,7 @@ export function useTopicSegments(topicId: string) {
   const segmentsByTopic = useAppSelector((state) => state.topicSegments.segmentsByTopic)
 
   const messageIdsForTopic = useAppSelector((state) => state.messages.messageIdsByTopic[topicId] || [])
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topicId))
 
   const segmentsForTopic = useMemo(() => {
     const ids = segmentsByTopic[topicId] || []
@@ -70,7 +72,14 @@ export function useTopicSegments(topicId: string) {
       // keep at least the new wire visible and log via the safe logger.
       const id = uuid()
       const color = getSegmentColor(id)
-      const wire = await dbService.upsertSegment(id, tid, name, messageIds, color)
+      const wire = await dbService.upsertSegment(
+        id,
+        tid,
+        name,
+        messageIds,
+        color,
+        tid === topicId ? activeBranchId : null
+      )
       const segment = mapSegmentWireToTopicSegment(wire)
       try {
         await convergeTopicSegmentCatalog(dispatch, tid)
@@ -81,7 +90,7 @@ export function useTopicSegments(topicId: string) {
       logger.info(`Created segment "${name}" with ${segment.messageCount} messages`)
       return segment
     },
-    [dispatch]
+    [dispatch, topicId, activeBranchId]
   )
 
   const updateSegmentName = useCallback(
@@ -110,7 +119,7 @@ export function useTopicSegments(topicId: string) {
   const updateSegmentMessageIds = useCallback(
     async (segmentId: string, newMessageIds: string[]) => {
       // DB-first enriched: empty membership deletes per repo semantics (null wire).
-      const wire = await dbService.replaceSegmentMembership(segmentId, newMessageIds)
+      const wire = await dbService.replaceSegmentMembership(segmentId, newMessageIds, activeBranchId)
       if (wire === null) {
         dispatch(removeSegment(segmentId))
         return
@@ -129,7 +138,7 @@ export function useTopicSegments(topicId: string) {
         })
       )
     },
-    [dispatch]
+    [dispatch, activeBranchId]
   )
 
   const deleteSegment = useCallback(

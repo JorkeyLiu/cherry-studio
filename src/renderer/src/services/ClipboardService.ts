@@ -6,6 +6,7 @@ import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { addSegment } from '@renderer/store/topicSegment'
 import { pushUndoAction } from '@renderer/store/undoStack'
 import type {
@@ -91,7 +92,8 @@ function findAnchorAfterPosition(messages: Message[], positionIndex: number, exc
  */
 async function buildAuthorityClipboardPayload(
   topicId: string,
-  selectedGroupIds: string[]
+  selectedGroupIds: string[],
+  branchId?: string | null
 ): Promise<{ items: ClipboardItem[]; segmentSnapshots: ClipboardSegmentSnapshot[] } | null> {
   // Stable group IDs only (dedupe defense-in-depth; same contract as the
   // semantic delete path).
@@ -100,13 +102,18 @@ async function buildAuthorityClipboardPayload(
     return null
   }
 
-  // Group-scoped authority read; never relies on or mutates Redux, never
-  // fetches the whole topic. A selected ID absent from authority (deletion
-  // race, unknown id, non-clipboard role, cross-topic id) is filtered by
-  // Main and resolves to nothing here.
+  // Group-scoped authority read in the addressed route (null = main route);
+  // never relies on or mutates Redux, never fetches the whole topic. A
+  // selected ID absent from authority (deletion race, unknown id,
+  // non-clipboard role, cross-topic id) is filtered by Main and resolves to
+  // nothing here.
   let clipboard: Awaited<ReturnType<typeof dbService.fetchClipboardGroups>>
   try {
-    clipboard = await dbService.fetchClipboardGroups({ topicId, groupIds: rootIds })
+    clipboard = await dbService.fetchClipboardGroups({
+      topicId,
+      branchId: typeof branchId === 'string' && branchId.length > 0 ? branchId : null,
+      groupIds: rootIds
+    })
   } catch (error) {
     logger.error('[buildAuthorityClipboardPayload] Failed to fetch clipboard groups', error as Error)
     return null
@@ -213,9 +220,10 @@ async function buildAuthorityClipboardPayload(
 export async function copyMessages(
   dispatch: AppDispatch,
   topicId: string,
-  selectedGroupIds: string[]
+  selectedGroupIds: string[],
+  branchId?: string | null
 ): Promise<number> {
-  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds)
+  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds, branchId)
 
   if (!payload || payload.items.length === 0) {
     return 0
@@ -246,8 +254,13 @@ export async function copyMessages(
  * Redux message and block projections are never mutated. Returns the number
  * of messages cut.
  */
-export async function cutMessages(dispatch: AppDispatch, topicId: string, selectedGroupIds: string[]): Promise<number> {
-  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds)
+export async function cutMessages(
+  dispatch: AppDispatch,
+  topicId: string,
+  selectedGroupIds: string[],
+  branchId?: string | null
+): Promise<number> {
+  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds, branchId)
 
   if (!payload || payload.items.length === 0) {
     return 0
@@ -434,9 +447,11 @@ export async function pasteMessages(
   // DB-first (LOCK-001): ONE atomic stable insertion BEFORE any Redux commit.
   // If the batch fails, Redux is never touched and nothing is projected.
   try {
-    await dbService.insertMessageGroups(targetTopicId, [
-      { entries: entries as unknown as MessageBlockEntry[], intent: stableIntent }
-    ])
+    await dbService.insertMessageGroups(
+      targetTopicId,
+      [{ entries: entries as unknown as MessageBlockEntry[], intent: stableIntent }],
+      selectActiveBranchId(getState(), targetTopicId)
+    )
   } catch (error) {
     logger.error('[pasteMessages] Failed to persist paste batch to DB', error as Error)
     throw new Error(`[pasteMessages] DB batch write failed for ${entries.length} entries`)
@@ -510,7 +525,14 @@ export async function pasteMessages(
       // DB-first: collect the Main wire mapping; Redux convergence happens
       // once below via a single list+replace so shifted siblings converge.
       const newId = uuidv4()
-      const wire = await dbService.upsertSegment(newId, targetTopicId, clipSnap.name, newMessageIds, clipSnap.color)
+      const wire = await dbService.upsertSegment(
+        newId,
+        targetTopicId,
+        clipSnap.name,
+        newMessageIds,
+        clipSnap.color,
+        selectActiveBranchId(getState(), targetTopicId)
+      )
       const newSegment = mapSegmentWireToTopicSegment(wire)
       if (wire.name == null) newSegment.name = clipSnap.name
       targetSegmentSnapshots.push(newSegment)

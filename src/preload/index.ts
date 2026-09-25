@@ -8,7 +8,9 @@ import type {
   BulkAddBlocksRequest,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
+  CreateBranchRequest,
   DeleteBlocksRequest,
+  DeleteBranchRequest,
   DeleteMessageRequest,
   DeleteMessagesRequest,
   DeleteMessagesWithDependentsRequest,
@@ -29,12 +31,14 @@ import type {
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
+  ListBranchesRequest,
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
+  RenameBranchRequest,
   ReorderAnswerGroupRequest,
   ReorderMessagesRequest,
   ReplaceSegmentMembershipRequest,
@@ -743,6 +747,11 @@ const api = {
     // S6.2c-1: branch by stable anchor (additive, keeps old clone intact)
     branchMessagesToTopic: (request: BranchMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_BranchMessagesToTopic, request),
+    // Topic-internal branches (016): local-only, no prefix cloning (only creation method)
+    createBranch: (request: CreateBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_CreateBranch, request),
+    listBranches: (request: ListBranchesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ListBranches, request),
+    renameBranch: (request: RenameBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_RenameBranch, request),
+    deleteBranch: (request: DeleteBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBranch, request),
     // S6.2c-2: insert after stable anchor (additive, keeps old append intact)
     insertMessagesAfterAnchor: (request: InsertMessagesAfterAnchorRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_InsertMessagesAfterAnchor, request),

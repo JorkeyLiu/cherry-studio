@@ -144,7 +144,7 @@ describe('reorderMessageGroupThunk — semantic authority reorder', () => {
     await reorderMessageGroupThunk(topicId, ['assistant-2', 'assistant-1'])(dispatch, getState)
 
     expect(mocks.reorderAnswerGroup).toHaveBeenCalledTimes(1)
-    expect(mocks.reorderAnswerGroup).toHaveBeenCalledWith(topicId, 'assistant-2', ['assistant-2', 'assistant-1'])
+    expect(mocks.reorderAnswerGroup).toHaveBeenCalledWith(topicId, 'assistant-2', ['assistant-2', 'assistant-1'], null)
     const dbIdx = callOrder.findIndex((c) => c.startsWith('db-'))
     const reduxIdx = callOrder.findIndex((c) => c.startsWith('redux-'))
     expect(dbIdx).toBeGreaterThanOrEqual(0)

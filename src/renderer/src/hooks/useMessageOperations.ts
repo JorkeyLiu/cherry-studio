@@ -15,6 +15,7 @@ import {
 import {
   appendAssistantResponseThunk,
   branchMessagesToTopicThunk,
+  createBranchThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
   regenerateAssistantResponseThunk,
@@ -320,6 +321,21 @@ export function useMessageOperations(topic: Topic) {
   )
 
   /**
+   * True branch creation (the ONLY true-branch creation method): fork one
+   * internal branch node at the anchor message of a parent route (which may
+   * itself be inherited). No prefix cloning, no sync intent, no new topic.
+   */
+  const createBranch = useCallback(
+    (topicId: string, parentBranchId: string | null, anchorMessageId: string, name: string) => {
+      logger.info(
+        `Creating branch in topic ${topicId} at anchor ${anchorMessageId} (parent route ${parentBranchId ?? 'main'})`
+      )
+      return dispatch(createBranchThunk(topicId, parentBranchId, anchorMessageId, name))
+    },
+    [dispatch]
+  )
+
+  /**
    * Updates message blocks by comparing original and edited blocks.
    * Handles adding, updating, and removing blocks in a SINGLE atomic SQLite
    * transaction via updateMessageAndBlocksThunk with blockIdsToDelete.
@@ -528,6 +544,7 @@ export function useMessageOperations(topic: Topic) {
     resumeMessage,
     getTranslationUpdater,
     createTopicBranchByAnchor,
+    createBranch,
     editMessageBlocks,
     removeMessageBlock
   }

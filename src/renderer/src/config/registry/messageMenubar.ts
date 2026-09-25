@@ -11,6 +11,13 @@ export type MessageMenubarButtonId =
   | 'translate'
   | 'useful'
   | 'notes'
+  // True topic branch creation: visible assistant-message toolbar button.
+  // The ONLY true-branch creation method.
+  | 'true-branch'
+  // Assistant insert/edit moved from the More menu into the visible toolbar
+  // between Branch and Delete (exact order: Branch → Insert → Edit → Delete).
+  | 'assistant-insert'
+  | 'assistant-edit'
   | 'delete'
   | 'trace'
   | 'more-menu'
@@ -25,16 +32,21 @@ export type MessageMenubarScopeConfig = {
 
 export const DEFAULT_MESSAGE_MENUBAR_SCOPE: MessageMenubarScope = TopicType.Chat
 
+// Translate and Save to Notes live in the More menu (overflow), not as
+// visible buttons; their button renderers stay reusable for scopes that
+// still list them. Exact assistant visible order around branch management:
+// Branch → Insert Message → Edit → Delete.
 export const DEFAULT_MESSAGE_MENUBAR_BUTTON_IDS: MessageMenubarButtonId[] = [
   'user-regenerate',
   'user-edit',
   'copy',
   'assistant-regenerate',
   'assistant-mention-model',
-  'translate',
   'useful',
-  'notes',
   'context-anchor',
+  'true-branch',
+  'assistant-insert',
+  'assistant-edit',
   'delete',
   'trace',
   'inspect-data',

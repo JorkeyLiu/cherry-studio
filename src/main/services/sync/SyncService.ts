@@ -33,7 +33,7 @@ import {
 } from '@shared/sync'
 import { SYNC_MAX_OPERATIONS_PER_PULL, SYNC_MAX_OPERATIONS_PER_PUSH } from '@shared/sync'
 import type Database from 'better-sqlite3'
-import { and, asc, eq } from 'drizzle-orm'
+import { and, asc, eq, isNull } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { chatDbService } from '../chatDb'
@@ -1364,7 +1364,9 @@ export class SyncService {
     const fullSiblingRows = tx
       .select()
       .from(schema.messages)
-      .where(eq(schema.messages.topicId, topicId))
+      // Main-route rows only: branch-owned suffix rows are local-only and
+      // never enter membership, frames, or the wire.
+      .where(and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId)))
       .all() as Array<{
       id: string
       topicId: string
@@ -2948,7 +2950,8 @@ export class SyncService {
     const rows = tx
       .select({ id: schema.messages.id, sortOrder: schema.messages.sortOrder, status: schema.messages.status })
       .from(schema.messages)
-      .where(eq(schema.messages.topicId, topicId))
+      // Main-route rows only (branch-owned rows are local-only, never framed).
+      .where(and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId)))
       .all()
       .sort((a, b) => {
         if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
@@ -3565,7 +3568,13 @@ export class SyncService {
     if (!childMem || childMem.parentId !== parentId) return false
     // Collect current parent's complete live eligible set; every live child
     // must carry legal same-parent membership or no repair is attempted.
-    const rows = db.select().from(schema.messages).where(eq(schema.messages.topicId, parentId)).all()
+    // Main-route rows only: branch-owned suffix rows are local-only and
+    // carry no membership — including them would stall frame repair.
+    const rows = db
+      .select()
+      .from(schema.messages)
+      .where(and(eq(schema.messages.topicId, parentId), isNull(schema.messages.branchId)))
+      .all()
     const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
     for (const row of rows) {
       if (!isStableMessageStatus(row.status)) continue
@@ -4157,7 +4166,13 @@ export class SyncService {
       throw new SyncOrphanError(`orphan order_frame ${op.id} parent ${parentId} missing`)
     }
     // Collect live stable messages for this parent with tombstone suppression.
-    const messageRows = db.select().from(schema.messages).where(eq(schema.messages.topicId, parentId)).all()
+    // Main-route rows only: branch-owned suffix rows are local-only and
+    // carry no membership (including them would fail the frame apply).
+    const messageRows = db
+      .select()
+      .from(schema.messages)
+      .where(and(eq(schema.messages.topicId, parentId), isNull(schema.messages.branchId)))
+      .all()
     const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
     for (const row of messageRows) {
       if (!isStableMessageStatus(row.status)) continue
@@ -4811,7 +4826,13 @@ export class SyncService {
       }
       throw new SyncOrphanError(`orphan message_stable_replace ${op.id} topicFrame parent ${parentId} missing`)
     }
-    const messageRows = db.select().from(schema.messages).where(eq(schema.messages.topicId, parentId)).all()
+    // Main-route rows only: branch-owned suffix rows are local-only and
+    // carry no membership (including them would fail the bundled apply).
+    const messageRows = db
+      .select()
+      .from(schema.messages)
+      .where(and(eq(schema.messages.topicId, parentId), isNull(schema.messages.branchId)))
+      .all()
     const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
     for (const row of messageRows) {
       if (!isStableMessageStatus(row.status)) continue
@@ -5702,7 +5723,13 @@ export class SyncService {
         const updatedAt = (p.updatedAt as string | null) ?? nowIso
         const rawSort = p.sortOrder as number | null | undefined
         const sortOrder = typeof rawSort === 'number' && Number.isFinite(rawSort) ? rawSort : 0
-        const maxRow = db.select().from(schema.messages).where(eq(schema.messages.topicId, topicId)).all()
+        // Main-route rows only: remote applies land on the main route and
+        // must not collide with branch-owned sort orders.
+        const maxRow = db
+          .select()
+          .from(schema.messages)
+          .where(and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId)))
+          .all()
         const maxSort = maxRow.length > 0 ? Math.max(...maxRow.map((r) => r.sortOrder)) + 1 : sortOrder
         let insertSort = typeof sortOrder === 'number' ? sortOrder : maxSort
         if (maxRow.some((r) => r.sortOrder === insertSort)) insertSort = maxSort

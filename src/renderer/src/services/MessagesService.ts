@@ -67,6 +67,17 @@ export function __testSetPendingNavigate(pending: PendingNavigate | null): void 
   pendingNavigate = pending
 }
 
+/**
+ * Set a pending cross-topic anchor navigation (e.g. fork-divider branch
+ * switch): the next mount/bootstrap for `pending.topicId` navigates to the
+ * shared anchor instead of the latest-bottom/saved-restore path. Consumed
+ * via the existing pending mechanisms (bootstrap priority + the
+ * NAVIGATE_TO_MESSAGE event); cleared only by the consumer.
+ */
+export function setPendingAnchorNavigate(pending: PendingNavigate): void {
+  pendingNavigate = pending
+}
+
 export {
   filterEmptyMessages,
   filterErrorOnlyMessagesWithRelated,
@@ -313,7 +324,11 @@ export async function getMessageTitle(message: Message, length = 30): Promise<st
   return title
 }
 
-export async function checkRateLimit(assistant: Assistant, topicId: string): Promise<boolean> {
+export async function checkRateLimit(
+  assistant: Assistant,
+  topicId: string,
+  branchId?: string | null
+): Promise<boolean> {
   const provider = getAssistantProvider(assistant)
 
   if (!provider?.rateLimit) {
@@ -330,7 +345,7 @@ export async function checkRateLimit(assistant: Assistant, topicId: string): Pro
   let messageCount: number
   let latestMessageCreatedAt: string | null
   try {
-    const activity = await dbService.fetchTopicActivity(topicId)
+    const activity = await dbService.fetchTopicActivity(topicId, branchId ?? null)
     messageCount = activity.messageCount
     latestMessageCreatedAt = activity.latestMessageCreatedAt
   } catch (error) {

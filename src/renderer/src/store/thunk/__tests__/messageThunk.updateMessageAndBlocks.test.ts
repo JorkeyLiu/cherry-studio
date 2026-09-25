@@ -197,7 +197,9 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
       topicId,
       expect.objectContaining({ id: messageId }),
       blocks,
-      []
+      [],
+      undefined,
+      null
     )
 
     // SQLite must appear before Redux in the call order
@@ -247,7 +249,9 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
       topicId,
       expect.objectContaining({ id: messageId, updatedAt: messageUpdates.updatedAt }),
       blocks,
-      []
+      [],
+      undefined,
+      null
     )
 
     // Redux was also called
@@ -294,7 +298,9 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
       topicId,
       expect.objectContaining({ id: messageId }),
       blocks,
-      blockIdsToDelete
+      blockIdsToDelete,
+      undefined,
+      null
     )
   })
 
@@ -406,7 +412,9 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
       topicId,
       expect.objectContaining({ id: messageId, usage: messageUpdates.usage }),
       newBlocks,
-      blockIdsToDelete
+      blockIdsToDelete,
+      undefined,
+      null
     )
 
     // Redux: message patch + block upsert + block removal all dispatched
@@ -453,7 +461,9 @@ describe('updateMessageAndBlocksThunk — LOCK-001 atomic persistence', () => {
         usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 }
       }),
       [],
-      []
+      [],
+      undefined,
+      null
     )
 
     // Redux message update also includes usage

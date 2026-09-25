@@ -196,7 +196,11 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     ]
     expect(groups[0].intent).toEqual({ kind: 'before-message', messageId: 'paste-copy-1' })
     // Paste copies removed afterwards via the exact inserted IDs.
-    expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['paste-copy-1', 'paste-copy-2'])
+    expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith(
+      'topic-1',
+      ['paste-copy-1', 'paste-copy-2'],
+      null
+    )
   })
 
   it('source-restore failure leaves paste copies untouched (no data loss, history does not advance)', async () => {

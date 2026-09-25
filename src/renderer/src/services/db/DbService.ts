@@ -71,16 +71,20 @@ class DbService implements MessageDataSource {
     return DbService.instance
   }
 
-  fetchMessages(topicId: string, forceReload?: boolean) {
-    return this.ordinarySource.fetchMessages(topicId, forceReload)
+  fetchMessages(topicId: string, forceReload?: boolean, branchId?: string | null) {
+    return this.ordinarySource.fetchMessages(topicId, forceReload, branchId)
   }
   fetchMessagesWindow(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse> {
     if (!this.ordinarySource.fetchMessagesWindow) throw new Error('fetchMessagesWindow unavailable')
     return this.ordinarySource.fetchMessagesWindow(request)
   }
-  fetchAnswerGroup(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse> {
+  fetchAnswerGroup(
+    topicId: string,
+    anchorMessageId: string,
+    branchId?: string | null
+  ): Promise<FetchAnswerGroupResponse> {
     if (!this.ordinarySource.fetchAnswerGroup) throw new Error('fetchAnswerGroup unavailable')
-    return this.ordinarySource.fetchAnswerGroup(topicId, anchorMessageId)
+    return this.ordinarySource.fetchAnswerGroup(topicId, anchorMessageId, branchId)
   }
   fetchContextClosure(request: FetchContextClosureRequest): Promise<FetchContextClosureResponse> {
     if (!this.ordinarySource.fetchContextClosure) throw new Error('fetchContextClosure unavailable')
@@ -90,19 +94,25 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.resolveContextClosure) throw new Error('resolveContextClosure unavailable')
     return this.ordinarySource.resolveContextClosure(request)
   }
-  fetchWholeTopicSnapshot(topicId: string): Promise<{
+  fetchWholeTopicSnapshot(
+    topicId: string,
+    branchId?: string | null
+  ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]
     snapshot: FetchWholeTopicSnapshotResponse['snapshot']
   }> {
     if (!this.ordinarySource.fetchWholeTopicSnapshot) throw new Error('fetchWholeTopicSnapshot unavailable')
-    return this.ordinarySource.fetchWholeTopicSnapshot(topicId)
+    return this.ordinarySource.fetchWholeTopicSnapshot(topicId, branchId)
   }
   fetchClipboardGroups(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse> {
     if (!this.ordinarySource.fetchClipboardGroups) throw new Error('fetchClipboardGroups unavailable')
     return this.ordinarySource.fetchClipboardGroups(request)
   }
-  fetchTopicNamingContext(topicId: string): Promise<{
+  fetchTopicNamingContext(
+    topicId: string,
+    branchId?: string | null
+  ): Promise<{
     topic: FetchTopicNamingContextResponse['topic']
     messageCount: number
     firstMessage: Message | null
@@ -111,11 +121,11 @@ class DbService implements MessageDataSource {
     naming: FetchTopicNamingContextResponse['naming']
   }> {
     if (!this.ordinarySource.fetchTopicNamingContext) throw new Error('fetchTopicNamingContext unavailable')
-    return this.ordinarySource.fetchTopicNamingContext(topicId)
+    return this.ordinarySource.fetchTopicNamingContext(topicId, branchId)
   }
-  fetchTopicActivity(topicId: string): Promise<FetchTopicActivityResponse> {
+  fetchTopicActivity(topicId: string, branchId?: string | null): Promise<FetchTopicActivityResponse> {
     if (!this.ordinarySource.fetchTopicActivity) throw new Error('fetchTopicActivity unavailable')
-    return this.ordinarySource.fetchTopicActivity(topicId)
+    return this.ordinarySource.fetchTopicActivity(topicId, branchId)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)
@@ -126,37 +136,68 @@ class DbService implements MessageDataSource {
     blocks: MessageBlock[],
     insertIndex?: number,
     sendContext?: SendDiagnosticsContext,
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    branchId?: string | null
   ) {
-    return this.ordinarySource.appendMessage(topicId, message, blocks, insertIndex, sendContext, resendAttemptId)
+    return this.ordinarySource.appendMessage(
+      topicId,
+      message,
+      blocks,
+      insertIndex,
+      sendContext,
+      resendAttemptId,
+      branchId
+    )
   }
-  updateMessage(topicId: string, messageId: string, updates: Partial<Message>, resendAttemptId?: string) {
-    return this.ordinarySource.updateMessage(topicId, messageId, updates, resendAttemptId)
+  updateMessage(
+    topicId: string,
+    messageId: string,
+    updates: Partial<Message>,
+    resendAttemptId?: string,
+    branchId?: string | null
+  ) {
+    return this.ordinarySource.updateMessage(topicId, messageId, updates, resendAttemptId, branchId)
   }
   updateMessageAndBlocks(
     topicId: string,
     updates: Partial<Message> & Pick<Message, 'id'>,
     blocks: MessageBlock[],
     blockIdsToDelete: string[] = [],
-    resendAttemptId?: string
+    resendAttemptId?: string,
+    branchId?: string | null
   ): Promise<FileCleanupResult> {
-    return this.ordinarySource.updateMessageAndBlocks(topicId, updates, blocks, blockIdsToDelete, resendAttemptId)
+    return this.ordinarySource.updateMessageAndBlocks(
+      topicId,
+      updates,
+      blocks,
+      blockIdsToDelete,
+      resendAttemptId,
+      branchId
+    )
   }
-  selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse> {
-    return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId)
+  selectAnswerMessage(
+    topicId: string,
+    selectedMessageId: string,
+    branchId?: string | null
+  ): Promise<SelectAnswerMessageResponse> {
+    return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId, branchId)
   }
-  deleteMessagesWithDependents(topicId: string, messageIds: string[]): Promise<DeleteMessagesWithDependentsResponse> {
+  deleteMessagesWithDependents(
+    topicId: string,
+    messageIds: string[],
+    branchId?: string | null
+  ): Promise<DeleteMessagesWithDependentsResponse> {
     if (!this.ordinarySource.deleteMessagesWithDependents) throw new Error('deleteMessagesWithDependents unavailable')
-    return this.ordinarySource.deleteMessagesWithDependents(topicId, messageIds)
+    return this.ordinarySource.deleteMessagesWithDependents(topicId, messageIds, branchId)
   }
-  deleteMessage(topicId: string, messageId: string) {
-    return this.ordinarySource.deleteMessage(topicId, messageId)
+  deleteMessage(topicId: string, messageId: string, branchId?: string | null) {
+    return this.ordinarySource.deleteMessage(topicId, messageId, branchId)
   }
-  deleteMessages(topicId: string, messageIds: string[]) {
-    return this.ordinarySource.deleteMessages(topicId, messageIds)
+  deleteMessages(topicId: string, messageIds: string[], branchId?: string | null) {
+    return this.ordinarySource.deleteMessages(topicId, messageIds, branchId)
   }
-  pasteMessagesToTopic(topicId: string, entries: MessageBlockEntry[], insertIndex?: number) {
-    return this.ordinarySource.pasteMessagesToTopic(topicId, entries, insertIndex)
+  pasteMessagesToTopic(topicId: string, entries: MessageBlockEntry[], insertIndex?: number, branchId?: string | null) {
+    return this.ordinarySource.pasteMessagesToTopic(topicId, entries, insertIndex, branchId)
   }
   topicExists(topicId: string) {
     return this.ordinarySource.topicExists(topicId)
@@ -218,25 +259,27 @@ class DbService implements MessageDataSource {
     topicId: string,
     name: string | null | undefined,
     messageIds: string[],
-    color?: string | null
+    color?: string | null,
+    branchId?: string | null
   ) {
-    return this.ordinarySource.upsertSegment(segmentId, topicId, name, messageIds, color)
+    return this.ordinarySource.upsertSegment(segmentId, topicId, name, messageIds, color, branchId)
   }
   deleteSegment(segmentId: string) {
     return this.ordinarySource.deleteSegment(segmentId)
   }
-  replaceSegmentMembership(segmentId: string, messageIds: string[]) {
-    return this.ordinarySource.replaceSegmentMembership(segmentId, messageIds)
+  replaceSegmentMembership(segmentId: string, messageIds: string[], branchId?: string | null) {
+    return this.ordinarySource.replaceSegmentMembership(segmentId, messageIds, branchId)
   }
-  reorderMessages(topicId: string, messageIds: string[]) {
-    return this.ordinarySource.reorderMessages(topicId, messageIds)
+  reorderMessages(topicId: string, messageIds: string[], branchId?: string | null) {
+    return this.ordinarySource.reorderMessages(topicId, messageIds, branchId)
   }
   reorderAnswerGroup(
     topicId: string,
     anchorMessageId: string,
-    orderedMessageIds: string[]
+    orderedMessageIds: string[],
+    branchId?: string | null
   ): Promise<ReorderAnswerGroupResponse> {
-    return this.ordinarySource.reorderAnswerGroup(topicId, anchorMessageId, orderedMessageIds)
+    return this.ordinarySource.reorderAnswerGroup(topicId, anchorMessageId, orderedMessageIds, branchId)
   }
   listBlocksByFile(fileId: string) {
     return this.ordinarySource.listBlocksByFile(fileId)
@@ -250,25 +293,59 @@ class DbService implements MessageDataSource {
   updateSegmentMetadata(segmentId: string, name?: string | null, color?: string | null) {
     return this.ordinarySource.updateSegmentMetadata(segmentId, name, color)
   }
-  branchMessagesToTopic(sourceTopicId: string, targetTopicId: string, anchorMessageId: string, assistantId?: string) {
+  branchMessagesToTopic(
+    sourceTopicId: string,
+    targetTopicId: string,
+    anchorMessageId: string,
+    assistantId?: string,
+    sourceBranchId?: string | null
+  ) {
     if (!this.ordinarySource.branchMessagesToTopic) throw new Error('branchMessagesToTopic unavailable')
-    return this.ordinarySource.branchMessagesToTopic(sourceTopicId, targetTopicId, anchorMessageId, assistantId)
+    return this.ordinarySource.branchMessagesToTopic(
+      sourceTopicId,
+      targetTopicId,
+      anchorMessageId,
+      assistantId,
+      sourceBranchId
+    )
   }
-  insertMessagesAfterAnchor(topicId: string, afterMessageId: string, entries: MessageBlockEntry[]) {
+  createBranch(topicId: string, parentBranchId: string | null | undefined, anchorMessageId: string, name?: string) {
+    if (!this.ordinarySource.createBranch) throw new Error('createBranch unavailable')
+    return this.ordinarySource.createBranch(topicId, parentBranchId, anchorMessageId, name)
+  }
+  listBranches(topicId: string) {
+    if (!this.ordinarySource.listBranches) throw new Error('listBranches unavailable')
+    return this.ordinarySource.listBranches(topicId)
+  }
+  renameBranch(topicId: string, branchId: string, name: string) {
+    if (!this.ordinarySource.renameBranch) throw new Error('renameBranch unavailable')
+    return this.ordinarySource.renameBranch(topicId, branchId, name)
+  }
+  deleteBranch(topicId: string, branchId: string) {
+    if (!this.ordinarySource.deleteBranch) throw new Error('deleteBranch unavailable')
+    return this.ordinarySource.deleteBranch(topicId, branchId)
+  }
+  insertMessagesAfterAnchor(
+    topicId: string,
+    afterMessageId: string,
+    entries: MessageBlockEntry[],
+    branchId?: string | null
+  ) {
     if (!this.ordinarySource.insertMessagesAfterAnchor) throw new Error('insertMessagesAfterAnchor unavailable')
-    return this.ordinarySource.insertMessagesAfterAnchor(topicId, afterMessageId, entries)
+    return this.ordinarySource.insertMessagesAfterAnchor(topicId, afterMessageId, entries, branchId)
   }
-  insertMessageGroups(topicId: string, groups: InsertMessageGroup[]) {
+  insertMessageGroups(topicId: string, groups: InsertMessageGroup[], branchId?: string | null) {
     if (!this.ordinarySource.insertMessageGroups) throw new Error('insertMessageGroups unavailable')
-    return this.ordinarySource.insertMessageGroups(topicId, groups)
+    return this.ordinarySource.insertMessageGroups(topicId, groups, branchId)
   }
 
   resetMessagesForResend(
     topicId: string,
     messages: Array<{ message: any; blocks: any[] }>,
-    blockIdsToDelete: string[]
+    blockIdsToDelete: string[],
+    branchId?: string | null
   ): Promise<ResetMessagesForResendResponse> {
-    return this.ordinarySource.resetMessagesForResend(topicId, messages, blockIdsToDelete)
+    return this.ordinarySource.resetMessagesForResend(topicId, messages, blockIdsToDelete, branchId)
   }
   resendUserMessages(request: ResendUserMessagesRequest): Promise<SemanticResendResponse> {
     if (!this.ordinarySource.resendUserMessages) throw new Error('resendUserMessages unavailable')
@@ -278,8 +355,8 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.regenerateAssistantMessage) throw new Error('regenerateAssistantMessage unavailable')
     return this.ordinarySource.regenerateAssistantMessage(request)
   }
-  deleteMessagesWithSegments(topicId: string, messageIds: string[]) {
-    return this.ordinarySource.deleteMessagesWithSegments(topicId, messageIds)
+  deleteMessagesWithSegments(topicId: string, messageIds: string[], branchId?: string | null) {
+    return this.ordinarySource.deleteMessagesWithSegments(topicId, messageIds, branchId)
   }
   updateFileCount(fileId: string, delta: number, deleteIfZero = false) {
     return fileCountSource.updateFileCount(fileId, delta, deleteIfZero)

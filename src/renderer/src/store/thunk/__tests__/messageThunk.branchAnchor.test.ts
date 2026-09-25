@@ -64,7 +64,7 @@ describe('branchMessagesToTopicThunk — S6.2c-1', () => {
 
     expect(ok).toBe(true)
     expect(mocks.branchMessagesToTopic).toHaveBeenCalledOnce()
-    expect(mocks.branchMessagesToTopic).toHaveBeenCalledWith('src-1', 'new-topic', 'anchor-123', 'assistant-1')
+    expect(mocks.branchMessagesToTopic).toHaveBeenCalledWith('src-1', 'new-topic', 'anchor-123', 'assistant-1', null)
     // Ensure no slice logic: the thunk file must not contain branchPointIndex param usage for this path
     const thunkSource = await import('node:fs').then((fs) =>
       fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')

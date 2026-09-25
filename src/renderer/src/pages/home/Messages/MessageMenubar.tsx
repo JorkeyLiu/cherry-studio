@@ -27,6 +27,7 @@ import type { RootState } from '@renderer/store'
 import store, { useAppDispatch } from '@renderer/store'
 import { type messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
 import { type Message, type MessageBlock, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -64,7 +65,7 @@ import {
   Bug,
   Check,
   CirclePause,
-  FilePenLine,
+  Copy,
   Languages,
   Menu,
   MessageSquarePlus,
@@ -80,7 +81,7 @@ import { useTranslation } from 'react-i18next'
 import { shallowEqual, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
-import { emitNewBranch } from './messageBranch'
+import { emitNewBranch, emitTrueBranch } from './messageBranch'
 import MessageTokens from './MessageTokens'
 
 const createTranslationAbortKey = (messageId: string) => `translation-abort-key:${messageId}`
@@ -148,15 +149,23 @@ type MessageMenubarButtonContext = {
   isBubbleStyle: boolean
   isContextAnchor: boolean
   isGrouped?: boolean
+  isEditable: boolean
   isLastMessage: boolean
   isTranslating: boolean
   isUserMessage: boolean
+  // True when this message is inherited from another route of the same
+  // logical topic (stable shared prefix). Inherited rows are immutable
+  // locally: edit/delete/regenerate/translate renderers return null; Main
+  // rejects.
+  isInherited: boolean
   message: Message
   notesPath: string
   onCopy: (e: React.MouseEvent) => void
   onEdit: () => void | Promise<void>
+  onInsertMessages: () => void | Promise<void>
   onMentionModel: (e: React.MouseEvent) => void | Promise<void>
   onRegenerate: (e?: React.MouseEvent) => void | Promise<void>
+  onTrueBranch: () => void | Promise<void>
   onUseful: (e: React.MouseEvent) => void
   removeMessageBlock: MessageOperationsHandlers['removeMessageBlock']
   setShowDeleteTooltip: Dispatch<SetStateAction<boolean>>
@@ -215,14 +224,24 @@ const MessageMenubar: FC<Props> = (props) => {
     const assistantId = assistant.id
     const topicId = topic.id
     const clickedMessageId = message.id
-    const preAnchor = assistantSettings.contextWindowAnchor?.[topicId]
+    // Route-scoped anchor key: branch routes anchor under their own route
+    // key (plain topicId for the main route). Reads resolve against the
+    // active route and persist under the same key.
+    let route: string | null = null
+    try {
+      route = selectActiveBranchId(store.getState(), topicId)
+    } catch {
+      route = null
+    }
+    const anchorKey = typeof route === 'string' && route.length > 0 ? `${topicId}:${route}` : topicId
+    const preAnchor = assistantSettings.contextWindowAnchor?.[anchorKey]
     const preKey = preAnchor?.kind === 'active' ? preAnchor.groupKey : null
     const readFresh = () => {
       try {
         const assistants = store.getState().assistants.assistants
         const found = assistants.find((a) => a.id === assistantId) ?? assistant
         const settings = getAssistantSettings(found)
-        const anchor = settings.contextWindowAnchor?.[topicId]
+        const anchor = settings.contextWindowAnchor?.[anchorKey]
         const key = anchor?.kind === 'active' ? anchor.groupKey : null
         return { settings, key }
       } catch {
@@ -239,14 +258,14 @@ const MessageMenubar: FC<Props> = (props) => {
       if (resolved === null || resolved === undefined) {
         if (fresh.key === null) return
         const updated = { ...fresh.settings.contextWindowAnchor }
-        delete updated[topicId]
+        delete updated[anchorKey]
         updateAssistantSettings({ contextWindowAnchor: updated })
         return
       }
       updateAssistantSettings({
         contextWindowAnchor: {
           ...fresh.settings.contextWindowAnchor,
-          [topicId]: { kind: 'active', groupKey: resolved }
+          [anchorKey]: { kind: 'active', groupKey: resolved }
         }
       })
     }
@@ -254,6 +273,7 @@ const MessageMenubar: FC<Props> = (props) => {
     try {
       const response = await dbService.resolveContextClosure({
         topicId,
+        branchId: route,
         intent: 'move',
         messageId: clickedMessageId,
         currentAnchorGroupKey: preKey,
@@ -277,6 +297,7 @@ const MessageMenubar: FC<Props> = (props) => {
     try {
       const response = await dbService.resolveContextClosure({
         topicId,
+        branchId: route,
         intent: 'reanchor-default',
         contextCount: currentContextCount,
         currentAnchorGroupKey: baseline,
@@ -353,8 +374,16 @@ const MessageMenubar: FC<Props> = (props) => {
 
   const onNewBranch = useCallback(async () => {
     // NEW_BRANCH contract is ID-based; the listener reports success/failure toasts
-    // only after the async branch operation completes.
+    // only after the async branch operation completes. Legacy Copy Topic
+    // (clone-prefix) semantics are unchanged.
     await emitNewBranch(message.id)
+  }, [message.id])
+
+  const onTrueBranch = useCallback(async () => {
+    // NEW_TRUE_BRANCH contract is ID-based (fork/anchor message ID); the
+    // listener reports success/failure toasts only after completion. This
+    // toolbar button is the ONLY true-branch creation method.
+    await emitTrueBranch(message.id)
   }, [message.id])
 
   const onInsertMessages = useCallback(async () => {
@@ -467,28 +496,47 @@ const MessageMenubar: FC<Props> = (props) => {
   }, [message])
 
   const dropdownItems = useMemo(() => {
+    // More menu (overflow): Copy Topic stays; Translate and Save to Notes
+    // moved here from visible buttons; Edit/Insert moved OUT to visible
+    // toolbar renderers (`assistant-edit`/`assistant-insert`).
     const items: MenuProps['items'] = [
-      ...(isEditable
-        ? [
-            {
-              label: t('common.edit'),
-              key: 'edit',
-              icon: <FilePenLine size={15} />,
-              onClick: onEdit
-            }
-          ]
-        : []),
       {
-        label: <span data-testid="message-branch-btn">{t('chat.message.new.branch.label')}</span>,
-        key: 'new-branch',
-        icon: <Split size={15} />,
+        label: <span data-testid="message-copy-topic-btn">{t('chat.message.copy_topic.label')}</span>,
+        key: 'copy-topic',
+        icon: <Copy size={15} />,
         onClick: onNewBranch
       },
+      // Overflow stop: translate lives in the More menu, so while a
+      // translation is streaming the entry itself becomes the stop action —
+      // the only in-menu way to abort. Idle state keeps the language submenu.
+      isTranslating
+        ? {
+            label: <span data-testid="message-translate-stop-menu-btn">{t('translate.stop')}</span>,
+            key: 'translate',
+            icon: <CirclePause size={15} />,
+            onClick: () => abortTranslation(message.id)
+          }
+        : {
+            label: <span data-testid="message-translate-menu-btn">{t('chat.translate')}</span>,
+            key: 'translate',
+            icon: <Languages size={15} />,
+            children: [
+              ...translateLanguages.map((item) => ({
+                label: item.emoji + ' ' + item.label(),
+                key: item.langCode,
+                onClick: () => handleTranslate(item)
+              }))
+            ]
+          },
       {
-        label: <span data-testid="message-insert-btn">{t('chat.message.insert.label')}</span>,
-        key: 'insert-message',
-        icon: <MessageSquarePlus size={15} />,
-        onClick: onInsertMessages
+        label: <span data-testid="message-save-notes-menu-btn">{t('notes.save')}</span>,
+        key: 'save-to-notes',
+        icon: <NotebookPen size={15} />,
+        onClick: async () => {
+          const title = await getMessageTitle(message)
+          const markdown = messageToMarkdown(message)
+          void exportMessageToNotes(title, markdown, notesPath)
+        }
       },
       {
         label: t('chat.save.label'),
@@ -640,15 +688,16 @@ const MessageMenubar: FC<Props> = (props) => {
     exportMenuOptions.plain_text,
     exportMenuOptions.siyuan,
     exportMenuOptions.yuque,
-    isEditable,
+    handleTranslate,
+    isTranslating,
     mainTextContent,
     message,
     messageContainerRef,
-    onEdit,
-    onInsertMessages,
+    notesPath,
     onNewBranch,
     t,
-    topic.name
+    topic.name,
+    translateLanguages
   ])
 
   const onRegenerate = useCallback(async () => {
@@ -680,6 +729,11 @@ const MessageMenubar: FC<Props> = (props) => {
   const softHoverBg = isBubbleStyle && isUserMessage && !isLastMessage
   const isUserBubbleStyleMessage = isBubbleStyle && isUserMessage
   const showMessageTokens = !isBubbleStyle || isAssistantMessage || isUserBubbleStyleMessage
+  // Inherited shared-prefix rows (stable IDs owned by another route of the
+  // same logical topic) are immutable locally: mutating toolbar actions
+  // hide, Main rejects. Owned = message route matches the active route.
+  const activeBranchIdForMenu = useSelector((state: RootState) => selectActiveBranchId(state, topic.id))
+  const isInherited = (message.branchId ?? null) !== activeBranchIdForMenu
 
   const buttonContext: MessageMenubarButtonContext = {
     assistant,
@@ -698,7 +752,9 @@ const MessageMenubar: FC<Props> = (props) => {
     isAssistantMessage,
     isBubbleStyle,
     isContextAnchor,
+    isEditable,
     isGrouped,
+    isInherited,
     isLastMessage,
     isTranslating,
     isUserMessage,
@@ -706,8 +762,10 @@ const MessageMenubar: FC<Props> = (props) => {
     notesPath,
     onCopy,
     onEdit,
+    onInsertMessages,
     onMentionModel,
     onRegenerate,
+    onTrueBranch,
     onUseful,
     removeMessageBlock,
     setShowDeleteTooltip,
@@ -857,8 +915,12 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'user-edit': ({ message, onEdit, softHoverBg, t }) => {
+  'user-edit': ({ message, onEdit, softHoverBg, t, isInherited }) => {
     if (message.role !== 'user') {
+      return null
+    }
+    // Inherited shared rows are immutable locally (Main rejects).
+    if (isInherited) {
       return null
     }
 
@@ -888,6 +950,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
   ),
   'assistant-regenerate': ({
     isAssistantMessage,
+    isInherited,
     confirmRegenerateMessage,
     onRegenerate,
     setShowDeleteTooltip,
@@ -895,6 +958,10 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     t
   }) => {
     if (!isAssistantMessage) {
+      return null
+    }
+    // Inherited shared rows are immutable locally (Main rejects).
+    if (isInherited) {
       return null
     }
 
@@ -945,6 +1012,7 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
   },
   translate: ({
     isUserMessage,
+    isInherited,
     isTranslating,
     translateLanguages,
     handleTranslate,
@@ -956,6 +1024,11 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     t
   }) => {
     if (isUserMessage) {
+      return null
+    }
+
+    // Inherited shared rows are immutable locally (Main rejects).
+    if (isInherited) {
       return null
     }
 
@@ -1087,15 +1160,85 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
+  'true-branch': ({ isAssistantMessage, onTrueBranch, softHoverBg, t }) => {
+    // Visible assistant-message toolbar button, immediately left of Delete
+    // (registry order). The ONLY true-branch creation method: forks a
+    // local-only lineage branch at this (anchor) message, which may itself
+    // be inherited (branch-from-inherited). No edit-and-branch.
+    if (!isAssistantMessage) {
+      return null
+    }
+
+    return (
+      <Tooltip title={t('chat.message.true_branch.label')} mouseEnterDelay={0.8}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="msg-true-branch-btn"
+          onClick={onTrueBranch}
+          $softHoverBg={softHoverBg}>
+          <Split size={15} />
+        </ActionButton>
+      </Tooltip>
+    )
+  },
+  'assistant-insert': ({ isAssistantMessage, onInsertMessages, softHoverBg, t }) => {
+    // Visible assistant-message toolbar button between Branch and Delete
+    // (registry order). Insert follows current authority constraints
+    // (Main-authoritative insert thunk); no inherited hide.
+    if (!isAssistantMessage) {
+      return null
+    }
+    return (
+      <Tooltip title={t('chat.message.insert.label')} mouseEnterDelay={0.8}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="msg-insert-btn"
+          onClick={onInsertMessages}
+          $softHoverBg={softHoverBg}>
+          <MessageSquarePlus size={15} />
+        </ActionButton>
+      </Tooltip>
+    )
+  },
+  'assistant-edit': ({ isAssistantMessage, isEditable, isInherited, onEdit, softHoverBg, t }) => {
+    // Visible assistant-message toolbar button between Insert and Delete
+    // (registry order). Respects inherited-message immutability like the
+    // other mutating actions: hidden where existing guards require.
+    if (!isAssistantMessage) {
+      return null
+    }
+    if (isInherited) {
+      return null
+    }
+    if (!isEditable) {
+      return null
+    }
+    return (
+      <Tooltip title={t('common.edit')} mouseEnterDelay={0.8}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="msg-assistant-edit-btn"
+          onClick={onEdit}
+          $softHoverBg={softHoverBg}>
+          <EditIcon size={15} />
+        </ActionButton>
+      </Tooltip>
+    )
+  },
   delete: ({
     confirmDeleteMessage,
     deleteMessageWithUndo,
+    isInherited,
     message,
     setShowDeleteTooltip,
     showDeleteTooltip,
     softHoverBg,
     t
   }) => {
+    // Inherited shared rows are immutable locally (Main rejects).
+    if (isInherited) {
+      return null
+    }
     const deleteTooltip = (
       <Tooltip
         title={t('common.delete')}

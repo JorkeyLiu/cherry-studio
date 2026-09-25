@@ -15,6 +15,7 @@ import {
   toggleEditMode as toggleEditModeAction
 } from '@renderer/store/editMode'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Message } from '@renderer/types/newMessage'
 import i18n from 'i18next'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -40,6 +41,7 @@ export function useCreateEditMode(
   // memoized so the edit-group memo keeps a stable identity while non-resident
   // (`undefined` stays at the API boundary).
   const loadedMessages = useAppSelector((state) => selectLoadedMessagesForTopic(state, topicId))
+  const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topicId))
   const messages = useMemo(() => (loadedMessages ?? []) as Message[], [loadedMessages])
 
   // 消息组
@@ -131,7 +133,7 @@ export function useCreateEditMode(
     // The lock always releases in finally.
     void (async () => {
       try {
-        const count = await copyMessages(dispatch, topicId, selectedGroupIds)
+        const count = await copyMessages(dispatch, topicId, selectedGroupIds, activeBranchId)
         if (count > 0) {
           window.toast.success(i18n.t('chat.edit.copied', { count }))
         }
@@ -141,7 +143,7 @@ export function useCreateEditMode(
         dispatch(finishProcessing())
       }
     })()
-  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
 
   // 剪切
   const handleCut = useCallback(() => {
@@ -152,7 +154,7 @@ export function useCreateEditMode(
     // deletion itself happens at paste time. Failure semantics as handleCopy.
     void (async () => {
       try {
-        const count = await cutMessages(dispatch, topicId, selectedGroupIds)
+        const count = await cutMessages(dispatch, topicId, selectedGroupIds, activeBranchId)
         if (count > 0) {
           window.toast.success(i18n.t('chat.edit.cut', { count }))
         }
@@ -162,7 +164,7 @@ export function useCreateEditMode(
         dispatch(finishProcessing())
       }
     })()
-  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
 
   // 粘贴
   const handlePaste = useCallback(async () => {
@@ -213,7 +215,7 @@ export function useCreateEditMode(
     } finally {
       dispatch(finishProcessing())
     }
-  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds])
+  }, [dispatch, isEnabled, isProcessing, topicId, selectedGroupIds, activeBranchId])
 
   // 撤销
   const handleUndo = useCallback(async () => {

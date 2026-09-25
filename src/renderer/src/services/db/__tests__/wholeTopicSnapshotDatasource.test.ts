@@ -38,7 +38,7 @@ describe('SqliteMessageDataSource — fetchWholeTopicSnapshot', () => {
     mockDispatch.mockClear()
     const res = await ds.fetchWholeTopicSnapshot('t1')
     expect(api.fetchWholeTopicSnapshot).toHaveBeenCalledOnce()
-    expect(api.fetchWholeTopicSnapshot).toHaveBeenCalledWith({ topicId: 't1' })
+    expect(api.fetchWholeTopicSnapshot).toHaveBeenCalledWith({ topicId: 't1', branchId: null })
     expect(res.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3'])
     expect(res.blocks.map((b) => b.id)).toEqual(['b1', 'b2'])
     expect(res.snapshot).toEqual(snapshotMeta)

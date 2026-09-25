@@ -336,6 +336,36 @@ async function clickPortalScopedMenuAction(page: any, dataTestId: string): Promi
     .toBe(true)
 }
 
+// Visible assistant-toolbar action (toolbar order Branch → Insert → Edit →
+// Delete): Insert and Edit moved OUT of the More menu into visible buttons,
+// so they are clicked directly on the message container after hover — never
+// via the dropdown portal. Copy Topic stays in overflow (portal path above).
+async function clickAssistantToolbarButton(page: any, messageId: string, testId: string): Promise<void> {
+  const e = messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const sel = `[id="message-${e}"][data-message-id="${e}"]`
+  let container = page.locator(sel).first()
+  await expect(container, `message container ${messageId} must be visible`).toBeVisible({ timeout: 15000 })
+  await page.evaluate((id: string) => {
+    const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+    const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+    if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+  }, messageId)
+  container = page.locator(sel).first()
+  await expect(container, `message container ${messageId} must be visible after scroll`).toBeVisible({ timeout: 15000 })
+  try {
+    await container.hover({ timeout: 8000 })
+  } catch {
+    // Hover flakiness near edges; the button click below uses force fallback.
+  }
+  const btn = container.locator(`[data-testid="${testId}"]`)
+  await expect(btn, `toolbar button ${testId} for ${messageId} must be attached`).toBeAttached({ timeout: 10000 })
+  try {
+    await btn.click({ timeout: 8000 })
+  } catch {
+    await btn.click({ force: true } as any)
+  }
+}
+
 // LOCK-E2E-CLEAN-006: meaningful DB readiness polling — no fixed post-close sleeps.
 // Uses existing ownership-scoped queryChatDbViaElectron helper with bounded expect.poll retry
 // that proves disposable DB is open/readable and contains expected state.
@@ -765,7 +795,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
 
     // Branch via real UI: hover message, open more-menu, click New Branch (portal-scoped, exact data-testid + menuitem)
     await hoverMessageAndOpenMore(page, anchorId)
-    await clickPortalScopedMenuAction(page, 'message-branch-btn')
+    await clickPortalScopedMenuAction(page, 'message-copy-topic-btn')
 
     // Wait for new branch topic to be created: any topic with expected length (anchorIdx+1) should appear,
     // with content matching source prefix content (since clone uses fresh IDs). We verify via API, not via same IDs.
@@ -963,8 +993,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       ),
       `effective insert anchor ${resolvedAnchor} must be visible`
     ).toBeVisible({ timeout: 15000 })
-    await hoverMessageAndOpenMore(page, resolvedAnchor)
-    await clickPortalScopedMenuAction(page, 'message-insert-btn')
+    await clickAssistantToolbarButton(page, resolvedAnchor, 'msg-insert-btn')
 
     // Meaningful pre-close synchronization: poll authority state for inserted count (TOTAL + 2) instead of unconditional sleep / trivial return true
     await page.waitForFunction(

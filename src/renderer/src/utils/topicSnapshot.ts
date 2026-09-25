@@ -20,8 +20,11 @@ export interface WholeTopicSnapshot {
   snapshot: FetchWholeTopicSnapshotResponse['snapshot']
 }
 
-export const loadWholeTopicSnapshot = async (topicId: string): Promise<WholeTopicSnapshot> => {
-  const result = await dbService.fetchWholeTopicSnapshot(topicId)
+export const loadWholeTopicSnapshot = async (
+  topicId: string,
+  branchId?: string | null
+): Promise<WholeTopicSnapshot> => {
+  const result = await dbService.fetchWholeTopicSnapshot(topicId, branchId)
   const messages = result.messages
   const blocks = result.blocks
   return {

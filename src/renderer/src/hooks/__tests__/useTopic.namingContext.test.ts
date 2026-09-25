@@ -90,7 +90,7 @@ describe('autoRenameTopic — bounded naming authority', () => {
 
     await autoRenameTopic(assistant, 'topic-1')
 
-    expect(dbServiceMocks.fetchTopicNamingContext).toHaveBeenCalledExactlyOnceWith('topic-1')
+    expect(dbServiceMocks.fetchTopicNamingContext).toHaveBeenCalledExactlyOnceWith('topic-1', null)
     // Misleading whole-topic helper is removed; naming never loads windows.
     expect(TopicManager).not.toHaveProperty('getTopicMessages')
     expect(loadTopicMessagesThunk).not.toHaveBeenCalled()

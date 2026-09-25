@@ -61,7 +61,7 @@ describe('checkRateLimit — bounded topic activity authority', () => {
       activity: { completeness: 'topic-activity', topicId: 'current-topic' }
     })
     const blocked = await checkRateLimit(assistant, 'current-topic')
-    expect(activityMock).toHaveBeenCalledExactlyOnceWith('current-topic')
+    expect(activityMock).toHaveBeenCalledExactlyOnceWith('current-topic', null)
     expect(blocked).toBe(false)
   })
 

@@ -298,7 +298,7 @@ describe('ChatFlowHistory snapshot wiring', () => {
     mocks.loadWholeTopicSnapshot.mockResolvedValueOnce(snapshotOf(messages, blocks))
 
     render(<ChatFlowHistory conversationId="topic-1" />)
-    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1', null)
 
     await waitFor(() => expect(screen.getByTestId('flow')).toBeInTheDocument())
     expect(screen.getByTestId('node-user-u1')).toHaveTextContent('first question')
@@ -367,7 +367,7 @@ describe('ChatFlowHistory snapshot wiring', () => {
     for (const selector of mocks.seenSelectors) {
       expect(() => selector(guarded)).not.toThrow()
     }
-    expect(mocks.seenSelectors[0](mocks.state)).toBe('updated-1')
+    expect(mocks.seenSelectors.map((selector) => selector(mocks.state))).toContain('updated-1')
   })
 
   it('rejects stale responses when the topic changes mid-flight', async () => {
@@ -398,8 +398,8 @@ describe('ChatFlowHistory snapshot wiring', () => {
     // Stale topic-1 payload must not overwrite the current topic-2 graph.
     expect(screen.queryByTestId('node-user-u1')).not.toBeInTheDocument()
     expect(screen.getByTestId('node-user-u9')).toHaveTextContent('topic two')
-    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1')
-    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-2')
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1', null)
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-2', null)
   })
 
   it('refetches on updatedAt change and MESSAGE_COMPLETE, coalesced without polling', async () => {

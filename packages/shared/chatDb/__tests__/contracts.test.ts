@@ -69,6 +69,11 @@ describe('chatDbContracts', () => {
     'chatdb:fetch-answer-group',
     // S6.2c-1: branch by stable anchor
     'chatdb:branch-messages-to-topic',
+    // Topic-internal branches (local-only, no prefix cloning)
+    'chatdb:create-branch',
+    'chatdb:list-branches',
+    'chatdb:rename-branch',
+    'chatdb:delete-branch',
     // S6.2c-2: Main-authoritative insert after stable anchor
     'chatdb:insert-messages-after-anchor',
     'chatdb:insert-message-groups',
@@ -1123,31 +1128,33 @@ describe('JSON round-trip', () => {
 // ===========================================================================
 
 describe('contract allowedKeys', () => {
-  it('fetch-messages has exactly topicId', () => {
+  it('fetch-messages has exactly topicId, branchId', () => {
     const keys = getContract('chatdb:fetch-messages').allowedKeys
-    expect(keys).toEqual(new Set(['topicId']))
+    expect(keys).toEqual(new Set(['topicId', 'branchId']))
   })
 
-  it('append-message has exactly topicId, message, blocks, insertIndex, diagnostics, resendAttemptId', () => {
+  it('append-message has exactly topicId, branchId, message, blocks, insertIndex, diagnostics, resendAttemptId', () => {
     const keys = getContract('chatdb:append-message').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'message', 'blocks', 'insertIndex', 'diagnostics', 'resendAttemptId']))
-  })
-
-  it('update-message-and-blocks has exactly topicId, messageUpdates, blocksToUpdate, blockIdsToDelete, resendAttemptId', () => {
-    const keys = getContract('chatdb:update-message-and-blocks').allowedKeys
     expect(keys).toEqual(
-      new Set(['topicId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete', 'resendAttemptId'])
+      new Set(['topicId', 'branchId', 'message', 'blocks', 'insertIndex', 'diagnostics', 'resendAttemptId'])
     )
   })
 
-  it('select-answer-message has exactly topicId, selectedMessageId', () => {
-    const keys = getContract('chatdb:select-answer-message').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'selectedMessageId']))
+  it('update-message-and-blocks has exactly topicId, branchId, messageUpdates, blocksToUpdate, blockIdsToDelete, resendAttemptId', () => {
+    const keys = getContract('chatdb:update-message-and-blocks').allowedKeys
+    expect(keys).toEqual(
+      new Set(['topicId', 'branchId', 'messageUpdates', 'blocksToUpdate', 'blockIdsToDelete', 'resendAttemptId'])
+    )
   })
 
-  it('delete-messages-with-dependents has exactly topicId, messageIds', () => {
+  it('select-answer-message has exactly topicId, branchId, selectedMessageId', () => {
+    const keys = getContract('chatdb:select-answer-message').allowedKeys
+    expect(keys).toEqual(new Set(['topicId', 'branchId', 'selectedMessageId']))
+  })
+
+  it('delete-messages-with-dependents has exactly topicId, branchId, messageIds', () => {
     const keys = getContract('chatdb:delete-messages-with-dependents').allowedKeys
-    expect(keys).toEqual(new Set(['topicId', 'messageIds']))
+    expect(keys).toEqual(new Set(['topicId', 'branchId', 'messageIds']))
   })
 
   it('ensure-topic has topicId, assistantId, and name keys', () => {
@@ -3092,6 +3099,249 @@ describe('branch-messages-to-topic contract (S6.2c-1)', () => {
   })
 })
 
+describe('create-branch contract (topic-internal branches)', () => {
+  const branchWire = {
+    id: 'b-1',
+    topicId: 't-1',
+    parentBranchId: null,
+    anchorMessageId: 'm-anchor',
+    name: 'B1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }
+
+  it('create-branch: accepts minimal valid request (main-route parent)', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-branch', {
+        topicId: 't-1',
+        anchorMessageId: 'm-anchor'
+      })
+    ).not.toThrow()
+  })
+
+  it('create-branch: accepts request with parent branch and name', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-branch', {
+        topicId: 't-1',
+        parentBranchId: 'b-parent',
+        anchorMessageId: 'm-anchor',
+        name: 'B1'
+      })
+    ).not.toThrow()
+  })
+
+  it('create-branch: rejects missing anchorMessageId', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-branch', {
+        topicId: 't-1'
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('create-branch: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:create-branch', {
+        topicId: 't-1',
+        anchorMessageId: 'm-anchor',
+        branchPointIndex: 2
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('create-branch: accepts valid result with branch node and effective messages/blocks', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:create-branch', {
+        ok: true,
+        value: {
+          branch: branchWire,
+          messages: [],
+          blocks: []
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('create-branch: rejects result with unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:create-branch', {
+        ok: true,
+        value: {
+          branch: branchWire,
+          messages: [],
+          blocks: [],
+          extra: 'nope'
+        } as any
+      })
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('list-branches contract (topic-internal branches)', () => {
+  const branchWire = {
+    id: 'b-1',
+    topicId: 't-1',
+    parentBranchId: null,
+    anchorMessageId: 'm-anchor',
+    name: 'B1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }
+
+  it('list-branches: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:list-branches', {
+        topicId: 't-1'
+      })
+    ).not.toThrow()
+  })
+
+  it('list-branches: rejects missing topicId', () => {
+    expect(() => validateChatDbRequest('chatdb:list-branches', {} as any)).toThrow(ValidationError)
+  })
+
+  it('list-branches: rejects unknown keys', () => {
+    expect(() => validateChatDbRequest('chatdb:list-branches', { topicId: 't-1', extra: 'nope' } as any)).toThrow(
+      ValidationError
+    )
+  })
+
+  it('list-branches: accepts valid result (empty = never branched)', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-branches', {
+        ok: true,
+        value: { topicId: 't-1', branches: [] }
+      })
+    ).not.toThrow()
+  })
+
+  it('list-branches: accepts valid result with branch nodes', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-branches', {
+        ok: true,
+        value: { topicId: 't-1', branches: [branchWire] }
+      })
+    ).not.toThrow()
+  })
+
+  it('list-branches: rejects result with unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:list-branches', {
+        ok: true,
+        value: { topicId: 't-1', branches: [], extra: 'nope' }
+      } as any)
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('rename-branch contract (topic-internal branches)', () => {
+  const branchWire = {
+    id: 'b-1',
+    topicId: 't-1',
+    parentBranchId: null,
+    anchorMessageId: 'm-anchor',
+    name: 'Renamed',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  }
+
+  it('rename-branch: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:rename-branch', {
+        topicId: 't-1',
+        branchId: 'b-1',
+        name: 'Renamed'
+      })
+    ).not.toThrow()
+  })
+
+  it('rename-branch: rejects missing name', () => {
+    expect(() => validateChatDbRequest('chatdb:rename-branch', { topicId: 't-1', branchId: 'b-1' } as any)).toThrow(
+      ValidationError
+    )
+  })
+
+  it('rename-branch: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:rename-branch', {
+        topicId: 't-1',
+        branchId: 'b-1',
+        name: 'Renamed',
+        extra: 'nope'
+      } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('rename-branch: accepts valid result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:rename-branch', {
+        ok: true,
+        value: { branch: branchWire }
+      })
+    ).not.toThrow()
+  })
+
+  it('rename-branch: rejects result with unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:rename-branch', {
+        ok: true,
+        value: { branch: branchWire, extra: 'nope' }
+      } as any)
+    ).toThrow(ValidationError)
+  })
+})
+
+describe('delete-branch contract (topic-internal branches)', () => {
+  it('delete-branch: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-branch', {
+        topicId: 't-1',
+        branchId: 'b-1'
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-branch: rejects missing branchId', () => {
+    expect(() => validateChatDbRequest('chatdb:delete-branch', { topicId: 't-1' } as any)).toThrow(ValidationError)
+  })
+
+  it('delete-branch: rejects unknown keys', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:delete-branch', { topicId: 't-1', branchId: 'b-1', extra: 'nope' } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('delete-branch: accepts valid subtree result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-branch', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedBranchIds: ['b-1'],
+          deletedMessageIds: [],
+          deletedBlockIds: []
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('delete-branch: rejects result with unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:delete-branch', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          deletedBranchIds: ['b-1'],
+          deletedMessageIds: [],
+          deletedBlockIds: [],
+          extra: 'nope'
+        }
+      } as any)
+    ).toThrow(ValidationError)
+  })
+})
+
 describe('insert-messages-after-anchor contract (S6.2c-2)', () => {
   it('insert-messages-after-anchor: accepts minimal valid batch request', () => {
     expect(() =>
@@ -3555,6 +3805,11 @@ describe('coverage consistency', () => {
     'chatdb:fetch-answer-group',
     // S6.2c-1: branch by stable anchor
     'chatdb:branch-messages-to-topic',
+    // Topic-internal branches (local-only, no prefix cloning)
+    'chatdb:create-branch',
+    'chatdb:list-branches',
+    'chatdb:rename-branch',
+    'chatdb:delete-branch',
     // S6.2c-2: insert after stable anchor
     'chatdb:insert-messages-after-anchor',
     // Stable insert-message-groups (paste/redo/delete-undo authority)

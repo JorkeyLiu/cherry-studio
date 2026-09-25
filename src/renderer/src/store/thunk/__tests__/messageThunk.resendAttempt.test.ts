@@ -364,7 +364,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     } as never)(dispatch, getState as never)
 
     await updateMessage('topic-1', 'assistant-1', { content: 'x' } as never)
-    expect(mocks.updateMessage).toHaveBeenCalledWith('topic-1', 'assistant-1', { content: 'x' }, undefined)
+    expect(mocks.updateMessage).toHaveBeenCalledWith('topic-1', 'assistant-1', { content: 'x' }, undefined, null)
   })
 
   it('explicit updateMessageAndBlocksThunk never carries an execution attempt', async () => {
@@ -399,7 +399,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     mocks.updateMessageAndBlocks.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
     const editUpdates = { id: 'assistant-1', content: 'edit' } as never
     await updateMessageAndBlocksThunk('topic-1', editUpdates, [])(vi.fn())
-    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledWith('topic-1', editUpdates, [], [])
+    expect(mocks.updateMessageAndBlocks).toHaveBeenCalledWith('topic-1', editUpdates, [], [], undefined, null)
   })
 })
 

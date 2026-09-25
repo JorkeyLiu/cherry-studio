@@ -25,6 +25,7 @@ import {
   updateTopics
 } from '@renderer/store/assistants'
 import { setDefaultModel, setQuickModel, setTranslateModel } from '@renderer/store/llm'
+import { activeBranchReset } from '@renderer/store/topicBranch'
 import type { Assistant, AssistantSettings, Model, Topic } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
 import { uuid } from '@renderer/utils'
@@ -176,6 +177,9 @@ export function useAssistant(id: string) {
       // The mutation must succeed before the Redux mutation runs (LOCK-528).
       await softDeleteOrdinaryTopic(topic.id, topic.name)
       dispatch(removeTopic({ assistantId: assistant.id, topic }))
+      // Trash keeps the branch catalog (restore resumes it) but resets the
+      // active route to main.
+      dispatch(activeBranchReset({ topicId: topic.id }))
     },
     restoreTopic: async (topicId: string) => {
       // Ordinary restore is ONE atomic Main command that returns the

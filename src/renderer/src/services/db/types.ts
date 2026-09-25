@@ -1,5 +1,6 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  DeleteBranchResponse,
   DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -13,18 +14,30 @@ import type {
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
+  ListBranchesResponse,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
+  RenameBranchResponse,
   ReorderAnswerGroupResponse,
   ResendUserMessagesRequest,
   ResolveContextClosureRequest,
   ResolveContextClosureResult,
   SelectAnswerMessageResponse,
   SemanticResendResponse,
-  StreamWriteDiagnostics
+  StreamWriteDiagnostics,
+  TopicBranchWire
 } from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
+
+export type { TopicBranchWire }
+
+/**
+ * Route owner for branch-aware reads/writes: null/undefined = main route,
+ * non-null = that branch's effective route within the same logical topic.
+ * Switching branches never changes the active topic.
+ */
+export type BranchRoute = string | null | undefined
 
 /**
  * Message exchange data structure for persisting user-assistant conversations
@@ -47,11 +60,13 @@ export interface MessageExchange {
 export interface MessageDataSource {
   // ============ Read Operations ============
   /**
-   * Fetch all messages and blocks for a topic
+   * Fetch all messages and blocks for one route (topic + branch).
+   * `branchId` null/undefined = main route.
    */
   fetchMessages(
     topicId: string,
-    forceReload?: boolean
+    forceReload?: boolean,
+    branchId?: BranchRoute
   ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]
@@ -64,7 +79,7 @@ export interface MessageDataSource {
 
   // ============ Write Operations ============
   /**
-   * Append a single message with its blocks.
+   * Append a single message with its blocks to one route.
    *
    * `sendContext` is optional diagnostic-only correlation metadata (LOCK-004):
    * when supplied by the ordinary send path, the append consumes the next
@@ -75,16 +90,24 @@ export interface MessageDataSource {
     message: Message,
     blocks: MessageBlock[],
     insertIndex?: number,
-    sendContext?: SendDiagnosticsContext
+    sendContext?: SendDiagnosticsContext,
+    resendAttemptId?: string,
+    branchId?: BranchRoute
   ): Promise<void>
 
   /**
-   * Update an existing message
+   * Update an existing message in one route
    */
-  updateMessage(topicId: string, messageId: string, updates: Partial<Message>): Promise<void>
+  updateMessage(
+    topicId: string,
+    messageId: string,
+    updates: Partial<Message>,
+    resendAttemptId?: string,
+    branchId?: BranchRoute
+  ): Promise<void>
 
   /**
-   * Update existing message and its blocks.
+   * Update existing message and its blocks in one route.
    * Returns FileCleanupResult when blocks are deleted, for post-commit
    * consumption by the caller.
    */
@@ -92,11 +115,13 @@ export interface MessageDataSource {
     topicId: string,
     messageUpdates: Partial<Message> & Pick<Message, 'id'>,
     blocksToUpdate: MessageBlock[],
-    blockIdsToDelete?: string[]
+    blockIdsToDelete?: string[],
+    resendAttemptId?: string,
+    branchId?: BranchRoute
   ): Promise<FileCleanupResult>
 
   /**
-   * Cross-process authority answer selection.
+   * Cross-process authority answer selection in one route.
    *
    * The renderer supplies ONLY the selected message ID; Main resolves the
    * complete answer group in the same SQLite transaction and persists
@@ -104,10 +129,14 @@ export interface MessageDataSource {
    * loaded-projection intersection commit. Dispatches `updateTopicUpdatedAt`
    * exactly once after success (the thunk must NOT dispatch it again).
    */
-  selectAnswerMessage(topicId: string, selectedMessageId: string): Promise<SelectAnswerMessageResponse>
+  selectAnswerMessage(
+    topicId: string,
+    selectedMessageId: string,
+    branchId?: BranchRoute
+  ): Promise<SelectAnswerMessageResponse>
 
   /**
-   * Answer-group authority reorder (additive semantic command).
+   * Answer-group authority reorder in one route (additive semantic command).
    *
    * The renderer supplies ONLY the stable anchor + desired group order; Main
    * resolves the full group and persists the authority slots permutation
@@ -118,11 +147,12 @@ export interface MessageDataSource {
   reorderAnswerGroup(
     topicId: string,
     anchorMessageId: string,
-    orderedMessageIds: string[]
+    orderedMessageIds: string[],
+    branchId?: BranchRoute
   ): Promise<ReorderAnswerGroupResponse>
 
   /**
-   * Semantic plural deletion with Main-resolved dependents.
+   * Semantic plural deletion with Main-resolved dependents in one route.
    *
    * The renderer supplies ONLY stable root IDs; Main expands user dependents
    * (user + same-askId assistants, or single non-user), deletes in one
@@ -131,7 +161,11 @@ export interface MessageDataSource {
    * authority undo snapshot (restore groups + affected segment snapshots).
    * Dispatches `updateTopicUpdatedAt` exactly once after success.
    */
-  deleteMessagesWithDependents(topicId: string, messageIds: string[]): Promise<DeleteMessagesWithDependentsResponse>
+  deleteMessagesWithDependents(
+    topicId: string,
+    messageIds: string[],
+    branchId?: BranchRoute
+  ): Promise<DeleteMessagesWithDependentsResponse>
 
   /**
    * Semantic resend by stable user ID (Main-resolved full group).
@@ -151,24 +185,30 @@ export interface MessageDataSource {
   regenerateAssistantMessage?(request: RegenerateAssistantMessageRequest): Promise<SemanticResendResponse>
 
   /**
-   * Delete a single message and its blocks
+   * Delete a single message and its blocks in one route
    */
-  deleteMessage(topicId: string, messageId: string): Promise<void>
+  deleteMessage(topicId: string, messageId: string, branchId?: BranchRoute): Promise<void>
 
   /**
-   * Delete multiple messages and their blocks
+   * Delete multiple messages and their blocks in one route
    */
-  deleteMessages(topicId: string, messageIds: string[]): Promise<void>
+  deleteMessages(topicId: string, messageIds: string[], branchId?: BranchRoute): Promise<void>
 
   /**
    * Atomically insert an ordered batch of message+block entries at a
    * position in one Main SQLite transaction (PERF-100 batch paste).
    *
    * Entries are inserted at `insertIndex` (zero-based; absent = append at
-   * end) in array order. Existing messages keep their position and only
-   * receive a metadata patch. Returns the aggregate FileCleanupResult.
+   * end) in array order within the addressed route owner's rows. Existing
+   * messages keep their position and only receive a metadata patch. Returns
+   * the aggregate FileCleanupResult.
    */
-  pasteMessagesToTopic(topicId: string, entries: MessageBlockEntry[], insertIndex?: number): Promise<FileCleanupResult>
+  pasteMessagesToTopic(
+    topicId: string,
+    entries: MessageBlockEntry[],
+    insertIndex?: number,
+    branchId?: BranchRoute
+  ): Promise<FileCleanupResult>
 
   // ============ Block Operations ============
   /**
@@ -215,29 +255,73 @@ export interface MessageDataSource {
     assistantId?: string
   ): Promise<{ messages: Message[]; blocks: MessageBlock[] }>
 
+  // ============ Topic-internal branches (local-only, no prefix cloning) ============
+  /**
+   * Create one internal branch node inside a logical topic from a parent
+   * route anchor. The anchor may itself be inherited
+   * (branch-from-inherited). No prefix cloning, no sync intent. Returns the
+   * created node plus the effective wire (shared prefix + empty suffix).
+   * This is the ONLY true-branch creation method.
+   */
+  createBranch?(
+    topicId: string,
+    parentBranchId: BranchRoute,
+    anchorMessageId: string,
+    name?: string
+  ): Promise<{
+    branch: TopicBranchWire
+    messages: Message[]
+    blocks: MessageBlock[]
+  }>
+
+  /**
+   * List all branch nodes of one logical topic in (createdAt, id) order.
+   * Empty when never branched. Pure read.
+   */
+  listBranches?(topicId: string): Promise<ListBranchesResponse>
+
+  /**
+   * Rename a branch node (name-only). Topic rename stays logical.
+   */
+  renameBranch?(topicId: string, branchId: string, name: string): Promise<RenameBranchResponse>
+
+  /**
+   * Delete one branch subtree (selected branch + descendants + only their
+   * owned messages/blocks/file references). Shared prefixes and siblings
+   * survive.
+   */
+  deleteBranch?(topicId: string, branchId: string): Promise<DeleteBranchResponse>
+
   // ============ Insert after stable anchor (S6.2c-2) ============
   /**
    * Insert entries after a stable anchor (group-tail aware) atomically in Main.
-   * Validates topic/anchor membership, resolves ordered authority order
-   * (sort_order ASC, id ASC), advances past contiguous assistant group tail
-   * when anchor is assistant with askId, then inserts entries with dense-order logic.
-   * No numeric insertIndex in request. Fail closed with no partial writes.
-   * Dispatches updateTopicUpdatedAt exactly once after success.
+   * Validates anchor membership inside the addressed route, resolves ordered
+   * authority order (sort_order ASC, id ASC) of the route owner, advances
+   * past contiguous assistant group tail when anchor is assistant with
+   * askId, then inserts entries with dense-order logic. An inherited anchor
+   * lands at the owner tail. No numeric insertIndex in request. Fail closed
+   * with no partial writes. Dispatches updateTopicUpdatedAt exactly once
+   * after success.
    */
   insertMessagesAfterAnchor?(
     topicId: string,
     afterMessageId: string,
-    entries: MessageBlockEntry[]
+    entries: MessageBlockEntry[],
+    branchId?: BranchRoute
   ): Promise<FileCleanupResult>
 
   /**
    * Insert message groups with stable intents atomically in Main.
    * The renderer supplies only stable intents (after-group-tail /
-   * before-message / topic-tail); Main validates anchors against complete
-   * authority order and inserts all groups atomically. Dispatches
+   * before-message / topic-tail); Main validates anchors against the
+   * addressed route order and inserts all groups atomically. Dispatches
    * updateTopicUpdatedAt exactly once after success.
    */
-  insertMessageGroups?(topicId: string, groups: InsertMessageGroup[]): Promise<FileCleanupResult>
+  insertMessageGroups?(
+    topicId: string,
+    groups: InsertMessageGroup[],
+    branchId?: BranchRoute
+  ): Promise<FileCleanupResult>
 
   // ============ Batch Operations ============
   /**
@@ -258,12 +342,13 @@ export interface MessageDataSource {
   fetchMessagesWindow?(request: FetchMessagesWindowRequest): Promise<FetchMessagesWindowResponse>
 
   /**
-   * Authoritative answer-group READ — S6.2b R-05.
-   * Returns complete ordered answer-group for an anchor assistant message.
-   * Missing topic/anchor/cross-topic/anchor without usable askId → throws ChatDbResultError (NOT_FOUND).
+   * Authoritative answer-group READ — S6.2b R-05, route-scoped.
+   * Returns complete ordered answer-group for an anchor assistant message
+   * inside the addressed route. Missing topic/anchor/cross-topic/anchor
+   * without usable askId → throws ChatDbResultError (NOT_FOUND).
    * No mutation, no timestamp dispatch.
    */
-  fetchAnswerGroup?(topicId: string, anchorMessageId: string): Promise<FetchAnswerGroupResponse>
+  fetchAnswerGroup?(topicId: string, anchorMessageId: string, branchId?: BranchRoute): Promise<FetchAnswerGroupResponse>
 
   /**
    * Authoritative context closure READ — S6.3 R-06.
@@ -284,13 +369,18 @@ export interface MessageDataSource {
   resolveContextClosure?(request: ResolveContextClosureRequest): Promise<ResolveContextClosureResult>
 
   /**
-   * Explicit short-lived whole-topic snapshot for one-shot topic exports /
-   * knowledge jobs. Returns the full ordered topic with reconstructed block
+   * Explicit short-lived route snapshot for one-shot topic exports /
+   * knowledge jobs. Returns the full ordered route with reconstructed block
    * relations and strict whole-topic metadata. Converts wires to domain
    * Message[]/MessageBlock[] and dispatches nothing (caller-local only).
-   * Missing topic → throws ChatDbResultError (NOT_FOUND).
+   * Sidebar export/copy stays main-route unless the current active branch
+   * is explicitly used from in-chat actions. Missing topic → throws
+   * ChatDbResultError (NOT_FOUND).
    */
-  fetchWholeTopicSnapshot?(topicId: string): Promise<{
+  fetchWholeTopicSnapshot?(
+    topicId: string,
+    branchId?: BranchRoute
+  ): Promise<{
     messages: Message[]
     blocks: MessageBlock[]
     snapshot: FetchWholeTopicSnapshotResponse['snapshot']
@@ -306,12 +396,15 @@ export interface MessageDataSource {
   fetchClipboardGroups?(request: FetchClipboardGroupsRequest): Promise<FetchClipboardGroupsResponse>
 
   /**
-   * Bounded naming-context READ for automatic/manual naming.
+   * Bounded naming-context READ for automatic/manual naming, route-scoped.
    * Returns authority naming metadata, exact count, first message (or null),
    * latest at most 5 messages in authority ASC order, and blocks for those
    * returned messages only. Missing topic → throws ChatDbResultError (NOT_FOUND).
    */
-  fetchTopicNamingContext?(topicId: string): Promise<{
+  fetchTopicNamingContext?(
+    topicId: string,
+    branchId?: BranchRoute
+  ): Promise<{
     topic: FetchTopicNamingContextResponse['topic']
     messageCount: number
     firstMessage: Message | null
@@ -321,11 +414,11 @@ export interface MessageDataSource {
   }>
 
   /**
-   * Bounded topic activity READ for rate-limit checks.
+   * Bounded topic activity READ for rate-limit checks, route-scoped.
    * Returns exact count plus latest message id/timestamp; no messages/blocks.
    * Missing topic → throws ChatDbResultError (NOT_FOUND).
    */
-  fetchTopicActivity?(topicId: string): Promise<FetchTopicActivityResponse>
+  fetchTopicActivity?(topicId: string, branchId?: BranchRoute): Promise<FetchTopicActivityResponse>
 
   // ============ File Operations (Optional) ============
 

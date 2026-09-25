@@ -97,6 +97,7 @@ import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
+import { selectActiveBranchId, selectRouteGeneration } from '../topicBranch'
 import { replaceSegmentsForTopic } from '../topicSegment'
 // import {
 //   bulkAddBlocksV2,
@@ -111,6 +112,20 @@ import { replaceSegmentsForTopic } from '../topicSegment'
 // } from './messageThunk.v2'
 
 const logger = loggerService.withContext('MessageThunk')
+
+/**
+ * Active route of a logical topic for branch-aware writes/reads
+ * (null = main route). Single source: the topicBranch slice. Never throws —
+ * an unreadable store resolves to the main route.
+ */
+export const activeRouteOf = (getState: (() => RootState) | undefined, topicId: string): string | null => {
+  try {
+    if (typeof getState !== 'function') return null
+    return selectActiveBranchId(getState(), topicId)
+  } catch {
+    return null
+  }
+}
 
 /**
  * Maximum cadence/throttle window for per-block Redux/persistence updates
@@ -150,9 +165,11 @@ const finishTopicLoading = async (topicId: string) => {
 const updateExistingMessageAndBlocksInDB = async (
   updatedMessage: Partial<Message> & Pick<Message, 'id' | 'topicId'>,
   updatedBlocks: MessageBlock[],
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  branchId?: string | null
 ) => {
   try {
+    const route = branchId ?? activeRouteOf(store.getState, updatedMessage.topicId)
     // Always update blocks if provided
     if (updatedBlocks.length > 0) {
       await updateBlocks(updatedBlocks, undefined, resendAttemptId)
@@ -167,7 +184,7 @@ const updateExistingMessageAndBlocksInDB = async (
         return acc
       }, {})
 
-      await updateMessage(updatedMessage.topicId, updatedMessage.id, messageUpdatesPayload, resendAttemptId)
+      await updateMessage(updatedMessage.topicId, updatedMessage.id, messageUpdatesPayload, resendAttemptId, route)
 
       store.dispatch(updateTopicUpdatedAt({ topicId: updatedMessage.topicId }))
     }
@@ -357,7 +374,8 @@ export const saveUpdatesToDB = async (
   topicId: string,
   messageUpdates: Partial<Message>, // 需要更新的消息字段
   blocksToUpdate: MessageBlock[], // 需要更新/创建的块
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  branchId?: string | null
 ) => {
   try {
     const messageDataToSave: Partial<Message> & Pick<Message, 'id' | 'topicId'> = {
@@ -365,7 +383,7 @@ export const saveUpdatesToDB = async (
       topicId,
       ...messageUpdates
     }
-    await updateExistingMessageAndBlocksInDB(messageDataToSave, blocksToUpdate, resendAttemptId)
+    await updateExistingMessageAndBlocksInDB(messageDataToSave, blocksToUpdate, resendAttemptId, branchId)
   } catch (error) {
     logger.error(`[DB Save Updates] Failed for message ${messageId}:`, error as Error)
   }
@@ -415,15 +433,18 @@ export const saveFinalMessageAndBlocksAtomically = async (
   messageId: string,
   messageUpdates: Partial<Message>,
   blocksToUpdate: MessageBlock[],
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  branchId?: string | null
 ): Promise<FileCleanupResult> => {
   try {
+    const route = branchId ?? activeRouteOf(store.getState, topicId)
     const cleanup = await dbService.updateMessageAndBlocks(
       topicId,
       { id: messageId, ...messageUpdates } as Partial<Message> & Pick<Message, 'id'>,
       blocksToUpdate,
       [],
-      resendAttemptId
+      resendAttemptId,
+      route
     )
     await consumeFileCleanupResult(cleanup)
     return cleanup
@@ -580,6 +601,9 @@ const fetchAndProcessAssistantResponseImpl = async (
   // just-persisted anchor, docs/adr/context-window.md CW-6). The result is an
   // independently writable top-level object — never the frozen Redux one.
   const assistant = mergeRequestAssistantSnapshot(origAssistant, freshAssistant, topicId)
+  // Pin the execution route at send start: every persistence write below
+  // lands in this route even if the user switches branches mid-stream.
+  const execRoute = activeRouteOf(getState, topicId)
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
   // Request-local execution state: the execution fact for this generation.
@@ -590,13 +614,15 @@ const fetchAndProcessAssistantResponseImpl = async (
   // F2: one write barrier per execution; all persistence this execution
   // produces is tracked here for finalization quiescence.
   const writeBarrier = new WriteBarrier()
-  // F1: execution-scoped save wrappers binding the immutable closure attempt.
+  // F1: execution-scoped save wrappers binding the immutable closure attempt
+  // and the pinned execution route.
   const saveUpdatesToDBForExec = (
     messageId: string,
     execTopicId: string,
     messageUpdates: Partial<Message>,
     blocksToUpdate: MessageBlock[]
-  ): Promise<void> => saveUpdatesToDB(messageId, execTopicId, messageUpdates, blocksToUpdate, resendAttemptId)
+  ): Promise<void> =>
+    saveUpdatesToDB(messageId, execTopicId, messageUpdates, blocksToUpdate, resendAttemptId, execRoute)
   const saveUpdatedBlockToDBForExec = (
     blockId: string | null,
     messageId: string,
@@ -622,7 +648,14 @@ const fetchAndProcessAssistantResponseImpl = async (
     messageUpdates: Partial<Message>,
     blocksToUpdate: MessageBlock[]
   ): Promise<FileCleanupResult> =>
-    saveFinalMessageAndBlocksAtomically(execTopicId, messageId, messageUpdates, blocksToUpdate, resendAttemptId)
+    saveFinalMessageAndBlocksAtomically(
+      execTopicId,
+      messageId,
+      messageUpdates,
+      blocksToUpdate,
+      resendAttemptId,
+      execRoute
+    )
   try {
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
@@ -729,6 +762,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         messages: messagesForContext,
         assistant,
         topicId,
+        branchId: activeRouteOf(getState, topicId),
         blockManager,
         assistantMsgId,
         callbacks,
@@ -799,8 +833,9 @@ export const sendMessage =
       // recalculated; an empty topic never receives an anchor. This runs
       // BEFORE the assistant response is queued so the first request resolves
       // the same persisted anchor even though its captured assistant snapshot
-      // predates this dispatch.
-      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId)
+      // predates this dispatch. Route-scoped: branch routes anchor under
+      // their own route key.
+      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, activeRouteOf(getState, topicId))
 
       const queue = getTopicQueue(topicId)
 
@@ -941,7 +976,7 @@ export const executeDeleteMessagesWithDependents = async (
   // the full authority restore groups.
   const preDeleteLoadedIds = new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
   // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
-  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds)
+  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds, activeRouteOf(getState, topicId))
 
   // Cancel throttled block updates for the authoritative deleted blocks.
   response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
@@ -963,13 +998,14 @@ export const executeDeleteMessagesWithDependents = async (
     meta: { isDeletePairedFollowUp: true }
   } as any)
 
-  // Renderer-owned anchor transfer from authoritative group keys.
+  // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
   transferAnchorsWithAuthorityGroupKeys(
     dispatch,
     getState,
     topicId,
     response.previousUserMessageIds,
-    response.remainingUserMessageIds
+    response.remainingUserMessageIds,
+    activeRouteOf(getState, topicId)
   )
 
   return { response, undoParts: buildDeleteDependentsUndoParts(response, preDeleteLoadedIds) }
@@ -1048,6 +1084,7 @@ export const resendMessageThunk =
       try {
         response = await dbService.resendUserMessages({
           topicId,
+          branchId: activeRouteOf(getState, topicId),
           userMessageId: userMessageToResend.id,
           assistantId: assistant.id,
           currentModel
@@ -1175,6 +1212,7 @@ export const regenerateAssistantResponseThunk =
       try {
         response = await dbService.regenerateAssistantMessage({
           topicId,
+          branchId: activeRouteOf(getState, topicId),
           assistantMessageId: assistantMessageToRegenerate.id,
           assistantId: assistant.id,
           ...(currentModel !== undefined && { currentModel })
@@ -1295,7 +1333,14 @@ export const initiateTranslationThunk =
 
       // 3. Update Database
       // Get the final message list from Redux state *after* updates
-      await dbService.updateMessageAndBlocks(topicId, { id: messageId, blocks: updatedBlockIds }, [newBlock])
+      await dbService.updateMessageAndBlocks(
+        topicId,
+        { id: messageId, blocks: updatedBlockIds },
+        [newBlock],
+        [],
+        undefined,
+        activeRouteOf(getState, topicId)
+      )
       return newBlock.id // Return the ID
     } catch (error) {
       logger.error(`[initiateTranslationThunk] Failed for message ${messageId}:`, error as Error)
@@ -1397,9 +1442,12 @@ export const appendAssistantResponseThunk =
       // 4. Persist the stub via the stable-ID authority capability. Main
       // resolves insertion after the anchor/contiguous assistant group tail
       // in one transaction (cold-window safe: no loaded-relative DB index).
-      await dbService.insertMessagesAfterAnchor(topicId, existingAssistantMessageId, [
-        { message: newAssistantMessageStub as unknown as JsonObject, blocks: [] }
-      ])
+      await dbService.insertMessagesAfterAnchor(
+        topicId,
+        existingAssistantMessageId,
+        [{ message: newAssistantMessageStub as unknown as JsonObject, blocks: [] }],
+        activeRouteOf(getState, topicId)
+      )
 
       dispatch(
         newMessagesActions.insertMessageAtIndex({
@@ -1515,16 +1563,21 @@ export const insertMessagesThunk =
 
     try {
       // Primary path: Main-authoritative batch insert after stable anchor (no renderer index)
-      await dbService.insertMessagesAfterAnchor(topicId, afterMessageId, [
-        {
-          message: userMessage as unknown as JsonObject,
-          blocks: [userBlock as unknown as JsonObject]
-        },
-        {
-          message: assistantMessage as unknown as JsonObject,
-          blocks: [assistantBlock as unknown as JsonObject]
-        }
-      ])
+      await dbService.insertMessagesAfterAnchor(
+        topicId,
+        afterMessageId,
+        [
+          {
+            message: userMessage as unknown as JsonObject,
+            blocks: [userBlock as unknown as JsonObject]
+          },
+          {
+            message: assistantMessage as unknown as JsonObject,
+            blocks: [assistantBlock as unknown as JsonObject]
+          }
+        ],
+        activeRouteOf(getState, topicId)
+      )
 
       // Publish to Redux only after Main success (fail closed, no partial)
       dispatch(withClosureTopics(upsertOneBlock(userBlock), topicId))
@@ -1581,18 +1634,23 @@ export const insertMessagesThunk =
  * computation. Returns the actual cloned wire for projection.
  */
 export const branchMessagesToTopicThunk =
-  (sourceTopicId: string, anchorMessageId: string, newTopic: Topic) =>
-  async (dispatch: AppDispatch, _getState: () => RootState): Promise<boolean> => {
+  (sourceTopicId: string, anchorMessageId: string, newTopic: Topic, sourceBranchId?: string | null) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<boolean> => {
     if (!newTopic || !newTopic.id) {
       logger.error(`[branchMessagesToTopicThunk] Invalid newTopic provided.`)
       return false
     }
     try {
+      // Legacy Copy Topic (clone-prefix to a new logical topic). Sidebar
+      // invocation stays main-route; an explicitly used in-chat branch route
+      // clones its effective prefix instead.
+      const route = sourceBranchId ?? activeRouteOf(getState, sourceTopicId)
       const { messages: clonedMessages, blocks: clonedBlocks } = await dbService.branchMessagesToTopic(
         sourceTopicId,
         newTopic.id,
         anchorMessageId,
-        newTopic.assistantId
+        newTopic.assistantId,
+        route
       )
 
       // File count parity (same as old path): bump Dexie file counts for file/image blocks
@@ -1638,6 +1696,76 @@ export const branchMessagesToTopicThunk =
   }
 
 /**
+ * Create one topic-internal branch node (the ONLY true-branch creation
+ * method).
+ *
+ * No prefix cloning: Main inserts one branch row (topic + parent route +
+ * anchor + name) and returns the effective wire (shared prefix + empty
+ * suffix) for the renderer projection. The anchor may itself be inherited
+ * (branch-from-inherited). Local-only: no sync intent is minted. No topics
+ * are created: the caller selects the new route via activeBranchSet on the
+ * SAME logical topic (never addTopic/setActiveTopic).
+ */
+export const createBranchThunk =
+  (topicId: string, parentBranchId: string | null, anchorMessageId: string, name: string) =>
+  async (
+    dispatch: AppDispatch,
+    _getState: () => RootState
+  ): Promise<{ branchId: string; anchorMessageId: string } | null> => {
+    if (!topicId || !anchorMessageId) {
+      logger.error(`[createBranchThunk] Invalid topicId/anchorMessageId provided.`)
+      return null
+    }
+    try {
+      const result = await dbService.createBranch(topicId, parentBranchId, anchorMessageId, name)
+
+      // Project the effective route (shared prefix + empty suffix) under
+      // the SAME logical topic: stable IDs are shared across routes by
+      // design (Redux entities are ID-keyed; messageIdsByTopic[topicId]
+      // holds the active route order after the caller switches routes).
+      const effectiveMessages = result.messages as unknown as Message[]
+      const effectiveBlocks = result.blocks as unknown as MessageBlock[]
+      dispatch(
+        newMessagesActions.messagesReceived({
+          topicId,
+          messages: effectiveMessages
+        })
+      )
+      if (effectiveBlocks.length > 0) {
+        dispatch(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId))
+      }
+      const { branchesReceived } = await import('../topicBranch')
+      try {
+        const catalog = await dbService.listBranches(topicId)
+        dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+      } catch (catalogError) {
+        logger.error(`[createBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
+      }
+      return { branchId: result.branch.id, anchorMessageId: result.branch.anchorMessageId }
+    } catch (error) {
+      logger.error(`[createBranchThunk] Failed to create branch:`, error as Error)
+      return null
+    }
+  }
+
+/**
+ * Load the Main-authoritative branch catalog for the unified top selector
+ * and fork dividers. Pure read; stores the projection in the topicBranch
+ * slice. Missing topics resolve to null (caller keeps previous projection).
+ */
+export const fetchTopicBranchesThunk =
+  (topicId: string) =>
+  async (dispatch: AppDispatch, _getState: () => RootState): Promise<void> => {
+    try {
+      const catalog = await dbService.listBranches(topicId)
+      const { branchesReceived } = await import('../topicBranch')
+      dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+    } catch (error) {
+      logger.error(`[fetchTopicBranchesThunk] Failed to load branches for ${topicId}:`, error as Error)
+    }
+  }
+
+/**
  * Thunk to edit properties of a message and/or its associated blocks.
  * Persists ALL changes in a SINGLE atomic SQLite transaction FIRST,
  * then commits Redux state on success.
@@ -1657,7 +1785,7 @@ export const updateMessageAndBlocksThunk =
     blockUpdatesList: MessageBlock[], // Block updates to upsert
     blockIdsToDelete: string[] = [] // Block IDs to delete atomically in the same transaction
   ) =>
-  async (dispatch: AppDispatch): Promise<FileCleanupResult> => {
+  async (dispatch: AppDispatch, getState?: () => RootState): Promise<FileCleanupResult> => {
     const messageId = messageUpdates?.id
 
     if (messageUpdates && !messageId) {
@@ -1672,7 +1800,9 @@ export const updateMessageAndBlocksThunk =
       topicId,
       messageUpdates ?? { id: messageId! },
       blockUpdatesList,
-      blockIdsToDelete
+      blockIdsToDelete,
+      undefined,
+      activeRouteOf(getState, topicId)
     )
 
     // 2. Commit to Redux AFTER successful SQLite persistence
@@ -1730,7 +1860,7 @@ export const selectAnswerMessageThunk =
   (topicId: string, selectedMessageId: string) =>
   async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
     // 1. Atomic Main-authoritative persistence (DB-first, LOCK-001).
-    const response = await dbService.selectAnswerMessage(topicId, selectedMessageId)
+    const response = await dbService.selectAnswerMessage(topicId, selectedMessageId, activeRouteOf(getState, topicId))
 
     // 2. ONE plural Redux commit intersected with the loaded projection.
     const state = getState()
@@ -1772,7 +1902,14 @@ export const removeBlocksThunk =
       // Strip all contract-forbidden identity/order fields (id, topicId, sortOrder).
       const messagePatch = { id: messageId, blocks: updatedBlockIds }
 
-      const cleanup = await dbService.updateMessageAndBlocks(topicId, messagePatch, [], blockIdsToRemove)
+      const cleanup = await dbService.updateMessageAndBlocks(
+        topicId,
+        messagePatch,
+        [],
+        blockIdsToRemove,
+        undefined,
+        activeRouteOf(getState, topicId)
+      )
       await consumeFileCleanupResult(cleanup)
       // Cancel throttled block updates (file cleanup handled by consumeFileCleanupResult)
       blockIdsToRemove.forEach((id) => cancelThrottledBlockUpdate(id))
@@ -1828,9 +1965,11 @@ function scheduleTopicAnchorEstablishment(
   topicId: string
 ): void {
   try {
-    void ensureTopicAnchorEstablished(dispatch, getState, assistantId, topicId).catch(() => {
-      // best-effort; anchor repair never breaks topic activation
-    })
+    void ensureTopicAnchorEstablished(dispatch, getState, assistantId, topicId, activeRouteOf(getState, topicId)).catch(
+      () => {
+        // best-effort; anchor repair never breaks topic activation
+      }
+    )
   } catch {
     // best-effort; anchor repair never breaks topic activation
   }
@@ -1984,7 +2123,14 @@ export const loadTopicMessagesThunk =
 
       const limitRaw = getState().messages.displayCount ?? INITIAL_MESSAGES_COUNT
       const limit = clampWindowLimit(limitRaw)
-      const request: FetchMessagesWindowRequest = { kind: 'latest', topicId, limit }
+      // Topic loads respect the stored route (main after a real topic
+      // switch, since the switch resets the active branch to null).
+      const request: FetchMessagesWindowRequest = {
+        kind: 'latest',
+        topicId,
+        branchId: activeRouteOf(getState, topicId),
+        limit
+      }
 
       const requestSeq = ++loadTopicMessagesRequestSeq
       latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -2179,6 +2325,73 @@ export const loadTopicMessagesThunk =
   }
 
 /**
+ * Load one route (topic + branch) for branch switching.
+ *
+ * Branch switches never run topic-transition semantics: no setCurrentTopicId
+ * (the topic stays fixed), no sidebar/ordering/trash effects. The full
+ * effective route is fetched (shared prefix through each anchor + owned
+ * suffix, stable IDs) and published under the SAME topicId, replacing the
+ * route order. Stale guards: same-topic request sequence (shared with topic
+ * loads — a branch load supersedes in-flight topic loads and vice versa),
+ * the active route still matching, the current topic unchanged, deletion
+ * generation, and the route generation. The caller navigates to the fork
+ * anchor vicinity afterwards — never to bottom.
+ */
+export const loadRouteMessagesThunk =
+  (topicId: string, branchId: string | null) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+    const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+    const requestSeq = ++loadTopicMessagesRequestSeq
+    latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
+    const deletionGenAtStart = captureDeletionGeneration(topicId)
+    let routeGenAtStart = 0
+    try {
+      routeGenAtStart = selectRouteGeneration(getState(), topicId)
+    } catch {
+      routeGenAtStart = 0
+    }
+    dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
+    try {
+      const { messages, blocks } = await dbService.fetchMessages(topicId, false, route)
+      if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
+        recordResidentReadDiscard('superseded')
+        return
+      }
+      if (activeRouteOf(getState, topicId) !== route) {
+        recordResidentReadDiscard('superseded')
+        return
+      }
+      const currentId = getState().messages.currentTopicId
+      if (currentId !== null && currentId !== undefined && currentId !== topicId) {
+        recordResidentReadDiscard('currentMoved')
+        return
+      }
+      if (isDeletionStale(topicId, deletionGenAtStart)) {
+        recordResidentReadDiscard('deletedDuringFetch')
+        return
+      }
+      let routeGenNow = 0
+      try {
+        routeGenNow = selectRouteGeneration(getState(), topicId)
+      } catch {
+        routeGenNow = 0
+      }
+      if (routeGenNow !== routeGenAtStart) {
+        recordResidentReadDiscard('generationMismatch')
+        return
+      }
+      const typedMessages = messages as unknown as Message[]
+      const typedBlocks = blocks as unknown as MessageBlock[]
+      if (typedBlocks.length > 0) {
+        dispatch(withClosureTopics(upsertManyBlocks(typedBlocks), topicId))
+      }
+      dispatch(newMessagesActions.messagesReceived({ topicId, messages: typedMessages }))
+    } finally {
+      dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
+    }
+  }
+
+/**
  * Get raw topic data using unified DbService
  * Returns topic with messages array
  */
@@ -2214,11 +2427,17 @@ export const updateFileCount = async (fileId: string, delta: number, deleteIfZer
  * Delete multiple messages from database.
  * Uses atomic deleteMessagesWithSegments returning FileCleanupResult.
  * LOCK-001: caller must consume FileCleanupResult exactly once post-commit before Redux changes.
+ * Branch-aware: callers pass the active route of the topic (null = main
+ * route); omitted for legacy callers (main route).
  */
-export const deleteMessagesFromDB = async (topicId: string, messageIds: string[]): Promise<FileCleanupResult> => {
+export const deleteMessagesFromDB = async (
+  topicId: string,
+  messageIds: string[],
+  branchId?: string | null
+): Promise<FileCleanupResult> => {
   try {
     // Atomic compound deletion returns FileCleanupResult.
-    const cleanup = await dbService.deleteMessagesWithSegments(topicId, messageIds)
+    const cleanup = await dbService.deleteMessagesWithSegments(topicId, messageIds, branchId ?? null)
     logger.silly('Deleted messages via deleteMessagesWithSegments', {
       topicId,
       count: messageIds.length,
@@ -2244,7 +2463,8 @@ export const saveMessageAndBlocksToDB = async (
   message: Message,
   blocks: MessageBlock[],
   messageIndex: number = -1,
-  sendContext?: SendDiagnosticsContext
+  sendContext?: SendDiagnosticsContext,
+  branchId?: string | null
 ): Promise<void> => {
   try {
     const blockIds = blocks.map((block) => block.id)
@@ -2252,8 +2472,10 @@ export const saveMessageAndBlocksToDB = async (
       blockIds.length > 0 && (!message.blocks || blockIds.some((id, index) => message.blocks?.[index] !== id))
 
     const messageWithBlocks = shouldSyncBlocks ? { ...message, blocks: blockIds } : message
-    // Direct call without conditional logic, now with messageIndex
-    await dbService.appendMessage(topicId, messageWithBlocks, blocks, messageIndex, sendContext)
+    // Direct call without conditional logic, now with messageIndex.
+    // Route defaults to the topic's active route (send/branch-aware).
+    const route = branchId ?? activeRouteOf(store.getState, topicId)
+    await dbService.appendMessage(topicId, messageWithBlocks, blocks, messageIndex, sendContext, undefined, route)
     logger.silly('Saved message and blocks via DbService', {
       topicId,
       messageId: message.id,
@@ -2277,10 +2499,12 @@ export const updateMessage = async (
   topicId: string,
   messageId: string,
   updates: Partial<Message>,
-  resendAttemptId?: string
+  resendAttemptId?: string,
+  branchId?: string | null
 ): Promise<void> => {
   try {
-    await dbService.updateMessage(topicId, messageId, updates, resendAttemptId)
+    const route = branchId ?? activeRouteOf(store.getState, topicId)
+    await dbService.updateMessage(topicId, messageId, updates, resendAttemptId, route)
     logger.silly('Updated message via DbService', { topicId, messageId })
   } catch (error) {
     logger.error('Failed to update message:', { topicId, messageId, error })

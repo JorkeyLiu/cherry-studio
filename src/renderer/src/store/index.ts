@@ -61,6 +61,7 @@ import runtime from './runtime'
 import settings from './settings'
 import shortcuts from './shortcuts'
 import tabs from './tabs'
+import topicBranch from './topicBranch'
 import topicSegment from './topicSegment'
 import translate from './translate'
 import undoStack from './undoStack'
@@ -91,6 +92,7 @@ const appReducer = combineReducers({
   clipboard,
   editMode,
   undoStack,
+  topicBranch,
   topicSegments: topicSegment,
   residentRegistry: residentRegistryReducer
 })

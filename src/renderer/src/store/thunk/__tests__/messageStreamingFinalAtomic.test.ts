@@ -454,7 +454,8 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       { id: ASSISTANT_MSG_ID, status: AssistantMessageStatus.SUCCESS },
       [expect.objectContaining({ id: 'b-text' })],
       [],
-      ATTEMPT
+      ATTEMPT,
+      null
     )
     expect(mocks.consumeFileCleanupResult).toHaveBeenCalledWith(cleanup)
 
@@ -474,7 +475,8 @@ describe('Terminal ordering: quiesce before terminal marking + DB-first atomic',
       { id: ASSISTANT_MSG_ID, status: 'success' },
       [],
       [],
-      undefined
+      undefined,
+      null
     )
   })
 })
@@ -518,7 +520,7 @@ describe('Naming lifecycle: post-persist only', () => {
 
     expect(order).toEqual(['persist', 'naming'])
     expect(mocks.autoRenameTopic).toHaveBeenCalledTimes(1)
-    expect(mocks.autoRenameTopic).toHaveBeenCalledWith(assistantStub, TOPIC_ID)
+    expect(mocks.autoRenameTopic).toHaveBeenCalledWith(assistantStub, TOPIC_ID, null)
     // Loaded Redux final update already dispatched before naming started.
     expect(reduxAtNaming.block).toBe(MessageBlockStatus.SUCCESS)
     expect(reduxAtNaming.message).toBe(AssistantMessageStatus.SUCCESS)

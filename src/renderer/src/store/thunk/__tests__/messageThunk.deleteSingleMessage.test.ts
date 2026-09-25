@@ -216,7 +216,7 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
 
       await deleteSingleMessageThunk('topic-1', 'msg-1')(dispatch, () => storeState as any)
 
-      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'])
+      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'], null)
       expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
       expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(semanticResponse)
       expect(mocks.replaceSegmentsForTopic).toHaveBeenCalledTimes(1)
@@ -225,7 +225,8 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
         expect.any(Function),
         'topic-1',
         ['msg-1'],
-        []
+        [],
+        null
       )
     })
 
@@ -300,7 +301,8 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
     const result = await deleteMessagesWithDependentsThunk('topic-1', ['msg-1', 'other-root'])(dispatch, getState)
 
     // Roots pass through untouched — no loaded expansion, no cascade derivation.
-    expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'other-root'])
+    // Main route resolves to the null route owner.
+    expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'other-root'], null)
     expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(mocks.buildGroupList).not.toHaveBeenCalled()
     // Authority convergence.
@@ -314,7 +316,8 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
       expect.any(Function),
       'topic-1',
       ['msg-1'],
-      []
+      [],
+      null
     )
     // Normalized undo snapshot for the caller.
     expect(result.response).toBe(semanticResponse)

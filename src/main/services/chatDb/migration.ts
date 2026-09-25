@@ -1209,6 +1209,30 @@ export const MIGRATIONS: MigrationEntry[] = [
       END
       WHERE id IN (SELECT thinking_id FROM inverted UNION ALL SELECT main_id FROM inverted)`
     ]
+  },
+  {
+    key: '016_topic_branches',
+    description:
+      'Topic-internal branch model: topic_branches stores one row per internal branch node (id PK, topic_id CASCADE, nullable parent_branch_id self-CASCADE, anchor_message_id, name, timestamps); messages gains nullable branch_id (NULL = main route, non-NULL = owned by that branch, CASCADE on branch delete). Drops the unshipped wrong child-topic lineage table if present (disposable, never released). Existing topics/messages become main-route (branch_id NULL); no backfill. FTS/triggers untouched.',
+    sql: [
+      `DROP TABLE IF EXISTS topic_branches`,
+      `CREATE TABLE IF NOT EXISTS topic_branches (
+        id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+        parent_branch_id TEXT REFERENCES topic_branches(id) ON DELETE CASCADE,
+        anchor_message_id TEXT NOT NULL,
+        name TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        extra TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS topic_branches_topic_id_idx ON topic_branches(topic_id)`,
+      `CREATE INDEX IF NOT EXISTS topic_branches_parent_branch_id_idx ON topic_branches(parent_branch_id)`,
+      `CREATE INDEX IF NOT EXISTS topic_branches_anchor_message_id_idx ON topic_branches(anchor_message_id)`,
+      `ALTER TABLE messages ADD COLUMN branch_id TEXT REFERENCES topic_branches(id) ON DELETE CASCADE`,
+      `CREATE INDEX IF NOT EXISTS messages_branch_id_idx ON messages(branch_id)`,
+      `CREATE INDEX IF NOT EXISTS messages_topic_id_branch_id_sort_order_idx ON messages(topic_id, branch_id, sort_order)`
+    ]
   }
 ]
 

@@ -235,7 +235,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       await executeRedo(dispatch, () => storeState)
 
-      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['u1'])
+      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['u1'], null)
       expect(mocks.consumeFileCleanupResult).toHaveBeenCalledExactlyOnceWith(semanticRedoResponse)
       expect(mocks.updateFileCount).not.toHaveBeenCalled()
     })
@@ -266,7 +266,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
       await executeRedo(dispatch, () => storeState)
 
-      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'])
+      expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1'], null)
       // Authority convergence: exact expanded removal + full segment replace, no loaded segment sync.
       expect(mocks.newMessagesActions.removeMessages).toHaveBeenCalledWith({
         topicId: 'topic-1',

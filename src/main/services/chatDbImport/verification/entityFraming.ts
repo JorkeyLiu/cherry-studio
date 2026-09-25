@@ -81,6 +81,9 @@ export function frameMessageRecord(m: MessageData): Record<string, unknown> {
   return {
     id: m.id,
     topicId: m.topicId,
+    // Route owner column (016): NULL = main route. Explicitly present so
+    // main-route and branch-owned rows digest distinctly (LOCK-4302).
+    branchId: m.branchId ?? null,
     role: m.role,
     content: m.content,
     status: m.status,

@@ -28,6 +28,10 @@ const TOPIC_FIELDS = new Set(['id', 'assistantId', 'name', 'createdAt', 'updated
 const MESSAGE_FIELDS = new Set([
   'id',
   'topicId',
+  // Route owner column (null = main route). Inbound values are never
+  // trusted: aggregate mutations stamp branchId from the typed route
+  // context. Outbound values tell the renderer the owning route.
+  'branchId',
   'role',
   'content',
   'status',
@@ -152,6 +156,7 @@ export function wireToMessage(json: JsonObject): MessageData {
   return {
     id: result.id as string,
     topicId: (result.topicId as string) ?? '',
+    branchId: (result.branchId as string | null) ?? null,
     role: (result.role as string | null) ?? null,
     content: (result.content as string | null) ?? null,
     status: (result.status as string | null) ?? null,

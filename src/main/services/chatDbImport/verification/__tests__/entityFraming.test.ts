@@ -61,6 +61,9 @@ function message(overrides: Partial<MessageData> = {}): MessageData {
   return {
     id: 'm-1',
     topicId: 't-1',
+    // Route owner column (016): NULL = main route, explicitly present in
+    // the canonical framing (LOCK-4302).
+    branchId: null,
     role: 'user',
     content: null,
     status: 'success',
@@ -148,6 +151,7 @@ describe('entityFraming — record framing (LOCK-4302)', () => {
     expect(Object.keys(framed).sort()).toEqual([
       'askId',
       'assistantId',
+      'branchId',
       'content',
       'createdAt',
       'id',
@@ -161,6 +165,7 @@ describe('entityFraming — record framing (LOCK-4302)', () => {
       'updatedAt'
     ])
     const canonical = canonicalStringify(framed)
+    expect(canonical).toContain('"branchId":null')
     expect(canonical).toContain('"content":null')
     expect(canonical).toContain('"askId":null')
     expect(canonical).toContain('"model":null')

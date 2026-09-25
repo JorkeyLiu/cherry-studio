@@ -12,6 +12,7 @@ import {
   restoreTargetSegments,
   syncSegmentsAfterMessageDeletion
 } from '@renderer/store/thunk/topicSegmentThunk'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { replaceSegmentsForTopic } from '@renderer/store/topicSegment'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
 import type {
@@ -129,7 +130,7 @@ async function restoreGroupsByStableAnchors(
   // cross-topic anchors fail the whole transaction with no partial writes and
   // no Redux changes.
   try {
-    await dbService.insertMessageGroups(topicId, groups)
+    await dbService.insertMessageGroups(topicId, groups, selectActiveBranchId(getState(), topicId))
   } catch (error) {
     logger.error('[restoreGroupsByStableAnchors] Failed to restore groups to DB', error as Error)
     throw error
@@ -308,10 +309,15 @@ async function undoPaste(
     }
   }
 
-  // DB-first: delete from DB before dispatching to Redux (LOCK-001)
+  // DB-first: delete from DB before dispatching to Redux (LOCK-001).
+  // Branch-aware: pasted copies live in the topic's active route.
   let cleanup
   try {
-    cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds)
+    cleanup = await deleteMessagesFromDB(
+      targetTopicId,
+      insertedMessageIds,
+      selectActiveBranchId(getState(), targetTopicId)
+    )
   } catch (error) {
     logger.error('[undoPaste] Failed to delete from DB', error as Error)
     throw error
@@ -424,8 +430,10 @@ async function undoCutPaste(
  * Legacy actions without roots fall back to the expanded set, which Main
  * handles as unique roots. Converges from the authority response (exact
  * expanded IDs/blocks + full segment catalog) — no loaded-projection reads.
+ *
+ * Branch-aware: re-deletes in the topic's active route (null = main route).
  */
-async function redoDelete(dispatch: AppDispatch, _getState: () => RootState, action: DeleteUndoAction): Promise<void> {
+async function redoDelete(dispatch: AppDispatch, getState: () => RootState, action: DeleteUndoAction): Promise<void> {
   const { targetTopicId, insertedMessageIds = [], rootMessageIds } = action
   const roots = rootMessageIds && rootMessageIds.length > 0 ? rootMessageIds : insertedMessageIds
 
@@ -436,7 +444,11 @@ async function redoDelete(dispatch: AppDispatch, _getState: () => RootState, act
   // DB-first via the unified semantic command (LOCK-001)
   let response: Awaited<ReturnType<typeof dbService.deleteMessagesWithDependents>>
   try {
-    response = await dbService.deleteMessagesWithDependents(targetTopicId, roots)
+    response = await dbService.deleteMessagesWithDependents(
+      targetTopicId,
+      roots,
+      selectActiveBranchId(getState(), targetTopicId)
+    )
   } catch (error) {
     logger.error('[redoDelete] Failed to delete from DB', error as Error)
     throw error
@@ -496,7 +508,11 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
 
   // DB-first: one atomic stable re-insert before any Redux commit.
   try {
-    await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }])
+    await dbService.insertMessageGroups(
+      targetTopicId,
+      [{ entries, intent }],
+      selectActiveBranchId(getState(), targetTopicId)
+    )
   } catch (error) {
     logger.error('[redoPaste] Failed to save to DB', error as Error)
     throw error
@@ -604,7 +620,11 @@ async function redoCutPaste(
     }))
 
     try {
-      await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }])
+      await dbService.insertMessageGroups(
+        targetTopicId,
+        [{ entries, intent }],
+        selectActiveBranchId(getState(), targetTopicId)
+      )
     } catch (error) {
       logger.error('[redoCutPaste] Failed to save pasted messages to DB', error as Error)
       throw error
