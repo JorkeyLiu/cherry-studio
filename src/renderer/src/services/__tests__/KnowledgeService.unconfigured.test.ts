@@ -11,7 +11,6 @@ vi.mock('i18next', async (importOriginal) => {
 
 vi.mock('@renderer/services/AssistantService', () => ({
   getProviderByModel: vi.fn(),
-  getDefaultAssistant: vi.fn(() => ({ id: 'default', name: 'Default Assistant', prompt: '', settings: {} })),
   getDefaultTopic: vi.fn((assistantId: string) => ({ id: 'default-topic', assistantId })),
   DEFAULT_ASSISTANT_SETTINGS: {},
   getAssistantSettings: vi.fn(() => ({})),

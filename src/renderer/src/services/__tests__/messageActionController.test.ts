@@ -239,35 +239,29 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     expect(resolved!.explicitModel).toBeUndefined()
   })
 
-  it('unified lookup: empty array falls back to defaultAssistant id (user resend still resolves)', () => {
-    const fallback = makeAssistant('default', makeModel('fallback-model'))
-    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'default' })
+  it('unified lookup: missing assistant id stays fail-closed (pure defaults are never a fallback)', () => {
+    const userMsg = makeMessage({ id: 'u-1', topicId: 'topic-1', role: 'user', assistantId: 'ghost' })
     mocks.storeGetState.mockReturnValue({
       messages: { entities: { 'u-1': userMsg }, messageIdsByTopic: { 'topic-1': ['u-1'] } },
-      assistants: { assistants: [], defaultAssistant: fallback },
+      assistants: { assistants: [], assistantDefaults: { name: 'Defaults', settings: {} } },
       messageBlocks: { entities: {} }
     })
-    expect(findAssistantById(mocks.storeGetState() as never, 'default')).toBe(fallback)
-    const resolved = resolveAssistantSnapshot({ topicId: 'topic-1', assistantId: 'default' })
-    expect(resolved).not.toBeNull()
-    expect(resolved!.fresh).toBe(fallback)
-    const resend = resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })
-    expect(resend).not.toBeNull()
-    expect(resend!.assistant.fresh).toBe(fallback)
+    expect(findAssistantById(mocks.storeGetState() as never, 'ghost')).toBeUndefined()
+    expect(resolveAssistantSnapshot({ topicId: 'topic-1', assistantId: 'ghost' })).toBeNull()
+    expect(resolveResendForUser({ topicId: 'topic-1', messageId: 'u-1' })).toBeNull()
   })
 
-  it('unified lookup: array match wins over defaultAssistant; unknown id stays null (fail-closed)', () => {
+  it('unified lookup: array match resolves; unknown id stays null (fail-closed)', () => {
     const inList = makeAssistant('asst-1', makeModel('list-model'))
-    const fallback = makeAssistant('asst-1', makeModel('fallback-model'))
     mocks.storeGetState.mockReturnValue({
       messages: { entities: {}, messageIdsByTopic: {} },
-      assistants: { assistants: [inList], defaultAssistant: fallback },
+      assistants: { assistants: [inList] },
       messageBlocks: { entities: {} }
     })
     expect(findAssistantById(mocks.storeGetState() as never, 'asst-1')).toBe(inList)
     mocks.storeGetState.mockReturnValue({
       messages: { entities: {}, messageIdsByTopic: {} },
-      assistants: { assistants: [], defaultAssistant: fallback },
+      assistants: { assistants: [] },
       messageBlocks: { entities: {} }
     })
     expect(resolveAssistantSnapshot({ topicId: 'topic-1', assistantId: 'unknown' })).toBeNull()
@@ -383,23 +377,23 @@ describe('messageActionController — S3.4 event-time resolution', () => {
     expect(resolved!.assistant.snapshot.model?.id).toBe('mock-model')
   })
 
-  it('unified lookup: regenerate path resolves via defaultAssistant without regression', () => {
-    const fallback = makeAssistant('default', makeModel('fallback-model'))
+  it('unified lookup: regenerate path resolves an ordinary assistant without regression', () => {
+    const ordinary = makeAssistant('asst-1', makeModel('list-model'))
     const msg = makeMessage({
       id: 'a-1',
       topicId: 'topic-1',
       role: 'assistant',
-      assistantId: 'default',
+      assistantId: 'asst-1',
       askId: 'u-1'
     })
     mocks.storeGetState.mockReturnValue({
       messages: { entities: { 'a-1': msg }, messageIdsByTopic: { 'topic-1': ['a-1'] } },
-      assistants: { assistants: [], defaultAssistant: fallback },
+      assistants: { assistants: [ordinary] },
       messageBlocks: { entities: {} }
     })
     const resolved = resolveRegenerateForAssistant({ topicId: 'topic-1', messageId: 'a-1' })
     expect(resolved).not.toBeNull()
-    expect(resolved!.assistant.fresh).toBe(fallback)
+    expect(resolved!.assistant.fresh).toBe(ordinary)
     expect(resolved!.message).toBe(msg)
   })
 })

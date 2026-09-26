@@ -9,7 +9,6 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import i18n from '@renderer/i18n'
 import type { RootState } from '@renderer/store'
 import { useAppDispatch } from '@renderer/store'
-import { updateAssistant, updateDefaultAssistant } from '@renderer/store/assistants'
 import {
   setEnableDataCollection,
   setEnableSpellCheck,
@@ -49,9 +48,6 @@ const spellCheckLanguageOptions: readonly SpellCheckOption[] = [
   { value: 'sk', label: 'Slovenčina', flag: '🇸🇰' },
   { value: 'el', label: 'Ελληνικά', flag: '🇬🇷' }
 ]
-
-const getDefaultNamesForKey = (key: string): Set<string> =>
-  new Set(Object.keys(i18n.store.data).map((locale) => i18n.getFixedT(locale)(key)))
 
 const GeneralSettings: FC = () => {
   const {
@@ -106,23 +102,15 @@ const GeneralSettings: FC = () => {
 
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
-  const defaultAssistant = useSelector((state: RootState) => state.assistants.defaultAssistant)
 
   const onSelectLanguage = async (value: LanguageVarious) => {
+    // Language switch changes language/i18n UI state only. It never
+    // renames or mutates any existing assistant or topic; new entities use
+    // the language/default configuration in effect when they are created.
     dispatch(setLanguage(value))
     localStorage.setItem('language', value)
     void window.api.setLanguage(value)
     await i18n.changeLanguage(value)
-
-    if (getDefaultNamesForKey('chat.default.name').has(defaultAssistant.name)) {
-      const newName = i18n.t('chat.default.name')
-      const knownTopicNames = getDefaultNamesForKey('chat.default.topic.name')
-      const updatedTopics = defaultAssistant.topics.map((topic) =>
-        knownTopicNames.has(topic.name) ? { ...topic, name: i18n.t('chat.default.topic.name') } : topic
-      )
-      dispatch(updateDefaultAssistant({ assistant: { ...defaultAssistant, name: newName, topics: updatedTopics } }))
-      dispatch(updateAssistant({ id: defaultAssistant.id, name: newName, topics: updatedTopics }))
-    }
   }
 
   const handleSpellCheckChange = (checked: boolean) => {

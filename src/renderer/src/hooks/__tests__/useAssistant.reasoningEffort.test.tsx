@@ -50,7 +50,7 @@ vi.mock('@renderer/databases', () => ({
   db: { topics: { add: vi.fn() } }
 }))
 
-vi.mock('@renderer/services/AssistantService', () => ({
+vi.mock('@renderer/services/assistantDefaults', () => ({
   getDefaultTopic: () => ({ id: 'default-topic', name: 'Default', messages: [] })
 }))
 
@@ -66,7 +66,7 @@ vi.mock('@renderer/store/assistants', () => ({
   updateAssistant: vi.fn((p) => ({ type: 'updateAssistant', p })),
   updateAssistants: vi.fn((p) => ({ type: 'updateAssistants', p })),
   updateAssistantSettings: vi.fn((p) => ({ type: 'assistants/updateAssistantSettings', payload: p })),
-  updateDefaultAssistant: vi.fn((p) => ({ type: 'updateDefaultAssistant', p })),
+  updateAssistantDefaults: vi.fn((p) => ({ type: 'updateAssistantDefaults', p })),
   updateTopic: vi.fn((p) => ({ type: 'assistants/updateTopic', p })),
   updateTopics: vi.fn((p) => ({ type: 'updateTopics', p }))
 }))
@@ -115,7 +115,7 @@ describe('useAssistant per-model reasoning_effort independent restore', () => {
       }
     })
     fakeState = {
-      assistants: { assistants: [fakeAssistant], defaultAssistant: fakeAssistant },
+      assistants: { assistants: [fakeAssistant], assistantDefaults: { name: 'Defaults', prompt: '', settings: {} } },
       llm: { defaultModel: { id: 'mock-model', provider: 'mock-openai' } },
       settings: {}
     }

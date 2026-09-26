@@ -34,14 +34,10 @@ async function prepareLargeWindowAndAssistant(page: Page): Promise<string> {
       (
         window as unknown as {
           store: {
-            getState: () => { assistants: { assistants: Array<{ id: string }>; defaultAssistant?: { id: string } } }
+            getState: () => { assistants: { assistants: Array<{ id: string }> } }
           }
         }
-      ).store.getState().assistants?.assistants?.[0]?.id ??
-      (
-        window as unknown as { store: { getState: () => { assistants: { defaultAssistant?: { id: string } } } } }
-      ).store.getState().assistants?.defaultAssistant?.id ??
-      null
+      ).store.getState().assistants?.assistants?.[0]?.id ?? null
   )
   expect(liveAssistantId, 'live assistant id must exist').toBeTruthy()
   return liveAssistantId as string

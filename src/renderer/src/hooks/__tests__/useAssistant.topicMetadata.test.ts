@@ -26,7 +26,7 @@ vi.mock('@renderer/databases', () => ({
   db: { topics: { add: vi.fn() } }
 }))
 
-vi.mock('@renderer/services/AssistantService', () => ({
+vi.mock('@renderer/services/assistantDefaults', () => ({
   getDefaultTopic: () => ({ id: 'default-topic', name: 'Default', messages: [] })
 }))
 
@@ -42,7 +42,7 @@ vi.mock('@renderer/store/assistants', () => ({
   updateAssistant: vi.fn((p) => ({ type: 'updateAssistant', p })),
   updateAssistants: vi.fn((p) => ({ type: 'updateAssistants', p })),
   updateAssistantSettings: vi.fn((p) => ({ type: 'updateAssistantSettings', p })),
-  updateDefaultAssistant: vi.fn((p) => ({ type: 'updateDefaultAssistant', p })),
+  updateAssistantDefaults: vi.fn((p) => ({ type: 'updateAssistantDefaults', p })),
   updateTopic: vi.fn((p) => ({ type: 'assistants/updateTopic', p })),
   updateTopics: vi.fn((p) => ({ type: 'updateTopics', p }))
 }))
@@ -98,7 +98,7 @@ const assistant = {
 }
 
 const fakeState = {
-  assistants: { assistants: [assistant], defaultAssistant: assistant },
+  assistants: { assistants: [assistant], assistantDefaults: { name: 'Defaults', prompt: '', settings: {} } },
   llm: { defaultModel: { id: 'dm' }, quickModel: {}, translateModel: {} },
   settings: {}
 }

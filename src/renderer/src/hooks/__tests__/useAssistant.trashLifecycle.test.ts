@@ -38,7 +38,7 @@ vi.mock('@renderer/databases', () => ({
   db: { topics: { add: vi.fn() } }
 }))
 
-vi.mock('@renderer/services/AssistantService', () => ({
+vi.mock('@renderer/services/assistantDefaults', () => ({
   getDefaultTopic: mocks.getDefaultTopic
 }))
 
@@ -54,7 +54,7 @@ vi.mock('@renderer/store/assistants', () => ({
   updateAssistant: vi.fn((p) => ({ type: 'updateAssistant', p })),
   updateAssistants: vi.fn((p) => ({ type: 'updateAssistants', p })),
   updateAssistantSettings: vi.fn((p) => ({ type: 'updateAssistantSettings', p })),
-  updateDefaultAssistant: vi.fn((p) => ({ type: 'updateDefaultAssistant', p })),
+  updateAssistantDefaults: vi.fn((p) => ({ type: 'updateAssistantDefaults', p })),
   updateTopic: vi.fn((p) => ({ type: 'assistants/updateTopic', p })),
   updateTopics: vi.fn((p) => ({ type: 'updateTopics', p }))
 }))
@@ -113,13 +113,16 @@ const assistant = {
 }
 
 const fakeState = {
-  assistants: { assistants: [assistant], defaultAssistant: assistant },
+  assistants: {
+    assistants: [assistant],
+    assistantDefaults: { name: 'Defaults', emoji: '😀', prompt: '', type: 'assistant', settings: {} }
+  },
   llm: { defaultModel: { id: 'dm' }, quickModel: {}, translateModel: {} },
   settings: {}
 }
 
 // Must be defined after fakeState due to hoisting of vi.mock factory.
-import { useAssistant, useAssistants, useDefaultAssistant } from '../useAssistant'
+import { useAssistant, useAssistantDefaults, useAssistants } from '../useAssistant'
 
 // --- Tests ----------------------------------------------------------------
 
@@ -277,15 +280,20 @@ describe('useAssistant trash lifecycle (Phase 5.2B)', () => {
     })
   })
 
-  describe('useDefaultAssistant topic ownership', () => {
-    it('exposes default assistant topics bound to default assistant ID (LOCK-534)', () => {
-      const { result } = renderHook(() => useDefaultAssistant())
-      const { defaultAssistant } = result.current
+  describe('useAssistantDefaults pure configuration', () => {
+    it('exposes pure defaults with no id/topics/messages; updates affect defaults only', () => {
+      const { result } = renderHook(() => useAssistantDefaults())
+      const { assistantDefaults } = result.current
 
-      expect(defaultAssistant.id).toBe('a-1')
-      expect(defaultAssistant.topics).toHaveLength(1)
-      expect(defaultAssistant.topics[0].assistantId).toBe(defaultAssistant.id)
-      expect(mocks.getDefaultTopic).toHaveBeenCalledWith(defaultAssistant.id)
+      expect(assistantDefaults.name).toBe('Defaults')
+      expect(assistantDefaults).not.toHaveProperty('id')
+      expect(assistantDefaults).not.toHaveProperty('topics')
+      expect(assistantDefaults).not.toHaveProperty('messages')
+
+      result.current.updateAssistantDefaults({ name: 'Renamed' } as never)
+      expect(mockDispatch).toHaveBeenCalledWith({ type: 'updateAssistantDefaults', p: { name: 'Renamed' } })
+      // Updating defaults never touches the existing ordinary assistant.
+      expect(assistant.topics[0].assistantId).toBe('a-1')
     })
   })
 })

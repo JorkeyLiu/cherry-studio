@@ -218,7 +218,7 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     expect((error as Error).message).toContain('select fail')
   })
 
-  it('resendUser dispatches the semantic thunk when the controller resolves (defaultAssistant fallback path)', async () => {
+  it('resendUser dispatches the semantic thunk when the controller resolves (ordinary assistant path)', async () => {
     const userMsg = { id: 'u-1', topicId: 't1', role: 'user' } as any
     const snapshot = { id: 'default', model: { id: 'm' } } as any
     mocks.resolveResend.mockReturnValue({ message: userMsg, assistant: { snapshot } })

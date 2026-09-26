@@ -518,7 +518,7 @@ const migrateConfig = {
         ...state,
         assistants: {
           ...state.assistants,
-          defaultAssistant: fixAssistantName(state.assistants.defaultAssistant),
+          defaultAssistant: fixAssistantName((state.assistants as any).defaultAssistant),
           assistants: state.assistants.assistants.map((assistant) => fixAssistantName(assistant))
         }
       }
@@ -576,10 +576,10 @@ const migrateConfig = {
         assistants: {
           ...state.assistants,
           defaultAssistant: {
-            ...state.assistants.defaultAssistant,
-            name: ['Default Assistant', '默认助手'].includes(state.assistants.defaultAssistant.name)
+            ...(state.assistants as any).defaultAssistant,
+            name: ['Default Assistant', '默认助手'].includes((state.assistants as any).defaultAssistant.name)
               ? i18n.t('settings.assistant.label')
-              : state.assistants.defaultAssistant.name
+              : (state.assistants as any).defaultAssistant.name
           }
         }
       }
@@ -830,7 +830,7 @@ const migrateConfig = {
   },
   '33': (state: RootState) => {
     try {
-      state.assistants.defaultAssistant.type = 'assistant'
+      ;(state.assistants as any).defaultAssistant.type = 'assistant'
 
       // @ts-ignore
       state.agents.agents.forEach((agent) => {
@@ -1328,11 +1328,11 @@ const migrateConfig = {
         }
       })
 
-      const defaultAssistantEmoji = getLeadingEmoji(state.assistants.defaultAssistant.name)
+      const defaultAssistantEmoji = getLeadingEmoji((state.assistants as any).defaultAssistant.name)
 
       if (defaultAssistantEmoji) {
-        state.assistants.defaultAssistant.emoji = defaultAssistantEmoji
-        state.assistants.defaultAssistant.name = state.assistants.defaultAssistant.name
+        ;(state.assistants as any).defaultAssistant.emoji = defaultAssistantEmoji
+        ;(state.assistants as any).defaultAssistant.name = (state.assistants as any).defaultAssistant.name
           .replace(defaultAssistantEmoji, '')
           .trim()
       }
@@ -2226,9 +2226,9 @@ const migrateConfig = {
       updateModelTextDelta(state.llm.topicNamingModel)
       updateModelTextDelta(state.llm.translateModel)
 
-      if (state.assistants.defaultAssistant.model) {
-        updateModelTextDelta(state.assistants.defaultAssistant.model)
-        updateModelTextDelta(state.assistants.defaultAssistant.defaultModel)
+      if ((state.assistants as any).defaultAssistant.model) {
+        updateModelTextDelta((state.assistants as any).defaultAssistant.model)
+        updateModelTextDelta((state.assistants as any).defaultAssistant.defaultModel)
       }
 
       addProvider(state, 'aws-bedrock')
@@ -2434,11 +2434,10 @@ const migrateConfig = {
   },
   '135': (state: RootState) => {
     try {
-      if (!state.assistants.defaultAssistant.settings) {
-        state.assistants.defaultAssistant.settings =
-          MIGRATION_DEFAULT_ASSISTANT_SETTINGS as unknown as typeof state.assistants.defaultAssistant.settings
-      } else if (!state.assistants.defaultAssistant.settings.toolUseMode) {
-        state.assistants.defaultAssistant.settings.toolUseMode = 'prompt'
+      if (!(state.assistants as any).defaultAssistant.settings) {
+        ;(state.assistants as any).defaultAssistant.settings = MIGRATION_DEFAULT_ASSISTANT_SETTINGS as any
+      } else if (!(state.assistants as any).defaultAssistant.settings.toolUseMode) {
+        ;(state.assistants as any).defaultAssistant.settings.toolUseMode = 'prompt'
       }
       return state
     } catch (error) {
@@ -3174,8 +3173,8 @@ const migrateConfig = {
   '185': (state: RootState) => {
     try {
       // Reset toolUseMode to function for default assistant
-      if (state.assistants.defaultAssistant.settings?.toolUseMode) {
-        state.assistants.defaultAssistant.settings.toolUseMode = 'function'
+      if ((state.assistants as any).defaultAssistant.settings?.toolUseMode) {
+        ;(state.assistants as any).defaultAssistant.settings.toolUseMode = 'function'
       }
       // Reset toolUseMode to function for assistants
       state.assistants.assistants.forEach((assistant) => {
@@ -3617,7 +3616,7 @@ const migrateConfig = {
         return assistant
       }
 
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
 
       logger.info('migrate 209 success')
@@ -3703,7 +3702,7 @@ const migrateConfig = {
         }
         return assistant
       }
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 211 success')
       return state
@@ -3737,7 +3736,7 @@ const migrateConfig = {
         }
         return assistant
       }
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
       logger.info('migrate 212 success')
       return state
@@ -3757,7 +3756,7 @@ const migrateConfig = {
         }
         return assistant
       }
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
       logger.info('migrate 213 success')
       return state
@@ -3861,7 +3860,7 @@ const migrateConfig = {
         return assistant
       }
 
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 216 success')
       return state
@@ -3896,9 +3895,13 @@ const migrateConfig = {
       state.llm.quickModel = clearIfPlatform(state.llm.quickModel)
       state.llm.translateModel = clearIfPlatform(state.llm.translateModel)
 
-      if (state.assistants?.defaultAssistant) {
-        state.assistants.defaultAssistant.model = clearIfPlatform(state.assistants.defaultAssistant.model)
-        state.assistants.defaultAssistant.defaultModel = clearIfPlatform(state.assistants.defaultAssistant.defaultModel)
+      if ((state.assistants as any)?.defaultAssistant) {
+        ;(state.assistants as any).defaultAssistant.model = clearIfPlatform(
+          (state.assistants as any).defaultAssistant.model
+        )
+        ;(state.assistants as any).defaultAssistant.defaultModel = clearIfPlatform(
+          (state.assistants as any).defaultAssistant.defaultModel
+        )
       }
       state.assistants.assistants.forEach((assistant) => {
         assistant.model = clearIfPlatform(assistant.model)
@@ -4047,7 +4050,7 @@ const migrateConfig = {
         return assistant
       }
 
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 219 success')
       return state
@@ -4089,7 +4092,7 @@ const migrateConfig = {
         return assistant
       }
 
-      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
+      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 220 success')
       return state
@@ -4139,8 +4142,8 @@ const migrateConfig = {
         collectModel(state.llm?.topicNamingModel)
         collectModel(state.llm?.quickModel)
         collectModel(state.llm?.translateModel)
-        collectModel(state.assistants?.defaultAssistant?.model)
-        collectModel(state.assistants?.defaultAssistant?.defaultModel)
+        collectModel((state.assistants as any)?.defaultAssistant?.model)
+        collectModel((state.assistants as any)?.defaultAssistant?.defaultModel)
         state.assistants?.assistants?.forEach((assistant) => {
           collectModel(assistant.model)
           collectModel(assistant.defaultModel)
@@ -4220,10 +4223,12 @@ const migrateConfig = {
           state.llm.translateModel = clearIfDropped(state.llm.translateModel)
         }
 
-        if (state.assistants?.defaultAssistant) {
-          state.assistants.defaultAssistant.model = clearIfDropped(state.assistants.defaultAssistant.model)
-          state.assistants.defaultAssistant.defaultModel = clearIfDropped(
-            state.assistants.defaultAssistant.defaultModel
+        if ((state.assistants as any)?.defaultAssistant) {
+          ;(state.assistants as any).defaultAssistant.model = clearIfDropped(
+            (state.assistants as any).defaultAssistant.model
+          )
+          ;(state.assistants as any).defaultAssistant.defaultModel = clearIfDropped(
+            (state.assistants as any).defaultAssistant.defaultModel
           )
         }
         state.assistants?.assistants?.forEach((assistant) => {
@@ -4355,10 +4360,12 @@ const migrateConfig = {
           state.llm.translateModel = clearIfRemoved(state.llm.translateModel)
         }
 
-        if (state.assistants?.defaultAssistant) {
-          state.assistants.defaultAssistant.model = clearIfRemoved(state.assistants.defaultAssistant.model)
-          state.assistants.defaultAssistant.defaultModel = clearIfRemoved(
-            state.assistants.defaultAssistant.defaultModel
+        if ((state.assistants as any)?.defaultAssistant) {
+          ;(state.assistants as any).defaultAssistant.model = clearIfRemoved(
+            (state.assistants as any).defaultAssistant.model
+          )
+          ;(state.assistants as any).defaultAssistant.defaultModel = clearIfRemoved(
+            (state.assistants as any).defaultAssistant.defaultModel
           )
         }
         state.assistants?.assistants?.forEach((assistant) => {
@@ -4572,6 +4579,91 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 224 error', error as Error)
+      return state
+    }
+  },
+  '225': (state: RootState) => {
+    try {
+      // Assistant-defaults redesign: replace the persisted
+      // `assistants.defaultAssistant` Assistant entity with the pure
+      // `assistants.assistantDefaults` configuration (no id/topics/messages).
+      // `assistants[]` is never mutated — existing user assistant IDs, names,
+      // and topics (including a historical `id='default'` entity) pass
+      // through byte/deep-equal unchanged, and no topic authority is written.
+      //
+      // Migration-local conversion (mirrors the cycle-free
+      // `toAssistantDefaults` in `@renderer/services/assistantDefaults`):
+      // only allowed config fields are selected, entity fields (`id`,
+      // `topics`, `messages`, `content`/`targetLanguage`) are dropped, and
+      // malformed/missing legacy values fall back to fresh defaults.
+      // Implemented locally so this module stays free of the service-layer
+      // import chain, per this file's convention.
+      const assistantsState = (state as any).assistants ?? {}
+      const legacy = assistantsState.defaultAssistant
+      if (assistantsState.assistantDefaults && (legacy === undefined || legacy === null)) {
+        // Already migrated (idempotent re-run): keep stored config as-is.
+        logger.info('migrate 225 success')
+        return state
+      }
+      const toDefaults225 = (source: unknown): Record<string, unknown> => {
+        const freshSettings = { ...(MIGRATION_DEFAULT_ASSISTANT_SETTINGS as Record<string, unknown>) }
+        const fresh: Record<string, unknown> = {
+          name: (() => {
+            try {
+              return i18n.t('chat.default.name')
+            } catch {
+              return 'Default Assistant'
+            }
+          })(),
+          prompt: '',
+          type: 'assistant',
+          settings: freshSettings
+        }
+        if (!source || typeof source !== 'object') {
+          return fresh
+        }
+        const record = source as Record<string, unknown>
+        const next: Record<string, unknown> = {
+          ...fresh,
+          name: typeof record.name === 'string' ? record.name : fresh.name,
+          prompt: typeof record.prompt === 'string' ? record.prompt : fresh.prompt,
+          type: typeof record.type === 'string' ? record.type : fresh.type,
+          settings:
+            record.settings && typeof record.settings === 'object'
+              ? (record.settings as Record<string, unknown>)
+              : freshSettings
+        }
+        for (const key of [
+          'emoji',
+          'description',
+          'model',
+          'defaultModel',
+          'knowledge_bases',
+          'enableWebSearch',
+          'webSearchProviderId',
+          'enableUrlContext',
+          'enableGenerateImage',
+          'mcpMode',
+          'mcpServers',
+          'knowledgeRecognition',
+          'tags',
+          'enableMemory'
+        ]) {
+          if (record[key] !== undefined) {
+            next[key] = record[key]
+          }
+        }
+        if (next.emoji !== undefined && typeof next.emoji !== 'string') {
+          delete next.emoji
+        }
+        return next
+      }
+      assistantsState.assistantDefaults = toDefaults225(legacy)
+      delete assistantsState.defaultAssistant
+      logger.info('migrate 225 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 225 error', error as Error)
       return state
     }
   }

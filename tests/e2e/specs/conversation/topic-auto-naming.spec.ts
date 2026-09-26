@@ -581,10 +581,7 @@ test.describe('Topic Auto-Naming (repaired message-read path)', () => {
       expect(ctx.topicId).not.toBe('')
       defaultTopicId = ctx.topicId
       liveAssistantId = await page.evaluate(
-        () =>
-          (window as any).store.getState().assistants?.assistants?.[0]?.id ??
-          (window as any).store.getState().assistants?.defaultAssistant?.id ??
-          null
+        () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
       )
       expect(liveAssistantId).toBeTruthy()
       console.log(`[E2E][topic-naming] Cold seed display=${COLD_DISPLAY} total=${COLD_TOTAL}`)

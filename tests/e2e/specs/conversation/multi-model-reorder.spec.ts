@@ -86,10 +86,7 @@ function deriveStableGroupIdMirror(ids: readonly string[]): string {
 
 async function getLiveAssistantId(page: Page): Promise<string> {
   const liveAssistantId = await page.evaluate(
-    () =>
-      (window as any).store.getState().assistants?.assistants?.[0]?.id ??
-      (window as any).store.getState().assistants?.defaultAssistant?.id ??
-      null
+    () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
   )
   expect(liveAssistantId, 'live assistant id must exist').toBeTruthy()
   return liveAssistantId as string

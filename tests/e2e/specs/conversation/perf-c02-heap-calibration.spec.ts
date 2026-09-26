@@ -337,9 +337,6 @@ async function observeFinalSettledProjection(
 
       const assistantsState = state?.assistants as Record<string, unknown> | undefined
       const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
-      const defaultAss = assistantsState?.defaultAssistant as
-        | { id?: string; settings?: Record<string, unknown> }
-        | undefined
       let persisted: { kind: string; groupKey: string } | null = null
       let actualCount: number | null | undefined = undefined
       for (const a of list) {
@@ -351,11 +348,7 @@ async function observeFinalSettledProjection(
         }
       }
       if (!persisted) {
-        const dMap = (defaultAss?.settings?.contextWindowAnchor ?? {}) as Record<string, unknown>
-        if ((dMap as Record<string, unknown>)[finalTopicId]) {
-          persisted = (dMap as Record<string, unknown>)[finalTopicId] as { kind: string; groupKey: string }
-          actualCount = (defaultAss?.settings as Record<string, unknown>)?.contextCount as number | null | undefined
-        } else {
+        {
           // Fallback to any assistant's contextCount if anchor not found (still need count)
           for (const a of list) {
             const c = (a.settings as Record<string, unknown>)?.contextCount
@@ -363,9 +356,6 @@ async function observeFinalSettledProjection(
               actualCount = c as number | null | undefined
               break
             }
-          }
-          if (actualCount === undefined && defaultAss?.settings) {
-            actualCount = (defaultAss.settings as Record<string, unknown>)?.contextCount as number | null | undefined
           }
         }
       }
@@ -734,10 +724,7 @@ async function activateReduxProjection(
 
   // Discover the live assistant id from renderer store (canonical production ownership)
   const liveAssistantId = await page.evaluate(
-    () =>
-      (window as any).store.getState().assistants?.assistants?.[0]?.id ??
-      (window as any).store.getState().assistants?.defaultAssistant?.id ??
-      null
+    () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
   )
   if (!liveAssistantId) {
     return {
@@ -945,10 +932,7 @@ async function activateReduxProjection(
       const s = (window as unknown as { store: { getState(): Record<string, unknown> } }).store.getState()
       const assistantsState = s.assistants as Record<string, unknown> | undefined
       const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
-      const defaultAss = assistantsState?.defaultAssistant as
-        | { id?: string; settings?: Record<string, unknown> }
-        | undefined
-      const ass = list.find((a) => a.id === assistantId) ?? defaultAss ?? null
+      const ass = list.find((a) => a.id === assistantId) ?? null
       const settings = (ass?.settings ?? {}) as Record<string, unknown>
       const raw = (settings as Record<string, unknown>).contextCount
       return raw as unknown as number | null | undefined
@@ -1106,10 +1090,7 @@ async function activateReduxProjection(
           const s = (window as any).store.getState() as Record<string, unknown>
           const assistantsState = s.assistants as Record<string, unknown> | undefined
           const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
-          const defaultAss = assistantsState?.defaultAssistant as
-            | { id?: string; settings?: Record<string, unknown> }
-            | undefined
-          const ass = list.find((a) => a.id === assistantId) ?? defaultAss ?? null
+          const ass = list.find((a) => a.id === assistantId) ?? null
           const settings = (ass?.settings ?? {}) as Record<string, unknown>
           const anchorMap = (settings.contextWindowAnchor ?? {}) as Record<
             string,
@@ -1214,10 +1195,7 @@ async function activateReduxProjection(
       const s = (window as any).store.getState() as Record<string, unknown>
       const assistantsState = s.assistants as Record<string, unknown> | undefined
       const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
-      const defaultAss = assistantsState?.defaultAssistant as
-        | { id?: string; settings?: Record<string, unknown> }
-        | undefined
-      const ass = list.find((a) => a.id === assistantId) ?? defaultAss ?? null
+      const ass = list.find((a) => a.id === assistantId) ?? null
       const settings = (ass?.settings ?? {}) as Record<string, unknown>
       const raw = (settings as Record<string, unknown>).contextCount
       // Preserve undefined as invalid marker — do not infer 25 (LOCK-001)
@@ -1270,9 +1248,6 @@ async function activateReduxProjection(
         // Persisted anchor proof via public renderer store — must be valid non-null and equal expected canonical anchor
         const assistantsState = s.assistants as Record<string, unknown> | undefined
         const list = (assistantsState?.assistants ?? []) as Array<{ id: string; settings?: Record<string, unknown> }>
-        const defaultAss = assistantsState?.defaultAssistant as
-          | { id?: string; settings?: Record<string, unknown> }
-          | undefined
         // Find live assistant by checking which has the topic
         let persisted: { kind: string; groupKey: string } | null = null
         for (const a of list) {
@@ -1281,10 +1256,6 @@ async function activateReduxProjection(
             persisted = map[lastTopicId] as { kind: string; groupKey: string }
             break
           }
-        }
-        if (!persisted) {
-          const dMap = (defaultAss?.settings?.contextWindowAnchor ?? {}) as Record<string, unknown>
-          if (dMap[lastTopicId]) persisted = dMap[lastTopicId] as { kind: string; groupKey: string }
         }
         if (
           !persisted ||

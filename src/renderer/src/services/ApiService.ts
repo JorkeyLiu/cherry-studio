@@ -39,7 +39,7 @@ import { AiProvider } from '../aiCore'
 import {
   // getAssistantProvider,
   // getAssistantSettings,
-  getDefaultAssistant,
+  createEphemeralAssistant,
   getDefaultModel,
   getProviderByModel,
   getQuickModel
@@ -588,17 +588,15 @@ export async function fetchMessagesSummary({
   })
   const conversation = JSON.stringify(structredMessages)
 
-  const defaultAssistant = getDefaultAssistant()
-  const summaryAssistant = {
-    ...defaultAssistant,
+  // Non-persisted request-local assistant (no fixed identity, no topics).
+  const summaryAssistant = createEphemeralAssistant({
+    prompt,
+    model,
     settings: {
-      ...defaultAssistant.settings,
       reasoning_effort: 'none',
       qwenThinkMode: false
-    },
-    prompt,
-    model
-  } satisfies Assistant
+    }
+  }) satisfies Assistant
 
   const { providerOptions, standardParams } = buildProviderOptions(summaryAssistant, model, actualProvider, {
     enableReasoning: false,
@@ -654,7 +652,9 @@ export async function fetchMessagesSummary({
 
 export async function fetchNoteSummary({ content, assistant }: { content: string; assistant?: Assistant }) {
   let prompt = getStoreSetting('topicNamingPrompt') || i18n.t('prompts.title')
-  const resolvedAssistant = assistant || getDefaultAssistant()
+  // Non-persisted request-local assistant when the caller passes none
+  // (no fixed identity, no topics); a passed assistant is used as-is.
+  const resolvedAssistant = assistant || createEphemeralAssistant()
   const model = getQuickModel() || resolvedAssistant.model || getDefaultModel()
 
   if (!model) {
@@ -808,9 +808,7 @@ export async function fetchGenerate({
 
   const AI = new AiProvider(model, providerWithRotatedKey)
 
-  const assistant = getDefaultAssistant()
-  assistant.model = model
-  assistant.prompt = prompt
+  const assistant = createEphemeralAssistant({ model, prompt })
 
   // const params: CompletionsParams = {
   //   callType: 'generate',
@@ -967,9 +965,8 @@ export async function checkApi(provider: Provider, model: Model, timeout = 15000
 
   const ai = new AiProvider(model, provider)
 
-  const assistant = getDefaultAssistant()
-  assistant.model = model
-  assistant.prompt = 'test' // 避免部分 provider 空系统提示词会报错
+  // Non-persisted request-local check assistant (no fixed identity, no topics).
+  const assistant = createEphemeralAssistant({ model, prompt: 'test' })
 
   if (isEmbeddingModel(model)) {
     logger.info('checkApi: embedding model detected, calling getEmbeddingDimensions', { modelId: model.id })

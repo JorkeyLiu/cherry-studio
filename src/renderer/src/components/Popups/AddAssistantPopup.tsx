@@ -1,12 +1,12 @@
 import { loggerService } from '@logger'
 import { TopView } from '@renderer/components/TopView'
-import { useAssistants, useDefaultAssistant } from '@renderer/hooks/useAssistant'
+import { useAssistantDefaults, useAssistants } from '@renderer/hooks/useAssistant'
 import { useAssistantPresets } from '@renderer/hooks/useAssistantPresets'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { createAssistantFromAgent, getDefaultTopic } from '@renderer/services/AssistantService'
+import { createAssistantFromDefaults } from '@renderer/services/assistantDefaults'
+import { createAssistantFromAgent } from '@renderer/services/AssistantService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { Assistant, AssistantPreset } from '@renderer/types'
-import { uuid } from '@renderer/utils'
 import type { InputRef } from 'antd'
 import { Divider, Input, Modal, Tag } from 'antd'
 import { take } from 'lodash'
@@ -21,6 +21,12 @@ import Scrollbar from '../Scrollbar'
 
 const logger = loggerService.withContext('AddAssistantPopup')
 
+/**
+ * Explicit discriminant for the system/default preset row. The defaults entry
+ * is pure configuration (no Assistant id/topics) — never a fake Assistant id.
+ */
+export type AddAssistantPresetItem = AssistantPreset & { presetKind?: 'system-default' }
+
 interface Props {
   resolve: (value: Assistant | undefined) => void
 }
@@ -30,7 +36,7 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
   const { t } = useTranslation()
   const { presets: userPresets } = useAssistantPresets()
   const [searchText, setSearchText] = useState('')
-  const { defaultAssistant } = useDefaultAssistant()
+  const { assistantDefaults } = useAssistantDefaults()
   const { assistants, addAssistant } = useAssistants()
   const inputRef = useRef<InputRef>(null)
   const loadingRef = useRef(false)
@@ -38,9 +44,25 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const { setTimeoutTimer } = useTimer()
 
+  const defaultPreset = useMemo<AddAssistantPresetItem>(
+    () => ({
+      id: 'system-default',
+      presetKind: 'system-default',
+      name: assistantDefaults.name,
+      emoji: assistantDefaults.emoji,
+      description: assistantDefaults.description,
+      prompt: assistantDefaults.prompt,
+      type: assistantDefaults.type,
+      defaultModel: assistantDefaults.defaultModel,
+      settings: assistantDefaults.settings,
+      topics: []
+    }),
+    [assistantDefaults]
+  )
+
   const presets = useMemo(() => {
     const allPresets = [...userPresets] as AssistantPreset[]
-    const list = [defaultAssistant, ...allPresets.filter((preset) => !assistants.map((a) => a.id).includes(preset.id))]
+    const list = [defaultPreset, ...allPresets.filter((preset) => !assistants.map((a) => a.id).includes(preset.id))]
     const filtered = searchText
       ? list.filter(
           (preset) =>
@@ -61,7 +83,7 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
       return [newAgent, ...filtered]
     }
     return filtered
-  }, [assistants, defaultAssistant, searchText, userPresets])
+  }, [assistants, defaultPreset, searchText, userPresets])
 
   // 重置选中索引当搜索或列表内容变更时
   useEffect(() => {
@@ -78,9 +100,10 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
       let assistant: Assistant
 
       try {
-        if (preset.id === 'default') {
-          const newId = uuid()
-          assistant = { ...preset, id: newId, topics: [getDefaultTopic(newId)] }
+        if ((preset as AddAssistantPresetItem).presetKind === 'system-default') {
+          // Single generic creation path: ordinary entity from pure defaults
+          // (new id + fresh topic), no fake-Assistant-id branching.
+          assistant = createAssistantFromDefaults(assistantDefaults)
           // LOCK-533: topic ownership persists in SQLite before Redux exposure.
           await addAssistant(assistant)
         } else {
@@ -98,7 +121,7 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
       resolve(assistant)
       setOpen(false)
     },
-    [setTimeoutTimer, resolve, addAssistant]
+    [setTimeoutTimer, resolve, addAssistant, assistantDefaults]
   ) // 添加函数内使用的依赖项
   // 键盘导航处理
   useEffect(() => {
@@ -209,13 +232,15 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
           <AgentItem
             key={preset.id}
             onClick={() => onCreateAssistant(preset)}
-            className={`agent-item ${preset.id === 'default' ? 'default' : ''} ${index === selectedIndex ? 'keyboard-selected' : ''}`}
+            className={`agent-item ${(preset as AddAssistantPresetItem).presetKind === 'system-default' ? 'default' : ''} ${index === selectedIndex ? 'keyboard-selected' : ''}`}
             onMouseEnter={() => setSelectedIndex(index)}>
             <HStack alignItems="center" gap={5} style={{ overflow: 'hidden', maxWidth: '100%' }}>
               <EmojiIcon emoji={preset.emoji || ''} />
               <span className="text-nowrap">{preset.name}</span>
             </HStack>
-            {preset.id === 'default' && <Tag color="green">{t('assistants.presets.tag.system')}</Tag>}
+            {(preset as AddAssistantPresetItem).presetKind === 'system-default' && (
+              <Tag color="green">{t('assistants.presets.tag.system')}</Tag>
+            )}
             {preset.type === 'agent' && <Tag color="orange">{t('assistants.presets.tag.agent')}</Tag>}
             {preset.id === 'new' && <Tag color="green">{t('assistants.presets.tag.new')}</Tag>}
           </AgentItem>

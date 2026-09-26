@@ -1,5 +1,5 @@
 import { loggerService } from '@logger'
-import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { type AssistantDefaults, getDefaultTopic } from '@renderer/services/assistantDefaults'
 import { dbService } from '@renderer/services/db'
 import { persistTopicMetadata } from '@renderer/services/db/topicMetadataPersist'
 import {
@@ -18,9 +18,9 @@ import {
   removeTopic,
   setModel,
   updateAssistant,
+  updateAssistantDefaults,
   updateAssistants,
   updateAssistantSettings as _updateAssistantSettings,
-  updateDefaultAssistant,
   updateTopic,
   updateTopics
 } from '@renderer/store/assistants'
@@ -220,17 +220,18 @@ export function useAssistant(id: string) {
   }
 }
 
-export function useDefaultAssistant() {
-  const defaultAssistant = useAppSelector((state) => state.assistants.defaultAssistant)
+export function useAssistantDefaults() {
+  const assistantDefaults = useAppSelector((state) => state.assistants.assistantDefaults)
   const dispatch = useAppDispatch()
-  const memoizedTopics = useMemo(() => [getDefaultTopic(defaultAssistant.id)], [defaultAssistant.id])
+
+  const updateAssistantDefaultsSettings = useCallback(
+    (defaults: Partial<AssistantDefaults>) => dispatch(updateAssistantDefaults(defaults)),
+    [dispatch]
+  )
 
   return {
-    defaultAssistant: {
-      ...defaultAssistant,
-      topics: memoizedTopics
-    },
-    updateDefaultAssistant: (assistant: Assistant) => dispatch(updateDefaultAssistant({ assistant }))
+    assistantDefaults,
+    updateAssistantDefaults: updateAssistantDefaultsSettings
   }
 }
 

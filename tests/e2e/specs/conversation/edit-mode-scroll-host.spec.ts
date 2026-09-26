@@ -26,10 +26,7 @@ async function prepareDisplayCountAndAssistant(page: any, limit: number): Promis
   const ok = await page.evaluate((lim: number) => (window as any).store.getState().messages.displayCount, limit)
   expect(ok).toBe(limit)
   const liveAssistantId = await page.evaluate(
-    () =>
-      (window as any).store.getState().assistants?.assistants?.[0]?.id ??
-      (window as any).store.getState().assistants?.defaultAssistant?.id ??
-      null
+    () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
   )
   expect(liveAssistantId, 'live assistant id must exist').toBeTruthy()
   return liveAssistantId as string

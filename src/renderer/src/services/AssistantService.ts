@@ -19,21 +19,23 @@ import type {
 } from '@renderer/types'
 import { v4 as uuid } from 'uuid'
 
-import { DEFAULT_ASSISTANT_SETTINGS, getDefaultAssistant, getDefaultTopic } from './assistantDefaults'
+import { createEphemeralAssistant, DEFAULT_ASSISTANT_SETTINGS, getDefaultTopic } from './assistantDefaults'
 
 const logger = loggerService.withContext('AssistantService')
 
 /**
  * Default assistant settings configuration template.
  *
- * **Important**: This defines the DEFAULT VALUES for assistant settings, NOT the current settings
- * of the default assistant. To get the actual settings of the default assistant, use `getDefaultAssistantSettings()`.
+ * **Important**: This defines the DEFAULT VALUES for assistant settings, NOT
+ * the current settings of any assistant. The user-configured defaults for new
+ * assistants live as pure configuration at
+ * `store.getState().assistants.assistantDefaults` (no id/topics/messages).
  *
  * Single source of truth lives in the cycle-free `./assistantDefaults`
  * (parameterBuilder reads defaults from there without importing the
  * store/AssistantService chain); re-exported here for existing consumers.
  */
-export { DEFAULT_ASSISTANT_SETTINGS, getDefaultAssistant, getDefaultTopic } from './assistantDefaults'
+export { createEphemeralAssistant, DEFAULT_ASSISTANT_SETTINGS, getDefaultTopic } from './assistantDefaults'
 
 /**
  * Creates a default translate assistant.
@@ -49,7 +51,8 @@ export function getDefaultTranslateAssistant(
   _settings?: Partial<AssistantSettings>
 ): TranslateAssistant {
   const model = getTranslateModel()
-  const assistant: Assistant = getDefaultAssistant()
+  // Non-persisted request-local assistant (no fixed identity, no topics).
+  const assistant: Assistant = createEphemeralAssistant()
 
   if (!model) {
     logger.error('No translate model')
@@ -93,18 +96,15 @@ export function getDefaultTranslateAssistant(
 }
 
 /**
- * Gets the CURRENT SETTINGS of the default assistant.
+ * Gets the CURRENT user-configured defaults for new assistants (pure
+ * configuration: no id/topics/messages). Previously this returned the
+ * settings of a persisted `defaultAssistant` entity; that entity no longer
+ * exists.
  *
- * **Important**: This returns the actual current settings of the default assistant (user-configured),
- * NOT the DEFAULT_ASSISTANT_SETTINGS template. The settings may have been modified by the user
- * from their initial default values.
- *
- * To get the template of default values, use DEFAULT_ASSISTANT_SETTINGS directly.
- *
- * @returns Current settings of the default assistant from store state
+ * @returns Current assistant defaults from store state
  */
-export function getDefaultAssistantSettings() {
-  return store.getState().assistants.defaultAssistant.settings
+export function getAssistantDefaultsSettings() {
+  return store.getState().assistants.assistantDefaults.settings
 }
 
 export function getDefaultProvider() {

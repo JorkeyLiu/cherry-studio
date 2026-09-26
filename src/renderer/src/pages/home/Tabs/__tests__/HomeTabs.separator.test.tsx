@@ -13,10 +13,13 @@ function readTabsSource() {
 // Mocks for HomeTabs hooks
 vi.mock('@renderer/hooks/useAssistant', () => ({
   useAssistants: () => ({ addAssistant: vi.fn() }),
-  useDefaultAssistant: () => ({ defaultAssistant: { id: 'default', topics: [] } as any })
+  useAssistantDefaults: () => ({
+    assistantDefaults: { name: 'Defaults', prompt: '', settings: {} } as any,
+    updateAssistantDefaults: vi.fn()
+  })
 }))
-vi.mock('@renderer/services/AssistantService', () => ({
-  getDefaultTopic: (id: string) => ({ id: `topic-${id}`, name: 'default' })
+vi.mock('@renderer/services/assistantDefaults', () => ({
+  createAssistantFromDefaults: () => ({ id: 'new-id', topics: [{ id: 'topic-new-id', assistantId: 'new-id' }] })
 }))
 vi.mock('@renderer/components/Popups/AddAssistantPopup', () => ({
   default: { show: vi.fn() }

@@ -7,7 +7,7 @@ import Selector from '@renderer/components/Selector'
 import { TopView } from '@renderer/components/TopView'
 import { DEFAULT_CONTEXTCOUNT, DEFAULT_TEMPERATURE } from '@renderer/config/constant'
 import { useTheme } from '@renderer/context/ThemeProvider'
-import { useDefaultAssistant } from '@renderer/hooks/useAssistant'
+import { useAssistantDefaults } from '@renderer/hooks/useAssistant'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/AssistantService'
 import {
   buildSettingsResetPatch,
@@ -26,23 +26,25 @@ import styled from 'styled-components'
 import { SettingContainer, SettingRow, SettingSubtitle } from '..'
 
 const AssistantSettings: FC = () => {
-  const { defaultAssistant, updateDefaultAssistant } = useDefaultAssistant()
-  const [temperature, setTemperature] = useState(defaultAssistant.settings?.temperature ?? DEFAULT_TEMPERATURE)
-  const [enableTemperature, setEnableTemperature] = useState(defaultAssistant.settings?.enableTemperature ?? false)
-  const rawContextCount = defaultAssistant.settings?.contextCount
+  // Pure defaults configuration (no id/topics/messages): edits here affect
+  // only future assistants built from defaults, never an existing assistant.
+  const { assistantDefaults, updateAssistantDefaults } = useAssistantDefaults()
+  const [temperature, setTemperature] = useState(assistantDefaults.settings?.temperature ?? DEFAULT_TEMPERATURE)
+  const [enableTemperature, setEnableTemperature] = useState(assistantDefaults.settings?.enableTemperature ?? false)
+  const rawContextCount = assistantDefaults.settings?.contextCount
   const [contextCount, setContextCount] = useState<number | null>(
     rawContextCount === undefined ? DEFAULT_CONTEXTCOUNT : rawContextCount
   )
-  const [enableMaxTokens, setEnableMaxTokens] = useState(defaultAssistant?.settings?.enableMaxTokens ?? false)
-  const [maxTokens, setMaxTokens] = useState(defaultAssistant?.settings?.maxTokens ?? 0)
-  const [topP, setTopP] = useState(defaultAssistant.settings?.topP ?? 1)
-  const [enableTopP, setEnableTopP] = useState(defaultAssistant.settings?.enableTopP ?? false)
+  const [enableMaxTokens, setEnableMaxTokens] = useState(assistantDefaults?.settings?.enableMaxTokens ?? false)
+  const [maxTokens, setMaxTokens] = useState(assistantDefaults?.settings?.maxTokens ?? 0)
+  const [topP, setTopP] = useState(assistantDefaults.settings?.topP ?? 1)
+  const [enableTopP, setEnableTopP] = useState(assistantDefaults.settings?.enableTopP ?? false)
   const [toolUseMode, setToolUseMode] = useState<AssistantSettingsType['toolUseMode']>(
-    defaultAssistant.settings?.toolUseMode ?? 'function'
+    assistantDefaults.settings?.toolUseMode ?? 'function'
   )
-  const [emoji, setEmoji] = useState(defaultAssistant.emoji || getLeadingEmoji(defaultAssistant.name) || '')
+  const [emoji, setEmoji] = useState(assistantDefaults.emoji || getLeadingEmoji(assistantDefaults.name) || '')
   const [name, setName] = useState(
-    defaultAssistant.name.replace(getLeadingEmoji(defaultAssistant.name) || '', '').trim()
+    assistantDefaults.name.replace(getLeadingEmoji(assistantDefaults.name) || '', '').trim()
   )
   const { theme } = useTheme()
 
@@ -51,10 +53,9 @@ const AssistantSettings: FC = () => {
   const onUpdateAssistantSettings = (settings: Partial<AssistantSettingsType>) => {
     // Use explicit undefined check for contextCount since null is a valid value (unlimited).
     const effectiveContextCount = settings.contextCount !== undefined ? settings.contextCount : contextCount
-    updateDefaultAssistant({
-      ...defaultAssistant,
+    updateAssistantDefaults({
       settings: {
-        ...defaultAssistant.settings,
+        ...assistantDefaults.settings,
         temperature: settings.temperature ?? temperature,
         enableTemperature: settings.enableTemperature ?? enableTemperature,
         contextCount: effectiveContextCount,
@@ -101,26 +102,26 @@ const AssistantSettings: FC = () => {
     setToolUseMode('function')
     // Generic settings reset changes defaults, never topic anchors
     // (docs/adr/context-window.md CW-1): the per-topic anchor map is preserved.
-    updateDefaultAssistant({
-      ...defaultAssistant,
-      settings: buildSettingsResetPatch(defaultAssistant.settings, DEFAULT_ASSISTANT_SETTINGS)
+    // The reset patch is full defaults + preserved anchors (typed Partial).
+    updateAssistantDefaults({
+      settings: buildSettingsResetPatch(assistantDefaults.settings, DEFAULT_ASSISTANT_SETTINGS) as AssistantSettingsType
     })
   }
 
   const handleEmojiSelect = (selectedEmoji: string) => {
     setEmoji(selectedEmoji)
-    updateDefaultAssistant({ ...defaultAssistant, emoji: selectedEmoji, name })
+    updateAssistantDefaults({ emoji: selectedEmoji, name })
   }
 
   const handleEmojiDelete = () => {
     setEmoji('')
-    updateDefaultAssistant({ ...defaultAssistant, emoji: '', name })
+    updateAssistantDefaults({ emoji: '', name })
   }
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newName = e.target.value
     setName(newName)
-    updateDefaultAssistant({ ...defaultAssistant, name: newName })
+    updateAssistantDefaults({ name: newName })
   }
 
   return (
@@ -162,8 +163,8 @@ const AssistantSettings: FC = () => {
       <TextArea
         rows={4}
         placeholder={t('common.assistant') + t('common.prompt')}
-        value={defaultAssistant.prompt}
-        onChange={(e) => updateDefaultAssistant({ ...defaultAssistant, prompt: e.target.value })}
+        value={assistantDefaults.prompt}
+        onChange={(e) => updateAssistantDefaults({ prompt: e.target.value })}
         spellCheck={false}
       />
       <SettingSubtitle

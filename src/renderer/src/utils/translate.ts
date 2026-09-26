@@ -5,7 +5,7 @@ import { builtinLanguages, LanguagesEnum, UNKNOWN } from '@renderer/config/trans
 import db from '@renderer/databases'
 import i18n from '@renderer/i18n'
 import { fetchChatCompletion } from '@renderer/services/ApiService'
-import { getDefaultAssistant, getQuickModel } from '@renderer/services/AssistantService'
+import { createEphemeralAssistant, getQuickModel } from '@renderer/services/AssistantService'
 import { hasModel } from '@renderer/services/ModelService'
 import { estimateTextTokens } from '@renderer/services/TokenService'
 import { getAllCustomLanguages } from '@renderer/services/TranslateService'
@@ -81,13 +81,14 @@ const detectLanguageByLLM = async (inputText: string): Promise<TranslateLanguage
     }
   }
 
-  const assistant: Assistant = getDefaultAssistant()
-
-  assistant.model = model
-  assistant.settings = {
-    reasoning_effort: 'none'
-  }
-  assistant.prompt = LANG_DETECT_PROMPT.replace('{{list_lang}}', listLangText).replace('{{input}}', text)
+  // Non-persisted request-local assistant (no fixed identity, no topics).
+  const assistant: Assistant = createEphemeralAssistant({
+    model,
+    settings: {
+      reasoning_effort: 'none'
+    },
+    prompt: LANG_DETECT_PROMPT.replace('{{list_lang}}', listLangText).replace('{{input}}', text)
+  })
 
   const onChunk: (chunk: Chunk) => void = (chunk: Chunk) => {
     // 你的意思是，虽然写的是delta类型，但其实是完整拼接后的结果？

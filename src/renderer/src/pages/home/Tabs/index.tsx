@@ -1,8 +1,8 @@
 import AddAssistantPopup from '@renderer/components/Popups/AddAssistantPopup'
-import { useAssistants, useDefaultAssistant } from '@renderer/hooks/useAssistant'
-import { getDefaultTopic } from '@renderer/services/AssistantService'
+import { useAssistantDefaults, useAssistants } from '@renderer/hooks/useAssistant'
+import { createAssistantFromDefaults } from '@renderer/services/assistantDefaults'
 import type { Assistant, Topic } from '@renderer/types'
-import { classNames, uuid } from '@renderer/utils'
+import { classNames } from '@renderer/utils'
 import type { CSSProperties, FC } from 'react'
 import styled from 'styled-components'
 
@@ -22,7 +22,7 @@ interface Props {
 // assistant list; the right panel always renders topics. No tab switching.
 const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant, setActiveTopic, position, style }) => {
   const { addAssistant } = useAssistants()
-  const { defaultAssistant } = useDefaultAssistant()
+  const { assistantDefaults } = useAssistantDefaults()
 
   const tabsWidthStyle = {
     '--tabs-width': position === 'right' ? 'var(--topic-list-width, 275px)' : 'var(--assistants-width, 275px)'
@@ -36,8 +36,8 @@ const HomeTabs: FC<Props> = ({ activeAssistant, activeTopic, setActiveAssistant,
   }
 
   const onCreateDefaultAssistant = async () => {
-    const newId = uuid()
-    const assistant = { ...defaultAssistant, id: newId, topics: [getDefaultTopic(newId)] }
+    // Ordinary entity built from pure defaults (new id + fresh topic).
+    const assistant = createAssistantFromDefaults(assistantDefaults)
     // LOCK-533: topic ownership persists in SQLite before Redux exposure.
     await addAssistant(assistant)
     setActiveAssistant(assistant)

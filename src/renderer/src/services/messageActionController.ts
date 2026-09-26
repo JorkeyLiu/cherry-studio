@@ -50,16 +50,12 @@ export function resolveMessageEntity(target: ActionTarget): Message | null {
 }
 
 /**
- * Single unified assistant lookup: array id match first, then the
- * `defaultAssistant` fallback when its id matches. All controller resolvers
- * go through this seam so event-time lookup never diverges per call site.
+ * Single unified assistant lookup: ordinary `assistants[]` id match only.
+ * Missing IDs stay fail-closed (null) — pure assistant defaults carry no id
+ * and are never usable as an Assistant fallback.
  */
 export function findAssistantById(state: RootState, assistantId: string): Assistant | undefined {
-  const fromList = state.assistants.assistants.find((a) => a.id === assistantId)
-  if (fromList) return fromList
-  const fallback = state.assistants.defaultAssistant
-  if (fallback && fallback.id === assistantId) return fallback
-  return undefined
+  return state.assistants.assistants.find((a) => a.id === assistantId)
 }
 
 /**

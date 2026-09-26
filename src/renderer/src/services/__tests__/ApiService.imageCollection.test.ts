@@ -71,7 +71,13 @@ vi.mock('@renderer/aiCore', () => ({
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({
-  getDefaultAssistant: vi.fn(),
+  createEphemeralAssistant: vi.fn((init: unknown) => ({
+    id: 'ephemeral-test',
+    topics: [],
+    messages: [],
+    settings: {},
+    ...(init as object)
+  })),
   getDefaultModel: vi.fn(),
   getProviderByModel: vi.fn(),
   getQuickModel: vi.fn()

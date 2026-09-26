@@ -30,7 +30,13 @@ vi.mock('@renderer/hooks/useSettings', () => ({ getStoreSetting: vi.fn(() => '')
 
 const { assistantMocks, completionsMock } = vi.hoisted(() => ({
   assistantMocks: {
-    getDefaultAssistant: vi.fn(),
+    createEphemeralAssistant: vi.fn((init: unknown) => ({
+      id: 'ephemeral-test',
+      topics: [],
+      messages: [],
+      settings: {},
+      ...(init as object)
+    })),
     getDefaultModel: vi.fn(),
     getProviderByModel: vi.fn(),
     getQuickModel: vi.fn()
@@ -83,7 +89,13 @@ describe('fetchMessagesSummary — explicit snapshot block source', () => {
     vi.clearAllMocks()
     assistantMocks.getQuickModel.mockReturnValue(model)
     assistantMocks.getProviderByModel.mockReturnValue(provider)
-    assistantMocks.getDefaultAssistant.mockReturnValue({ id: 'default', settings: {} })
+    assistantMocks.createEphemeralAssistant.mockImplementation((init: unknown) => ({
+      id: 'ephemeral-test',
+      topics: [],
+      messages: [],
+      settings: {},
+      ...(init as object)
+    }))
     completionsMock.mockResolvedValue({ getText: () => 'Title', usage: undefined })
   })
 

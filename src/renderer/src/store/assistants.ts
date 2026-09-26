@@ -18,14 +18,20 @@
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSelector, createSlice } from '@reduxjs/toolkit'
 import { DEFAULT_CONTEXTCOUNT, DEFAULT_TEMPERATURE } from '@renderer/config/constant'
-import { DEFAULT_ASSISTANT_SETTINGS, getDefaultAssistant, getDefaultTopic } from '@renderer/services/assistantDefaults'
+import {
+  type AssistantDefaults,
+  createAssistantDefaults,
+  createInitialAssistant,
+  DEFAULT_ASSISTANT_SETTINGS,
+  getDefaultTopic
+} from '@renderer/services/assistantDefaults'
 import type { Assistant, AssistantPreset, AssistantSettings, Model, Topic } from '@renderer/types'
 import { isEmpty, uniqBy } from 'lodash'
 
 import type { RootState } from '.'
 
 export interface AssistantsState {
-  defaultAssistant: Assistant
+  assistantDefaults: AssistantDefaults
   assistants: Assistant[]
   tagsOrder: string[]
   collapsedTags: Record<string, boolean>
@@ -34,9 +40,11 @@ export interface AssistantsState {
   unifiedListOrder: Array<{ type: 'agent' | 'assistant'; id: string }>
 }
 
+const freshDefaults = createAssistantDefaults()
+
 const initialState: AssistantsState = {
-  defaultAssistant: getDefaultAssistant(),
-  assistants: [getDefaultAssistant()],
+  assistantDefaults: freshDefaults,
+  assistants: [createInitialAssistant(freshDefaults)],
   tagsOrder: [],
   collapsedTags: {},
   presets: [],
@@ -49,9 +57,8 @@ const assistantsSlice = createSlice({
   name: 'assistants',
   initialState,
   reducers: {
-    updateDefaultAssistant: (state, action: PayloadAction<{ assistant: Assistant }>) => {
-      // @ts-ignore ts2589
-      state.defaultAssistant = action.payload.assistant
+    updateAssistantDefaults: (state, action: PayloadAction<Partial<AssistantDefaults>>) => {
+      state.assistantDefaults = { ...state.assistantDefaults, ...action.payload }
     },
     updateAssistants: (state, action: PayloadAction<Assistant[]>) => {
       state.assistants = action.payload
@@ -256,7 +263,7 @@ const assistantsSlice = createSlice({
 })
 
 export const {
-  updateDefaultAssistant,
+  updateAssistantDefaults,
   updateAssistants,
   addAssistant,
   insertAssistant,

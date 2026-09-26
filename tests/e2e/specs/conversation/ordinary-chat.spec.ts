@@ -1199,10 +1199,7 @@ test.describe('Phase 5.4: Ordinary Chat Critical Paths', () => {
     let liveAssistantId: string
     await test.step('B: Seed allowing topics[0] and blocking current topic', async () => {
       liveAssistantId = await page.evaluate(
-        () =>
-          (window as any).store.getState().assistants?.assistants?.[0]?.id ??
-          (window as any).store.getState().assistants?.defaultAssistant?.id ??
-          null
+        () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
       )
       expect(liveAssistantId).toBeTruthy()
 

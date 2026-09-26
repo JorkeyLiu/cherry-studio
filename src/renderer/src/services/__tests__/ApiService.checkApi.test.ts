@@ -37,16 +37,17 @@ vi.mock('@renderer/config/models', async (importOriginal) => {
 })
 vi.mock('@renderer/hooks/useSettings', () => ({ getStoreSetting: vi.fn(() => '') }))
 vi.mock('@renderer/services/AssistantService', () => ({
-  getDefaultAssistant: vi.fn(() => ({
-    id: 'assistant-check',
-    name: 'Check Assistant',
+  createEphemeralAssistant: vi.fn((init: unknown) => ({
+    id: 'ephemeral-check',
+    name: '',
     prompt: 'test',
     topics: [],
     messages: [],
     type: 'assistant',
     mcpMode: 'disabled',
     settings: {},
-    model: undefined
+    model: undefined,
+    ...(init as object)
   })),
   getDefaultModel: vi.fn(),
   getProviderByModel: vi.fn(),

@@ -101,6 +101,24 @@ vi.mock('@renderer/services/assistantDefaults', () => {
   })
   return {
     DEFAULT_ASSISTANT_SETTINGS,
+    createAssistantDefaults: (overrides: Record<string, unknown> = {}) => ({
+      name: 'Default Assistant',
+      emoji: '😀',
+      prompt: '',
+      type: 'assistant',
+      settings: { ...DEFAULT_ASSISTANT_SETTINGS },
+      ...overrides
+    }),
+    createInitialAssistant: (defaults: any = {}) => ({
+      id: 'default',
+      name: defaults.name ?? 'Default Assistant',
+      emoji: '😀',
+      prompt: '',
+      topics: [makeTopic('default')],
+      messages: [] as never[],
+      type: 'assistant' as const,
+      settings: { ...DEFAULT_ASSISTANT_SETTINGS }
+    }),
     getDefaultAssistant: () => ({
       id: 'default',
       name: 'Default Assistant',
