@@ -21,6 +21,8 @@
 | 术语 | 标识符 | 定义 |
 |---|---|---|
 | 服务请求身份 | serving ID | Provider API 请求中原样发送的模型标识。来源是用户配置的 `Model.id`（或 provider 侧可配置覆盖），请求层**惰性直送**，不经元数据改写或归一 |
+| 官方服务 ID | official serving ID | Provider 官方 API 当前实际服务的 serving ID，可能与 canonical ID 文本不同（如 `deepseek-flash` vs `deepseek/deepseek-v4.1-flash`）。是合法请求身份，不是可选别名；展示侧可经有界反向关联恢复 canonical，仅为展示 enrichment，永不改写请求 |
+| 别名 | alias | 可选的替代名称，不是当前官方服务 ID。`name`/`family` 文本相似性、family/日期/限制启发式永不作为身份推导；自动请求 ID 改写永被禁止 |
 | 规范身份 | canonical ID | `models.dev` `models.json` 的模型身份（record key，如 `moonshotai/kimi-k3`）。用于跨 provider 的固有事实关联，不决定请求能否发出 |
 | 显示名 | display name | 模型的展示字符串（`Model.name` / `model.name` 等可编辑字段）。仅用于展示，永不作为身份推导输入 |
 | 规范元数据 | canonical metadata | 来自 `models.json` 的跨 provider 固有事实：模态、能力（attachment/toolCall/structuredOutput/temperature/reasoning）、limits/context 等标准能力画像 |
@@ -28,7 +30,7 @@
 | 拥有者 provider 源 | owning provider source | `Model.provider` 精确匹配的用户自定义连接所解析出的 `models.dev` source id（经 `resolveMetadataSource` / `resolveExactProvider` 的精确契约），仅用于请求侧 serving 建议与 connection logo 归属；Edit Model 展示永不使用该映射。应用内 provider 条目均为用户自定义连接，不是内建供应商身份 |
 | 规范匹配 | canonical matching | `models.json` 上的身份解析：exact full id → exact basename（唯一）→ case-folded（唯一且无歧义），歧义/未知一律 fail-closed |
 | 参考服务条目 | reference serving entry | `snapshot.providers[canonicalLab]` 内经模型中心参考查找命中的展示条目：价格/限制/effort 等参考字段的唯一来源；显示合并但永不成为请求身份 |
-| 模型中心参考查找 | model-centric reference lookup | `api.json` 上的展示查找：canonical 先解析，再仅在 `snapshot.providers[canonicalLab]` 内按序匹配（canonical 全 ID → basename → 唯一精确显示名 → 唯一折叠显示名），fail-closed；永不使用用户 provider/API host |
+| 模型中心参考查找 | model-centric reference lookup | `api.json` 上的展示查找：display canonical 先解析（直接 canonical 契约优先，未命中时经有界官方服务 ID 反向关联恢复），再仅在 `snapshot.providers[canonicalLab]` 内按序匹配（canonical 全 ID → basename → 唯一精确显示名 → 唯一折叠显示名），fail-closed；永不使用用户 provider/API host、可编辑名/group |
 | Enrichment-only | enrichment-only | 外部元数据只丰富展示与可选参数建议，永不拦截准入或基础请求 |
 | Unknown vs false | unknown vs false | 外部缺省的可选字段为 unknown（`undefined`），不是 false；只有经校验的布尔值才能落为 supported/unsupported |
 | API dialect | API dialect | Provider 侧请求参数形状的编码（如 `reasoning_effort` / `thinking` 形态），不推断模型是否具备某能力 |
@@ -43,12 +45,12 @@
 | **MM-2** | **双源职责隔离，展示合并永不成为权威对象**：`models.json` 承载跨 provider 固有事实（canonical），`api.json` 承载 provider-serving 服务事实（source `api`/`name` + 可选 `models[*]` 展示字段）。二者隔离存储于同一快照的不同子树（`snapshot.models` vs `snapshot.providers[*].models`），**永不合并**为单一权威对象；`api.json` 的 serving 能力永不写入 canonical 能力。Edit Model 有效视图可将 `snapshot.providers[canonicalLab]` 的参考条目字段覆盖于 canonical 之上（cost/limits/effort 可见），但该合并仅为展示，来源以 `source` 标记区分，永不成为请求身份 | **Locked** |
 | **MM-3** | **Enrichment-only，never gate admission/basic request**：元数据缺失/网络/缓存/schema/查找失败时，**用户显式模型与基础请求仍可发出**。外部数据只用于 UI 丰富与参数建议，不决定准入；失败静默降级，不阻断请求 | **Locked** |
 | **MM-4** | **缺失 = unknown not false；用户意图惰性发送，上游结果最终**：外部缺省的可选能力字段为 unknown，不是否定；用户显式的模型/模态/reasoning 意图**惰性发送**（按用户配置与当前请求上下文编码，不提前以元数据改写 ID），上游返回为最终事实，错误透明回显 | **Locked** |
-| **MM-5** | **模型中心参考查找（展示唯一合法）**：canonical 先按 MM-6 解析，再仅在 `snapshot.providers[canonicalLab]` 内按序匹配——(a) 精确 canonical 全 ID 键；(b) 精确 canonical basename 键；(c) 与 canonical 名唯一精确显示名相等（trimmed 大小写敏感）；(d) 若 (c) 无命中，与 canonical 名唯一折叠显示名相等。歧义/缺 lab provider/缺名一律 fail-closed（undefined）。永不使用用户 provider/API host、永不跨 provider、永不模糊/子串、永不用 family/日期/限制作身份、永不影响请求语义。请求侧 serving 建议（推理强度菜单）仍经 owning-provider 精确映射（`resolveMetadataSource` + exact serving id），与展示参考语义分离 | **Locked** |
-| **MM-6** | **Canonical 匹配 fail-closed，禁止猜身份**：canonical 解析按 §5 的分层契约（exact → exact basename唯一 → case-folded唯一无歧义），其余一律 unknown/ambiguous → 未命中。**禁止**从 `apiHost`/`group`/`editable name`/`brand`/`owned_by` 或相似名称猜身份；调用方只传 model id 本体 | **Locked** |
+| **MM-5** | **模型中心参考查找（展示唯一合法）**：display canonical 先按 MM-6 直接解析，未命中时经有界官方服务 ID 反向关联恢复（对含 trimmed serving 键的每一源独立求候选：取该源上游 `name`，仅在 `labOf(canonicalId) == 该源` 的 canonical 子空间内以唯一 trimmed 精确名相等恢复，无精确命中时以唯一 trimmed 折叠名相等恢复；该源精确名歧义则该源无候选且不进入折叠，该源无上游名/无同 lab 候选则该源无候选；再按 canonicalId 去重后恰好一最终候选，零/多候选一律 fail-closed；永不用用户连接/可编辑名/group；无模糊/子串/family/日期/限制、无路由后缀剥离、无首选源、无首候选截断），再仅在 `snapshot.providers[canonicalLab]` 内按序匹配——(a) 精确 canonical 全 ID 键；(b) 精确 canonical basename 键；(c) 与 canonical 名唯一精确显示名相等（trimmed 大小写敏感）；(d) 若 (c) 无命中，与 canonical 名唯一折叠显示名相等。歧义/缺 lab provider/缺名一律 fail-closed（undefined）。永不使用用户 provider/API host、可编辑名/group、永不跨 provider、永不模糊/子串、永不用 family/日期/限制作身份、永不影响请求语义。请求侧 serving 建议（推理强度菜单）仍经 owning-provider 精确映射（`resolveMetadataSource` + exact serving id），与展示参考语义分离 | **Locked** |
+| **MM-6** | **Canonical 匹配 fail-closed，禁止猜身份**：canonical 直接解析按 §5 的分层契约（exact → exact basename唯一 → case-folded唯一无歧义），其余一律 unknown/ambiguous → 未命中。**禁止**从 `apiHost`/`group`/`editable name`/`brand`/`owned_by` 或相似名称猜身份；调用方只传 model id 本体。MM-6 直接契约不变；MM-5 的反向关联仅为展示侧 canonical 恢复，不改变直接匹配语义 | **Locked** |
 | **MM-7** | **互补的丰富分工，不覆盖 Model/llm slice**：模型中心参考条目可补**参考侧**价格/限制/能力（cost/limits/effort 等显示字段覆盖于 canonical 之上，来源以 `source` 标记），canonical 数据可补**跨 provider 固有事实**（模态/标准能力/limits）。价格/限制/能力是第三方参考信息，不代表当前自定义连接。二者均**不得覆盖** `Model` 对象或 `llm` Redux slice 的持久化状态，不创建持久化/Redux 状态；快照为 renderer memory-only / Main cache-file-only | **Locked** |
 | **MM-8** | **缓存边界只引用 source 常量，不复制易变数字**：缓存与归一化边界只引用已锁定的 source/endpoint/version 常量（`MODEL_METADATA_SOURCE`/`MODEL_METADATA_ENDPOINT`/`MODEL_METADATA_PROVIDER_SOURCES_ENDPOINT`/`MODEL_METADATA_CACHE_VERSION`/`MODEL_METADATA_CACHE_REL_PATH`）；价格/限制等易变数值不复制为代码常量，始终以快照为准 | **Locked** |
 | **MM-9** | **Logo 语义分层**：模型/logo 解析优先级为 **canonical developer/lab**（`models.json` 的 lab 前缀，如 `moonshotai`）> **owning provider source fallback**（`api.json` 的 provider source，仅在 canonical 未命中时用于 connection 侧回退）> **model initial**（确定性首字母）。Provider fallback **不是** canonical 认定；**connection logo** 归属用户自定义连接经 `resolveMetadataSource` 映射的 source，**model logo** 归属 canonical lab，二者职责分离；应用内 provider 条目均为用户自定义连接，不是内建供应商身份；Logo 准入门槛 fail-closed，不发明 key | **Locked** |
-| **MM-10** | **Alias/base_model 现实与治理边界**：上游 source TOML 存在 `base_model`，但公开发布的生成 JSON 会剥离该结构化字段（payload 中无该键），故请求身份永不依赖它。展示侧允许**有界回退**：模型中心参考查找的 (c)/(d) 以 canonical 名与 `snapshot.providers[canonicalLab]` 内 `name` 的唯一精确/折叠相等作别名式命中（如 `DeepSeek V4.1 Flash` → `deepseek-flash` 式），该回退仅为**展示 enrichment**，不是请求身份认定。未来若上游新增结构化 `base_model` 字段或提供显式审计映射，仅可用于 **enrichment**（展示/建议），**自动请求 ID 改写**（以别名/基座名替换 serving ID）须**独立治理与用户确认**，不得静默改写。不维护 ID 清单 | **Locked** |
+| **MM-10** | **官方服务 ID / Alias 现实与治理边界**：`deepseek-flash` 是 DeepSeek 官方 API 当前服务 ID，不是可选别名；`deepseek/deepseek-v4.1-flash` 是 models.dev 规范知识 ID；合法服务 ID 可与规范 ID 文本不同。上游 source TOML 存在 `base_model`，但公开发布的生成 JSON 会剥离该结构化字段（payload 中无该键），故请求身份永不依赖它。展示侧允许两处有界展示关联（均仅为**展示 enrichment**，不是请求身份认定）：(i) 模型中心参考查找的 (c)/(d) 以 canonical 名与 `snapshot.providers[canonicalLab]` 内 `name` 的唯一精确/折叠相等命中 differing 服务条目（如 `DeepSeek V4.1 Flash` 的 `deepseek-flash` 记录）；(ii) 直接 canonical 未命中时的官方服务 ID 反向关联（MM-5）。`name`/`family` 相似性、family/日期/限制启发式永不作为身份推导。未来若上游新增结构化 `base_model` 字段或提供显式审计映射，仅可用于 **enrichment**（展示/建议），**自动请求 ID 改写**（以别名/基座名替换 serving ID）须**独立治理与用户确认**，不得静默改写。不维护 ID 清单 | **Locked** |
 | **MM-11** | **API dialect 只编码参数形状，不推断模型能力；serving 列表不作 request gate；参考价格不代表当前连接；上游响应最终；错误透明**：aiCore/请求层的 dialect 仅编码“该 provider 该模型族以何种参数形状表达推理/思考”（如 `reasoning_effort` / `thinking` / `effort` 映射），不以 dialect 存在与否推断模型是否具备推理能力；provider 的 serving 模型清单不作为请求闸门，请求层仍为用户 `Model.id` 惰性直送；展示的价格/限制/能力是第三方参考信息，不代表当前自定义供应商或接口；上游错误与上游返回（含认证/限流/模型不存在等）为最终事实，透明回显，不以本地元数据掩盖或改写 | **Locked** |
 | **MM-12** | **演进与测试契约**：变更传播、测试分层与验收按 §10–§12 治理；任何新增读取必须声明能力归属（canonical / 参考 serving / 请求侧 serving 建议），任何新增变更必须用稳定 ID 意图；模型中心参考查找的覆盖（全 ID、basename、唯一精确名、唯一折叠名、歧义 fail-closed、缺 lab、无连接依赖）必须有契约测试；禁止以投影外观包装权威 | **Locked** |
 
@@ -92,16 +94,21 @@
 ### 6.1 Model-Centric Reference Lookup（MM-5，展示唯一合法）
 
 ```
+resolveDisplayCanonicalModel(modelId, snapshot)
+  = resolveCanonicalModel(modelId, snapshot)
+  ?? resolveCanonicalViaOfficialServingId(modelId, snapshot)
+  （直接契约优先；反向关联仅为展示 canonical 恢复，永不改写请求）
 resolveReferenceServingModel(canonicalId, snapshot, canonicalName?)
   = snapshot.providers[labOf(canonicalId)].models[<ordered match>]?
-  （lab 仅为 canonical 前缀；用户 provider/API host 永不参与）
+  （lab 仅为 canonical 前缀；用户 provider/API host、可编辑名/group 永不参与）
 ```
 
-1. **(a) 精确 canonical 全 ID 键**：`canonicalId.trim()` 大小写敏感全量相等即命中。
-2. **(b) 精确 canonical basename 键**：`basename(canonicalId)` 大小写敏感相等即命中。
-3. **(c) 唯一精确显示名**：canonical 名（显式传入或 canonical 条目 `name`，trimmed）与 lab 内某条目 `name`（trimmed）大小写敏感相等，且恰好一条时命中；多条即歧义 → 未命中，不再进入 (d)。
-4. **(d) 唯一折叠显示名**：(c) 无命中时，双方 trim 后 case-folded 相等且恰好一条时命中；否则未命中。
-5. **Never**：跨 provider、模糊/子串匹配、以 family/日期/限制作身份、剥离 `:xxx` 路由后缀、版本推断、首候选截断、以用户 provider/`apiHost`/`group`/可编辑名推导。
+1. **Display canonical**：先按 §6.2 直接解析；未命中时经有界官方服务 ID 反向关联恢复——对含 trimmed serving 键的每一源独立求候选：取该上游服务条目的归一化上游 `name`（永不用 `Model.name`），仅在 `labOf(canonicalId) == 该源` 的 canonical 子空间内以唯一 trimmed 精确名相等恢复，无精确命中时以唯一 trimmed 折叠名相等恢复；该源精确名歧义则该源无候选且不进入折叠，该源无上游名/无同 lab 候选则该源无候选；再按 canonicalId 去重后恰好一最终候选，零/多候选一律 unknown。无模糊/子串/family/日期/限制、无路由后缀剥离、无首选源、无首候选截断。快照级反向索引缓存，避免逐渲染全源扫描。
+2. **(a) 精确 canonical 全 ID 键**：`canonicalId.trim()` 大小写敏感全量相等即命中。
+3. **(b) 精确 canonical basename 键**：`basename(canonicalId)` 大小写敏感相等即命中。
+4. **(c) 唯一精确显示名**：canonical 名（显式传入或 canonical 条目 `name`，trimmed）与 lab 内某条目 `name`（trimmed）大小写敏感相等，且恰好一条时命中；多条即歧义 → 未命中，不再进入 (d)。
+5. **(d) 唯一折叠显示名**：(c) 无命中时，双方 trim 后 case-folded 相等且恰好一条时命中；否则未命中。
+6. **Never**：跨 provider、模糊/子串匹配、以 family/日期/限制作身份、剥离 `:xxx` 路由后缀、版本推断、首候选截断、以用户 provider/`apiHost`/`group`/可编辑名推导。
 - 缺 lab provider、缺 models 映射、canonical 无名（(c)/(d) 无法比较）、歧义一律为无参考元数据（unknown），不否定请求能力。
 - 请求侧 serving 建议（推理强度菜单）仍经 owning-provider 精确映射：`resolveMetadataSource`（`type: 'anthropic'` → `anthropic`、`type: 'gemini'` → `google`、OpenAI 官方 host 精确相等 → `openai`，其余以 `apiHost` 归一化后与 `snapshot.providers[*].api` 唯一精确匹配，零或多匹配均为 unknown）+ `exact case-sensitive trimmed model id`；该映射同时用于 connection logo 归属，不用于 canonical 身份判定与 Edit Model 展示。
 
@@ -143,10 +150,10 @@ resolveReferenceServingModel(canonicalId, snapshot, canonicalName?)
 
 ---
 
-## 10. Alias / Base Model 现实与治理边界（Alias & Base Model）
+## 10. 官方服务 ID / Alias 现实与治理边界（Official Serving ID & Base Model）
 
-- **当前现实**：上游 source TOML 存在 `base_model`，但公开发布的生成 JSON 会剥离该结构化字段（payload 中无该键）；`name`/`family` 字段为展示性文本，**不得**作别名启发式（如家族前缀、名称相似度）推导 canonical 身份（MM-10）。唯一的例外是展示侧有界回退：MM-5 (c)/(d) 以 canonical 名与 `snapshot.providers[canonicalLab]` 内 `name` 的唯一精确/折叠相等作别名式命中，仅为展示 enrichment，不是请求身份认定。
-- **未来演进**：若上游新增结构化 `base_model` 字段或提供显式审计映射，仅可用于 **enrichment**（如展示“基于 …”或建议关联），**自动请求 ID 改写**（将用户填写的 serving ID 静默替换为别名/基座 ID）须**独立治理与用户显式确认**，不得自动改写请求身份（MM-1/MM-4）。
+- **当前现实**：`deepseek-flash` 是 DeepSeek 官方 API 当前服务 ID，不是可选别名；`deepseek/deepseek-v4.1-flash` 是 models.dev 规范知识 ID；合法服务 ID 可与规范 ID 文本不同。上游 source TOML 存在 `base_model`，但公开发布的生成 JSON 会剥离该结构化字段（payload 中无该键），故请求身份永不依赖它；`name`/`family` 字段为展示性文本，**不得**作别名启发式（如家族前缀、名称相似度）推导 canonical 身份（MM-10）。展示侧仅允许两处有界展示关联：MM-5 (c)/(d) 以 canonical 名与 `snapshot.providers[canonicalLab]` 内 `name` 的唯一精确/折叠相等命中 differing 服务条目，以及直接 canonical 未命中时的官方服务 ID 反向关联（对含 serving 键的每一源独立求同 lab 候选，再按 canonicalId 去重后恰好一最终候选；镜像源无同 lab 候选则不阻止官方源命中）；二者均仅为展示 enrichment，不是请求身份认定，永不用用户连接/可编辑名。
+- **未来演进**：若上游新增结构化 `base_model` 字段或提供显式审计映射，仅可用于 **enrichment**（如展示“基于 …”或建议关联），**自动请求 ID 改写**（将用户填写的 serving ID 静默替换为别名/基座 ID）须**独立治理与用户显式确认**，不得自动改写请求身份（MM-1/MM-4）。请求层保持用户 `Model.id` 惰性直送，上游响应最终。
 - **非规范性例子**：如 `DeepSeek Flash` 场景下某思考变体与基座的关联，仅作理解辅助的非规范性举例，**不维护**任何 ID 清单或硬编码映射；真实关联以未来上游结构化字段或显式审计映射为准。
 
 ---
@@ -178,7 +185,7 @@ resolveReferenceServingModel(canonicalId, snapshot, canonicalName?)
 
 ## 13. 测试与证据契约（Test/Evidence Contract）
 
-- **单元测试**：双源归一化（`normalizeCanonicalModelsPayload` / `normalizeProviderSourcesPayload`）、有界限幅与不安全键过滤、模型中心参考查找（canonical 全 ID → basename → 唯一精确显示名 → 唯一折叠显示名，歧义 fail-closed，缺 lab、与用户连接无关）、请求侧 owning-provider 精确查找（大小写敏感、trim、source 精确）、canonical 分层匹配（exact → basename唯一 → case-folded唯一无歧义，歧义 fail-closed）、unknown vs false（缺省 unknown）、enrichment-only（网络/缓存/查找失败不阻断请求）。
+- **单元测试**：双源归一化（`normalizeCanonicalModelsPayload` / `normalizeProviderSourcesPayload`）、有界限幅与不安全键过滤、模型中心参考查找（display canonical 直接优先 + 官方服务 ID 反向关联按同 lab 独立候选去重 + canonical 全 ID → basename → 唯一精确显示名 → 唯一折叠显示名，歧义/零多候选 fail-closed，缺 lab、与用户连接/可编辑名无关）、请求侧 owning-provider 精确查找（大小写敏感、trim、source 精确）、canonical 直接分层匹配（exact → basename唯一 → case-folded唯一无歧义，歧义 fail-closed；反向关联不改变直接语义）、unknown vs false（缺省 unknown）、enrichment-only（网络/缓存/查找失败不阻断请求；请求 `Model.id` 永不改写）。
 - **组件测试**：模型卡片/头像的 logo 分层（canonical lab > provider fallback > initial）、Edit Model 模型数据的参考装配与 HelpTooltip（`models.reference.disclaimer_tooltip` 标题）、reasoning 强度菜单的 serving 驱动装配（`default`/`none` 恒为产品项，serving 仅附加）、缺省/未知态的展示正确性。
 - **证据层级**：按 `AGENTS.md`「Testing and UI/E2E Evidence」路由；UI 变更的渲染/交互验证经 `ui-verify-change`；跨组件/IPC/持久化/生命周期行为的合同级回归以 Playwright E2E 为准，隔离的稳定展示/逻辑以 Vitest/组件测试为先。
 - **禁令回归**：以用户 provider/`apiHost`/`group`/可编辑名/`brand`/`owned_by` 或相似名称猜 canonical 身份、以 serving 列表作 request gate、以参考价格/限制覆盖当前连接事实的任何新增，必须以契约测试失败为门禁（fail-closed），不得以展示正确为通过条件。

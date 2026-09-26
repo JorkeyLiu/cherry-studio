@@ -594,7 +594,8 @@ function normalizeProviderServingModel(
  * context/output, release_date/last_updated/knowledge, cost, reasoning_options
  * effort with `max` mapped to `xhigh`). Provider serving records are never
  * merged into canonical `models` and never overwrite canonical entries; they
- * are accessed only through the exact owning-provider+serving-id resolver.
+ * are accessed through the exact owning-provider+serving-id request helper
+ * and the display-only official serving-ID reverse association.
  * Returns null when the top level is not a record; an empty record is a
  * usable (if logo-poor) result, never a failure. Optional `limits` override
  * exists for tests.
@@ -798,6 +799,167 @@ export function resolveReferenceServingModel(
   )
   if (foldedName.length === 1) return foldedName[0][1]
   return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Display-only official serving-ID reverse association (Edit Model display)
+// ---------------------------------------------------------------------------
+
+interface DisplayReverseIndex {
+  servingKeyToSources: ReadonlyMap<string, ReadonlyArray<{ sourceId: string; entry: NormalizedProviderServingModel }>>
+  canonicalByLab: ReadonlyMap<string, ReadonlyArray<{ canonicalId: string; entry: NormalizedModelMetadata }>>
+}
+
+function buildDisplayReverseIndex(snapshot: ModelMetadataSnapshot): DisplayReverseIndex {
+  const servingKeyToSources = new Map<string, Array<{ sourceId: string; entry: NormalizedProviderServingModel }>>()
+  const canonicalByLab = new Map<string, Array<{ canonicalId: string; entry: NormalizedModelMetadata }>>()
+  const providers = (snapshot as { providers?: unknown }).providers
+  if (providers && typeof providers === 'object') {
+    for (const [sourceId, sourceRaw] of Object.entries(providers as Record<string, unknown>)) {
+      if (!isSafeMetadataKey(sourceId) || !sourceRaw || typeof sourceRaw !== 'object') continue
+      const models = (sourceRaw as { models?: unknown }).models
+      if (!models || typeof models !== 'object') continue
+      for (const [servingKey, entryRaw] of Object.entries(models as Record<string, unknown>)) {
+        if (!isSafeMetadataKey(servingKey) || !entryRaw || typeof entryRaw !== 'object') continue
+        const bucket = servingKeyToSources.get(servingKey)
+        const record = { sourceId, entry: entryRaw as NormalizedProviderServingModel }
+        if (bucket) bucket.push(record)
+        else servingKeyToSources.set(servingKey, [record])
+      }
+    }
+  }
+  const models = (snapshot as { models?: unknown }).models
+  if (models && typeof models === 'object') {
+    for (const [canonicalId, entryRaw] of Object.entries(models as Record<string, unknown>)) {
+      if (!isSafeMetadataKey(canonicalId) || !entryRaw || typeof entryRaw !== 'object') continue
+      const lab = labOf(canonicalId)
+      if (!lab || !isSafeMetadataKey(lab)) continue
+      const bucket = canonicalByLab.get(lab)
+      const record = { canonicalId, entry: entryRaw as NormalizedModelMetadata }
+      if (bucket) (bucket as Array<{ canonicalId: string; entry: NormalizedModelMetadata }>).push(record)
+      else canonicalByLab.set(lab, [record])
+    }
+  }
+  return { servingKeyToSources, canonicalByLab }
+}
+
+/** Reverse-index cache: built once per snapshot object, never scanned per render. */
+const displayReverseIndexCache = new WeakMap<object, DisplayReverseIndex>()
+
+function getDisplayReverseIndex(snapshot: ModelMetadataSnapshot | null | undefined): DisplayReverseIndex | null {
+  if (!snapshot || typeof snapshot !== 'object') return null
+  const cached = displayReverseIndexCache.get(snapshot)
+  if (cached) return cached
+  const built = buildDisplayReverseIndex(snapshot)
+  displayReverseIndexCache.set(snapshot, built)
+  return built
+}
+
+/**
+ * Display-only reverse association from an official provider-serving ID to
+ * its canonical entry.
+ *
+ * A legitimate provider-serving ID may differ textually from the canonical
+ * knowledge ID (e.g. DeepSeek official API's current serving ID
+ * `deepseek-flash` vs models.dev canonical knowledge ID
+ * `deepseek/deepseek-v4.1-flash`). This helper recovers the canonical entry
+ * for display enrichment only — it never rewrites the request `Model.id`,
+ * never reads the user connection/provider/apiHost, and never uses the
+ * editable `Model.name`/`group`.
+ *
+ * Bounded, fail-closed (candidate-after-same-lab):
+ * - Find every provider source containing the exact trimmed case-sensitive
+ *   serving key (prototype-safe). Zero sources fail closed.
+ * - For each such source independently, take that source's upstream serving
+ *   record's normalized upstream `name` (trimmed, non-empty; missing/blank
+ *   yields no candidate for that source) and look only among canonical
+ *   models whose `labOf(canonicalId)` equals that source id:
+ *   exactly one trimmed case-sensitive canonical name -> candidate for that
+ *   source; more than one exact -> that source contributes no candidate and
+ *   must not fall through to folded; when none exact, exactly one trimmed
+ *   case-folded name -> candidate; otherwise no candidate.
+ * - Deduplicate candidates by canonicalId and require exactly one final
+ *   canonical candidate. Zero or multiple fail closed.
+ * Never fuzzy/substring/family/date/limit matching, never route-suffix
+ * stripping, never a preferred-source list, never first-candidate truncation.
+ * Never throws.
+ */
+export function resolveCanonicalViaOfficialServingId(
+  servingId: string | undefined | null,
+  snapshot: ModelMetadataSnapshot | null | undefined
+): CanonicalModelResolution | undefined {
+  if (typeof servingId !== 'string') return undefined
+  const key = servingId.trim()
+  if (!key || !isSafeMetadataKey(key)) return undefined
+  if (!snapshot || typeof snapshot !== 'object') return undefined
+  const index = getDisplayReverseIndex(snapshot)
+  if (!index) return undefined
+  const sources = index.servingKeyToSources.get(key)
+  if (!sources || sources.length === 0) return undefined
+  const finalById = new Map<string, CanonicalModelResolution>()
+  for (const { sourceId, entry: servingEntry } of sources) {
+    if (!sourceId || !isSafeMetadataKey(sourceId)) continue
+    const upstreamNameRaw = (servingEntry as { name?: unknown }).name
+    if (typeof upstreamNameRaw !== 'string') continue
+    const upstreamName = upstreamNameRaw.trim()
+    if (!upstreamName) continue
+    const candidates = index.canonicalByLab.get(sourceId)
+    if (!candidates || candidates.length === 0) continue
+    const exact = candidates.filter(
+      (candidate) => typeof candidate.entry.name === 'string' && candidate.entry.name.trim() === upstreamName
+    )
+    if (exact.length === 1) {
+      const match = exact[0]
+      if (!finalById.has(match.canonicalId)) {
+        finalById.set(match.canonicalId, {
+          entry: match.entry,
+          canonicalId: match.canonicalId,
+          lab: labOf(match.canonicalId)
+        })
+      }
+      continue
+    }
+    // Exact-name ambiguity for this source fails closed for this source and
+    // must not fall through to the folded pass.
+    if (exact.length > 1) continue
+    const folded = upstreamName.toLowerCase()
+    const foldedMatches = candidates.filter(
+      (candidate) => typeof candidate.entry.name === 'string' && candidate.entry.name.trim().toLowerCase() === folded
+    )
+    if (foldedMatches.length === 1) {
+      const match = foldedMatches[0]
+      if (!finalById.has(match.canonicalId)) {
+        finalById.set(match.canonicalId, {
+          entry: match.entry,
+          canonicalId: match.canonicalId,
+          lab: labOf(match.canonicalId)
+        })
+      }
+    }
+  }
+  if (finalById.size !== 1) return undefined
+  return [...finalById.values()][0]
+}
+
+/**
+ * Display-only canonical resolution for the Edit Model UI: try the existing
+ * `resolveCanonicalModel` contract unchanged first; when it misses, apply the
+ * bounded official serving-ID reverse association above. Direct canonical
+ * matches keep precedence; the reverse path never affects requests, aiCore,
+ * provider selection, reasoning request encoding, or connection logos.
+ * Never throws.
+ */
+export function resolveDisplayCanonicalModel(
+  query: string | undefined | null,
+  snapshot: ModelMetadataSnapshot | null | undefined
+): CanonicalModelResolution | undefined {
+  try {
+    const direct = resolveCanonicalModel(query, snapshot)
+    if (direct) return direct
+    return resolveCanonicalViaOfficialServingId(query, snapshot)
+  } catch {
+    return undefined
+  }
 }
 
 // ---------------------------------------------------------------------------

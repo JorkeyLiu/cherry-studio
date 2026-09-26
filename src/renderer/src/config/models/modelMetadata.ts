@@ -11,7 +11,7 @@ import { isUserSelectedModelType } from '@renderer/utils'
 import {
   type NormalizedModelMetadata,
   type NormalizedProviderServingModel,
-  resolveCanonicalModel,
+  resolveDisplayCanonicalModel,
   resolveReferenceServingModel
 } from '@shared/modelMetadata'
 
@@ -108,12 +108,15 @@ export interface ModelMetadataDisplaySources {
 }
 
 /**
- * Model-centric display metadata for the Edit Model UI: canonical resolves
- * first (shared contract, unchanged), then a display-only reference serving
- * entry resolves inside `snapshot.providers[canonicalLab]` only — never from
- * the user's provider/API host. Reference serving fields win, canonical fills
- * only missing fields; the two sources stay distinct and never gate or rewrite
- * requests. The optional `provider` argument remains for call-site
+ * Model-centric display metadata for the Edit Model UI: display canonical
+ * resolves first (direct canonical contract unchanged, then the bounded
+ * official serving-ID reverse association for differing serving IDs such as
+ * `deepseek-flash`), then a display-only reference serving entry resolves
+ * inside `snapshot.providers[canonicalLab]` only — never from the user's
+ * provider/API host and never from the editable name/group. Reference serving
+ * fields win, canonical fills only missing fields; the two sources stay
+ * distinct and never gate or rewrite requests. The request `Model.id` is
+ * never rewritten. The optional `provider` argument remains for call-site
  * compatibility but never controls the result.
  */
 export function getModelMetadataForDisplay(
@@ -123,7 +126,7 @@ export function getModelMetadataForDisplay(
   void _provider
   if (!model || typeof model.id !== 'string') return { source: 'none' }
   const snapshot = getModelMetadataSnapshot()
-  const resolved = resolveCanonicalModel(model.id, snapshot)
+  const resolved = resolveDisplayCanonicalModel(model.id, snapshot)
   if (!resolved) return { source: 'none' }
   const canonical = resolved.entry
   const serving = resolveReferenceServingModel(resolved.canonicalId, snapshot, canonical.name)

@@ -11,6 +11,7 @@ import {
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
   resolveCanonicalModel,
+  resolveDisplayCanonicalModel,
   resolveProviderServingModel,
   resolveReferenceServingModel
 } from '@shared/modelMetadata'
@@ -207,11 +208,13 @@ export function resolveCanonicalModelEntry(
 /**
  * Model-centric reference serving record for Edit Model display only.
  *
- * Resolves canonical first (shared contract), then the reference serving
- * entry inside `snapshot.providers[canonicalLab]` via
+ * Resolves display canonical first (direct canonical contract, then the
+ * bounded official serving-ID reverse association), then the reference
+ * serving entry inside `snapshot.providers[canonicalLab]` via
  * `resolveReferenceServingModel`. Never reads the user's provider/API host,
- * never affects requests. Returns undefined when canonical is unknown or the
- * reference lookup is ambiguous/missing. Never throws.
+ * editable name/group, and never affects requests. Returns undefined when
+ * canonical is unknown or the reference lookup is ambiguous/missing.
+ * Never throws.
  */
 export function resolveReferenceServingForModel(
   model: Model | undefined | null,
@@ -221,7 +224,7 @@ export function resolveReferenceServingForModel(
     if (!model || typeof model.id !== 'string') return undefined
     const snapshotToUse = current ?? snapshot
     if (!snapshotToUse) return undefined
-    const resolved = resolveCanonicalModel(model.id, snapshotToUse)
+    const resolved = resolveDisplayCanonicalModel(model.id, snapshotToUse)
     if (!resolved) return undefined
     return resolveReferenceServingModel(resolved.canonicalId, snapshotToUse, resolved.entry.name)
   } catch {

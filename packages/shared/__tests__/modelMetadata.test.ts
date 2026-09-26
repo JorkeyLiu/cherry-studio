@@ -13,6 +13,8 @@ import {
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
   resolveCanonicalModel,
+  resolveCanonicalViaOfficialServingId,
+  resolveDisplayCanonicalModel,
   resolveProviderServingModel,
   resolveReferenceServingModel,
   toModelMetadataStatus
@@ -725,7 +727,7 @@ describe('resolveReferenceServingModel — model-centric reference (canonical la
     expect(resolveReferenceServingModel('moonshotai/kimi-k3', snapshot, 'Kimi K3')?.cost).toEqual({ input: 5 })
   })
 
-  it('resolves a unique exact display-name alias (DeepSeek V4.1 Flash -> deepseek-flash style)', () => {
+  it('resolves a unique exact display name for a differing official serving ID (DeepSeek V4.1 Flash -> deepseek-flash style)', () => {
     const snapshot: ModelMetadataSnapshot = {
       source: 'models.dev',
       fetchedAt: 1,
@@ -781,7 +783,7 @@ describe('resolveReferenceServingModel — model-centric reference (canonical la
     expect(resolveReferenceServingModel('lab-a/case-model', snapshot)).toBeUndefined()
   })
 
-  it('prefers the exact basename key over a competing unique exact-name alias', () => {
+  it('prefers the exact basename key over a competing unique exact-name differing serving entry', () => {
     const snapshot: ModelMetadataSnapshot = {
       source: 'models.dev',
       fetchedAt: 1,
@@ -804,7 +806,7 @@ describe('resolveReferenceServingModel — model-centric reference (canonical la
       }
     }
     // Tier (b) basename wins even though 'alias-one' is a unique exact-name
-    // alias for the canonical name at tier (c).
+    // differing serving entry for the canonical name at tier (c).
     expect(resolveReferenceServingModel('lab-a/case-model', snapshot)?.id).toBe('case-model')
   })
 
@@ -882,5 +884,341 @@ describe('resolveReferenceServingModel — model-centric reference (canonical la
     expect(resolveReferenceServingModel('', snapshot, 'x')).toBeUndefined()
     expect(resolveReferenceServingModel(undefined, snapshot, 'x')).toBeUndefined()
     expect(resolveReferenceServingModel('deepseek/deepseek-v4.1-flash', null, 'DeepSeek V4.1 Flash')).toBeUndefined()
+  })
+})
+
+describe('resolveCanonicalViaOfficialServingId — display-only reverse association', () => {
+  function deepseekSnapshot(): ModelMetadataSnapshot {
+    return {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'deepseek/deepseek-v4.1-flash': {
+          id: 'deepseek/deepseek-v4.1-flash',
+          name: 'DeepSeek V4.1 Flash',
+          modalities: { input: ['text'], output: ['text'] },
+          limits: { context: 128000 }
+        }
+      },
+      providers: {
+        deepseek: {
+          api: 'https://api.deepseek.com/v1',
+          name: 'DeepSeek',
+          models: {
+            'deepseek-flash': {
+              id: 'deepseek-flash',
+              name: 'DeepSeek V4.1 Flash',
+              cost: { input: 0.15, output: 1.2 },
+              limits: { context: 128000 },
+              effort: ['low']
+            }
+          }
+        },
+        '302ai': {
+          api: 'https://api.302.ai/v1',
+          name: '302.AI',
+          models: {
+            'deepseek-flash': {
+              id: 'deepseek-flash',
+              name: 'DeepSeek V4.1 Flash',
+              cost: { input: 0.2, output: 1.5 }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  it('recovers canonical from the exact official serving ID (deepseek-flash -> deepseek/deepseek-v4.1-flash)', () => {
+    const snapshot = deepseekSnapshot()
+    // Direct canonical path misses the differing official serving ID.
+    expect(resolveCanonicalModel('deepseek-flash', snapshot)).toBeUndefined()
+    const via = resolveCanonicalViaOfficialServingId('deepseek-flash', snapshot)
+    expect(via?.canonicalId).toBe('deepseek/deepseek-v4.1-flash')
+    expect(via?.entry.name).toBe('DeepSeek V4.1 Flash')
+    // Display resolver prefers direct matches but recovers via the reverse path.
+    expect(resolveDisplayCanonicalModel('deepseek-flash', snapshot)?.canonicalId).toBe('deepseek/deepseek-v4.1-flash')
+    // Once canonical is recovered, the existing reference merge applies.
+    const serving = resolveReferenceServingModel(via!.canonicalId, snapshot, via!.entry.name)
+    expect(serving?.cost).toEqual({ input: 0.15, output: 1.2 })
+  })
+
+  it('trims the serving ID and stays case-sensitive', () => {
+    const snapshot = deepseekSnapshot()
+    expect(resolveCanonicalViaOfficialServingId('  deepseek-flash  ', snapshot)?.canonicalId).toBe(
+      'deepseek/deepseek-v4.1-flash'
+    )
+    expect(resolveCanonicalViaOfficialServingId('DeepSeek-Flash', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('DEEPSEEK-FLASH', snapshot)).toBeUndefined()
+  })
+
+  it('fails closed when the serving key appears in zero sources', () => {
+    const snapshot = deepseekSnapshot()
+    expect(resolveCanonicalViaOfficialServingId('missing-key', snapshot)).toBeUndefined()
+    expect(resolveDisplayCanonicalModel('missing-key', snapshot)).toBeUndefined()
+  })
+
+  it('resolves a mirrored serving key when only one source yields a same-lab canonical candidate', () => {
+    // Live models.dev reality: `deepseek-flash` exists under both `deepseek`
+    // and the `302ai` mirror. Only `deepseek` has a same-lab canonical model
+    // (`deepseek/deepseek-v4.1-flash` uniquely named `DeepSeek V4.1 Flash`);
+    // `302ai` has no `302ai/*` canonical lab entry, so it contributes no
+    // candidate and the mirrored key still resolves.
+    const snapshot = deepseekSnapshot()
+    expect(resolveCanonicalModel('deepseek-flash', snapshot)).toBeUndefined()
+    const via = resolveCanonicalViaOfficialServingId('deepseek-flash', snapshot)
+    expect(via?.canonicalId).toBe('deepseek/deepseek-v4.1-flash')
+    expect(resolveDisplayCanonicalModel('deepseek-flash', snapshot)?.canonicalId).toBe('deepseek/deepseek-v4.1-flash')
+  })
+
+  it('fails closed when two sources each yield distinct same-lab canonical candidates', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/model-a': {
+          id: 'lab-a/model-a',
+          name: 'Name A',
+          modalities: { input: ['text'], output: ['text'] }
+        },
+        'lab-b/model-b': {
+          id: 'lab-b/model-b',
+          name: 'Name B',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'shared-serving': { id: 'shared-serving', name: 'Name A' }
+          }
+        },
+        'lab-b': {
+          api: 'https://api.b.example/v1',
+          name: 'Lab B',
+          models: {
+            'shared-serving': { id: 'shared-serving', name: 'Name B' }
+          }
+        }
+      }
+    }
+    // Each source independently yields its own same-lab candidate, so the
+    // deduplicated final set has two entries -> fail closed.
+    expect(resolveCanonicalModel('shared-serving', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('shared-serving', snapshot)).toBeUndefined()
+    expect(resolveDisplayCanonicalModel('shared-serving', snapshot)).toBeUndefined()
+  })
+
+  it('fails closed without folded fallback when exact canonical names are ambiguous in the lab', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/model-one': {
+          id: 'lab-a/model-one',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        },
+        'lab-a/model-two': {
+          id: 'lab-a/model-two',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'serving-x': { id: 'serving-x', name: 'Case Model' },
+            'folded-only': { id: 'folded-only', name: 'case model' }
+          }
+        }
+      }
+    }
+    // Two exact-name canonical candidates fail immediately, even though a
+    // folded-only entry would look unique if exact matches were ignored.
+    expect(resolveCanonicalViaOfficialServingId('serving-x', snapshot)).toBeUndefined()
+  })
+
+  it('recovers via a unique folded-only canonical name when no exact-name candidate exists', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'folded-serving': { id: 'folded-serving', name: 'case model' }
+          }
+        }
+      }
+    }
+    expect(resolveCanonicalViaOfficialServingId('folded-serving', snapshot)?.canonicalId).toBe('lab-a/case-model')
+  })
+
+  it('fails closed on ambiguous folded names and on missing/blank upstream names', () => {
+    const ambiguousFolded: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/one': {
+          id: 'lab-a/one',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        },
+        'lab-a/two': {
+          id: 'lab-a/two',
+          name: 'CASE MODEL',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'serving-x': { id: 'serving-x', name: 'cAsE mOdEl' }
+          }
+        }
+      }
+    }
+    // No exact-name candidate (upstream name differs in case from both), and
+    // two folded candidates -> unknown.
+    expect(resolveCanonicalViaOfficialServingId('serving-x', ambiguousFolded)).toBeUndefined()
+
+    const blankName: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'serving-blank': { id: 'serving-blank', name: '   ' },
+            'serving-noname': { id: 'serving-noname' }
+          }
+        }
+      }
+    }
+    expect(resolveCanonicalViaOfficialServingId('serving-blank', blankName)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('serving-noname', blankName)).toBeUndefined()
+  })
+
+  it('only matches canonical models in the same source lab (never crosses providers)', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'other/model-a': {
+          id: 'other/model-a',
+          name: 'Shared Name',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'serving-x': { id: 'serving-x', name: 'Shared Name' }
+          }
+        }
+      }
+    }
+    expect(resolveCanonicalViaOfficialServingId('serving-x', snapshot)).toBeUndefined()
+  })
+
+  it('never uses family/dates/limits or route suffixes as identity', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Canonical Name',
+          family: 'Shared Family',
+          modalities: { input: ['text'], output: ['text'] },
+          limits: { context: 100 }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'serving-x': { id: 'serving-x', name: 'Other Name', family: 'Shared Family', limits: { context: 100 } }
+          }
+        }
+      }
+    }
+    // Same family/limits but different upstream name -> unknown.
+    expect(resolveCanonicalViaOfficialServingId('serving-x', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('serving-x:thinking', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('serving-x ', snapshot)).toBeUndefined()
+  })
+
+  it('rejects unsafe and empty inputs without throwing', () => {
+    const snapshot = deepseekSnapshot()
+    expect(resolveCanonicalViaOfficialServingId('__proto__', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('constructor', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('   ', snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId(undefined, snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId(null, snapshot)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('deepseek-flash', null)).toBeUndefined()
+    expect(resolveCanonicalViaOfficialServingId('deepseek-flash', undefined)).toBeUndefined()
+    expect(resolveDisplayCanonicalModel(undefined, snapshot)).toBeUndefined()
+    expect(resolveDisplayCanonicalModel('__proto__', snapshot)).toBeUndefined()
+  })
+
+  it('keeps direct canonical precedence and existing full-id/basename behavior', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Canonical Name',
+          modalities: { input: ['text'], output: ['text'] }
+        },
+        'lab-a/other': {
+          id: 'lab-a/other',
+          name: 'Other Name',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'case-model': { id: 'case-model', name: 'Upstream Different Name' }
+          }
+        }
+      }
+    }
+    // Full-id and basename direct paths still win with their canonical entries.
+    expect(resolveDisplayCanonicalModel('lab-a/case-model', snapshot)?.canonicalId).toBe('lab-a/case-model')
+    expect(resolveDisplayCanonicalModel('case-model', snapshot)?.canonicalId).toBe('lab-a/case-model')
+    // Direct canonical resolution itself is unchanged by the reverse path.
+    expect(resolveCanonicalModel('lab-a/case-model', snapshot)?.canonicalId).toBe('lab-a/case-model')
   })
 })

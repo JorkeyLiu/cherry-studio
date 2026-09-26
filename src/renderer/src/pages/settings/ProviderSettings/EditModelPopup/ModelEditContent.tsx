@@ -38,11 +38,12 @@ const ModelEditContent: FC<ModelEditContentProps & ModalProps> = ({ provider, mo
   // async init/refresh round completes, and drives the all-empty state below.
   const metadataStatus = useModelMetadataStatus()
 
-  // Effective model metadata for display: model-centric reference — canonical
-  // resolves first, then reference serving inside snapshot.providers
-  // [canonicalLab] only (never the user connection). Reference serving wins,
-  // canonical fills only missing fields; the sources stay distinct and never
-  // gate or rewrite requests.
+  // Effective model metadata for display: model-centric reference — display
+  // canonical resolves first (direct contract, then bounded official
+  // serving-ID reverse association), then reference serving inside
+  // snapshot.providers[canonicalLab] only (never the user connection).
+  // Reference serving wins, canonical fills only missing fields; the sources
+  // stay distinct and never gate or rewrite requests.
   const display = useMemo(
     () => getModelMetadataForDisplay(model, provider),
     // eslint-disable-next-line react-hooks/exhaustive-deps
