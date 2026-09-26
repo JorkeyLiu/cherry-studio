@@ -437,6 +437,37 @@ export async function refreshModelMetadataRegistry(): Promise<ModelMetadataSnaps
   }
 }
 
+/**
+ * Bounded post-proxy recovery for a cold first-load failure.
+ *
+ * On a fresh cache the nonblocking boot fetch in `init.ts` can run before
+ * Main applies the renderer proxy config, so the first Main fetch fails and
+ * the registry settles `unavailable` with a null snapshot. Call this once
+ * the `App_Proxy` promise resolves: it awaits the previous init/convergence
+ * round to completion (never joining a stale pre-proxy Main in-flight as the
+ * retry itself), then does exactly one `refresh` when — and only when — the
+ * completed round left no snapshot. A cached-ready snapshot never forces a
+ * refresh; a still-loading round never spins. Best-effort and never throws,
+ * so startup stays nonblocking and last-known-good is preserved.
+ */
+export async function retryModelMetadataAfterProxyApplied(): Promise<ModelMetadataSnapshot | null> {
+  try {
+    try {
+      await initModelMetadataRegistry()
+    } catch {
+      // init never throws; defensive only.
+    }
+    if (snapshot) return snapshot
+    const current = getModelMetadataStatus()
+    if (current.snapshot) return current.snapshot
+    if (current.kind === 'ready' || current.kind === 'loading') return snapshot
+    return await refreshModelMetadataRegistry()
+  } catch (error) {
+    logger.warn('model metadata post-proxy retry failed; registry stays unknown', error as Error)
+    return snapshot
+  }
+}
+
 /** Test-only seam: install a snapshot without IPC. */
 export function setModelMetadataSnapshotForTests(next: ModelMetadataSnapshot | null): void {
   snapshot = next

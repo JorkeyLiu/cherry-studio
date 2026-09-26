@@ -7,6 +7,7 @@ import db from '@renderer/databases'
 import i18n from '@renderer/i18n'
 import KnowledgeQueue from '@renderer/queue/KnowledgeQueue'
 import MemoryService from '@renderer/services/MemoryService'
+import { applyProxyAndRetryModelMetadata } from '@renderer/services/proxyMetadataRetry'
 import { handleSaveData, useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMemoryConfig } from '@renderer/store/memory'
 import { setAvatar, setFilesPath, setResourcesPath, setUpdateState } from '@renderer/store/runtime'
@@ -110,14 +111,7 @@ export function useAppInit() {
   }, [dispatch, autoCheckUpdate])
 
   useEffect(() => {
-    if (proxyMode === 'system') {
-      void window.api.setProxy('system', undefined)
-    } else if (proxyMode === 'custom') {
-      void (proxyUrl && window.api.setProxy(proxyUrl, proxyBypassRules))
-    } else {
-      // set proxy to none for direct mode
-      void window.api.setProxy('', undefined)
-    }
+    void applyProxyAndRetryModelMetadata({ proxyMode, proxyUrl, proxyBypassRules })
   }, [proxyUrl, proxyMode, proxyBypassRules])
 
   useEffect(() => {
