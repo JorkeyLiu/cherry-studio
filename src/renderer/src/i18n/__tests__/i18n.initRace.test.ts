@@ -249,11 +249,15 @@ describe('i18n initial race fix — configured locale deterministically wins (S7
     const fs = await import('node:fs')
     const path = await import('node:path')
     const source = fs.readFileSync(path.join(process.cwd(), 'src/renderer/src/i18n/index.ts'), 'utf-8')
-    // Must contain serialized async init block with initPromise
+    // Must contain serialized async init block with initPromise, exposed as
+    // the cycle-safe `initialI18nReady` readiness contract (entry awaits it
+    // before evaluating App/store/fresh-assistant factories).
     expect(source).toMatch(/const initPromise\s*=\s*i18n\.use\(initReactI18next\)\.init/)
-    expect(source).toMatch(/void\s*\(async\s*\(\)\s*=>\s*\{[\s\S]*?await initPromise/)
+    expect(source).toMatch(/export const initialI18nReady/)
+    expect(source).toMatch(/initialI18nReady[^=]*=\s*\(async\s*\(\)\s*=>\s*\{[\s\S]*?await initPromise/)
     expect(source).toMatch(/await\s*\(i18n as any\)\.changeLanguage/)
-    const block = source.match(/void\s*\(async\s*\(\)\s*=>\s*\{([\s\S]*?)\}\)\(\)/m)?.[1] ?? ''
+    const block =
+      source.match(/export const initialI18nReady[^=]*=\s*\(async\s*\(\)\s*=>\s*\{([\s\S]*?)\}\)\(\)/m)?.[1] ?? ''
     const awaitInitIdx = block.indexOf('await initPromise')
     const changePos = block.indexOf('(i18n as any).changeLanguage')
     expect(awaitInitIdx).toBeGreaterThan(-1)

@@ -39,6 +39,7 @@ export type ImportProjectionReadinessState = 'pending' | 'ready' | 'failed'
 let state: ImportProjectionReadinessState = 'pending'
 const listeners = new Set<() => void>()
 let storedApply: (() => Promise<boolean>) | null = null
+let storedFinalizeFreshBootstrap: ((applied: boolean) => Promise<void>) | null = null
 
 /** True only after the projection has safely settled (applied or no-pending). */
 export function isImportProjectionReady(): boolean {
@@ -93,6 +94,7 @@ export function settleImportProjectionReadiness(next: Exclude<ImportProjectionRe
 export function resetImportProjectionReadiness(): void {
   state = 'pending'
   storedApply = null
+  storedFinalizeFreshBootstrap = null
 }
 
 /** Dependencies injected by the store (post-rehydrate), not imported. */
@@ -104,6 +106,17 @@ export interface ImportProjectionBootDeps {
    * failure (the pending row is retained for next-startup retry).
    */
   apply: () => Promise<boolean>
+  /**
+   * Fresh-chat bootstrap finalizer. Invoked with the apply result for BOTH
+   * outcomes — `applied === true` (imported navigation supersedes the initial
+   * Redux topics: clear the pending marker without ensuring) and `applied ===
+   * false` (verified no-pending: ensure current initial topics create-only
+   * when the durable marker is pending, then clear it). A rejection is a boot
+   * failure: the marker is retained, readiness settles `failed`, and the
+   * ordinary tree stays gated for retry/next-boot. Optional so callers
+   * without fresh-boot wiring keep the apply → ready contract.
+   */
+  finalizeFreshBootstrap?: (applied: boolean) => Promise<void>
 }
 
 /**
@@ -121,6 +134,7 @@ export interface ImportProjectionBootDeps {
  */
 export async function runImportProjectionBoot(deps: ImportProjectionBootDeps): Promise<'ready' | 'failed'> {
   storedApply = deps.apply
+  storedFinalizeFreshBootstrap = deps.finalizeFreshBootstrap ?? null
   let applied: boolean
   try {
     applied = await deps.apply()
@@ -128,6 +142,22 @@ export async function runImportProjectionBoot(deps: ImportProjectionBootDeps): P
     logger.error('Failed to apply pending import navigation projection (retained for retry):', error as Error)
     settleImportProjectionReadiness('failed')
     return 'failed'
+  }
+
+  // Fresh-bootstrap finalize for BOTH outcomes, before readiness, so HomePage
+  // can never read a missing initial topic: applied-true clears the pending
+  // marker without ensuring; verified-no-pending ensures current initial
+  // topics create-only when the marker is pending, then clears it. A failure
+  // retains the marker and keeps the tree gated (retry is idempotent —
+  // Main-side ensure is create-only, so partial ensures are safe to rerun).
+  if (deps.finalizeFreshBootstrap) {
+    try {
+      await deps.finalizeFreshBootstrap(applied)
+    } catch (error) {
+      logger.error('Failed to finalize fresh chat bootstrap (tree stays gated for retry):', error as Error)
+      settleImportProjectionReadiness('failed')
+      return 'failed'
+    }
   }
 
   settleImportProjectionReadiness('ready')
@@ -146,6 +176,8 @@ export interface ReduxStoreBootDeps {
   notifyMain: () => void
   /** One-shot projection apply — same contract as `ImportProjectionBootDeps.apply`. */
   apply: () => Promise<boolean>
+  /** Fresh-chat bootstrap finalizer — same contract as `ImportProjectionBootDeps.finalizeFreshBootstrap`. */
+  finalizeFreshBootstrap?: (applied: boolean) => Promise<void>
 }
 
 /**
@@ -163,6 +195,7 @@ export interface ReduxStoreBootDeps {
  */
 export async function runReduxStoreBoot(deps: ReduxStoreBootDeps): Promise<'ready' | 'failed'> {
   storedApply = deps.apply
+  storedFinalizeFreshBootstrap = deps.finalizeFreshBootstrap ?? null
   try {
     deps.notifyMain()
   } catch (error) {
@@ -170,7 +203,7 @@ export async function runReduxStoreBoot(deps: ReduxStoreBootDeps): Promise<'read
     // runs regardless.
     logger.warn('ReduxStoreReady notification failed (store still selectable):', error as Error)
   }
-  return runImportProjectionBoot({ apply: deps.apply })
+  return runImportProjectionBoot({ apply: deps.apply, finalizeFreshBootstrap: deps.finalizeFreshBootstrap })
 }
 
 /**
@@ -198,5 +231,8 @@ export async function retryImportProjectionReadiness(): Promise<'ready' | 'faile
   for (const listener of [...listeners]) {
     listener()
   }
-  return runImportProjectionBoot({ apply: storedApply })
+  return runImportProjectionBoot({
+    apply: storedApply,
+    finalizeFreshBootstrap: storedFinalizeFreshBootstrap ?? undefined
+  })
 }

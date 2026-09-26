@@ -279,7 +279,7 @@ describe('i18n initial atomic activation (S7.4)', () => {
     expect(source).toMatch(/const initPromise\s*=\s*i18n\.use\(initReactI18next\)\.init/)
     expect(source).toMatch(/await initPromise/)
     expect(source).toMatch(/await\s*\(i18n as any\)\.changeLanguage/)
-    const asyncBlock = source.match(/void\s*\(async\s*\(\)\s*=>\s*\{([\s\S]*?)\}\)\(\)/m)
+    const asyncBlock = source.match(/export const initialI18nReady[^=]*=\s*\(async\s*\(\)\s*=>\s*\{([\s\S]*?)\}\)\(\)/m)
     const block = asyncBlock ? asyncBlock[1] : ''
     const awaitInitIdx = block.indexOf('await initPromise')
     const changeIdx = block.indexOf('(i18n as any).changeLanguage')

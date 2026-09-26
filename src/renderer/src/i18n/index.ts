@@ -211,7 +211,13 @@ const originalChangeLanguage =
 // then load configured language exclusively through the wrapped atomic path.
 // No competing wrapped request exists by construction (initImmediate:false + wrapper after init).
 // Pending preserves fallback while configured is pending; atomic commit only on combined success.
-void (async () => {
+//
+// Cycle-safe readiness contract for renderer entry sequencing: resolves after
+// the initial resource bundle activation has settled (success or fallback
+// retention on failure). The entry point awaits this before evaluating
+// App/store/fresh-assistant factories so fresh `i18n.t` defaults never run
+// against unactivated resources. Never rejects — failure retains fallback.
+export const initialI18nReady: Promise<void> = (async () => {
   try {
     await initPromise
   } catch {}

@@ -31,6 +31,11 @@ import {
 } from '../pages/home/Messages/messageWindow'
 import { clearCachedContextClosure as clearClosureCache } from '../services/contextClosure'
 import * as closureCache from '../services/contextClosure'
+import {
+  collectFreshTopicTargets,
+  finalizeFreshChatBootstrap,
+  markFreshBootstrapPendingIfFreshProfile
+} from '../services/freshChatBootstrap'
 import { applyPendingImportProjection } from '../services/importProjection'
 import { runReduxStoreBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
@@ -491,6 +496,36 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
   return result
 }
 
+// Fresh-chat bootstrap pending marker: set synchronously here at module
+// evaluation when the persist compatibility key is absent — before
+// redux-persist can write for this boot. Outside the Redux persist payload,
+// so it survives apply/ensure failure and renderer restart; cleared only by
+// the boot finalizer. Full lifecycle contract in `freshChatBootstrap`.
+markFreshBootstrapPendingIfFreshProfile()
+
+/**
+ * Fresh-bootstrap finalizer for the boot readiness gate.
+ *
+ * Runs after the pending import outcome is known (`applied`) and before
+ * `ImportProjectionGate` readiness, so HomePage can never mount a NOT_FOUND
+ * initial topic read. An applied import clears the marker without ensuring
+ * (imported navigation supersedes initial topics); verified-no-pending with
+ * a pending marker ensures every current initial topic create-only, then
+ * clears. A rejection retains the marker (next-boot/retry) and the caller
+ * keeps the ordinary tree gated. Dynamic import keeps the store free of a
+ * static cycle into the SQLite lifecycle module.
+ */
+async function finalizeFreshChatBootstrapForBoot(applied: boolean): Promise<void> {
+  await finalizeFreshChatBootstrap({
+    applied,
+    collectTargets: () => collectFreshTopicTargets(store.getState().assistants?.assistants ?? []),
+    ensureTopic: async (target) => {
+      const { ensureOrdinaryTopicOwnership } = await import('../services/db/topicTrashLifecycle')
+      await ensureOrdinaryTopicOwnership(target.id, target.assistantId, target.name ?? null)
+    }
+  })
+}
+
 const store = configureStore({
   // @ts-ignore store type is unknown
   reducer: persistedReducer as typeof rootReducer,
@@ -561,7 +596,8 @@ export const persistor = persistStore(store, undefined, () => {
       void window.electron?.ipcRenderer?.invoke(IpcChannel.ReduxStoreReady)
       logger.info('Redux store rehydrated, notified main process')
     },
-    apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData })
+    apply: () => applyPendingImportProjection({ dispatch: store.dispatch, flush: handleSaveData }),
+    finalizeFreshBootstrap: finalizeFreshChatBootstrapForBoot
   }).catch((error) => {
     logger.error('Import projection boot failed unexpectedly (retained for retry):', error as Error)
   })

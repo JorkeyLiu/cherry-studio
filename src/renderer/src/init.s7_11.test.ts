@@ -3,7 +3,22 @@ import * as path from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-describe('init.ts S7.11 — source-level static and synchronous topology', () => {
+/**
+ * init.ts — main-window bootstrap contract (async i18n barrier + dynamic store).
+ *
+ * Binding production contract:
+ * - No static runtime import from `init.ts` may transitively reach
+ *   store/assistants before `initialI18nReady` (see also
+ *   `__tests__/mainWindowBootGraph.test.ts`, which owns the static
+ *   reachability proof — this file asserts only the local source shape).
+ * - Store-free initializers (Keyv, StoreSync, WebTrace, ModelMetadata) run
+ *   immediately at module evaluation.
+ * - Store-dependent initializers (residentRetention, AutoSync, TopicDeletion,
+ *   ExactProviderResolver) dynamically import after `await initialI18nReady`,
+ *   retain per-step failure isolation/logging, and use the imported store
+ *   directly.
+ */
+describe('init.ts — async-barrier bootstrap topology (source-level)', () => {
   const initPath = path.join(process.cwd(), 'src/renderer/src/init.ts')
   const content = fs.readFileSync(initPath, 'utf-8')
 
@@ -13,12 +28,12 @@ describe('init.ts S7.11 — source-level static and synchronous topology', () =>
   }
 
   function extractFunctionRegion(src: string, name: string): string {
-    const startRe = new RegExp(`^function\\s+${name}\\s*\\(\\)`, 'm')
+    const startRe = new RegExp(`^function\\s+${name}\\s*\\(`, 'm')
     const start = src.search(startRe)
     if (start === -1) return ''
     const tailStart = src.search(/^initKeyv\(\)/m)
     const after = src.slice(start + 1)
-    const nextRel = after.search(/^\s*function\s+\w+\s*\(\)\s*\{/m)
+    const nextRel = after.search(/^\s*(?:async\s+)?function\s+\w+\s*\(\s*[^)]*\)\s*\{/m)
     let end: number
     if (nextRel !== -1) {
       end = start + 1 + nextRel
@@ -30,97 +45,84 @@ describe('init.ts S7.11 — source-level static and synchronous topology', () =>
     return src.slice(start, end)
   }
 
-  it('preserves static imports for critical bootstrap services', () => {
+  it('statically imports store-free services but never the store or topicDeletion subscription as values', () => {
+    // Store-free services stay static and run immediately.
     expect(content).toMatch(/import\s+storeSyncService\s+from\s+['"]\.\/services\/StoreSyncService['"]/)
-    expect(content).toMatch(
-      /import\s+\{\s*subscribeTopicDeletionEvents\s*\}\s+from\s+['"]\.\/services\/topicDeletionSubscription['"]/
-    )
     expect(content).toMatch(/import\s+\{\s*webTraceService\s*\}\s+from\s+['"]\.\/services\/WebTraceService['"]/)
+    // Readiness barrier itself is a static import.
+    expect(content).toMatch(/import\s+\{\s*initialI18nReady\s*\}\s+from\s+['"]\.\/i18n['"]/)
+    // No static VALUE import of the store (type-only is erased at runtime and
+    // evaluates nothing); same for the transitive store-reaching subscription.
+    expect(content).not.toMatch(/^\s*import\s+(?!type\b)[^'\n]*\sfrom\s+['"]\.\/store['"]/m)
+    expect(content).not.toMatch(
+      /^\s*import\s+(?!type\b)[^'\n]*\sfrom\s+['"]\.\/services\/topicDeletionSubscription['"]/m
+    )
   })
 
-  it('does not use dynamic import for critical services', () => {
-    expect(content).not.toMatch(/import\(['"]\.\/services\/StoreSyncService['"]\)/)
-    expect(content).not.toMatch(/import\(['"]\.\/services\/topicDeletionSubscription['"]\)/)
-    expect(content).not.toMatch(/import\(['"]\.\/services\/WebTraceService['"]\)/)
+  it('gates store-reaching init behind initialI18nReady with dynamic store + topicDeletion imports', () => {
+    expect(content).toMatch(/await\s+initialI18nReady/)
+    expect(content).toMatch(/await\s+import\(['"]\.\/store['"]\)/)
+    expect(content).toMatch(/await\s+import\(['"]\.\/services\/topicDeletionSubscription['"]\)/)
+    // The store-dependent bootstrap is invoked at the tail and threads the
+    // dynamically imported store into store consumers.
+    expect(content).toMatch(/void\s+bootstrapStoreDependent\(\)/)
+    expect(content).toMatch(/initAutoSync\(store\)/)
+    expect(content).toMatch(/initExactProviderResolver\(store\)/)
   })
 
-  it('calls critical initializers synchronously in order StoreSync → TopicDeletion → WebTrace', () => {
-    // presence of direct calls
-    expect(content).toMatch(/storeSyncService\.subscribe\(\)/)
-    expect(content).toMatch(/subscribeTopicDeletionEvents\(\)/)
-    expect(content).toMatch(/webTraceService\.init\(\)/)
-
-    // order via direct service calls (unique to wrapper bodies)
-    const idxStoreSyncCall = content.indexOf('storeSyncService.subscribe()')
-    const idxTopicCall = content.indexOf('subscribeTopicDeletionEvents()')
-    const idxWebTraceCall = content.indexOf('webTraceService.init()')
-    expect(idxStoreSyncCall).toBeGreaterThan(-1)
-    expect(idxTopicCall).toBeGreaterThan(-1)
-    expect(idxWebTraceCall).toBeGreaterThan(-1)
-    expect(idxStoreSyncCall).toBeLessThan(idxTopicCall)
-    expect(idxTopicCall).toBeLessThan(idxWebTraceCall)
-
-    // invocation order at bottom — inspect bootstrap-call tail region after function definitions
+  it('runs store-free initializers immediately; topicDeletion subscribes only after the barrier', () => {
     const tail = extractBootstrapTail(content)
     expect(tail.length).toBeGreaterThan(0)
+    // Immediate store-free inits at module evaluation.
     expect(tail).toMatch(/^initKeyv\(\)/m)
-    expect(tail).toMatch(/^initAutoSync\(\)/m)
     expect(tail).toMatch(/^initStoreSync\(\)/m)
-    expect(tail).toMatch(/^initTopicDeletionSubscription\(\)/m)
     expect(tail).toMatch(/^initWebTrace\(\)/m)
+    expect(tail).toMatch(/^initModelMetadata\(\)/m)
 
-    const idxBottomStoreSync = tail.search(/^initStoreSync\(\)/m)
-    const idxBottomTopic = tail.search(/^initTopicDeletionSubscription\(\)/m)
-    const idxBottomWebTrace = tail.search(/^initWebTrace\(\)/m)
-    expect(idxBottomStoreSync).toBeGreaterThan(-1)
-    expect(idxBottomTopic).toBeGreaterThan(-1)
-    expect(idxBottomWebTrace).toBeGreaterThan(-1)
-    expect(idxBottomStoreSync).toBeLessThan(idxBottomTopic)
-    expect(idxBottomTopic).toBeLessThan(idxBottomWebTrace)
+    // No synchronous top-level TopicDeletion subscription: the only
+    // subscribeTopicDeletionEvents call site lives after `await
+    // initialI18nReady` inside the async bootstrap.
+    const idxBarrier = content.indexOf('await initialI18nReady')
+    const idxTopicCall = content.indexOf('subscribeTopicDeletionEvents()')
+    expect(idxBarrier).toBeGreaterThan(-1)
+    expect(idxTopicCall).toBeGreaterThan(-1)
+    expect(idxTopicCall).toBeGreaterThan(idxBarrier)
 
-    // extracted wrapper regions are non-empty and contain expected direct calls
+    // StoreSync/WebTrace direct calls still exist in their immediate wrappers.
     const storeSyncRegion = extractFunctionRegion(content, 'initStoreSync')
-    const topicRegion = extractFunctionRegion(content, 'initTopicDeletionSubscription')
     const webTraceRegion = extractFunctionRegion(content, 'initWebTrace')
     expect(storeSyncRegion.length).toBeGreaterThan(0)
-    expect(topicRegion.length).toBeGreaterThan(0)
     expect(webTraceRegion.length).toBeGreaterThan(0)
     expect(storeSyncRegion).toMatch(/storeSyncService\.subscribe\(\)/)
-    expect(topicRegion).toMatch(/subscribeTopicDeletionEvents\(\)/)
     expect(webTraceRegion).toMatch(/webTraceService\.init\(\)/)
   })
 
   it('uses one bootstrap logger context created once with distinct warning messages', () => {
-    // single creation
     const bootstrapCreations = (content.match(/loggerService\.withContext\(['"]Bootstrap['"]\)/g) || []).length
     expect(bootstrapCreations).toBe(1)
     expect(content).toMatch(/const\s+bootstrapLogger\s*=\s*loggerService\.withContext\(['"]Bootstrap['"]\)/)
 
-    // distinct warning messages containing service identifiers
+    // Distinct warning messages containing service identifiers (per-step
+    // failure isolation retained across the async barrier).
     expect(content).toMatch(/bootstrapLogger\.warn\(.*StoreSync/)
     expect(content).toMatch(/bootstrapLogger\.warn\(.*TopicDeletion/)
     expect(content).toMatch(/bootstrapLogger\.warn\(.*WebTrace/)
 
-    // each wrapped in try/catch
+    // Each step individually guarded so one failure never blocks the rest.
     expect(content).toMatch(/function initStoreSync\(\)\s*\{\s*try\s*\{/)
-    expect(content).toMatch(/function initTopicDeletionSubscription\(\)\s*\{\s*try\s*\{/)
     expect(content).toMatch(/function initWebTrace\(\)\s*\{\s*try\s*\{/)
+    expect(content).toMatch(/subscribeTopicDeletionEvents\(\)/)
   })
 
-  it('does not introduce timers, microtasks, or async wrappers for critical initializers', () => {
+  it('keeps store-free initializers timer/microtask-free; async is scoped to the store-dependent bootstrap', () => {
     const storeSyncBody = extractFunctionRegion(content, 'initStoreSync')
-    const topicBody = extractFunctionRegion(content, 'initTopicDeletionSubscription')
     const webTraceBody = extractFunctionRegion(content, 'initWebTrace')
-
-    // genuine non-empty bodies with expected direct calls — proves extraction is real, not empty
     expect(storeSyncBody.length).toBeGreaterThan(0)
-    expect(topicBody.length).toBeGreaterThan(0)
     expect(webTraceBody.length).toBeGreaterThan(0)
     expect(storeSyncBody).toMatch(/storeSyncService\.subscribe\(\)/)
-    expect(topicBody).toMatch(/subscribeTopicDeletionEvents\(\)/)
     expect(webTraceBody).toMatch(/webTraceService\.init\(\)/)
 
-    for (const body of [storeSyncBody, topicBody, webTraceBody]) {
+    for (const body of [storeSyncBody, webTraceBody]) {
       expect(body).not.toMatch(/setTimeout/)
       expect(body).not.toMatch(/setInterval/)
       expect(body).not.toMatch(/queueMicrotask/)
@@ -131,29 +133,58 @@ describe('init.ts S7.11 — source-level static and synchronous topology', () =>
       expect(body).not.toMatch(/await/)
       expect(body).not.toMatch(/import\(/)
     }
+
+    // The async barrier itself exists exactly once, scoped to the
+    // store-dependent bootstrap (never around the store-free inits above).
+    const asyncBarriers = content.match(/async\s+function\s+bootstrapStoreDependent/m)
+    expect(asyncBarriers).not.toBeNull()
   })
 
-  it('preserves initKeyv, initAutoSync, S7.10 0ms maintenance behavior and does not add WebTrace idempotency', () => {
+  it('preserves initKeyv, initAutoSync 8s demand timer, scroll-sweep and does not add WebTrace idempotency', () => {
     expect(content).toMatch(/function initKeyv\(\)/)
-    expect(content).toMatch(/function initAutoSync\(\)/)
+    expect(content).toMatch(/function initAutoSync\(/)
     expect(content).toMatch(/scheduleScrollSnapshotStartupSweep/)
     expect(content).toMatch(/8000/)
     // WebTraceService should not gain idempotency guard — init.ts must not add guard logic
-    // Ensure no added flag check for WebTrace in init.ts
     expect(content).not.toMatch(/webTrace.*initialized/)
     expect(content).not.toMatch(/hasInitialized/)
   })
 })
 
-describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', () => {
+describe('init.ts — async-barrier bootstrap failure isolation (behavioral)', () => {
   const unhandled: unknown[] = []
   let handler: (r: unknown) => void
+  // Owned-timer interception for the real 8s initAutoSync demand timer:
+  // init.ts schedules a native setTimeout(..., 8000) after the readiness
+  // barrier; under real timers vi.clearAllTimers() cannot cancel it, so each
+  // behavioral import would leak one pending timer. We wrap global setTimeout
+  // (microtask/barrier behavior unchanged) and clear every owned id in
+  // afterEach. No fake timers — deterministic flushMicrotasks() preserved.
+  const ownedTimeoutIds: Array<ReturnType<typeof setTimeout>> = []
+  let origSetTimeout: typeof setTimeout | null = null
+  let origClearTimeout: typeof clearTimeout | null = null
+  let origWindowSetTimeout: typeof setTimeout | null = null
 
   beforeEach(() => {
     unhandled.length = 0
     handler = (r: unknown) => unhandled.push(r)
     if (typeof process !== 'undefined' && (process as any).on) (process as any).on('unhandledRejection', handler)
-    // ensure window stub
+    if (origSetTimeout === null) {
+      origSetTimeout = globalThis.setTimeout
+      origClearTimeout = globalThis.clearTimeout
+    }
+    ownedTimeoutIds.length = 0
+    const activeOrigSet = origSetTimeout as unknown as (...args: any[]) => any
+    const track = (id: ReturnType<typeof setTimeout>) => {
+      ownedTimeoutIds.push(id)
+      return id
+    }
+    globalThis.setTimeout = ((fn: any, ms?: any, ...args: any[]) => track(activeOrigSet(fn, ms, ...args))) as any
+    if ((global as any).window?.setTimeout) {
+      if (origWindowSetTimeout === null) origWindowSetTimeout = (global as any).window.setTimeout
+      const windowOrigSet = origWindowSetTimeout!.bind((global as any).window)
+      ;(global as any).window.setTimeout = (fn: any, ms?: any, ...args: any[]) => track(windowOrigSet(fn, ms, ...args))
+    }
     if (!(global as any).window) (global as any).window = {}
     if (!(global as any).window.api) (global as any).window.api = {}
     if (!(global as any).window.electron)
@@ -161,6 +192,27 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
   })
 
   afterEach(async () => {
+    try {
+      const clear = origClearTimeout ?? globalThis.clearTimeout
+      for (const id of ownedTimeoutIds) {
+        try {
+          ;(clear as any)(id)
+        } catch {}
+      }
+      ownedTimeoutIds.length = 0
+    } catch {}
+    try {
+      if (origSetTimeout) globalThis.setTimeout = origSetTimeout
+      if (origClearTimeout) globalThis.clearTimeout = origClearTimeout
+      if (origWindowSetTimeout && (global as any).window?.setTimeout) {
+        try {
+          ;(global as any).window.setTimeout = origWindowSetTimeout
+        } catch {}
+      }
+    } catch {}
+    origSetTimeout = null
+    origClearTimeout = null
+    origWindowSetTimeout = null
     try {
       if (typeof process !== 'undefined' && (process as any).off) (process as any).off('unhandledRejection', handler)
     } catch {}
@@ -189,6 +241,16 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
     storeSyncImpl?: () => void
     topicImpl?: () => void
     webTraceImpl?: () => void
+    /** When 'reject', initialI18nReady rejects; when 'never', it stays pending. */
+    readiness?: 'resolve' | 'reject' | 'never'
+    storeLoadShouldReject?: boolean
+    topicLoadShouldReject?: boolean
+  }
+
+  async function flushMicrotasks(rounds = 30) {
+    for (let i = 0; i < rounds; i++) {
+      await Promise.resolve()
+    }
   }
 
   async function loadInit(opts: LoadOpts = {}) {
@@ -211,6 +273,18 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
         events.push('WebTrace')
       })
 
+    // Controllable readiness barrier — deterministic, no timing sleeps.
+    let resolveReadiness!: () => void
+    let rejectReadiness!: (e: unknown) => void
+    const readinessMode = opts.readiness ?? 'resolve'
+    const readinessPromise =
+      readinessMode === 'never'
+        ? new Promise<void>(() => {})
+        : new Promise<void>((resolve, reject) => {
+            resolveReadiness = resolve
+            rejectReadiness = reject
+          })
+
     vi.doMock('@kangfenmao/keyv-storage', () => ({
       default: class {
         init() {
@@ -223,22 +297,37 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
       initScrollSnapshotCache: vi.fn()
     }))
     vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
+    vi.doMock('./i18n', () => ({ initialI18nReady: readinessPromise }))
+    vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
+    vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
+    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncImpl } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({
-      subscribeTopicDeletionEvents: topicImpl
-    }))
+    if (opts.topicLoadShouldReject) {
+      vi.doMock('./services/topicDeletionSubscription', () => {
+        throw new Error('topic chunk load failed')
+      })
+    } else {
+      vi.doMock('./services/topicDeletionSubscription', () => ({
+        subscribeTopicDeletionEvents: topicImpl
+      }))
+    }
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceImpl } }))
     vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({
-      default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) }
-    }))
+    if (opts.storeLoadShouldReject) {
+      vi.doMock('./store', () => {
+        throw new Error('store chunk load failed')
+      })
+    } else {
+      vi.doMock('./store', () => ({
+        default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) }
+      }))
+    }
     vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
     vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
 
     const { loggerService } = await import('@logger')
     const warnSpy = vi.fn()
     const withContextSpy = vi.spyOn(loggerService, 'withContext').mockImplementation(() => {
-      // return a context-like object; for any ctx return warnSpy so we can capture
       return {
         warn: warnSpy,
         info: vi.fn(),
@@ -249,7 +338,6 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
       } as any
     })
 
-    // ensure window exists before import (initKeyv will assign window.keyv)
     if (!(global as any).window) (global as any).window = {}
 
     let importError: unknown = null
@@ -258,91 +346,34 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
     } catch (e) {
       importError = e
     }
-    // allow top-level dynamic import (residentRetention) microtasks to settle
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
+
+    // Store-free inits run synchronously at module evaluation; settle their
+    // microtasks without resolving the readiness barrier.
+    await flushMicrotasks()
+
+    if (readinessMode === 'resolve') {
+      resolveReadiness()
+      await flushMicrotasks()
+    } else if (readinessMode === 'reject') {
+      rejectReadiness(new Error('i18n activation failed'))
+      await flushMicrotasks()
+    }
 
     return { events, warnSpy, withContextSpy, importError, storeSyncImpl, topicImpl, webTraceImpl }
   }
 
-  it('successful bootstrap calls in order StoreSync → TopicDeletion → WebTrace with no warning and no unhandled rejection', async () => {
-    const { events, warnSpy, withContextSpy, importError } = await loadInit()
-    expect(importError).toBeNull()
-    expect(events).toEqual(['StoreSync', 'TopicDeletion', 'WebTrace'])
-    expect(warnSpy).not.toHaveBeenCalled()
-    // bootstrap logger created once with 'Bootstrap'
-    const bootstrapCalls = withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap')
-    expect(bootstrapCalls.length).toBe(1)
-    expect(unhandled.length).toBe(0)
-  })
-
-  it('StoreSync throw is bounded to one warning with error and later initializers still run', async () => {
-    const storeSyncError = new Error('storeSync boom')
-    const events: string[] = []
-    const storeSyncThrow = vi.fn(() => {
-      events.push('StoreSync:throw')
-      throw storeSyncError
-    })
-    const topicOk = vi.fn(() => events.push('TopicDeletion'))
-    const webTraceOk = vi.fn(() => events.push('WebTrace'))
+  it('runs store-free inits immediately and gates TopicDeletion behind readiness, in order', async () => {
     vi.resetModules()
-    vi.doMock('@kangfenmao/keyv-storage', () => ({
-      default: class {
-        init() {
-          return Promise.resolve()
-        }
-      }
-    }))
-    vi.doMock('./services/scrollSnapshotCache', () => ({
-      scheduleScrollSnapshotStartupSweep: vi.fn(),
-      initScrollSnapshotCache: vi.fn()
-    }))
-    vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
-    vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncThrow } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: topicOk }))
-    vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceOk } }))
-    vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
-    vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
-    const { loggerService } = await import('@logger')
-    const warnSpy = vi.fn()
-    const withContextSpy = vi
-      .spyOn(loggerService, 'withContext')
-      .mockImplementation(
-        () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn(), silly: vi.fn() }) as any
-      )
-    if (!(global as any).window) (global as any).window = {}
-    let importError: unknown = null
-    try {
-      await import('./init')
-    } catch (e) {
-      importError = e
-    }
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(importError).toBeNull()
-    expect(events).toEqual(['StoreSync:throw', 'TopicDeletion', 'WebTrace'])
-    expect(warnSpy).toHaveBeenCalledTimes(1)
-    expect(String(warnSpy.mock.calls[0][0])).toMatch(/StoreSync/i)
-    expect(warnSpy.mock.calls[0][1]).toBe(storeSyncError)
-    expect(topicOk).toHaveBeenCalledTimes(1)
-    expect(webTraceOk).toHaveBeenCalledTimes(1)
-    expect(withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap').length).toBe(1)
-    expect(unhandled.length).toBe(0)
-  })
-
-  it('TopicDeletion throw is bounded to one warning with error and later initializer still runs', async () => {
-    const topicError = new Error('topic boom')
     const events: string[] = []
     const storeSyncMock = vi.fn(() => events.push('StoreSync'))
-    const topicThrow = vi.fn(() => {
-      events.push('TopicDeletion:throw')
-      throw topicError
-    })
+    const topicMock = vi.fn(() => events.push('TopicDeletion'))
     const webTraceMock = vi.fn(() => events.push('WebTrace'))
-    vi.resetModules()
+
+    // Manual harness for the pre-resolution gate assertion.
+    let resolveReadiness!: () => void
+    const readinessPromise = new Promise<void>((resolve) => {
+      resolveReadiness = resolve
+    })
     vi.doMock('@kangfenmao/keyv-storage', () => ({
       default: class {
         init() {
@@ -355,8 +386,14 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
       initScrollSnapshotCache: vi.fn()
     }))
     vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
+    vi.doMock('./i18n', () => ({ initialI18nReady: readinessPromise }))
+    vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
+    vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
+    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncMock } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: topicThrow }))
+    vi.doMock('./services/topicDeletionSubscription', () => ({
+      subscribeTopicDeletionEvents: topicMock
+    }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceMock } }))
     vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
     vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
@@ -370,16 +407,77 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
         () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn(), silly: vi.fn() }) as any
       )
     if (!(global as any).window) (global as any).window = {}
+
     let importError: unknown = null
     try {
       await import('./init')
     } catch (e) {
       importError = e
     }
-    await Promise.resolve()
-    await Promise.resolve()
+    await flushMicrotasks()
+
+    // Deterministic gate proof: store-free inits already ran, TopicDeletion
+    // has not — the barrier is still pending.
     expect(importError).toBeNull()
-    expect(events).toEqual(['StoreSync', 'TopicDeletion:throw', 'WebTrace'])
+    expect(events).toEqual(['StoreSync', 'WebTrace'])
+    expect(topicMock).not.toHaveBeenCalled()
+
+    resolveReadiness()
+    await flushMicrotasks()
+    expect(topicMock).toHaveBeenCalledTimes(1)
+    expect(events).toEqual(['StoreSync', 'WebTrace', 'TopicDeletion'])
+    expect(warnSpy).not.toHaveBeenCalled()
+    expect(withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap').length).toBe(1)
+    expect(unhandled.length).toBe(0)
+  })
+
+  it('StoreSync throw is bounded to one warning with error; WebTrace still runs sync and TopicDeletion after barrier', async () => {
+    const storeSyncError = new Error('storeSync boom')
+    const events: string[] = []
+    const storeSyncThrow = vi.fn(() => {
+      events.push('StoreSync:throw')
+      throw storeSyncError
+    })
+    const topicOk = vi.fn(() => events.push('TopicDeletion'))
+    const webTraceOk = vi.fn(() => events.push('WebTrace'))
+    const {
+      events: got,
+      warnSpy,
+      withContextSpy,
+      importError
+    } = await loadInit({
+      storeSyncImpl: storeSyncThrow,
+      topicImpl: topicOk,
+      webTraceImpl: webTraceOk
+    })
+    void got
+    expect(importError).toBeNull()
+    expect(events).toEqual(['StoreSync:throw', 'WebTrace', 'TopicDeletion'])
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(String(warnSpy.mock.calls[0][0])).toMatch(/StoreSync/i)
+    expect(warnSpy.mock.calls[0][1]).toBe(storeSyncError)
+    expect(topicOk).toHaveBeenCalledTimes(1)
+    expect(webTraceOk).toHaveBeenCalledTimes(1)
+    expect(withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap').length).toBe(1)
+    expect(unhandled.length).toBe(0)
+  })
+
+  it('TopicDeletion throw after barrier is bounded to one warning and bootstrap completes', async () => {
+    const topicError = new Error('topic boom')
+    const events: string[] = []
+    const storeSyncMock = vi.fn(() => events.push('StoreSync'))
+    const topicThrow = vi.fn(() => {
+      events.push('TopicDeletion:throw')
+      throw topicError
+    })
+    const webTraceMock = vi.fn(() => events.push('WebTrace'))
+    const { warnSpy, withContextSpy, importError } = await loadInit({
+      storeSyncImpl: storeSyncMock,
+      topicImpl: topicThrow,
+      webTraceImpl: webTraceMock
+    })
+    expect(importError).toBeNull()
+    expect(events).toEqual(['StoreSync', 'WebTrace', 'TopicDeletion:throw'])
     expect(storeSyncMock).toHaveBeenCalledTimes(1)
     expect(topicThrow).toHaveBeenCalledTimes(1)
     expect(webTraceMock).toHaveBeenCalledTimes(1)
@@ -387,6 +485,16 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
     expect(String(warnSpy.mock.calls[0][0])).toMatch(/TopicDeletion/i)
     expect(warnSpy.mock.calls[0][1]).toBe(topicError)
     expect(withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap').length).toBe(1)
+    expect(unhandled.length).toBe(0)
+  })
+
+  it('TopicDeletion module load rejection is bounded and bootstrap completes', async () => {
+    const { events, warnSpy, importError } = await loadInit({ topicLoadShouldReject: true })
+    expect(importError).toBeNull()
+    // Store-free inits still ran; the gated subscription was skipped with a warning.
+    expect(events).toEqual(['StoreSync', 'WebTrace'])
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(String(warnSpy.mock.calls[0][0])).toMatch(/TopicDeletion/i)
     expect(unhandled.length).toBe(0)
   })
 
@@ -399,44 +507,13 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
       events.push('WebTrace:throw')
       throw webTraceError
     })
-    vi.resetModules()
-    vi.doMock('@kangfenmao/keyv-storage', () => ({
-      default: class {
-        init() {
-          return Promise.resolve()
-        }
-      }
-    }))
-    vi.doMock('./services/scrollSnapshotCache', () => ({
-      scheduleScrollSnapshotStartupSweep: vi.fn(),
-      initScrollSnapshotCache: vi.fn()
-    }))
-    vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
-    vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncMock } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: topicMock }))
-    vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceThrow } }))
-    vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
-    vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
-    const { loggerService } = await import('@logger')
-    const warnSpy = vi.fn()
-    const withContextSpy = vi
-      .spyOn(loggerService, 'withContext')
-      .mockImplementation(
-        () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn(), silly: vi.fn() }) as any
-      )
-    if (!(global as any).window) (global as any).window = {}
-    let importError: unknown = null
-    try {
-      await import('./init')
-    } catch (e) {
-      importError = e
-    }
-    await Promise.resolve()
-    await Promise.resolve()
+    const { warnSpy, withContextSpy, importError } = await loadInit({
+      storeSyncImpl: storeSyncMock,
+      topicImpl: topicMock,
+      webTraceImpl: webTraceThrow
+    })
     expect(importError).toBeNull()
-    expect(events).toEqual(['StoreSync', 'TopicDeletion', 'WebTrace:throw'])
+    expect(events).toEqual(['StoreSync', 'WebTrace:throw', 'TopicDeletion'])
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(String(warnSpy.mock.calls[0][0])).toMatch(/WebTrace/i)
     expect(warnSpy.mock.calls[0][1]).toBe(webTraceError)
@@ -459,52 +536,39 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
       events.push('WebTrace:throw')
       throw errors[2]
     })
-    vi.resetModules()
-    vi.doMock('@kangfenmao/keyv-storage', () => ({
-      default: class {
-        init() {
-          return Promise.resolve()
-        }
-      }
-    }))
-    vi.doMock('./services/scrollSnapshotCache', () => ({
-      scheduleScrollSnapshotStartupSweep: vi.fn(),
-      initScrollSnapshotCache: vi.fn()
-    }))
-    vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
-    vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncThrow } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: topicThrow }))
-    vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceThrow } }))
-    vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
-    vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
-    const { loggerService } = await import('@logger')
-    const warnSpy = vi.fn()
-    const withContextSpy = vi
-      .spyOn(loggerService, 'withContext')
-      .mockImplementation(
-        () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn(), silly: vi.fn() }) as any
-      )
-    if (!(global as any).window) (global as any).window = {}
-    let importError: unknown = null
-    try {
-      await import('./init')
-    } catch (e) {
-      importError = e
-    }
-    await Promise.resolve()
-    await Promise.resolve()
+    const { warnSpy, withContextSpy, importError } = await loadInit({
+      storeSyncImpl: storeSyncThrow,
+      topicImpl: topicThrow,
+      webTraceImpl: webTraceThrow
+    })
     expect(importError).toBeNull()
-    expect(events).toEqual(['StoreSync:throw', 'TopicDeletion:throw', 'WebTrace:throw'])
+    // Store-free failures surface synchronously; the gated failure after the barrier.
+    expect(events).toEqual(['StoreSync:throw', 'WebTrace:throw', 'TopicDeletion:throw'])
     expect(warnSpy).toHaveBeenCalledTimes(3)
     expect(String(warnSpy.mock.calls[0][0])).toMatch(/StoreSync/i)
     expect(warnSpy.mock.calls[0][1]).toBe(errors[0])
-    expect(String(warnSpy.mock.calls[1][0])).toMatch(/TopicDeletion/i)
-    expect(warnSpy.mock.calls[1][1]).toBe(errors[1])
-    expect(String(warnSpy.mock.calls[2][0])).toMatch(/WebTrace/i)
-    expect(warnSpy.mock.calls[2][1]).toBe(errors[2])
+    expect(String(warnSpy.mock.calls[1][0])).toMatch(/WebTrace/i)
+    expect(warnSpy.mock.calls[1][1]).toBe(errors[2])
+    expect(String(warnSpy.mock.calls[2][0])).toMatch(/TopicDeletion/i)
+    expect(warnSpy.mock.calls[2][1]).toBe(errors[1])
     expect(withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap').length).toBe(1)
+    expect(unhandled.length).toBe(0)
+  })
+
+  it('store import failure skips only store-dependent init with a warning; store-free inits already ran', async () => {
+    const { events, warnSpy, importError } = await loadInit({ storeLoadShouldReject: true })
+    expect(importError).toBeNull()
+    expect(events).toEqual(['StoreSync', 'WebTrace'])
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(String(warnSpy.mock.calls[0][0])).toMatch(/Store import failed/)
+    expect(unhandled.length).toBe(0)
+  })
+
+  it('readiness rejection still bootstraps on the fallback language — TopicDeletion still subscribes', async () => {
+    const { events, topicImpl, importError } = await loadInit({ readiness: 'reject' })
+    expect(importError).toBeNull()
+    expect(topicImpl).toHaveBeenCalledTimes(1)
+    expect(events).toEqual(['StoreSync', 'WebTrace', 'TopicDeletion'])
     expect(unhandled.length).toBe(0)
   })
 
@@ -516,42 +580,13 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
     })
     const topicMock = vi.fn(() => events.push('TopicDeletion'))
     const webTraceMock = vi.fn(() => events.push('WebTrace'))
-    vi.resetModules()
-    vi.doMock('@kangfenmao/keyv-storage', () => ({
-      default: class {
-        init() {
-          return Promise.resolve()
-        }
-      }
-    }))
-    vi.doMock('./services/scrollSnapshotCache', () => ({
-      scheduleScrollSnapshotStartupSweep: vi.fn(),
-      initScrollSnapshotCache: vi.fn()
-    }))
-    vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
-    vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncThrow } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: topicMock }))
-    vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceMock } }))
-    vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
-    vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
-    const { loggerService } = await import('@logger')
-    const warnSpy = vi.fn()
-    vi.spyOn(loggerService, 'withContext').mockImplementation(
-      () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn(), silly: vi.fn() }) as any
-    )
-    if (!(global as any).window) (global as any).window = {}
-    let threw = false
-    try {
-      await import('./init')
-      // second microtask flush to ensure no async throw
-      await Promise.resolve()
-    } catch {
-      threw = true
-    }
-    expect(threw).toBe(false)
-    expect(events).toEqual(['StoreSync:throw', 'TopicDeletion', 'WebTrace'])
+    const { warnSpy, importError } = await loadInit({
+      storeSyncImpl: storeSyncThrow,
+      topicImpl: topicMock,
+      webTraceImpl: webTraceMock
+    })
+    expect(importError).toBeNull()
+    expect(events).toEqual(['StoreSync:throw', 'WebTrace', 'TopicDeletion'])
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(unhandled.length).toBe(0)
   })
@@ -564,37 +599,12 @@ describe('init.ts S7.11 — critical bootstrap synchronous failure isolation', (
     })
     const topicMock = vi.fn(() => events.push('TopicDeletion'))
     const webTraceMock = vi.fn(() => events.push('WebTrace'))
-    vi.resetModules()
-    vi.doMock('@kangfenmao/keyv-storage', () => ({
-      default: class {
-        init() {
-          return Promise.resolve()
-        }
-      }
-    }))
-    vi.doMock('./services/scrollSnapshotCache', () => ({
-      scheduleScrollSnapshotStartupSweep: vi.fn(),
-      initScrollSnapshotCache: vi.fn()
-    }))
-    vi.doMock('./config/title', () => ({ applyMainWindowTitle: vi.fn() }))
-    vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncThrow } }))
-    vi.doMock('./services/topicDeletionSubscription', () => ({ subscribeTopicDeletionEvents: topicMock }))
-    vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: webTraceMock } }))
-    vi.doMock('./services/residentRetention', () => ({ startResidentRetention: vi.fn() }))
-    vi.doMock('./store', () => ({ default: { getState: vi.fn(() => ({ settings: {}, nutstore: {} })) } }))
-    vi.doMock('./services/BackupService', () => ({ startAutoSync: vi.fn() }))
-    vi.doMock('./services/NutstoreService', () => ({ startNutstoreAutoSync: vi.fn() }))
-    const { loggerService } = await import('@logger')
-    const warnSpy = vi.fn()
-    const withContextSpy = vi
-      .spyOn(loggerService, 'withContext')
-      .mockImplementation(
-        () => ({ warn: warnSpy, info: vi.fn(), error: vi.fn(), debug: vi.fn(), silly: vi.fn() }) as any
-      )
-    if (!(global as any).window) (global as any).window = {}
-    await import('./init')
-    await Promise.resolve()
-    await Promise.resolve()
+    const { withContextSpy, importError } = await loadInit({
+      storeSyncImpl: storeSyncThrow,
+      topicImpl: topicMock,
+      webTraceImpl: webTraceMock
+    })
+    expect(importError).toBeNull()
     const bootstrapCalls = withContextSpy.mock.calls.filter((c) => c[0] === 'Bootstrap')
     expect(bootstrapCalls.length).toBe(1)
     expect(unhandled.length).toBe(0)

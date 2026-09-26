@@ -2,12 +2,19 @@ import KeyvStorage from '@kangfenmao/keyv-storage'
 import { loggerService } from '@logger'
 
 import { applyMainWindowTitle } from './config/title'
+import { initialI18nReady } from './i18n'
 import { setExactProviderResolver } from './services/exactProviderResolver'
 import { scheduleScrollSnapshotStartupSweep } from './services/scrollSnapshotCache'
 import storeSyncService from './services/StoreSyncService'
-import { subscribeTopicDeletionEvents } from './services/topicDeletionSubscription'
 import { webTraceService } from './services/WebTraceService'
-import store from './store'
+import type { RootState } from './store'
+
+// NOTE: this module must not statically import `./store` (or any module that
+// reaches it — e.g. `topicDeletionSubscription` via `topicDeletionInvalidation`
+// → `store/assistants`). Store/assistants module evaluation constructs fresh
+// `i18n.t` defaults, so every store-reaching path below is dynamically
+// imported behind `initialI18nReady`. `index.html` loads this script before
+// `entryPoint.tsx`; both entries gate independently on the same promise.
 
 // S7.13 startup stage bootstrap anchor — capture perf now before any init work.
 // The actual mark is emitted after synchronous bootstrap completes. Fail-closed
@@ -17,25 +24,6 @@ const bootstrapStartPerfMs = performance.now()
 loggerService.initWindowSource('mainWindow')
 
 const bootstrapLogger = loggerService.withContext('Bootstrap')
-
-// Start renderer-local retention enforcement (B-01..B-05) — bounded TTL timer, subscription, no content retention.
-// ESM-safe dynamic import avoids renderer import cycle/mock-hoist cascade while retaining immediate correctness with bounded logging.
-// No CommonJS require; startup failures are logged centrally via loggerService and not swallowed silently.
-void import('./services/residentRetention')
-  .then(({ startResidentRetention }) => {
-    try {
-      startResidentRetention(store as any)
-    } catch (e) {
-      loggerService
-        .withContext('Store')
-        .warn('[store] resident retention startup failed — retention inactive', e as Error)
-    }
-  })
-  .catch((e) => {
-    loggerService
-      .withContext('Store')
-      .warn('[store] resident retention startup failed — retention inactive', e as Error)
-  })
 
 // LOCK-RETIRE-001: Cherry Chat is the single application identity. Resolve the
 // main-window title from the identity-derived constant at startup — the title
@@ -57,7 +45,7 @@ function initKeyv() {
   }
 }
 
-function initAutoSync() {
+function initAutoSync(store: { getState(): RootState }) {
   setTimeout(() => {
     const { webdavAutoSync, localBackupAutoSync, s3 } = store.getState().settings
     const { nutstoreAutoSync } = store.getState().nutstore
@@ -93,14 +81,6 @@ function initStoreSync() {
   }
 }
 
-function initTopicDeletionSubscription() {
-  try {
-    subscribeTopicDeletionEvents()
-  } catch (e) {
-    bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
-  }
-}
-
 function initWebTrace() {
   try {
     webTraceService.init()
@@ -115,7 +95,7 @@ function initWebTrace() {
 // Registered here — after store construction, synchronous because capability
 // predicates are synchronous — with an exact `model.provider` id match and
 // no default fallback (no-silent-substitution contract). Never throws.
-function initExactProviderResolver() {
+function initExactProviderResolver(store: { getState(): RootState }) {
   try {
     setExactProviderResolver((model) => store.getState().llm.providers.find((p) => p.id === model?.provider) ?? null)
   } catch (e) {
@@ -135,13 +115,81 @@ function initModelMetadata() {
     })
 }
 
+// Store-dependent bootstrap, gated on initial i18n resource activation.
+//
+// `index.html` loads this script before `entryPoint.tsx`, and the store (via
+// `store/assistants`) constructs fresh `i18n.t` defaults at module evaluation.
+// Every store-reaching initialization therefore waits for `initialI18nReady`
+// and dynamically imports the store (module evaluated once, shared with the
+// entry-point chunk). A readiness failure still bootstraps on the fallback
+// language; a store import failure skips only store-dependent init — the
+// store-free inits below already ran. Each step is individually guarded so one
+// failure never blocks the remaining steps (same as the previous sequential
+// init chain).
+async function bootstrapStoreDependent(): Promise<void> {
+  try {
+    await initialI18nReady
+  } catch {
+    // Failure retains the fallback language — still bootstrap.
+  }
+
+  let store: { getState(): RootState }
+  try {
+    ;({ default: store } = await import('./store'))
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] Store import failed — store-dependent init skipped', e as Error)
+    return
+  }
+
+  // Start renderer-local retention enforcement (B-01..B-05) — bounded TTL timer, subscription, no content retention.
+  // ESM-safe dynamic import avoids renderer import cycle/mock-hoist cascade while retaining immediate correctness with bounded logging.
+  // No CommonJS require; startup failures are logged centrally via loggerService and not swallowed silently.
+  try {
+    const { startResidentRetention } = await import('./services/residentRetention')
+    try {
+      startResidentRetention(store as any)
+    } catch (e) {
+      loggerService
+        .withContext('Store')
+        .warn('[store] resident retention startup failed — retention inactive', e as Error)
+    }
+  } catch (e) {
+    loggerService
+      .withContext('Store')
+      .warn('[store] resident retention startup failed — retention inactive', e as Error)
+  }
+
+  try {
+    initAutoSync(store)
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] AutoSync init failed', e as Error)
+  }
+
+  try {
+    const { subscribeTopicDeletionEvents } = await import('./services/topicDeletionSubscription')
+    try {
+      subscribeTopicDeletionEvents()
+    } catch (e) {
+      bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
+    }
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
+  }
+
+  try {
+    initExactProviderResolver(store)
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] ExactProviderResolver init failed; capabilities stay unknown', e as Error)
+  }
+}
+
+// Store-free inits run immediately (unchanged behavior); store-reaching inits
+// run behind the i18n readiness barrier above.
 initKeyv()
-initAutoSync()
 initStoreSync()
-initTopicDeletionSubscription()
 initWebTrace()
-initExactProviderResolver()
 initModelMetadata()
+void bootstrapStoreDependent()
 
 // S7.13: renderer.bootstrap — synchronous bootstrap completion, idempotent once.
 // Fail-closed diagnostic only; uses dynamic import to avoid cycle.

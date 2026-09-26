@@ -1052,7 +1052,9 @@ describe('Phase 4 exercised-workload validation increment (B-06/B-07/B-08/B-09)'
     // Cleanup B-08 owner to avoid leak for subsequent tests
     releaseContentSearchSessionIfOwned(ownerC)
     expect(getContentSearchDiagnostics().liveRangeCount).toBe(0)
-  })
+    // Local budget only (60s): persistent-like heavy workload exceeds the 20s
+    // global timeout under full-suite 2-thread contention; no global change.
+  }, 60_000)
 
   it('B-07/B-08/B-09 bounds remain observable and privacy-safe when no window supplied', () => {
     store = new Map()

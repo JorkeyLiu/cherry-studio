@@ -168,6 +168,13 @@ describe('initAutoSync — demand activation (S7.9)', () => {
     const mockApplyMainWindowTitle = vi.fn()
 
     vi.doMock('./config/title', () => ({ applyMainWindowTitle: mockApplyMainWindowTitle }))
+    // Async-barrier contract: store-reaching init (including AutoSync
+    // scheduling) runs after `initialI18nReady`. Mock it resolved so the
+    // barrier settles deterministically via microtasks — no timing sleeps.
+    vi.doMock('./i18n', () => ({ initialI18nReady: Promise.resolve() }))
+    vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
+    vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
+    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/scrollSnapshotCache', () => ({
       initScrollSnapshotCache: mockInitScrollSnapshotCache,
       scheduleScrollSnapshotStartupSweep: vi.fn()
@@ -231,7 +238,17 @@ describe('initAutoSync — demand activation (S7.9)', () => {
     // Import init (which will use the global mock for @logger)
     await import('./init')
 
-    // Allow any top-level dynamic import (residentRetention) to settle
+    // Deterministically settle the async bootstrap barrier (initialI18nReady
+    // + dynamic store/topicDeletion imports) BEFORE touching the 8s timer, so
+    // initAutoSync has scheduled exactly once. The gated TopicDeletion
+    // subscription is the barrier-settled signal. Microtasks only — the
+    // mocked barrier needs no timers.
+    for (let i = 0; i < 30 && mockSubscribeTopicDeletion.mock.calls.length === 0; i++) {
+      await Promise.resolve()
+    }
+    expect(mockSubscribeTopicDeletion).toHaveBeenCalledTimes(1)
+
+    // Allow any remaining top-level dynamic import (residentRetention) to settle
     await Promise.resolve()
     await Promise.resolve()
 

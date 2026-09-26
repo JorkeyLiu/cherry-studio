@@ -165,6 +165,14 @@ describe('resident lifecycle joint publication', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    // Cascade hardening: vi.clearAllMocks() only clears call history — a
+    // timed-out test's unconsumed mockRejectedValueOnce/mockImplementationOnce
+    // queue would otherwise leak into the next test and consume its rejection.
+    // mockReset() drops any stale once-queue; defaults are re-established below.
+    mocks.fetchMessagesWindow.mockReset()
+    mocks.listSegments.mockReset()
+    mocks.bumpGeneration.mockReset()
+    mocks.publishResidentComplete.mockReset()
     storeState = {
       assistants: { assistants: [{ id: 'asst-1', topics: [{ id: 't1' }, { id: 't2' }] }] },
       messages: {
@@ -253,9 +261,12 @@ describe('resident lifecycle joint publication', () => {
     // one dispatch for joint publish observable
     const jointDispatches = dispatch.mock.calls.filter(([a]: any) => a?.type === 'resident/jointPublishComplete')
     expect(jointDispatches.length).toBe(1)
-  })
+    // Local budget only (60s): first dynamic import of messageThunk builds the
+    // heavy module graph; under full-suite 2-thread contention this can exceed
+    // the 20s global timeout. No global config change.
+  }, 60_000)
 
-  it('no residency/partial publication when window fails', async () => {
+  it('no residency/partial publication when window fails', { timeout: 60_000 }, async () => {
     mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('window fail'))
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn((action: any) => {
@@ -270,7 +281,7 @@ describe('resident lifecycle joint publication', () => {
     expect(storeState.residentRegistry.entries['t1'].chatData).toBe(false)
   })
 
-  it('no residency when segments fail', async () => {
+  it('no residency when segments fail', { timeout: 60_000 }, async () => {
     mocks.listSegments.mockRejectedValueOnce(new Error('segments fail'))
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn((action: any) => {
@@ -283,7 +294,7 @@ describe('resident lifecycle joint publication', () => {
     expect(storeState.residentRegistry.entries['t1'].residentTopic).toBe(false)
   })
 
-  it('stale generation discard does not publish', async () => {
+  it('stale generation discard does not publish', { timeout: 60_000 }, async () => {
     let resolveWindow: (v: any) => void
     let resolveSegments: (v: any) => void
     mocks.fetchMessagesWindow.mockImplementation(
@@ -330,7 +341,7 @@ describe('resident lifecycle joint publication', () => {
     expect(storeState.residentRegistry.entries['t1'].residentTopic).toBe(false)
   })
 
-  it('deletion invalidation between staged reads discards joint publish', async () => {
+  it('deletion invalidation between staged reads discards joint publish', { timeout: 60_000 }, async () => {
     let resolveWindow: (v: any) => void
     let resolveSegments: (v: any) => void
     mocks.fetchMessagesWindow.mockImplementation(
@@ -378,7 +389,7 @@ describe('resident lifecycle joint publication', () => {
     expect(mocks.publishResidentComplete).not.toHaveBeenCalled()
   })
 
-  it('retry succeeds with new generation after failure', async () => {
+  it('retry succeeds with new generation after failure', { timeout: 60_000 }, async () => {
     mocks.fetchMessagesWindow.mockRejectedValueOnce(new Error('first fail'))
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     const dispatch = vi.fn((action: any) => {
@@ -422,7 +433,7 @@ describe('resident lifecycle joint publication', () => {
     expect(mocks.publishResidentComplete).toHaveBeenCalledTimes(1) // only second succeeded
   })
 
-  it('registry reset and per-topic isolation', async () => {
+  it('registry reset and per-topic isolation', { timeout: 60_000 }, async () => {
     const { bumpGeneration, resetAllResidentRegistry } = await import('@renderer/store/residentRegistry')
     // simulate two topics
     storeState.residentRegistry.entries['t1'] = {
@@ -455,7 +466,7 @@ describe('resident lifecycle joint publication', () => {
     void resetAllResidentRegistry
   })
 
-  it('cache-hit only when registry says resident/current', async () => {
+  it('cache-hit only when registry says resident/current', { timeout: 60_000 }, async () => {
     const { loadTopicMessagesThunk } = await import('../messageThunk')
     // prepare resident state for t1
     storeState.messages.messageIdsByTopic['t1'] = ['m-0', 'm-1']
@@ -536,5 +547,5 @@ describe('resident lifecycle joint publication', () => {
     mocks.listSegments.mockClear()
     await loadTopicMessagesThunk('t-empty-not-resident')(dispatch, getState as any)
     expect(mocks.fetchMessagesWindow).toHaveBeenCalledTimes(1)
-  })
+  }, 60_000)
 })
