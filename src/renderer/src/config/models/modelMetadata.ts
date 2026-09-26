@@ -1,12 +1,19 @@
 import {
+  getModelMetadataSnapshot,
   resolveCanonicalModelEntry,
   resolveProviderForMetadata,
+  resolveReferenceServingForModel,
   resolveServingEffortForModel,
   resolveServingModelForModel
 } from '@renderer/services/modelMetadata'
 import type { Model, Provider } from '@renderer/types'
 import { isUserSelectedModelType } from '@renderer/utils'
-import type { NormalizedModelMetadata, NormalizedProviderServingModel } from '@shared/modelMetadata'
+import {
+  type NormalizedModelMetadata,
+  type NormalizedProviderServingModel,
+  resolveCanonicalModel,
+  resolveReferenceServingModel
+} from '@shared/modelMetadata'
 
 /**
  * Tri-state capability resolvers over the optional canonical models.dev
@@ -62,7 +69,7 @@ export function getExternalModelEntry(
   return resolveCanonicalModelEntry(model.id)
 }
 
-/** Exact provider-serving metadata entry (api.json, owning provider + exact serving id), or undefined. */
+/** Request-lane exact provider-serving entry (owning provider + exact serving id), or undefined. Edit display never uses this. */
 export function getServingModelEntry(
   model: Model | undefined | null,
   provider?: Provider | null
@@ -70,100 +77,105 @@ export function getServingModelEntry(
   return resolveServingModelForModel(model, provider === undefined ? undefined : provider)
 }
 
+/**
+ * Model-centric reference serving entry for Edit Model display: the serving
+ * record inside `snapshot.providers[canonicalLab]` resolved after canonical,
+ * independent of the user's provider/API host. Returns undefined when
+ * canonical is unknown or the reference lookup misses. Never affects requests.
+ */
+export function getReferenceServingEntry(model: Model | undefined | null): NormalizedProviderServingModel | undefined {
+  return resolveReferenceServingForModel(model)
+}
+
 export interface ModelMetadataDisplaySources {
   /** Canonical entry from models.json (lab standard facts). */
   canonical?: NormalizedModelMetadata
-  /** Exact serving entry from api.json (provider-specific display facts). Never merged into canonical. */
+  /**
+   * Model-centric reference serving entry from api.json
+   * (`snapshot.providers[canonicalLab]`; display-only reference facts such as
+   * cost/limits/effort). Never merged into canonical, never request identity.
+   * Kept under the `serving` key for call-site compatibility.
+   */
   serving?: NormalizedProviderServingModel
-  /** Effective merged view for display: serving fields win, canonical fills only missing fields. */
+  /** Effective merged view for display: canonical-lab reference serving fields win, canonical fills only missing fields. */
   effective?: NormalizedModelMetadata & {
     description?: string
     cost?: NormalizedProviderServingModel['cost']
     effort?: string[]
   }
   /** Which source contributed at least one field to the effective view. */
-  source: 'serving' | 'canonical' | 'mixed' | 'none'
+  source: 'canonical' | 'mixed' | 'none'
 }
 
 /**
- * Display-priority metadata for the Edit Model UI: exact serving entry wins,
- * canonical fills only fields absent from serving (and never overwrites
- * serving). The two sources are kept distinct; the caller must not treat them
- * as one identity. For unknown ids both are undefined and effective is absent.
+ * Model-centric display metadata for the Edit Model UI: canonical resolves
+ * first (shared contract, unchanged), then a display-only reference serving
+ * entry resolves inside `snapshot.providers[canonicalLab]` only — never from
+ * the user's provider/API host. Reference serving fields win, canonical fills
+ * only missing fields; the two sources stay distinct and never gate or rewrite
+ * requests. The optional `provider` argument remains for call-site
+ * compatibility but never controls the result.
  */
 export function getModelMetadataForDisplay(
   model: Model | undefined | null,
-  provider?: Provider | null
+  _provider?: Provider | null
 ): ModelMetadataDisplaySources {
-  const canonical = getExternalModelEntry(model, provider)
-  const serving = getServingModelEntry(model, provider)
-  if (!canonical && !serving) return { source: 'none' }
-  if (serving && !canonical) {
-    const eff: ModelMetadataDisplaySources['effective'] = {
-      id: serving.id ?? model?.id ?? '',
-      modalities: serving.modalities ?? { input: [], output: [] },
-      ...(serving.name !== undefined ? { name: serving.name } : {}),
-      ...(serving.family !== undefined ? { family: serving.family } : {}),
-      ...(serving.knowledgeCutoff !== undefined ? { knowledgeCutoff: serving.knowledgeCutoff } : {}),
-      ...(serving.releaseDate !== undefined ? { releaseDate: serving.releaseDate } : {}),
-      ...(serving.lastUpdated !== undefined ? { lastUpdated: serving.lastUpdated } : {}),
-      ...(serving.attachment !== undefined ? { attachment: serving.attachment } : {}),
-      ...(serving.toolCall !== undefined ? { toolCall: serving.toolCall } : {}),
-      ...(serving.structuredOutput !== undefined ? { structuredOutput: serving.structuredOutput } : {}),
-      ...(serving.temperature !== undefined ? { temperature: serving.temperature } : {}),
-      ...(serving.reasoning !== undefined ? { reasoning: serving.reasoning } : {}),
-      ...(serving.limits !== undefined ? { limits: serving.limits } : {}),
-      ...(serving.description !== undefined ? { description: serving.description } : {}),
-      ...(serving.cost !== undefined ? { cost: serving.cost } : {}),
-      ...(serving.effort !== undefined ? { effort: serving.effort } : {})
-    }
-    return { serving, canonical, effective: eff, source: 'serving' }
-  }
-  if (canonical && !serving) {
+  void _provider
+  if (!model || typeof model.id !== 'string') return { source: 'none' }
+  const snapshot = getModelMetadataSnapshot()
+  const resolved = resolveCanonicalModel(model.id, snapshot)
+  if (!resolved) return { source: 'none' }
+  const canonical = resolved.entry
+  const serving = resolveReferenceServingModel(resolved.canonicalId, snapshot, canonical.name)
+  if (!serving) {
     return { canonical, serving, effective: canonical as ModelMetadataDisplaySources['effective'], source: 'canonical' }
   }
-  // both present: serving wins, canonical fills gaps
+  // Both present: canonical-lab reference serving wins, canonical fills gaps.
+  // Cost, limits, and effort can appear from the reference entry;
+  // capabilities/modalities stay reference metadata about the resolved model,
+  // never the user's connection.
   const eff: ModelMetadataDisplaySources['effective'] = {
-    id: serving!.id ?? canonical!.id,
+    id: serving.id ?? canonical.id,
     modalities:
-      serving!.modalities && (serving!.modalities.input.length > 0 || serving!.modalities.output.length > 0)
-        ? serving!.modalities
-        : canonical!.modalities,
-    name: serving!.name ?? canonical!.name,
-    family: serving!.family ?? canonical!.family,
-    knowledgeCutoff: serving!.knowledgeCutoff ?? canonical!.knowledgeCutoff,
-    releaseDate: serving!.releaseDate ?? canonical!.releaseDate,
-    lastUpdated: serving!.lastUpdated ?? canonical!.lastUpdated,
-    attachment: serving!.attachment ?? canonical!.attachment,
-    toolCall: serving!.toolCall ?? canonical!.toolCall,
-    structuredOutput: serving!.structuredOutput ?? canonical!.structuredOutput,
-    temperature: serving!.temperature ?? canonical!.temperature,
-    reasoning: serving!.reasoning ?? canonical!.reasoning,
-    limits: serving!.limits ?? canonical!.limits,
-    description: serving!.description,
-    cost: serving!.cost,
-    effort: serving!.effort
+      serving.modalities && (serving.modalities.input.length > 0 || serving.modalities.output.length > 0)
+        ? serving.modalities
+        : canonical.modalities,
+    name: serving.name ?? canonical.name,
+    family: serving.family ?? canonical.family,
+    knowledgeCutoff: serving.knowledgeCutoff ?? canonical.knowledgeCutoff,
+    releaseDate: serving.releaseDate ?? canonical.releaseDate,
+    lastUpdated: serving.lastUpdated ?? canonical.lastUpdated,
+    attachment: serving.attachment ?? canonical.attachment,
+    toolCall: serving.toolCall ?? canonical.toolCall,
+    structuredOutput: serving.structuredOutput ?? canonical.structuredOutput,
+    temperature: serving.temperature ?? canonical.temperature,
+    reasoning: serving.reasoning ?? canonical.reasoning,
+    limits: serving.limits ?? canonical.limits,
+    description: serving.description,
+    cost: serving.cost,
+    effort: serving.effort
   }
-  // Reliable rule: if serving exists and contributes any field to the effective
-  // view (any of its own keys !== undefined), the honest source is 'mixed'.
-  // This includes provider-specific display-only fields (description/cost/effort).
+  // Reliable rule: if the reference entry contributes any field to the
+  // effective view (any of its own keys !== undefined), the honest source is
+  // 'mixed'. This includes reference-only display fields
+  // (description/cost/effort).
   const hasServingField =
-    serving!.id !== undefined ||
-    serving!.name !== undefined ||
-    serving!.description !== undefined ||
-    serving!.family !== undefined ||
-    serving!.knowledgeCutoff !== undefined ||
-    serving!.releaseDate !== undefined ||
-    serving!.lastUpdated !== undefined ||
-    serving!.modalities !== undefined ||
-    serving!.attachment !== undefined ||
-    serving!.toolCall !== undefined ||
-    serving!.structuredOutput !== undefined ||
-    serving!.temperature !== undefined ||
-    serving!.reasoning !== undefined ||
-    serving!.limits !== undefined ||
-    serving!.cost !== undefined ||
-    serving!.effort !== undefined
+    serving.id !== undefined ||
+    serving.name !== undefined ||
+    serving.description !== undefined ||
+    serving.family !== undefined ||
+    serving.knowledgeCutoff !== undefined ||
+    serving.releaseDate !== undefined ||
+    serving.lastUpdated !== undefined ||
+    serving.modalities !== undefined ||
+    serving.attachment !== undefined ||
+    serving.toolCall !== undefined ||
+    serving.structuredOutput !== undefined ||
+    serving.temperature !== undefined ||
+    serving.reasoning !== undefined ||
+    serving.limits !== undefined ||
+    serving.cost !== undefined ||
+    serving.effort !== undefined
   const source: ModelMetadataDisplaySources['source'] = hasServingField ? 'mixed' : 'canonical'
   return { serving, canonical, effective: eff, source }
 }

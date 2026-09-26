@@ -14,6 +14,7 @@ import {
   parseModelMetadataStatus,
   resolveCanonicalModel,
   resolveProviderServingModel,
+  resolveReferenceServingModel,
   toModelMetadataStatus
 } from '../modelMetadata'
 
@@ -655,5 +656,231 @@ describe('provider serving full metadata — normalization + exact resolver', ()
     expect(parsed.models['lab-a/model-x'].limits?.context).toBe(10)
     // serving never overwrote canonical
     expect(parsed.models['lab-a/model-x'].limits?.context).not.toBe(999999)
+  })
+})
+
+describe('resolveReferenceServingModel — model-centric reference (canonical lab only)', () => {
+  function referenceSnapshot(): ModelMetadataSnapshot {
+    return {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'deepseek/deepseek-v4.1-flash': {
+          id: 'deepseek/deepseek-v4.1-flash',
+          name: 'DeepSeek V4.1 Flash',
+          modalities: { input: ['text'], output: ['text'] }
+        },
+        'moonshotai/kimi-k3': {
+          id: 'moonshotai/kimi-k3',
+          name: 'Kimi K3',
+          modalities: { input: ['text'], output: ['text'] }
+        },
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        deepseek: {
+          api: 'https://api.deepseek.example/v1',
+          name: 'DeepSeek',
+          models: {
+            'deepseek/deepseek-v4.1-flash': {
+              id: 'deepseek/deepseek-v4.1-flash',
+              name: 'DeepSeek V4.1 Flash',
+              cost: { input: 1, output: 2 }
+            },
+            'deepseek-flash': { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', cost: { input: 3 } }
+          }
+        },
+        moonshotai: {
+          api: 'https://api.moonshot.example/v1',
+          name: 'Moonshot',
+          models: {
+            'kimi-k3': { id: 'kimi-k3', name: 'Kimi K3', cost: { input: 5 } }
+          }
+        },
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'alias-one': { id: 'alias-one', name: 'Case Model' },
+            'alias-two': { id: 'alias-two', name: 'Case Model' }
+          }
+        }
+      }
+    }
+  }
+
+  it('resolves the exact canonical full ID key inside the canonical lab', () => {
+    const snapshot = referenceSnapshot()
+    expect(resolveReferenceServingModel('deepseek/deepseek-v4.1-flash', snapshot, 'DeepSeek V4.1 Flash')?.cost).toEqual(
+      { input: 1, output: 2 }
+    )
+  })
+
+  it('resolves the exact canonical basename key when the full ID key is absent', () => {
+    const snapshot = referenceSnapshot()
+    expect(resolveReferenceServingModel('moonshotai/kimi-k3', snapshot, 'Kimi K3')?.cost).toEqual({ input: 5 })
+  })
+
+  it('resolves a unique exact display-name alias (DeepSeek V4.1 Flash -> deepseek-flash style)', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'deepseek/deepseek-v4.1-flash': {
+          id: 'deepseek/deepseek-v4.1-flash',
+          name: 'DeepSeek V4.1 Flash',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        deepseek: {
+          api: 'https://api.deepseek.example/v1',
+          name: 'DeepSeek',
+          models: {
+            'deepseek-flash': { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', cost: { input: 3 } }
+          }
+        }
+      }
+    }
+    // Neither the full ID nor the basename exists as a serving key; the
+    // unique exact display name identifies the reference entry.
+    expect(resolveReferenceServingModel('deepseek/deepseek-v4.1-flash', snapshot)?.id).toBe('deepseek-flash')
+  })
+
+  it('resolves a unique case-folded display name when no exact-name candidate exists', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'folded-only': { id: 'folded-only', name: 'case model' }
+          }
+        }
+      }
+    }
+    expect(resolveReferenceServingModel('lab-a/case-model', snapshot)?.id).toBe('folded-only')
+  })
+
+  it('fails closed on ambiguous display names (never first candidate)', () => {
+    const snapshot = referenceSnapshot()
+    // lab-a has two serving entries both named 'Case Model': exact-name is ambiguous.
+    expect(resolveReferenceServingModel('lab-a/case-model', snapshot)).toBeUndefined()
+  })
+
+  it('prefers the exact basename key over a competing unique exact-name alias', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'case-model': { id: 'case-model', name: 'Unrelated', cost: { input: 1 } },
+            'alias-one': { id: 'alias-one', name: 'Case Model', cost: { input: 2 } }
+          }
+        }
+      }
+    }
+    // Tier (b) basename wins even though 'alias-one' is a unique exact-name
+    // alias for the canonical name at tier (c).
+    expect(resolveReferenceServingModel('lab-a/case-model', snapshot)?.id).toBe('case-model')
+  })
+
+  it('returns undefined on ambiguous exact names without falling through to a folded-only candidate', () => {
+    const snapshot: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: {
+        'lab-a/case-model': {
+          id: 'lab-a/case-model',
+          name: 'Case Model',
+          modalities: { input: ['text'], output: ['text'] }
+        }
+      },
+      providers: {
+        'lab-a': {
+          api: 'https://api.a.example/v1',
+          name: 'Lab A',
+          models: {
+            'alias-one': { id: 'alias-one', name: 'Case Model' },
+            'alias-two': { id: 'alias-two', name: 'Case Model' },
+            'folded-only': { id: 'folded-only', name: 'case model' }
+          }
+        }
+      }
+    }
+    // Two exact-name matches at tier (c) fail closed immediately. The
+    // folded-only entry would look unique if exact matches were excluded
+    // before tier (d), so undefined here proves no fallthrough.
+    expect(resolveReferenceServingModel('lab-a/case-model', snapshot)).toBeUndefined()
+  })
+
+  it('returns undefined when the canonical lab has no provider entry', () => {
+    const snapshot = referenceSnapshot()
+    expect(resolveReferenceServingModel('unknown-lab/some-model', snapshot, 'Some Model')).toBeUndefined()
+  })
+
+  it('never reads the user connection: only snapshot.providers[canonicalLab] matters', () => {
+    const snapshot = referenceSnapshot()
+    // A serving record for the same model id under a different provider is invisible.
+    const cross: ModelMetadataSnapshot = {
+      ...snapshot,
+      providers: {
+        ...snapshot.providers,
+        other: {
+          api: 'https://custom.example/v1',
+          name: 'Custom',
+          models: {
+            'deepseek/deepseek-v4.1-flash': { id: 'deepseek/deepseek-v4.1-flash', name: 'Hijack', cost: { input: 9 } }
+          }
+        }
+      }
+    }
+    expect(resolveReferenceServingModel('deepseek/deepseek-v4.1-flash', cross, 'DeepSeek V4.1 Flash')?.cost).toEqual({
+      input: 1,
+      output: 2
+    })
+    // Removing the canonical-lab provider misses even though another provider has the id.
+    const withoutLab: ModelMetadataSnapshot = {
+      source: 'models.dev',
+      fetchedAt: 1,
+      models: cross.models,
+      providers: {
+        other: cross.providers['other']
+      }
+    }
+    expect(
+      resolveReferenceServingModel('deepseek/deepseek-v4.1-flash', withoutLab, 'DeepSeek V4.1 Flash')
+    ).toBeUndefined()
+  })
+
+  it('rejects unsafe keys and malformed inputs without throwing', () => {
+    const snapshot = referenceSnapshot()
+    expect(resolveReferenceServingModel('__proto__', snapshot, 'x')).toBeUndefined()
+    expect(resolveReferenceServingModel('', snapshot, 'x')).toBeUndefined()
+    expect(resolveReferenceServingModel(undefined, snapshot, 'x')).toBeUndefined()
+    expect(resolveReferenceServingModel('deepseek/deepseek-v4.1-flash', null, 'DeepSeek V4.1 Flash')).toBeUndefined()
   })
 })

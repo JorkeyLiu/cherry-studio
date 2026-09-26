@@ -1,3 +1,4 @@
+import { HelpTooltip } from '@renderer/components/TooltipIcons'
 import {
   MODEL_METADATA_SOURCE,
   type NormalizedModelMetadata,
@@ -21,6 +22,13 @@ function isDisplayText(value: unknown): value is string {
 export function formatReferencePrice(value: number): string {
   return `$${String(value)}`
 }
+
+/**
+ * Untranslated technical per-million-token unit for Edit Model price rows.
+ * Always renders exactly ` / M Token` (e.g. `$0.15 / M Token`) in every
+ * locale; intentionally not an i18n key so it is never translated.
+ */
+export const REFERENCE_PRICE_UNIT = ' / M Token'
 
 /** Token limits render with en-US grouping (e.g. 200000 -> 200,000). */
 export function formatLimitTokens(value: number): string {
@@ -99,11 +107,14 @@ interface ReferenceRow {
  * both capability icons and model data together. Never writes, never applies,
  * never edits: it only displays published metadata. Capability icons live in
  * ModelCapabilityGroups; this section keeps pricing (via effective.cost),
- * context/output limits, dates, and effort-only reasoning controls. Serving
- * wins, canonical fills only missing fields (resolved upstream via
- * getModelMetadataForDisplay); this view only reads the effective result.
- * Family/status/description/lastUpdated/limits.input/tiering/button are
- * intentionally not restored.
+ * context/output limits, dates, and effort-only reasoning controls. Reference
+ * serving wins, canonical fills only missing fields (resolved upstream via
+ * getModelMetadataForDisplay from the canonical lab, never the user
+ * connection); this view only reads the effective result. Family/status/
+ * description/lastUpdated/limits.input/tiering/button are intentionally not
+ * restored. Prices, limits, and capabilities are third-party reference info
+ * about the model and may differ from the current custom provider/endpoint;
+ * the upstream service is authoritative (see the HelpTooltip below).
  */
 const ModelMetadataReference: FC<{ entry?: EffectiveModelMetadataEntry | null }> = ({ entry }) => {
   const { t } = useTranslation()
@@ -114,7 +125,6 @@ const ModelMetadataReference: FC<{ entry?: EffectiveModelMetadataEntry | null }>
     const limits = entry.limits
     const cost = entry.cost
     const effort = entry.effort
-    const unit = t('models.reference.per_million_tokens')
 
     if (cost && typeof cost === 'object') {
       const priced: Array<{ key: string; labelKey: string; value: unknown; testId: string }> = [
@@ -138,7 +148,7 @@ const ModelMetadataReference: FC<{ entry?: EffectiveModelMetadataEntry | null }>
           out.push({
             key: `cost.${item.key}`,
             label: t(item.labelKey),
-            value: `${formatReferencePrice(item.value)} ${unit}`,
+            value: `${formatReferencePrice(item.value)}${REFERENCE_PRICE_UNIT}`,
             testId: item.testId,
             known: true,
             concrete: true
@@ -220,6 +230,9 @@ const ModelMetadataReference: FC<{ entry?: EffectiveModelMetadataEntry | null }>
       <Flex justify="space-between" align="center" gap={8}>
         <ReferenceTitle>
           {t('models.reference.title')} <SourceTag data-testid="ref-source">{MODEL_METADATA_SOURCE}</SourceTag>
+          <span data-testid="ref-disclaimer-tip" title={t('models.reference.disclaimer_tooltip')}>
+            <HelpTooltip title={t('models.reference.disclaimer_tooltip')} />
+          </span>
         </ReferenceTitle>
       </Flex>
       <Rows>

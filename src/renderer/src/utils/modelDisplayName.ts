@@ -30,8 +30,9 @@ export function shouldShowModelId(name: string | undefined | null, id: string | 
 /**
  * Resolved models.dev display name for a Model+Provider, or undefined when
  * absent/blank/unknown. Synchronous, fail-open: never throws, never blocks.
- * Uses the existing `getModelMetadataForDisplay` contract (serving wins,
- * canonical fills gaps) and returns only its effective `name` when trimmed.
+ * Uses the existing `getModelMetadataForDisplay` contract (canonical-lab
+ * reference serving wins, canonical fills gaps; never the user's
+ * provider/API host) and returns only its effective `name` when trimmed.
  */
 export function getModelMetadataDisplayName(model: Model, provider: Provider | null | undefined): string | undefined {
   try {

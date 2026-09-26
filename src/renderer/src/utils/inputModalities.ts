@@ -16,8 +16,9 @@ import type { NormalizedModelMetadata } from '@shared/modelMetadata'
  *
  * Compact rows and detail groups share one effective display resolver:
  * `getSupportedInputModalitiesForDisplay` → `getModelMetadataForDisplay(...).effective`
- * → `resolveSupportedInputModalities`. Serving wins, canonical fills gaps,
- * unknown renders empty; never writes back to Model.capabilities/type.
+ * → `resolveSupportedInputModalities`. Canonical-lab reference serving wins,
+ * canonical fills gaps, unknown renders empty; never the user's connection,
+ * never writes back to Model.capabilities/type.
  */
 
 export const INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const
@@ -81,7 +82,7 @@ export function resolveSupportedInputModalities(entry: NormalizedModelMetadata |
  * Resolution is exact-only via `getExternalModelEntry` (canonical models.dev
  * id matching, provider arg ignored). Display code must NOT use this helper;
  * use `getSupportedInputModalitiesForDisplay` which reads the effective
- * serving+canonical merge. Unknown means zero modalities.
+ * canonical-lab reference serving + canonical merge. Unknown means zero modalities.
  */
 export function getSupportedInputModalities(
   model: Model | undefined | null,
@@ -95,8 +96,10 @@ export function getSupportedInputModalities(
  * Display-layer supported input modalities for a model.
  *
  * Single display truth for all compact tags and filters: reads
- * `getModelMetadataForDisplay(model, provider).effective` (serving wins,
- * canonical fills gaps, unknown → empty) then `resolveSupportedInputModalities`.
+ * `getModelMetadataForDisplay(model, provider).effective` (model-centric
+ * reference inside `snapshot.providers[canonicalLab]`, never the user's
+ * connection: canonical first, reference serving wins, unknown → empty) then
+ * `resolveSupportedInputModalities`.
  * Compact rows (ModelTagsWithLabel) and detail groups (ModelCapabilityGroups
  * via entry) share this effective resolver so list and detail never diverge.
  * Never writes back to Model.capabilities/type/pricing; never merges serving
@@ -119,7 +122,7 @@ export function supportsInputModality(
   return getSupportedInputModalities(model, provider).includes(modality)
 }
 
-/** Display-layer exact supported check (serving wins, unknown → false). */
+/** Display-layer exact supported check (canonical-lab reference serving wins, unknown → false). */
 export function supportsInputModalityForDisplay(
   model: Model | undefined | null,
   modality: InputModality,
@@ -140,7 +143,8 @@ function normalizeRef(ref: ModalityModelRef): { model: Model; provider?: Provide
 
 /**
  * Availability map over a mixed list of models/refs: true only for modalities
- * with at least one exact supported occurrence (display-layer: serving wins).
+ * with at least one exact supported occurrence (display-layer: canonical-lab
+ * reference serving wins).
  * Unknown-only lists yield all false (zero tags / zero filter options).
  */
 export function getInputModalityAvailability(items: ReadonlyArray<ModalityModelRef>): Record<InputModality, boolean> {
@@ -161,7 +165,7 @@ export function getInputModalityAvailability(items: ReadonlyArray<ModalityModelR
 
 /**
  * Provider-aware availability for popup-level tag filters (exact attribution per provider).
- * Display-layer: serving wins per model/provider, canonical fills gaps.
+ * Display-layer: model-centric reference per model, canonical fills gaps.
  */
 export function getInputModalityAvailabilityFromProviders(
   providers: ReadonlyArray<Provider>

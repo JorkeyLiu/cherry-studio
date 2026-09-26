@@ -11,7 +11,8 @@ import {
   parseModelMetadataSnapshot,
   parseModelMetadataStatus,
   resolveCanonicalModel,
-  resolveProviderServingModel
+  resolveProviderServingModel,
+  resolveReferenceServingModel
 } from '@shared/modelMetadata'
 import { isSafeLogoSourceId } from '@shared/providerLogo'
 
@@ -204,12 +205,37 @@ export function resolveCanonicalModelEntry(
 }
 
 /**
+ * Model-centric reference serving record for Edit Model display only.
+ *
+ * Resolves canonical first (shared contract), then the reference serving
+ * entry inside `snapshot.providers[canonicalLab]` via
+ * `resolveReferenceServingModel`. Never reads the user's provider/API host,
+ * never affects requests. Returns undefined when canonical is unknown or the
+ * reference lookup is ambiguous/missing. Never throws.
+ */
+export function resolveReferenceServingForModel(
+  model: Model | undefined | null,
+  current: ModelMetadataSnapshot | null = snapshot
+): NormalizedProviderServingModel | undefined {
+  try {
+    if (!model || typeof model.id !== 'string') return undefined
+    const snapshotToUse = current ?? snapshot
+    if (!snapshotToUse) return undefined
+    const resolved = resolveCanonicalModel(model.id, snapshotToUse)
+    if (!resolved) return undefined
+    return resolveReferenceServingModel(resolved.canonicalId, snapshotToUse, resolved.entry.name)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Provider-specific serving metadata record for a model, resolved through
  * the exact owning provider -> source-id mapping. Exact trimmed model-id
- * match only (case-sensitive, no basename/case-fold). Provider-specific
- * records are enrichment only and never merged into canonical capabilities;
- * they never overwrite canonical fields. Returns undefined when unknown or
- * when the connection is explicitly absent. Never throws.
+ * match only (case-sensitive, no basename/case-fold). Request-lane helper
+ * for serving suggestions (e.g. reasoning effort menus); Edit Model display
+ * uses `resolveReferenceServingForModel` instead. Returns undefined when
+ * unknown or when the connection is explicitly absent. Never throws.
  */
 export function resolveServingModelForModel(
   model: Model | undefined | null,

@@ -36,9 +36,11 @@ export const MODEL_METADATA_ENDPOINT = 'https://models.dev/models.json'
 
 /**
  * Upstream provider-source list endpoint. Owned by the Main
- * ModelMetadataService for connection-logo attribution ONLY (normalized
- * `api` base URL + display name per source; no model facts). Model metadata
- * and model logos never read this endpoint.
+ * ModelMetadataService for connection-logo attribution and for model-centric
+ * reference serving display (`snapshot.providers[canonicalLab]` via
+ * `resolveReferenceServingModel`; display-only, never request identity).
+ * Model capability facts and model logos never read this endpoint by user
+ * connection; reference serving reads it only by canonical lab.
  */
 export const MODEL_METADATA_PROVIDER_SOURCES_ENDPOINT = 'https://models.dev/api.json'
 
@@ -179,7 +181,7 @@ export interface ModelMetadataSnapshot {
   etag?: string
   /** Canonical models keyed by exact canonical id (`lab/name`). */
   models: Record<string, NormalizedModelMetadata>
-  /** Provider sources keyed by source id — connection logos only. */
+  /** Provider sources keyed by source id — connection logos + model-centric reference serving display. */
   providers: Record<string, NormalizedProviderSource>
 }
 
@@ -666,10 +668,10 @@ export function parseModelMetadataCache(data: unknown): { snapshot: ModelMetadat
  * Resolve the exact provider-serving metadata record for a model id inside
  * one source. Exact trimmed model-id only (case-sensitive, no basename or
  * case-fold), zero model record -> undefined. Provider-specific records never
- * merge into canonical capabilities and never overwrite canonical fields; callers
- * that need both must read them separately and decide display priority
- * (serving exact wins for UI display, canonical fills only missing fields).
- * Never throws.
+ * merge into canonical capabilities and never overwrite canonical fields.
+ * Request-lane helper (owning-provider source mapping for serving
+ * suggestions and connection logos); Edit Model display uses
+ * `resolveReferenceServingModel` instead. Never throws.
  */
 export function resolveProviderServingModel(
   sourceId: string | null | undefined,
@@ -696,6 +698,12 @@ export function resolveProviderServingModel(
  * source. Exact trimmed model-id only (case-sensitive, no basename or
  * case-fold), zero model record -> undefined. Provider-specific records never
  * merge into canonical capabilities.
+ *
+ * Request-lane helper: the source id comes from the owning-provider mapping
+ * (`resolveMetadataSource`) and is used for request-adjacent serving
+ * suggestions (e.g. reasoning effort menus) and connection-logo attribution.
+ * Edit Model display never uses this helper; it uses
+ * `resolveReferenceServingModel` below.
  */
 export function resolveProviderServingEffort(
   sourceId: string | null | undefined,
@@ -705,6 +713,91 @@ export function resolveProviderServingEffort(
   const entry = resolveProviderServingModel(sourceId, modelId, snapshot)
   if (!entry || !Array.isArray(entry.effort) || entry.effort.length === 0) return undefined
   return entry.effort
+}
+
+// ---------------------------------------------------------------------------
+// Model-centric reference serving (Edit Model display only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Model-centric reference serving entry for Edit Model display only.
+ *
+ * After canonical resolution, look inside `snapshot.providers[canonicalLab]`
+ * only — never from the user's provider/API host. Ordered, fail-closed:
+ * a. exact canonical full ID key (case-sensitive, trimmed);
+ * b. exact canonical basename key (case-sensitive, trimmed);
+ * c. exactly one trimmed case-sensitive display-name (`name`) equality with
+ *    the canonical name;
+ * d. if (c) has none, exactly one trimmed case-folded display-name equality.
+ * Ambiguity (>1) at (c) or (d) is unknown (undefined); missing lab provider,
+ * missing models map, or missing canonical name (for c/d) is unknown.
+ * Never crosses providers, never fuzzy/substring matches, never uses
+ * family/dates/limits as identity, and never affects request semantics.
+ * Never throws.
+ */
+export function resolveReferenceServingModel(
+  canonicalId: string | undefined | null,
+  snapshot: ModelMetadataSnapshot | null | undefined,
+  canonicalName?: string | null
+): NormalizedProviderServingModel | undefined {
+  if (typeof canonicalId !== 'string') return undefined
+  const canonicalKey = canonicalId.trim()
+  if (!canonicalKey || !isSafeMetadataKey(canonicalKey)) return undefined
+  if (!snapshot || typeof snapshot !== 'object') return undefined
+  const lab = labOf(canonicalKey)
+  if (!lab || !isSafeMetadataKey(lab)) return undefined
+  const providers = (snapshot as { providers?: unknown }).providers
+  if (!providers || typeof providers !== 'object') return undefined
+  const source = (providers as Record<string, unknown>)[lab]
+  if (!source || typeof source !== 'object') return undefined
+  const models = (source as { models?: unknown }).models
+  if (!models || typeof models !== 'object') return undefined
+  const table = models as Record<string, unknown>
+
+  // (a) exact canonical full ID key.
+  if (isSafeMetadataKey(canonicalKey)) {
+    const exact = table[canonicalKey]
+    if (exact && typeof exact === 'object') return exact as NormalizedProviderServingModel
+  }
+
+  // (b) exact canonical basename key.
+  const basename = basenameOf(canonicalKey)
+  if (basename && basename !== canonicalKey && isSafeMetadataKey(basename)) {
+    const byBasename = table[basename]
+    if (byBasename && typeof byBasename === 'object') return byBasename as NormalizedProviderServingModel
+  }
+
+  // Resolve the canonical display name for (c)/(d): explicit arg wins,
+  // otherwise the canonical entry's own `name`.
+  let displayName: string | undefined
+  if (typeof canonicalName === 'string' && canonicalName.trim().length > 0) {
+    displayName = canonicalName.trim()
+  } else {
+    const canonicalEntry = (snapshot.models as Record<string, unknown> | undefined)?.[canonicalKey]
+    const rawName =
+      canonicalEntry && typeof canonicalEntry === 'object' ? (canonicalEntry as { name?: unknown }).name : undefined
+    if (typeof rawName === 'string' && rawName.trim().length > 0) displayName = rawName.trim()
+  }
+  if (!displayName) return undefined
+
+  const entries = Object.entries(table).filter(
+    (entry): entry is [string, NormalizedProviderServingModel] =>
+      isSafeMetadataKey(entry[0]) && !!entry[1] && typeof entry[1] === 'object'
+  )
+  if (entries.length === 0) return undefined
+
+  // (c) exactly one trimmed case-sensitive display-name equality.
+  const exactName = entries.filter(([, entry]) => typeof entry.name === 'string' && entry.name.trim() === displayName)
+  if (exactName.length === 1) return exactName[0][1]
+  if (exactName.length > 1) return undefined
+
+  // (d) exactly one trimmed case-folded display-name equality.
+  const folded = displayName.toLowerCase()
+  const foldedName = entries.filter(
+    ([, entry]) => typeof entry.name === 'string' && entry.name.trim().toLowerCase() === folded
+  )
+  if (foldedName.length === 1) return foldedName[0][1]
+  return undefined
 }
 
 // ---------------------------------------------------------------------------

@@ -146,7 +146,7 @@ Slices (redux-persist enabled; `residentRegistry` is non-persisted and excluded 
 
 ## AI Core (`packages/aiCore/`)
 
-Model metadata (serving vs canonical vs display, enrichment-only, exact lookup) is governed by [Model Metadata Governance](../adr/model-metadata.md); this section describes implementation locations only. Canonical facts come from `models.json` and serving facts from `api.json`, with provider-serving resolution via exact owning-provider source mapping (anthropic/gemini/OpenAI official host + normalized API URL unique match). See the governance doc for the decision table and lookup contracts.
+Model metadata (model-centric reference vs canonical vs display, enrichment-only, upstream-final) is governed by [Model Metadata Governance](../adr/model-metadata.md); this section describes implementation locations only. Canonical facts come from `models.json` and reference serving facts from `api.json` inside `snapshot.providers[canonicalLab]` (display-only, never the user connection; cost/limits/effort merge into the Edit Model effective view with source marking). App provider entries are user-defined connections, never built-in supplier identities; requests send the user `Model.id` lazily with metadata never gating or rewriting. Owning-provider source mapping remains only for connection logos and request-lane serving suggestions. See the governance doc for the decision table and lookup contracts.
 
 The `@cherrystudio/ai-core` package abstracts AI SDK providers and runtime execution. Built on Vercel AI SDK v6 (`ai`):
 

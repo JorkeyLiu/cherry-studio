@@ -49,10 +49,10 @@ describe('ModelMetadataReference', () => {
     expect(screen.getByTestId('ref-release-date')).toHaveTextContent('2025-02-01')
     expect(screen.getByTestId('ref-knowledge-cutoff')).toHaveTextContent('2025-01-01')
     // Pricing via effective.cost
-    expect(screen.getByTestId('ref-price-input')).toHaveTextContent('$3')
-    expect(screen.getByTestId('ref-price-output')).toHaveTextContent('$15')
-    expect(screen.getByTestId('ref-price-cache-read')).toHaveTextContent('$0.3')
-    expect(screen.getByTestId('ref-price-cache-write')).toHaveTextContent('$1.5')
+    expect(screen.getByTestId('ref-price-input')).toHaveTextContent('$3 / M Token')
+    expect(screen.getByTestId('ref-price-output')).toHaveTextContent('$15 / M Token')
+    expect(screen.getByTestId('ref-price-cache-read')).toHaveTextContent('$0.3 / M Token')
+    expect(screen.getByTestId('ref-price-cache-write')).toHaveTextContent('$1.5 / M Token')
     // Reasoning controls via effective.effort (normalized, max stays as provided here)
     expect(screen.getByTestId('ref-reasoning-controls')).toHaveTextContent('low, max')
     // Unrelated historical fields never render
@@ -69,6 +69,17 @@ describe('ModelMetadataReference', () => {
     expect(screen.queryByTestId('ref-temperature')).not.toBeInTheDocument()
   })
 
+  it('shows the reference disclaimer tooltip beside the Model Data title', () => {
+    const { container } = render(<ModelMetadataReference entry={FULL_ENTRY} />)
+
+    const tip = screen.getByTestId('ref-disclaimer-tip')
+    expect(tip).toBeInTheDocument()
+    // Translated explanatory title (mocked t returns the key).
+    expect(tip.getAttribute('title')).toBe('models.reference.disclaimer_tooltip')
+    // Help icon is present inside the tooltip wrapper.
+    expect(container.querySelector('[aria-label="Help"]')).not.toBeNull()
+  })
+
   it('renders pricing and reasoning rows from cost/effort and hides missing subfields', () => {
     render(
       <ModelMetadataReference
@@ -83,8 +94,8 @@ describe('ModelMetadataReference', () => {
     )
 
     expect(screen.getByTestId('models-dev-reference')).toBeInTheDocument()
-    expect(screen.getByTestId('ref-price-input')).toHaveTextContent('$1.25')
-    expect(screen.getByTestId('ref-price-output')).toHaveTextContent('$5')
+    expect(screen.getByTestId('ref-price-input')).toHaveTextContent('$1.25 / M Token')
+    expect(screen.getByTestId('ref-price-output')).toHaveTextContent('$5 / M Token')
     expect(screen.queryByTestId('ref-price-cache-read')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ref-price-cache-write')).not.toBeInTheDocument()
     expect(screen.getByTestId('ref-reasoning-controls')).toHaveTextContent('low')
