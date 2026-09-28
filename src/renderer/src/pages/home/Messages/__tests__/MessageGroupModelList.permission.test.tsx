@@ -1,9 +1,9 @@
 /**
- * PROJ-13 MessageGroupModelList permission gating.
+ * BRANCH-12 MessageGroupModelList permission gating.
  *
- * - `disabled` (group-immutable/incomplete): selectors are inert
+ * - `disabled` (non-owned/incomplete): selectors are inert
  *   (aria-disabled, clicks never reach selection) and Sortable is not
- *   rendered (no drag reorder through shared prefixes).
+ *   rendered (no drag reorder through read-only ancestor references).
  * - enabled: selector clicks reach `setSelectedMessage`.
  */
 import type { Message } from '@renderer/types/newMessage'

@@ -130,7 +130,7 @@ describe('ChatDb IPC Registration', () => {
       IpcChannel.ChatDb_UpdateMessageAndBlocks,
       // PERF-100: one atomic multi-model answer-tab selection
       IpcChannel.ChatDb_SelectAnswerMessage,
-      // PROJ-13: one atomic multi-model useful selection
+      // BRANCH-12: one atomic multi-model useful selection
       IpcChannel.ChatDb_SelectUsefulAnswer,
       IpcChannel.ChatDb_DeleteMessage,
       IpcChannel.ChatDb_DeleteMessages,

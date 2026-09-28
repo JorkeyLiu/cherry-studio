@@ -28,7 +28,7 @@ export function useEditModeContextMenuItems(topicId: string) {
     canUndo,
     canRedo,
     groups,
-    // PROJ-13 (B2): 选集不可变时 cut/delete/segment 写操作禁用；copy 允许.
+    // BRANCH-12: 选集不可变时 cut/delete/segment 写操作禁用；copy 允许.
     isSelectionMutable
   } = useEditMode()
 
@@ -76,7 +76,7 @@ export function useEditModeContextMenuItems(topicId: string) {
   )
 
   const handleCreateSegment = useCallback(async () => {
-    // PROJ-13 (B2/B5): 选集不可变时 segment 创建零调用（Main 最终校验为界）。
+    // BRANCH-12: 选集不可变时 segment 创建零调用（Main 最终校验为界）。
     if (!isSelectionMutable) return
     const msgIds = getSelectedMessageIds()
     if (msgIds.length === 0) {
@@ -161,7 +161,7 @@ export function useEditModeContextMenuItems(topicId: string) {
 
   const handleMerge = useCallback(
     async (direction: 'up' | 'down') => {
-      // PROJ-13 (B2/B5): 选集不可变时 segment 合并零调用。
+      // BRANCH-12: 选集不可变时 segment 合并零调用。
       if (!isSelectionMutable) return
       const msgIds = getSelectedMessageIds()
       if (!mergeInfo) return
@@ -215,7 +215,7 @@ export function useEditModeContextMenuItems(topicId: string) {
   }, [getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId])
 
   const canCreateSegment = useMemo(() => {
-    // PROJ-13 (B2): 选集不可变时 segment 创建禁用（与 cut/delete 同门禁）。
+    // BRANCH-12: 选集不可变时 segment 创建禁用（与 cut/delete 同门禁）。
     if (!isSelectionMutable) return false
     const msgIds = getSelectedMessageIds()
     if (msgIds.length === 0) return false
@@ -227,7 +227,7 @@ export function useEditModeContextMenuItems(topicId: string) {
   }, [isSelectionMutable, getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId])
 
   const handleRemoveFromSegment = useCallback(async () => {
-    // PROJ-13 (B2/B5): 选集不可变时 segment 移除/解散零调用。
+    // BRANCH-12: 选集不可变时 segment 移除/解散零调用。
     if (!isSelectionMutable) return
     if (!removeFromSegmentInfo) return
     const { type, segment } = removeFromSegmentInfo
@@ -264,7 +264,7 @@ export function useEditModeContextMenuItems(topicId: string) {
       {
         key: 'cut',
         label: t('editMode.contextMenu.cut'),
-        // PROJ-13 (B2): 选集不可变时剪切禁用（copy 保持允许）。
+        // BRANCH-12: 选集不可变时剪切禁用（copy 保持允许）。
         disabled: !isSelectionMutable,
         onClick: handleCut
       },
@@ -277,7 +277,7 @@ export function useEditModeContextMenuItems(topicId: string) {
       {
         key: 'delete',
         label: t('editMode.contextMenu.delete'),
-        // PROJ-13 (B2): 空选或选集不可变时删除禁用。
+        // BRANCH-12: 空选或选集不可变时删除禁用。
         disabled: selectedGroupIds.length === 0 || !isSelectionMutable,
         onClick: () => void handleDelete()
       },

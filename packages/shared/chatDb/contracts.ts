@@ -438,7 +438,7 @@ const selectAnswerMessageContract: ChatDbContract = {
 }
 
 /**
- * Group-level atomic `useful` selection (PROJ-13).
+ * Group-level atomic `useful` selection (BRANCH-12).
  *
  * Request is toggled-ID only (Main resolves the full group):
  * - `topicId` and `messageId` are non-empty strings.
@@ -4269,7 +4269,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:update-message-and-blocks': updateMessageAndBlocksContract,
   // PERF-100: one atomic multi-model answer selection (foldSelected group switch)
   'chatdb:select-answer-message': selectAnswerMessageContract,
-  // PROJ-13: one atomic multi-model useful selection (group-level useful switch)
+  // BRANCH-12: one atomic multi-model useful selection (group-level useful switch)
   'chatdb:select-useful-answer': selectUsefulAnswerContract,
   'chatdb:delete-message': deleteMessageContract,
   'chatdb:delete-messages': deleteMessagesContract,

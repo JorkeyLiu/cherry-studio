@@ -1,10 +1,10 @@
 /**
- * PROJ-13 (A5) MessageGroupMenuBar permission gating (real component).
+ * BRANCH-12 MessageGroupMenuBar permission gating (real component).
  *
- * - `disabled` (group-immutable): retry-all button hidden, zero calls.
- * - Enabled + shared loaded member: handler fails closed with zero calls
+ * - `disabled` (non-owned/incomplete): retry-all button hidden, zero calls.
+ * - Enabled + non-owned loaded member: handler fails closed with zero calls
  *   (Main per-item guard stays final for window-outside members).
- * - Enabled + private group: failed members retried; the first Main
+ * - Enabled + owned group: failed members retried; the first Main
  *   failure stops the batch (no partial-success continuation, no atomicity
  *   claim).
  */
@@ -101,11 +101,11 @@ describe('MessageGroupMenuBar permission gating', () => {
     mocks.regenerateAssistant.mockResolvedValue(undefined)
     // Pre-warm the handler's dynamic import so each click's async
     // continuation settles within the test's own waits instead of leaking
-    // into the next test's shared fakeState (call-count pollution).
+    // into the next test's non-owned fakeState (call-count pollution).
     await import('@renderer/store/routeAnswerGroup')
   })
 
-  it('hides retry-all when disabled (group-immutable)', () => {
+  it('hides retry-all when disabled (non-owned/incomplete)', () => {
     const messages = setGroupState(['u1', 'a1'])
     const { unmount } = renderBar(messages, true)
     expect(screen.queryByTestId('group-retry-all-btn')).toBeNull()
@@ -113,7 +113,7 @@ describe('MessageGroupMenuBar permission gating', () => {
     unmount()
   })
 
-  it('fails closed with zero calls when a loaded member is shared', async () => {
+  it('fails closed with zero calls when a loaded member is non-owned', async () => {
     const messages = setGroupState(['u1', 'a1'])
     const { unmount } = renderBar(messages, false)
     expect(screen.queryByTestId('group-retry-all-btn')).not.toBeNull()
@@ -125,7 +125,7 @@ describe('MessageGroupMenuBar permission gating', () => {
     unmount()
   })
 
-  it('retries every failed member of a private group', async () => {
+  it('retries every failed member of an owned group', async () => {
     const messages = setGroupState(['u1', 'a1', 'a2'])
     const { unmount } = renderBar(messages, false)
     fireEvent.click(screen.getByTestId('group-retry-all-btn'))

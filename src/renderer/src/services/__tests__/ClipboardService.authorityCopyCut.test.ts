@@ -225,7 +225,7 @@ function clipboardResponseFor(groupIds: string[]) {
   }
 }
 
-// The cut service entry carries its own PROJ-15 depth gate (same
+// The cut service entry carries its own BRANCH-12 depth gate (same
 // `requireEditSelectionMutable` the `useEditMode` caller applies), so cut
 // tests below publish a gate-passing loaded projection + route capability for
 // group u1. Fail-closed gate behavior itself is covered in

@@ -2,9 +2,11 @@
 
 > **文档状态**：Authoritative（权威规范，实现阶段的目标契约）。本文档是上下文窗口（context window）语义的**唯一权威规范**：定义默认上下文数量（`contextCount`）、稳定 topic 锚点（`contextWindowAnchor`）、上下文窗口、允许的锚点迁移、持久化归属、兼容性修复与测试边界，防止既有语义漂移再次发生。
 > **决策锁**：CW-1 … CW-8（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-08-13
+> **最后更新**：2026-09-28
 > **Owner**：Personal fork（jorkeyliu）
-> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理——本文档不改变、不重述这两个治理域的边界。
+> **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
+>
+> **分支澄清（BRANCH-8 链接，不重复）**：上下文算法 branch-neutral，只关注当前 route 的 effective message sequence 与稳定 IDs，不判定 ownership/permission；每 route 有独立 `contextWindowAnchor[routeKey]`/state，不同分支可有不同窗口。Branch anchor（fork 消息，immutable 路由构成）与 context-window anchor（起始 turn 的 group key，窗口起点）严格区分；context capability 永不作为 mutation permission。
 
 ---
 

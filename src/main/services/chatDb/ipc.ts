@@ -465,7 +465,7 @@ export function registerChatDbIpc(): () => void {
     return agg.selectAnswerMessage(req.topicId, req.selectedMessageId, req.branchId)
   })
 
-  // 7c. select-useful-answer (PROJ-13): group-level atomic useful toggle —
+  // 7c. select-useful-answer (BRANCH-12): group-level atomic useful toggle —
   // Main resolves the complete answer group (including window-outside
   // members) from the toggled ID and persists exactly one useful=true (or
   // a full clear when the target is already useful) in one transaction.

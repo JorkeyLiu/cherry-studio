@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
     hasClipboard: false,
     canUndo: false,
     canRedo: false,
-    // PROJ-13 (B2): edit-selection write capability; tests set it per case.
+    // BRANCH-12: edit-selection write capability; tests set it per case.
     isSelectionMutable: true,
     toggleEditMode: vi.fn(),
     handleGroupClick: vi.fn(),
@@ -218,12 +218,12 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       expect(byKey('redo').disabled).toBe(true)
     })
 
-    it('PROJ-13 (B2): disables cut/delete/segment writes on immutable selections while copy stays enabled', () => {
+    it('BRANCH-12: disables cut/delete/segment writes on non-owned selections while copy stays enabled', () => {
       mocks.editMode.isEnabled = true
       mocks.editMode.selectedGroupIds = ['ask-1']
       mocks.editMode.groups = [{ askId: 'ask-1', messages: [{ id: 'm1' }] }]
       mocks.editMode.hasClipboard = true
-      // Mixed shared+private selection: writes fail closed.
+      // Mixed owned+non-owned selection: writes fail closed.
       mocks.editMode.isSelectionMutable = false
 
       renderHost(<p data-testid="target">content</p>)

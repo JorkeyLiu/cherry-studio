@@ -144,7 +144,7 @@ function makeFileBlock(id: string, fileId: string): MessageBlock {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
-  // PROJ-13 (B6): redo re-deletes existing messages — the redo roots must be
+  // BRANCH-12: redo re-deletes existing messages — the redo roots must be
   // loaded + capability-covered or the redo fails closed with zero IPC calls.
   const publishRedoCapability = (loadedIds: string[]) => {
     const state = storeState as any

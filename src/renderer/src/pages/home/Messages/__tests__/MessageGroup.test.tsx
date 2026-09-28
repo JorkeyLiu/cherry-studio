@@ -183,7 +183,7 @@ vi.mock('@renderer/services/TokenService', () => ({
 
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => vi.fn(),
-  // PROJ-13 group capability runs the real selector against a private-group
+  // BRANCH-12 group capability runs the real selector against an owned-group
   // fixture (all members mutable through the main route).
   useAppSelector: (selector: (state: unknown) => unknown) => selector(fakeGroupState.current)
 }))

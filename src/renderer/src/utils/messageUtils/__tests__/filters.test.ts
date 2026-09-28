@@ -209,7 +209,7 @@ describe('Message Filter Utils', () => {
       expect(result.find((m) => m.id === 'assistant-2')).toBeUndefined()
     })
 
-    it('PROJ-14: after reorder without useful, the new order head enters context', () => {
+    it('BRANCH-12: after reorder without useful, the new order head enters context', () => {
       const userId = 'user-1'
       const userMsg = createMessage('user', 'topic-1', 'assistant-1', { id: userId })
       const assistant1 = createMessage('assistant', 'topic-1', 'assistant-1', { id: 'assistant-1', askId: userId })
@@ -223,7 +223,7 @@ describe('Message Filter Utils', () => {
       expect(result.find((m) => m.id === 'assistant-1')).toBeUndefined()
     })
 
-    it('PROJ-14: useful wins over the reorder head', () => {
+    it('BRANCH-12: useful wins over the reorder head', () => {
       const userId = 'user-1'
       const userMsg = createMessage('user', 'topic-1', 'assistant-1', { id: userId })
       const assistant1 = createMessage('assistant', 'topic-1', 'assistant-1', {

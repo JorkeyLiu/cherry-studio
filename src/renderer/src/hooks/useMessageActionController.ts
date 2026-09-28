@@ -71,7 +71,7 @@ export function useMessageActionController() {
 
   const selectUseful = useCallback(
     async (target: ActionTarget) => {
-      // PROJ-13: group-level atomic useful toggle — same authority shape as
+      // BRANCH-12: group-level atomic useful toggle — same authority shape as
       // selectAnswer (toggled ID only, Main resolves the full group).
       await dispatch(selectUsefulAnswerThunk(target.topicId, target.messageId))
     },

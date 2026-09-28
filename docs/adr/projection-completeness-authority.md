@@ -1,8 +1,8 @@
 # 投影完备性与权威意图（Projection Completeness and Authority Intents）
 
-> **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威；并锁定分支路由的最终变更权限语义（PROJ-13…PROJ-16）：当前路由只能变更私有（owned-unshared）消息。
-> **决策锁**：PROJ-1 … PROJ-16（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-09-27
+> **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是投影完备性（projection completeness）与跨进程权威意图（authority intents）的**唯一权威规范**：定义 Main SQLite 聊天权威的覆盖范围、普通 Renderer Redux 消息状态的投影性质、不可互换的完备性能力（completeness capabilities）、窗口三元区分、稳定 ID 导航与变更语义、调用者本地（caller-local）完整读取、请求本地（request-local）执行覆盖、集合变更规则与暂定候选（provisional candidate）边界，禁止以外观完整的投影 API 或序号位置推导权威。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）唯一治理，本文档不定义分支权限；需要分支能力的地方仅链接，不复制决策表。
+> **决策锁**：PROJ-1 … PROJ-12（§3 决策表，durable decision IDs）。PROJ-13…PROJ-16 已迁出至 [Topic Branches ADR](./topic-branches.md)，本文档不再使用这些编号。
+> **最后更新**：2026-09-28
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，多端同步收敛由 [Personal Multi-Device Sync](../work/multi-device-sync.md)（现状）与 [Sync Connection & Channel ADR](./sync-connection-channel.md)、[Sync Data Convergence ADR](./sync-data-convergence.md)（目标）治理——本文档不改变、不重述这些治理域的边界。
 
@@ -43,13 +43,10 @@
 | 请求本地执行覆盖 | request-local execution overlay | 重发/重新生成期间覆盖 Redux 的请求本地块视图，随执行存活，不注入 Redux |
 | 暂定已加载候选 | provisional loaded candidate | 显式标注的暂定已加载消息候选，仅用于 §8 所列的三种用途，不得决定权威状态 |
 | 权威集合响应 | authority collection response | Main 返回的完整集合（有序成员 ID 列表、完整目录、完整展开），是集合变更后渲染收敛的唯一依据 |
-| 路由/有效路由 | route / effective route | 一次权威读写所寻址的逻辑 topic 内分支：`branchId` 缺席/null 为 main 路由，非空为该分支的有效路由（经各锚点的祖先前缀加自有后缀，稳定 ID 共享、无前缀拷贝）。路由切换永不改变 topic 身份 |
-| 活后代 | live descendant | 同一逻辑 topic 内仍然存在的分支节点中，以当前路由为祖先（经 `parentBranchId` 链）的分支；已删除分支不再是活后代 |
-| 私有（自有-未共享） | private (owned-unshared) | 经当前路由可变的消息：其 owner `branch_id` 等于当前路由（main=null）**且**未被任何活后代的有效前缀（锚点 inclusive）引用。判定由 Main 在同一权威事务内完成 |
-| 共享前缀 | shared prefix | 被任一活后代有效前缀引用（含锚点）的已拥有行，或 owner 为他路由的行（继承行）。共享前缀不可变，且无 copy-on-write（禁止为写入而复制共享行） |
-| 可变消息集 | mutableMessageIds | Main 随每次窗口响应发布的权威能力：该响应窗口messages中的owned-unshared精确子集。Renderer 仅预检，未知时 fail-closed |
-| 回答组变更 | answer-group mutation | 改变回答组正文、blocks、结构、回答组顺序、回答选择（foldSelected）、`useful` 选择、上下文选择（该组贡献的上下文头）的任一操作：选择、重排、useful 切换、加入既有组的 append multi-model（组级原子）；retry-all/批量重生成属同类意图但执行为逐项 Main 事务（非组级原子，见 PROJ-14） |
-| 编辑选集变更 | edit selection mutation | 经 `selectedGroupIds`（askId）解析出的选中组当前 loaded/resident 可解析成员上的任一变更：cut/delete、segment 成员创建/合并/移除、批量删除（窗口外/依赖展开成员由 Main 最终裁决）。只读 copy/export 不受限制 |
+| 路由/有效路由 | route / effective route | 一次权威读写所寻址的逻辑 topic 内分支。构成与权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-2/11）唯一治理；本文档仅在投影/完备性语境引用路由，不定义权限。路由切换永不改变 topic 身份 |
+| 可变消息集 | mutableMessageIds | Main 随每次窗口响应发布的权威能力。其精确定义与权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-9）唯一治理；本文档仅说明其作为窗口能力携带的归属/生命周期（§5），不复制定义。Renderer 仅预检，未知时 fail-closed |
+| 回答组变更 | answer-group mutation | 改变回答组正文、blocks、结构、回答组顺序、回答选择（foldSelected）、`useful` 选择、上下文选择的任一操作。执行分类（组级原子 vs 逐项）与权限（实际写目标 owner）由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）唯一治理；本文档仅保留其作为变更意图的投影收敛语义（已加载交集） |
+| 编辑选集变更 | edit selection mutation | 经 `selectedGroupIds`（askId）解析出的选中组当前 loaded/resident 可解析成员上的任一变更。权限与原子性由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）唯一治理；本文档仅保留其投影收敛语义。只读 copy/export 不受限制 |
 
 ---
 
@@ -69,14 +66,12 @@
 | **PROJ-10** | **当同级顺序或集合变化时，renderer 必须消费完整权威集合响应或重新读取它；永不从单实体响应推导完整集合**。权威有序 ID 列表/目录/展开是集合收敛的唯一依据 | **Locked** |
 | **PROJ-11** | **暂定已加载候选仅允许三用途**：瞬时展示、请求可用性、用量估算回退。它们**不能**移动持久化锚点、决定权威组/变更作用域、替代新鲜闭包、改变最终持久化 | **Locked** |
 | **PROJ-12** | **未来变更禁令**：禁止在已加载投影之上提供外观完整的含糊 API（读起来像整体、实际只是投影的接口）；禁止以数字序号（loaded-index）向 Main 发起权威变更。新增读取必须声明 §5 的完备性能力；新增变更必须使用稳定 ID 意图 | **Locked** |
-| **PROJ-13** | **当前路由只能变更私有消息**。私有 = owner `branch_id` 等于当前路由（main=null）且未被任何活后代有效前缀（锚点 inclusive）引用。改变正文、blocks、结构、回答组顺序、回答选择、上下文选择或批量关系的任一操作都是 mutation；只读 copy/export 不受限制。共享前缀不可变且无 copy-on-write。同胞后缀互不锁定；锚点之后 main 行保持可变。分支创建收缩父路由能力，分支删除恢复之 | **Locked** |
-| **PROJ-14** | **回答组变更分两类执行**。上下文回答选择（select/fold）、重排、`useful` 选择、加入既有回答组的 append multi-model 是组级原子的：必须在同一 Main 事务内解析完整回答组（含用户 root 与窗口外成员）并验证全组私有；任一成员非私有则整批拒绝、无部分写。`useful` 切换（清其余、置目标）是单事务单命令。retry-all/批量重生成不在组级原子集合内：已知不可变时整组禁用/零调用，窗口外未知成员逐个经 Main 守卫、执行中首败停止，不声称跨项原子。仅创建新私有后缀且不改变既有回答组的 assistant insert 保持原语义。只改变展示、不改变权威的读取（copy/export/命名/活跃度）为例外 | **Locked** |
-| **PROJ-15** | **编辑选集变更是选集级原子的**。`selectedGroupIds`（askId）解析为当前 loaded/resident 可解析成员；Renderer 仅要求这些当前响应的可解析成员全部位于当前路由 `mutableMessageIds`（该响应窗口messages中的owned-unshared精确子集）时可写，窗口外/依赖展开成员由 Main 在同一事务最终裁决（不要求窗口外 ID 位于 window capability）。选择 ID 不在当前 resident/capability、路由切换残留、组不完整一律 fail-closed。Cut/Delete 与全部基于选中消息的 segment 写在选集不可变时禁用；Copy 保持允许；Paste 本身添加数据可用，但 cut-paste 源删除约束为创建 cut clipboard 时预检、paste 源删除时 Main 复验（执行经现有 renderer 预检加 Main 最终守卫的权威删除路径）。含一个 shared 的多选整体阻断（不跳过）。Undo/redo 变更已非私有消息时由 Main 拒绝 | **Locked** |
-| **PROJ-16** | **Main 能力权威、Renderer fail-closed**。Main SQLite 是变更权限的最终权威（含 `mutableMessageIds` 窗口能力的发布者）；Renderer `mutableMessageIds` 仅为预检与 UI 门禁：未知/过期/路由不匹配/非 resident 一律视为不可变（隐藏/禁用/零调用），窗口外成员由 Main 权威查询裁决。渲染收敛仍只提交已加载交集 | **Locked** |
+
+> 分支路由的变更权限（PROJ-13…PROJ-16 旧编号）已整体迁出至 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）：实体唯一、永久所属、引用只读、owner 完整控制、蝴蝶效应与缺 anchor fail-closed、删除 subtree、anchor 与创建规则、上下文关系、Main 权威与 capability 定义、local-only、递归算法、复合原子性。本文档不再使用 PROJ-13…PROJ-16 编号，不保留其旧语义。
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：PROJ-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
 
-> `branch_id`/祖先链的存储细节由实现与 `docs/architecture/architecture.md` 承载，本文档只定义其权限语义（路由、私有、共享前缀、能力），不重述 schema。
+> `branch_id`/祖先链的存储细节由实现与 `docs/architecture/architecture.md` 承载；其权限语义由 [Topic Branches ADR](./topic-branches.md) 唯一定义，本文档不重述 schema 与权限。
 
 ---
 
@@ -87,7 +82,7 @@
 | 完备性 | 归属 | 生命周期 | 合法消费方 |
 |---|---|---|---|
 | `'window'` | Main SQLite 单事务读取；Renderer 视口消费 | 单次响应；边界随响应声明（`latest` / `around`、界、`hasMoreBefore` / `hasMoreAfter`） | 视口装配（最新/环绕/搜索命中导航）、分页与合并 |
-| `'window'` 能力携带 | Main SQLite 随窗口响应发布 | 随所属窗口响应存活；路由切换/驱逐/删除即失效（恰与窗口同代） | `mutableMessageIds`：该响应窗口messages中的owned-unshared精确子集，供 Renderer 对当前 loaded/resident 可解析成员预检与 UI 门禁（PROJ-15/PROJ-16），窗口外/依赖展开成员由 Main 最终裁决，永不替代 Main 守卫 |
+| `'window'` 能力携带 | Main SQLite 随窗口响应发布 | 随所属窗口响应存活；路由切换/驱逐/删除即失效（恰与窗口同代） | `mutableMessageIds`：精确定义与权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-9）唯一治理；本文档仅说明其作为窗口能力携带的生命周期。供 Renderer 对当前 loaded/resident 可解析成员预检与 UI 门禁，窗口外/依赖展开成员由 Main 最终裁决，永不替代 Main 守卫 |
 | `'answer-group'` | Main SQLite 单事务解析（成员集合声明） | 单次响应；变更后必须重新解析 | 回答选择、分支/克隆定位、回答组重排 |
 | `'context-closure'` | Main SQLite 按 renderer 拥有的稳定锚点派生（锚点 turn 至最新） | 单次响应；锚点/结构/代际/指纹任一变化即失效 | 请求上下文构建、锚点建立/重锚定/移动/继承 |
 | `'whole-topic'` | Main SQLite 单事务一次性快照 | 调用者本地、短生命周期；永不驻留普通 Redux | 导出、知识任务、剪贴/删除等需完整成员的作业 |
@@ -120,10 +115,7 @@
 - **I-5**：集合（回答组顺序、Segment 目录、删除展开、插入后顺序）变化后，渲染的集合视图必须来自完整权威集合响应或重新读取；单实体响应不携带集合语义。
 - **I-6**：暂定候选不改变持久化、不决定权威、不替代新鲜闭包（PROJ-11）。
 - **I-7**：权威变更请求携带稳定 ID 意图；数字序号只表达本地投影位置，永不作为权威变更坐标（PROJ-12）。
-- **I-8**：当前路由的任一 mutation 目标必须是私有（owned-unshared）消息；共享前缀（继承行或被活后代有效前缀锚点-inclusive 引用的已拥有行）上的 mutation 整批拒绝、无部分写、无 copy-on-write（PROJ-13）。
-- **I-9**：回答组变更分两类执行：选择/重排/useful/加入既有组的 append 在同一 Main 事务内验证完整组（含用户 root 与窗口外成员）全组私有；retry-all/批量重生成逐项经 Main 事务执行，已知不可变时零调用、执行中首败停止、不声称跨项原子；`useful` 恒唯一（单目标 true 其余 false，或全清）；上下文贡献规则恒为 useful 优先、无 useful 时顺序头（PROJ-14）。
-- **I-10**：编辑选集变更要求当前 loaded/resident 可解析成员全部位于当前路由 `mutableMessageIds`（该响应窗口messages中的owned-unshared精确子集）中，窗口外/依赖展开成员由 Main 在同一事务最终裁决；混合 private/shared 选集整体阻断；cut clipboard 仅在创建时通过私有检查方可建立，源删除执行时经现有 renderer 预检加 Main 最终守卫（PROJ-15）。
-- **I-11**：`mutableMessageIds` 仅与发布它的窗口同代有效；路由切换原子替换（永不复用旧路由集合）、缺失即清除 fail-closed；Renderer 预检永不替代 Main 守卫；分支创建收缩父能力、删除恢复之（PROJ-13/PROJ-16）。
+- **I-8**：`mutableMessageIds` 仅与发布它的窗口同代有效；路由切换原子替换（永不复用旧路由集合）、缺失即清除 fail-closed；Renderer 预检永不替代 Main 守卫。分支路由的变更权限语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/9）唯一治理，本文档不定义分支权限。
 
 ---
 
@@ -134,14 +126,14 @@
 | 最新窗口装配 | `latest` 窗口读取 + 本地最新窗口完备性保留 | 否（读取） |
 | 历史滚动/加载更多 | `around` 窗口读取，按稳定 ID 原子合并 | 否（读取；合并仍是投影） |
 | 搜索命中导航 | 命中消息 ID 加 `around` 读取；未命中为类型化信号 | 否（读取） |
-| 窗口外回答选择/重排 | 仅选定 ID 发往 Main；Main 返回完整组成员/顺序；Renderer 提交已加载交集 | 是（Main 事务） |
-| 回答组 useful 切换 | 仅 toggled ID 发往 Main；Main 同事务解析完整组、验证全组私有、原子置唯一 useful；Renderer 提交已加载交集 | 是（Main 事务） |
-| 加入既有回答组的 append multi-model | 组级预检（任一 loaded 成员/用户 root 非私有时零调用）+ Main join-group 守卫；仅新私有后缀的 insert 保持原语义 | 是（Main 事务；共享组拒绝） |
-| retry-all/批量重生成 | 已知不可变时整组禁用/零调用；未知成员逐个经 Main 守卫，首败即停，不声称原子 | 是（逐项 Main 事务） |
-| 编辑选集 cut/delete/segment 写 | 选集能力门禁（当前 loaded 可解析成员全员私有才可用；混合整体阻断；路由切换清选择）；窗口外/依赖展开成员由 Main 全事务守卫最终裁决 | 是（Main 事务） |
-| cut-paste 源删除 | 创建 cut clipboard 时预检（服务入口与 UI 调用方双层门禁），仅来自已过私有检查的 cut 意图；执行经现有 renderer 预检加 Main 最终守卫的权威删除路径 | 是（Main 事务） |
-| undo/redo | 变更已非私有消息时 Main 拒绝；redo 删除类路径预检零调用；恢复类路径新建私有行、由 Main 裁决 | 是（Main 事务） |
-| 分支创建/删除 | 创建收缩父路由 `mutableMessageIds`，删除恢复之；当前路由能力随窗口重发 | 否（能力发布；分支行变更是） |
+| 窗口外回答选择/重排 | 仅选定 ID 发往 Main；Main 返回完整组成员/顺序；Renderer 提交已加载交集。权限与原子性由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）治理 | 是（Main 事务） |
+| 回答组 useful 切换 | 仅 toggled ID 发往 Main；Main 同事务解析完整组、原子置唯一 useful；Renderer 提交已加载交集。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（Main 事务） |
+| 加入既有回答组的 append multi-model | 新后缀落 owned 后缀；既有行按实际写目标判权（祖先引用读取不阻断）；权限由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）治理 | 是（Main 事务） |
+| retry-all/批量重生成 | 已知不可变时整组禁用/零调用；未知成员逐个经 Main 守卫，首败即停，不声称原子。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（逐项 Main 事务） |
+| 编辑选集 cut/delete/segment 写 | 选集能力门禁（当前 loaded 可解析成员须在 Main 能力中；混合整体阻断；路由切换清选择）；窗口外/依赖展开成员由 Main 最终裁决。权限由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）治理 | 是（Main 事务） |
+| cut-paste 源删除 | 创建 cut clipboard 时预检（服务入口与 UI 调用方双层门禁）；执行经现有 renderer 预检加 Main 最终守卫的权威删除路径。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（Main 事务） |
+| undo/redo | 非 owner 目标由 Main 拒绝；redo 删除类路径预检零调用；恢复类路径新建 owned 行、由 Main 裁决 | 是（Main 事务） |
+| 分支创建/删除 | 分支路由能力与删除语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-6/9）唯一治理（创建不收缩 owner 权限）；当前路由能力随窗口重发 | 否（能力发布；分支行变更是） |
 | 稳定插入/分支/粘贴 | 稳定锚点意图发往 Main；Main 原子解析位置后写入；Renderer 提交已加载交集 | 是（Main 事务） |
 | 语义删除 | 根 ID 发往 Main；Main 返回完整展开、撤销物化与删除后 Segment 目录；Renderer 收敛已加载交集并替换 Segment 目录 | 是（Main 事务） |
 | 重发/重新生成 | 稳定 ID 加执行标识；请求本地覆盖存活至终态原子落盘；Redux 仅为镜像 | 是（Main 终态检查点） |
@@ -182,8 +174,8 @@
 ## 11. 测试与证据契约（Test/Evidence Contract）
 
 - **单元测试**：已加载投影判别（`'loaded-projection'`、空与未加载区分）、稳定 ID 合并与确定性排序、回答组选择/重排的已加载交集提交、删除展开的已加载交集与 Segment 目录替换、稳定插入的锚点解析、调用者本地读取不进 Redux、暂定候选三用途边界。
-- **分支权限单元测试（Main）**：`selectUsefulAnswer` 成功时唯一 true；shared（继承/他路由拥有）/直接子分支覆盖/孙覆盖组整批拒绝且无部分写（含窗口外成员验证）；`selectAnswer`/reorder/append-join 全组私有矩阵（含用户 root）shared 拒绝；上下文过滤（无 useful 时重排头进入 context，有 useful 时 useful 优先）；batch delete/segment 对混合 private/shared 整批拒绝无部分写。
-- **分支权限组件测试（Renderer）**：MessageMenubar mention-model 在 shared 组隐藏；MessageGroup selector/useful/sortable 在 shared 组 disabled、私有组 enabled、能力未知 fail-closed；retry-all 在已知不可变组零调用、窗口外未知成员逐项经 Main 守卫且首败停止（不声称跨项原子）；EditMode ActionBar/context menu 在混合选集上 cut/delete/segment disabled 而 copy enabled；键盘（Meta/Ctrl+X 与删除键）在不可变/mixed/unknown 选集上对 `cutMessages`/`deleteSelectedMessages` 及 IPC 零调用而 copy 仍调用；`ClipboardService.cutMessages` 被非 useEditMode 调用时同样 fail-closed 零 clipboard 发布；路由切换清选择或 fail-closed；私有全选可用；select/fold、reorder、useful、append join-existing-group 的 thunks 组级预检（不止 selected ID）。
+- **分支权限测试**：由 [Topic Branches ADR](./topic-branches.md)（§15 测试契约）唯一治理；本文档不保留分支权限矩阵（旧 shared/私有/后代覆盖断言已迁出删除）。
+- **投影组件测试（Renderer）**：MessageMenubar/ MessageGroup / EditMode / Clipboard 的预检与 UI 门禁行为（能力未知 fail-closed、路由切换清选择、copy 允许而 cut/delete/segment 按能力禁用）仍按投影收敛语义覆盖；分支权限的允许/拒绝语义以 Branch ADR 为准，不在本文档重复矩阵。
 - **组件测试**：窗口装配与分页边界保留、窗口外导航装配、回答选择可见折叠、删除后锚点转移展示。传输中状态不作为回归证据。
 - **证据层级**：按 `AGENTS.md`「Testing and UI/E2E Evidence」路由；UI 变更的渲染/交互验证经 `ui-verify-change`。跨组件/IPC/持久化/生命周期行为的合同级回归以 Playwright E2E 为准；隔离的稳定展示/逻辑以 Vitest/组件测试为先。
 - **禁令回归**：以外观完整 API 包装投影、或以数字序号发起权威变更的任何新增，必须以契约测试失败为门禁（fail-closed），不得以展示正确为通过条件。
@@ -202,8 +194,8 @@
 
 ## 13. 验收标准（Acceptance Criteria）
 
-- **AC-1**：本文档完整覆盖 PROJ-1…PROJ-16 决策表、完备性能力表（§5，七种拼写准确 + `window` 能力携带行）、状态与不变量（§6，I-1…I-11）、领域迁移表（§7，含回答组/选集/分支能力行）、暂定/执行边界（§8）、持久化边界（§9，含路由隔离锚点说明）、一致性（§10）、测试契约（§11，含分支权限矩阵）、非目标（§12）。
-- **AC-2**：全文内部一致——普通 Redux 消息状态只用 `'loaded-projection'`；`'window'` / `'answer-group'` / `'context-closure'` / `'whole-topic'` / `'naming-context'` / `'topic-activity'` 永不互换；三种窗口概念永不合并为通用 window 字段；数字序号永不作为权威变更坐标；当前路由变更恒限于私有消息（PROJ-13），`mutableMessageIds` 永不替代 Main 守卫（PROJ-16）。
-- **AC-3**：`docs/architecture/architecture.md` 治理段落与 Redux/SQLite/IPC 行链接本文档，且不复制决策表。
-- **AC-4**：`AGENTS.md` Detailed References 含单条链接；既有 MUST/NEVER/gate/security 规则零改动；`CLAUDE.md` 仍为 `AGENTS.md` 的符号链接。
-- **AC-5**：本次变更仅新增本文档并修改 `docs/architecture/architecture.md`、`docs/archived/architecture-evolution-program.md`、`AGENTS.md`；无代码/测试/配置变更。
+- **AC-1**：本文档完整覆盖 PROJ-1…PROJ-12 决策表、完备性能力表（§5，七种拼写准确 + `window` 能力携带行，能力定义链接 Branch ADR）、状态与不变量（§6，I-1…I-8）、领域迁移表（§7，分支权限行链接 Branch ADR）、暂定/执行边界（§8）、持久化边界（§9，含路由隔离锚点说明）、一致性（§10）、测试契约（§11，分支矩阵已迁出）、非目标（§12）。
+- **AC-2**：全文内部一致——普通 Redux 消息状态只用 `'loaded-projection'`；`'window'` / `'answer-group'` / `'context-closure'` / `'whole-topic'` / `'naming-context'` / `'topic-activity'` 永不互换；三种窗口概念永不合并为通用 window 字段；数字序号永不作为权威变更坐标；分支变更权限由 [Topic Branches ADR](./topic-branches.md) 唯一治理，本文档无 `private/shared-prefix/owned-unshared/活后代保护` 旧语义与悬空 PROJ-13…PROJ-16 编号；`mutableMessageIds` 永不替代 Main 守卫。
+- **AC-3**：`docs/architecture/architecture.md` 治理段落与 Redux/SQLite/IPC 行链接本文档与 [Topic Branches ADR](./topic-branches.md)，且不复制决策表。
+- **AC-4**：`AGENTS.md` Detailed References 含本文档与 Branch ADR 链接；既有 MUST/NEVER/gate/security 规则零改动；`CLAUDE.md` 仍为 `AGENTS.md` 的符号链接。
+- **AC-5**：本次 true-branch 迁移修改本文档、新增 `docs/adr/topic-branches.md` 并修改 `docs/adr/context-window.md`、`docs/architecture/architecture.md`、`AGENTS.md` 及代码/测试；无提交（按任务要求不 commit）。

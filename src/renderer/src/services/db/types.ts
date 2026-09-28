@@ -137,7 +137,7 @@ export interface MessageDataSource {
   ): Promise<SelectAnswerMessageResponse>
 
   /**
-   * PROJ-13: group-level atomic `useful` selection in one route.
+   * BRANCH-12: group-level atomic `useful` selection in one route.
    *
    * The renderer supplies ONLY the toggled message ID; Main resolves the
    * complete answer group (including window-outside members) in the same

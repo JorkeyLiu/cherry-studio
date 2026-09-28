@@ -4,7 +4,7 @@ import type { RootState } from './index'
 import { selectActiveBranchId } from './topicBranch'
 
 /**
- * PROJ-13: renderer-side answer-group capability helpers.
+ * BRANCH-4/9/12: renderer-side answer-group capability helpers.
  *
  * Main SQLite is the final authority (it resolves the complete group,
  * including window-outside members, in one transaction). These helpers are
@@ -13,9 +13,10 @@ import { selectActiveBranchId } from './topicBranch'
  * - single-message checks (`isMutableForActiveRoute`) stay for mutations
  *   that touch exactly one message;
  * - group mutations (select/fold, useful, reorder, append multi-model,
- *   retry-all) must resolve the LOADED answer group and require EVERY
- *   loaded member (plus the loaded user root when present) mutable through
- *   the active route. Any loaded immutable member fails closed before IPC.
+ *   retry-all) must resolve the LOADED assistant members and require every
+ *   loaded member mutable through the active route (owner equality).
+ *   Reading the loaded user root never requires mutability (BRANCH-12);
+ *   only actually-written members gate the UI.
  * - window-outside members are unknown to the renderer; the Main guard is
  *   the authoritative query for them. UI treats unknown capability as
  *   fail-closed (hidden/disabled).
@@ -137,16 +138,17 @@ export function resolveLoadedAnswerGroup(
 }
 
 /**
- * Group-level capability: every loaded group member (plus the loaded user
- * root when present) must be mutable through the active route. Unknown
+ * Group-level capability: every loaded assistant member must be mutable
+ * through the active route (BRANCH-12 actual-write-target). The loaded user
+ * root is a read-only reference and never gates mutability. Unknown
  * capability, route mismatch, or any loaded immutable member fails closed.
  * Window-outside members are decided by the Main guard.
  */
 export function isLoadedAnswerGroupMutable(state: RootState, topicId: string, group: LoadedAnswerGroup): boolean {
-  for (const id of group.allIds) {
+  for (const id of group.memberIds) {
     if (!isMutableForActiveRoute(state, topicId, id)) return false
   }
-  return group.allIds.length > 0
+  return group.memberIds.length > 0
 }
 
 /** Throw fail-closed unless the loaded answer group is fully mutable. */

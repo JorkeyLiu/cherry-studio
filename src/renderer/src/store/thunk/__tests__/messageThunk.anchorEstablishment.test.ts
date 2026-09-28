@@ -445,9 +445,9 @@ describe('messageThunk anchor hooks', () => {
               }
             },
             messageIdsByTopic: { 'topic-1': ['user-1', 'asst-msg-1'] },
-            // PROJ-13 join-group precheck: the anchor group (user root +
-            // member) is private through the main route so the append path
-            // reaches stub persistence + queueing.
+            // BRANCH-12 join-group precheck: the anchor group members are owned
+            // through the main route so the append path reaches stub
+            // persistence + queueing.
             mutableMessageIdsByTopic: { 'topic-1': ['user-1', 'asst-msg-1'] },
             mutableRouteByTopic: { 'topic-1': null },
             loadingByTopic: {},

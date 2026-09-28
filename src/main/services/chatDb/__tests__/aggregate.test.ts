@@ -779,7 +779,7 @@ describe('ChatDbAggregateService', () => {
       expect(() => validateChatDbResult('chatdb:select-answer-message', result)).not.toThrow()
     })
 
-    it('PROJ-13 selectUsefulAnswer response validates against the shared result contract', () => {
+    it('BRANCH-12 selectUsefulAnswer response validates against the shared result contract', () => {
       const topicId = `t-${uid()}`
       const askId = `ask-${uid()}`
       const m1 = makeMessageJson(topicId, { role: 'assistant', askId })

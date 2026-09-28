@@ -250,7 +250,7 @@ describe('ClipboardService.deleteSelectedMessages (semantic multi)', () => {
     }
   })
 
-  // PROJ-13 (B1/B3): the selection gate resolves groups through the loaded
+  // BRANCH-12: the selection gate resolves groups through the loaded
   // projection + route capability. Tests below publish that state; unknown
   // selections fail closed with zero IPC calls (covered in
   // answerGroupCapability.test.ts).

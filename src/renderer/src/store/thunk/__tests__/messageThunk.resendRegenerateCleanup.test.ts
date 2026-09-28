@@ -117,9 +117,9 @@ interface StoreState {
 
 let storeState: StoreState
 
-// PROJ-13: renderer resend/regenerate prechecks run against the
-// Main-authoritative window capability. Mirror the loaded projection into a
-// private main-route capability so thunks under test reach their DB contracts.
+// BRANCH-9/12: renderer resend/regenerate prechecks run against the
+// Main-authoritative window capability. Mirror the loaded projection into an
+// owned main-route capability so thunks under test reach their DB contracts.
 function syncMainRouteCap(topicId = 'topic-1'): void {
   const ids = [...(storeState.messages.messageIdsByTopic[topicId] ?? [])]
   storeState.messages.mutableMessageIdsByTopic = { [topicId]: ids }

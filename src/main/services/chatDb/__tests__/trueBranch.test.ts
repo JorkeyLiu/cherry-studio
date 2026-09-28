@@ -7,8 +7,9 @@
  * - `messages.topic_id` is logical; nullable `messages.branch_id` owns the
  *   route suffix (null = main route).
  * - Effective routes recursively compose ancestor prefixes through anchors +
- *   current suffix. Prefixes are shared stable IDs, immutable while a live
- *   descendant includes them.
+ *   current suffix. Prefixes are shared stable IDs (read-only ancestor
+ *   references through descendant routes, BRANCH-3); owners keep full
+ *   control even when referenced (BRANCH-4 butterfly).
  * - Branch domain is local-only: no sync capture/baseline/frames for branch
  *   rows or branch-owned suffixes; main route stays syncable; unknown
  *   first-block ownership fails closed.
@@ -280,14 +281,14 @@ describe('createBranch + effective route reads', () => {
     expect(agg.renameBranch('t-other', bid, 'Hijack').ok).toBe(false)
   })
 
-  it('shared prefix is immutable while a live descendant includes it; mutable again after subtree delete', () => {
+  it('referenced owner prefix stays mutable with live descendants (BRANCH-4 butterfly); readable after subtree delete', () => {
     seedTopic(agg, 't-root', ['m0', 'm1', 'm2'])
     const bid = (okValue(agg.createBranch('t-root', null, 'm1', 'B1')).branch as { id: string }).id
-    // m1 is shared with the live branch route.
-    expect(agg.updateMessage('t-root', 'm1', { content: 'edited' } as never).ok).toBe(false)
-    expect(agg.deleteBranch('t-root', bid).ok).toBe(true)
-    // After the subtree is gone the prefix is mutable again.
+    // m1 is referenced by the live branch route but stays mutable through its owner.
     expect(agg.updateMessage('t-root', 'm1', { content: 'edited' } as never).ok).toBe(true)
+    expect(agg.deleteBranch('t-root', bid).ok).toBe(true)
+    // After the subtree is gone the prefix is still mutable.
+    expect(agg.updateMessage('t-root', 'm1', { content: 'edited2' } as never).ok).toBe(true)
   })
 
   it('subtree deletion deletes owned suffix only; siblings and shared prefix survive; last delete restores never-branched state', () => {

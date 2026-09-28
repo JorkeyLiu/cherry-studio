@@ -115,7 +115,7 @@ import { replaceSegmentsForTopic } from '../topicSegment'
 const logger = loggerService.withContext('MessageThunk')
 
 /**
- * Active route + Main-authoritative window capability prechecks (PROJ-13).
+ * Active route + Main-authoritative window capability prechecks (BRANCH-9/12).
  * Canonical definitions live in `../routeAnswerGroup` (group-level answer
  * capability shares the same single-message base); re-exported here so
  * existing thunk/UI import paths keep working. The Main guard remains the
@@ -1058,12 +1058,11 @@ export const resendMessageThunk =
         logger.error(`[resendMessageThunk] Local user message ${userMessageToResend.id} not found in topic ${topicId}.`)
         throw new Error(`Local user message ${userMessageToResend.id} not found`)
       }
-      requireMutableForActiveRoute(state, topicId, userMessageToResend.id)
-      // PROJ-13 batch precheck (A5): resend regenerates every answer of the
-      // group, so every LOADED answer member must be mutable. Known-immutable
+      // BRANCH-12 actual-write-target precheck: reading the user root never
+      // requires mutability (ancestor reference). Only loaded assistant
+      // members (actually reset) gate the UI. Known-immutable
       // loaded members throw fail-closed with zero IPC calls; window-outside
-      // members are decided by the Main guard (per-item failures stop the
-      // batch without claiming atomicity).
+      // members are decided by the Main guard.
       requireLoadedAnswerMembersMutable(state, topicId, userMessageToResend.id)
 
       // Clear cached search results for the user message being resent
@@ -1457,11 +1456,11 @@ export const appendAssistantResponseThunk =
         return
       }
 
-      // PROJ-13 group precheck: joining an existing answer group mutates it
-      // (order, selection, context head), so every loaded member plus the
-      // loaded user root must be private through the active route. Any
+      // BRANCH-12 group precheck: appending creates an owned suffix row.
+      // Only loaded assistant members gate the UI; reading the loaded user
+      // root never blocks (ancestor reference). Any
       // loaded immutable member fails closed with zero IPC calls; the Main
-      // join-group guard stays final for window-outside members.
+      // guard stays final for window-outside members.
       try {
         requireAnswerGroupForMember(getState(), topicId, existingAssistantMessageId)
       } catch (precheck) {
@@ -1794,10 +1793,11 @@ export const createBranchThunk =
         logger.error(`[createBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
       }
       // Branch catalog change invalidates the current route window/capability:
-      // the parent anchor may now be descendant-protected. Clear stale
+      // the new route needs its own window. Clear stale
       // capability immediately (fail-closed); the new-route switch reloads the
       // target window, and a later parent revisit refetches fresh capability.
-      // Never long-stale.
+      // Never long-stale. Creating a branch never shrinks owner capability
+      // (BRANCH-4); invalidation here is only a window-generation guard.
       try {
         dispatch(newMessagesActions.invalidateRouteMutability({ topicId }))
       } catch {
@@ -2018,10 +2018,11 @@ export const updateMessageAndBlocksThunk =
 export const selectAnswerMessageThunk =
   (topicId: string, selectedMessageId: string, opts?: { joinGroupMemberId?: string }) =>
   async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
-    // PROJ-13 group precheck: the selection flips every group member
-    // atomically, so the loaded group (members + loaded user root) must be
-    // fully mutable. Unknown group or any loaded immutable member throws
-    // fail-closed before any IPC call; Main resolves window-outside members.
+    // BRANCH-12 actual-write-target precheck: the selection flips every
+    // actually-written assistant member atomically, so the loaded assistant
+    // members must all be owned. Reading the loaded user root never blocks.
+    // Unknown group or any loaded non-owned member throws fail-closed before
+    // any IPC call; Main resolves window-outside members.
     //
     // `joinGroupMemberId` (append path only): the selected ID is a just-
     // inserted stub that is not yet in the loaded projection — precheck the
@@ -2060,13 +2061,13 @@ export const selectAnswerMessageThunk =
   }
 
 /**
- * PROJ-13: group-level atomic `useful` toggle.
+ * BRANCH-12: group-level atomic `useful` toggle.
  *
  * DB-first, single-commit:
  * 1. ONE `selectUsefulAnswer` ChatDb command with the toggled ID only →
  *    ONE Main root SQLite transaction resolves the complete answer group
  *    (including window-outside members, topic/role/askId validated,
- *    cross-topic fail-closed), requires it fully private, and persists
+ *    cross-topic fail-closed), requires every actually-written member owned, and persists
  *    exactly one useful=true atomically (or a full clear when the target
  *    is already the useful member). The data source dispatches
  *    `updateTopicUpdatedAt` exactly once on success — this thunk must NOT

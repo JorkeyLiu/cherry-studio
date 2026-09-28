@@ -20,7 +20,7 @@ interface Props {
   setSelectedMessage: (message: Message) => void
   onReorderMessages: (messages: Message[]) => void
   topic: Topic
-  /** PROJ-13: group-immutable groups disable selector/reorder/retry-all. */
+  /** BRANCH-12: non-owned/incomplete groups disable selector/reorder/retry-all. */
   disabled?: boolean
 }
 
@@ -60,8 +60,8 @@ const MessageGroupMenuBar: FC<Props> = ({
   const hasFailedMessages = messages.some((m) => isFailedMessage(m) && !isTransmittingMessage(m))
 
   const handleRetryAll = async () => {
-    // PROJ-13 (A5): batch regeneration is whole-group-gated. A disabled
-    // (group-immutable) bar never issues calls; a known-immutable loaded
+    // BRANCH-12: batch regeneration is whole-group-gated. A disabled
+    // (non-owned/incomplete) bar never issues calls; a known non-owned loaded
     // member fails closed with zero calls. Window-outside members are
     // decided per item by the Main guard — the first failure stops the
     // batch (no partial-success claim, no atomicity claim).
@@ -90,14 +90,14 @@ const MessageGroupMenuBar: FC<Props> = ({
         await regenerateAssistant({ topicId: topic.id, messageId: id })
       } catch (e) {
         // Stop at the first Main-guard/transport failure: later items stay
-        // unattempted so a shared group never partially regenerates.
+        // unattempted so a non-owned group never partially regenerates.
         void e
         break
       }
     }
   }
 
-  // PROJ-13 (A3/A5): the whole bar is inert for immutable groups.
+  // BRANCH-12: the whole bar is inert for non-owned/incomplete groups.
   const barDisabled = disabled
 
   return (

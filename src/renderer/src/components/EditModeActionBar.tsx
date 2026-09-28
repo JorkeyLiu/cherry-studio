@@ -50,7 +50,7 @@ const EditModeActionBar = () => {
               variant="text"
               icon={<Scissors size={16} />}
               data-testid="edit-cut-btn"
-              // PROJ-13 (B2): 选集不可变时剪切禁用；Copy 保持允许。
+              // BRANCH-12: 选集不可变时剪切禁用；Copy 保持允许。
               disabled={!isSelectionMutable}
               onClick={handleCut}
             />
@@ -74,7 +74,7 @@ const EditModeActionBar = () => {
               danger
               icon={<Trash2 size={16} />}
               data-testid="edit-delete-btn"
-              // PROJ-13 (B2): 选集不可变时删除禁用（含一个 shared 即整体）。
+              // BRANCH-12: 选集不可变时删除禁用（含一个 non-owned 即整体）。
               disabled={!isSelectionMutable}
               onClick={() => void handleDelete()}
             />

@@ -58,13 +58,13 @@ export function useCreateEditMode(
     dispatch(clearSelection())
   }, [topicId, dispatch])
 
-  // PROJ-13 (B4): route 切换清空选择 — 避免残留计数误导写门禁；
+  // BRANCH-12: route 切换清空选择 — 避免残留计数误导写门禁；
   // 能力 route 不匹配本身也会使写 fail-closed（双保险）。
   useEffect(() => {
     dispatch(clearSelection())
   }, [activeBranchId, dispatch])
 
-  // PROJ-13 (B1/B2): 当前选集是否可写 — 每个选中组的全部 loaded 消息都
+  // BRANCH-12: 当前选集是否可写 — 每个选中组的全部 loaded 消息都
   // 在当前 route mutableMessageIds 中；未知/残留/不完整 fail-closed。
   // Copy 保持允许（authority 读取），不经此门禁。
   const isSelectionMutable = useAppSelector((state) => selectIsEditSelectionMutable(state, topicId))
@@ -161,7 +161,7 @@ export function useCreateEditMode(
   const handleCut = useCallback(() => {
     if (isProcessing) return
     if (!isEnabled || selectedGroupIds.length === 0) return
-    // PROJ-13 (B3): 选集不可变时零 clipboard cut、零 Main mutation、零 Redux
+    // BRANCH-12: 选集不可变时零 clipboard cut、零 Main mutation、零 Redux
     // 变化。Copy 保持允许；cut 的 clipboard 发布本身即写意图，故同样阻断。
     try {
       requireEditSelectionMutable(store.getState(), topicId, selectedGroupIds)
@@ -225,8 +225,8 @@ export function useCreateEditMode(
   const handleDelete = useCallback(async () => {
     if (isProcessing) return
     if (!isEnabled || selectedGroupIds.length === 0) return
-    // PROJ-13 (B3): 选集不可变时零 Main mutation、零 Redux 变化。
-    // 含一个 shared 即整体阻断（require 内逐成员验证，不跳过）。
+    // BRANCH-12: 选集不可变时零 Main mutation、零 Redux 变化。
+    // 含一个 non-owned 即整体阻断（require 内逐成员验证，不跳过）。
     try {
       requireEditSelectionMutable(store.getState(), topicId, selectedGroupIds)
     } catch (error) {
@@ -353,7 +353,7 @@ export function useCreateEditMode(
       hasClipboard: clipboard.items.length > 0,
       canUndo: undoStack.undoStack.length > 0,
       canRedo: undoStack.redoStack.length > 0,
-      // PROJ-13 (B2): 选集写能力 — Cut/Delete/segment 写操作 disabled 门禁；
+      // BRANCH-12: 选集写能力 — Cut/Delete/segment 写操作 disabled 门禁；
       // Copy/Paste 意图不受此门禁限制（paste 源删除由 Main 最终校验）。
       isSelectionMutable,
 

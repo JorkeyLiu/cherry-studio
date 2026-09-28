@@ -442,10 +442,10 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
     return
   }
 
-  // PROJ-13 (B6): redo re-deletes existing messages — fail closed with zero
-  // IPC calls when any root is already non-private through the active route.
+  // BRANCH-12: redo re-deletes existing messages — fail closed with zero
+  // IPC calls when any root is already non-owned through the active route.
   // The Main guard stays final for expanded dependents; undo (restore)
-  // paths create new private rows and stay Main-decided.
+  // paths create new owned rows and stay Main-decided.
   {
     const preState = getState()
     for (const rootId of roots) requireMutableForActiveRoute(preState, targetTopicId, rootId)

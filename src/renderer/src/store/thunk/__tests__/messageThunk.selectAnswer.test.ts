@@ -179,8 +179,8 @@ describe('selectAnswerMessageThunk — cross-process authority selection', () =>
           'a-2': { id: 'a-2', role: 'assistant', askId: 'ask-1' }
         },
         messageIdsByTopic: { [topicId]: ['a-1', 'a-2'] },
-        // PROJ-13 group precheck runs against the Main-authoritative window
-        // capability: the loaded group is private through the main route.
+        // BRANCH-12 group precheck runs against the Main-authoritative window
+        // capability: the loaded assistant members are owned through the main route.
         mutableMessageIdsByTopic: { [topicId]: ['a-1', 'a-2'] },
         mutableRouteByTopic: { [topicId]: null }
       },
@@ -302,8 +302,8 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
         [existingAssistantId]: { id: existingAssistantId, role: 'assistant', askId: userQueryId }
       },
       messageIdsByTopic: { [appendTopicId]: [userQueryId, existingAssistantId] },
-      // PROJ-13: the append join-group precheck requires the loaded group
-      // (member + user root) private through the active route.
+      // BRANCH-12: the append join-group precheck requires the loaded
+      // assistant members owned through the active route.
       mutableMessageIdsByTopic: { [appendTopicId]: [userQueryId, existingAssistantId] },
       mutableRouteByTopic: { [appendTopicId]: null }
     },

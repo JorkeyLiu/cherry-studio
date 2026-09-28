@@ -1,12 +1,14 @@
 /**
- * PROJ-13 renderer group capability (pure helpers, no DOM).
+ * BRANCH-4/9/12 renderer group capability (pure helpers, no DOM).
  *
- * - Answer groups resolve from the loaded projection (members + loaded user
- *   root) and require EVERY loaded member mutable through the active route.
- *   Unknown groups, unknown capability, route mismatch, or one shared loaded
- *   member fail closed.
+ * - Answer groups resolve from the loaded projection (assistant members plus
+ *   the loaded user root for shape) and require EVERY loaded ASSISTANT member
+ *   owned through the active route. Reading the loaded user root never
+ *   blocks (BRANCH-12 actual-write-target). Unknown groups, unknown
+ *   capability, route mismatch, or one non-owned loaded member fail closed.
  * - Edit selections resolve selectedGroupIds through the current loaded
- *   groups; only fully private selections are writable. Copy stays
+ *   groups; only fully owned selections are writable (every resolved message
+ *   is an actual delete/segment target). Copy stays
  *   unrestricted (no gate here by design).
  */
 import type { Message } from '@renderer/types/newMessage'
@@ -97,7 +99,7 @@ describe('resolveLoadedAnswerGroup', () => {
 describe('answer-group mutability', () => {
   const entities = { u1: userMsg('u1'), a1: assistantMsg('a1', 'u1'), a2: assistantMsg('a2', 'u1') }
 
-  it('private loaded groups are mutable', () => {
+  it('owned loaded groups are mutable', () => {
     const state = rootState({
       loadedIds: ['u1', 'a1', 'a2'],
       entities,
@@ -109,27 +111,31 @@ describe('answer-group mutability', () => {
     expect(() => requireAnswerGroupForMember(state, 't1', 'a1')).not.toThrow()
   })
 
-  it('one shared loaded member (or root) fails the whole group closed', () => {
-    // Shared answer member.
-    const sharedMember = rootState({
+  it('one non-owned loaded member fails the whole group closed; the user root never gates (BRANCH-12)', () => {
+    // Non-owned answer member.
+    const nonOwnedMember = rootState({
       loadedIds: ['u1', 'a1', 'a2'],
       entities,
       mutableIds: ['u1', 'a1'],
       mutableRoute: null
     })
-    const group = resolveLoadedAnswerGroup(sharedMember, 't1', 'a1')!
-    expect(isLoadedAnswerGroupMutable(sharedMember, 't1', group)).toBe(false)
-    expect(() => requireAnswerGroupForMember(sharedMember, 't1', 'a1')).toThrow()
-    // The selected ID itself is private — the precheck is group-level, not selected-ID-only.
-    expect(() => requireAnswerGroupForMember(sharedMember, 't1', 'a2')).toThrow()
-    // Shared user root.
-    const sharedRoot = rootState({
+    const group = resolveLoadedAnswerGroup(nonOwnedMember, 't1', 'a1')!
+    expect(isLoadedAnswerGroupMutable(nonOwnedMember, 't1', group)).toBe(false)
+    expect(() => requireAnswerGroupForMember(nonOwnedMember, 't1', 'a1')).toThrow()
+    // The selected ID itself is owned — the precheck is group-level, not selected-ID-only.
+    expect(() => requireAnswerGroupForMember(nonOwnedMember, 't1', 'a2')).toThrow()
+    // Non-owned (or capability-absent) user root never blocks: only actually-
+    // written assistant members gate the UI. Window-outside members stay
+    // Main-decided.
+    const unreadableRoot = rootState({
       loadedIds: ['u1', 'a1', 'a2'],
       entities,
       mutableIds: ['a1', 'a2'],
       mutableRoute: null
     })
-    expect(() => requireAnswerGroupForMember(sharedRoot, 't1', 'a1')).toThrow()
+    const rootGroup = resolveLoadedAnswerGroup(unreadableRoot, 't1', 'a1')!
+    expect(isLoadedAnswerGroupMutable(unreadableRoot, 't1', rootGroup)).toBe(true)
+    expect(() => requireAnswerGroupForMember(unreadableRoot, 't1', 'a1')).not.toThrow()
   })
 
   it('unknown capability and route mismatch fail closed', () => {
@@ -172,7 +178,7 @@ describe('edit-selection mutability', () => {
     a2: assistantMsg('a2', 'u2')
   }
 
-  it('fully private selections are writable', () => {
+  it('fully owned selections are writable', () => {
     const state = rootState({
       loadedIds: ['u1', 'a1', 'u2', 'a2'],
       entities,
@@ -185,7 +191,7 @@ describe('edit-selection mutability', () => {
     expect(requireEditSelectionMutable(state, 't1')).toEqual(['u1', 'a1', 'u2', 'a2'])
   })
 
-  it('one shared member blocks the whole mixed selection', () => {
+  it('one non-owned member blocks the whole mixed selection', () => {
     const state = rootState({
       loadedIds: ['u1', 'a1', 'u2', 'a2'],
       entities,

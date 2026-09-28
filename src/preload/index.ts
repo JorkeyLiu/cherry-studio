@@ -717,7 +717,7 @@ const api = {
     // PERF-100: one atomic multi-model answer-tab selection
     selectAnswerMessage: (request: SelectAnswerMessageRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_SelectAnswerMessage, request),
-    // PROJ-13: one atomic multi-model useful selection (group-level)
+    // BRANCH-12: one atomic multi-model useful selection (group-level)
     selectUsefulAnswer: (request: SelectUsefulAnswerRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_SelectUsefulAnswer, request),
     deleteMessage: (request: DeleteMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessage, request),

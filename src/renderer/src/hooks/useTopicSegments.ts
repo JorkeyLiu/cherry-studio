@@ -34,9 +34,8 @@ export function useTopicSegments(topicId: string) {
 
   const messageIdsForTopic = useAppSelector((state) => state.messages.messageIdsByTopic[topicId] || [])
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topicId))
-  // PROJ-13 (B5) capability snapshot from the same store the UI reads —
-  // segment membership mutates message relations, so every member must be
-  // private through the active route (zero IPC calls otherwise).
+  // BRANCH-12 capability snapshot from the same store the UI reads —
+  // every member must be owned through the active route (zero IPC calls otherwise).
   const routeCapability = useAppSelector((state) => selectRouteCapability(state, topicId))
 
   const segmentsForTopic = useMemo(() => {
@@ -71,8 +70,8 @@ export function useTopicSegments(topicId: string) {
 
   const createSegment = useCallback(
     async (tid: string, name: string, messageIds: string[]): Promise<TopicSegment> => {
-      // PROJ-13 (B5): segment membership mutates message relations — every
-      // member must be private through the active route. Fail closed with
+      // BRANCH-12: every member must be owned through the active route.
+      // Fail closed with
       // zero IPC calls; Main validates the addressed route atomically.
       // Cross-topic intents stay Main-decided (this hook only holds the
       // capability of its own topic).
@@ -131,8 +130,8 @@ export function useTopicSegments(topicId: string) {
 
   const updateSegmentMessageIds = useCallback(
     async (segmentId: string, newMessageIds: string[]) => {
-      // PROJ-13 (B5): membership replacement mutates message relations —
-      // fail closed with zero IPC calls unless every member is private.
+      // BRANCH-12: membership replacement mutates message relations —
+      // fail closed with zero IPC calls unless every member is owned.
       // The segment's topic is the hook topic; Main validates atomically.
       requireIdsMutableForRoute(routeCapability, topicId, newMessageIds)
       // DB-first enriched: empty membership deletes per repo semantics (null wire).

@@ -21,7 +21,7 @@ interface MessageGroupModelListProps {
   selectMessageId: string
   setSelectedMessage: (message: Message) => void
   onReorderMessages?: (messages: Message[]) => void
-  /** PROJ-13: group-immutable groups render an inert list (no select, no drag). */
+  /** BRANCH-12: non-owned groups render an inert list (no select, no drag). */
   disabled?: boolean
 }
 
@@ -61,8 +61,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
     (message: Message) => {
       const modelTip = message.model?.name
       const isProcessing = isMessageProcessing(message)
-      // PROJ-13 (A3): the whole selector is inert when the group is
-      // immutable — clicks never reach selection.
+      // BRANCH-12: the whole selector is inert when the group is
+      // non-owned/incomplete — clicks never reach selection.
       const handleSelect = disabled ? undefined : () => setSelectedMessage(message)
 
       if (isCompact) {
@@ -118,8 +118,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
       </Tooltip>
       <ModelsContainer $displayMode={foldDisplayMode}>
         {disabled ? (
-          // PROJ-13 (A4): immutable/incomplete groups render an inert list —
-          // Sortable stays disabled (no drag reorder through shared prefixes).
+          // BRANCH-12: non-owned/incomplete groups render an inert list —
+          // Sortable stays disabled (no drag reorder through read-only ancestor references).
           // Fragment keeps each selector a direct child of the layout
           // container, matching the enabled Sortable structure (no extra
           // span wrapper that would break the avatar-group/segmented-list

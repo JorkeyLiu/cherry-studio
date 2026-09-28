@@ -255,7 +255,7 @@ export async function copyMessages(
  * Redux message and block projections are never mutated. Returns the number
  * of messages cut.
  *
- * Service-level depth gate (PROJ-15): the cut entry itself requires the
+ * Service-level depth gate (BRANCH-12): the cut entry itself requires the
  * selection writable through the active route before any authority clipboard
  * read or `cut` publication — direct callers outside `useEditMode` fail
  * closed the same way. Copy stays ungated (read-only authority read).
@@ -693,8 +693,8 @@ export async function deleteSelectedMessages(
     return 0
   }
 
-  // PROJ-13 (B1/B3): the whole selection must be writable through the
-  // active route — one shared member blocks the entire batch with zero IPC
+  // BRANCH-12: the whole selection must be writable through the
+  // active route — one non-owned member blocks the entire batch with zero IPC
   // calls (no skip-and-partial-write). Main stays final for expansion.
   // The gate binds to the requested root IDs (never a stale store copy).
   try {

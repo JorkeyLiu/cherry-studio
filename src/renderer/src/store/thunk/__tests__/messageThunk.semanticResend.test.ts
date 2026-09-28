@@ -62,8 +62,8 @@ interface S {
   assistants: { assistants: Array<{ id: string }> }
 }
 let st: S
-// PROJ-13/16: renderer mutation prechecks run against the Main-authoritative
-// window capability. Mirror the loaded projection into a private main-route
+// BRANCH-9/12: renderer mutation prechecks run against the Main-authoritative
+// window capability. Mirror the loaded projection into an owned main-route
 // capability so the thunk under test reaches its DB contract.
 const syncCap = () => {
   const ids = ((st as any).messages.messageIdsByTopic?.['t-1'] ?? []) as string[]

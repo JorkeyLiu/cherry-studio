@@ -1,8 +1,8 @@
 /**
- * PROJ-13 (B2) EditModeActionBar permission gating.
+ * BRANCH-12 EditModeActionBar permission gating.
  *
- * - Immutable/mixed selections: Cut/Delete disabled, Copy stays enabled.
- * - Fully private selections: all actions enabled.
+ * - Non-owned/mixed selections: Cut/Delete disabled, Copy stays enabled.
+ * - Fully owned selections: all actions enabled.
  */
 import { render } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -57,7 +57,7 @@ describe('EditModeActionBar permission gating', () => {
     expect(button('edit-paste-btn')).toBeEnabled()
   })
 
-  it('enables all actions on fully private selections', () => {
+  it('enables all actions on fully owned selections', () => {
     setEditMode(true)
     const { container } = render(<EditModeActionBar />)
     const button = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement | null

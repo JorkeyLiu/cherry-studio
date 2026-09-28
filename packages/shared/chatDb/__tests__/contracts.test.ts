@@ -25,7 +25,7 @@ describe('chatDbContracts', () => {
     'chatdb:update-message-and-blocks',
     // PERF-100: one atomic multi-model answer-tab selection
     'chatdb:select-answer-message',
-    // PROJ-13: one atomic multi-model useful selection
+    // BRANCH-12: one atomic multi-model useful selection
     'chatdb:select-useful-answer',
     'chatdb:delete-message',
     'chatdb:delete-messages',
@@ -679,7 +679,7 @@ describe('validateChatDbRequest — invalid payloads', () => {
     ).toThrow(ValidationError)
   })
 
-  // PROJ-13 select-useful-answer: toggled-ID-only requests
+  // BRANCH-12 select-useful-answer: toggled-ID-only requests
   it('select-useful-answer: minimal valid toggled-only request', () => {
     expect(() =>
       validateChatDbRequest('chatdb:select-useful-answer', {
@@ -3820,7 +3820,7 @@ describe('coverage consistency', () => {
     'chatdb:update-message-and-blocks',
     // PERF-100: one atomic multi-model answer-tab selection
     'chatdb:select-answer-message',
-    // PROJ-13: one atomic multi-model useful selection
+    // BRANCH-12: one atomic multi-model useful selection
     'chatdb:select-useful-answer',
     'chatdb:delete-message',
     'chatdb:delete-messages',

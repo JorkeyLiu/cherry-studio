@@ -44,12 +44,12 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
-  // PROJ-13 group capability: the whole loaded answer group (members +
-  // loaded user root) must be mutable through the active route. Unknown
-  // capability or any loaded immutable member disables group mutations
-  // (selector, useful, reorder, retry-all); Main stays final for
-  // window-outside members. Single (non-grouped) messages fall back to
-  // their own mutability.
+  // BRANCH-12 group capability: every loaded assistant member must be
+  // owned through the active route (reading the loaded user root never
+  // blocks). Unknown capability or any loaded non-owned member disables
+  // group mutations (selector, useful, reorder, retry-all); Main stays
+  // final for window-outside members. Single (non-grouped) messages fall
+  // back to their own mutability.
   const groupMutable = useAppSelector((state) => {
     try {
       const seedId = messages.length > 0 ? messages[0].id : null
@@ -79,7 +79,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const setSelectedMessage = useCallback(
     (message: Message) => {
-      // PROJ-13: the whole selector is inert when the group is immutable.
+      // BRANCH-12: the whole selector is inert when the group is non-owned.
       if (!groupMutable) return
       // S3.4: explicit target IDs resolved at event time to the latest
       // complete answer group. No captured messages array is used so a
@@ -110,7 +110,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     return () => messages.forEach((message) => registerMessageElement?.(message.id, null))
   }, [messages, registerMessageElement])
 
-  // PROJ-13: group-level atomic useful toggle. One Main transaction sets
+  // BRANCH-12: group-level atomic useful toggle. One Main transaction sets
   // the single useful member (or clears when already useful); the old
   // per-message forEach(editMessage) partial-write path is removed.
   const onUpdateUseful = useCallback(
@@ -130,7 +130,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const handleReorderMessages = useCallback(
     (reorderedMessages: Message[]) => {
-      // PROJ-13: sortable is disabled when the group is immutable; the
+      // BRANCH-12: sortable is disabled when the group is non-owned; the
       // handler stays fail-closed as defense-in-depth.
       if (!groupMutable) return
       void dispatch(

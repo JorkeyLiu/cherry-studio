@@ -344,7 +344,7 @@ export enum IpcChannel {
   ChatDb_UpdateMessageAndBlocks = 'chatdb:update-message-and-blocks',
   // PERF-100: one atomic multi-model answer-tab selection (foldSelected group switch)
   ChatDb_SelectAnswerMessage = 'chatdb:select-answer-message',
-  // PROJ-13: one atomic multi-model useful selection (group-level useful switch)
+  // BRANCH-12: one atomic multi-model useful selection (group-level useful switch)
   ChatDb_SelectUsefulAnswer = 'chatdb:select-useful-answer',
   ChatDb_DeleteMessage = 'chatdb:delete-message',
   ChatDb_DeleteMessages = 'chatdb:delete-messages',

@@ -1,5 +1,5 @@
 /**
- * useCreateEditMode route/topic selection clearing (PROJ-15 double insurance).
+ * useCreateEditMode route/topic selection clearing (BRANCH-12 double insurance).
  *
  * The hook clears `selectedGroupIds` both when the topic changes (W3) and
  * when `activeBranchId` changes (B4), so route-switch residue can never

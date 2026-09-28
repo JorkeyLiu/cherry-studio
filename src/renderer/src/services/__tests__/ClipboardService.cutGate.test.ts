@@ -1,5 +1,5 @@
 /**
- * ClipboardService cut depth gate (PROJ-15) + delete/copy gate matrix.
+ * ClipboardService cut depth gate (BRANCH-12) + delete/copy gate matrix.
  *
  * The `cutMessages` service entry carries its own fail-closed gate (the same
  * `requireEditSelectionMutable` the `useEditMode` caller applies), so direct
@@ -90,7 +90,7 @@ interface GateStateOpts {
 function gateState(opts: GateStateOpts = {}): unknown {
   const { loadedIds = LOADED_IDS, mutableRoute = null, activeRoute = null, selection = ['u1'] } = opts
   // Explicit `mutableIds: undefined` means "no capability published" (unknown);
-  // an absent key means the fully-private default.
+  // an absent key means the fully-owned default.
   const mutableIds = 'mutableIds' in opts ? opts.mutableIds : ['u1', 'a1', 'u2']
   return {
     messages: {
@@ -142,7 +142,7 @@ describe('ClipboardService.cutMessages service-level depth gate', () => {
     mocks.listSegments.mockResolvedValue([])
   })
 
-  it('fully private selection publishes mode=cut with the requested branchId', async () => {
+  it('fully owned selection publishes mode=cut with the requested branchId', async () => {
     const { cutMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
@@ -163,7 +163,7 @@ describe('ClipboardService.cutMessages service-level depth gate', () => {
 
   it.each([
     ['immutable member', { mutableIds: ['u1', 'u2'], selection: ['u1'] } as GateStateOpts],
-    ['mixed private/shared selection', { mutableIds: ['u1', 'a1'], selection: ['u1', 'u2'] } as GateStateOpts]
+    ['mixed owned/non-owned selection', { mutableIds: ['u1', 'a1'], selection: ['u1', 'u2'] } as GateStateOpts]
   ])('fail-closed with zero reads/publication on %s', async (_label, override) => {
     const { cutMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
@@ -216,7 +216,7 @@ describe('ClipboardService copy stays ungated / delete gates with zero IPC', () 
     const { copyMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
-    // a1 shared through this route — cut would refuse, copy must still work.
+    // a1 non-owned through this route — cut would refuse, copy must still work.
     const count = await copyMessages(dispatch, 'topic-1', ['u1'])
 
     expect(count).toBe(2)
@@ -252,7 +252,7 @@ describe('ClipboardService copy stays ungated / delete gates with zero IPC', () 
     expect(mocks.pushUndoAction).not.toHaveBeenCalled()
   })
 
-  it('deleteSelectedMessages calls the semantic helper once on a fully private selection', async () => {
+  it('deleteSelectedMessages calls the semantic helper once on a fully owned selection', async () => {
     mocks.executeDeleteMessagesWithDependents.mockResolvedValue({
       response: { deletedMessageIds: ['u1', 'a1'] },
       undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }

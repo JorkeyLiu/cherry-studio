@@ -5,19 +5,21 @@ import type { RootState } from './index'
 import { selectActiveBranchId } from './topicBranch'
 
 /**
- * PROJ-13 (B): edit-selection mutability.
+ * BRANCH-12: edit-selection mutability.
  *
  * `selectedGroupIds` (askIds) resolve through the CURRENT loaded projection
  * (`messageIdsByTopic[topicId]` order, same grouping as the edit UI) to the
  * full loaded member list of every selected group. A selection is writable
  * only when every selected group resolves AND every resolved message is in
- * the current route `mutableMessageIds` capability:
+ * the current route `mutableMessageIds` capability (every resolved message
+ * is an actual delete/segment target, so owner equality applies to all of
+ * them):
  *
  * - selected ID absent from the resident projection (capability unknown,
  *   route-switch residue, window-cropped incompleteness) → fail-closed;
  * - route mismatch between the stored capability and the active route →
  *   fail-closed;
- * - one shared member anywhere in the selection blocks the WHOLE batch
+ * - one non-owned member anywhere in the selection blocks the WHOLE batch
  *   (never skip-and-partially-write).
  *
  * Read-only copy/export stays unrestricted (authority reads).

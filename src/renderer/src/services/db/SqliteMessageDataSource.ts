@@ -177,7 +177,7 @@ export interface ChatDbApi {
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
   // Cross-process authority answer selection (Main-resolved full group)
   selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<SelectAnswerMessageResponse>>
-  // PROJ-13: group-level atomic useful selection (Main-resolved full group)
+  // BRANCH-12: group-level atomic useful selection (Main-resolved full group)
   selectUsefulAnswer(request: SelectUsefulAnswerRequest): Promise<ChatDbResult<SelectUsefulAnswerResponse>>
   deleteMessagesWithDependents(
     request: DeleteMessagesWithDependentsRequest
@@ -523,7 +523,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
   }
 
   /**
-   * PROJ-13: group-level atomic `useful` selection.
+   * BRANCH-12: group-level atomic `useful` selection.
    *
    * ONE named bridge call to the Main `selectUsefulAnswer` command (ONE
    * root SQLite transaction resolving the full answer group from the

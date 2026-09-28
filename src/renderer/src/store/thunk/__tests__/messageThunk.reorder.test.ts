@@ -115,8 +115,8 @@ const makeLoadedState = () => {
         messageIdsByTopic: {
           [topicId]: ['user-1', 'assistant-1', 'assistant-2']
         },
-        // PROJ-13 group precheck runs against the Main-authoritative window
-        // capability: the loaded group is private through the main route.
+        // BRANCH-12 group precheck runs against the Main-authoritative window
+        // capability: the loaded assistant members are owned through the main route.
         mutableMessageIdsByTopic: {
           [topicId]: ['user-1', 'assistant-1', 'assistant-2']
         },

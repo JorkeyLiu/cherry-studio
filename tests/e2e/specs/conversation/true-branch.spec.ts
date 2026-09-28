@@ -834,10 +834,14 @@ test.describe('Topic-internal branches end-to-end', () => {
     )
     expect(await sidebarTopicIds(page)).toEqual(topicsBefore)
 
-    // 5b. Mutation capability on the restored parent route (Main-authoritative
-    // mutableMessageIds): the fork anchor and its prior shared prefix are
-    // immutable, while a post-anchor main message stays mutable. The L1 route
-    // probe excludes the shared prefix from its capability.
+    // 5b. Mutation capability on the restored main route (Main-authoritative
+    // mutableMessageIds, BRANCH-4/9 owner equality): the main route permanently
+    // owns the messages it created, so the fork anchor and its pre-anchor
+    // main-owned prefix stay mutable while live descendants exist — forking a
+    // branch never shrinks the owner capability. The resident converged to the
+    // full main route above, so the capability must be the exact owner set.
+    // The L1 child-route probe carries only its owned suffix: ancestor refs
+    // (including the fork anchor) stay immutable there.
     const restoredMutable: string[] = await page.evaluate(
       (tid: string) => (window as any).store.getState().messages?.mutableMessageIdsByTopic?.[tid] ?? [],
       sourceTopicId
@@ -847,32 +851,52 @@ test.describe('Topic-internal branches end-to-end', () => {
       sourceTopicId
     )
     expect(restoredRoute, 'restored parent capability must be bound to the main route').toBeNull()
-    expect(
-      restoredMutable.length,
-      'restored parent capability must be non-empty (no empty-array hole)'
-    ).toBeGreaterThan(0)
-    expect(restoredMutable, 'shared fork anchor must not be mutable on the parent route').not.toContain(anchorId)
-    expect(restoredMutable, 'pre-anchor shared prefix must not be mutable on the parent route').not.toContain(
-      sourceIds[0]
+    // Exact owner set (order-insensitive: Redux capability is a same-route
+    // window union): every main-created message, including the fork anchor and
+    // the pre-anchor prefix, stays mutable while L1/L2 descendants are live.
+    expect(restoredMutable.length, 'restored main capability must be exactly the full owner set').toBe(TOTAL)
+    expect(new Set(restoredMutable), 'restored main capability must equal the exact main owner IDs').toEqual(
+      new Set(sourceIds)
     )
-    for (const sharedId of sourceIds.slice(0, 5)) {
-      expect(restoredMutable, `shared prefix ${sharedId} must not be mutable on the parent route`).not.toContain(
-        sharedId
-      )
+    expect(restoredMutable, 'fork anchor stays mutable on its owner main route (BRANCH-4/9)').toContain(anchorId)
+    expect(restoredMutable, 'pre-anchor main-owned prefix stays mutable on the main route').toContain(sourceIds[0])
+    for (const prefixId of sourceIds.slice(0, 5)) {
+      expect(restoredMutable, `main-owned prefix ${prefixId} stays mutable on the main route`).toContain(prefixId)
     }
     const restoredTail = sourceIds[sourceIds.length - 1]
-    expect(restoredMutable, 'post-anchor parent message must stay mutable').toContain(restoredTail)
+    expect(restoredMutable, 'post-anchor main message stays mutable').toContain(restoredTail)
+    // Main-authoritative proof of the same contract (not just the Redux union):
+    // a latest window over the main route carries the exact owner set.
+    const mainCapProbe: any = await page.evaluate(
+      async ({ topicId, limit }: { topicId: string; limit: number }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId, limit }),
+      { topicId: sourceTopicId, limit: TOTAL }
+    )
+    expect(mainCapProbe?.ok, `main capability probe failed: ${JSON.stringify(mainCapProbe)}`).toBe(true)
+    expect((mainCapProbe.value.messages as any[]).map((m: any) => m.id)).toEqual(sourceIds)
+    expect(new Set(mainCapProbe.value.mutableMessageIds as string[])).toEqual(new Set(sourceIds))
+    expect(
+      (mainCapProbe.value.mutableMessageIds as string[]).includes(anchorId),
+      'fork anchor must be carried in the main owner capability'
+    ).toBe(true)
     const l1CapProbe: any = await page.evaluate(
       async ({ topicId, branchId }: { topicId: string; branchId: string }) =>
         await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId, branchId, limit: 10 }),
       { topicId: sourceTopicId, branchId: branch1Id }
     )
     expect(l1CapProbe?.ok, `L1 capability probe failed: ${JSON.stringify(l1CapProbe)}`).toBe(true)
+    // L1 has no owned suffix in this scenario, so its latest window is the
+    // ancestor tail main[6..15] and its capability is precisely empty: every
+    // ancestor ref is immutable on the child route (BRANCH-9 owned subset).
+    expect((l1CapProbe.value.messages as any[]).map((m: any) => m.id)).toEqual(
+      sourceIds.slice(ANCHOR_IDX + 1 - 10, ANCHOR_IDX + 1)
+    )
+    expect(l1CapProbe.value.mutableMessageIds as string[]).toEqual([])
     expect(
       (l1CapProbe.value.mutableMessageIds as string[]).includes(anchorId),
-      'shared prefix must be excluded from the L1 capability'
+      'ancestor refs must be excluded from the L1 child capability'
     ).toBe(false)
-    // DOM: the hovered shared anchor hides mutation controls on the parent route.
+    // DOM: the hovered owner anchor shows mutation controls on the main route.
     await page.evaluate((id: string) => {
       const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
       const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
@@ -880,20 +904,27 @@ test.describe('Topic-internal branches end-to-end', () => {
     }, anchorId)
     const anchorSel = `[id="message-${anchorId}"][data-message-id="${anchorId}"]`
     const anchorContainer = page.locator(anchorSel).first()
-    await expect(anchorContainer, 'shared anchor container must be visible').toBeVisible({ timeout: 15000 })
+    await expect(anchorContainer, 'owner anchor container must be visible').toBeVisible({ timeout: 15000 })
     try {
       await anchorContainer.hover({ timeout: 8000 })
     } catch {
-      // Hover flakiness near edges; visibility assertions below still hold.
+      // Hover flakiness near edges: re-anchor into view and retry once — the
+      // positive assertions below require the menubar to be revealed.
+      await page.evaluate((id: string) => {
+        const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+        const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+        if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+      }, anchorId)
+      await anchorContainer.hover({ timeout: 8000 }).catch(() => {})
     }
     await expect(
       anchorContainer.locator('[data-testid="msg-edit-btn"], [data-testid="msg-assistant-edit-btn"]'),
-      'shared anchor edit control must be hidden on the parent route'
-    ).toHaveCount(0)
+      'owner anchor edit control must be shown on the main route'
+    ).toHaveCount(1, { timeout: 15000 })
     await expect(
       anchorContainer.locator('[data-testid="message-delete-button"]'),
-      'shared anchor delete control must be hidden on the parent route'
-    ).toHaveCount(0)
+      'owner anchor delete control must be shown on the main route'
+    ).toHaveCount(1, { timeout: 15000 })
 
     // 6. Top-selector cascader switch back to L2 — breadcrumb updates, no jump.
     await page.locator('[data-testid="branch-selector-entry"]').first().click()
@@ -1128,6 +1159,17 @@ test.describe('Topic-internal branches end-to-end', () => {
         return st.assistants.assistants.flatMap((x: any) => (x.topics ?? []).map((t: any) => t.id)).sort()
       })
       expect(topicsAfterDelete).toEqual(topicsWithOther)
+      // Post-delete owner capability: removing the L1 subtree keeps/restores
+      // the exact main owner set (BRANCH-4/9 — no descendant shrink, no
+      // delete hole). Main-authoritative window probe, order-insensitive.
+      const postDeleteCap: any = await page2.evaluate(
+        async ({ topicId, limit }: { topicId: string; limit: number }) =>
+          await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId, limit }),
+        { topicId: sourceTopicId, limit: TOTAL }
+      )
+      expect(postDeleteCap?.ok, `post-delete capability probe failed: ${JSON.stringify(postDeleteCap)}`).toBe(true)
+      expect((postDeleteCap.value.messages as any[]).map((m: any) => m.id)).toEqual(sourceIds)
+      expect(new Set(postDeleteCap.value.mutableMessageIds as string[])).toEqual(new Set(sourceIds))
     } finally {
       await closeElectronWithExactCleanup(userDataDir, {
         close: () => relaunched.app.close(),
@@ -1479,14 +1521,14 @@ test.describe('Topic-internal branches end-to-end', () => {
     }
   })
 
-  test('branch route permission: shared answer group rejects, private group operates, mixed edit selection gates writes', async ({
+  test('branch route owner-only: referenced owner group still operates, child references read-only, owned edit selection gates', async ({
     mainWindow
   }) => {
     test.setTimeout(240000)
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'PROJ-13 INTEGRATED: a parent-route multi-answer group covered by a live child prefix rejects append/useful/select/reorder through the parent route (real IPC + SQLite, zero partial writes); a post-anchor private group still operates (selectAnswer); a mixed shared+private edit selection disables cut/delete with zero change while copy still works. No overlay semantics are introduced.'
+        'BRANCH-4/5/9 INTEGRATED: a parent-route multi-answer group referenced by a live child prefix still operates through the owner route (append/useful/select/reorder succeed, zero partial writes); a post-anchor owned group still operates (selectAnswer); a fully-owned edit selection enables cut/delete/copy with real keyboard cut publishing a cut clipboard and zero DB change. Child mutation of an ancestor reference rejects (covered by the focused describe below). No overlay semantics are introduced.'
     })
     await waitForAppReady(mainWindow)
     const page = mainWindow
@@ -1500,7 +1542,7 @@ test.describe('Topic-internal branches end-to-end', () => {
     const asstLater = sourceIds[21]
     const extraId = `${topicId}-msg-extra01`
 
-    // Build a two-answer group under user0 while it is still private.
+    // Build a two-answer group under user0 while it is still unreferenced.
     const joinExtra = await page.evaluate(
       ({
         tid,
@@ -1541,8 +1583,9 @@ test.describe('Topic-internal branches end-to-end', () => {
     )
     expect(joinExtra?.ok, `pre-fork join must succeed: ${JSON.stringify(joinExtra)}`).toBe(true)
 
-    // Fork L1 through msg-00010: the user0 answer group becomes a shared
-    // prefix on the parent route; the msg-00020 pair stays post-anchor private.
+    // Fork L1 through msg-00010: the user0 answer group stays owned by the
+    // parent route and referenced (read-only) from the child; the msg-00020
+    // pair stays a post-anchor owned group.
     const forked = await page.evaluate(
       ({ tid, anchor }: { tid: string; anchor: string }) => {
         const api: any = (window as any).api.chatDb
@@ -1555,25 +1598,26 @@ test.describe('Topic-internal branches end-to-end', () => {
     // Load the parent route window (default route) with its capability.
     await activateTopic(page, topicId, TOTAL + 1)
 
-    // Shared multi-answer group: append-join / useful / select / reorder all
-    // reject through the parent route with zero partial writes.
-    const selectShared = await page.evaluate(
+    // Referenced owner multi-answer group: append-join / useful / select /
+    // reorder all still succeed through the owner route (BRANCH-4 butterfly
+    // effect, no partial writes).
+    const selectOwned = await page.evaluate(
       ({ tid, id }: { tid: string; id: string }) => {
         const api: any = (window as any).api.chatDb
         return api.selectAnswerMessage({ topicId: tid, branchId: null, selectedMessageId: id })
       },
       { tid: topicId, id: extraId }
     )
-    expect(selectShared?.ok, 'shared group select must reject').toBe(false)
-    const usefulShared = await page.evaluate(
+    expect(selectOwned?.ok, `referenced owner group select must succeed: ${JSON.stringify(selectOwned)}`).toBe(true)
+    const usefulOwned = await page.evaluate(
       ({ tid, id }: { tid: string; id: string }) => {
         const api: any = (window as any).api.chatDb
         return api.selectUsefulAnswer({ topicId: tid, branchId: null, messageId: id })
       },
       { tid: topicId, id: asst1 }
     )
-    expect(usefulShared?.ok, 'shared group useful must reject').toBe(false)
-    const reorderShared = await page.evaluate(
+    expect(usefulOwned?.ok, `referenced owner group useful must succeed: ${JSON.stringify(usefulOwned)}`).toBe(true)
+    const reorderOwned = await page.evaluate(
       ({ tid, anchor, order }: { tid: string; anchor: string; order: string[] }) => {
         const api: any = (window as any).api.chatDb
         return api.reorderAnswerGroup({
@@ -1585,8 +1629,8 @@ test.describe('Topic-internal branches end-to-end', () => {
       },
       { tid: topicId, anchor: asst1, order: [extraId, asst1] }
     )
-    expect(reorderShared?.ok, 'shared group reorder must reject').toBe(false)
-    const joinShared = await page.evaluate(
+    expect(reorderOwned?.ok, `referenced owner group reorder must succeed: ${JSON.stringify(reorderOwned)}`).toBe(true)
+    const joinOwned = await page.evaluate(
       ({
         tid,
         asstId,
@@ -1624,9 +1668,9 @@ test.describe('Topic-internal branches end-to-end', () => {
       },
       { tid: topicId, asstId: assistantId, anchor: asst1, extra: `${topicId}-msg-extra02`, ask: user0 }
     )
-    expect(joinShared?.ok, 'shared group append-join must reject').toBe(false)
+    expect(joinOwned?.ok, `referenced owner group append-join must succeed: ${JSON.stringify(joinOwned)}`).toBe(true)
 
-    // Post-anchor private group still operates (one stable select).
+    // Post-anchor owned group still operates (one stable select).
     const selectPrivate = await page.evaluate(
       ({ tid, id }: { tid: string; id: string }) => {
         const api: any = (window as any).api.chatDb
@@ -1634,10 +1678,11 @@ test.describe('Topic-internal branches end-to-end', () => {
       },
       { tid: topicId, id: asstLater }
     )
-    expect(selectPrivate?.ok, `private group select must succeed: ${JSON.stringify(selectPrivate)}`).toBe(true)
+    expect(selectPrivate?.ok, `owned group select must succeed: ${JSON.stringify(selectPrivate)}`).toBe(true)
     expect((selectPrivate as any).value?.messageIds).toEqual([asstLater])
 
-    // Zero-partial-write proof against live SQLite (bounded retry on pressure).
+    // Owner-write proof against live SQLite (bounded retry on pressure): the
+    // pre-fork join plus the post-fork owner append-join both landed.
     const chatDbPath = getChatDbPath()
     expect(chatDbPath).not.toBeNull()
     const countAfter = await queryChatDbViaElectronWithRetry(
@@ -1645,18 +1690,17 @@ test.describe('Topic-internal branches end-to-end', () => {
       `SELECT COUNT(*) AS n FROM messages WHERE topic_id = '${esc(topicId)}'`
     )
     expect(countAfter?.ok).toBe(true)
-    expect((((countAfter as any).rows ?? []) as any[])[0]?.n).toBe(TOTAL + 1)
-    const joinAbsent = await queryChatDbViaElectronWithRetry(
+    expect((((countAfter as any).rows ?? []) as any[])[0]?.n).toBe(TOTAL + 2)
+    const joinPresent = await queryChatDbViaElectronWithRetry(
       chatDbPath!,
       `SELECT id FROM messages WHERE id = '${esc(`${topicId}-msg-extra02`)}'`
     )
-    expect(joinAbsent?.ok).toBe(true)
-    expect(((joinAbsent as any).rows ?? []) as any[]).toHaveLength(0)
+    expect(joinPresent?.ok).toBe(true)
+    expect(((joinPresent as any).rows ?? []) as any[]).toHaveLength(1)
 
-    // Mixed shared+private edit selection: cut/delete disabled, copy works,
-    // keyboard cut is a zero-change no-op. True-branch entry: the real
-    // edit-mode toggle enables edit mode first; selection is set in a
-    // separate step only after the heavy edit bridge is attached.
+    // Fully-owned edit selection: cut/delete/copy all enabled. True-branch
+    // entry: the real edit-mode toggle enables edit mode first; selection is
+    // set in a separate step only after the heavy edit bridge is attached.
     const editToggle = page.locator('[data-testid="edit-mode-toggle"]').first()
     await expect(editToggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
     await editToggle.click()
@@ -1684,9 +1728,9 @@ test.describe('Topic-internal branches end-to-end', () => {
     await expect(copyBtn, 'edit ActionBar must be attached after selection').toBeAttached({ timeout: 15000 })
     await expect(cutBtn, 'edit ActionBar must be attached after selection').toBeAttached({ timeout: 15000 })
     await expect(delBtn, 'edit ActionBar must be attached after selection').toBeAttached({ timeout: 15000 })
-    await expect(cutBtn, 'mixed-selection cut must be disabled').toBeDisabled({ timeout: 15000 })
-    await expect(delBtn, 'mixed-selection delete must be disabled').toBeDisabled({ timeout: 15000 })
-    await expect(copyBtn, 'copy stays enabled on mixed selections').toBeEnabled({ timeout: 15000 })
+    await expect(cutBtn, 'owned-selection cut must be enabled').toBeEnabled({ timeout: 15000 })
+    await expect(delBtn, 'owned-selection delete must be enabled').toBeEnabled({ timeout: 15000 })
+    await expect(copyBtn, 'copy stays enabled on owned selections').toBeEnabled({ timeout: 15000 })
     await copyBtn.click()
     await page.waitForFunction(
       () => {
@@ -1701,27 +1745,135 @@ test.describe('Topic-internal branches end-to-end', () => {
       return { mode: s.clipboard?.mode, groups: (s.clipboard?.items ?? []).length }
     })
     expect(clipboardAfterCopy.groups).toBeGreaterThan(0)
-    // Real keyboard cut path: Meta+X must leave the copy clipboard untouched.
-    // A short settle window is required here because the assertion is the
-    // ABSENCE of a change (no state transition to wait on); the cut handler
-    // is synchronous fire-and-forget, so 500ms bounds the observation.
+    // Real keyboard cut path: Meta+X on a fully-owned selection publishes a
+    // cut clipboard (mode flips, same groups). Cut stages the clipboard only —
+    // the DB below must stay unchanged.
     await page.keyboard.press('Meta+x')
-    await page.waitForTimeout(500)
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        return s.clipboard?.mode === 'cut' && (s.clipboard?.items ?? []).length > 0
+      },
+      null,
+      { timeout: 30000 }
+    )
     const clipboardAfterCut = await page.evaluate(() => {
       const s = (window as any).store.getState()
       return { mode: s.clipboard?.mode, groups: (s.clipboard?.items ?? []).length }
     })
-    expect(clipboardAfterCut).toEqual(clipboardAfterCopy)
+    expect(clipboardAfterCut.mode).toBe('cut')
+    expect(clipboardAfterCut.groups).toEqual(clipboardAfterCopy.groups)
     const countFinal = await queryChatDbViaElectronWithRetry(
       chatDbPath!,
       `SELECT COUNT(*) AS n FROM messages WHERE topic_id = '${esc(topicId)}'`
     )
     expect(countFinal?.ok).toBe(true)
-    expect((((countFinal as any).rows ?? []) as any[])[0]?.n).toBe(TOTAL + 1)
+    expect((((countFinal as any).rows ?? []) as any[])[0]?.n).toBe(TOTAL + 2)
     await editToggle.click()
     await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === false, null, {
       timeout: 15000
     })
     await expect(page.locator('[data-testid="edit-heavy-inactive"]').first()).toBeAttached({ timeout: 15000 })
+  })
+})
+
+test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
+  test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
+
+  test('owner main edit visible in child under stable ID; child ref read-only (no E2E run this round)', async ({
+    mainWindow,
+    electronApp,
+    mockPort,
+    ownedTmpRoot
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'TRUE-BRANCH OWNER-ONLY FOCUSED: seed small topic, fork L1 via IPC, owner main update succeeds and is visible in the child effective route under the same stable ID with no row copy; child update of the same ancestor ID fails closed; window capability carries owner-owned IDs on main and only the owned suffix on the child.'
+    })
+    void electronApp
+    void mockPort
+    void ownedTmpRoot
+    await waitForAppReady(mainWindow)
+    const page = mainWindow
+    const assistantId = await prepareAssistant(page)
+    const topicId = `tb-owner-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    await seedSmallTopic(page, assistantId, topicId, `OwnerOnly ${topicId}`)
+    const ids: string[] = await page.evaluate((tid: string) => {
+      const s = (window as any).store.getState()
+      return (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+    }, topicId)
+    // Ensure the seeded route is loaded; fall back to the known small-seed IDs.
+    const anchorId = ids.length > 1 ? ids[1] : `${topicId}-msg-00001`
+    // Fork L1 through the anchor via the real Main IPC (same contract the toolbar uses).
+    const created: any = await page.evaluate(
+      async ({ tid, anchor }: { tid: string; anchor: string }) =>
+        await (window as any).api.chatDb.createBranch({ topicId: tid, parentBranchId: null, anchorMessageId: anchor }),
+      { tid: topicId, anchor: anchorId }
+    )
+    expect(created?.ok, `createBranch failed: ${JSON.stringify(created)}`).toBe(true)
+    const branchId = created.value.branch.id as string
+    // Owner main edit of the referenced anchor succeeds (butterfly effect, BRANCH-4/5).
+    const editedContent = `owner-edit-${Date.now()}`
+    const updateOk: any = await page.evaluate(
+      async ({ tid, mid, content }: { tid: string; mid: string; content: string }) =>
+        await (window as any).api.chatDb.updateMessage({ topicId: tid, messageId: mid, updates: { content } }),
+      { tid: topicId, mid: anchorId, content: editedContent }
+    )
+    // NOTE: updateMessage IPC shape follows the existing preload contract; a
+    // contract mismatch surfaces here as a failed expectation, never as a pass.
+    expect(updateOk?.ok, `owner update failed: ${JSON.stringify(updateOk)}`).toBe(true)
+    // Child effective route sees the unique entity update under the same stable ID (no copy).
+    const childRoute: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchMessages({ topicId: tid, branchId: bid }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(childRoute?.ok, `child fetch failed: ${JSON.stringify(childRoute)}`).toBe(true)
+    const childHit = (childRoute.value.messages as any[]).find((m: any) => m.id === anchorId)
+    expect(childHit?.content).toBe(editedContent)
+    // Child mutation of the same ancestor ID fails closed (read-only reference, BRANCH-3/4).
+    const childWrite: any = await page.evaluate(
+      async ({ tid, mid, bid }: { tid: string; mid: string; bid: string }) =>
+        await (window as any).api.chatDb.updateMessage({
+          topicId: tid,
+          messageId: mid,
+          updates: { content: 'child-fork-attempt' },
+          branchId: bid
+        }),
+      { tid: topicId, mid: anchorId, bid: branchId }
+    )
+    expect(childWrite?.ok, 'child write of an ancestor reference must fail closed').toBe(false)
+    // Window capability: main carries the owned anchor; child carries only its owned suffix.
+    const mainCap: any = await page.evaluate(
+      async ({ tid }: { tid: string }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId: tid, limit: 10 }),
+      { tid: topicId }
+    )
+    expect(mainCap?.ok).toBe(true)
+    expect(mainCap.value.mutableMessageIds as string[]).toContain(anchorId)
+    const childCap: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: tid,
+          branchId: bid,
+          limit: 10
+        }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(childCap?.ok).toBe(true)
+    expect((childCap.value.mutableMessageIds as string[]).includes(anchorId)).toBe(false)
+    // Stable identity: no prefix copy was created (row count unchanged apart from the branch row).
+    const chatDbPath = getChatDbPath()
+    expect(chatDbPath).not.toBeNull()
+    const countRes = await queryChatDbViaElectronWithRetry(
+      chatDbPath!,
+      `SELECT COUNT(*) AS n FROM messages WHERE topic_id = '${esc(topicId)}'`
+    )
+    expect(countRes?.ok).toBe(true)
+    expect((((countRes as any).rows ?? []) as any[])[0]?.n).toBe(4)
+    // Fixture teardown owns Electron cleanup; no manual close here.
   })
 })

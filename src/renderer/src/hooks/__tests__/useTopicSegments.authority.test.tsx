@@ -66,8 +66,8 @@ function setupStore() {
       messages: [{ id: 'm-window' }, { id: 'm-window-2' }] as any
     })
   )
-  // PROJ-13 (B5): segment writes require a Main-authoritative route
-  // capability — publish the private loaded set for the main route.
+  // BRANCH-12: segment writes require a Main-authoritative route
+  // capability — publish the owned loaded set for the main route.
   store.dispatch(
     newMessagesActions.mergeRouteMutability({
       topicId: 't1',
@@ -137,7 +137,7 @@ describe('useTopicSegments authority catalog', () => {
       reducer: { topicSegments: topicSegmentReducer, messages: messagesReducer as any }
     })
     store.dispatch(newMessagesActions.messagesReceived({ topicId: 't1', messages: [{ id: 'm-early' }] as any }))
-    // PROJ-13 (B5): the created member must be capability-covered.
+    // BRANCH-12: the created member must be capability-covered.
     store.dispatch(
       newMessagesActions.mergeRouteMutability({ topicId: 't1', route: null, mutableMessageIds: ['m-early'] })
     )
@@ -216,7 +216,7 @@ describe('useTopicSegments authority catalog', () => {
       reducer: { topicSegments: topicSegmentReducer, messages: messagesReducer as any }
     })
     store.dispatch(newMessagesActions.messagesReceived({ topicId: 't1', messages: [{ id: 'm-new' }] as any }))
-    // PROJ-13 (B5): the created member must be capability-covered.
+    // BRANCH-12: the created member must be capability-covered.
     store.dispatch(
       newMessagesActions.mergeRouteMutability({ topicId: 't1', route: null, mutableMessageIds: ['m-new'] })
     )

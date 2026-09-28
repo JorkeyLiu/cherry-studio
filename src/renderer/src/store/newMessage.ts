@@ -271,7 +271,7 @@ export const messagesSlice = createSlice({
      * capability in the SAME commit — no intermediate all-immutable frame.
      *
      * Capability semantics: each response's `mutableMessageIds` covers only
-     * that response window's precise owned-unshared subset (Main authority).
+     * that response window's precise owned subset (Main authority, BRANCH-9).
      * Multi-page resident capability is the union of same-route window
      * capabilities, trimmed to the merged resident. Same-route unions (an
      * empty response therefore retains existing resident capability);

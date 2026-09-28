@@ -196,8 +196,8 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void; r
   return { promise, resolve, reject }
 }
 
-// PROJ-13: renderer resend prechecks run against the Main-authoritative
-// window capability. Mirror the loaded projection into a private main-route
+// BRANCH-9/12: renderer resend prechecks run against the Main-authoritative
+// window capability. Mirror the loaded projection into an owned main-route
 // capability so thunks under test reach their DB contracts.
 function syncMainRouteCap(topicId = 'topic-1'): void {
   const ids = [...(storeState.messages.messageIdsByTopic[topicId] ?? [])]

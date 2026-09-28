@@ -160,9 +160,10 @@ type MessageMenubarButtonContext = {
   // locally: edit/delete/regenerate/translate renderers return null; Main
   // rejects.
   isInherited: boolean
-  // PROJ-13: group-level mutability for the loaded answer group this
-  // message belongs to (members + loaded user root, all mutable through
-  // the active route). False hides/disables group mutations
+  // BRANCH-12: group-level mutability for the loaded answer group this
+  // message belongs to (every loaded assistant member owned through the
+  // active route; reading the loaded user root never blocks). False
+  // hides/disables group mutations
   // (mention-model append, useful toggle); Main stays final for
   // window-outside members. True for non-grouped messages.
   isGroupMutable: boolean
@@ -742,10 +743,11 @@ const MessageMenubar: FC<Props> = (props) => {
     selectIsMessageMutable(state, topic.id, message.id, activeBranchIdForMenu)
   )
   const isInherited = !isMutableForMenu
-  // PROJ-13 group capability for assistant answer members: the loaded group
-  // (members + loaded user root) must be fully mutable, otherwise
+  // BRANCH-12 group capability for assistant answer members: every loaded
+  // assistant member must be owned, otherwise
   // group-mutating buttons (mention-model append, useful) hide fail-closed.
-  // Non-assistant messages and assistants without a group key are unaffected.
+  // Reading the loaded user root never blocks. Non-assistant messages and
+  // assistants without a group key are unaffected.
   const isGroupMutableForMenu = useSelector((state: RootState) => {
     try {
       if (message.role !== 'assistant' || typeof message.askId !== 'string' || message.askId.length === 0) return true
@@ -758,7 +760,7 @@ const MessageMenubar: FC<Props> = (props) => {
   })
 
   const onUseful = useCallback(() => {
-    // PROJ-13: group-immutable useful toggles are inert (the button hides,
+    // BRANCH-12: non-owned group useful toggles are inert (the button hides,
     // this is defense-in-depth for keyboard/programmatic callers).
     if (!isGroupMutableForMenu) return
     onUpdateUseful?.(message.id)
@@ -1027,10 +1029,10 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     if (!isAssistantMessage) {
       return null
     }
-    // PROJ-13 (A1): appending a multi-model answer joins the existing
-    // answer group — hide when any loaded group member (or its user root)
-    // is non-private through the active route. Main join-group guard stays
-    // final for window-outside members.
+    // BRANCH-12: appending a multi-model answer creates an owned suffix row —
+    // hide when any loaded assistant member is non-owned through the active
+    // route. Reading the user root never blocks. Main stays final for
+    // window-outside members.
     if (!isGroupMutable) {
       return null
     }
@@ -1164,8 +1166,8 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
     if (!isAssistantMessage || !isGrouped) {
       return null
     }
-    // PROJ-13 (A2): the useful toggle clears/sets the whole group
-    // atomically — hide when the loaded group is not fully private.
+    // BRANCH-12: the useful toggle clears/sets the whole group
+    // atomically — hide when any loaded assistant member is non-owned.
     if (!isGroupMutable) {
       return null
     }

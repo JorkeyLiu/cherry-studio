@@ -3,8 +3,9 @@
  *
  * The menubar derives `isInherited = !isMutable` from the Main-authoritative
  * window capability (`selectIsMessageMutable`) — never from branchId guessing.
- * Owned-unshared rows show edit/delete; inherited and shared-descendant rows
- * hide them; main-null resolves correctly; unknown capability fails closed.
+ * Owned rows show edit/delete even when referenced by live descendants
+ * (BRANCH-4/9 owner equality only); inherited ancestor references hide them;
+ * main-null resolves correctly; unknown capability fails closed.
  */
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -296,7 +297,7 @@ describe('MessageMenubar capability gating (real component)', () => {
     updateAssistantSettingsMock.mockReset()
   })
 
-  it('owned-unshared user message shows edit/delete', () => {
+  it('owned user message shows edit/delete', () => {
     setFakeState({ activeRoute: 'b1', loadedIds: ['m0', 'c0'], mutableIds: ['c0'], mutableRoute: 'b1' })
     const { unmount } = renderMenubar(makeUserMessage('c0'))
     expect(screen.queryByTestId('msg-edit-btn')).not.toBeNull()
@@ -312,12 +313,18 @@ describe('MessageMenubar capability gating (real component)', () => {
     unmount()
   })
 
-  it('shared-descendant parent message hides edit/delete on the parent route', () => {
-    // Parent route active; m1 is parent-owned but covered by a live child prefix.
-    setFakeState({ activeRoute: null, loadedIds: ['m0', 'm1', 'm2'], mutableIds: ['m2'], mutableRoute: null })
+  it('referenced owner message keeps edit/delete on the owner route (BRANCH-4/9)', () => {
+    // Parent route active; m1 is parent-owned and referenced by a live child.
+    // Owner equality only: referenced owned rows stay mutable.
+    setFakeState({
+      activeRoute: null,
+      loadedIds: ['m0', 'm1', 'm2'],
+      mutableIds: ['m0', 'm1', 'm2'],
+      mutableRoute: null
+    })
     const { unmount } = renderMenubar(makeUserMessage('m1'))
-    expect(screen.queryByTestId('msg-edit-btn')).toBeNull()
-    expect(screen.queryByTestId('message-delete-button')).toBeNull()
+    expect(screen.queryByTestId('msg-edit-btn')).not.toBeNull()
+    expect(screen.queryByTestId('message-delete-button')).not.toBeNull()
     unmount()
   })
 
@@ -337,7 +344,7 @@ describe('MessageMenubar capability gating (real component)', () => {
     unmount()
   })
 
-  it('private answer group shows mention-model and useful', () => {
+  it('owned answer group shows mention-model and useful', () => {
     const entities: Record<string, Message> = {
       u1: makeUserMessage('u1'),
       a1: makeAssistantMessage('a1', 'u1'),
@@ -356,13 +363,13 @@ describe('MessageMenubar capability gating (real component)', () => {
     unmount()
   })
 
-  it('shared answer group hides mention-model and useful', () => {
+  it('non-owned answer group hides mention-model and useful', () => {
     const entities: Record<string, Message> = {
       u1: makeUserMessage('u1'),
       a1: makeAssistantMessage('a1', 'u1'),
       a2: makeAssistantMessage('a2', 'u1')
     }
-    // a2 is shared (absent from the capability): the whole group is immutable.
+    // a2 is non-owned through this route (absent from the capability): the whole group is immutable.
     setFakeState({
       activeRoute: null,
       loadedIds: ['u1', 'a1', 'a2'],

@@ -1,13 +1,14 @@
 /**
- * PROJ-13 answer-group thunk prechecks (group-level, never selected-ID-only).
+ * BRANCH-12 answer-group thunk prechecks (group-level, never selected-ID-only).
  *
- * - selectAnswer / selectUseful with a private selected ID but a SHARED
- *   non-selected group member (or shared user root) reject BEFORE any IPC
- *   call and dispatch nothing.
- * - Fully private groups call Main exactly once and commit the loaded
+ * - selectAnswer / selectUseful with an owned selected ID but a NON-owned
+ *   non-selected group member reject BEFORE any IPC call and dispatch
+ *   nothing. A non-owned (or capability-absent) user root never blocks —
+ *   only actually-written assistant members gate the UI.
+ * - Fully owned groups call Main exactly once and commit the loaded
  *   intersection only.
- * - appendAssistantResponse with a shared target group returns early with
- *   zero insert calls (the Main join-group guard stays final).
+ * - appendAssistantResponse with a non-owned target group returns early with
+ *   zero insert calls (Main stays final for window-outside members).
  */
 import type { Message } from '@renderer/types/newMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -108,8 +109,8 @@ describe('answer-group thunk prechecks', () => {
     ;(window as any).toast = { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() }
   })
 
-  it('selectAnswer rejects on a shared NON-selected member with zero IPC and zero dispatch', async () => {
-    // a1 (selected) is private; a2 is shared. Selected-ID-only precheck
+  it('selectAnswer rejects on a non-owned NON-selected member with zero IPC and zero dispatch', async () => {
+    // a1 (selected) is owned; a2 is non-owned. Selected-ID-only precheck
     // would pass — the group precheck must fail closed.
     setGroupState({ mutableIds: ['u1', 'a1'] })
     const { selectAnswerMessageThunk } = await import('../messageThunk')
@@ -119,16 +120,22 @@ describe('answer-group thunk prechecks', () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
-  it('selectAnswer rejects on a shared user root with zero IPC', async () => {
+  it('selectAnswer proceeds when only the user root is capability-absent (BRANCH-12 actual-write-target)', async () => {
     setGroupState({ mutableIds: ['a1', 'a2'] })
+    mocks.selectAnswerMessage.mockResolvedValue({
+      topicId: 'topic-1',
+      askId: 'u1',
+      selectedMessageId: 'a1',
+      messageIds: ['a1', 'a2']
+    })
     const { selectAnswerMessageThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
-    await expect(selectAnswerMessageThunk('topic-1', 'a1')(dispatch, () => storeState)).rejects.toThrow()
-    expect(mocks.selectAnswerMessage).not.toHaveBeenCalled()
-    expect(dispatch).not.toHaveBeenCalled()
+    await selectAnswerMessageThunk('topic-1', 'a1')(dispatch, () => storeState)
+    expect(mocks.selectAnswerMessage).toHaveBeenCalledExactlyOnceWith('topic-1', 'a1', null)
+    expect(dispatch).toHaveBeenCalledTimes(1)
   })
 
-  it('selectAnswer on a private group calls Main once and commits the loaded intersection', async () => {
+  it('selectAnswer on an owned group calls Main once and commits the loaded intersection', async () => {
     setGroupState({ mutableIds: ['u1', 'a1', 'a2'] })
     mocks.selectAnswerMessage.mockResolvedValue({
       topicId: 'topic-1',
@@ -153,7 +160,7 @@ describe('answer-group thunk prechecks', () => {
     expect(dispatch).toHaveBeenCalledTimes(1)
   })
 
-  it('selectUseful rejects on a shared group with zero IPC and zero dispatch', async () => {
+  it('selectUseful rejects on a non-owned group with zero IPC and zero dispatch', async () => {
     setGroupState({ mutableIds: ['u1', 'a1'] })
     const { selectUsefulAnswerThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
@@ -162,7 +169,7 @@ describe('answer-group thunk prechecks', () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
-  it('selectUseful on a private group calls Main once with the toggled-only request', async () => {
+  it('selectUseful on an owned group calls Main once with the toggled-only request', async () => {
     setGroupState({ mutableIds: ['u1', 'a1', 'a2'] })
     mocks.selectUsefulAnswer.mockResolvedValue({
       topicId: 'topic-1',
@@ -177,7 +184,7 @@ describe('answer-group thunk prechecks', () => {
     expect(dispatch).toHaveBeenCalledTimes(1)
   })
 
-  it('appendAssistantResponse on a shared group returns early with zero insert calls', async () => {
+  it('appendAssistantResponse on a non-owned group returns early with zero insert calls', async () => {
     setGroupState({ mutableIds: ['u1', 'a1'] })
     const { appendAssistantResponseThunk } = await import('../messageThunk')
     const dispatch = vi.fn()

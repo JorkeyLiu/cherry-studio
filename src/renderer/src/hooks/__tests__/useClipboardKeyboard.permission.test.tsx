@@ -1,5 +1,5 @@
 /**
- * useClipboardKeyboard entry mapping (PROJ-15 keyboard contract).
+ * useClipboardKeyboard entry mapping (BRANCH-12 keyboard contract).
  *
  * The edit-mode keyboard layer routes strictly:
  * - Meta/Ctrl+C → copy, Meta/Ctrl+X → cut, Meta/Ctrl+V → paste,
