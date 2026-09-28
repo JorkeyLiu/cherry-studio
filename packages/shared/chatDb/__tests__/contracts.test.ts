@@ -3477,20 +3477,121 @@ describe('insert-messages-after-anchor contract (S6.2c-2)', () => {
     ).toThrow(ValidationError)
   })
 
-  it('insert-messages-after-anchor: accepts valid FileCleanupResult result', () => {
+  it('insert-messages-after-anchor: accepts valid authoritative insert result', () => {
     expect(() =>
       validateChatDbResult('chatdb:insert-messages-after-anchor', {
         ok: true,
-        value: { affectedFileIds: [], remainingReferenceCounts: {}, deletedTopicIds: [] }
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          topicId: 't-1',
+          branchId: 'b-1',
+          afterMessageId: 'm-anchor',
+          insertedMessages: [{ id: 'm-n1' }],
+          insertedBlocks: [{ id: 'blk-n1', messageId: 'm-n1' }],
+          insertedMessageIds: ['m-n1'],
+          patchedMessageIds: [],
+          beforeMessageId: 'm-anchor',
+          nextMessageId: 'm-next',
+          mutableMessageIds: ['m-n1']
+        }
       })
     ).not.toThrow()
+  })
+
+  it('insert-messages-after-anchor: accepts empty-insert result with null placement', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:insert-messages-after-anchor', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          topicId: 't-1',
+          branchId: null,
+          afterMessageId: 'm-anchor',
+          insertedMessages: [],
+          insertedBlocks: [],
+          insertedMessageIds: [],
+          patchedMessageIds: ['m-existing'],
+          beforeMessageId: null,
+          nextMessageId: null,
+          mutableMessageIds: []
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('insert-messages-after-anchor: rejects legacy cleanup-only result (canonical fields required)', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:insert-messages-after-anchor', {
+        ok: true,
+        value: { affectedFileIds: [], remainingReferenceCounts: {} }
+      })
+    ).toThrow(ValidationError)
   })
 
   it('insert-messages-after-anchor: rejects result with malformed affectedFileIds', () => {
     expect(() =>
       validateChatDbResult('chatdb:insert-messages-after-anchor', {
         ok: true,
-        value: { affectedFileIds: 'not-array' as any, remainingReferenceCounts: {}, deletedTopicIds: [] }
+        value: {
+          affectedFileIds: 'not-array' as any,
+          remainingReferenceCounts: {},
+          topicId: 't-1',
+          branchId: null,
+          afterMessageId: 'm-anchor',
+          insertedMessages: [],
+          insertedBlocks: [],
+          insertedMessageIds: [],
+          patchedMessageIds: [],
+          beforeMessageId: null,
+          nextMessageId: null,
+          mutableMessageIds: []
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: rejects mutability outside inserted ids', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:insert-messages-after-anchor', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          topicId: 't-1',
+          branchId: null,
+          afterMessageId: 'm-anchor',
+          insertedMessages: [{ id: 'm-n1' }],
+          insertedBlocks: [],
+          insertedMessageIds: ['m-n1'],
+          patchedMessageIds: [],
+          beforeMessageId: 'm-anchor',
+          nextMessageId: null,
+          mutableMessageIds: ['m-other']
+        }
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('insert-messages-after-anchor: rejects patched/inserted overlap', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:insert-messages-after-anchor', {
+        ok: true,
+        value: {
+          affectedFileIds: [],
+          remainingReferenceCounts: {},
+          topicId: 't-1',
+          branchId: null,
+          afterMessageId: 'm-anchor',
+          insertedMessages: [{ id: 'm-n1' }],
+          insertedBlocks: [],
+          insertedMessageIds: ['m-n1'],
+          patchedMessageIds: ['m-n1'],
+          beforeMessageId: 'm-anchor',
+          nextMessageId: null,
+          mutableMessageIds: ['m-n1']
+        }
       })
     ).toThrow(ValidationError)
   })

@@ -161,6 +161,35 @@ interface InsertMessageAtIndexPayload {
 }
 
 /**
+ * Payload for applying a Main-authoritative insert-after-anchor result.
+ *
+ * Single-commit install of canonical inserted messages at the durable
+ * placement plus the same-route mutability delta — no frame ever contains
+ * the new messages without their capability. Placement uses stable
+ * neighbors: splice after `beforeMessageId` when resident, else before
+ * `nextMessageId` when resident, else conservative append (no false exact
+ * position claimed; the authoritative window converges on next fetch).
+ * Route mismatch against the stored resident route is fail-closed (no
+ * order and no capability change). Patched pre-existing rows are never
+ * carried here (they keep durable positions).
+ */
+export interface ApplyInsertedMessagesAfterAnchorPayload {
+  topicId: string
+  /** Addressed route key (null = main). Must match the request route. */
+  route: string | null
+  /** Canonical post-write inserted messages (request/insert order). */
+  messages: Message[]
+  /** Post-insert effective predecessor of the inserted run (null at head). */
+  beforeMessageId: string | null
+  /** Post-insert effective successor of the inserted run (null at tail). */
+  nextMessageId: string | null
+  /** Stable IDs of truly inserted messages (insert order). */
+  insertedMessageIds: string[]
+  /** Main-authoritative mutability delta (subset of insertedMessageIds). */
+  mutableMessageIds: string[]
+}
+
+/**
  * Answer-group authority reorder projection commit (ids-only).
  *
  * Permutes ONLY the existing loaded slots for a topic that belong to the
@@ -400,6 +429,71 @@ export const messagesSlice = createSlice({
       if (!(topicId in state.fulfilledByTopic)) {
         state.fulfilledByTopic[topicId] = false
       }
+    },
+    /**
+     * Apply a Main-authoritative insert-after-anchor result atomically.
+     *
+     * Order + capability commit in ONE reducer action: canonical inserted
+     * entities are upserted, the resident order splices the inserted run at
+     * the authoritative stable-neighbor position, and the same-route
+     * mutability delta unions in the same commit. Route mismatch against the
+     * stored resident route fails closed with zero change. Neither-neighbor-
+     * resident falls back to conservative append (immediate visibility
+     * without a false exact-position claim).
+     */
+    applyInsertedMessagesAfterAnchor(state, action: PayloadAction<ApplyInsertedMessagesAfterAnchorPayload>) {
+      const { topicId, route, messages, beforeMessageId, nextMessageId, insertedMessageIds, mutableMessageIds } =
+        action.payload
+      if (!Array.isArray(insertedMessageIds) || insertedMessageIds.length === 0) return
+      if (!Array.isArray(messages) || messages.length === 0) return
+      // Fail-closed on stale/route-mismatched resident capability: a stored
+      // route for another route must never authorize or order this insert.
+      const hasStoredRoute = Object.prototype.hasOwnProperty.call(state.mutableRouteByTopic, topicId)
+      if (hasStoredRoute && (state.mutableRouteByTopic[topicId] ?? null) !== route) return
+      // Upsert canonical entities first (ID-keyed; order set below).
+      // @ts-ignore ts-2589 false positive
+      messagesAdapter.upsertMany(state, messages)
+      const oldIds = state.messageIdsByTopic[topicId] ?? []
+      const insertedSet = new Set(insertedMessageIds)
+      const baseIds = oldIds.filter((id) => !insertedSet.has(id))
+      let insertAt: number | null = null
+      if (typeof beforeMessageId === 'string' && beforeMessageId.length > 0) {
+        const beforeIdx = baseIds.indexOf(beforeMessageId)
+        if (beforeIdx !== -1) insertAt = beforeIdx + 1
+      }
+      if (insertAt === null && typeof nextMessageId === 'string' && nextMessageId.length > 0) {
+        const nextIdx = baseIds.indexOf(nextMessageId)
+        if (nextIdx !== -1) insertAt = nextIdx
+      }
+      if (insertAt === null) {
+        // Conservative loaded-projection fallback: neither authoritative
+        // neighbor is resident, so append for immediate visibility without
+        // claiming an exact durable position.
+        insertAt = baseIds.length
+      }
+      const safeAt = Math.max(0, Math.min(insertAt, baseIds.length))
+      state.messageIdsByTopic[topicId] = [...baseIds.slice(0, safeAt), ...insertedMessageIds, ...baseIds.slice(safeAt)]
+      if (!(topicId in state.loadingByTopic)) {
+        state.loadingByTopic[topicId] = false
+      }
+      if (!(topicId in state.fulfilledByTopic)) {
+        state.fulfilledByTopic[topicId] = false
+      }
+      // Same-route capability delta, trimmed to the merged resident.
+      const nextSet = new Set(state.messageIdsByTopic[topicId])
+      const incoming = [...new Set((mutableMessageIds ?? []).filter((id) => typeof id === 'string' && id.length > 0))]
+        .filter((id) => insertedSet.has(id))
+        .filter((id) => nextSet.has(id))
+      const storedHasCapability = Object.prototype.hasOwnProperty.call(state.mutableMessageIdsByTopic, topicId)
+      if (!hasStoredRoute && !storedHasCapability) {
+        state.mutableRouteByTopic[topicId] = route
+        state.mutableMessageIdsByTopic[topicId] = incoming
+        return
+      }
+      const resident = new Set((state.mutableMessageIdsByTopic[topicId] ?? []).filter((id) => nextSet.has(id)))
+      for (const id of incoming) resident.add(id)
+      state.mutableRouteByTopic[topicId] = route
+      state.mutableMessageIdsByTopic[topicId] = [...resident]
     },
     updateMessage(
       state,

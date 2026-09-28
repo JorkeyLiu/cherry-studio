@@ -1479,28 +1479,35 @@ export const appendAssistantResponseThunk =
         traceId: traceId
       })
 
-      // 3. Local projection placement only (window-relative). Authority
-      // position is resolved in Main from the stable anchor below, so this
-      // loaded index must never reach persistence.
-      const currentTopicMessageIds = getState().messages.messageIdsByTopic[topicId] || []
-      const existingMessageIndex = currentTopicMessageIds.findIndex((id) => id === existingAssistantMessageId)
-      const insertAtIndex = existingMessageIndex !== -1 ? existingMessageIndex + 1 : currentTopicMessageIds.length
-
-      // 4. Persist the stub via the stable-ID authority capability. Main
-      // resolves insertion after the anchor/contiguous assistant group tail
-      // in one transaction (cold-window safe: no loaded-relative DB index).
-      await dbService.insertMessagesAfterAnchor(
+      // 3. Persist the stub via the stable-ID authority capability. Main
+      // resolves authoritative placement in one transaction (owned anchor:
+      // group tail; inherited branch anchor: suffix start — cold-window
+      // safe: no loaded-relative DB index). The authoritative response
+      // carries canonical wire + stable neighbors + mutability delta.
+      const appendRoute = activeRouteOf(getState, topicId)
+      const appendResult = await dbService.insertMessagesAfterAnchor(
         topicId,
         existingAssistantMessageId,
         [{ message: newAssistantMessageStub as unknown as JsonObject, blocks: [] }],
-        activeRouteOf(getState, topicId)
+        appendRoute
       )
+      if ((appendResult.branchId ?? null) !== appendRoute) {
+        logger.error(`[appendAssistantResponseThunk] Stale route response; failing closed without publication.`)
+        return
+      }
 
+      if (appendResult.insertedBlocks.length > 0) {
+        dispatch(withClosureTopics(upsertManyBlocks(appendResult.insertedBlocks as unknown as MessageBlock[]), topicId))
+      }
       dispatch(
-        newMessagesActions.insertMessageAtIndex({
+        newMessagesActions.applyInsertedMessagesAfterAnchor({
           topicId,
-          message: newAssistantMessageStub,
-          index: insertAtIndex
+          route: appendRoute,
+          messages: appendResult.insertedMessages as unknown as Message[],
+          beforeMessageId: appendResult.beforeMessageId,
+          nextMessageId: appendResult.nextMessageId,
+          insertedMessageIds: appendResult.insertedMessageIds,
+          mutableMessageIds: appendResult.mutableMessageIds
         })
       )
 
@@ -1613,8 +1620,13 @@ export const insertMessagesThunk =
     }
 
     try {
-      // Primary path: Main-authoritative batch insert after stable anchor (no renderer index)
-      await dbService.insertMessagesAfterAnchor(
+      // Primary path: Main-authoritative batch insert after stable anchor (no renderer index).
+      // Main resolves durable placement (owned anchor: group tail; inherited
+      // branch anchor: suffix start) and returns canonical wire + stable
+      // neighbors + mutability delta. The renderer applies that authority
+      // verbatim — never local splices, never branchId-guessed capability.
+      const insertRoute = activeRouteOf(getState, topicId)
+      const insertResult = await dbService.insertMessagesAfterAnchor(
         topicId,
         afterMessageId,
         [
@@ -1627,48 +1639,34 @@ export const insertMessagesThunk =
             blocks: [assistantBlock as unknown as JsonObject]
           }
         ],
-        activeRouteOf(getState, topicId)
+        insertRoute
       )
-
-      // Publish to Redux only after Main success (fail closed, no partial)
-      dispatch(withClosureTopics(upsertOneBlock(userBlock), topicId))
-      dispatch(withClosureTopics(upsertOneBlock(assistantBlock), topicId))
-
-      // Local projection insertion: best-effort window-relative placement for immediate UI.
-      // Authority order is already correct in Main; this projection step does not affect authority.
-      const state = getState()
-      // Explicit provisional loaded fallback for local placement only.
-      const provisionalLoadedMessagesForInsertion = (selectLoadedMessagesForTopic(state, topicId) ?? []) as Message[]
-      const topicMessages = provisionalLoadedMessagesForInsertion
-      let insertIndex: number | null = null
-      if (topicMessages && topicMessages.length > 0) {
-        const afterIdx = topicMessages.findIndex((msg) => msg.id === afterMessageId)
-        if (afterIdx !== -1) {
-          let tail = afterIdx
-          const afterMsg = topicMessages[afterIdx]
-          if (afterMsg?.role === 'assistant' && afterMsg.askId) {
-            for (let i = afterIdx + 1; i < topicMessages.length; i++) {
-              if (topicMessages[i].role === 'assistant' && topicMessages[i].askId === afterMsg.askId) {
-                tail = i
-              } else {
-                break
-              }
-            }
-          }
-          insertIndex = tail + 1
-        }
+      if ((insertResult.branchId ?? null) !== insertRoute) {
+        logger.error(`[insertMessagesThunk] Stale route response; failing closed without publication.`)
+        throw new Error('Stale route response for insertMessagesAfterAnchor')
       }
-      if (insertIndex !== null) {
-        dispatch(newMessagesActions.insertMessageAtIndex({ topicId, message: userMessage, index: insertIndex }))
-        dispatch(
-          newMessagesActions.insertMessageAtIndex({ topicId, message: assistantMessage, index: insertIndex + 1 })
-        )
+
+      // Publish blocks first so message entities never reference missing blocks.
+      if (insertResult.insertedBlocks.length > 0) {
+        dispatch(withClosureTopics(upsertManyBlocks(insertResult.insertedBlocks as unknown as MessageBlock[]), topicId))
       } else {
-        // Anchor outside current window/projection: append at end for immediate local visibility;
-        // authoritative window will converge on next fetch/window read.
-        dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
-        dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
+        dispatch(withClosureTopics(upsertOneBlock(userBlock), topicId))
+        dispatch(withClosureTopics(upsertOneBlock(assistantBlock), topicId))
       }
+
+      // Single-commit authoritative order + capability (no intermediate
+      // capability-less frame). Patched pre-existing rows are not reordered.
+      dispatch(
+        newMessagesActions.applyInsertedMessagesAfterAnchor({
+          topicId,
+          route: insertRoute,
+          messages: insertResult.insertedMessages as unknown as Message[],
+          beforeMessageId: insertResult.beforeMessageId,
+          nextMessageId: insertResult.nextMessageId,
+          insertedMessageIds: insertResult.insertedMessageIds,
+          mutableMessageIds: insertResult.mutableMessageIds
+        })
+      )
 
       logger.info(`[insertMessagesThunk] Inserted messages after ${afterMessageId} via Main-authoritative anchor`)
     } catch (error) {

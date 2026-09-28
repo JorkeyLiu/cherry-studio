@@ -5,6 +5,8 @@
  * - thunk sends stable afterMessageId, no insertIndex/sortOrder numeric index to Main
  * - calls insertMessagesAfterAnchor once with batch entries (user+assistant)
  * - fails closed: no Redux dispatch if Main fails
+ * - consumes the authoritative response (canonical wire + placement +
+ *   mutability delta) via one atomic apply action, never local splices
  * - dispatches updateTopicUpdatedAt exactly once via datasource (not double dispatch)
  * - handles anchor outside projection (no throw)
  */
@@ -16,10 +18,35 @@ const { mocks } = vi.hoisted(() => ({
     appendMessage: vi.fn(),
     dispatch: vi.fn(),
     upsertOneBlock: vi.fn((p: unknown) => ({ type: 'upsertOneBlock', payload: p })),
+    upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'upsertManyBlocks', payload: p })),
+    applyInserted: vi.fn((p: unknown) => ({ type: 'applyInsertedMessagesAfterAnchor', payload: p })),
     insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'insertMessageAtIndex', payload: p })),
     addMessage: vi.fn((p: unknown) => ({ type: 'addMessage', payload: p }))
   }
 }))
+
+function authoritativeResult() {
+  return {
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    topicId: 't-1',
+    branchId: null,
+    afterMessageId: 'm-anchor',
+    insertedMessages: [
+      { id: 'm-u', topicId: 't-1', role: 'user', blocks: ['b-u'] },
+      { id: 'm-a', topicId: 't-1', role: 'assistant', blocks: ['b-a'] }
+    ],
+    insertedBlocks: [
+      { id: 'b-u', messageId: 'm-u' },
+      { id: 'b-a', messageId: 'm-a' }
+    ],
+    insertedMessageIds: ['m-u', 'm-a'],
+    patchedMessageIds: [],
+    beforeMessageId: 'm-anchor',
+    nextMessageId: 'm-next',
+    mutableMessageIds: ['m-u', 'm-a']
+  }
+}
 
 vi.mock('@logger', () => ({
   loggerService: {
@@ -41,7 +68,7 @@ vi.mock('@renderer/store/messageBlock', async (importOriginal) => {
   return {
     ...actual,
     upsertOneBlock: mocks.upsertOneBlock,
-    upsertManyBlocks: vi.fn((p: any) => ({ type: 'upsertManyBlocks', payload: p }))
+    upsertManyBlocks: mocks.upsertManyBlocks
   }
 })
 vi.mock('@renderer/store/newMessage', async (importOriginal) => {
@@ -50,6 +77,7 @@ vi.mock('@renderer/store/newMessage', async (importOriginal) => {
     ...actual,
     newMessagesActions: {
       ...actual.newMessagesActions,
+      applyInsertedMessagesAfterAnchor: mocks.applyInserted,
       insertMessageAtIndex: mocks.insertMessageAtIndex,
       addMessage: mocks.addMessage
     },
@@ -68,7 +96,7 @@ vi.mock('i18next', async (importOriginal) => {
 describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.insertMessagesAfterAnchor.mockResolvedValue({ affectedFileIds: [], remainingReferenceCounts: {} })
+    mocks.insertMessagesAfterAnchor.mockResolvedValue(authoritativeResult())
   })
 
   it('sends stable afterMessageId to Main with batch entries, no numeric index', async () => {
@@ -124,11 +152,25 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
         messageBlocks: { entities: {} }
       })) as any
     )
-    // Two blocks upserted
-    expect(mocks.upsertOneBlock).toHaveBeenCalledTimes(2)
-    // Two messages inserted (either insertMessageAtIndex or addMessage)
-    const totalMsgDispatches = mocks.insertMessageAtIndex.mock.calls.length + mocks.addMessage.mock.calls.length
-    expect(totalMsgDispatches).toBe(2)
+    // Canonical blocks published via one batch action (no local stub guessing).
+    expect(mocks.upsertManyBlocks).toHaveBeenCalledOnce()
+    // Single atomic order + capability action with authoritative placement.
+    expect(mocks.applyInserted).toHaveBeenCalledOnce()
+    const payload = mocks.applyInserted.mock.calls[0][0] as {
+      topicId: string
+      insertedMessageIds: string[]
+      beforeMessageId: string | null
+      nextMessageId: string | null
+      mutableMessageIds: string[]
+    }
+    expect(payload.topicId).toBe('t-1')
+    expect(payload.insertedMessageIds).toEqual(['m-u', 'm-a'])
+    expect(payload.beforeMessageId).toBe('m-anchor')
+    expect(payload.nextMessageId).toBe('m-next')
+    expect(payload.mutableMessageIds).toEqual(['m-u', 'm-a'])
+    // No local splice guessing remains.
+    expect(mocks.insertMessageAtIndex).not.toHaveBeenCalled()
+    expect(mocks.addMessage).not.toHaveBeenCalled()
     // datasource dispatches updateTopicUpdatedAt exactly once; thunk must not dispatch it again
     const src = await import('node:fs').then((fs) =>
       fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')
@@ -139,9 +181,12 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     )
     // Should not contain explicit updateTopicUpdatedAt dispatch in primary thunk
     expect(primaryThunk).not.toContain('updateTopicUpdatedAt')
+    // Must not invent order/capability locally.
+    expect(primaryThunk).not.toContain('insertMessageAtIndex')
+    expect(primaryThunk).not.toMatch(/mutableMessageIdsByTopic/)
   })
 
-  it('handles anchor outside projection without throwing (appends)', async () => {
+  it('handles anchor outside projection without throwing (applies authority)', async () => {
     // Mock selectLoadedMessagesForTopic to return empty / not containing anchor
     const mod = await import('@renderer/store/newMessage')
     const selectMock = (mod as any).selectLoadedMessagesForTopic
@@ -151,7 +196,8 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     const thunk = insertMessagesThunk('t-1', 'm-anchor', 'assistant-1')
     await thunk(mocks.dispatch as any, (() => ({ messages: {}, messageBlocks: {} })) as any)
     expect(mocks.insertMessagesAfterAnchor).toHaveBeenCalledOnce()
-    // Should have dispatched addMessage fallback
+    // Authoritative apply still dispatched (reducer owns the conservative fallback).
+    expect(mocks.applyInserted).toHaveBeenCalledOnce()
     expect(mocks.dispatch).toHaveBeenCalled()
   })
 

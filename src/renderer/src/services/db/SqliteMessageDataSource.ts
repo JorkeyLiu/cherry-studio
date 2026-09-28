@@ -1029,11 +1029,11 @@ export class SqliteMessageDataSource implements MessageDataSource {
   // ============ S6.2c-2: Insert after stable anchor (additive, Main-authoritative) ============
 
   /**
-   * Insert entries after a stable anchor (group-tail aware) in ONE Main transaction.
+   * Insert entries after a stable anchor in ONE Main transaction.
    *
-   * Validates topic/anchor membership in Main, resolves ordered authority order
-   * (sort_order ASC, id ASC), advances past contiguous assistant group tail,
-   * then inserts entries atomically with existing dense-order logic.
+   * Owned anchor: group-tail aware. Inherited branch anchor: durable insert
+   * at the START of the owned suffix. Returns the authoritative insert
+   * response (canonical wire + stable neighbors + mutability delta).
    * No numeric insertIndex in request; failures are closed with no partial writes.
    * Dispatches updateTopicUpdatedAt exactly once after success.
    */
@@ -1042,7 +1042,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     afterMessageId: string,
     entries: MessageBlockEntry[],
     branchId?: string | null
-  ): Promise<FileCleanupResult> {
+  ): Promise<InsertMessagesAfterAnchorResponse> {
     if (!this.api.insertMessagesAfterAnchor) {
       throw new Error('ChatDb API unavailable: insertMessagesAfterAnchor not exposed')
     }

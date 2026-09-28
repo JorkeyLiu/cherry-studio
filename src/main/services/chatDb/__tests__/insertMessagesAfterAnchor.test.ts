@@ -10,7 +10,7 @@ vi.unmock('node:path')
 vi.unmock('node:crypto')
 vi.mock('@main/config', () => ({ DATA_PATH: '/mock/data' }))
 
-import { isSuccess } from '@shared/chatDb'
+import { isSuccess, validateChatDbResult } from '@shared/chatDb'
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 
@@ -351,5 +351,116 @@ describe('insertMessagesAfterAnchor — S6.2c-2 Main-authoritative anchor insert
     expect(order).toEqual([m0, newId, m1])
     const updated = fetched.messages.find((m: any) => m.id === m1) as any
     expect(updated.content).toBe('updated1')
+    // Patched rows are distinguished from truly inserted rows in the response.
+    const value = okValue(res) as any
+    expect(value.insertedMessageIds).toEqual([newId])
+    expect(value.patchedMessageIds).toEqual([m1])
+    expect(value.mutableMessageIds).toEqual([newId])
+  })
+
+  it('inherited branch anchor inserts at owned suffix start with authoritative placement + capability', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    const m2 = `m2-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0, role: 'user' }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1, role: 'user' }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m2, role: 'user' }) as any, [])
+    const branchId = (okValue(agg.createBranch(topic, null, m1, 'B1')).branch as { id: string }).id
+    const c0 = `c0-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: c0, role: 'user' }) as any, [], undefined, undefined, {
+      branchId
+    })
+    const n1 = `n1-${uid()}`
+    const n2 = `n2-${uid()}`
+    const res = agg.insertMessagesAfterAnchor(
+      topic,
+      m0,
+      [
+        { message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] },
+        { message: makeMessageJson(topic, { id: n2, role: 'user' }) as any, blocks: [] }
+      ],
+      branchId
+    )
+    expect(res.ok).toBe(true)
+    const value = okValue(res) as any
+    // Truly inserted rows are distinguished; capability delta is authoritative.
+    expect(value.insertedMessageIds).toEqual([n1, n2])
+    expect(value.patchedMessageIds).toEqual([])
+    expect(value.mutableMessageIds).toEqual([n1, n2])
+    expect(value.branchId).toBe(branchId)
+    expect(value.afterMessageId).toBe(m0)
+    // Owner stamping: canonical wire carries the branch owner.
+    for (const wire of value.insertedMessages as Array<Record<string, unknown>>) {
+      expect(wire.branchId).toBe(branchId)
+    }
+    // Stable neighbor placement: predecessor is the branch anchor (last
+    // prefix), successor is the previous suffix head.
+    expect(value.beforeMessageId).toBe(m1)
+    expect(value.nextMessageId).toBe(c0)
+    // Durable effective order: prefix through branch anchor, then new rows,
+    // then previous suffix.
+    const effective = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: topic, branchId, limit: 20 }))
+    expect(effective.messages.map((m: any) => m.id)).toEqual([m0, m1, n1, n2, c0])
+    // Main-authoritative window capability carries the new owned suffix rows.
+    expect(new Set(effective.mutableMessageIds)).toEqual(new Set([c0, n1, n2]))
+  })
+
+  it('F-1: duplicate fresh ID in same batch stays inserted-only with disjoint validated result', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const mExist = `mexist-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0 }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: mExist, content: 'orig' }) as any, [])
+    const dupId = `dup-${uid()}`
+    const first = makeMessageJson(topic, { id: dupId, content: 'v1' })
+    const second = makeMessageJson(topic, { id: dupId, content: 'v2-last-writer' })
+    const patchedExist = makeMessageJson(topic, { id: mExist, content: 'patched' })
+    const res = agg.insertMessagesAfterAnchor(topic, m0, [
+      { message: first as any, blocks: [] },
+      { message: second as any, blocks: [] },
+      { message: patchedExist as any, blocks: [] }
+    ])
+    expect(res.ok).toBe(true)
+    const value = okValue(res) as any
+    // Durable identity is inserted: duplicate fresh ID reports once as inserted, never as patched.
+    expect(value.insertedMessageIds).toEqual([dupId])
+    // Legitimate DB-existing patch is preserved and disjoint from inserted.
+    expect(value.patchedMessageIds).toEqual([mExist])
+    expect(value.mutableMessageIds).toEqual([dupId])
+    // Committed response is self-consistent: shared validator cannot fail on overlap after commit.
+    expect(() => validateChatDbResult('chatdb:insert-messages-after-anchor', res)).not.toThrow()
+    // No partial/ambiguous durable state: single duplicate row with last-writer content.
+    const fetched = okValue(agg.fetchMessages(topic))
+    const order = fetched.messages.map((m: any) => m.id)
+    expect(order).toEqual([m0, dupId, mExist])
+    expect((fetched.messages.find((m: any) => m.id === dupId) as any).content).toBe('v2-last-writer')
+    expect((fetched.messages.find((m: any) => m.id === mExist) as any).content).toBe('patched')
+  })
+
+  it('owned branch anchor keeps group-tail behavior after suffix-start fix', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0, role: 'user' }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1, role: 'user' }) as any, [])
+    const branchId = (okValue(agg.createBranch(topic, null, m0, 'B1')).branch as { id: string }).id
+    const c0 = `c0-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: c0, role: 'user' }) as any, [], undefined, undefined, {
+      branchId
+    })
+    const n1 = `n1-${uid()}`
+    const res = agg.insertMessagesAfterAnchor(
+      topic,
+      c0,
+      [{ message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] }],
+      branchId
+    )
+    expect(res.ok).toBe(true)
+    const value = okValue(res) as any
+    expect(value.beforeMessageId).toBe(c0)
+    expect(value.nextMessageId).toBeNull()
+    const effective = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: topic, branchId, limit: 20 }))
+    expect(effective.messages.map((m: any) => m.id)).toEqual([m0, c0, n1])
   })
 })

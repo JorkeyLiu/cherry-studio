@@ -43,6 +43,7 @@ import type {
   FileCleanupResult,
   FileReferenceWire,
   HardDeleteTopicResponse,
+  InsertMessagesAfterAnchorResponse,
   JsonObject,
   JsonValue,
   MessageBlockEntry,
@@ -2551,26 +2552,32 @@ export class ChatDbAggregateService {
    * S6.2c-2: Main-authoritative insert after stable anchor.
    *
    * One atomic Main SQLite transaction:
-   * - Validates topic exists, anchor belongs to topic.
-   * - Resolves ordered authority messages and group-tail index atomically.
+   * - Validates topic exists, anchor belongs to the addressed effective route.
+   * - Owned anchor: group-tail index inside the owner rows (established behavior).
+   * - Inherited (ancestor-reference) anchor on a branch route: durable insert
+   *   at the START of the branch owned suffix (index 0), so the effective
+   *   order is ancestor prefix through branch anchor, then new rows, then the
+   *   previous suffix. Main-route inherited anchors cannot occur (main has no
+   *   ancestors); main inserts keep owned group-tail behavior.
    * - Inserts supplied entries with existing dense-order repository logic
-   *   (batch insertManyAt, existing IDs preserve position).
+   *   (batch insertManyAt, existing IDs preserve position via patch-only).
    * - Upserts blocks + syncs file references in original entry order.
    * - Fail closed: validation/read/write errors throw typed envelope, no partial publication.
-   * - Returns FileCleanupResult (empty for pure inserts; prior refs harvested for existing IDs).
+   * - Returns the authoritative insert response: cleanup fields plus canonical
+   *   inserted wire, stable neighbor placement, and mutability delta.
    */
   insertMessagesAfterAnchor(
     topicId: string,
     afterMessageId: string,
     entries: Array<{ message: JsonObject; blocks: JsonObject[] }>,
     branchId?: string | null
-  ): ChatDbResult<FileCleanupResult> {
+  ): ChatDbResult<InsertMessagesAfterAnchorResponse> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(branchId)
       const ctx = this.syncCtxForTopic('insertMessagesAfterAnchor', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
-      let result: FileCleanupResult
+      let result: InsertMessagesAfterAnchorResponse
       try {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
@@ -2581,10 +2588,12 @@ export class ChatDbAggregateService {
           if (!topic.found) {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
-          // Validate anchor membership inside the addressed route (an
-          // inherited anchor is valid: new rows land in the route owner's
-          // suffix). Ordered authority snapshot is the route owner's rows —
-          // ordering never crosses route owners.
+          // Validate anchor membership inside the addressed effective route.
+          // An inherited ancestor reference is valid on a branch route: new
+          // rows land at the START of the route owner's suffix (BRANCH-11
+          // effective order: prefix through branch anchor, then owned
+          // suffix). Ordered authority for owner sequencing is the route
+          // owner's rows — ordering never crosses route owners.
           const routeMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
           const anchorData = routeMessages.find((m) => m.id === afterMessageId)
           if (!anchorData) {
@@ -2592,9 +2601,7 @@ export class ChatDbAggregateService {
           }
           const ownerMessages = repos.messages.listByTopic(topicId, route)
           const anchorOwned = (anchorData.branchId ?? null) === route
-          const resolvedInsertIndex = anchorOwned
-            ? this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData)
-            : ownerMessages.length
+          const resolvedInsertIndex = anchorOwned ? this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData) : 0
 
           // BRANCH-4/11: genuinely new suffixes never require existing-group
           // mutability. Reading an ancestor root/group to resolve placement
@@ -2892,7 +2899,51 @@ export class ChatDbAggregateService {
           }
 
           const uniqueAffectedIds = [...new Set(allAffectedFileIds)].sort()
-          return buildFileCleanupResult(repos, uniqueAffectedIds)
+          const cleanup = buildFileCleanupResult(repos, uniqueAffectedIds)
+          // Canonical authoritative insert payload: truly inserted rows only.
+          // Patched pre-existing rows keep their durable positions (patch-only
+          // above) and are reported separately so the renderer never reorders
+          // them as inserts.
+          const insertedIds = newMessages.map((m) => m.id)
+          // F-1: patched reports DB-pre-existing rows only. An in-request
+          // duplicate fresh ID is written as insert-then-patch (established
+          // last-writer path above) but its durable identity is inserted, so
+          // it must not also appear in patched — otherwise the committed
+          // response fails disjoint result validation after the commit.
+          const patchedIds = [...new Set(existingPlans.map((p) => p.id).filter((id) => !newMessageIds.has(id)))]
+          const durableBlocks = insertedIds.flatMap((mid) => repos.blocks.listByMessage(mid))
+          const messagesWithBlocks =
+            insertedIds.length > 0
+              ? reconstructMessageBlockRelations(messagesToWire(newMessages), blocksToWire(durableBlocks))
+              : []
+          // Stable neighbor placement in post-insert effective order. Numeric
+          // effective indexes never cross the wire; the renderer splices after
+          // beforeMessageId (when resident) or before nextMessageId.
+          let beforeMessageId: string | null = null
+          let nextMessageId: string | null = null
+          if (insertedIds.length > 0) {
+            const effective = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+            const firstIdx = effective.findIndex((m) => m.id === insertedIds[0])
+            const lastIdx = effective.findIndex((m) => m.id === insertedIds[insertedIds.length - 1])
+            if (firstIdx === -1 || lastIdx === -1 || lastIdx - firstIdx + 1 !== insertedIds.length) {
+              throw new Error('insertMessagesAfterAnchor inserted run is not contiguous in effective order')
+            }
+            beforeMessageId = firstIdx > 0 ? effective[firstIdx - 1].id : null
+            nextMessageId = lastIdx + 1 < effective.length ? effective[lastIdx + 1].id : null
+          }
+          return {
+            ...cleanup,
+            topicId,
+            branchId: route,
+            afterMessageId,
+            insertedMessages: messagesWithBlocks,
+            insertedBlocks: blocksToWire(durableBlocks),
+            insertedMessageIds: insertedIds,
+            patchedMessageIds: patchedIds,
+            beforeMessageId,
+            nextMessageId,
+            mutableMessageIds: [...insertedIds]
+          }
         })
       } catch (e) {
         this.recordSyncTxFailure('insertMessagesAfterAnchor', ctx, e)

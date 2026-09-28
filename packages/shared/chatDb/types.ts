@@ -1207,10 +1207,16 @@ export interface DeleteBranchResponse extends FileCleanupResult {
  * @see IpcChannel.ChatDb_InsertMessagesAfterAnchor — Main-authoritative insert after stable anchor
  *
  * One atomic Main transaction:
- * - Validates topic/anchor membership (anchor must belong to topic).
+ * - Validates topic exists, anchor belongs to the addressed effective route.
+ * - Owned anchor: group-tail index inside the route owner rows (established behavior).
+ * - Inherited (ancestor-reference) anchor on a branch route: durable insert
+ *   at the START of the branch owned suffix (index 0), so the effective
+ *   order is ancestor prefix through branch anchor, then new rows, then the
+ *   previous suffix. Main-route inherited anchors cannot occur (main has no
+ *   ancestors); main inserts keep owned group-tail behavior.
  * - Resolves ordered authority messages sort_order ASC, id ASC.
  * - Advances past contiguous assistant messages with same non-empty ask_id as anchor
- *   (group-tail insertion) when anchor is assistant with askId.
+ *   (group-tail insertion) when anchor is an owned assistant with askId.
  * - Inserts supplied entries atomically with existing dense-order logic.
  * No numeric insertIndex in request.
  */
@@ -1224,7 +1230,38 @@ export interface InsertMessagesAfterAnchorRequest {
 }
 
 /** @see IpcChannel.ChatDb_InsertMessagesAfterAnchor */
-export type InsertMessagesAfterAnchorResponse = FileCleanupResult
+export interface InsertMessagesAfterAnchorResponse extends FileCleanupResult {
+  /** Echo of the request topic. */
+  topicId: string
+  /** Normalized addressed route (null = main route). */
+  branchId: string | null
+  /** Echo of the request anchor. */
+  afterMessageId: string
+  /** Canonical post-write wire for truly inserted messages (request order). Empty when pure patch. */
+  insertedMessages: JsonObject[]
+  /** Canonical post-write wire for blocks under truly inserted messages (authority block order). */
+  insertedBlocks: JsonObject[]
+  /** Stable IDs of truly inserted messages (request order; matches insertedMessages ids). */
+  insertedMessageIds: string[]
+  /** Stable IDs of pre-existing rows patched in this command (no reorder). Disjoint from inserted. */
+  patchedMessageIds: string[]
+  /**
+   * Post-insert effective-route predecessor of the inserted run (stable ID),
+   * or null when the run starts the effective route.
+   */
+  beforeMessageId: string | null
+  /**
+   * Post-insert effective-route successor of the inserted run (stable ID),
+   * or null when the run ends the effective route or when nothing was inserted.
+   */
+  nextMessageId: string | null
+  /**
+   * Main-authoritative mutability delta for this command: the inserted owned
+   * IDs mutable through the addressed route. Renderer unions same-route only;
+   * never infers from branchId.
+   */
+  mutableMessageIds: string[]
+}
 
 // ---------------------------------------------------------------------------
 // Compound mutation DTOs (Phase 5.1B)

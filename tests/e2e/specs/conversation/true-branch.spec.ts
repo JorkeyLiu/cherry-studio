@@ -1876,4 +1876,219 @@ test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
     expect((((countRes as any).rows ?? []) as any[])[0]?.n).toBe(4)
     // Fixture teardown owns Electron cleanup; no manual close here.
   })
+
+  test('branch insert on last prefix via real UI lands at suffix start with immediate capability', async ({
+    mainWindow,
+    electronApp,
+    mockPort,
+    ownedTmpRoot
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'TRUE-BRANCH INSERT SUFFIX-START: fork L1 with a pre-existing owned suffix, invoke the production MessageMenubar insert on the last ancestor-prefix assistant message (branch anchor) via the real msg-insert-btn, then prove without any route switch or full reload that the two new branch-owned rows render at suffix start with immediate edit/delete controls; Redux supplements (never replaces) the DOM order; a Main fetchMessagesWindow probe preserves the authoritative capability; post-exit SQLite proves durable owned-suffix order.'
+    })
+    void mockPort
+    void ownedTmpRoot
+    await waitForAppReady(mainWindow)
+    const page = mainWindow
+    const assistantId = await prepareAssistant(page)
+    const topicId = `tb-insert-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    await seedSmallTopic(page, assistantId, topicId, `InsertSuffix ${topicId}`)
+    const seedIds = [`${topicId}-msg-00000`, `${topicId}-msg-00001`, `${topicId}-msg-00002`, `${topicId}-msg-00003`]
+    const branchAnchor = seedIds[1]
+    const created: any = await page.evaluate(
+      async ({ tid, anchor }: { tid: string; anchor: string }) =>
+        await (window as any).api.chatDb.createBranch({ topicId: tid, parentBranchId: null, anchorMessageId: anchor }),
+      { tid: topicId, anchor: branchAnchor }
+    )
+    expect(created?.ok, `createBranch failed: ${JSON.stringify(created)}`).toBe(true)
+    const branchId = created.value.branch.id as string
+    // Setup-only IPC seed: one pre-existing owned suffix row through the branch route.
+    const suffixId = `${topicId}-msg-suffix01`
+    const suffixOk: any = await page.evaluate(
+      async ({ tid, bid, mid, asstId }: { tid: string; bid: string; mid: string; asstId: string }) =>
+        await (window as any).api.chatDb.insertMessagesAfterAnchor({
+          topicId: tid,
+          branchId: bid,
+          afterMessageId: `${tid}-msg-00001`,
+          entries: [
+            {
+              message: {
+                id: mid,
+                topicId: tid,
+                role: 'user',
+                assistantId: asstId,
+                status: 'success',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              },
+              blocks: []
+            }
+          ]
+        }),
+      { tid: topicId, bid: branchId, mid: suffixId, asstId: assistantId }
+    )
+    expect(suffixOk?.ok, `suffix seed failed: ${JSON.stringify(suffixOk)}`).toBe(true)
+    // Load the branch route through production UI: activate the topic (main
+    // route), then switch to the L1 route via the real top-selector cascader.
+    await activateTopic(page, topicId, 4)
+    await page.locator('[data-testid="branch-selector-entry"]').first().click()
+    await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+    await page.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first().click()
+    await page.waitForFunction(
+      ({ tid, len }: { tid: string; len: number }) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages?.messageIdsByTopic?.[tid]
+        return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
+      },
+      { tid: topicId, len: 3 },
+      { timeout: 30000 }
+    )
+    const preBranchIds: string[] = await page.evaluate(
+      (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
+      topicId
+    )
+    expect(preBranchIds).toEqual([seedIds[0], seedIds[1], suffixId])
+    await page.waitForFunction((n: number) => document.querySelectorAll('#messages [data-message-id]').length >= n, 3, {
+      timeout: 30000
+    })
+    // Act: real production insert click on the last ancestor-prefix message
+    // (the branch anchor, an assistant row whose msg-insert-btn stays visible
+    // on inherited references by design). No direct insert IPC on this path.
+    const anchorSel = `[id="message-${branchAnchor}"][data-message-id="${branchAnchor}"]`
+    const anchorContainer = page.locator(anchorSel).first()
+    await expect(anchorContainer, 'branch-anchor container must be visible on the branch route').toBeVisible({
+      timeout: 15000
+    })
+    await page.evaluate((id: string) => {
+      const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+      const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+      if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+    }, branchAnchor)
+    try {
+      await anchorContainer.hover({ timeout: 8000 })
+    } catch {
+      // Hover flakiness near edges; the click below uses a force fallback.
+    }
+    const insertBtn = anchorContainer.locator('[data-testid="msg-insert-btn"]')
+    await expect(insertBtn, 'production insert control must be attached on the last prefix message').toBeAttached({
+      timeout: 10000
+    })
+    try {
+      await insertBtn.click({ timeout: 8000 })
+    } catch {
+      await insertBtn.click({ force: true } as any)
+    }
+    // The thunk publishes authoritatively into the same resident: no route
+    // switch and no full reload are performed after the click.
+    await page.waitForFunction(
+      ({ tid, len }: { tid: string; len: number }) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages?.messageIdsByTopic?.[tid]
+        return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
+      },
+      { tid: topicId, len: 5 },
+      { timeout: 30000 }
+    )
+    await page.waitForFunction((n: number) => document.querySelectorAll('#messages [data-message-id]').length >= n, 5, {
+      timeout: 30000
+    })
+    const postIds: string[] = await page.evaluate(
+      (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
+      topicId
+    )
+    // Discover the thunk-generated pair by diffing the same resident.
+    const freshIds = postIds.filter((id) => !preBranchIds.includes(id))
+    expect(freshIds, 'production insert must publish exactly two new rows into the same resident').toHaveLength(2)
+    // Suffix-start placement in the live resident: prefix through the branch
+    // anchor, then the new pair, then the previous suffix.
+    expect(postIds).toEqual([seedIds[0], seedIds[1], freshIds[0], freshIds[1], suffixId])
+    const freshRoles: Record<string, { role: string; askId: string | null }> = await page.evaluate(
+      ({ ids }: { ids: string[] }) => {
+        const entities = (window as any).store.getState().messages?.entities ?? {}
+        const out: Record<string, { role: string; askId: string | null }> = {}
+        for (const id of ids) {
+          out[id] = { role: entities[id]?.role ?? '', askId: (entities[id]?.askId ?? null) as string | null }
+        }
+        return out
+      },
+      { ids: freshIds }
+    )
+    expect(freshRoles[freshIds[0]]?.role).toBe('user')
+    expect(freshRoles[freshIds[1]]?.role).toBe('assistant')
+    expect(freshRoles[freshIds[1]]?.askId).toBe(freshIds[0])
+    // Primary rendered-UI proof (Redux above only supplements): visual
+    // top-to-bottom order matches the resident, and each new row is really
+    // rendered. #messages renders flex column-reverse so raw DOM query order
+    // is newest-to-oldest; sort by geometry top for the user-visible order.
+    const domOrder: string[] = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#messages [data-message-id]'))
+        .map((el) => ({
+          id: (el as HTMLElement).getAttribute('data-message-id') as string,
+          top: (el as HTMLElement).getBoundingClientRect().top
+        }))
+        .sort((a, b) => a.top - b.top)
+        .map((x) => x.id)
+    )
+    expect(domOrder).toEqual(postIds)
+    for (const freshId of freshIds) {
+      const sel = `[id="message-${freshId}"][data-message-id="${freshId}"]`
+      const container = page.locator(sel).first()
+      await expect(container, `inserted message ${freshId} must be rendered`).toBeVisible({ timeout: 15000 })
+      await page.evaluate((id: string) => {
+        const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+        const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+        if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+      }, freshId)
+      try {
+        await container.hover({ timeout: 8000 })
+      } catch {
+        // Hover flakiness near edges; assertions below retry via Playwright.
+      }
+      await expect(
+        container.locator('[data-testid="msg-edit-btn"], [data-testid="msg-assistant-edit-btn"]'),
+        `inserted message ${freshId} must immediately expose its edit control`
+      ).toHaveCount(1, { timeout: 15000 })
+      await expect(
+        container.locator('[data-testid="message-delete-button"]'),
+        `inserted message ${freshId} must immediately expose its delete control`
+      ).toHaveCount(1, { timeout: 15000 })
+    }
+    // Supplemental Main-authoritative capability (same contract the divider
+    // switch reads): the branch window carries the effective order with only
+    // the owned suffix mutable.
+    const branchWin: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: tid,
+          branchId: bid,
+          limit: 20
+        }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(branchWin?.ok).toBe(true)
+    expect((branchWin.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds)
+    expect(new Set(branchWin.value.mutableMessageIds as string[])).toEqual(new Set([suffixId, ...freshIds]))
+    // Durable post-exit SQLite proof via the established helper (ownership
+    // scope: this disposable topic only; the profile may own other topics).
+    await electronApp.close()
+    const chatDbPath = getChatDbPath()
+    expect(chatDbPath).not.toBeNull()
+    const durable = queryChatDbViaElectron(
+      chatDbPath!,
+      `SELECT id, branch_id FROM messages WHERE topic_id = '${esc(topicId)}' ORDER BY sort_order ASC, id ASC`
+    )
+    expect(durable?.ok).toBe(true)
+    const durableRows = ((durable as any).rows ?? []) as any[]
+    expect(durableRows.map((r: any) => r.id).sort()).toEqual([...seedIds, suffixId, ...freshIds].sort())
+    const ownedInOrder = durableRows.filter((r: any) => r.branch_id === branchId).map((r: any) => r.id)
+    expect(ownedInOrder).toEqual([...freshIds, suffixId])
+    for (const prefixId of seedIds) {
+      expect(durableRows.find((r: any) => r.id === prefixId)?.branch_id).toBeNull()
+    }
+    // Fixture teardown owns any remaining Electron cleanup after the close above.
+  })
 })

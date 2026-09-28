@@ -4234,6 +4234,111 @@ const insertMessageGroupsContract: ChatDbContract = {
 // S6.2c-2: Insert after stable anchor contract — Main-authoritative
 // ---------------------------------------------------------------------------
 
+const INSERT_AFTER_ANCHOR_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'topicId',
+  'branchId',
+  'afterMessageId',
+  'insertedMessages',
+  'insertedBlocks',
+  'insertedMessageIds',
+  'patchedMessageIds',
+  'beforeMessageId',
+  'nextMessageId',
+  'mutableMessageIds'
+])
+
+function validateInsertMessagesAfterAnchorResult(result: unknown): void {
+  const channel = 'chatdb:insert-messages-after-anchor'
+  validateResultEnvelope(result, channel)
+  const obj = result as Record<string, unknown>
+  if (obj.ok === true) {
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', `[${channel}] Expected InsertMessagesAfterAnchorResponse object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Success value must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!INSERT_AFTER_ANCHOR_VALUE_KEYS.has(key)) {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in success value: "${key}"`)
+      }
+    }
+    validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+    validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+    const counts = v.remainingReferenceCounts as Record<string, unknown>
+    for (const key of Object.keys(counts)) {
+      if (key.length === 0) {
+        throw new ValidationError(
+          'result.value.remainingReferenceCounts',
+          `[${channel}] remainingReferenceCounts key must be a non-empty string`
+        )
+      }
+      validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+    }
+    validateNonEmptyString(v.topicId, 'result.value.topicId')
+    if (v.branchId !== null) {
+      validateNonEmptyString(v.branchId, 'result.value.branchId')
+    }
+    validateNonEmptyString(v.afterMessageId, 'result.value.afterMessageId')
+    validateJsonObjectArray(v.insertedMessages, 'result.value.insertedMessages')
+    validateJsonObjectArrayBlock(v.insertedBlocks, 'result.value.insertedBlocks', BLOCK_JSON_PROFILE)
+    validateStringArray(v.insertedMessageIds, 'result.value.insertedMessageIds')
+    validateStringArray(v.patchedMessageIds, 'result.value.patchedMessageIds')
+    if (v.beforeMessageId !== null) {
+      validateNonEmptyString(v.beforeMessageId, 'result.value.beforeMessageId')
+    }
+    if (v.nextMessageId !== null) {
+      validateNonEmptyString(v.nextMessageId, 'result.value.nextMessageId')
+    }
+    validateStringArray(v.mutableMessageIds, 'result.value.mutableMessageIds')
+    const inserted = v.insertedMessageIds as string[]
+    const wireIds = (v.insertedMessages as Array<Record<string, unknown>>).map((m) => m.id as string)
+    if (inserted.length !== wireIds.length || !inserted.every((id, i) => id === wireIds[i])) {
+      throw new ValidationError(
+        'result.value.insertedMessageIds',
+        `[${channel}] insertedMessageIds must match insertedMessages ids in order`
+      )
+    }
+    if (new Set(inserted).size !== inserted.length) {
+      throw new ValidationError('result.value.insertedMessageIds', `[${channel}] Duplicate insertedMessageId`)
+    }
+    const patched = v.patchedMessageIds as string[]
+    if (new Set(patched).size !== patched.length) {
+      throw new ValidationError('result.value.patchedMessageIds', `[${channel}] Duplicate patchedMessageId`)
+    }
+    for (const id of patched) {
+      if (inserted.includes(id)) {
+        throw new ValidationError('result.value.patchedMessageIds', `[${channel}] patched id overlaps inserted id`)
+      }
+    }
+    const mutable = v.mutableMessageIds as string[]
+    for (const id of mutable) {
+      if (!inserted.includes(id)) {
+        throw new ValidationError('result.value.mutableMessageIds', `[${channel}] mutable id must be an inserted id`)
+      }
+    }
+    if (inserted.length === 0) {
+      if (v.beforeMessageId !== null || v.nextMessageId !== null) {
+        throw new ValidationError(
+          'result.value.beforeMessageId',
+          `[${channel}] empty insert must carry null placement neighbors`
+        )
+      }
+      if (mutable.length !== 0) {
+        throw new ValidationError(
+          'result.value.mutableMessageIds',
+          `[${channel}] empty insert must carry empty mutability delta`
+        )
+      }
+    }
+  }
+}
+
 const insertMessagesAfterAnchorContract: ChatDbContract = {
   allowedKeys: keySet('topicId', 'branchId', 'afterMessageId', 'entries'),
   validate(value: unknown): void {
@@ -4247,7 +4352,7 @@ const insertMessagesAfterAnchorContract: ChatDbContract = {
       throw new ValidationError('request.entries', 'entries must not be empty')
     }
   },
-  validateResult: fileCleanupResultValidator('chatdb:insert-messages-after-anchor')
+  validateResult: validateInsertMessagesAfterAnchorResult
 }
 
 // ---------------------------------------------------------------------------

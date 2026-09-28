@@ -23,7 +23,26 @@ describe('SqliteMessageDataSource.insertMessagesAfterAnchor — S6.2c-2', () => 
   })
 
   it('calls api.insertMessagesAfterAnchor with stable anchor request (no insertIndex)', async () => {
-    const mockResult = ok({ affectedFileIds: [], remainingReferenceCounts: {} })
+    const mockResult = ok({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 't-1',
+      branchId: null,
+      afterMessageId: 'm-anchor',
+      insertedMessages: [
+        { id: 'm-u1', topicId: 't-1', role: 'user', blocks: ['b-u1'] },
+        { id: 'm-a1', topicId: 't-1', role: 'assistant', blocks: ['b-a1'] }
+      ],
+      insertedBlocks: [
+        { id: 'b-u1', messageId: 'm-u1' },
+        { id: 'b-a1', messageId: 'm-a1' }
+      ],
+      insertedMessageIds: ['m-u1', 'm-a1'],
+      patchedMessageIds: [],
+      beforeMessageId: 'm-anchor',
+      nextMessageId: 'm-next',
+      mutableMessageIds: ['m-u1', 'm-a1']
+    })
     api.insertMessagesAfterAnchor.mockResolvedValue(mockResult)
 
     const entries = [
@@ -53,6 +72,11 @@ describe('SqliteMessageDataSource.insertMessagesAfterAnchor — S6.2c-2', () => 
     expect(req.entries[1].message.id).toBe('m-a1')
     expect(mockDispatch).toHaveBeenCalledOnce()
     expect(res.affectedFileIds).toEqual([])
+    // Authoritative placement + capability delta pass through untouched.
+    expect(res.insertedMessageIds).toEqual(['m-u1', 'm-a1'])
+    expect(res.beforeMessageId).toBe('m-anchor')
+    expect(res.nextMessageId).toBe('m-next')
+    expect(res.mutableMessageIds).toEqual(['m-u1', 'm-a1'])
   })
 
   it('throws ChatDbResultError on structured failure, propagates transport rejection', async () => {
@@ -69,7 +93,22 @@ describe('SqliteMessageDataSource.insertMessagesAfterAnchor — S6.2c-2', () => 
   })
 
   it('dispatches updateTopicUpdatedAt exactly once on success, not on failure', async () => {
-    api.insertMessagesAfterAnchor.mockResolvedValue(ok({ affectedFileIds: [], remainingReferenceCounts: {} }))
+    api.insertMessagesAfterAnchor.mockResolvedValue(
+      ok({
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        topicId: 't',
+        branchId: null,
+        afterMessageId: 'a',
+        insertedMessages: [{ id: 'm' }],
+        insertedBlocks: [],
+        insertedMessageIds: ['m'],
+        patchedMessageIds: [],
+        beforeMessageId: 'a',
+        nextMessageId: null,
+        mutableMessageIds: ['m']
+      })
+    )
     await ds.insertMessagesAfterAnchor('t', 'a', [{ message: { id: 'm' } as any, blocks: [] }])
     expect(mockDispatch).toHaveBeenCalledTimes(1)
 
@@ -85,7 +124,22 @@ describe('SqliteMessageDataSource.insertMessagesAfterAnchor — S6.2c-2', () => 
   })
 
   it('does not call legacy appendMessage or pasteMessagesToTopic', async () => {
-    api.insertMessagesAfterAnchor.mockResolvedValue(ok({ affectedFileIds: [], remainingReferenceCounts: {} }))
+    api.insertMessagesAfterAnchor.mockResolvedValue(
+      ok({
+        affectedFileIds: [],
+        remainingReferenceCounts: {},
+        topicId: 't',
+        branchId: null,
+        afterMessageId: 'a',
+        insertedMessages: [{ id: 'm' }],
+        insertedBlocks: [],
+        insertedMessageIds: ['m'],
+        patchedMessageIds: [],
+        beforeMessageId: 'a',
+        nextMessageId: null,
+        mutableMessageIds: ['m']
+      })
+    )
     api.appendMessage = vi.fn()
     api.pasteMessagesToTopic = vi.fn()
     await ds.insertMessagesAfterAnchor('t', 'a', [{ message: { id: 'm' } as any, blocks: [] }])
@@ -95,7 +149,20 @@ describe('SqliteMessageDataSource.insertMessagesAfterAnchor — S6.2c-2', () => 
 
   it('preserves file-reference semantics (blocks with file carry through)', async () => {
     api.insertMessagesAfterAnchor.mockResolvedValue(
-      ok({ affectedFileIds: ['file-1'], remainingReferenceCounts: { 'file-1': 1 } })
+      ok({
+        affectedFileIds: ['file-1'],
+        remainingReferenceCounts: { 'file-1': 1 },
+        topicId: 't',
+        branchId: null,
+        afterMessageId: 'anchor',
+        insertedMessages: [{ id: 'm1', blocks: ['b1'] }],
+        insertedBlocks: [{ id: 'b1', messageId: 'm1', file: { id: 'file-1' } }],
+        insertedMessageIds: ['m1'],
+        patchedMessageIds: [],
+        beforeMessageId: 'anchor',
+        nextMessageId: null,
+        mutableMessageIds: ['m1']
+      })
     )
     const entries = [
       { message: { id: 'm1' } as any, blocks: [{ id: 'b1', messageId: 'm1', file: { id: 'file-1' } } as any] }

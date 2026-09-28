@@ -14,6 +14,7 @@ import type {
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
+  InsertMessagesAfterAnchorResponse,
   ListBranchesResponse,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
@@ -309,21 +310,19 @@ export interface MessageDataSource {
 
   // ============ Insert after stable anchor (S6.2c-2) ============
   /**
-   * Insert entries after a stable anchor (group-tail aware) atomically in Main.
-   * Validates anchor membership inside the addressed route, resolves ordered
-   * authority order (sort_order ASC, id ASC) of the route owner, advances
-   * past contiguous assistant group tail when anchor is assistant with
-   * askId, then inserts entries with dense-order logic. An inherited anchor
-   * lands at the owner tail. No numeric insertIndex in request. Fail closed
-   * with no partial writes. Dispatches updateTopicUpdatedAt exactly once
-   * after success.
+   * Insert entries after a stable anchor (group-tail aware for owned anchors;
+   * suffix-start for inherited branch anchors) atomically in Main.
+   * Returns the authoritative insert response: cleanup fields plus canonical
+   * inserted wire, stable neighbor placement, and mutability delta. Patched
+   * pre-existing rows keep their durable positions and are reported
+   * separately (never reordered as inserts).
    */
   insertMessagesAfterAnchor?(
     topicId: string,
     afterMessageId: string,
     entries: MessageBlockEntry[],
     branchId?: BranchRoute
-  ): Promise<FileCleanupResult>
+  ): Promise<InsertMessagesAfterAnchorResponse>
 
   /**
    * Insert message groups with stable intents atomically in Main.

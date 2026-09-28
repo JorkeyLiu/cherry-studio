@@ -46,7 +46,8 @@ const { mocks } = vi.hoisted(() => ({
     setCurrentTopicId: vi.fn((p: unknown) => ({ type: 'newMessages/setCurrentTopicId', payload: p })),
     loadTopicSegmentsThunk: vi.fn(),
     queueAdd: vi.fn(),
-    transformMessagesAndFetch: vi.fn()
+    transformMessagesAndFetch: vi.fn(),
+    applyInserted: vi.fn((p: unknown) => ({ type: 'newMessages/applyInsertedMessagesAfterAnchor', payload: p }))
   }
 }))
 
@@ -200,7 +201,8 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicLoading: mocks.setTopicLoading,
     setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicFulfilled', payload: p })),
     setCurrentTopicId: mocks.setCurrentTopicId,
-    insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p }))
+    insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p })),
+    applyInsertedMessagesAfterAnchor: mocks.applyInserted
   },
   selectLoadedMessagesForTopic: () => []
 }))
@@ -237,7 +239,20 @@ const deepFreeze = <T>(value: T): T => {
 describe('messageThunk anchor hooks', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.insertMessagesAfterAnchor.mockResolvedValue(undefined)
+    mocks.insertMessagesAfterAnchor.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 'topic-1',
+      branchId: null,
+      afterMessageId: 'asst-msg-1',
+      insertedMessages: [{ id: 'asst-new', topicId: 'topic-1', role: 'assistant', blocks: [] }],
+      insertedBlocks: [],
+      insertedMessageIds: ['asst-new'],
+      patchedMessageIds: [],
+      beforeMessageId: 'asst-msg-1',
+      nextMessageId: null,
+      mutableMessageIds: ['asst-new']
+    })
     storeState = {
       assistants: { assistants: [{ id: 'asst-1', settings: { contextCount: 5 }, topics: [{ id: 'topic-1' }] }] },
       messages: {

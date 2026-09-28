@@ -29,10 +29,28 @@ const { mocks } = vi.hoisted(() => ({
     updateManyMessagesAction: vi.fn((p: unknown) => ({ type: 'updateManyMessages', payload: p })),
     updateTopicUpdatedAtAction: vi.fn((p: unknown) => ({ type: 'updateTopicUpdatedAt', payload: p })),
     insertMessageAtIndexAction: vi.fn((p: unknown) => ({ type: 'insertMessageAtIndex', payload: p })),
+    applyInsertedAction: vi.fn((p: unknown) => ({ type: 'applyInsertedMessagesAfterAnchor', payload: p })),
     setTopicLoadingAction: vi.fn((p: unknown) => ({ type: 'setTopicLoading', payload: p })),
     setTopicFulfilledAction: vi.fn((p: unknown) => ({ type: 'setTopicFulfilled', payload: p }))
   }
 }))
+
+function authoritativeAppendResult(newId = 'asst-new') {
+  return {
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    topicId: 'topic-append',
+    branchId: null,
+    afterMessageId: 'asst-existing',
+    insertedMessages: [{ id: newId, topicId: 'topic-append', role: 'assistant', blocks: [] }],
+    insertedBlocks: [],
+    insertedMessageIds: [newId],
+    patchedMessageIds: [],
+    beforeMessageId: 'asst-existing',
+    nextMessageId: null,
+    mutableMessageIds: [newId]
+  }
+}
 
 vi.mock('@logger', () => ({
   loggerService: {
@@ -59,6 +77,7 @@ vi.mock('@renderer/store/newMessage', () => ({
     updateManyMessages: mocks.updateManyMessagesAction,
     updateMessage: vi.fn(),
     insertMessageAtIndex: mocks.insertMessageAtIndexAction,
+    applyInsertedMessagesAfterAnchor: mocks.applyInsertedAction,
     setTopicLoading: mocks.setTopicLoadingAction,
     setTopicFulfilled: mocks.setTopicFulfilledAction
   },
@@ -330,7 +349,7 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.dbAppendMessage.mockResolvedValue(undefined)
-    mocks.dbInsertMessagesAfterAnchor.mockResolvedValue(undefined)
+    mocks.dbInsertMessagesAfterAnchor.mockResolvedValue(authoritativeAppendResult())
     mocks.queueAdd.mockResolvedValue(undefined)
     mocks.waitForTopicQueue.mockResolvedValue(undefined)
     mocks.dbSelectAnswerMessage.mockImplementation(async (_t: string, selectedId: string) => ({
@@ -434,10 +453,11 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
     // Positional loaded-relative DB path is not used for persistence.
     expect(mocks.dbAppendMessage).not.toHaveBeenCalled()
 
-    // Local projection still lands immediately after the loaded existing assistant.
-    expect(mocks.insertMessageAtIndexAction).toHaveBeenCalledTimes(1)
-    expect(mocks.insertMessageAtIndexAction).toHaveBeenCalledWith(
-      expect.objectContaining({ topicId: appendTopicId, index: 2 })
+    // Authoritative projection lands via one atomic order + capability action.
+    expect(mocks.applyInsertedAction).toHaveBeenCalledTimes(1)
+    expect(mocks.applyInsertedAction).toHaveBeenCalledWith(
+      expect.objectContaining({ topicId: appendTopicId, beforeMessageId: 'asst-existing' })
     )
+    expect(mocks.insertMessageAtIndexAction).not.toHaveBeenCalled()
   })
 })
