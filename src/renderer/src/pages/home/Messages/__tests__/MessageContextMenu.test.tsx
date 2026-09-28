@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
     hasClipboard: false,
     canUndo: false,
     canRedo: false,
+    // PROJ-13 (B2): edit-selection write capability; tests set it per case.
+    isSelectionMutable: true,
     toggleEditMode: vi.fn(),
     handleGroupClick: vi.fn(),
     handleCopy: vi.fn(),
@@ -100,6 +102,7 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
     mocks.editMode.hasClipboard = false
     mocks.editMode.canUndo = false
     mocks.editMode.canRedo = false
+    mocks.editMode.isSelectionMutable = true
     vi.clearAllMocks()
     clearSelection()
   })
@@ -213,6 +216,25 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       expect(byKey('delete').disabled).toBe(true)
       expect(byKey('undo').disabled).toBe(true)
       expect(byKey('redo').disabled).toBe(true)
+    })
+
+    it('PROJ-13 (B2): disables cut/delete/segment writes on immutable selections while copy stays enabled', () => {
+      mocks.editMode.isEnabled = true
+      mocks.editMode.selectedGroupIds = ['ask-1']
+      mocks.editMode.groups = [{ askId: 'ask-1', messages: [{ id: 'm1' }] }]
+      mocks.editMode.hasClipboard = true
+      // Mixed shared+private selection: writes fail closed.
+      mocks.editMode.isSelectionMutable = false
+
+      renderHost(<p data-testid="target">content</p>)
+
+      const items = mocks.dropdownProps.current.menu.items
+      const byKey = (key: string) => items.find((item) => item.key === key)!
+      expect(byKey('copy').disabled ?? false).toBe(false)
+      expect(byKey('cut').disabled).toBe(true)
+      expect(byKey('paste').disabled).toBe(false)
+      expect(byKey('delete').disabled).toBe(true)
+      expect(byKey('createSegment').disabled).toBe(true)
     })
 
     it('invokes edit-mode handlers from menu clicks', () => {

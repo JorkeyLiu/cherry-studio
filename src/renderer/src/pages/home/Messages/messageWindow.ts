@@ -541,6 +541,249 @@ export function clampWindowCount(n: number): number {
   return Math.min(100, Math.max(1, Math.floor(n) || 1))
 }
 
+/**
+ * Conservative route-window rebase (pure, production path).
+ *
+ * Safety contract (no persistence-architecture extension):
+ * - The Main `fetchMessagesWindow` response is the ONLY authority for the
+ *   target route. `nextIds` is ALWAYS exactly the target window's stable-ID
+ *   order (oldest-first) — never a union with pre-window old IDs.
+ * - Only the old contiguous prefix that is positionally identical to the
+ *   window's own head (`commonPrefixLen`) counts as "proven shared and
+ *   retained". It is observability only: those IDs are already inside the
+ *   window, so retention never extends resident coverage beyond the window.
+ * - Pre-window old IDs (older than the window's first ID) are NEVER retained:
+ *   the window protocol cannot prove they still belong to the target route
+ *   (they may be the old route's exclusive history). Middle-start windows,
+ *   disjoint routes, and trimmed prefixes therefore degrade to pure target
+ *   window replacement. Old exclusive suffixes always leave via `removedIds`.
+ * - Sort order is always the valid (target) route order — the window order.
+ * - Because resident coverage == window coverage exactly, the response's
+ *   `hasMoreBefore/After` stays exact for the resident projection: no boundary
+ *   adjustment is needed and `response.hasMoreBefore === false` can never
+ *   combine with an extra retained prefix into a wrong boundary.
+ *
+ * No store access, no mutation. The reducer publishes `nextIds` atomically
+ * (single commit, no blank/mixed frame) via `rebaseRouteWindow`.
+ */
+export function diffRouteRebase(
+  oldIds: readonly string[],
+  windowMessages: readonly { id: string }[]
+): {
+  commonPrefixLen: number
+  removedIds: string[]
+  addedIds: string[]
+  nextIds: string[]
+} {
+  const nextIds = windowMessages.map((m) => m.id)
+  const nextSet = new Set(nextIds)
+  let commonPrefixLen = 0
+  const maxPrefix = Math.min(oldIds.length, nextIds.length)
+  while (commonPrefixLen < maxPrefix && oldIds[commonPrefixLen] === nextIds[commonPrefixLen]) {
+    commonPrefixLen++
+  }
+  const removedIds = oldIds.filter((id) => !nextSet.has(id))
+  const oldSet = new Set(oldIds)
+  const addedIds = nextIds.filter((id) => !oldSet.has(id))
+  return { commonPrefixLen, removedIds, addedIds, nextIds }
+}
+
+/**
+ * Production rebase entry: old resident IDs + authoritative target window →
+ * atomic publish plan with boundary metadata.
+ *
+ * `windowMeta` is the validated response window's completeness flags. Because
+ * `nextIds` is exactly the window (see `diffRouteRebase` contract), the
+ * returned `hasMoreBefore/After` are exactly `windowMeta`'s values — provably
+ * consistent with actual resident coverage. `degraded` is true when no
+ * positional shared prefix could be proven (disjoint / middle-start window):
+ * the caller still publishes `nextIds` (safe replacement), it only signals
+ * that no shared head was retained.
+ */
+export function rebaseRouteWindow(
+  oldIds: readonly string[],
+  windowMessages: readonly { id: string }[],
+  windowMeta: { hasMoreBefore: boolean; hasMoreAfter: boolean }
+): {
+  commonPrefixLen: number
+  removedIds: string[]
+  addedIds: string[]
+  nextIds: string[]
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+  degraded: boolean
+} {
+  const diff = diffRouteRebase(oldIds, windowMessages)
+  return {
+    ...diff,
+    hasMoreBefore: windowMeta.hasMoreBefore,
+    hasMoreAfter: windowMeta.hasMoreAfter,
+    degraded: diff.commonPrefixLen === 0 && oldIds.length > 0 && diff.nextIds.length > 0
+  }
+}
+
+/**
+ * Loaded-route state (renderer-local, no persistence).
+ *
+ * Type-safe replacement for the former magic `branchId` marker string: the
+ * load-failed signal is an explicit `loadFailed` boolean on a tagged object,
+ * never a string that could collide with a real route key (`null` = main,
+ * non-empty = branch id). `route` always holds a real route key; `loadFailed`
+ * only says the last windowed load for that route failed twice and must be
+ * retried instead of trusted.
+ */
+export type RouteKey = string | null
+
+export interface LoadedRouteState {
+  route: RouteKey
+  loadFailed: boolean
+}
+
+/** Initial loaded-route state for the current active route (not failed). */
+export function initLoadedRouteState(route: RouteKey): LoadedRouteState {
+  return { route, loadFailed: false }
+}
+
+/** Claim that `route` is now the loaded projection (clears any failed flag). */
+export function claimLoadedRoute(route: RouteKey): LoadedRouteState {
+  return { route, loadFailed: false }
+}
+
+/** Mark `route` as double-failed: keeps the real route key, sets the flag. */
+export function markLoadedRouteFailed(route: RouteKey): LoadedRouteState {
+  return { route, loadFailed: true }
+}
+
+/**
+ * Whether the loaded projection can be trusted for `activeRoute`: true only
+ * when the routes match AND the last load did not fail. A failed state is
+ * never current even when its `route` equals the active route, so the next
+ * route effect (or route/topic switch) reloads instead of trusting an empty
+ * projection that was never loaded.
+ */
+export function isLoadedRouteCurrent(state: LoadedRouteState, activeRoute: RouteKey): boolean {
+  return !state.loadFailed && state.route === activeRoute
+}
+
+export interface DividerDoubleFailureSnapshot {
+  prevRoute: RouteKey
+  targetRoute: RouteKey
+  startTopicId: string
+  currentTopicId: string
+  currentRoute: RouteKey
+}
+
+/**
+ * Divider double-failure decision (pure, production path).
+ *
+ * The fork-anchor `around` read and the `latest` fallback both failed. Roll
+ * back to `prevRoute` ONLY while still on the failed target (same topic and
+ * the live route still equals the target). If the user already moved on
+ * (topic changed or route changed), do nothing so a stale rollback can never
+ * clobber the user's current route.
+ */
+export function decideDividerDoubleFailureRecovery(snapshot: DividerDoubleFailureSnapshot): {
+  shouldRollback: boolean
+  rollbackTo: RouteKey
+} {
+  const stillOnTarget =
+    snapshot.currentTopicId === snapshot.startTopicId && snapshot.currentRoute === snapshot.targetRoute
+  if (!stillOnTarget) return { shouldRollback: false, rollbackTo: snapshot.prevRoute }
+  return { shouldRollback: true, rollbackTo: snapshot.prevRoute }
+}
+
+export interface ExternalDoubleFailureSnapshot {
+  targetRoute: RouteKey
+  startTopicId: string
+  currentTopicId: string
+  currentRoute: RouteKey
+}
+
+/**
+ * Top/外部 route double-failure decision (pure, production path).
+ *
+ * The active route is external truth and cannot roll back, so the caller
+ * clears the target projection/viewport and marks the loaded route failed
+ * (retryable) — ONLY while still on the failed target. If the user already
+ * moved on, do nothing. The failed marker is built via
+ * `markLoadedRouteFailed` (tagged boolean, never a magic branch id).
+ */
+export function decideExternalDoubleFailureRecovery(snapshot: ExternalDoubleFailureSnapshot): {
+  shouldClear: boolean
+} {
+  const stillOnTarget =
+    snapshot.currentTopicId === snapshot.startTopicId && snapshot.currentRoute === snapshot.targetRoute
+  return { shouldClear: stillOnTarget }
+}
+
+export type RouteWindowSavedPosition = {
+  scrollTop: number
+  anchorId: string | null
+  isAtBottom: boolean
+} | null
+
+/**
+ * Top-selector window choice (pure, production path): which windowed read the
+ * NEW route needs from its own saved browsing position.
+ * - `isAtBottom` → latest (bottom vicinity; caller restores bottom naturally).
+ * - valid `anchorId` → around it (restores the saved vicinity, never a jump).
+ * - otherwise → latest (deterministic tail + vicinity fallback below).
+ * Never reads the OLD route's snapshot; never overwrites any snapshot here.
+ */
+export function chooseRouteWindowRequest(
+  saved: RouteWindowSavedPosition
+): { kind: 'latest' } | { kind: 'around'; anchorMessageId: string } {
+  if (saved?.isAtBottom) return { kind: 'latest' }
+  if (typeof saved?.anchorId === 'string' && saved.anchorId.length > 0) {
+    return { kind: 'around', anchorMessageId: saved.anchorId }
+  }
+  return { kind: 'latest' }
+}
+
+/**
+ * Route viewport rebuild (pure, production path): viewport window for the
+ * rebased loaded projection with atomic empty-route clearing.
+ *
+ * - Empty `loaded` (empty target route) → empty fixed window carrying the
+ *   authoritative flags (empty routes report hasMore false/false). The caller
+ *   applies it via `window/apply`, atomically clearing the viewport so no old
+ *   route residual survives. Returns `{ window, empty: true }`.
+ * - Non-empty → window around the first available anchor candidate
+ *   (fork anchor → visual anchor → vicinity → tail), else the loaded tail.
+ *   Never a bottom jump: the anchor list is ordered by stability, tail is the
+ *   last resort. Returns `{ window, empty: false }`, or `{ window: null }`
+ *   when no anchor resolves (caller keeps the current viewport).
+ */
+export function buildRouteViewport(
+  loaded: readonly Message[],
+  anchorCandidates: readonly (string | null | undefined)[],
+  authoritative: { hasMoreBefore: boolean; hasMoreAfter: boolean } | undefined,
+  visuallyOlderGroupCount: number,
+  visuallyNewerGroupCount: number
+): { window: MessageWindow | null; empty: boolean } {
+  if (loaded.length === 0) {
+    const emptyWindow = createLatestMessageWindow([], 1, {
+      hasMoreBefore: authoritative?.hasMoreBefore ?? false,
+      hasMoreAfter: authoritative?.hasMoreAfter ?? false
+    })
+    return { window: emptyWindow, empty: true }
+  }
+  const loadedIds = new Set(loaded.map((m) => m.id))
+  const anchor =
+    anchorCandidates.find((id): id is string => typeof id === 'string' && loadedIds.has(id)) ??
+    loaded[loaded.length - 1]?.id ??
+    null
+  if (!anchor) return { window: null, empty: false }
+  const targetWindow = createTargetMessageWindow(
+    [...loaded],
+    anchor,
+    visuallyOlderGroupCount,
+    visuallyNewerGroupCount,
+    authoritative
+  )
+  return { window: targetWindow, empty: false }
+}
+
 // Authoritative latest-window completeness store (renderer-only, per-topic.
 // Populated by loadTopicMessagesThunk after validated latest response;
 // consumed by Messages bootstrap to retain hasMoreBefore/hasMoreAfter.)

@@ -24,7 +24,7 @@
 | 术语 | 标识符 | 定义 |
 |---|---|---|
 | 默认上下文数量 | `contextCount` | assistant 级默认/初始/重置窗口大小（turn 数；`null` = 不限）。滑块域 1..99 + ∞ 端点。仅影响未来的初始建立与显式的重锚定动作 |
-| topic 锚点 | `contextWindowAnchor[topicId]` | 持久化的稳定 topic 上下文起点。值为起始 turn 的 **group key**。它不是 override，也不是渲染投影（CW-2） |
+| 路由锚点 | `contextWindowAnchor[routeKey]` | 持久化的稳定路由上下文起点。值为起始 turn 的 **group key**。主路由键 `routeKey = topicId`（持久化兼容），分支路由键 `routeKey = topicId:branchId`；各路由锚点严格隔离、互不写入。它不是 override，也不是渲染投影（CW-2） |
 | 上下文窗口 | context window | 锚点 turn 至 topic 末尾的连续 turn 区间（anchor-to-end） |
 | turn / 组键 | turn / group key | 语义问答组：user 消息 + 其 assistant 响应（按 askId 归组）。组键 = 该 turn 的 user 消息 id；assistant 消息属于其 askId 的组。窗口按整 turn 选取 |
 | 边界分隔线 | boundary divider | 窗口起始边界的 UI 表现（`boundaryMessageId`） |
@@ -42,7 +42,7 @@
 | # | 决策 | 状态 |
 |---|---|---|
 | **CW-1** | **`contextCount` 是 assistant 级默认/初始/重置窗口大小**（turn 数；`null` = 不限）。单独改变它**永不移动**已存在的 topic 锚点；它只作用于未来的初始建立与未来的显式重锚定动作 | **Locked** |
-| **CW-2** | **`contextWindowAnchor[topicId]` 是持久化的稳定 topic 上下文起点**（起始 turn 的 group key）。它不是 override，也不是渲染投影 | **Locked** |
+| **CW-2** | **`contextWindowAnchor[routeKey]` 是持久化的稳定路由上下文起点**（起始 turn 的 group key；主路由键 `routeKey = topicId`，分支路由键 `routeKey = topicId:branchId`）。它不是 override，也不是渲染投影 | **Locked** |
 | **CW-3** | **非空且已初始化的 topic 恰好有一个锚点**；其上下文窗口 = 锚点 turn 至 topic 末尾。新消息使窗口增长，**不移动锚点** | **Locked** |
 | **CW-4** | **锚点仅在以下情形变化**：首次建立；用户点击 TokenCount 以当前 `contextCount` 重锚定；用户选择/点击消息锚点控件；确定性删除转移/修复；分支继承；显式迁移/兼容性修复 | **Locked** |
 | **CW-5** | **应用启动/重启、topic 加载、消息渲染、新 assistant 响应、改变 `contextCount` 均不是普通锚点迁移**。兼容性修复可对缺少锚点的遗留非空 topic **恰好一次**初始化锚点；它**永不重算**有效锚点 | **Locked** |
@@ -61,19 +61,19 @@
 | 状态 | 归属 | 语义 |
 |---|---|---|
 | `contextCount` | assistant 设置（renderer） | 标量；`number \| null`；默认/初始/重置窗口大小 |
-| `contextWindowAnchor[topicId]` | assistant 设置（renderer） | per-topic 映射；值为起始 turn 的 group key |
+| `contextWindowAnchor[routeKey]` | assistant 设置（renderer） | per-route 映射；值为起始 turn 的 group key。`routeKey = topicId`（主路由，持久化兼容），分支路由 `routeKey = topicId:branchId`，各路由锚点严格隔离、互不写入 |
 
-两者均属普通 renderer assistant-settings 配置（§11），不是聊天权威数据。
+两者均属普通 renderer assistant-settings 配置（§11），不是聊天权威数据。单 topic 内同名 `topicId` 的裸键恒指主路由；分支锚点永不复用裸键。切 route、窗口加载、渲染均不得迁移或重算任一路由的有效锚点（CW-5）；局部 Redux 投影（loaded viewport）永不成为完整上下文权威。
 
 ### 不变量（Invariants）
 
-- **I-1**：非空已初始化的 topic **恰好有一个锚点**；空 topic **没有锚点**。
-- **I-2**：上下文窗口 = 锚点 turn 至 topic 末尾；新 turn 使窗口增长，窗口永不收缩、锚点永不移动（CW-3）。
+- **I-1**：非空已初始化的路由**恰好有一个锚点**；空路由**没有锚点**（按 `routeKey` 适用；单 topic 多路由各持其一）。
+- **I-2**：上下文窗口 = 锚点 turn 至路由末尾；新 turn 使窗口增长，窗口永不收缩、锚点永不移动（CW-3）。
 - **I-3**：锚点是持久化状态，不是投影；UI 高亮、TokenCount、边界分隔线、模型请求均从同一锚点解析（CW-6）。
 - **I-4**：改变 `contextCount` 永不移动既有锚点（CW-1）；该改变只作用于未来的初始建立与显式重锚定。
 - **I-5**：锚点迁移的完整集合 = CW-4 六类；其余事件（CW-5 列表）均不是迁移。
 - **I-6**：删除锚点 turn 时锚点确定性转移（§9）；删除非锚点 turn 不移动锚点。
-- **I-7**：已初始化的非空 topic 在任何时刻（含重锚定交互之后）都保留恰好一个锚点；「无锚点」只对空 topic 或尚未修复的遗留 topic 存在。
+- **I-7**：已初始化的非空路由在任何时刻（含重锚定交互之后）都保留恰好一个锚点；「无锚点」只对空路由或尚未修复的遗留路由存在。
 
 ---
 
@@ -135,12 +135,14 @@
 
 **删除非锚点 turn**：锚点相对位置不动（I-6）。
 
-**分支继承（CW-4）**：topic 分支创建时，新分支**确定性继承**父 topic 的锚点；该动作不使用 `contextCount` 重新推导，也不使任何已初始化 topic 无锚点。确切映射（CW-FIX-1，实现契约）：以父锚点在父 group list 中的**索引**映射进分支 group list——
+**分支继承（CW-4）**：同-topic 真分支创建时，新分支**确定性继承**父路由的有效锚点；该动作不使用 `contextCount` 重新推导，也不使任何已初始化路由无锚点。确切映射（CW-FIX-1，实现契约）：以父锚点在父有效 group list 中的**索引**映射进新分支 group list——
 
-- 分支为空 → 无锚点（空 topic 无锚点，I-1）。
-- 父锚点缺失或无效（非 active、父 list 中不存在该 group key）→ 分支不继承；**非空分支必须立即获得锚点**（按 §6 默认位置建立），不允许已初始化的非空分支保持无锚点。
-- 索引在分支范围内（`index < branchGroups.length`）→ 锚点 = 分支 group list 同索引组。
-- 索引超出分支范围（分支是父 list 的严格前缀）→ **钳制到分支最后一个可用组**（最近可用前驱），而非放弃继承。
+- 新分支为空 → 无锚点（空路由无锚点，I-1；I-1 按路由适用）。
+- 父锚点缺失或无效（非 active、父 list 中不存在该 group key）→ 新分支不继承；**非空新分支必须立即获得锚点**（按 §6 默认位置建立），不允许已初始化的非空分支保持无锚点。
+- 索引在分支范围内（`index < branchGroups.length`）→ 锚点 = 新分支 group list 同索引组。
+- 索引超出分支范围（新分支是父 list 的严格前缀）→ **钳制到新分支最后一个可用组**（最近可用前驱），而非放弃继承。
+
+路由隔离：继承源为父路由键（`topicId` 或 `topicId:parentBranchId`），写入目标为新路由键（`topicId:newBranchId`）；源键与目标键互不覆盖。切 route 与窗口化读取（latest/around）永不触发继承与重算。
 
 ---
 

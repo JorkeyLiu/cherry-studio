@@ -46,14 +46,17 @@ describe('route-switch scroll + footer contract', () => {
     // Strip line comments so prose mentions (e.g. "never dispatches
     // NAVIGATE_TO_MESSAGE") cannot false-positive the call assertions.
     const handler = messagesSource
-      .slice(switchIdx, switchIdx + 8000)
+      .slice(switchIdx, switchIdx + 14000)
       .split('\n')
       .filter((line) => !line.trim().startsWith('//'))
       .join('\n')
-    expect(handler).toMatch(/findFirstVisibleMessage/)
-    expect(handler).toMatch(/visualOffset/)
+    expect(handler).toMatch(/dividerVisualAnchorOffset|findViewportTopAnchorWithOffset/)
+    expect(handler).toMatch(/dividerKey|dividerVisualAnchor/)
     expect(handler).toMatch(/rawScrollTop/)
-    expect(handler).toMatch(/loadRouteMessagesThunk/)
+    // Fork-anchor around read (+latest fallback) via the production helper
+    // (which issues loadRouteMessagesThunk around/latest in messageThunk.ts).
+    expect(handler).toMatch(/loadRouteWindowWithFallback/)
+    expect(handler).toMatch(/rebaseRouteMessages|routeWindow/)
     expect(handler).not.toMatch(/setPendingAnchorNavigate/)
     expect(handler).not.toMatch(/NAVIGATE_TO_MESSAGE/)
   })

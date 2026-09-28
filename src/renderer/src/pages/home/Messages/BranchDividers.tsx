@@ -107,6 +107,58 @@ export function forkRouteOptions(
   return options
 }
 
+/** Stable divider identity: same fork = same anchor + same parent route. */
+export const buildDividerKey = (anchorMessageId: string, parentBranchId: string | null): string =>
+  `${anchorMessageId}::${parentBranchId ?? 'main'}`
+
+/** Test id for a logical divider row (stable across routes). */
+export const dividerRowTestId = (anchorMessageId: string, parentBranchId: string | null): string =>
+  `branch-fork-divider-${anchorMessageId}-${parentBranchId ?? 'main'}`
+
+/**
+ * Divider switch context passed from the clicked divider row to Messages.
+ * Carries the stable divider identity plus the synchronously captured pixel
+ * offset of the clicked row relative to `#messages` top. Messages restores
+ * the SAME logical divider row to the SAME offset after the target route
+ * window commits (never the nearest-message heuristic as primary).
+ */
+export interface DividerSwitchInfo {
+  anchorMessageId: string
+  parentBranchId: string | null
+  dividerKey: string
+  /** Row top - container top at click time; null when unmeasurable. */
+  dividerOffset: number | null
+}
+
+/** Capture a divider row's offset relative to a container (null-safe). */
+export const captureDividerOffset = (dividerEl: HTMLElement | null, container: HTMLElement | null): number | null => {
+  if (!dividerEl || !container) return null
+  try {
+    return dividerEl.getBoundingClientRect().top - container.getBoundingClientRect().top
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Divider restore decision (pure): which anchor to align after the target
+ * route commits. Priority: same logical divider row → shared message visual
+ * anchor → fork message. Never bottom.
+ */
+export const decideDividerRestoreTarget = (input: {
+  dividerKeyPresentInTarget: boolean
+  sharedVisualMessageId: string | null
+  forkAnchorMessageId: string
+}): { kind: 'divider-row' | 'shared-message' | 'fork-message'; targetId: string | null; dividerKey: string | null } => {
+  if (input.dividerKeyPresentInTarget) {
+    return { kind: 'divider-row', targetId: null, dividerKey: '__divider__' }
+  }
+  if (input.sharedVisualMessageId) {
+    return { kind: 'shared-message', targetId: input.sharedVisualMessageId, dividerKey: null }
+  }
+  return { kind: 'fork-message', targetId: input.forkAnchorMessageId, dividerKey: null }
+}
+
 interface ForkDividerProps {
   topicId: string
   anchorMessageId: string
@@ -122,7 +174,7 @@ interface ForkDividerProps {
   activeBranchId: string | null
   /** Label for the count form (e.g. localized "此处有 x 条分支"). Rendered by the caller via i18n. */
   countLabel: string
-  onSelectRoute: (branchId: string | null, anchorMessageId: string) => void
+  onSelectRoute: (branchId: string | null, anchorMessageId: string, info?: DividerSwitchInfo) => void
 }
 
 /**
@@ -233,7 +285,32 @@ export const ForkDivider = ({
                 return
               }
               setOpen(false)
-              onSelectRoute(opt.branchId, anchorMessageId)
+              const esc =
+                typeof CSS !== 'undefined' &&
+                typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+                  ? (CSS as unknown as { escape: (v: string) => string }).escape
+                  : (v: string) => v
+              let dividerOffset: number | null = null
+              try {
+                const container = document.getElementById('messages')
+                const key = buildDividerKey(anchorMessageId, parentBranchId)
+                const row =
+                  (document.querySelector(`[data-divider-key="${esc(key)}"]`) as HTMLElement | null) ??
+                  (document.querySelector(
+                    `[data-testid="${esc(dividerRowTestId(anchorMessageId, parentBranchId))}"]`
+                  ) as HTMLElement | null)
+                dividerOffset = captureDividerOffset(row, container)
+              } catch {
+                dividerOffset = null
+              }
+              // captureSelfOffset retained as a named seam (same measurement).
+              void captureSelfOffset
+              onSelectRoute(opt.branchId, anchorMessageId, {
+                anchorMessageId,
+                parentBranchId,
+                dividerKey: buildDividerKey(anchorMessageId, parentBranchId),
+                dividerOffset
+              })
             }}
           />
         )
@@ -241,8 +318,33 @@ export const ForkDivider = ({
     </div>
   )
 
+  const dividerKey = buildDividerKey(anchorMessageId, parentBranchId)
+  const rowTestId = dividerRowTestId(anchorMessageId, parentBranchId)
+  const captureSelfOffset = (): number | null => {
+    try {
+      const container = document.getElementById('messages')
+      // Stable identity query: same anchor + same parent across routes.
+      const row =
+        (document.querySelector(`[data-divider-key="${CSS.escape(dividerKey)}"]`) as HTMLElement | null) ??
+        (document.querySelector(`[data-testid="${CSS.escape(rowTestId)}"]`) as HTMLElement | null) ??
+        // Legacy fallback: anchor-only test id (single divider per anchor).
+        (document.querySelector(
+          `[data-testid="branch-fork-divider-${CSS.escape(anchorMessageId)}"]`
+        ) as HTMLElement | null)
+      return captureDividerOffset(row, container)
+    } catch {
+      return null
+    }
+  }
+
   return (
-    <ForkDividerRow data-testid={`branch-fork-divider-${anchorMessageId}`}>
+    <ForkDividerRow
+      data-testid={rowTestId}
+      data-divider-key={dividerKey}
+      data-divider-anchor={anchorMessageId}
+      data-divider-parent={parentBranchId ?? 'main'}>
+      {/* Legacy anchor-only id retained as an alias for existing queries. */}
+      <span data-testid={`branch-fork-divider-${anchorMessageId}`} style={{ display: 'none' }} aria-hidden />
       <ForkDividerLine />
       <Popover
         content={content}
@@ -258,6 +360,7 @@ export const ForkDivider = ({
           data-testid={taken ? `branch-fork-selected-${anchorMessageId}` : `branch-fork-toggle-${anchorMessageId}`}
           type="text"
           size="small"
+          autoInsertSpace={false}
           aria-expanded={open}
           aria-label={t(open ? 'chat.topics.branch.collapse' : 'chat.topics.branch.expand')}>
           {taken ? takenName : countLabel} ▾

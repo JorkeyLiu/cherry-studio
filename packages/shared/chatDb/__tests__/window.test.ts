@@ -157,6 +157,7 @@ describe('S6.1 windowed reads — contract validation', () => {
       value: {
         messages: [{ id: 'm1' }],
         blocks: [{ id: 'b1', messageId: 'm1' }],
+        mutableMessageIds: ['m1'],
         window: {
           kind: 'latest' as const,
           completeness: 'window' as const,
@@ -180,6 +181,7 @@ describe('S6.1 windowed reads — contract validation', () => {
         value: {
           messages: [{ id: 'm2' }],
           blocks: [],
+          mutableMessageIds: ['m2'],
           window: {
             kind: 'around' as const,
             completeness: 'window' as const,
@@ -202,6 +204,7 @@ describe('S6.1 windowed reads — contract validation', () => {
         value: {
           messages: [],
           blocks: [],
+          mutableMessageIds: [],
           window: {
             kind: 'latest' as const,
             completeness: 'window' as const,

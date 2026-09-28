@@ -66,8 +66,27 @@ describe('ConversationService closure-sourced', () => {
     }
     const viewport: any = [{ id: 'u2', role: 'user' }]
     const result = await ConversationService.prepareMessagesForModel(viewport, assistant, 't1')
-    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistant, 't1', undefined)
+    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistant, 't1', undefined, null)
     expect(result.uiMessages).toBeDefined()
+  })
+
+  it('passes branchId through to computeContextInfo on branch route', async () => {
+    vi.mocked(getFreshValidatedClosure).mockReturnValue(null)
+    const assistant: any = {
+      id: 'a',
+      settings: { contextWindowAnchor: { 't1:b1': { kind: 'active', groupKey: 'u1' } }, contextCount: 5 },
+      model: { id: 'm', provider: 'p', name: 'm' }
+    }
+    const viewport: any = [{ id: 'u1', role: 'user' }]
+    computeMock.mockReturnValue({
+      uiMessages: viewport,
+      tokenEstimationMessages: [],
+      boundaryMessageId: null,
+      contextCount: { current: 1, max: 1 },
+      anchorGroupKey: 'u1'
+    })
+    await ConversationService.prepareMessagesForModel(viewport, assistant, 't1', undefined, 'b1')
+    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined, 'b1')
   })
 
   it('falls back to viewport when cache miss or mismatched anchor (fail-closed)', async () => {
@@ -89,7 +108,7 @@ describe('ConversationService closure-sourced', () => {
       anchorGroupKey: 'u1'
     })
     await ConversationService.prepareMessagesForModel(viewport, assistant, 't1')
-    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined)
+    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined, null)
   })
 
   it('does not use closure when anchor mismatched (no silent substitution)', async () => {
@@ -125,7 +144,7 @@ describe('ConversationService closure-sourced', () => {
       anchorGroupKey: 'u1'
     })
     await ConversationService.prepareMessagesForModel(viewport, assistant, 't1')
-    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined)
+    expect(computeMock).toHaveBeenCalledWith(viewport, assistant, 't1', undefined, null)
   })
 
   it('contextCount change alone does not affect closure cache hit (stable anchor)', async () => {
@@ -161,7 +180,7 @@ describe('ConversationService closure-sourced', () => {
     const viewport: any = [{ id: 'u1', role: 'user' }]
     // first call with contextCount 5
     await ConversationService.prepareMessagesForModel(viewport, assistantV1, 't1')
-    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV1, 't1', undefined)
+    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV1, 't1', undefined, null)
     vi.clearAllMocks()
     computeMock.mockReturnValue({
       uiMessages: viewport,
@@ -172,6 +191,6 @@ describe('ConversationService closure-sourced', () => {
     })
     // second call with different contextCount but same anchor => still hits cache
     await ConversationService.prepareMessagesForModel(viewport, assistantV2, 't1')
-    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV2, 't1', undefined)
+    expect(computeMock).toHaveBeenCalledWith(closure.messages, assistantV2, 't1', undefined, null)
   })
 })

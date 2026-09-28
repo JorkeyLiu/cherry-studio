@@ -3,9 +3,9 @@ import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
-import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useTimer } from '@renderer/hooks/useTimer'
-import { useAppDispatch } from '@renderer/store'
+import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { isLoadedAnswerGroupMutable, resolveLoadedAnswerGroup } from '@renderer/store/routeAnswerGroup'
 import { reorderMessageGroupThunk } from '@renderer/store/thunk/messageGroupReorder'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
@@ -37,13 +37,30 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   }, [stableGroupId])
 
   // Hooks
-  const { editMessage } = useMessageOperations(topic)
-  const { selectAnswer } = useMessageActionController()
+  const { selectAnswer, selectUseful } = useMessageActionController()
   const { isMultiSelectMode } = useChatContext(topic)
   const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
+
+  // PROJ-13 group capability: the whole loaded answer group (members +
+  // loaded user root) must be mutable through the active route. Unknown
+  // capability or any loaded immutable member disables group mutations
+  // (selector, useful, reorder, retry-all); Main stays final for
+  // window-outside members. Single (non-grouped) messages fall back to
+  // their own mutability.
+  const groupMutable = useAppSelector((state) => {
+    try {
+      const seedId = messages.length > 0 ? messages[0].id : null
+      if (!seedId) return false
+      const group = resolveLoadedAnswerGroup(state, topic.id, seedId)
+      if (!group) return false
+      return isLoadedAnswerGroupMutable(state, topic.id, group)
+    } catch {
+      return false
+    }
+  })
 
   // LOCK-105: multi-model answer layout is always fold/tag mode. The runtime
   // no longer renders horizontal/vertical/grid layouts; the per-message
@@ -62,6 +79,8 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
 
   const setSelectedMessage = useCallback(
     (message: Message) => {
+      // PROJ-13: the whole selector is inert when the group is immutable.
+      if (!groupMutable) return
       // S3.4: explicit target IDs resolved at event time to the latest
       // complete answer group. No captured messages array is used so a
       // projection update that expands the group is observed.
@@ -80,7 +99,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         200
       )
     },
-    [selectAnswer, topic.id, setTimeoutTimer]
+    [groupMutable, selectAnswer, topic.id, setTimeoutTimer]
   )
   // NOTE: registerMessageElement logic is kept for future use (currently not used for navigation)
   useEffect(() => {
@@ -91,6 +110,9 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     return () => messages.forEach((message) => registerMessageElement?.(message.id, null))
   }, [messages, registerMessageElement])
 
+  // PROJ-13: group-level atomic useful toggle. One Main transaction sets
+  // the single useful member (or clears when already useful); the old
+  // per-message forEach(editMessage) partial-write path is removed.
   const onUpdateUseful = useCallback(
     (msgId: string) => {
       const message = messages.find((msg) => msg.id === msgId)
@@ -98,24 +120,19 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         logger.error("the message to update doesn't exist in this group")
         return
       }
-      if (message.useful) {
-        void editMessage(msgId, { useful: undefined })
-        return
-      } else {
-        const toResetUsefulMsgs = messages.filter((msg) => msg.id !== msgId && msg.useful)
-        toResetUsefulMsgs.forEach(async (msg) => {
-          void editMessage(msg.id, {
-            useful: undefined
-          })
-        })
-        void editMessage(msgId, { useful: true })
-      }
+      if (!groupMutable) return
+      void selectUseful({ topicId: topic.id, messageId: msgId }).catch((e) => {
+        logger.error('[onUpdateUseful] Failed to toggle useful:', e as Error)
+      })
     },
-    [editMessage, messages]
+    [groupMutable, messages, selectUseful, topic.id]
   )
 
   const handleReorderMessages = useCallback(
     (reorderedMessages: Message[]) => {
+      // PROJ-13: sortable is disabled when the group is immutable; the
+      // handler stays fail-closed as defense-in-depth.
+      if (!groupMutable) return
       void dispatch(
         reorderMessageGroupThunk(
           topic.id,
@@ -123,7 +140,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         )
       )
     },
-    [dispatch, topic.id]
+    [dispatch, groupMutable, topic.id]
   )
 
   const groupContextMessageId = useMemo(() => {
@@ -197,6 +214,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
             setSelectedMessage={setSelectedMessage}
             onReorderMessages={handleReorderMessages}
             topic={topic}
+            disabled={!groupMutable}
           />
         )}
       </GroupContainer>

@@ -138,6 +138,7 @@ describe('useContextWindowAnchor', () => {
     await result.current.onReanchor()
     expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
       topicId: TOPIC_ID,
+      branchId: null,
       intent: 'reanchor-default',
       contextCount: 2,
       currentAnchorGroupKey: 'u1',
@@ -160,6 +161,7 @@ describe('useContextWindowAnchor', () => {
     await result.current.onReanchor()
     expect(mocks.resolveContextClosure).toHaveBeenCalledWith({
       topicId: TOPIC_ID,
+      branchId: null,
       intent: 'reanchor-default',
       contextCount: 2,
       currentAnchorGroupKey: 'u1',

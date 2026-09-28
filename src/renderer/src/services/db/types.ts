@@ -23,6 +23,7 @@ import type {
   ResolveContextClosureRequest,
   ResolveContextClosureResult,
   SelectAnswerMessageResponse,
+  SelectUsefulAnswerResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics,
   TopicBranchWire
@@ -136,6 +137,19 @@ export interface MessageDataSource {
   ): Promise<SelectAnswerMessageResponse>
 
   /**
+   * PROJ-13: group-level atomic `useful` selection in one route.
+   *
+   * The renderer supplies ONLY the toggled message ID; Main resolves the
+   * complete answer group (including window-outside members) in the same
+   * SQLite transaction and persists exactly one `useful=true` (or a full
+   * clear when the target is already useful) atomically. Returns the
+   * authoritative group for a loaded-projection intersection commit.
+   * Dispatches `updateTopicUpdatedAt` exactly once after success (the thunk
+   * must NOT dispatch it again).
+   */
+  selectUsefulAnswer(topicId: string, messageId: string, branchId?: BranchRoute): Promise<SelectUsefulAnswerResponse>
+
+  /**
    * Answer-group authority reorder in one route (additive semantic command).
    *
    * The renderer supplies ONLY the stable anchor + desired group order; Main
@@ -217,7 +231,7 @@ export interface MessageDataSource {
    * `streamDiag` is optional measurement-only correlation metadata
    * (PERF-STREAM-ATTR-001); never affects persistence.
    */
-  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics): Promise<void>
+  updateBlocks(blocks: MessageBlock[], streamDiag?: StreamWriteDiagnostics, resendAttemptId?: string): Promise<void>
 
   /**
    * Update single block
@@ -228,7 +242,8 @@ export interface MessageDataSource {
   updateSingleBlock?(
     blockId: string,
     updates: Partial<MessageBlock>,
-    streamDiag?: StreamWriteDiagnostics
+    streamDiag?: StreamWriteDiagnostics,
+    resendAttemptId?: string
   ): Promise<void>
 
   /**

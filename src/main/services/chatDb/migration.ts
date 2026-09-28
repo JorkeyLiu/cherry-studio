@@ -1233,6 +1233,20 @@ export const MIGRATIONS: MigrationEntry[] = [
       `CREATE INDEX IF NOT EXISTS messages_branch_id_idx ON messages(branch_id)`,
       `CREATE INDEX IF NOT EXISTS messages_topic_id_branch_id_sort_order_idx ON messages(topic_id, branch_id, sort_order)`
     ]
+  },
+  {
+    key: '017_cleanup_route_message_overlay',
+    description:
+      'Idempotent cleanup of the unshipped 017 route-local mutation overlay model (never released): drops the ghost message_route_overlays table and its indexes if present and clears the stale 017_route_message_overlay migration_state row. Fresh databases are a no-op; old dev databases recover the branch_id-ownership + topic_branches-ancestry model. The 017 number is burned and never reused; the next future migration must be 018.',
+    sql: [
+      `DROP TABLE IF EXISTS message_route_overlays`,
+      `DROP INDEX IF EXISTS message_route_overlays_topic_id_idx`,
+      `DROP INDEX IF EXISTS message_route_overlays_route_key_idx`,
+      `DROP INDEX IF EXISTS message_route_overlays_message_id_idx`,
+      `DROP INDEX IF EXISTS message_route_overlays_topic_route_message_idx`,
+      `DROP INDEX IF EXISTS message_route_overlays_topic_route_idx`,
+      `DELETE FROM migration_state WHERE key='017_route_message_overlay'`
+    ]
   }
 ]
 

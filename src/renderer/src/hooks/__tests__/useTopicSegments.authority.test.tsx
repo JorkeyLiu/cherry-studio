@@ -66,6 +66,15 @@ function setupStore() {
       messages: [{ id: 'm-window' }, { id: 'm-window-2' }] as any
     })
   )
+  // PROJ-13 (B5): segment writes require a Main-authoritative route
+  // capability — publish the private loaded set for the main route.
+  store.dispatch(
+    newMessagesActions.mergeRouteMutability({
+      topicId: 't1',
+      route: null,
+      mutableMessageIds: ['m-window', 'm-window-2']
+    })
+  )
   return store
 }
 
@@ -127,6 +136,11 @@ describe('useTopicSegments authority catalog', () => {
     const store = configureStore({
       reducer: { topicSegments: topicSegmentReducer, messages: messagesReducer as any }
     })
+    store.dispatch(newMessagesActions.messagesReceived({ topicId: 't1', messages: [{ id: 'm-early' }] as any }))
+    // PROJ-13 (B5): the created member must be capability-covered.
+    store.dispatch(
+      newMessagesActions.mergeRouteMutability({ topicId: 't1', route: null, mutableMessageIds: ['m-early'] })
+    )
     const lateStale = makeSeg('seg-late', 0, ['m-late'], 'm-late', 'm-late')
     store.dispatch({
       type: 'topicSegments/replaceSegmentsForTopic',
@@ -201,6 +215,11 @@ describe('useTopicSegments authority catalog', () => {
     const store = configureStore({
       reducer: { topicSegments: topicSegmentReducer, messages: messagesReducer as any }
     })
+    store.dispatch(newMessagesActions.messagesReceived({ topicId: 't1', messages: [{ id: 'm-new' }] as any }))
+    // PROJ-13 (B5): the created member must be capability-covered.
+    store.dispatch(
+      newMessagesActions.mergeRouteMutability({ topicId: 't1', route: null, mutableMessageIds: ['m-new'] })
+    )
     const lateStale = makeSeg('seg-late', 0, ['m-late'], 'm-late', 'm-late')
     store.dispatch({
       type: 'topicSegments/replaceSegmentsForTopic',

@@ -15,6 +15,7 @@
  * at paste time through the semantic transaction.
  */
 
+import type { RootState } from '@renderer/store'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType, UserMessageStatus } from '@renderer/types/newMessage'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
@@ -224,6 +225,23 @@ function clipboardResponseFor(groupIds: string[]) {
   }
 }
 
+// The cut service entry carries its own PROJ-15 depth gate (same
+// `requireEditSelectionMutable` the `useEditMode` caller applies), so cut
+// tests below publish a gate-passing loaded projection + route capability for
+// group u1. Fail-closed gate behavior itself is covered in
+// `ClipboardService.cutGate.test.ts` with the real gate logic.
+function gatePassingGetState(): RootState {
+  return {
+    messages: {
+      entities: { u1, a1, a2, u2 },
+      messageIdsByTopic: { 'topic-1': ['u1', 'a1', 'a2', 'u2'] },
+      mutableMessageIdsByTopic: { 'topic-1': ['u1', 'a1', 'a2', 'u2'] },
+      mutableRouteByTopic: { 'topic-1': null }
+    },
+    topicBranch: { activeBranchIdByTopic: {} }
+  } as unknown as RootState
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)', () => {
@@ -317,7 +335,7 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const { cutMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
-    const count = await cutMessages(dispatch, 'topic-1', ['u1'])
+    const count = await cutMessages(dispatch, gatePassingGetState, 'topic-1', ['u1'])
 
     expect(count).toBe(3)
     expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
@@ -411,7 +429,7 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const { copyMessages, cutMessages } = await import('../ClipboardService')
 
     expect(await copyMessages(vi.fn(), 'topic-1', ['u1'])).toBe(0)
-    expect(await cutMessages(vi.fn(), 'topic-1', ['u1'])).toBe(0)
+    expect(await cutMessages(vi.fn(), gatePassingGetState, 'topic-1', ['u1'])).toBe(0)
     expect(mocks.setClipboard).not.toHaveBeenCalled()
   })
 

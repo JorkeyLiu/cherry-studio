@@ -49,6 +49,7 @@ import type {
   RestoreTopicRequest,
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
+  SelectUsefulAnswerRequest,
   SoftDeleteTopicRequest,
   TopicDeletionEvent,
   TopicExistsRequest,
@@ -81,6 +82,7 @@ import { IpcChannel } from '@shared/IpcChannel'
 import type { MediaAttachmentOpenRequest } from '@shared/mediaAttachment'
 import type { ModelMetadataRefreshResult, ModelMetadataSnapshot, ModelMetadataStatus } from '@shared/modelMetadata'
 import type { ProviderLogoResult } from '@shared/providerLogo'
+import type { SaveDataAck, SaveDataRequest } from '@shared/saveData'
 import type { Notification } from '@types'
 import type {
   AddMemoryOptions,
@@ -178,6 +180,24 @@ const api = {
   getSystemFonts: (): Promise<string[]> => ipcRenderer.invoke(IpcChannel.App_GetSystemFonts),
   getIpCountry: (): Promise<string> => ipcRenderer.invoke(IpcChannel.App_GetIpCountry),
   mockCrashRenderProcess: () => ipcRenderer.invoke(IpcChannel.APP_CrashRenderProcess),
+  saveData: {
+    // Main → renderer save-data handshake (main window only): Main sends a
+    // `SaveDataRequest`; the renderer flushes redux-persist and MUST ack
+    // (success or failure) via `ackSaveData` so Main can settle the close.
+    onSaveData: (callback: (request: SaveDataRequest | undefined) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: SaveDataRequest | undefined) => {
+        // `undefined` is the legacy fire-and-forget flush hint
+        // (close-to-tray hide / power-shutdown): forwarded as-is so the
+        // renderer can flush best-effort with no ack.
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.App_SaveData, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.App_SaveData, listener)
+      }
+    },
+    ackSaveData: (ack: SaveDataAck): Promise<void> => ipcRenderer.invoke(IpcChannel.App_SaveDataAck, ack)
+  },
   mac: {
     isProcessTrusted: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.App_MacIsProcessTrusted),
     requestProcessTrust: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.App_MacRequestProcessTrust)
@@ -697,6 +717,9 @@ const api = {
     // PERF-100: one atomic multi-model answer-tab selection
     selectAnswerMessage: (request: SelectAnswerMessageRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_SelectAnswerMessage, request),
+    // PROJ-13: one atomic multi-model useful selection (group-level)
+    selectUsefulAnswer: (request: SelectUsefulAnswerRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_SelectUsefulAnswer, request),
     deleteMessage: (request: DeleteMessageRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessage, request),
     deleteMessages: (request: DeleteMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteMessages, request),
     updateBlocks: (request: UpdateBlocksRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_UpdateBlocks, request),

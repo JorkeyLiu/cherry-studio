@@ -404,15 +404,18 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         const provisionalLoadedMessages = (selectLoadedMessagesForTopic(latestState, topicId) ?? []) as Message[]
         const orderedMsgs = provisionalLoadedMessages
         let contextMsgs = orderedMsgs
-        const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[topicId]?.groupKey ?? null
+        const execRoute = selectActiveBranchId(latestState, topicId)
+        const execAnchorKey =
+          typeof execRoute === 'string' && execRoute.length > 0 ? `${topicId}:${execRoute}` : topicId
+        const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[execAnchorKey]?.groupKey ?? null
         if (anchorGroupKey) {
           const currentFp = computeClosureFingerprint(orderedMsgs as any)
-          const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp)
+          const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp, execRoute)
           if (fresh) {
             contextMsgs = fresh.messages as any
           }
         }
-        const { uiMessages } = computeContextInfo(contextMsgs, assistant, topicId)
+        const { uiMessages } = computeContextInfo(contextMsgs, assistant, topicId, undefined, execRoute)
         const finalContextWithAssistant = [...uiMessages, latestAssistantMsg]
 
         const possibleBlockId = findBlockIdForCompletion(latestAssistantMsg)

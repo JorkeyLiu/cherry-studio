@@ -62,6 +62,15 @@ interface S {
   assistants: { assistants: Array<{ id: string }> }
 }
 let st: S
+// PROJ-13/16: renderer mutation prechecks run against the Main-authoritative
+// window capability. Mirror the loaded projection into a private main-route
+// capability so the thunk under test reaches its DB contract.
+const syncCap = () => {
+  const ids = ((st as any).messages.messageIdsByTopic?.['t-1'] ?? []) as string[]
+  ;(st as any).messages.mutableMessageIdsByTopic = { 't-1': [...ids] }
+  ;(st as any).messages.mutableRouteByTopic = { 't-1': null }
+  ;(st as any).topicBranch = { activeBranchIdByTopic: {} }
+}
 vi.mock('@renderer/store', () => ({ default: { dispatch: vi.fn(), getState: () => st } }))
 vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: {
@@ -99,6 +108,7 @@ describe('semantic resend/regenerate renderer', () => {
     // Loaded has user + a1 only; a2 is window-outside in authority.
     st.messages.entities = { 'u-1': u, 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['u-1', 'a-1'] }
+    syncCap()
     st.messageBlocks.entities = { 'b-old-1': { id: 'b-old-1' } }
     const a2 = msg({ id: 'a-2', askId: 'u-1', blocks: [] })
     mocks.resendUserMessages.mockResolvedValue({
@@ -149,6 +159,7 @@ describe('semantic resend/regenerate renderer', () => {
     const u = user()
     st.messages.entities = { 'u-1': u }
     st.messages.messageIdsByTopic = { 't-1': ['u-1'] }
+    syncCap()
     const created = msg({ id: 'a-new', askId: 'u-1' })
     mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],
@@ -176,6 +187,7 @@ describe('semantic resend/regenerate renderer', () => {
     // User missing from Redux (window-outside), assistant loaded.
     st.messages.entities = { 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['a-1'] }
+    syncCap()
     const au = user()
     mocks.regenerateAssistantMessage.mockResolvedValue({
       affectedFileIds: [],
@@ -209,6 +221,7 @@ describe('semantic resend/regenerate renderer', () => {
     const a1 = msg({ id: 'a-1', askId: 'u-1', modelId: 'self-model', model: { id: 'self-model' } as never })
     st.messages.entities = { 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['a-1'] }
+    syncCap()
     const au = user()
     mocks.regenerateAssistantMessage.mockResolvedValue({
       affectedFileIds: [],
@@ -242,6 +255,7 @@ describe('semantic resend/regenerate renderer', () => {
     const a1 = msg({ id: 'a-1', askId: 'u-1', modelId: '' })
     st.messages.entities = { 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['a-1'] }
+    syncCap()
     const dispatch = vi.fn()
     await regenerateAssistantResponseThunk('t-1', a1, {
       id: 'as-1',
@@ -258,6 +272,7 @@ describe('semantic resend/regenerate renderer', () => {
     const u = user()
     st.messages.entities = { 'u-1': u }
     st.messages.messageIdsByTopic = { 't-1': ['u-1'] }
+    syncCap()
     mocks.resendUserMessages.mockRejectedValue(new Error('db down'))
     const dispatch = vi.fn()
     await expect(
@@ -280,6 +295,7 @@ describe('semantic resend/regenerate renderer', () => {
     const u = user()
     st.messages.entities = { 'u-1': u }
     st.messages.messageIdsByTopic = { 't-1': ['u-1'] }
+    syncCap()
     const dispatch = vi.fn()
     await expect(
       resendMessageThunk('t-1', u, { id: 'as-1', model: { id: 'm1' }, topics: [], settings: {} } as never)(
@@ -298,6 +314,7 @@ describe('semantic resend/regenerate renderer', () => {
     const u = user()
     st.messages.entities = { 'u-1': u }
     st.messages.messageIdsByTopic = { 't-1': ['u-1'] }
+    syncCap()
     const created = msg({ id: 'a-new', askId: 'u-1' })
     mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],
@@ -330,6 +347,7 @@ describe('semantic resend/regenerate renderer', () => {
     const a1 = msg({ id: 'a-1', askId: 'u-1', modelId: '' })
     st.messages.entities = { 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['a-1'] }
+    syncCap()
     const dispatch = vi.fn()
     await regenerateAssistantResponseThunk('t-1', a1, {
       id: 'as-1',
@@ -346,6 +364,7 @@ describe('semantic resend/regenerate renderer', () => {
     const a1 = msg({ id: 'a-1', askId: 'u-1', modelId: 'self-model', model: { id: 'self-model' } as never })
     st.messages.entities = { 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['a-1'] }
+    syncCap()
     const au = user()
     mocks.regenerateAssistantMessage.mockResolvedValue({
       affectedFileIds: [],
@@ -376,6 +395,7 @@ describe('semantic resend/regenerate renderer', () => {
     const a1 = msg({ id: 'a-1', askId: 'u-1', modelId: '' })
     st.messages.entities = { 'a-1': a1 }
     st.messages.messageIdsByTopic = { 't-1': ['a-1'] }
+    syncCap()
     const au = user()
     mocks.regenerateAssistantMessage.mockResolvedValue({
       affectedFileIds: [],

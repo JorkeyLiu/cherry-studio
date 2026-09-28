@@ -28,7 +28,9 @@ vi.mock('@renderer/store', () => ({
 vi.mock('@renderer/store/topicBranch', () => ({
   activeBranchReset: (payload: unknown) => ({ type: 'topicBranch/activeBranchReset', payload }),
   activeBranchSet: (payload: unknown) => ({ type: 'topicBranch/activeBranchSet', payload }),
-  branchesReceived: (payload: unknown) => ({ type: 'topicBranch/branchesReceived', payload })
+  branchesReceived: (payload: unknown) => ({ type: 'topicBranch/branchesReceived', payload }),
+  deletionFallbackRequested: (payload: unknown) => ({ type: 'topicBranch/deletionFallbackRequested', payload }),
+  deletionFallbackConsumed: (payload: unknown) => ({ type: 'topicBranch/deletionFallbackConsumed', payload })
 }))
 
 vi.mock('../DbService', () => ({

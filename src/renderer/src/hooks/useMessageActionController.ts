@@ -7,12 +7,14 @@ import {
   regenerateAssistantResponseThunk,
   resendMessageThunk,
   resendUserMessageWithEditThunk,
-  selectAnswerMessageThunk
+  selectAnswerMessageThunk,
+  selectUsefulAnswerThunk
 } from '@renderer/store/thunk/messageThunk'
 import { updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import { estimateMessageBlocksUsage } from '@renderer/utils/messageUtils/usage'
+import { t } from 'i18next'
 import { useCallback } from 'react'
 
 const logger = loggerService.withContext('useMessageActionController')
@@ -67,6 +69,15 @@ export function useMessageActionController() {
     [dispatch]
   )
 
+  const selectUseful = useCallback(
+    async (target: ActionTarget) => {
+      // PROJ-13: group-level atomic useful toggle — same authority shape as
+      // selectAnswer (toggled ID only, Main resolves the full group).
+      await dispatch(selectUsefulAnswerThunk(target.topicId, target.messageId))
+    },
+    [dispatch]
+  )
+
   const editSave = useCallback(
     async (
       target: ActionTarget,
@@ -101,9 +112,19 @@ export function useMessageActionController() {
       }
       const allBlocksToPersist = [...blocksToAdd, ...blocksToUpdate]
       if (allBlocksToPersist.length > 0 || blockIdsToRemove.length > 0 || Object.keys(messageUpdates).length > 1) {
-        const cleanup = await dispatch(
-          updateMessageAndBlocksThunk(target.topicId, messageUpdates, allBlocksToPersist, blockIdsToRemove)
-        )
+        let cleanup: { affectedFileIds: string[]; remainingReferenceCounts: Record<string, number> } | undefined
+        try {
+          cleanup = await dispatch(
+            updateMessageAndBlocksThunk(target.topicId, messageUpdates, allBlocksToPersist, blockIdsToRemove)
+          )
+        } catch (e) {
+          // Main validation failures must never be silent: a unified toast
+          // fires AND the error still propagates so callers keep the editor
+          // open for retry (existing contract).
+          logger.error('[editSave] Failed to persist message updates', e as Error)
+          window.toast.error(t('message.error.unknown'))
+          throw e
+        }
         let postCommitError: unknown
         try {
           onCommit?.(editedBlocks.map((b) => b.id))
@@ -161,6 +182,7 @@ export function useMessageActionController() {
     regenerateAssistant,
     resendUser,
     selectAnswer,
+    selectUseful,
     editSave,
     resendWithEdit
   }

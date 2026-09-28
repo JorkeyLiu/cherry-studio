@@ -22,6 +22,7 @@ import { registerIpc } from './ipc'
 import { analyticsService } from './services/AnalyticsService'
 import { markStartupStageSync, withStartupStage } from './services/startupStageDiagnostics'
 import { apiServerService } from './services/ApiServerService'
+import { saveDataHandshake } from './services/SaveDataHandshake'
 import { appMenuService } from './services/AppMenuService'
 import { configManager } from './services/ConfigManager'
 import mcpService from './services/MCPService'
@@ -451,6 +452,15 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', async () => {
     // Clean up resources — each service in its own try/catch so one failure
     // cannot prevent cleanup of subsequent services.
+
+    // Save-data handshake: remove the ack handler and settle any in-flight
+    // request as `disposed` so a late renderer ack can never settle a
+    // future session's request.
+    try {
+      saveDataHandshake.dispose()
+    } catch (error) {
+      logger.warn('Error disposing save-data handshake:', error as Error)
+    }
 
     // L2 control layer (poller, terminal ownership, webContents ref) must be
     // settled BEFORE the underlying import session is torn down. This stops

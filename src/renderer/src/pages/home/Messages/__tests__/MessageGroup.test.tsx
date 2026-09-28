@@ -41,6 +41,29 @@ const mocks = vi.hoisted(() => ({
   MessageOutline: vi.fn(() => null)
 }))
 
+const fakeGroupState = vi.hoisted(() => {
+  const assistant = (id: string): Record<string, unknown> => ({
+    id,
+    topicId: 'topic-1',
+    role: 'assistant',
+    assistantId: 'asst-1',
+    askId: 'ask-1',
+    blocks: []
+  })
+  const ids = ['msg-1', 'msg-2', 'a0', 'a1', 'a2', 'a3']
+  return {
+    current: {
+      messages: {
+        entities: Object.fromEntries(ids.map((id) => [id, assistant(id)])),
+        messageIdsByTopic: { 'topic-1': ids },
+        mutableMessageIdsByTopic: { 'topic-1': ids },
+        mutableRouteByTopic: { 'topic-1': null }
+      },
+      topicBranch: { activeBranchIdByTopic: {} }
+    }
+  }
+})
+
 vi.mock('@logger', () => ({
   loggerService: {
     withContext: () => ({
@@ -116,6 +139,7 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
 vi.mock('@renderer/hooks/useMessageActionController', () => ({
   useMessageActionController: () => ({
     selectAnswer: mocks.selectAnswerMessage,
+    selectUseful: vi.fn(),
     regenerateAssistant: vi.fn(),
     resendUser: vi.fn(),
     editSave: vi.fn(),
@@ -158,7 +182,10 @@ vi.mock('@renderer/services/TokenService', () => ({
 }))
 
 vi.mock('@renderer/store', () => ({
-  useAppDispatch: () => vi.fn()
+  useAppDispatch: () => vi.fn(),
+  // PROJ-13 group capability runs the real selector against a private-group
+  // fixture (all members mutable through the main route).
+  useAppSelector: (selector: (state: unknown) => unknown) => selector(fakeGroupState.current)
 }))
 
 vi.mock('@renderer/store/thunk/messageGroupReorder', () => ({

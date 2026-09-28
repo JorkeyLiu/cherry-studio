@@ -136,13 +136,13 @@ const Chat: FC<Props> = (props) => {
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, props.activeTopic.id))
   const anchorRouteKey = anchorKeyForRoute(props.activeTopic.id, activeBranchId)
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey]?.groupKey ?? null
-  const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey)
+  const { closure } = useContextClosure(props.activeTopic.id, anchorGroupKey, activeBranchId)
   // R-06: authoritative closure supplies message lists and full-topic metadata; fallback preserves bounded behavior
   const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages), [topicMessages])
   const freshClosure = useMemo(() => {
     void closure // keep hook subscription; actual freshness is gated via centralized helper reading cache
-    return getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint)
-  }, [props.activeTopic.id, anchorGroupKey, currentFingerprint, closure])
+    return getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, currentFingerprint, activeBranchId)
+  }, [props.activeTopic.id, anchorGroupKey, activeBranchId, currentFingerprint, closure])
   // Subscribe to closure-referenced blocks when closure is active so filterEmptyMessages invalidation covers closure blocks
   const closureBlockIds = useMemo(
     () => (freshClosure ? freshClosure.messages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
@@ -155,7 +155,13 @@ const Chat: FC<Props> = (props) => {
     const active = currentPhaseCorrelation()
     const startedAt = active ? performance.now() : 0
     // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; otherwise bounded fallback
-    const result = resolveSharedContextInfo(topicMessages, assistant, props.activeTopic.id, freshClosure as any)
+    const result = resolveSharedContextInfo(
+      topicMessages,
+      assistant,
+      props.activeTopic.id,
+      freshClosure as any,
+      activeBranchId
+    )
     if (active && topicMessages.length > 0) {
       recordPhaseDurationForCorrelation(
         active.correlationId,
@@ -165,7 +171,7 @@ const Chat: FC<Props> = (props) => {
       )
     }
     return result
-  }, [freshClosure, topicMessages, activeBlocksForContext, assistant, props.activeTopic.id])
+  }, [freshClosure, topicMessages, activeBlocksForContext, assistant, props.activeTopic.id, activeBranchId])
 
   const enableContentSearch = React.useCallback((initialText?: string) => {
     if (isSearchActiveRef.current) {

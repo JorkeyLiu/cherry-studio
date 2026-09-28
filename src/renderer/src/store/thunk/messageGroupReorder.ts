@@ -3,6 +3,7 @@ import { dbService } from '@renderer/services/db'
 import type { AppDispatch, RootState } from '../index'
 import { newMessagesActions } from '../newMessage'
 import { selectActiveBranchId } from '../topicBranch'
+import { isMutableForActiveRoute } from './messageThunk'
 
 /**
  * Answer-group authority reorder (renderer thin client).
@@ -24,6 +25,14 @@ export const reorderMessageGroupThunk =
   (topicId: string, orderedGroupIds: string[]) => async (dispatch: AppDispatch, getState: () => RootState) => {
     if (!Array.isArray(orderedGroupIds) || orderedGroupIds.length === 0) {
       return
+    }
+    // Renderer precheck against Main-authoritative capability; Main guard
+    // stays final. Any immutable member fails closed before the IPC call.
+    const preState = getState()
+    for (const id of orderedGroupIds) {
+      if (!isMutableForActiveRoute(preState, topicId, id)) {
+        throw new Error(`Message ${id} is immutable through this route`)
+      }
     }
     const anchorMessageId = orderedGroupIds[0]
     const response = await dbService.reorderAnswerGroup(

@@ -16,6 +16,7 @@ import iconPath from '../../../build/icon.png?asset'
 import { titleBarOverlayDark, titleBarOverlayLight } from '../config'
 import { configManager } from './ConfigManager'
 import { contextMenu } from './ContextMenu'
+import { saveDataHandshake } from './SaveDataHandshake'
 import { isSafeExternalUrl } from './security'
 import { initSessionUserAgent } from './WebviewService'
 
@@ -376,55 +377,159 @@ export class WindowService {
     return this.mainWindow
   }
 
+  /**
+   * Close intent for the main window.
+   *
+   * - `quit`: the window is really going away (app quit, or a direct
+   *   close on Win/Linux without close-to-tray). The save-data handshake
+   *   MUST run before the window is destroyed.
+   * - `hide`: close-to-tray / macOS hide semantics. Window behavior is
+   *   unchanged (fire-and-forget flush hint + hide); no handshake, so
+   *   user "close to tray" behavior never changes.
+   */
+  private resolveMainCloseIntent(): 'quit' | 'hide' {
+    // 如果已经触发退出，直接退出
+    if (app.isQuitting) {
+      return 'quit'
+    }
+
+    // 托盘及关闭行为设置
+    const isShowTray = configManager.getTray()
+    const isTrayOnClose = configManager.getTrayOnClose()
+
+    // 没有开启托盘，或者开启了托盘，但设置了直接关闭，应执行直接退出
+    if (!isShowTray || (isShowTray && !isTrayOnClose)) {
+      // 如果是Windows或Linux，直接退出
+      // mac按照系统默认行为，不退出
+      if (isWin || isLinux) {
+        return 'quit'
+      }
+    }
+
+    /**
+     * 上述逻辑以下:
+     * win/linux: 是"开启托盘+设置关闭时最小化到托盘"的情况
+     * mac: 任何情况都会到这里，因此需要单独处理mac
+     */
+    return 'hide'
+  }
+
+  /**
+   * Electron DOMStorage durable barrier (quit path only).
+   *
+   * Best-effort synchronous `session.flushStorageData()` after the
+   * save-data handshake settles and before `destroy()`. Electron 41
+   * returns void — never awaited, never blocks. Failures are logged
+   * and never prevent destroy/quit. Deliberately touches only
+   * DOMStorage: no `cookies.flushStore()`, no `closeAllConnections()`.
+   */
+  private flushDomStorageBarrier(mainWindow: BrowserWindow): void {
+    try {
+      if (mainWindow.isDestroyed()) {
+        return
+      }
+      const contents = mainWindow.webContents
+      if (!contents) {
+        return
+      }
+      try {
+        if (typeof contents.isDestroyed === 'function' && contents.isDestroyed()) {
+          return
+        }
+      } catch {
+        return
+      }
+      const session = contents.session
+      if (!session || typeof session.flushStorageData !== 'function') {
+        return
+      }
+      // Electron 41 returns void: synchronous fire, no await.
+      session.flushStorageData()
+    } catch (error) {
+      logger.warn('Failed to flush DOM storage before destroy:', error as Error)
+    }
+  }
+
+  private hideMainWindowToTray(mainWindow: BrowserWindow) {
+    mainWindow.hide()
+    //for mac users, should hide dock icon if close to tray
+    if (isMac && configManager.getTrayOnClose()) {
+      app.dock?.hide()
+
+      mainWindow.once('show', () => {
+        //restore the window can hide by cmd+h when the window is shown again
+        // https://github.com/electron/electron/pull/47970
+        void app.dock?.show()
+      })
+    }
+  }
+
   private setupWindowLifecycleEvents(mainWindow: BrowserWindow) {
     mainWindow.on('close', (event) => {
-      // save data before when close window
-      try {
-        mainWindow.webContents.send(IpcChannel.App_SaveData)
-      } catch (error) {
-        logger.error('Failed to save data:', error as Error)
-      }
-
-      // 如果已经触发退出，直接退出
-      if (app.isQuitting) {
-        return app.quit()
-      }
-
-      // 托盘及关闭行为设置
-      const isShowTray = configManager.getTray()
-      const isTrayOnClose = configManager.getTrayOnClose()
-
-      // 没有开启托盘，或者开启了托盘，但设置了直接关闭，应执行直接退出
-      if (!isShowTray || (isShowTray && !isTrayOnClose)) {
-        // 如果是Windows或Linux，直接退出
-        // mac按照系统默认行为，不退出
-        if (isWin || isLinux) {
-          return app.quit()
-        }
-      }
-
-      /**
-       * 上述逻辑以下:
-       * win/linux: 是"开启托盘+设置关闭时最小化到托盘"的情况
-       * mac: 任何情况都会到这里，因此需要单独处理mac
-       */
-
-      if (!mainWindow.isFullScreen()) {
+      // A handshake is already in flight for this window: keep the
+      // original prevention and wait — never send a duplicate request.
+      if (saveDataHandshake.hasPending(mainWindow)) {
         event.preventDefault()
+        return
       }
 
-      mainWindow.hide()
+      // Tray-hide (non-quit) keeps the existing semantics: a
+      // fire-and-forget flush hint, then hide. No handshake, so close to
+      // tray behavior never changes and is never blocked.
+      if (this.resolveMainCloseIntent() === 'hide') {
+        try {
+          // Legacy fire-and-forget flush hint (no requestId, no ack):
+          // the renderer flushes best-effort. Close-to-tray is never
+          // blocked and its behavior never changes.
+          mainWindow.webContents.send(IpcChannel.App_SaveData)
+        } catch (error) {
+          logger.error('Failed to save data:', error as Error)
+        }
 
-      //for mac users, should hide dock icon if close to tray
-      if (isMac && isTrayOnClose) {
-        app.dock?.hide()
+        if (!mainWindow.isFullScreen()) {
+          event.preventDefault()
+        }
 
-        mainWindow.once('show', () => {
-          //restore the window can hide by cmd+h when the window is shown again
-          // https://github.com/electron/electron/pull/47970
-          void app.dock?.show()
-        })
+        this.hideMainWindowToTray(mainWindow)
+        return
       }
+
+      // Real close/quit: prevent default ONCE, wait for the renderer
+      // `persistor.flush()` ack (bounded timeout / crash degrade), then
+      // destroy without re-emitting `close` (no recursion). Repeat
+      // close events and concurrent quits are idempotent via hasPending.
+      event.preventDefault()
+      void saveDataHandshake.requestSave(mainWindow).then((result) => {
+        if (result.status !== 'acked-ok') {
+          logger.warn('Main window closing without clean save-data ack', {
+            status: result.status,
+            requestId: result.requestId
+          })
+        }
+        if (mainWindow.isDestroyed()) {
+          return
+        }
+        // DOMStorage durable barrier: after handshake settle, while the
+        // window/webContents are still valid, before destroy. Best-effort
+        // for every settle status; window-gone / no-window means the
+        // target is already gone so there is nothing to flush.
+        // Deliberately DOMStorage-only: no cookies, no connections.
+        if (result.status !== 'window-gone' && result.status !== 'no-window') {
+          this.flushDomStorageBarrier(mainWindow)
+          // The barrier may have destroyed nothing, but the window could
+          // have been destroyed re-entrantly (flush throw path included):
+          // re-check before destroy.
+          if (mainWindow.isDestroyed()) {
+            return
+          }
+        }
+        // `destroy` emits `closed` (not `close`): no recursion.
+        // `preventDefault` above aborts an in-flight `app.quit()`, and a
+        // direct Win/Linux close never called it — so re-drive quit to
+        // preserve the existing close contract on this path.
+        mainWindow.destroy()
+        app.quit()
+      })
     })
 
     mainWindow.on('closed', () => {

@@ -56,6 +56,7 @@ import { providerLogoService, registerProviderLogoIpc } from './services/Provide
 import { proxyManager } from './services/ProxyManager'
 import { pythonService } from './services/PythonService'
 import { FileServiceManager } from './services/remotefile/FileServiceManager'
+import { saveDataHandshake } from './services/SaveDataHandshake'
 import { searchService } from './services/SearchService'
 import { isSafeExternalUrl } from './services/security'
 import { registerShortcuts, unregisterAllShortcuts } from './services/ShortcutService'
@@ -109,11 +110,20 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   })
 
   powerMonitorService.registerShutdownHandler(() => {
+    // Explicit hard-exit exception (no handshake): the OS power path
+    // cannot be delayed, so this stays a fire-and-forget flush hint and
+    // is recorded here rather than silently reused.
+    logger.warn('Power shutdown: sending best-effort save-data hint without handshake (hard-exit exception)')
     const mw = windowService.getMainWindow()
     if (mw && !mw.isDestroyed()) {
       mw.webContents.send(IpcChannel.App_SaveData)
     }
   })
+
+  // Main ↔ renderer save-data handshake (main window only). Registered
+  // once per process; `dispose()` in will-quit keeps test multi-instance
+  // safe. Main-window close/quit reuses this via WindowService.
+  saveDataHandshake.register()
 
   const checkMainWindow = () => {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -431,6 +441,10 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // Relaunch app
   ipcMain.handle(IpcChannel.App_RelaunchApp, (_, options?: Electron.RelaunchOptions) => {
+    // Explicit hard-exit exception (no handshake): `app.exit(0)` below
+    // cannot wait for a renderer round-trip. Callers needing durability
+    // must flush via the main-window close handshake first; recorded here
+    // rather than silently assumed.
     // Fix for .AppImage
     if (isLinux && process.env.APPIMAGE) {
       logger.info(`Relaunching app with options: ${process.env.APPIMAGE}`, options)

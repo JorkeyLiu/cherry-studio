@@ -342,6 +342,11 @@ export default class AppUpdater {
   }
 
   public quitAndInstall() {
+    // Update quit reuses the main-window close handshake: quitting emits
+    // `close`, and WindowService waits for the save-data ack (bounded)
+    // before destroying the window. No separate flush is needed here —
+    // the pre-update `handleSaveData` in the update dialog is only a
+    // best-effort early flush.
     app.isQuitting = true
     setImmediate(() => autoUpdater.quitAndInstall(true, true))
   }

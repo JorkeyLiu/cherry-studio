@@ -48,12 +48,22 @@ describe('Messages NEW_TRUE_BRANCH listener (internal branch creation)', () => {
   it('divider route switch preserves the visual reference (never pending navigate, never bottom)', () => {
     const switchIdx = source.indexOf('handleSelectRoute')
     expect(switchIdx).toBeGreaterThanOrEqual(0)
-    const switchSlice = source.slice(switchIdx, switchIdx + 6000)
+    const switchSlice = source.slice(switchIdx, switchIdx + 7000)
     expect(switchSlice).toMatch(/savePosition/)
     expect(switchSlice).toMatch(/findFirstVisibleMessage/)
     expect(switchSlice).toMatch(/visualOffset|visual-anchor/)
     expect(switchSlice).not.toMatch(/setPendingAnchorNavigate/)
     expect(switchSlice).not.toMatch(/NAVIGATE_TO_MESSAGE/)
     expect(switchSlice).not.toMatch(/setActiveTopic/)
+  })
+
+  it('branch creation inherits the parent route anchor per-route (no bare-topic overwrite)', () => {
+    const thunkStart = thunkSource.indexOf('export const createBranchThunk')
+    expect(thunkStart).toBeGreaterThanOrEqual(0)
+    const thunkSlice = thunkSource.slice(thunkStart, thunkStart + 8000)
+    expect(thunkSlice).toMatch(/intent:\s*'inherit'/)
+    expect(thunkSlice).toMatch(/anchorKeyForRoute/)
+    expect(thunkSlice).toMatch(/sourceAnchorGroupKey/)
+    expect(thunkSlice).toMatch(/\[targetKey\]/)
   })
 })

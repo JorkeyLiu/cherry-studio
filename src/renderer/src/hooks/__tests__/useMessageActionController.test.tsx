@@ -51,11 +51,16 @@ vi.mock('@renderer/utils/messageUtils/usage', () => ({
   estimateMessageBlocksUsage: mocks.estimateUsage
 }))
 
+vi.mock('i18next', () => ({
+  t: (k: string) => k
+}))
+
 import { useMessageActionController } from '../useMessageActionController'
 
 describe('useMessageActionController — S3.4 hook event-time + error propagation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    window.toast = { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() } as never
     mocks.storeGetState.mockReturnValue({
       messages: { entities: {}, messageIdsByTopic: {} },
       assistants: { assistants: [] },
@@ -113,6 +118,8 @@ describe('useMessageActionController — S3.4 hook event-time + error propagatio
     })
     expect(error).toBeDefined()
     expect((error as Error).message).toContain('DB failure')
+    // Unified failure feedback accompanies propagation (never silent).
+    expect(window.toast.error).toHaveBeenCalledWith('message.error.unknown')
   })
 
   it('thrown persistence errors propagate from resendWithEdit', async () => {

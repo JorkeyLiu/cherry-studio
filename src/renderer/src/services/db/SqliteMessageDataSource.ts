@@ -114,6 +114,8 @@ import type {
   SearchMessagesResponse,
   SelectAnswerMessageRequest,
   SelectAnswerMessageResponse,
+  SelectUsefulAnswerRequest,
+  SelectUsefulAnswerResponse,
   SemanticResendResponse,
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
@@ -175,6 +177,8 @@ export interface ChatDbApi {
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
   // Cross-process authority answer selection (Main-resolved full group)
   selectAnswerMessage(request: SelectAnswerMessageRequest): Promise<ChatDbResult<SelectAnswerMessageResponse>>
+  // PROJ-13: group-level atomic useful selection (Main-resolved full group)
+  selectUsefulAnswer(request: SelectUsefulAnswerRequest): Promise<ChatDbResult<SelectUsefulAnswerResponse>>
   deleteMessagesWithDependents(
     request: DeleteMessagesWithDependentsRequest
   ): Promise<ChatDbResult<DeleteMessagesWithDependentsResponse>>
@@ -514,6 +518,26 @@ export class SqliteMessageDataSource implements MessageDataSource {
   ): Promise<SelectAnswerMessageResponse> {
     const request: SelectAnswerMessageRequest = cloneForWire({ topicId, branchId: branchId ?? null, selectedMessageId })
     const response = unwrap(await this.api.selectAnswerMessage(request))
+    dispatchTopicUpdatedAt(topicId)
+    return response
+  }
+
+  /**
+   * PROJ-13: group-level atomic `useful` selection.
+   *
+   * ONE named bridge call to the Main `selectUsefulAnswer` command (ONE
+   * root SQLite transaction resolving the full answer group from the
+   * toggled ID and persisting exactly one useful=true, or a full clear).
+   * Returns the authoritative group. Dispatches `updateTopicUpdatedAt`
+   * exactly once after success — the calling thunk must NOT dispatch it.
+   */
+  async selectUsefulAnswer(
+    topicId: string,
+    messageId: string,
+    branchId?: string | null
+  ): Promise<SelectUsefulAnswerResponse> {
+    const request: SelectUsefulAnswerRequest = cloneForWire({ topicId, branchId: branchId ?? null, messageId })
+    const response = unwrap(await this.api.selectUsefulAnswer(request))
     dispatchTopicUpdatedAt(topicId)
     return response
   }
@@ -1151,7 +1175,10 @@ export class SqliteMessageDataSource implements MessageDataSource {
     return {
       messages: result.messages as unknown as Message[],
       blocks: result.blocks as unknown as MessageBlock[],
-      window: result.window
+      window: result.window,
+      mutableMessageIds: Array.isArray((result as { mutableMessageIds?: unknown }).mutableMessageIds)
+        ? ((result as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
+        : []
     } as unknown as FetchMessagesWindowResponse
   }
 

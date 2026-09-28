@@ -33,7 +33,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
  *   responses cannot overwrite newer block entities.
  * - No separate persistence, no viewport expansion, no contextCount bound.
  */
-export function useContextClosure(topicId: string, anchorGroupKey: string | null) {
+export function useContextClosure(topicId: string, anchorGroupKey: string | null, branchId?: string | null) {
+  const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
   const dispatch = useAppDispatch()
   // Explicit provisional loaded candidate for closure freshness only; context
   // closure authority stays with the persisted anchor + Main closure response.
@@ -46,6 +47,7 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
   const seqRef = useRef(0)
   const topicRef = useRef(topicId)
   const anchorRef = useRef(anchorGroupKey)
+  const routeRef = useRef<string | null>(route)
   // LOCK-R06-006: fingerprint for visible mutations; generation covers outside-viewport
   const currentFingerprint = useMemo(() => computeClosureFingerprint(topicMessages), [topicMessages])
 
@@ -53,32 +55,33 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
   useEffect(() => {
     topicRef.current = topicId
     anchorRef.current = anchorGroupKey
-  }, [topicId, anchorGroupKey])
+    routeRef.current = route
+  }, [topicId, anchorGroupKey, route])
 
-  // B-09: active-topic-only retention — on activation, atomically prune inactive closures/fingerprints/generations
+  // B-09: active-route-only retention — on activation, atomically prune inactive closures/fingerprints/generations
   useEffect(() => {
     if (!topicId) return
-    enforceContextClosureRetention(topicId)
-  }, [topicId])
+    enforceContextClosureRetention(topicId, route)
+  }, [topicId, route])
 
   // Load or reuse closure with full-closure freshness gate
   useEffect(() => {
     if (topicId) {
-      enforceContextClosureRetention(topicId)
+      enforceContextClosureRetention(topicId, route)
     }
     if (!topicId || !anchorGroupKey) {
       setClosure(null)
       return
     }
     // Centralized freshness-gated read: structural + anchor + generation + fingerprint
-    const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFingerprint)
+    const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFingerprint, route)
     if (fresh) {
       // Additional newest check: if viewport newest not in closure, treat as stale (covers window-truncated add before generation bump)
       if (topicMessages.length > 0) {
         const closureIds = new Set((fresh.messages as any).map((m: any) => m.id))
         const newestId = topicMessages[topicMessages.length - 1]?.id
         if (newestId && !closureIds.has(newestId)) {
-          bumpAndInvalidate(topicId)
+          bumpAndInvalidate(topicId, route)
         } else {
           setClosure(fresh)
           return
@@ -96,9 +99,9 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
     }
     // Need to fetch
     const seq = ++seqRef.current
-    const request: FetchContextClosureRequest = { topicId, anchorGroupKey }
+    const request: FetchContextClosureRequest = { topicId, branchId: route, anchorGroupKey }
     // Capture generation + fingerprint + global block epoch + deletion generation at fetch start for in-flight publication guard (covers uncached topics with active fetches and hard-deletion)
-    const generationAtFetch = getClosureLoadGeneration(topicId)
+    const generationAtFetch = getClosureLoadGeneration(topicId, route)
     const fingerprintAtFetch = currentFingerprint
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
@@ -110,22 +113,28 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
         // Fail-closed validation together with block/message refs
         if (!isValidContextClosureResponse(request, response)) {
-          if (seq === seqRef.current && topicRef.current === topicId && anchorRef.current === anchorGroupKey) {
+          if (
+            seq === seqRef.current &&
+            topicRef.current === topicId &&
+            anchorRef.current === anchorGroupKey &&
+            routeRef.current === route
+          ) {
             setClosure(null)
           }
           return
         }
-        // Stale/in-flight discard: topic or anchor moved, or seq superseded
+        // Stale/in-flight discard: topic/route or anchor moved, or seq superseded
         if (seq !== seqRef.current) return
-        if (topicRef.current !== topicId || anchorRef.current !== anchorGroupKey) return
-        // Same-generation check via current store anchor (still same)
+        if (topicRef.current !== topicId || anchorRef.current !== anchorGroupKey || routeRef.current !== route) return
+        // Same-generation check via current store anchor (still same) — route-keyed.
         const state = store.getState()
         const asst = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
-        const currentAnchor = asst?.settings?.contextWindowAnchor?.[topicId]?.groupKey ?? null
+        const routeKey = typeof route === 'string' && route.length > 0 ? `${topicId}:${route}` : topicId
+        const currentAnchor = asst?.settings?.contextWindowAnchor?.[routeKey]?.groupKey ?? null
         if (currentAnchor !== anchorGroupKey) return
 
         // Re-read freshness signal immediately before staged publication (covers mutations during fetch)
-        const curGenNow = getClosureLoadGeneration(topicId)
+        const curGenNow = getClosureLoadGeneration(topicId, route)
         if (curGenNow !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
@@ -137,7 +146,7 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
         }
 
         // Staged publication: re-read once more immediately before upsert to guard against race between check and dispatch
-        const genBeforePublish = getClosureLoadGeneration(topicId)
+        const genBeforePublish = getClosureLoadGeneration(topicId, route)
         if (genBeforePublish !== generationAtFetch) return
         if (getGlobalBlockGeneration() !== globalAtFetch) return
         if (isDeletionStale(topicId, deletionGenAtFetch)) return
@@ -147,24 +156,34 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
           dispatch(withClosureTopics(upsertManyBlocks(response.blocks as any), topicId))
         }
         // Cache publication stores snapshot of generation at fetch start (which equals current)
-        setCachedContextClosureWithFingerprint(topicId, response, fingerprintAtFetch)
-        if (seq === seqRef.current && topicRef.current === topicId && anchorRef.current === anchorGroupKey) {
+        setCachedContextClosureWithFingerprint(topicId, response, fingerprintAtFetch, route)
+        if (
+          seq === seqRef.current &&
+          topicRef.current === topicId &&
+          anchorRef.current === anchorGroupKey &&
+          routeRef.current === route
+        ) {
           setClosure(response)
         }
       } catch {
-        if (seq === seqRef.current && topicRef.current === topicId && anchorRef.current === anchorGroupKey) {
+        if (
+          seq === seqRef.current &&
+          topicRef.current === topicId &&
+          anchorRef.current === anchorGroupKey &&
+          routeRef.current === route
+        ) {
           setClosure(null)
         }
       } finally {
         if (seq === seqRef.current) setLoading(false)
       }
     })()
-  }, [topicId, anchorGroupKey, dispatch, topicMessages, currentFingerprint])
+  }, [topicId, anchorGroupKey, route, dispatch, topicMessages, currentFingerprint])
 
   // Invalidate hook state when cache becomes stale via generation or fingerprint, or newest missing
   useEffect(() => {
     if (!closure) return
-    const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFingerprint)
+    const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFingerprint, route)
     if (!fresh) {
       setClosure(null)
       return
@@ -174,11 +193,11 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
       const closureIds = new Set(closure.messages.map((m: any) => m.id))
       const newestId = topicMessages[topicMessages.length - 1]?.id
       if (newestId && !closureIds.has(newestId)) {
-        bumpAndInvalidate(topicId)
+        bumpAndInvalidate(topicId, route)
         setClosure(null)
       }
     }
-  }, [topicMessages, closure, topicId, anchorGroupKey, currentFingerprint])
+  }, [topicMessages, closure, topicId, anchorGroupKey, route, currentFingerprint])
 
   return { closure, loading }
 }
@@ -187,6 +206,6 @@ export function useContextClosure(topicId: string, anchorGroupKey: string | null
  * Invalidate closure cache for a topic (call after authoritative publication).
  * Bumps generation so in-flight publishes are discarded and future reads refetch.
  */
-export function invalidateContextClosure(topicId: string) {
-  bumpAndInvalidate(topicId)
+export function invalidateContextClosure(topicId: string, branchId?: string | null) {
+  bumpAndInvalidate(topicId, branchId)
 }

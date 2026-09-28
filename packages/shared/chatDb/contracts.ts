@@ -62,6 +62,7 @@ import type {
   RestoreTopicRequest,
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
+  SelectUsefulAnswerRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -430,6 +431,103 @@ const selectAnswerMessageContract: ChatDbContract = {
         throw new ValidationError(
           'result.value.selectedMessageId',
           '[chatdb:select-answer-message] selectedMessageId must appear in messageIds exactly once'
+        )
+      }
+    }
+  }
+}
+
+/**
+ * Group-level atomic `useful` selection (PROJ-13).
+ *
+ * Request is toggled-ID only (Main resolves the full group):
+ * - `topicId` and `messageId` are non-empty strings.
+ * - No extra fields (unknown keys fail closed).
+ *
+ * Result is the Main-resolved full group:
+ * `{topicId, askId, usefulMessageId, messageIds}` with messageIds
+ * non-empty, unique; usefulMessageId is null (cleared) or appears in
+ * messageIds exactly once.
+ */
+const SELECT_USEFUL_VALUE_KEYS = new Set(['topicId', 'askId', 'usefulMessageId', 'messageIds'])
+
+const selectUsefulAnswerContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'branchId', 'messageId'),
+  validate(value: unknown): void {
+    validateRequest(value, selectUsefulAnswerContract.allowedKeys)
+    const req = value as SelectUsefulAnswerRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.branchId, 'request.branchId')
+    validateNonEmptyString(req.messageId, 'request.messageId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:select-useful-answer')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:select-useful-answer] Expected SelectUsefulAnswerResponse object'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:select-useful-answer] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!SELECT_USEFUL_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:select-useful-answer] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateNonEmptyString(v.topicId, 'result.value.topicId')
+      validateNonEmptyString(v.askId, 'result.value.askId')
+      if (v.usefulMessageId !== null) {
+        validateNonEmptyString(v.usefulMessageId, 'result.value.usefulMessageId')
+      }
+      if (!Array.isArray(v.messageIds)) {
+        throw new ValidationError(
+          'result.value.messageIds',
+          '[chatdb:select-useful-answer] Expected array of messageIds'
+        )
+      }
+      if ((v.messageIds as unknown[]).length === 0) {
+        throw new ValidationError(
+          'result.value.messageIds',
+          '[chatdb:select-useful-answer] messageIds must not be empty'
+        )
+      }
+      const seen = new Set<string>()
+      let usefulCount = 0
+      for (let i = 0; i < (v.messageIds as unknown[]).length; i++) {
+        const id = (v.messageIds as unknown[])[i]
+        if (typeof id !== 'string' || id.length === 0) {
+          throw new ValidationError(`result.value.messageIds[${i}]`, 'Expected a non-empty string')
+        }
+        if (seen.has(id)) {
+          throw new ValidationError(
+            `result.value.messageIds[${i}]`,
+            '[chatdb:select-useful-answer] Duplicate messageId'
+          )
+        }
+        seen.add(id)
+        if (id === v.usefulMessageId) usefulCount += 1
+      }
+      if (v.usefulMessageId === null) {
+        if (usefulCount !== 0) {
+          throw new ValidationError(
+            'result.value.usefulMessageId',
+            '[chatdb:select-useful-answer] null usefulMessageId must not appear in messageIds'
+          )
+        }
+      } else if (usefulCount !== 1) {
+        throw new ValidationError(
+          'result.value.usefulMessageId',
+          '[chatdb:select-useful-answer] usefulMessageId must appear in messageIds exactly once'
         )
       }
     }
@@ -2465,7 +2563,7 @@ function validateBoundedCount(value: unknown, path: string): void {
   }
 }
 
-const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window'])
+const FETCH_MESSAGES_WINDOW_VALUE_KEYS = new Set(['messages', 'blocks', 'window', 'mutableMessageIds'])
 const FETCH_MESSAGES_WINDOW_META_KEYS = new Set([
   'kind',
   'completeness',
@@ -2672,6 +2770,35 @@ const fetchMessagesWindowContract: ChatDbContract = {
           throw new ValidationError(
             'result.value.window',
             '[chatdb:fetch-messages-window] Non-empty window must have first/lastMessageId'
+          )
+        }
+      }
+      if (!Array.isArray(v.mutableMessageIds)) {
+        throw new ValidationError(
+          'result.value.mutableMessageIds',
+          '[chatdb:fetch-messages-window] Expected mutableMessageIds string array'
+        )
+      }
+      const returnedIds = new Set<string>()
+      if (Array.isArray(v.messages)) {
+        for (const m of v.messages as Array<Record<string, unknown>>) {
+          if (m && typeof m === 'object' && typeof (m as { id?: unknown }).id === 'string') {
+            returnedIds.add((m as { id: string }).id)
+          }
+        }
+      }
+      for (let i = 0; i < (v.mutableMessageIds as unknown[]).length; i++) {
+        const id = (v.mutableMessageIds as unknown[])[i]
+        if (typeof id !== 'string' || id.length === 0) {
+          throw new ValidationError(
+            `result.value.mutableMessageIds[${i}]`,
+            '[chatdb:fetch-messages-window] Expected non-empty string message ID'
+          )
+        }
+        if (!returnedIds.has(id)) {
+          throw new ValidationError(
+            `result.value.mutableMessageIds[${i}]`,
+            '[chatdb:fetch-messages-window] mutableMessageIds must be subset of returned messages'
           )
         }
       }
@@ -4142,6 +4269,8 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:update-message-and-blocks': updateMessageAndBlocksContract,
   // PERF-100: one atomic multi-model answer selection (foldSelected group switch)
   'chatdb:select-answer-message': selectAnswerMessageContract,
+  // PROJ-13: one atomic multi-model useful selection (group-level useful switch)
+  'chatdb:select-useful-answer': selectUsefulAnswerContract,
   'chatdb:delete-message': deleteMessageContract,
   'chatdb:delete-messages': deleteMessagesContract,
   'chatdb:update-blocks': updateBlocksContract,

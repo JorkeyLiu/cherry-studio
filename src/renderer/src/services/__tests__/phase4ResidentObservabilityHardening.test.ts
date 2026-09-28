@@ -390,6 +390,10 @@ function createIsolatedTestStore(topicIds: string[], recordedActions?: any[]) {
         ids: [],
         entities: {},
         messageIdsByTopic: {},
+        // Production invariant (newMessage initialState): capability maps
+        // always exist; the joint publication reducer deletes/sets per-topic keys.
+        mutableMessageIdsByTopic: {},
+        mutableRouteByTopic: {},
         currentTopicId: null,
         loadingByTopic: {},
         fulfilledByTopic: {},

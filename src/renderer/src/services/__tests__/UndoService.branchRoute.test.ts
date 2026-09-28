@@ -114,9 +114,17 @@ const semanticRedoResponse = {
 }
 
 function stateWithRoute(topicId: string, branchId: string | null): RootState {
+  const route = branchId
   return {
     undoStack: { undoStack: [], redoStack: [] },
-    messages: { entities: {} },
+    messages: {
+      entities: { u1: makeMessage('u1') },
+      messageIdsByTopic: { [topicId]: ['u1'] },
+      // PROJ-13 (B6): redo re-deletes existing messages — the roots must be
+      // capability-covered or the redo fails closed with zero IPC calls.
+      mutableMessageIdsByTopic: { [topicId]: ['u1'] },
+      mutableRouteByTopic: { [topicId]: route }
+    },
     messageBlocks: { entities: {} },
     topicBranch: {
       branchesByTopic: {},

@@ -133,6 +133,8 @@ export type {
   SegmentWire,
   SelectAnswerMessageRequest,
   SelectAnswerMessageResponse,
+  SelectUsefulAnswerRequest,
+  SelectUsefulAnswerResponse,
   SemanticModelSnapshot,
   SemanticResendResponse,
   SoftDeleteTopicRequest,

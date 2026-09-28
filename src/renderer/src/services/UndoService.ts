@@ -5,6 +5,7 @@ import type { AppDispatch, RootState } from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import { requireMutableForActiveRoute } from '@renderer/store/routeAnswerGroup'
 import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
 import {
   deleteSegmentsBySnapshots,
@@ -439,6 +440,15 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
 
   if (roots.length === 0) {
     return
+  }
+
+  // PROJ-13 (B6): redo re-deletes existing messages — fail closed with zero
+  // IPC calls when any root is already non-private through the active route.
+  // The Main guard stays final for expanded dependents; undo (restore)
+  // paths create new private rows and stay Main-decided.
+  {
+    const preState = getState()
+    for (const rootId of roots) requireMutableForActiveRoute(preState, targetTopicId, rootId)
   }
 
   // DB-first via the unified semantic command (LOCK-001)

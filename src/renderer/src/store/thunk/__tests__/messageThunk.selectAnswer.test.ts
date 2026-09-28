@@ -174,8 +174,20 @@ describe('selectAnswerMessageThunk — cross-process authority selection', () =>
     mocks.dbSelectAnswerMessage.mockResolvedValue(authorityResponse)
     getState.mockReturnValue({
       messages: {
-        entities: { 'a-1': { id: 'a-1' }, 'a-2': { id: 'a-2' } },
-        messageIdsByTopic: { [topicId]: ['a-1', 'a-2'] }
+        entities: {
+          'a-1': { id: 'a-1', role: 'assistant', askId: 'ask-1' },
+          'a-2': { id: 'a-2', role: 'assistant', askId: 'ask-1' }
+        },
+        messageIdsByTopic: { [topicId]: ['a-1', 'a-2'] },
+        // PROJ-13 group precheck runs against the Main-authoritative window
+        // capability: the loaded group is private through the main route.
+        mutableMessageIdsByTopic: { [topicId]: ['a-1', 'a-2'] },
+        mutableRouteByTopic: { [topicId]: null }
+      },
+      topicBranch: {
+        branchesByTopic: {},
+        activeBranchIdByTopic: {},
+        routeGenerationByTopic: {}
       }
     })
   })
@@ -206,8 +218,13 @@ describe('selectAnswerMessageThunk — cross-process authority selection', () =>
   it('passes the active branch route to the atomic DB command', async () => {
     getState.mockReturnValue({
       messages: {
-        entities: { 'a-1': { id: 'a-1' }, 'a-2': { id: 'a-2' } },
-        messageIdsByTopic: { [topicId]: ['a-1', 'a-2'] }
+        entities: {
+          'a-1': { id: 'a-1', role: 'assistant', askId: 'ask-1' },
+          'a-2': { id: 'a-2', role: 'assistant', askId: 'ask-1' }
+        },
+        messageIdsByTopic: { [topicId]: ['a-1', 'a-2'] },
+        mutableMessageIdsByTopic: { [topicId]: ['a-1', 'a-2'] },
+        mutableRouteByTopic: { [topicId]: 'branch-7' }
       },
       topicBranch: {
         branchesByTopic: {},
@@ -284,7 +301,16 @@ describe('appendAssistantResponseThunk — selection failure never blocks the ge
         [userQueryId]: { id: userQueryId, role: 'user' },
         [existingAssistantId]: { id: existingAssistantId, role: 'assistant', askId: userQueryId }
       },
-      messageIdsByTopic: { [appendTopicId]: [userQueryId, existingAssistantId] }
+      messageIdsByTopic: { [appendTopicId]: [userQueryId, existingAssistantId] },
+      // PROJ-13: the append join-group precheck requires the loaded group
+      // (member + user root) private through the active route.
+      mutableMessageIdsByTopic: { [appendTopicId]: [userQueryId, existingAssistantId] },
+      mutableRouteByTopic: { [appendTopicId]: null }
+    },
+    topicBranch: {
+      branchesByTopic: {},
+      activeBranchIdByTopic: {},
+      routeGenerationByTopic: {}
     }
   })
 

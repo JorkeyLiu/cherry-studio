@@ -7,7 +7,7 @@
  * - Drops the disposable wrong-model child-topic lineage table if present
  *   (unshipped, never released — data need not be preserved)
  * - No backfill: existing topics/messages become main-route (branch_id NULL)
- * - Registry count 16, idempotent, upgrade preserves rows, FK cascades drop
+ * - Registry count 17 (016 + 017 cleanup), idempotent, upgrade preserves rows, FK cascades drop
  *   branch rows with their topics
  */
 import * as realFs from 'node:fs'
@@ -60,8 +60,9 @@ afterEach(() => {
 
 describe('016_topic_branches', () => {
   it('is registered as 16th migration after 015 with route-node DDL', () => {
-    expect(MIGRATIONS.length).toBe(16)
+    expect(MIGRATIONS.length).toBe(17)
     expect(MIGRATIONS[15].key).toBe('016_topic_branches')
+    expect(MIGRATIONS[16].key).toBe('017_cleanup_route_message_overlay')
     const joined = MIGRATIONS[15].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS topic_branches')
     expect(joined).toContain('parent_branch_id')
@@ -78,9 +79,9 @@ describe('016_topic_branches', () => {
     expect(MIGRATIONS[13].key).toBe('014_sync_resend_attempt')
   })
 
-  it('fresh database applies 16 migrations; rerun is idempotent', () => {
+  it('fresh database applies 17 migrations; rerun is idempotent', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(16)
+    expect(runMigrations(db as never, sqlite)).toBe(17)
     const table = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='topic_branches'`).get()
     expect(table).toBeTruthy()
     const cols = sqlite.prepare(`PRAGMA table_info(topic_branches)`).all() as Array<{ name: string }>

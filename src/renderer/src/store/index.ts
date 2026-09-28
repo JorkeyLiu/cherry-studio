@@ -66,7 +66,7 @@ import runtime from './runtime'
 import settings from './settings'
 import shortcuts from './shortcuts'
 import tabs from './tabs'
-import topicBranch from './topicBranch'
+import topicBranch, { topicBranchPersistTransform } from './topicBranch'
 import topicSegment from './topicSegment'
 import translate from './translate'
 import undoStack from './undoStack'
@@ -356,6 +356,72 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
     return nextStatePre as any
   }
 
+  // Route rebase: atomically drop blocks exclusive to the old route in the
+  // same dispatch (full cross-slice visibility). Messages slice already
+  // removed old-exclusive message entities; here we remove blocks referenced
+  // only by those removed messages and not by the new route or any other
+  // topic, so stale blocks cannot leak via direct block-ID selectors and
+  // block memory stays bounded. Stable-ID reuse preserved:
+  // blocks referenced by the new route are never removed.
+  if (action?.type === 'newMessages/rebaseRouteMessages' || action?.type === 'newMessages/messagesWindowMerged') {
+    const topicId = (action.payload as { topicId?: string })?.topicId
+    if (typeof topicId === 'string' && topicId.length > 0) {
+      const prevMessageIds: string[] = (state as any)?.messages?.messageIdsByTopic?.[topicId] ?? []
+      const prevEntities = (state as any)?.messages?.entities ?? {}
+      const prevBlockEntities = (state as any)?.messageBlocks?.entities ?? {}
+      const nextStatePre = appReducer(state, action)
+      try {
+        const nextIds: string[] = (nextStatePre as any)?.messages?.messageIdsByTopic?.[topicId] ?? []
+        const nextSet = new Set(nextIds)
+        const removedIds = prevMessageIds.filter((id) => !nextSet.has(id))
+        if (removedIds.length === 0) return nextStatePre as any
+        // Blocks still referenced by the new route or other topics survive.
+        const liveBlockIds = new Set<string>()
+        const nextEntities = (nextStatePre as any)?.messages?.entities ?? {}
+        const nextIdsByTopic = (nextStatePre as any)?.messages?.messageIdsByTopic ?? {}
+        for (const ids of Object.values(nextIdsByTopic as Record<string, string[]>)) {
+          for (const mid of ids) {
+            const msg = nextEntities[mid]
+            if (Array.isArray(msg?.blocks)) for (const bid of msg.blocks as string[]) liveBlockIds.add(bid)
+          }
+        }
+        for (const block of Object.values((nextStatePre as any)?.messageBlocks?.entities ?? {}) as Array<any>) {
+          if (block && typeof block.messageId === 'string' && nextSet.has(block.messageId)) {
+            liveBlockIds.add(block.id)
+          }
+        }
+        const removedSet = new Set(removedIds)
+        const candidates = new Set<string>()
+        for (const mid of removedIds) {
+          const msg = prevEntities[mid]
+          if (msg && Array.isArray(msg.blocks)) for (const bid of msg.blocks as string[]) candidates.add(bid)
+        }
+        for (const block of Object.values(prevBlockEntities as Record<string, any>)) {
+          if (block && typeof block.messageId === 'string' && removedSet.has(block.messageId)) {
+            candidates.add(block.id)
+          }
+        }
+        const exclusive = [...candidates].filter((bid) => !liveBlockIds.has(bid))
+        if (exclusive.length === 0) return nextStatePre as any
+        const curEntities = (nextStatePre as any).messageBlocks.entities
+        const curIds = (nextStatePre as any).messageBlocks.ids as string[]
+        const newEntities = { ...curEntities }
+        for (const bid of exclusive) delete newEntities[bid]
+        const newIds = curIds.filter((id) => !exclusive.includes(id))
+        return {
+          ...nextStatePre,
+          messageBlocks: {
+            ...(nextStatePre as any).messageBlocks,
+            entities: newEntities,
+            ids: newIds
+          }
+        } as any
+      } catch {
+        return nextStatePre as any
+      }
+    }
+  }
+
   // Centralized unpaired segment invalidation — capture before
   // projection is mutated so remove/update can resolve topicId from prior state.
   let segmentAffected: string[] | null = null
@@ -411,11 +477,12 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
   return nextState
 }
 
-const persistedReducer = persistReducer(
+const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
     version: 225,
+    transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',
       'messages',

@@ -107,12 +107,25 @@ interface StoreState {
   messages: {
     entities: Record<string, Message>
     messageIdsByTopic: Record<string, string[]>
+    mutableMessageIdsByTopic?: Record<string, string[]>
+    mutableRouteByTopic?: Record<string, string | null>
   }
   messageBlocks: { entities: Record<string, unknown> }
   assistants: { assistants: Array<{ id: string }> }
+  topicBranch?: { activeBranchIdByTopic: Record<string, string> }
 }
 
 let storeState: StoreState
+
+// PROJ-13: renderer resend/regenerate prechecks run against the
+// Main-authoritative window capability. Mirror the loaded projection into a
+// private main-route capability so thunks under test reach their DB contracts.
+function syncMainRouteCap(topicId = 'topic-1'): void {
+  const ids = [...(storeState.messages.messageIdsByTopic[topicId] ?? [])]
+  storeState.messages.mutableMessageIdsByTopic = { [topicId]: ids }
+  storeState.messages.mutableRouteByTopic = { [topicId]: null }
+  storeState.topicBranch = { activeBranchIdByTopic: {} }
+}
 
 vi.mock('@renderer/store', () => ({
   default: {
@@ -164,6 +177,7 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'msg-1']
     }
+    syncMainRouteCap()
     mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.resendUserMessages.mockResolvedValue({
       ...emptyCleanup,
@@ -201,6 +215,7 @@ describe('resendMessageThunk — no legacy double cleanup (LOCK-001)', () => {
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'msg-1']
     }
+    syncMainRouteCap()
     storeState.messageBlocks.entities = {
       'old-block-1': { id: 'old-block-1' },
       'old-block-2': { id: 'old-block-2' }
@@ -255,6 +270,7 @@ describe('regenerateAssistantResponseThunk — no legacy double cleanup (LOCK-00
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'asst-1']
     }
+    syncMainRouteCap()
     mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.regenerateAssistantMessage.mockResolvedValue({
       ...emptyCleanup,
@@ -308,6 +324,7 @@ describe('resendUserMessageWithEditThunk — failure propagation (LOCK-005)', ()
     storeState.messages.messageIdsByTopic = {
       'topic-1': ['user-msg-1', 'msg-1']
     }
+    syncMainRouteCap()
     mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, asstMsg])
     mocks.resendUserMessages.mockRejectedValue(new Error('DB write failed'))
 

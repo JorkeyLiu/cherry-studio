@@ -110,6 +110,7 @@ export function isValidWindowResponse(
       if ((response.messages[0] as any)?.id !== w.firstMessageId) return false
       if ((response.messages[response.messages.length - 1] as any)?.id !== w.lastMessageId) return false
     }
+    if (!isValidMutableCapability(response)) return false
     return true
   }
 
@@ -129,8 +130,27 @@ export function isValidWindowResponse(
       if ((response.messages[response.messages.length - 1] as any)?.id !== w.lastMessageId) return false
       if (!response.messages.some((m) => (m as any).id === request.anchorMessageId)) return false
     }
+    if (!isValidMutableCapability(response)) return false
     return true
   }
 
+  if (!isValidMutableCapability(response)) return false
   return false
+}
+
+/**
+ * Fail-closed capability shape check: absent (legacy fixtures) is accepted
+ * and downstream treats it as empty; when present it must be a string array
+ * subset of the returned window messages.
+ */
+function isValidMutableCapability(response: FetchMessagesWindowResponse): boolean {
+  const raw = (response as unknown as { mutableMessageIds?: unknown }).mutableMessageIds
+  if (raw === undefined) return true
+  if (!Array.isArray(raw)) return false
+  const returned = new Set(response.messages.map((m) => (m as unknown as { id: string }).id))
+  for (const id of raw as unknown[]) {
+    if (typeof id !== 'string' || id.length === 0) return false
+    if (!returned.has(id)) return false
+  }
+  return true
 }

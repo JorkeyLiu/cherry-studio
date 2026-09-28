@@ -53,11 +53,13 @@ describe('useScrollPosition', () => {
       })
 
       const saved = window.keyv.get('scroll:test-topic')
-      expect(saved).toEqual({
-        scrollTop: -200,
-        anchorId: null,
-        isAtBottom: false
-      })
+      expect(saved).toEqual(
+        expect.objectContaining({
+          scrollTop: -200,
+          anchorId: null,
+          isAtBottom: false
+        })
+      )
     })
 
     it('detects isAtBottom when scrollTop is near zero (column-reverse layout)', () => {
@@ -96,22 +98,26 @@ describe('useScrollPosition', () => {
         result.current.savePosition()
       })
 
-      expect(window.keyv.get('scroll:test-topic')).toEqual({
-        scrollTop: -500,
-        anchorId: null,
-        isAtBottom: false
-      })
+      expect(window.keyv.get('scroll:test-topic')).toEqual(
+        expect.objectContaining({
+          scrollTop: -500,
+          anchorId: null,
+          isAtBottom: false
+        })
+      )
 
       Object.defineProperty(container, 'scrollTop', { value: -1000 })
       act(() => {
         result.current.savePosition()
       })
 
-      expect(window.keyv.get('scroll:test-topic')).toEqual({
-        scrollTop: -1000,
-        anchorId: null,
-        isAtBottom: false
-      })
+      expect(window.keyv.get('scroll:test-topic')).toEqual(
+        expect.objectContaining({
+          scrollTop: -1000,
+          anchorId: null,
+          isAtBottom: false
+        })
+      )
     })
 
     it('cancels pending throttle trailing before writing — trailing does not overwrite', () => {
@@ -202,22 +208,26 @@ describe('useScrollPosition', () => {
         result.current.savePosition()
       })
 
-      expect(result.current.getSavedPosition()).toEqual({
-        scrollTop: -400,
-        anchorId: null,
-        isAtBottom: false
-      })
+      expect(result.current.getSavedPosition()).toEqual(
+        expect.objectContaining({
+          scrollTop: -400,
+          anchorId: null,
+          isAtBottom: false
+        })
+      )
     })
 
     it('supports legacy plain number format', () => {
       store.set('scroll:test-topic', -250)
       const { result } = renderHook(() => useScrollPosition('test-topic'))
 
-      expect(result.current.getSavedPosition()).toEqual({
-        scrollTop: -250,
-        anchorId: null,
-        isAtBottom: false
-      })
+      expect(result.current.getSavedPosition()).toEqual(
+        expect.objectContaining({
+          scrollTop: -250,
+          anchorId: null,
+          isAtBottom: false
+        })
+      )
     })
   })
 

@@ -20,6 +20,8 @@ interface Props {
   setSelectedMessage: (message: Message) => void
   onReorderMessages: (messages: Message[]) => void
   topic: Topic
+  /** PROJ-13: group-immutable groups disable selector/reorder/retry-all. */
+  disabled?: boolean
 }
 
 // LOCK-105: the multi-model group menu bar always renders in fold/tag mode;
@@ -30,7 +32,8 @@ const MessageGroupMenuBar: FC<Props> = ({
   selectMessageId,
   setSelectedMessage,
   onReorderMessages,
-  topic
+  topic,
+  disabled = false
 }) => {
   const { t } = useTranslation()
   const { regenerateAssistant } = useMessageActionController()
@@ -57,10 +60,27 @@ const MessageGroupMenuBar: FC<Props> = ({
   const hasFailedMessages = messages.some((m) => isFailedMessage(m) && !isTransmittingMessage(m))
 
   const handleRetryAll = async () => {
+    // PROJ-13 (A5): batch regeneration is whole-group-gated. A disabled
+    // (group-immutable) bar never issues calls; a known-immutable loaded
+    // member fails closed with zero calls. Window-outside members are
+    // decided per item by the Main guard — the first failure stops the
+    // batch (no partial-success claim, no atomicity claim).
+    if (disabled) return
     // Event-time status: re-read each explicit ID from store before checking.
     // Do not subscribe the component; do not retry newly added IDs not in
     // the explicit rendered group.
     const explicitIds = messages.map((m) => m.id)
+    try {
+      const { requireLoadedAnswerMembersMutable } = await import('@renderer/store/routeAnswerGroup')
+      const askId = messages.find(
+        (m) => m.role === 'assistant' && typeof m.askId === 'string' && m.askId.length > 0
+      )?.askId
+      if (typeof askId === 'string' && askId.length > 0) {
+        requireLoadedAnswerMembersMutable(store.getState(), topic.id, askId)
+      }
+    } catch {
+      return
+    }
     for (const id of explicitIds) {
       const latest = store.getState().messages.entities[id] as Message | undefined
       if (!latest) continue
@@ -69,27 +89,35 @@ const MessageGroupMenuBar: FC<Props> = ({
       try {
         await regenerateAssistant({ topicId: topic.id, messageId: id })
       } catch (e) {
-        // swallow per-item errors to continue others
+        // Stop at the first Main-guard/transport failure: later items stay
+        // unattempted so a shared group never partially regenerates.
+        void e
+        break
       }
     }
   }
 
+  // PROJ-13 (A3/A5): the whole bar is inert for immutable groups.
+  const barDisabled = disabled
+
   return (
-    <GroupMenuBar className="group-menu-bar">
+    <GroupMenuBar className="group-menu-bar" aria-disabled={barDisabled}>
       <HStack style={{ alignItems: 'center', flex: 1, overflow: 'hidden' }}>
         <MessageGroupModelList
           messages={messages}
           selectMessageId={selectMessageId}
           setSelectedMessage={setSelectedMessage}
           onReorderMessages={onReorderMessages}
+          disabled={barDisabled}
         />
       </HStack>
-      {hasFailedMessages && (
+      {hasFailedMessages && !barDisabled && (
         <Tooltip title={t('message.group.retry_failed')} mouseEnterDelay={0.6}>
           <Button
             type="text"
             size="small"
             icon={<ReloadOutlined />}
+            data-testid="group-retry-all-btn"
             onClick={handleRetryAll}
             style={{ marginRight: 4 }}
           />

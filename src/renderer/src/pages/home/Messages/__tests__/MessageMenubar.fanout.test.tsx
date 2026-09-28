@@ -113,7 +113,9 @@ vi.mock('@renderer/store', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectLoadedMessagesForTopic: vi.fn(() => [])
+  selectLoadedMessagesForTopic: vi.fn(() => []),
+  // Fixture messages are mutable: fan-out counts re-renders, not gating.
+  selectIsMessageMutable: () => true
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({

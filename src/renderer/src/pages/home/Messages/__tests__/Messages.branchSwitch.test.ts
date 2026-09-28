@@ -1,3 +1,5 @@
+import * as fs from 'node:fs'
+
 import {
   __testSetPendingNavigate,
   clearPendingNavigate,
@@ -43,5 +45,68 @@ describe('branch divider switch pending-anchor path', () => {
     expect(getPendingNavigate()).toEqual({ messageId: 'm2', topicId: 't-1' })
     expect(clearPendingNavigate({ messageId: 'm1', topicId: 't-1' })).toBe(false)
     expect(getPendingNavigate()).toEqual({ messageId: 'm2', topicId: 't-1' })
+  })
+})
+
+/**
+ * True incremental branch switch (windowed, no full fetch).
+ *
+ * STRUCTURAL guardrails only: they pin wiring shape, not behavior. Behavior
+ * evidence lives in messageWindow.routeRebase.test.ts (rebase/viewport
+ * choice) and messageThunk.routeSwitch.test.ts (windowed loads, around→latest
+ * fallback, empty clear, staleness).
+ *
+ * Divider keeps the current visual position via fork-anchor around reads;
+ * top-selector restores the target route snapshot via latest/around reads.
+ * Both publish via atomic rebase without blank/reset or full-route fetch.
+ */
+describe('true branch incremental switch (windowed)', () => {
+  const messagesSource = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
+  const thunkSource = fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')
+
+  it('divider switch reads around the fork anchor (not history snapshot, not bottom)', () => {
+    const idx = messagesSource.indexOf('Divider route switch')
+    expect(idx).toBeGreaterThanOrEqual(0)
+    const slice = messagesSource.slice(idx, idx + 14000)
+    // Production path delegates the fork-anchor around read (+latest
+    // fallback) to loadRouteWindowWithFallback with the divider anchor.
+    expect(slice).toMatch(/loadRouteWindowWithFallback/)
+    expect(slice).toMatch(/anchorMessageId/)
+    expect(slice).toMatch(/dividerVisualAnchorOffset|dividerKey/)
+    expect(slice).toMatch(/findViewportTopAnchorWithOffset/)
+    // Double failure rolls back to the previous route (never new-active +
+    // old-projection, never mixed pagination).
+    expect(slice).toMatch(/prevRoute/)
+    const code = slice
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n')
+    expect(code).not.toMatch(/setPendingAnchorNavigate/)
+    expect(code).not.toMatch(/NAVIGATE_TO_MESSAGE/)
+  })
+
+  it('top-selector switch reads latest/around from the target snapshot (never overwrites it)', () => {
+    const idx = messagesSource.indexOf('Top-selector route switch')
+    expect(idx).toBeGreaterThanOrEqual(0)
+    const slice = messagesSource.slice(idx, idx + 9000)
+    expect(slice).toMatch(/getRouteSavedPosition/)
+    expect(slice).toMatch(/isAtBottom/)
+    expect(slice).toMatch(/anchorId/)
+    expect(slice).toMatch(/kind:\s*'latest'/)
+    expect(slice).toMatch(/kind:\s*'around'/)
+    const code = slice
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n')
+    expect(code).not.toMatch(/savePosition\(\)/)
+  })
+
+  it('route loads are windowed only (no full fetchMessages) with atomic rebase', () => {
+    const start = thunkSource.indexOf('export const loadRouteMessagesThunk')
+    expect(start).toBeGreaterThanOrEqual(0)
+    const slice = thunkSource.slice(start, start + 8000)
+    expect(slice).toMatch(/fetchMessagesWindow/)
+    expect(slice).toMatch(/rebaseRouteMessages/)
+    expect(slice).not.toMatch(/fetchMessages\(topicId/)
   })
 })

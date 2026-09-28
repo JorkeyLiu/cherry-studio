@@ -25,6 +25,8 @@ describe('chatDbContracts', () => {
     'chatdb:update-message-and-blocks',
     // PERF-100: one atomic multi-model answer-tab selection
     'chatdb:select-answer-message',
+    // PROJ-13: one atomic multi-model useful selection
+    'chatdb:select-useful-answer',
     'chatdb:delete-message',
     'chatdb:delete-messages',
     'chatdb:update-blocks',
@@ -673,6 +675,64 @@ describe('validateChatDbRequest — invalid payloads', () => {
         topicId: 't1',
         selectedMessageId: 'a-1',
         foldSelected: true
+      })
+    ).toThrow(ValidationError)
+  })
+
+  // PROJ-13 select-useful-answer: toggled-ID-only requests
+  it('select-useful-answer: minimal valid toggled-only request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:select-useful-answer', {
+        topicId: 'topic-1',
+        messageId: 'a-2'
+      })
+    ).not.toThrow()
+  })
+
+  it('select-useful-answer: rejects missing/empty IDs and unknown keys', () => {
+    expect(() => validateChatDbRequest('chatdb:select-useful-answer', { messageId: 'a-1' })).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:select-useful-answer', { topicId: 't1' })).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:select-useful-answer', { topicId: '', messageId: 'a-1' })).toThrow(
+      ValidationError
+    )
+    expect(() => validateChatDbRequest('chatdb:select-useful-answer', { topicId: 't1', messageId: '' })).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbRequest('chatdb:select-useful-answer', {
+        topicId: 't1',
+        messageId: 'a-1',
+        useful: true
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('select-useful-answer: accepts a set useful result and a cleared (null) result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-useful-answer', {
+        ok: true,
+        value: { topicId: 't1', askId: 'u1', usefulMessageId: 'a-2', messageIds: ['a-1', 'a-2'] }
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateChatDbResult('chatdb:select-useful-answer', {
+        ok: true,
+        value: { topicId: 't1', askId: 'u1', usefulMessageId: null, messageIds: ['a-1', 'a-2'] }
+      })
+    ).not.toThrow()
+  })
+
+  it('select-useful-answer: rejects useful IDs outside the group and duplicates', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:select-useful-answer', {
+        ok: true,
+        value: { topicId: 't1', askId: 'u1', usefulMessageId: 'a-9', messageIds: ['a-1', 'a-2'] }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:select-useful-answer', {
+        ok: true,
+        value: { topicId: 't1', askId: 'u1', usefulMessageId: 'a-1', messageIds: ['a-1', 'a-1'] }
       })
     ).toThrow(ValidationError)
   })
@@ -3760,6 +3820,8 @@ describe('coverage consistency', () => {
     'chatdb:update-message-and-blocks',
     // PERF-100: one atomic multi-model answer-tab selection
     'chatdb:select-answer-message',
+    // PROJ-13: one atomic multi-model useful selection
+    'chatdb:select-useful-answer',
     'chatdb:delete-message',
     'chatdb:delete-messages',
     'chatdb:update-blocks',

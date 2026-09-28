@@ -8,13 +8,13 @@ import i18n from '@renderer/i18n'
 import KnowledgeQueue from '@renderer/queue/KnowledgeQueue'
 import MemoryService from '@renderer/services/MemoryService'
 import { applyProxyAndRetryModelMetadata } from '@renderer/services/proxyMetadataRetry'
+import { createSaveDataHandler } from '@renderer/services/saveData'
 import { handleSaveData, useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMemoryConfig } from '@renderer/store/memory'
 import { setAvatar, setFilesPath, setResourcesPath, setUpdateState } from '@renderer/store/runtime'
 import { delay, runAsyncFunction } from '@renderer/utils'
 import { checkDataLimit } from '@renderer/utils'
 import { defaultLanguage } from '@shared/config/constant'
-import { IpcChannel } from '@shared/IpcChannel'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useEffect } from 'react'
 
@@ -61,9 +61,19 @@ export function useAppInit() {
   }, [])
 
   useEffect(() => {
-    window.electron.ipcRenderer.on(IpcChannel.App_SaveData, async () => {
-      await handleSaveData()
+    // Main ↔ renderer save-data handshake (main window only): Main sends a
+    // `SaveDataRequest` before close/quit; flush redux-persist and ALWAYS
+    // ack (success or failure) so Main can settle the close. Duplicate
+    // delivery of the same requestId is deduped in the handler.
+    // Narrow typed preload surface only — no executeJavaScript.
+    const handle = createSaveDataHandler({
+      flush: handleSaveData,
+      ack: (ack) => window.api.saveData.ackSaveData(ack)
     })
+    const unsubscribe = window.api.saveData.onSaveData((request) => {
+      void handle(request)
+    })
+    return unsubscribe
   }, [])
 
   useUpdateHandler()

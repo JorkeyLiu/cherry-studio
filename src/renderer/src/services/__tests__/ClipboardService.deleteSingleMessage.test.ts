@@ -42,6 +42,10 @@ vi.mock('@logger', () => ({
   }
 }))
 
+vi.mock('i18next', () => ({
+  t: (k: string) => k
+}))
+
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
   executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
@@ -208,11 +212,13 @@ describe('ClipboardService.deleteSingleMessage (semantic)', () => {
     expect(undoAction.groupAnchors[0].loadedMessageIds).toEqual(['msg-1'])
   })
 
-  it('DB failure pushes no undo and leaves Redux untouched', async () => {
+  it('DB failure pushes no undo, leaves Redux untouched, and toasts', async () => {
     const userMsg = createUserMessage()
     storeState.messages.entities = { 'msg-1': userMsg }
     storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
     mocks.executeDeleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+    const toastError = vi.fn()
+    window.toast = { error: toastError, success: vi.fn(), warning: vi.fn(), info: vi.fn() } as never
 
     const { deleteSingleMessage } = await import('../ClipboardService')
     const dispatch = vi.fn() as any
@@ -221,6 +227,7 @@ describe('ClipboardService.deleteSingleMessage (semantic)', () => {
 
     expect(mocks.pushUndoAction).not.toHaveBeenCalled()
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'removeMessages' }))
+    expect(toastError).toHaveBeenCalledWith('common.delete_failed')
   })
 
   it('missing entity is a no-op without touching the helper', async () => {
@@ -243,10 +250,30 @@ describe('ClipboardService.deleteSelectedMessages (semantic multi)', () => {
     }
   })
 
+  // PROJ-13 (B1/B3): the selection gate resolves groups through the loaded
+  // projection + route capability. Tests below publish that state; unknown
+  // selections fail closed with zero IPC calls (covered in
+  // answerGroupCapability.test.ts).
+  const publishSelectionState = (loadedIds: string[], mutableIds: string[]) => {
+    const entities: Record<string, Message> = {}
+    for (const id of loadedIds) {
+      entities[id] =
+        id === 'u1' || id === 'u2'
+          ? ({ id, topicId: 'topic-1', role: 'user' } as unknown as Message)
+          : ({ id, topicId: 'topic-1', role: 'assistant', askId: 'u1' } as unknown as Message)
+    }
+    ;(storeState as any).messages.entities = entities
+    ;(storeState as any).messages.messageIdsByTopic = { 'topic-1': loadedIds }
+    ;(storeState as any).messages.mutableMessageIdsByTopic = { 'topic-1': mutableIds }
+    ;(storeState as any).messages.mutableRouteByTopic = { 'topic-1': null }
+    ;(storeState as any).topicBranch = { activeBranchIdByTopic: {} }
+  }
+
   it('passes selected group IDs as stable roots (never loaded-expanded IDs)', async () => {
     mocks.executeDeleteMessagesWithDependents.mockResolvedValue(
       semanticResult({ deletedMessageIds: ['u1', 'a1', 'u2'] })
     )
+    publishSelectionState(['u1', 'a1', 'u2'], ['u1', 'a1', 'u2'])
 
     const { deleteSelectedMessages } = await import('../ClipboardService')
     const dispatch = vi.fn() as any
@@ -280,6 +307,7 @@ describe('ClipboardService.deleteSelectedMessages (semantic multi)', () => {
 
   it('DB failure returns 0 with no undo', async () => {
     mocks.executeDeleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+    publishSelectionState(['u1'], ['u1'])
 
     const { deleteSelectedMessages } = await import('../ClipboardService')
     const dispatch = vi.fn() as any

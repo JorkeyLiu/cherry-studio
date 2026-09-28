@@ -73,6 +73,7 @@ import type {
   RestoreTopicRequest,
   SearchMessagesRequest,
   SelectAnswerMessageRequest,
+  SelectUsefulAnswerRequest,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   TransferTopicOwnershipRequest,
@@ -462,6 +463,14 @@ export function registerChatDbIpc(): () => void {
   // exactly one foldSelected=true in one Main transaction.
   handleCommand(IpcChannel.ChatDb_SelectAnswerMessage, (agg, req: SelectAnswerMessageRequest) => {
     return agg.selectAnswerMessage(req.topicId, req.selectedMessageId, req.branchId)
+  })
+
+  // 7c. select-useful-answer (PROJ-13): group-level atomic useful toggle —
+  // Main resolves the complete answer group (including window-outside
+  // members) from the toggled ID and persists exactly one useful=true (or
+  // a full clear when the target is already useful) in one transaction.
+  handleCommand(IpcChannel.ChatDb_SelectUsefulAnswer, (agg, req: SelectUsefulAnswerRequest) => {
+    return agg.selectUsefulAnswer(req.topicId, req.messageId, req.branchId)
   })
 
   // 8. delete-message

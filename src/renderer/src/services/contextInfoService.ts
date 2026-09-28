@@ -91,7 +91,8 @@ export function computeContextInfo(
   messages: Message[],
   assistant: Assistant | undefined,
   topicId?: string,
-  overlay?: BlockOverlay
+  overlay?: BlockOverlay,
+  branchId?: string | null
 ): ContextInfo {
   if (!assistant) {
     return {
@@ -118,7 +119,12 @@ export function computeContextInfo(
   // state) the start falls back to the default-derived position — a safety
   // projection, never an ongoing sliding policy.
   let startIndex: number
-  const persistedAnchor = topicId ? settings.contextWindowAnchor?.[topicId] : undefined
+  const routeKey = topicId
+    ? typeof branchId === 'string' && branchId.length > 0
+      ? `${topicId}:${branchId}`
+      : topicId
+    : undefined
+  const persistedAnchor = topicId && routeKey ? settings.contextWindowAnchor?.[routeKey] : undefined
   if (isResolvableAnchor(persistedAnchor, allTurns)) {
     startIndex = resolveAnchorTurnIndex(allTurns, persistedAnchor.groupKey)
   } else {
@@ -201,11 +207,12 @@ export function resolveSharedContextInfo(
   topicMessages: Message[],
   assistant: Assistant | undefined,
   topicId: string,
-  freshClosure: FetchContextClosureResponse | null
+  freshClosure: FetchContextClosureResponse | null,
+  branchId?: string | null
 ): ContextInfo {
   return freshClosure
     ? deriveContextInfoFromClosure(freshClosure)
-    : computeContextInfo(topicMessages, assistant, topicId)
+    : computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null)
 }
 
 export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {

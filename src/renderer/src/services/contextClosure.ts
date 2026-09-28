@@ -251,45 +251,79 @@ export function computeClosureFingerprint(
   return out
 }
 
-export function getCachedContextClosure(topicId: string): FetchContextClosureResponse | null {
-  return closureCache.get(topicId) ?? null
+/**
+ * Route-scoped closure cache key: main route is exactly `topicId`
+ * (persisted compatibility); branch routes use `topicId:branchId` so
+ * per-route context closures never collide under one logical topic.
+ * Mirrors `anchorKeyForRoute` without importing anchorService (cycle-free).
+ */
+export function closureKeyForRoute(topicId: string, branchId?: string | null): string {
+  return typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
 }
 
-export function getCachedClosureFingerprint(topicId: string): string | null {
-  return closureFingerprints.get(topicId) ?? null
+export function getCachedContextClosure(topicId: string, branchId?: string | null): FetchContextClosureResponse | null {
+  return closureCache.get(closureKeyForRoute(topicId, branchId)) ?? null
 }
 
-export function getCachedClosureGeneration(topicId: string): number | undefined {
-  return cachedGenerations.get(topicId)
+export function getCachedClosureFingerprint(topicId: string, branchId?: string | null): string | null {
+  return closureFingerprints.get(closureKeyForRoute(topicId, branchId)) ?? null
 }
 
-export function getCurrentClosureGeneration(topicId: string): number {
-  return loadGenerations.get(topicId) ?? 0
+export function getCachedClosureGeneration(topicId: string, branchId?: string | null): number | undefined {
+  return cachedGenerations.get(closureKeyForRoute(topicId, branchId))
+}
+
+export function getCurrentClosureGeneration(topicId: string, branchId?: string | null): number {
+  return loadGenerations.get(closureKeyForRoute(topicId, branchId)) ?? 0
 }
 
 export function getAllCachedTopicIds(): string[] {
   return Array.from(closureCache.keys())
 }
 
-export function setCachedContextClosure(topicId: string, response: FetchContextClosureResponse): void {
-  closureCache.set(topicId, response)
-  cachedGenerations.set(topicId, loadGenerations.get(topicId) ?? 0)
+export function setCachedContextClosure(
+  topicId: string,
+  response: FetchContextClosureResponse,
+  branchId?: string | null
+): void {
+  const key = closureKeyForRoute(topicId, branchId)
+  closureCache.set(key, response)
+  cachedGenerations.set(key, loadGenerations.get(key) ?? 0)
 }
 
 export function setCachedContextClosureWithFingerprint(
   topicId: string,
   response: FetchContextClosureResponse,
-  fingerprint: string
+  fingerprint: string,
+  branchId?: string | null
 ): void {
-  closureCache.set(topicId, response)
-  closureFingerprints.set(topicId, fingerprint)
-  cachedGenerations.set(topicId, loadGenerations.get(topicId) ?? 0)
+  const key = closureKeyForRoute(topicId, branchId)
+  closureCache.set(key, response)
+  closureFingerprints.set(key, fingerprint)
+  cachedGenerations.set(key, loadGenerations.get(key) ?? 0)
 }
 
-export function clearCachedContextClosure(topicId: string): void {
-  closureCache.delete(topicId)
-  closureFingerprints.delete(topicId)
-  cachedGenerations.delete(topicId)
+export function clearCachedContextClosure(topicId: string, branchId?: string | null): void {
+  // Bare-topic clear (branchId omitted) removes every route of that topic so
+  // topic deletion never leaves a branch closure behind. Route-scoped clear
+  // removes only that route.
+  if (branchId === undefined) {
+    const prefix = `${topicId}:`
+    for (const key of Array.from(closureCache.keys())) {
+      if (key === topicId || key.startsWith(prefix)) closureCache.delete(key)
+    }
+    for (const key of Array.from(closureFingerprints.keys())) {
+      if (key === topicId || key.startsWith(prefix)) closureFingerprints.delete(key)
+    }
+    for (const key of Array.from(cachedGenerations.keys())) {
+      if (key === topicId || key.startsWith(prefix)) cachedGenerations.delete(key)
+    }
+    return
+  }
+  const key = closureKeyForRoute(topicId, branchId)
+  closureCache.delete(key)
+  closureFingerprints.delete(key)
+  cachedGenerations.delete(key)
   // loadGenerations preserved — mutation generation remains to invalidate in-flight
 }
 
@@ -301,16 +335,20 @@ export function clearAllContextClosureCache(): void {
 }
 
 /**
- * B-09: Enforce active-topic-only retention for context-closure cache.
+ * B-09: Enforce active-route-only retention for context-closure cache.
  *
- * On activation of a topic, atomically removes cached closures,
- * fingerprints and cached generations for all other topics while
- * preserving per-topic load generations and the global block generation.
+ * On activation of a route, atomically removes cached closures,
+ * fingerprints and cached generations for all other routes/topics while
+ * preserving load generations and the global block generation.
  * Does not invalidate/bump the active cache merely due to trimming;
  * in-flight stale publication protection (generation/global checks) remains intact.
+ * Bare-topic call (branchId omitted) retains every route of that topic for
+ * backward compatibility with callers that are not yet route-aware.
  */
-export function enforceContextClosureRetention(activeTopicId: string): void {
+export function enforceContextClosureRetention(activeTopicId: string, branchId?: string | null): void {
   if (!activeTopicId || typeof activeTopicId !== 'string') return
+  const retainAllRoutesOfTopic = branchId === undefined
+  const activeKey = closureKeyForRoute(activeTopicId, branchId)
   // Collect union of keys to ensure no orphan fingerprint/generation retained without closure
   const toInspect = new Set<string>([
     ...closureCache.keys(),
@@ -318,7 +356,18 @@ export function enforceContextClosureRetention(activeTopicId: string): void {
     ...cachedGenerations.keys()
   ])
   for (const id of toInspect) {
-    if (id !== activeTopicId) {
+    if (retainAllRoutesOfTopic) {
+      if (id === activeTopicId || id.startsWith(`${activeTopicId}:`)) continue
+      // Legacy keys without route separator that are not this topic are pruned.
+      // Route keys of other topics never share the prefix (topicIds are UUIDs).
+      if (id !== activeTopicId && !id.startsWith(`${activeTopicId}:`)) {
+        closureCache.delete(id)
+        closureFingerprints.delete(id)
+        cachedGenerations.delete(id)
+      }
+      continue
+    }
+    if (id !== activeKey) {
       closureCache.delete(id)
       closureFingerprints.delete(id)
       cachedGenerations.delete(id)
@@ -351,19 +400,45 @@ export function resetContextClosureDiagnosticsForTests(): void {
  * Covers full closure freshness including same-length mutations outside viewport.
  * Conservative: clears cache so next read must refetch; in-flight publishes
  * detect generation mismatch and discard.
+ * Bare-topic call invalidates every route of that topic (branch-safe).
  */
-export function bumpAndInvalidate(topicId: string): void {
-  bumpClosureGeneration(topicId)
-  closureCache.delete(topicId)
-  closureFingerprints.delete(topicId)
-  cachedGenerations.delete(topicId)
+export function bumpAndInvalidate(topicId: string, branchId?: string | null): void {
+  if (branchId === undefined) {
+    const prefix = `${topicId}:`
+    const keys = new Set<string>([...closureCache.keys(), ...loadGenerations.keys()])
+    let touched = false
+    for (const key of keys) {
+      if (key === topicId || key.startsWith(prefix)) {
+        bumpClosureGenerationForKey(key)
+        closureCache.delete(key)
+        closureFingerprints.delete(key)
+        cachedGenerations.delete(key)
+        touched = true
+      }
+    }
+    if (!touched) {
+      bumpClosureGenerationForKey(topicId)
+    }
+    return
+  }
+  const key = closureKeyForRoute(topicId, branchId)
+  bumpClosureGenerationForKey(key)
+  closureCache.delete(key)
+  closureFingerprints.delete(key)
+  cachedGenerations.delete(key)
 }
 
 export function bumpAndInvalidateAll(): void {
   globalBlockGeneration += 1
   const ids = Array.from(closureCache.keys())
   for (const id of ids) {
-    bumpAndInvalidate(id)
+    // Cache keys are already route keys; invalidate each route directly.
+    const parts = id.split(':')
+    void parts
+    bumpClosureGenerationForKey(id)
+    closureCache.delete(id)
+    closureFingerprints.delete(id)
+    cachedGenerations.delete(id)
   }
 }
 
@@ -376,14 +451,18 @@ export function bumpGlobalBlockGeneration(): number {
   return globalBlockGeneration
 }
 
-export function getClosureLoadGeneration(topicId: string): number {
-  return loadGenerations.get(topicId) ?? 0
+export function getClosureLoadGeneration(topicId: string, branchId?: string | null): number {
+  return loadGenerations.get(closureKeyForRoute(topicId, branchId)) ?? 0
 }
 
-export function bumpClosureGeneration(topicId: string): number {
-  const next = (loadGenerations.get(topicId) ?? 0) + 1
-  loadGenerations.set(topicId, next)
+function bumpClosureGenerationForKey(key: string): number {
+  const next = (loadGenerations.get(key) ?? 0) + 1
+  loadGenerations.set(key, next)
   return next
+}
+
+export function bumpClosureGeneration(topicId: string, branchId?: string | null): number {
+  return bumpClosureGenerationForKey(closureKeyForRoute(topicId, branchId))
 }
 
 export function nextGlobalLoadSeq(): number {
@@ -409,24 +488,26 @@ export function nextGlobalLoadSeq(): number {
 export function getFreshValidatedClosure(
   topicId: string,
   anchorGroupKey: string | null,
-  currentFingerprint?: string | null
+  currentFingerprint?: string | null,
+  branchId?: string | null
 ): FetchContextClosureResponse | null {
   if (!anchorGroupKey) {
     closureCacheMissCount += 1
     return null
   }
-  const cached = closureCache.get(topicId) ?? null
+  const key = closureKeyForRoute(topicId, branchId)
+  const cached = closureCache.get(key) ?? null
   if (!cached) {
     closureCacheMissCount += 1
     return null
   }
-  if (!isValidContextClosureResponse({ topicId, anchorGroupKey }, cached)) {
+  if (!isValidContextClosureResponse({ topicId, anchorGroupKey, branchId: branchId ?? null }, cached)) {
     closureCacheMissCount += 1
     return null
   }
   // Full-closure freshness: generation must match snapshot at cache time
-  const curGen = loadGenerations.get(topicId) ?? 0
-  const storedGen = cachedGenerations.get(topicId)
+  const curGen = loadGenerations.get(key) ?? 0
+  const storedGen = cachedGenerations.get(key)
   if (storedGen !== undefined) {
     if (storedGen !== curGen) {
       closureCacheMissCount += 1
@@ -438,7 +519,7 @@ export function getFreshValidatedClosure(
     return null
   }
   // Viewport fingerprint freshness (same-length visible mutations)
-  const storedFp = closureFingerprints.get(topicId) ?? null
+  const storedFp = closureFingerprints.get(key) ?? null
   if (
     !isValidContextClosureCacheHit(
       cached,
@@ -492,19 +573,22 @@ export function isValidFreshClosure(
   response: FetchContextClosureResponse | null | undefined,
   topicId: string,
   anchorGroupKey: string | null,
-  currentFingerprint?: string | null
+  currentFingerprint?: string | null,
+  branchId?: string | null
 ): boolean {
   if (!response) return false
   if (!anchorGroupKey) return false
-  if (!isValidContextClosureResponse({ topicId, anchorGroupKey }, response as any)) return false
-  const curGen = loadGenerations.get(topicId) ?? 0
-  const storedGen = cachedGenerations.get(topicId)
+  if (!isValidContextClosureResponse({ topicId, anchorGroupKey, branchId: branchId ?? null }, response as any))
+    return false
+  const key = closureKeyForRoute(topicId, branchId)
+  const curGen = loadGenerations.get(key) ?? 0
+  const storedGen = cachedGenerations.get(key)
   if (storedGen !== undefined) {
     if (storedGen !== curGen) return false
   } else if (curGen !== 0) {
     return false
   }
-  const storedFp = closureFingerprints.get(topicId) ?? null
+  const storedFp = closureFingerprints.get(key) ?? null
   if (
     !isValidContextClosureCacheHit(
       response as any,

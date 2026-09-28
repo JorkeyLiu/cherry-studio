@@ -134,7 +134,10 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic,
+  // Fixture messages are mutable through the main route: these tests prove
+  // anchor-button projection, not capability gating (fail-closed stays in prod).
+  selectIsMessageMutable: () => true
 }))
 
 vi.mock('@renderer/services/db/DbService', () => ({

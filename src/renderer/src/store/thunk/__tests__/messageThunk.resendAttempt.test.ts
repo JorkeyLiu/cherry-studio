@@ -143,9 +143,15 @@ const createUserMessage = (overrides: Partial<Message> = {}): Message =>
   }) as unknown as Message
 
 interface StoreState {
-  messages: { entities: Record<string, Message>; messageIdsByTopic: Record<string, string[]> }
+  messages: {
+    entities: Record<string, Message>
+    messageIdsByTopic: Record<string, string[]>
+    mutableMessageIdsByTopic?: Record<string, string[]>
+    mutableRouteByTopic?: Record<string, string | null>
+  }
   messageBlocks: { entities: Record<string, any> }
   assistants: { assistants: Array<{ id: string }> }
+  topicBranch?: { activeBranchIdByTopic: Record<string, string> }
 }
 
 let storeState: StoreState
@@ -190,6 +196,16 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void; r
   return { promise, resolve, reject }
 }
 
+// PROJ-13: renderer resend prechecks run against the Main-authoritative
+// window capability. Mirror the loaded projection into a private main-route
+// capability so thunks under test reach their DB contracts.
+function syncMainRouteCap(topicId = 'topic-1'): void {
+  const ids = [...(storeState.messages.messageIdsByTopic[topicId] ?? [])]
+  storeState.messages.mutableMessageIdsByTopic = { [topicId]: ids }
+  storeState.messages.mutableRouteByTopic = { [topicId]: null }
+  storeState.topicBranch = { activeBranchIdByTopic: {} }
+}
+
 /** Drain the microtask queue (deeper than a single tick). */
 const flushMicrotasks = (): Promise<void> => new Promise((r) => setImmediate(r))
 
@@ -218,6 +234,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messages.entities[assistantA.id] = assistantA
     storeState.messages.entities[assistantB.id] = assistantB
     storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantA.id, assistantB.id]
+    syncMainRouteCap()
     storeState.messageBlocks.entities['block-A'] = { id: 'block-A', messageId: 'assistant-A' }
     storeState.messageBlocks.entities['block-B'] = { id: 'block-B', messageId: 'assistant-B' }
     storeState.assistants.assistants = [{ id: 'assistant-1', topics: [], settings: {}, prompt: '' } as never]
@@ -353,6 +370,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantMsg.id] = assistantMsg
     storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantMsg.id]
+    syncMainRouteCap()
     mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
     const dispatch = vi.fn()
     const getState = () => storeState as never
@@ -374,6 +392,7 @@ describe('F1: execution closure owns the attempt (no shared lookup)', () => {
     storeState.messages.entities[userMsg.id] = userMsg
     storeState.messages.entities[assistantMsg.id] = assistantMsg
     storeState.messages.messageIdsByTopic['topic-1'] = [userMsg.id, assistantMsg.id]
+    syncMainRouteCap()
     mocks.selectLoadedMessagesForTopic.mockReturnValue([userMsg, assistantMsg])
     mocks.resendUserMessages.mockResolvedValue({
       affectedFileIds: [],

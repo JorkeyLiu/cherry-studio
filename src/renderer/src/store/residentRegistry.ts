@@ -22,6 +22,11 @@ export interface JointPublishPayload {
   generation: number
   windowResponse: FetchMessagesWindowResponse
   segments: TopicSegment[]
+  /**
+   * Requested route key for the published window (null = main). Optional for
+   * backward compatibility; absent clears capability fail-closed.
+   */
+  route?: string | null
 }
 
 export const JOINT_PUBLISH_COMPLETE = 'resident/jointPublishComplete'

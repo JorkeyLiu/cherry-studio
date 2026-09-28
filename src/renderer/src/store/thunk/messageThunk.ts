@@ -97,7 +97,8 @@ import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
-import { selectActiveBranchId, selectRouteGeneration } from '../topicBranch'
+import { requireAnswerGroupForMember, requireLoadedAnswerMembersMutable } from '../routeAnswerGroup'
+import { selectRouteGeneration } from '../topicBranch'
 import { replaceSegmentsForTopic } from '../topicSegment'
 // import {
 //   bulkAddBlocksV2,
@@ -114,18 +115,14 @@ import { replaceSegmentsForTopic } from '../topicSegment'
 const logger = loggerService.withContext('MessageThunk')
 
 /**
- * Active route of a logical topic for branch-aware writes/reads
- * (null = main route). Single source: the topicBranch slice. Never throws —
- * an unreadable store resolves to the main route.
+ * Active route + Main-authoritative window capability prechecks (PROJ-13).
+ * Canonical definitions live in `../routeAnswerGroup` (group-level answer
+ * capability shares the same single-message base); re-exported here so
+ * existing thunk/UI import paths keep working. The Main guard remains the
+ * final authority in every path.
  */
-export const activeRouteOf = (getState: (() => RootState) | undefined, topicId: string): string | null => {
-  try {
-    if (typeof getState !== 'function') return null
-    return selectActiveBranchId(getState(), topicId)
-  } catch {
-    return null
-  }
-}
+export { activeRouteOf, isMutableForActiveRoute, requireMutableForActiveRoute } from '../routeAnswerGroup'
+import { activeRouteOf, requireMutableForActiveRoute } from '../routeAnswerGroup'
 
 /**
  * Maximum cadence/throttle window for per-block Redux/persistence updates
@@ -971,6 +968,11 @@ export const executeDeleteMessagesWithDependents = async (
   topicId: string,
   rootIds: string[]
 ): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+  // Renderer precheck against Main-authoritative capability; Main guard stays
+  // final. Fail-closed before any Main call so shared/inherited targets never
+  // issue a mutation (existing toast path on throw).
+  const preState = getState()
+  for (const rootId of rootIds) requireMutableForActiveRoute(preState, topicId, rootId)
   // Capture the pre-delete loaded projection BEFORE any persistence. The
   // intersection below bounds the Redux undo projection; Main always keeps
   // the full authority restore groups.
@@ -1035,7 +1037,9 @@ export const deleteSingleMessageThunk =
     try {
       await executeDeleteMessagesWithDependents(dispatch, getState, topicId, [messageId])
     } catch (error) {
+      // Main validation/not-found failures are never silent: unified toast.
       logger.error(`[deleteSingleMessage] Failed to delete message ${messageId}:`, error as Error)
+      window.toast.error(t('common.delete_failed'))
     }
   }
 
@@ -1054,6 +1058,13 @@ export const resendMessageThunk =
         logger.error(`[resendMessageThunk] Local user message ${userMessageToResend.id} not found in topic ${topicId}.`)
         throw new Error(`Local user message ${userMessageToResend.id} not found`)
       }
+      requireMutableForActiveRoute(state, topicId, userMessageToResend.id)
+      // PROJ-13 batch precheck (A5): resend regenerates every answer of the
+      // group, so every LOADED answer member must be mutable. Known-immutable
+      // loaded members throw fail-closed with zero IPC calls; window-outside
+      // members are decided by the Main guard (per-item failures stop the
+      // batch without claiming atomicity).
+      requireLoadedAnswerMembersMutable(state, topicId, userMessageToResend.id)
 
       // Clear cached search results for the user message being resent
       // This ensures that the regenerated responses will not use stale search results
@@ -1187,6 +1198,16 @@ export const regenerateAssistantResponseThunk =
         )
         return
       }
+      try {
+        requireMutableForActiveRoute(state, topicId, assistantMessageToRegenerate.id)
+      } catch (precheck) {
+        logger.error(
+          `[regenerateAssistantResponseThunk] Message ${assistantMessageToRegenerate.id} is immutable through this route:`,
+          precheck as Error
+        )
+        window.toast.error(t('message.error.unknown'))
+        return
+      }
       if (!assistantMessageToRegenerate.askId && !localSelected.askId) {
         logger.error(
           `[appendAssistantResponseThunk] Existing assistant message ${assistantMessageToRegenerate.id} does not have an askId.`
@@ -1230,6 +1251,7 @@ export const regenerateAssistantResponseThunk =
           `[regenerateAssistantResponseThunk] Error regenerating response for assistant message ${assistantMessageToRegenerate.id}:`,
           dbError as Error
         )
+        window.toast.error(t('message.error.unknown'))
         return
       }
       const matchedAttempt = (response.attempts ?? []).find(
@@ -1307,6 +1329,16 @@ export const initiateTranslationThunk =
         logger.error(`[initiateTranslationThunk] Original message ${messageId} not found.`)
         return undefined
       }
+      try {
+        requireMutableForActiveRoute(state, topicId, messageId)
+      } catch (precheck) {
+        logger.error(
+          `[initiateTranslationThunk] Message ${messageId} is immutable through this route:`,
+          precheck as Error
+        )
+        window.toast.error(t('translate.error'))
+        return undefined
+      }
 
       // 1. Create the initial translation block (streaming state)
       const newBlock = createTranslationBlock(
@@ -1371,6 +1403,7 @@ export const updateTranslationBlockThunk =
       // Logger.log(`[updateTranslationBlockThunk] Successfully updated translation block ${blockId}.`)
     } catch (error) {
       logger.error(`[updateTranslationBlockThunk] Failed to update translation block ${blockId}:`, error as Error)
+      window.toast.error(t('translate.error'))
     }
   }
 
@@ -1421,6 +1454,21 @@ export const appendAssistantResponseThunk =
         // Show error popup instead of creating error message block
         window.toast.error(t('error.missing_user_message'))
 
+        return
+      }
+
+      // PROJ-13 group precheck: joining an existing answer group mutates it
+      // (order, selection, context head), so every loaded member plus the
+      // loaded user root must be private through the active route. Any
+      // loaded immutable member fails closed with zero IPC calls; the Main
+      // join-group guard stays final for window-outside members.
+      try {
+        requireAnswerGroupForMember(getState(), topicId, existingAssistantMessageId)
+      } catch (precheck) {
+        logger.error(
+          `[appendAssistantResponseThunk] Answer group for ${existingAssistantMessageId} is immutable through this route:`,
+          precheck as Error
+        )
         return
       }
 
@@ -1485,7 +1533,11 @@ export const appendAssistantResponseThunk =
       void requestTask
 
       try {
-        await dispatch(selectAnswerMessageThunk(topicId, newAssistantMessageStub.id))
+        await dispatch(
+          selectAnswerMessageThunk(topicId, newAssistantMessageStub.id, {
+            joinGroupMemberId: existingAssistantMessageId
+          })
+        )
       } catch (error) {
         logger.error(
           `[appendAssistantResponseThunk] Failed to select appended answer; continuing with queued generation:`,
@@ -1710,7 +1762,7 @@ export const createBranchThunk =
   (topicId: string, parentBranchId: string | null, anchorMessageId: string, name: string) =>
   async (
     dispatch: AppDispatch,
-    _getState: () => RootState
+    getState: () => RootState
   ): Promise<{ branchId: string; anchorMessageId: string } | null> => {
     if (!topicId || !anchorMessageId) {
       logger.error(`[createBranchThunk] Invalid topicId/anchorMessageId provided.`)
@@ -1741,7 +1793,103 @@ export const createBranchThunk =
       } catch (catalogError) {
         logger.error(`[createBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
       }
-      return { branchId: result.branch.id, anchorMessageId: result.branch.anchorMessageId }
+      // Branch catalog change invalidates the current route window/capability:
+      // the parent anchor may now be descendant-protected. Clear stale
+      // capability immediately (fail-closed); the new-route switch reloads the
+      // target window, and a later parent revisit refetches fresh capability.
+      // Never long-stale.
+      try {
+        dispatch(newMessagesActions.invalidateRouteMutability({ topicId }))
+      } catch {
+        // best-effort invalidation; never break branch creation
+      }
+      const newBranchId = result.branch.id
+      // Deterministic per-route context-anchor inheritance (ADR §9, CW-4):
+      // parent effective group-list index → new branch group-list with clamp;
+      // invalid/missing source on a non-empty branch falls back to the default
+      // position; empty branches stay anchorless. Anchors are route-isolated
+      // (main `topicId`, branch `topicId:branchId`). Main `inherit` resolver
+      // owns the index mapping; this thunk only persists the non-stale result.
+      try {
+        const state = getState()
+        const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
+        if (owner) {
+          const { getAssistantSettings } = await import('@renderer/services/AssistantService')
+          const { anchorKeyForRoute } = await import('@renderer/services/anchorService')
+          const parentRoute = typeof parentBranchId === 'string' && parentBranchId.length > 0 ? parentBranchId : null
+          const parentKey = anchorKeyForRoute(topicId, parentRoute)
+          const targetKey = anchorKeyForRoute(topicId, newBranchId)
+          const parentAnchor =
+            (getAssistantSettings(owner).contextWindowAnchor?.[parentKey] as
+              | { kind: string; groupKey: string }
+              | undefined) ?? null
+          const sourceKey =
+            parentAnchor && (parentAnchor as { kind: string }).kind === 'active'
+              ? (parentAnchor as { groupKey: string }).groupKey
+              : null
+          const contextCount = getAssistantSettings(owner).contextCount ?? null
+          try {
+            const inheritRes = await dbService.resolveContextClosure({
+              topicId,
+              branchId: newBranchId,
+              intent: 'inherit',
+              sourceTopicId: topicId,
+              sourceBranchId: parentRoute,
+              sourceAnchorGroupKey: sourceKey,
+              contextCount,
+              currentAnchorGroupKey: null,
+              detail: 'anchor'
+            })
+            const resolved = (inheritRes as { resolvedAnchorGroupKey: string | null }).resolvedAnchorGroupKey
+            const fresh = getState()
+            const freshOwner = fresh.assistants.assistants.find((a) => a.id === owner.id)
+            const freshSettings = freshOwner ? getAssistantSettings(freshOwner) : getAssistantSettings(owner)
+            const existing =
+              (freshSettings.contextWindowAnchor?.[targetKey] as { kind: string; groupKey: string } | undefined) ?? null
+            if (resolved !== null && resolved !== undefined) {
+              if (!existing || (existing as { kind: string }).kind !== 'active') {
+                const { updateAssistantSettings } = await import('../assistants')
+                dispatch(
+                  updateAssistantSettings({
+                    assistantId: owner.id,
+                    settings: {
+                      contextWindowAnchor: {
+                        ...freshSettings.contextWindowAnchor,
+                        [targetKey]: { kind: 'active', groupKey: resolved }
+                      }
+                    }
+                  }) as any
+                )
+              }
+            } else {
+              // Empty branch stays anchorless (I-1); ensure no stale key.
+              if (existing) {
+                const { updateAssistantSettings } = await import('../assistants')
+                const next = { ...freshSettings.contextWindowAnchor }
+                delete next[targetKey]
+                dispatch(
+                  updateAssistantSettings({
+                    assistantId: owner.id,
+                    settings: { contextWindowAnchor: next }
+                  }) as any
+                )
+              }
+            }
+          } catch {
+            // Inherit failure (NOT_FOUND/transport): non-empty branches still
+            // need an anchor via establishment; empty branches stay anchorless.
+            // Establishment is route-scoped and never recomputes valid anchors.
+            if (effectiveMessages.length > 0) {
+              try {
+                await ensureTopicAnchorEstablished(dispatch, getState, owner.id, topicId, newBranchId)
+              } catch {}
+            }
+          }
+        }
+      } catch {
+        // Best-effort inheritance; never break branch creation.
+      }
+      return { branchId: newBranchId, anchorMessageId: result.branch.anchorMessageId }
     } catch (error) {
       logger.error(`[createBranchThunk] Failed to create branch:`, error as Error)
       return null
@@ -1791,6 +1939,17 @@ export const updateMessageAndBlocksThunk =
     if (messageUpdates && !messageId) {
       logger.error('[updateMessageAndBlocksThunk] Message ID is required.')
       return { affectedFileIds: [], remainingReferenceCounts: {} }
+    }
+    if (messageId && getState) {
+      try {
+        requireMutableForActiveRoute(getState(), topicId, messageId)
+      } catch (precheck) {
+        logger.error(
+          `[updateMessageAndBlocksThunk] Message ${messageId} is immutable through this route:`,
+          precheck as Error
+        )
+        throw precheck
+      }
     }
 
     // 1. Atomic SQLite persistence (LOCK-001)
@@ -1857,8 +2016,30 @@ export const updateMessageAndBlocksThunk =
  * 3. On DB failure the error propagates and NO Redux commit happens.
  */
 export const selectAnswerMessageThunk =
-  (topicId: string, selectedMessageId: string) =>
+  (topicId: string, selectedMessageId: string, opts?: { joinGroupMemberId?: string }) =>
   async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+    // PROJ-13 group precheck: the selection flips every group member
+    // atomically, so the loaded group (members + loaded user root) must be
+    // fully mutable. Unknown group or any loaded immutable member throws
+    // fail-closed before any IPC call; Main resolves window-outside members.
+    //
+    // `joinGroupMemberId` (append path only): the selected ID is a just-
+    // inserted stub that is not yet in the loaded projection — precheck the
+    // joined anchor's group instead. The anchor group was verified before
+    // the insert and Main re-resolves the full group authoritatively.
+    const precheckId =
+      typeof opts?.joinGroupMemberId === 'string' && opts.joinGroupMemberId.length > 0
+        ? opts.joinGroupMemberId
+        : selectedMessageId
+    try {
+      requireAnswerGroupForMember(getState(), topicId, precheckId)
+    } catch (precheck) {
+      logger.error(
+        `[selectAnswerMessageThunk] Message ${selectedMessageId} is immutable through this route:`,
+        precheck as Error
+      )
+      throw precheck
+    }
     // 1. Atomic Main-authoritative persistence (DB-first, LOCK-001).
     const response = await dbService.selectAnswerMessage(topicId, selectedMessageId, activeRouteOf(getState, topicId))
 
@@ -1871,6 +2052,54 @@ export const selectAnswerMessageThunk =
       .map((messageId) => ({
         messageId,
         updates: { foldSelected: messageId === response.selectedMessageId }
+      }))
+    if (visibleUpdates.length > 0) {
+      dispatch(newMessagesActions.updateManyMessages({ topicId, updates: visibleUpdates }))
+    }
+    // updateTopicUpdatedAt is dispatched exactly once by the data source.
+  }
+
+/**
+ * PROJ-13: group-level atomic `useful` toggle.
+ *
+ * DB-first, single-commit:
+ * 1. ONE `selectUsefulAnswer` ChatDb command with the toggled ID only →
+ *    ONE Main root SQLite transaction resolves the complete answer group
+ *    (including window-outside members, topic/role/askId validated,
+ *    cross-topic fail-closed), requires it fully private, and persists
+ *    exactly one useful=true atomically (or a full clear when the target
+ *    is already the useful member). The data source dispatches
+ *    `updateTopicUpdatedAt` exactly once on success — this thunk must NOT
+ *    dispatch it again.
+ * 2. On success, ONE plural `updateManyMessages` Redux dispatch commits the
+ *    authoritative group, intersected with the currently loaded projection
+ *    (never injects window-outside entities).
+ * 3. On DB failure the error propagates and NO Redux commit happens.
+ */
+export const selectUsefulAnswerThunk =
+  (topicId: string, messageId: string) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+    // Group precheck mirrors selectAnswer: the toggle clears/sets every
+    // group member atomically. Unknown group or any loaded immutable member
+    // throws fail-closed before any IPC call.
+    try {
+      requireAnswerGroupForMember(getState(), topicId, messageId)
+    } catch (precheck) {
+      logger.error(`[selectUsefulAnswerThunk] Message ${messageId} is immutable through this route:`, precheck as Error)
+      throw precheck
+    }
+    // 1. Atomic Main-authoritative persistence (DB-first, LOCK-001).
+    const response = await dbService.selectUsefulAnswer(topicId, messageId, activeRouteOf(getState, topicId))
+
+    // 2. ONE plural Redux commit intersected with the loaded projection.
+    const state = getState()
+    const loadedIds = state.messages.messageIdsByTopic[topicId] || []
+    const loadedSet = new Set(loadedIds)
+    const visibleUpdates = response.messageIds
+      .filter((id) => loadedSet.has(id))
+      .map((id) => ({
+        messageId: id,
+        updates: { useful: id === response.usefulMessageId ? true : undefined }
       }))
     if (visibleUpdates.length > 0) {
       dispatch(newMessagesActions.updateManyMessages({ topicId, updates: visibleUpdates }))
@@ -1893,6 +2122,12 @@ export const removeBlocksThunk =
       if (!message) {
         logger.error(`[removeBlocksThunk] Message ${messageId} not found in state.`)
         return
+      }
+      try {
+        requireMutableForActiveRoute(state, topicId, messageId)
+      } catch (precheck) {
+        logger.error(`[removeBlocksThunk] Message ${messageId} is immutable through this route:`, precheck as Error)
+        throw precheck
       }
       const blockIdsToRemoveSet = new Set(blockIdsToRemove)
 
@@ -2257,13 +2492,15 @@ export const loadTopicMessagesThunk =
       if (hasRegistry) {
         // Single controlled Redux publication consumed by relevant projection slices and registry.
         // Topic activation is interactively complete at this point: bounded latest
-        // window + segment catalog are atomically published.
+        // window + segment catalog are atomically published. Route capability
+        // rides atomically via the joint payload (fail-closed when absent).
         dispatch(
           publishResidentComplete({
             topicId,
             generation,
             windowResponse: response!,
-            segments
+            segments,
+            route: activeRouteOf(getState, topicId)
           })
         )
         // Preserve existing topicSegments/ StoreSync projection behavior when joint publication
@@ -2325,21 +2562,30 @@ export const loadTopicMessagesThunk =
   }
 
 /**
- * Load one route (topic + branch) for branch switching.
+ * Load one route (topic + branch) for branch switching — windowed incremental.
  *
  * Branch switches never run topic-transition semantics: no setCurrentTopicId
- * (the topic stays fixed), no sidebar/ordering/trash effects. The full
- * effective route is fetched (shared prefix through each anchor + owned
- * suffix, stable IDs) and published under the SAME topicId, replacing the
- * route order. Stale guards: same-topic request sequence (shared with topic
+ * (the topic stays fixed), no sidebar/ordering/trash effects. The target
+ * route is read ONLY via branch-aware `fetchMessagesWindow` (latest/around,
+ * never full `fetchMessages`) and published atomically under the SAME
+ * topicId via `rebaseRouteMessages`: common stable-ID entities are retained
+ * by ID-keyed upsert, the old route's invalid suffix leaves the ordered
+ * projection in the same commit, and no blank/mixed-route frame is published.
+ * Authoritative `hasMoreBefore/After` rides with the returned window response
+ * for the caller's viewport apply; further pagination continues existing
+ * around reads. Stale guards: same-topic request sequence (shared with topic
  * loads — a branch load supersedes in-flight topic loads and vice versa),
  * the active route still matching, the current topic unchanged, deletion
- * generation, and the route generation. The caller navigates to the fork
- * anchor vicinity afterwards — never to bottom.
+ * generation, and the route generation. Rapid consecutive switches never let
+ * an older response overwrite the newer route.
  */
+export type LoadRouteWindowOpts =
+  | { kind?: 'latest'; limit?: number }
+  | { kind: 'around'; anchorMessageId: string; before?: number; after?: number }
+
 export const loadRouteMessagesThunk =
-  (topicId: string, branchId: string | null) =>
-  async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+  (topicId: string, branchId: string | null, opts?: LoadRouteWindowOpts) =>
+  async (dispatch: AppDispatch, getState: () => RootState): Promise<FetchMessagesWindowResponse | void> => {
     const route = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
     const requestSeq = ++loadTopicMessagesRequestSeq
     latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -2350,9 +2596,35 @@ export const loadRouteMessagesThunk =
     } catch {
       routeGenAtStart = 0
     }
+    // Window intent: divider passes around/fork-anchor; top-selector passes
+    // latest (isAtBottom) or around (saved anchorId); default is latest.
+    let request: FetchMessagesWindowRequest
+    if (opts && opts.kind === 'around') {
+      const beforeRaw = typeof opts.before === 'number' ? Math.floor(opts.before) : 10
+      const afterRaw = typeof opts.after === 'number' ? Math.floor(opts.after) : 19
+      request = {
+        kind: 'around',
+        topicId,
+        branchId: route,
+        anchorMessageId: opts.anchorMessageId,
+        before: Math.min(100, Math.max(1, beforeRaw || 10)),
+        after: Math.min(100, Math.max(1, afterRaw || 19))
+      }
+    } else {
+      const limitRaw =
+        opts && 'limit' in opts && typeof opts.limit === 'number'
+          ? opts.limit
+          : (getState().messages.displayCount ?? INITIAL_MESSAGES_COUNT)
+      request = {
+        kind: 'latest',
+        topicId,
+        branchId: route,
+        limit: clampWindowLimit(limitRaw)
+      }
+    }
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
     try {
-      const { messages, blocks } = await dbService.fetchMessages(topicId, false, route)
+      const response = await runTopicWindowRead(topicId, request.kind, () => dbService.fetchMessagesWindow(request))
       if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) {
         recordResidentReadDiscard('superseded')
         return
@@ -2380,16 +2652,76 @@ export const loadRouteMessagesThunk =
         recordResidentReadDiscard('generationMismatch')
         return
       }
-      const typedMessages = messages as unknown as Message[]
-      const typedBlocks = blocks as unknown as MessageBlock[]
+      if (!validateWindowResponse(request, response)) {
+        recordResidentReadDiscard('malformed')
+        logger.error(`[loadRouteMessagesThunk] malformed window response for ${topicId}`, {
+          window: (response as any)?.window
+        } as unknown as Error)
+        throw new Error('malformed window response')
+      }
+      const typedMessages = response.messages as unknown as Message[]
+      const typedBlocks = response.blocks as unknown as MessageBlock[]
       if (typedBlocks.length > 0) {
         dispatch(withClosureTopics(upsertManyBlocks(typedBlocks), topicId))
       }
-      dispatch(newMessagesActions.messagesReceived({ topicId, messages: typedMessages }))
+      // Atomic conservative rebase with Main-authoritative capability:
+      // single commit, no blank, no mixed route. Empty windows publish []
+      // (clear). Capability rides atomically; absent clears fail-closed.
+      const mutableMessageIds = Array.isArray((response as { mutableMessageIds?: unknown }).mutableMessageIds)
+        ? ((response as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
+        : []
+      dispatch(newMessagesActions.rebaseRouteMessages({ topicId, messages: typedMessages, route, mutableMessageIds }))
+      return response
     } finally {
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
     }
   }
+
+/**
+ * Divider fork-anchor read with reliable degradation (production path).
+ *
+ * Tries the fork-anchor `around` window first (preserves the current visual
+ * reference; never the target history snapshot, never a bottom jump). When
+ * the anchor is no longer on the target route (around rejects / malformed),
+ * falls back to a stale-safe `latest` window for the SAME target route and
+ * publishes it — the nearest safe view to the existing fork/tail fallback
+ * (tail vicinity, authoritative hasMore, raw scroll preserved; still never a
+ * bottom jump). When BOTH fail it rethrows: the caller must roll back to the
+ * previous route (divider) so the UI never shows "new active route + old
+ * route projection" and pagination can never mix routes.
+ *
+ * Stale safety rides on `loadRouteMessagesThunk`'s own guards (request
+ * sequence, active-route match, generations); `isStillTarget` lets the caller
+ * abort the fallback when the user already moved on.
+ */
+export const loadRouteWindowWithFallback = async (
+  dispatch: AppDispatch,
+  topicId: string,
+  branchId: string | null,
+  around: { anchorMessageId: string; before?: number; after?: number },
+  isStillTarget: () => boolean = () => true
+): Promise<{ response: FetchMessagesWindowResponse; fallbackUsed: boolean }> => {
+  try {
+    const aroundRes = (await dispatch(
+      loadRouteMessagesThunk(topicId, branchId, { kind: 'around', ...around })
+    )) as unknown as FetchMessagesWindowResponse | void
+    if (aroundRes && aroundRes.window) {
+      return { response: aroundRes, fallbackUsed: false }
+    }
+    // Stale discard (void, no throw): propagate as failure so the caller can
+    // decide (rollback / retry) instead of rendering a half state.
+    throw new Error('around route read discarded as stale')
+  } catch (aroundError) {
+    if (!isStillTarget()) throw aroundError
+    const latestRes = (await dispatch(
+      loadRouteMessagesThunk(topicId, branchId, { kind: 'latest' })
+    )) as unknown as FetchMessagesWindowResponse | void
+    if (!latestRes || !latestRes.window) {
+      throw new Error('latest route fallback discarded as stale')
+    }
+    return { response: latestRes, fallbackUsed: true }
+  }
+}
 
 /**
  * Get raw topic data using unified DbService

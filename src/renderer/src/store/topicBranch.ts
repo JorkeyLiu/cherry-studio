@@ -2,6 +2,7 @@ import { loggerService } from '@logger'
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
 import type { TopicBranchWire } from '@renderer/services/db/types'
+import { createTransform } from 'redux-persist'
 
 import type { RootState } from './index'
 
@@ -19,20 +20,89 @@ const logger = loggerService.withContext('topicBranch')
  *   to assistants.topics and NEVER become the active topic.
  */
 
-interface TopicBranchState {
+export interface TopicBranchState {
   /** Branch catalog per logical topic. */
   branchesByTopic: Record<string, TopicBranchWire[]>
   /** Active route per logical topic (absent = main route). */
   activeBranchIdByTopic: Record<string, string | null>
   /** Monotonic route generation per topic: stale route fetches discard. */
   routeGenerationByTopic: Record<string, number>
+  /**
+   * One-shot deletion-fallback reload intent per logical topic.
+   * Set by `deleteBranchSubtree` together with the active-fallback switch
+   * when the active route was deleted; consumed exactly once by the Messages
+   * route owner which performs an explicit `latest` reload. Never persisted
+   * across relaunch (stripped by the persist transform; rehydrate always
+   * yields `{}`). `route` is the fallback route, `deletedBranchIds`
+   * identifies the removed subtree whose scroll snapshots must not influence
+   * the recovery.
+   */
+  deletionFallbackByTopic: Record<string, { route: string | null; intentId: number; deletedBranchIds: string[] }>
 }
 
 const initialState: TopicBranchState = {
   branchesByTopic: {},
   activeBranchIdByTopic: {},
-  routeGenerationByTopic: {}
+  routeGenerationByTopic: {},
+  deletionFallbackByTopic: {}
 }
+
+/**
+ * Persisted wire for the topicBranch slice: the one-shot
+ * `deletionFallbackByTopic` intent is runtime-only and never reaches storage.
+ */
+export type TopicBranchPersistedState = Omit<TopicBranchState, 'deletionFallbackByTopic'>
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * redux -> storage: strip the one-shot fallback, keep branches/active/generation.
+ */
+export function topicBranchInboundForPersist(state: TopicBranchState): TopicBranchPersistedState {
+  return {
+    branchesByTopic: state.branchesByTopic ?? {},
+    activeBranchIdByTopic: state.activeBranchIdByTopic ?? {},
+    routeGenerationByTopic: state.routeGenerationByTopic ?? {}
+  }
+}
+
+/**
+ * storage -> redux: discard any persisted fallback (old wires included),
+ * retain branches/active/generation, default missing maps to `{}`.
+ */
+export function topicBranchOutboundFromPersist(stored: unknown): TopicBranchState {
+  const record: Record<string, unknown> = isRecord(stored) ? stored : {}
+  const branchesByTopic = isRecord(record.branchesByTopic)
+    ? (record.branchesByTopic as TopicBranchState['branchesByTopic'])
+    : {}
+  const activeBranchIdByTopic = isRecord(record.activeBranchIdByTopic)
+    ? (record.activeBranchIdByTopic as TopicBranchState['activeBranchIdByTopic'])
+    : {}
+  const routeGenerationByTopic = isRecord(record.routeGenerationByTopic)
+    ? (record.routeGenerationByTopic as TopicBranchState['routeGenerationByTopic'])
+    : {}
+  return {
+    branchesByTopic,
+    activeBranchIdByTopic,
+    routeGenerationByTopic,
+    deletionFallbackByTopic: {}
+  }
+}
+
+/**
+ * Narrow persist transform for `topicBranch` only: the slice must stay
+ * persisted (branches/active survive relaunch) while the one-shot fallback
+ * never crosses a restart. The slice itself handles no `persist/REHYDRATE`
+ * action so `autoMergeLevel1` merges the inbound slice instead of skipping it
+ * as reducer-modified.
+ */
+export const topicBranchPersistTransform = createTransform<TopicBranchState, TopicBranchPersistedState>(
+  (inboundState) => topicBranchInboundForPersist(inboundState),
+  (outboundState) => topicBranchOutboundFromPersist(outboundState),
+  { whitelist: ['topicBranch'] }
+)
 
 function isValidBranchWire(value: unknown): value is TopicBranchWire {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -105,18 +175,69 @@ export const topicBranchSlice = createSlice({
         delete state.branchesByTopic[id]
         delete state.activeBranchIdByTopic[id]
         delete state.routeGenerationByTopic[id]
+        // Backward-compatible: persisted states predating the one-shot
+        // deletion intent carry no `deletionFallbackByTopic` field.
+        if (state.deletionFallbackByTopic) {
+          delete state.deletionFallbackByTopic[id]
+        }
       }
     },
     branchesCleared(state) {
       state.branchesByTopic = {}
       state.activeBranchIdByTopic = {}
       state.routeGenerationByTopic = {}
+      state.deletionFallbackByTopic = {}
+    },
+    /**
+     * One-shot deletion-fallback intent: the active route was deleted and the
+     * caller already switched `activeBranchId` to `route`. Messages consumes
+     * it once with an explicit `latest` windowed read (never the generic
+     * snapshot-around path). Overwrites any unconsumed intent for the topic.
+     */
+    deletionFallbackRequested(
+      state,
+      action: PayloadAction<{ topicId: string; route: string | null; deletedBranchIds: string[] }>
+    ) {
+      const { topicId, route, deletedBranchIds } = action.payload
+      if (typeof topicId !== 'string' || topicId.length === 0) {
+        logger.warn('[deletionFallbackRequested] Ignoring intent with missing topicId')
+        return
+      }
+      if (!state.deletionFallbackByTopic) {
+        state.deletionFallbackByTopic = {}
+      }
+      const prev = state.deletionFallbackByTopic[topicId]
+      const intentId = (prev?.intentId ?? 0) + 1
+      state.deletionFallbackByTopic[topicId] = {
+        route: typeof route === 'string' && route.length > 0 ? route : null,
+        intentId,
+        deletedBranchIds: Array.isArray(deletedBranchIds) ? [...deletedBranchIds] : []
+      }
+    },
+    /**
+     * Consume a deletion-fallback intent exactly once. Only the matching
+     * `intentId` clears; stale consumes are no-ops so a newer intent is never
+     * dropped by an older consumer.
+     */
+    deletionFallbackConsumed(state, action: PayloadAction<{ topicId: string; intentId: number }>) {
+      const { topicId, intentId } = action.payload
+      const current = state.deletionFallbackByTopic?.[topicId]
+      if (current && current.intentId === intentId) {
+        delete state.deletionFallbackByTopic[topicId]
+      }
     }
   }
 })
 
-export const { branchesReceived, activeBranchSet, activeBranchReset, branchesRemoved, branchesCleared } =
-  topicBranchSlice.actions
+export const {
+  branchesReceived,
+  activeBranchSet,
+  activeBranchReset,
+  branchesRemoved,
+  branchesCleared,
+  deletionFallbackRequested,
+  deletionFallbackConsumed
+} = topicBranchSlice.actions
 export default topicBranchSlice.reducer
 
 const selectTopicBranchState = (state: RootState): TopicBranchState =>
@@ -133,6 +254,13 @@ export const selectActiveBranchId = (state: RootState, topicId: string): string 
 /** Route generation for stale-fetch guards (0 when never switched). */
 export const selectRouteGeneration = (state: RootState, topicId: string): number =>
   selectTopicBranchState(state).routeGenerationByTopic[topicId] ?? 0
+
+/** One-shot deletion-fallback intent for a topic (undefined when none pending). */
+export const selectDeletionFallbackIntent = (
+  state: RootState,
+  topicId: string
+): { route: string | null; intentId: number; deletedBranchIds: string[] } | undefined =>
+  selectTopicBranchState(state).deletionFallbackByTopic?.[topicId]
 
 /** One branch node by ID within its topic (undefined when unknown). */
 export const selectBranchNode = (

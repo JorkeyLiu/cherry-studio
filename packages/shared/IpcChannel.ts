@@ -37,6 +37,7 @@ export enum IpcChannel {
   App_InstallBunBinary = 'app:install-bun-binary',
   App_LogToMain = 'app:log-to-main',
   App_SaveData = 'app:save-data',
+  App_SaveDataAck = 'app:save-data-ack',
   App_GetDiskInfo = 'app:get-disk-info',
   App_SetFullScreen = 'app:set-full-screen',
   App_IsFullScreen = 'app:is-full-screen',
@@ -343,6 +344,8 @@ export enum IpcChannel {
   ChatDb_UpdateMessageAndBlocks = 'chatdb:update-message-and-blocks',
   // PERF-100: one atomic multi-model answer-tab selection (foldSelected group switch)
   ChatDb_SelectAnswerMessage = 'chatdb:select-answer-message',
+  // PROJ-13: one atomic multi-model useful selection (group-level useful switch)
+  ChatDb_SelectUsefulAnswer = 'chatdb:select-useful-answer',
   ChatDb_DeleteMessage = 'chatdb:delete-message',
   ChatDb_DeleteMessages = 'chatdb:delete-messages',
   ChatDb_UpdateBlocks = 'chatdb:update-blocks',

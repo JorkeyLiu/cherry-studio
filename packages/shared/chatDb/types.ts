@@ -231,6 +231,41 @@ export interface SelectAnswerMessageResponse {
   messageIds: string[]
 }
 
+/**
+ * @see IpcChannel.ChatDb_SelectUsefulAnswer
+ *
+ * Atomic group-level `useful` selection. The renderer supplies ONLY the
+ * toggled message ID; Main resolves the complete answer group in the same
+ * SQLite transaction and persists exactly one `useful=true` atomically:
+ * when the target is already useful it is cleared (all false), otherwise
+ * the target becomes the single useful member and every other member is
+ * cleared. Window-outside members included; no partial write.
+ *
+ * `useful` stays local-only: no sync frame/outbox change.
+ */
+export interface SelectUsefulAnswerRequest {
+  topicId: string
+  /** Route owner: absent/null = main route, non-null = that branch's effective route. */
+  branchId?: BranchRouteId
+  /** The message whose `useful` flag is toggled. Main resolves its group. */
+  messageId: string
+}
+
+/**
+ * @see IpcChannel.ChatDb_SelectUsefulAnswer
+ *
+ * Main-authoritative answer-group useful result. `messageIds` is the
+ * complete answer group resolved by Main (sort_order ASC, id ASC);
+ * `usefulMessageId` is the single useful member, or null when cleared.
+ */
+export interface SelectUsefulAnswerResponse {
+  topicId: string
+  askId: string
+  usefulMessageId: string | null
+  /** Complete ordered answer-group message IDs (sort_order ASC, id ASC). */
+  messageIds: string[]
+}
+
 /** @see IpcChannel.ChatDb_DeleteMessage */
 export interface DeleteMessageRequest {
   topicId: string
@@ -379,6 +414,15 @@ export interface FetchMessagesWindowResponse {
   messages: JsonObject[]
   blocks: JsonObject[]
   window: FetchMessagesWindowMeta
+  /**
+   * Main-authoritative per-window mutation capability: stable IDs from THIS
+   * response's `messages` that are mutable through the requested route
+   * (owner equals the requested branchId AND not covered by any live
+   * descendant effective-prefix through its anchor, inclusive). Read-only
+   * metadata — never persisted to SQLite. Renderer must treat a missing or
+   * stale list as fail-closed (no mutation).
+   */
+  mutableMessageIds: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,6 +1570,8 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
   // Cross-process authority answer selection (Main-resolved full group)
   'chatdb:select-answer-message': { request: SelectAnswerMessageRequest; response: SelectAnswerMessageResponse }
+  // Atomic group-level useful selection (Main-resolved full group)
+  'chatdb:select-useful-answer': { request: SelectUsefulAnswerRequest; response: SelectUsefulAnswerResponse }
   'chatdb:delete-message': { request: DeleteMessageRequest; response: null }
   'chatdb:delete-messages': { request: DeleteMessagesRequest; response: null }
   'chatdb:update-blocks': { request: UpdateBlocksRequest; response: null }

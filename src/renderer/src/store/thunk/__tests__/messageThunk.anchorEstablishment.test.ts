@@ -170,6 +170,8 @@ interface StoreState {
   messages: {
     entities: Record<string, Message>
     messageIdsByTopic: Record<string, string[]>
+    mutableMessageIdsByTopic?: Record<string, string[]>
+    mutableRouteByTopic?: Record<string, string | null>
     loadingByTopic: Record<string, boolean>
     fulfilledByTopic: Record<string, boolean>
     currentTopicId: string | null
@@ -443,6 +445,11 @@ describe('messageThunk anchor hooks', () => {
               }
             },
             messageIdsByTopic: { 'topic-1': ['user-1', 'asst-msg-1'] },
+            // PROJ-13 join-group precheck: the anchor group (user root +
+            // member) is private through the main route so the append path
+            // reaches stub persistence + queueing.
+            mutableMessageIdsByTopic: { 'topic-1': ['user-1', 'asst-msg-1'] },
+            mutableRouteByTopic: { 'topic-1': null },
             loadingByTopic: {},
             fulfilledByTopic: {},
             currentTopicId: null

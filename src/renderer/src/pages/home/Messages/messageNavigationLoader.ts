@@ -46,7 +46,7 @@ export function buildNavigationAroundRequest(topicId: string, anchorMessageId: s
 
 export type EnsureMessageLoadedResult =
   | { status: 'resident' }
-  | { status: 'loaded'; messages: Message[]; blocks: MessageBlock[] }
+  | { status: 'loaded'; messages: Message[]; blocks: MessageBlock[]; mutableMessageIds: string[] }
   | { status: 'not-found' }
   | { status: 'cancelled' }
   | { status: 'error' }
@@ -141,5 +141,14 @@ export const ensureMessageLoaded = async (
     return { status: 'error' }
   }
 
-  return { status: 'loaded', messages: merged, blocks }
+  // Main-authoritative per-window capability rides with the merged publish
+  // so the atomic `messagesWindowMerged` commit can union it without an
+  // intermediate all-immutable frame. Missing/invalid lists fail closed as
+  // empty (union contributes nothing; route-mismatch adopts empty).
+  const rawMutable = (response as unknown as { mutableMessageIds?: unknown }).mutableMessageIds
+  const mutableMessageIds = Array.isArray(rawMutable)
+    ? [...new Set(rawMutable.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+    : []
+
+  return { status: 'loaded', messages: merged, blocks, mutableMessageIds }
 }

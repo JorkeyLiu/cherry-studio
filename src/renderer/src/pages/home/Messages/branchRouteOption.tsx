@@ -95,6 +95,7 @@ export const BranchRouteOptionRow = (props: BranchRouteOptionRowProps) => {
           type={selected ? 'primary' : 'text'}
           size="small"
           block
+          autoInsertSpace={false}
           style={{ display: 'flex', justifyContent: 'flex-start', textAlign: 'left', overflow: 'hidden' }}
           onClick={onSelect}>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

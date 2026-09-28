@@ -1,6 +1,7 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
+import { requireIdsMutableForRoute, selectRouteCapability } from '@renderer/store/routeAnswerGroup'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { addSegment, removeSegment, updateSegment } from '@renderer/store/topicSegment'
 import type { TopicSegment } from '@renderer/types/topicSegment'
@@ -33,6 +34,10 @@ export function useTopicSegments(topicId: string) {
 
   const messageIdsForTopic = useAppSelector((state) => state.messages.messageIdsByTopic[topicId] || [])
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, topicId))
+  // PROJ-13 (B5) capability snapshot from the same store the UI reads —
+  // segment membership mutates message relations, so every member must be
+  // private through the active route (zero IPC calls otherwise).
+  const routeCapability = useAppSelector((state) => selectRouteCapability(state, topicId))
 
   const segmentsForTopic = useMemo(() => {
     const ids = segmentsByTopic[topicId] || []
@@ -66,6 +71,14 @@ export function useTopicSegments(topicId: string) {
 
   const createSegment = useCallback(
     async (tid: string, name: string, messageIds: string[]): Promise<TopicSegment> => {
+      // PROJ-13 (B5): segment membership mutates message relations — every
+      // member must be private through the active route. Fail closed with
+      // zero IPC calls; Main validates the addressed route atomically.
+      // Cross-topic intents stay Main-decided (this hook only holds the
+      // capability of its own topic).
+      if (tid === topicId) {
+        requireIdsMutableForRoute(routeCapability, tid, messageIds)
+      }
       // DB-first with read-after catalog convergence: the single upsert wire
       // cannot carry shifted siblings, so follow with exactly one list+replace.
       // listSegments failure must not roll back the successful Main mutation:
@@ -90,7 +103,7 @@ export function useTopicSegments(topicId: string) {
       logger.info(`Created segment "${name}" with ${segment.messageCount} messages`)
       return segment
     },
-    [dispatch, topicId, activeBranchId]
+    [dispatch, topicId, activeBranchId, routeCapability]
   )
 
   const updateSegmentName = useCallback(
@@ -118,6 +131,10 @@ export function useTopicSegments(topicId: string) {
 
   const updateSegmentMessageIds = useCallback(
     async (segmentId: string, newMessageIds: string[]) => {
+      // PROJ-13 (B5): membership replacement mutates message relations —
+      // fail closed with zero IPC calls unless every member is private.
+      // The segment's topic is the hook topic; Main validates atomically.
+      requireIdsMutableForRoute(routeCapability, topicId, newMessageIds)
       // DB-first enriched: empty membership deletes per repo semantics (null wire).
       const wire = await dbService.replaceSegmentMembership(segmentId, newMessageIds, activeBranchId)
       if (wire === null) {
@@ -138,7 +155,7 @@ export function useTopicSegments(topicId: string) {
         })
       )
     },
-    [dispatch, activeBranchId]
+    [dispatch, activeBranchId, routeCapability, topicId]
   )
 
   const deleteSegment = useCallback(

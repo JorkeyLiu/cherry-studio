@@ -27,7 +27,9 @@ export function useEditModeContextMenuItems(topicId: string) {
     hasClipboard,
     canUndo,
     canRedo,
-    groups
+    groups,
+    // PROJ-13 (B2): 选集不可变时 cut/delete/segment 写操作禁用；copy 允许.
+    isSelectionMutable
   } = useEditMode()
 
   const { createSegment, getSegmentsForTopic, updateSegmentMessageIds, deleteSegment } = useTopicSegments(topicId)
@@ -74,6 +76,8 @@ export function useEditModeContextMenuItems(topicId: string) {
   )
 
   const handleCreateSegment = useCallback(async () => {
+    // PROJ-13 (B2/B5): 选集不可变时 segment 创建零调用（Main 最终校验为界）。
+    if (!isSelectionMutable) return
     const msgIds = getSelectedMessageIds()
     if (msgIds.length === 0) {
       window.toast.warning(t('topicSegment.create.selectMessages'))
@@ -95,7 +99,16 @@ export function useEditModeContextMenuItems(topicId: string) {
     await createSegment(topicId, t('topicSegment.create.defaultName'), msgIds)
     dispatch(clearSelection())
     window.toast.success(t('topicSegment.createAction'))
-  }, [getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId, t, createSegment, dispatch])
+  }, [
+    isSelectionMutable,
+    getSelectedMessageIds,
+    checkMessagesContinuous,
+    getSegmentsForTopic,
+    topicId,
+    t,
+    createSegment,
+    dispatch
+  ])
 
   const getMergeDirections = useCallback(
     (msgIds: string[]): { upSegment?: TopicSegment; downSegment?: TopicSegment } | null => {
@@ -148,6 +161,8 @@ export function useEditModeContextMenuItems(topicId: string) {
 
   const handleMerge = useCallback(
     async (direction: 'up' | 'down') => {
+      // PROJ-13 (B2/B5): 选集不可变时 segment 合并零调用。
+      if (!isSelectionMutable) return
       const msgIds = getSelectedMessageIds()
       if (!mergeInfo) return
 
@@ -167,7 +182,7 @@ export function useEditModeContextMenuItems(topicId: string) {
       dispatch(clearSelection())
       window.toast?.success?.(t('topicSegment.merge.success'))
     },
-    [mergeInfo, getSelectedMessageIds, updateSegmentMessageIds, dispatch, t]
+    [isSelectionMutable, mergeInfo, getSelectedMessageIds, updateSegmentMessageIds, dispatch, t]
   )
 
   // ─── 从消息组移除 ───
@@ -200,6 +215,8 @@ export function useEditModeContextMenuItems(topicId: string) {
   }, [getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId])
 
   const canCreateSegment = useMemo(() => {
+    // PROJ-13 (B2): 选集不可变时 segment 创建禁用（与 cut/delete 同门禁）。
+    if (!isSelectionMutable) return false
     const msgIds = getSelectedMessageIds()
     if (msgIds.length === 0) return false
     if (!checkMessagesContinuous(msgIds)) return false
@@ -207,9 +224,11 @@ export function useEditModeContextMenuItems(topicId: string) {
     const hasOverlap = msgIds.some((id) => existingSegments.some((seg) => seg.messageIds.includes(id)))
     if (hasOverlap) return false
     return true
-  }, [getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId])
+  }, [isSelectionMutable, getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId])
 
   const handleRemoveFromSegment = useCallback(async () => {
+    // PROJ-13 (B2/B5): 选集不可变时 segment 移除/解散零调用。
+    if (!isSelectionMutable) return
     if (!removeFromSegmentInfo) return
     const { type, segment } = removeFromSegmentInfo
 
@@ -226,7 +245,7 @@ export function useEditModeContextMenuItems(topicId: string) {
     }
     dispatch(clearSelection())
     window.toast?.success?.(t('topicSegment.remove.success'))
-  }, [removeFromSegmentInfo, deleteSegment, updateSegmentMessageIds, dispatch, t])
+  }, [isSelectionMutable, removeFromSegmentInfo, deleteSegment, updateSegmentMessageIds, dispatch, t])
 
   const handleSelectAll = useCallback(() => {
     const allAskIds = groups.map((g) => g.askId)
@@ -245,6 +264,8 @@ export function useEditModeContextMenuItems(topicId: string) {
       {
         key: 'cut',
         label: t('editMode.contextMenu.cut'),
+        // PROJ-13 (B2): 选集不可变时剪切禁用（copy 保持允许）。
+        disabled: !isSelectionMutable,
         onClick: handleCut
       },
       {
@@ -256,7 +277,8 @@ export function useEditModeContextMenuItems(topicId: string) {
       {
         key: 'delete',
         label: t('editMode.contextMenu.delete'),
-        disabled: selectedGroupIds.length === 0,
+        // PROJ-13 (B2): 空选或选集不可变时删除禁用。
+        disabled: selectedGroupIds.length === 0 || !isSelectionMutable,
         onClick: () => void handleDelete()
       },
       { type: 'divider' },
@@ -267,7 +289,7 @@ export function useEditModeContextMenuItems(topicId: string) {
         onClick: handleCreateSegment
       },
       // 向上合并（选区合并到上方 segment）
-      ...(mergeInfo?.upSegment
+      ...(mergeInfo?.upSegment && isSelectionMutable
         ? [
             {
               key: 'mergeUp',
@@ -277,7 +299,7 @@ export function useEditModeContextMenuItems(topicId: string) {
           ]
         : []),
       // 向下合并（选区合并到下方 segment）
-      ...(mergeInfo?.downSegment
+      ...(mergeInfo?.downSegment && isSelectionMutable
         ? [
             {
               key: 'mergeDown',
@@ -287,7 +309,7 @@ export function useEditModeContextMenuItems(topicId: string) {
           ]
         : []),
       // 从消息组移除 / 解散消息组
-      ...(removeFromSegmentInfo
+      ...(removeFromSegmentInfo && isSelectionMutable
         ? [
             {
               key: 'removeFromSegment',
@@ -336,6 +358,7 @@ export function useEditModeContextMenuItems(topicId: string) {
     canUndo,
     canRedo,
     selectedGroupIds,
+    isSelectionMutable,
     mergeInfo,
     removeFromSegmentInfo,
     canCreateSegment

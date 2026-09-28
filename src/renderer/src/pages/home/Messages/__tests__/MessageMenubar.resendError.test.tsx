@@ -131,7 +131,10 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
+  selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic,
+  // Fixture user messages are mutable through the main route: these tests
+  // prove resend error classification, not capability gating.
+  selectIsMessageMutable: () => true
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({

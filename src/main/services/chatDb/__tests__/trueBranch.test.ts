@@ -161,8 +161,8 @@ describe('branch migration 016 registration', () => {
 
   it('registers 016 after 015 and applies idempotently', () => {
     const keys = MIGRATIONS.map((m) => m.key)
-    expect(keys[keys.length - 1]).toBe('016_topic_branches')
-    expect(keys).toContain('015_thinking_block_order_repair')
+    expect(keys[keys.length - 1]).toBe('017_cleanup_route_message_overlay')
+    expect(keys).toContain('016_topic_branches')
     const first = runMigrations(db, sqlite)
     expect(first).toBe(MIGRATIONS.length)
     const branchTable = sqlite

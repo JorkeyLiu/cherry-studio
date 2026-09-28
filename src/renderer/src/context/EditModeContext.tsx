@@ -51,6 +51,7 @@ export function EditModeProvider({ children, topicId, scrollToGroup, visibleGrou
       hasClipboard: false,
       canUndo: false,
       canRedo: false,
+      isSelectionMutable: false,
       toggleEditMode,
       handleGroupClick: () => {},
       handleCopy: () => {},

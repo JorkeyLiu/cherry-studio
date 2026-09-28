@@ -32,10 +32,12 @@ const blockFor = (messageId: string, n: number) => ({
 const makeWindowResponse = (
   request: { topicId: string; anchorMessageId: string; before: number; after: number },
   messages: Message[],
-  blocks: unknown[] = []
+  blocks: unknown[] = [],
+  mutableMessageIds?: string[]
 ) => ({
   messages,
   blocks,
+  ...(mutableMessageIds !== undefined ? { mutableMessageIds } : {}),
   window: {
     kind: 'around' as const,
     completeness: 'window' as const,
@@ -282,6 +284,46 @@ describe('messageNavigationLoader', () => {
     })
     expect(result).toEqual({ status: 'cancelled' })
     expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('loaded result carries the Main window capability for atomic publish', async () => {
+    const existing = [msg('m-30', 30)]
+    const incoming = [msg('m-5', 5), msg('m-6', 6)]
+    const read = vi.fn(
+      async () =>
+        makeWindowResponse(
+          { topicId: 'topic-1', anchorMessageId: 'm-5', before: 10, after: 19 },
+          incoming as any,
+          [],
+          ['m-5']
+        ) as any
+    )
+    const loaded = await ensureMessageLoaded('topic-1', 'm-5', {
+      getExistingMessages: () => existing,
+      readAroundWindow: read
+    })
+    expect(loaded.status).toBe('loaded')
+    if (loaded.status !== 'loaded') return
+    expect(loaded.mutableMessageIds).toEqual(['m-5'])
+  })
+
+  it('missing capability fails closed as empty (union contributes nothing)', async () => {
+    const existing = [msg('m-30', 30)]
+    const incoming = [msg('m-5', 5)]
+    const read = vi.fn(
+      async () =>
+        makeWindowResponse(
+          { topicId: 'topic-1', anchorMessageId: 'm-5', before: 10, after: 19 },
+          incoming as any
+        ) as any
+    )
+    const loaded = await ensureMessageLoaded('topic-1', 'm-5', {
+      getExistingMessages: () => existing,
+      readAroundWindow: read
+    })
+    expect(loaded.status).toBe('loaded')
+    if (loaded.status !== 'loaded') return
+    expect(loaded.mutableMessageIds).toEqual([])
   })
 
   it('ensure then transaction succeeds from merged projection when target starts outside loaded messages', async () => {

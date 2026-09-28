@@ -1,4 +1,5 @@
 import { loggerService } from '@logger'
+import { saveRouteScrollSync } from '@renderer/hooks/useScrollPosition'
 import { BranchRouteOptionRow } from '@renderer/pages/home/Messages/branchRouteOption'
 import { requestTopicBranches, useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
 import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
@@ -174,6 +175,17 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
       setOpen(false)
       return
     }
+    // Synchronously persist the OLD route's viewport-top snapshot before the
+    // active route changes. Never rely on the 100ms throttle trailing or the
+    // key-change effect flush; never touch the target route's snapshot here.
+    // The target window is chosen from the NEW route's own saved
+    // route-saved-row-anchor (`messageId` + `intraRowOffset`, `isAtBottom` →
+    // latest + bottom, else around + precise offset).
+    try {
+      saveRouteScrollSync()
+    } catch {
+      // fail-closed: route switch proceeds; target falls back to vicinity/tail
+    }
     dispatch(activeBranchSet({ topicId: activeTopic.id, branchId }))
     setOpen(false)
     setHoverPath(null)
@@ -280,6 +292,7 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
           data-testid="branch-selector-entry"
           type="text"
           size="small"
+          autoInsertSpace={false}
           icon={<GitFork size={14} />}
           style={{ display: 'flex', alignItems: 'center', gap: 4, maxWidth: 320 }}>
           <span

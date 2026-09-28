@@ -266,7 +266,7 @@ describe('B-09 hook-level retention (useContextClosure)', () => {
       await Promise.resolve()
     })
     expect(fetchClosureMock).toHaveBeenCalledTimes(1)
-    expect(fetchClosureMock).toHaveBeenCalledWith({ topicId: 't-stale', anchorGroupKey: 'u1' })
+    expect(fetchClosureMock).toHaveBeenCalledWith({ topicId: 't-stale', branchId: null, anchorGroupKey: 'u1' })
     expect(getCachedContextClosure('t-stale')).toBeNull()
 
     // Switch to active topic before stale resolves — triggers retention pruning and new fetch
@@ -276,7 +276,7 @@ describe('B-09 hook-level retention (useContextClosure)', () => {
     })
     // Second fetch started for active
     await waitFor(() => expect(fetchClosureMock).toHaveBeenCalledTimes(2))
-    expect(fetchClosureMock).toHaveBeenLastCalledWith({ topicId: 't-active', anchorGroupKey: 'u1' })
+    expect(fetchClosureMock).toHaveBeenLastCalledWith({ topicId: 't-active', branchId: null, anchorGroupKey: 'u1' })
 
     // At this point, only active should be retained (stale had no cache, but after switch stale must not be cached)
     // Resolve stale first — should be discarded via seq/topic guard

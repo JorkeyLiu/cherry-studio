@@ -144,6 +144,14 @@ function makeFileBlock(id: string, fileId: string): MessageBlock {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
+  // PROJ-13 (B6): redo re-deletes existing messages — the redo roots must be
+  // loaded + capability-covered or the redo fails closed with zero IPC calls.
+  const publishRedoCapability = (loadedIds: string[]) => {
+    const state = storeState as any
+    state.messages.messageIdsByTopic = { 'topic-1': loadedIds }
+    state.messages.mutableMessageIdsByTopic = { 'topic-1': loadedIds }
+    state.messages.mutableRouteByTopic = { 'topic-1': null }
+  }
   beforeEach(() => {
     vi.clearAllMocks()
     storeState = {
@@ -211,7 +219,8 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
     it('re-issues the original root IDs via the semantic command (never expanded IDs as intent)', async () => {
       const msg1 = makeMessage('msg-1', ['blk-1'])
-      storeState.messages.entities = { 'msg-1': msg1 }
+      storeState.messages.entities = { 'msg-1': msg1, u1: makeMessage('u1', []) }
+      publishRedoCapability(['u1'])
       mocks.deleteMessagesWithDependents.mockResolvedValue(semanticRedoResponse)
 
       const action: DeleteUndoAction = {
@@ -243,6 +252,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
     it('falls back to expanded IDs for legacy actions and converges segments from the response', async () => {
       const msg1 = makeMessage('msg-1', ['blk-1'])
       storeState.messages.entities = { 'msg-1': msg1 }
+      publishRedoCapability(['msg-1'])
       mocks.deleteMessagesWithDependents.mockResolvedValue(semanticRedoResponse)
 
       const action: DeleteUndoAction = {
@@ -282,6 +292,7 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
       const msg1 = makeMessage('msg-1', ['blk-1'])
       storeState.messages.entities = { 'msg-1': msg1 }
       storeState.messageBlocks.entities = { 'blk-1': fileBlock }
+      publishRedoCapability(['msg-1'])
 
       const responseWithFiles = { ...semanticRedoResponse, ...cleanupWithFiles }
       mocks.deleteMessagesWithDependents.mockResolvedValue(responseWithFiles)
@@ -313,6 +324,8 @@ describe('UndoService cleanup invariants (LOCK-P5.3-1)', () => {
 
     it('DB failure yields no cleanup consume and returns null', async () => {
       mocks.deleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+      storeState.messages.entities = { 'msg-1': makeMessage('msg-1', []) }
+      publishRedoCapability(['msg-1'])
 
       const action: DeleteUndoAction = {
         id: 'redo-del-fail',

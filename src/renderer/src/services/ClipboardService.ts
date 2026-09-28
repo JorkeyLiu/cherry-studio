@@ -24,6 +24,7 @@ import type { TopicSegment } from '@renderer/types/topicSegment'
 import { convergeTopicSegmentCatalog, mapSegmentWireToTopicSegment } from '@renderer/utils/topicSegmentCatalog'
 import { getSegmentColor } from '@renderer/utils/topicSegmentColor'
 import type { InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
+import { t } from 'i18next'
 import { v4 as uuidv4 } from 'uuid'
 
 const logger = loggerService.withContext('ClipboardService')
@@ -253,14 +254,37 @@ export async function copyMessages(
  * delete transaction there. Read-only apart from the clipboard publication —
  * Redux message and block projections are never mutated. Returns the number
  * of messages cut.
+ *
+ * Service-level depth gate (PROJ-15): the cut entry itself requires the
+ * selection writable through the active route before any authority clipboard
+ * read or `cut` publication — direct callers outside `useEditMode` fail
+ * closed the same way. Copy stays ungated (read-only authority read).
+ * Gate failure publishes nothing and issues no Main mutation (existing
+ * warn-and-zero semantics, no new copy).
  */
 export async function cutMessages(
   dispatch: AppDispatch,
+  getState: () => RootState,
   topicId: string,
   selectedGroupIds: string[],
   branchId?: string | null
 ): Promise<number> {
-  const payload = await buildAuthorityClipboardPayload(topicId, selectedGroupIds, branchId)
+  // Stable group IDs only (same contract as the authority payload builder).
+  const rootIds = [...new Set(selectedGroupIds.filter((id) => typeof id === 'string' && id.length > 0))]
+  if (rootIds.length === 0) {
+    return 0
+  }
+
+  // Depth gate binds to the exact requested set (never a stale store copy).
+  try {
+    const { requireEditSelectionMutable } = await import('@renderer/store/editSelection')
+    requireEditSelectionMutable(getState(), topicId, rootIds)
+  } catch (error) {
+    logger.warn('[cutMessages] Selection is immutable through this route; cut refused', error as Error)
+    return 0
+  }
+
+  const payload = await buildAuthorityClipboardPayload(topicId, rootIds, branchId)
 
   if (!payload || payload.items.length === 0) {
     return 0
@@ -669,6 +693,18 @@ export async function deleteSelectedMessages(
     return 0
   }
 
+  // PROJ-13 (B1/B3): the whole selection must be writable through the
+  // active route — one shared member blocks the entire batch with zero IPC
+  // calls (no skip-and-partial-write). Main stays final for expansion.
+  // The gate binds to the requested root IDs (never a stale store copy).
+  try {
+    const { requireEditSelectionMutable } = await import('@renderer/store/editSelection')
+    requireEditSelectionMutable(getState(), topicId, rootIds)
+  } catch (error) {
+    logger.warn('[deleteSelectedMessages] Selection is immutable through this route; delete refused', error as Error)
+    return 0
+  }
+
   // Unified semantic delete: DB-first, then one converged projection update
   // (cleanup consume, loaded-intersection removal, full segment replace,
   // authority-key anchor transfer) inside the helper.
@@ -735,7 +771,9 @@ export async function deleteSingleMessage(
   try {
     result = await executeDeleteMessagesWithDependents(dispatch, getState, topicId, [message.id])
   } catch (error) {
+    // Main validation/not-found failures are never silent: unified toast.
     logger.error('[deleteSingleMessage] Failed to delete from DB', error as Error)
+    window.toast.error(t('common.delete_failed'))
     return
   }
 

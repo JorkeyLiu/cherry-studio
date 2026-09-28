@@ -139,7 +139,7 @@ describe('useScrollPosition with bounded scroll snapshot cache', () => {
     store.set('scroll:topic-cache-legacy', -250)
     const { result } = renderHook(() => useScrollPosition('topic-cache-legacy'))
     const pos = result.current.getSavedPosition()
-    expect(pos).toEqual({ scrollTop: -250, anchorId: null, isAtBottom: false })
+    expect(pos).toEqual(expect.objectContaining({ scrollTop: -250, anchorId: null, isAtBottom: false }))
     const idx = store.get(SCROLL_SNAPSHOT_INDEX_KEY) as any[]
     expect(idx.find((e) => e.key === 'scroll:topic-cache-legacy')).toBeDefined()
   })

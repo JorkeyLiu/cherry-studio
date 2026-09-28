@@ -52,6 +52,9 @@ function makeWindowResponse(topicId: string, messages: Array<{ id: string }>): F
   return {
     messages: messages as unknown as FetchMessagesWindowResponse['messages'],
     blocks: [] as unknown as FetchMessagesWindowResponse['blocks'],
+    // PROJ-13/16: publish the Main-authoritative route capability together
+    // with the resident window so guarded thunks reach their DB contract.
+    mutableMessageIds: messages.map((m) => m.id),
     window: {
       kind: 'latest',
       completeness: 'window',

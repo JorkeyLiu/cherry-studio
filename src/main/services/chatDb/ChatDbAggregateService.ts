@@ -55,6 +55,7 @@ import type {
   ResolveContextClosureResult,
   SegmentWire,
   SelectAnswerMessageResponse,
+  SelectUsefulAnswerResponse,
   SemanticModelSnapshot,
   SemanticResendResponse,
   StreamWriteDiagnostics,
@@ -971,9 +972,19 @@ export class ChatDbAggregateService {
           const wireMessages = messagesToWire(windowMessages)
           const wireBlocks = blocksToWire(allBlocks)
           const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
+          // Mutation capability: same-tx consistent view, no N+1 per-message
+          // SQL beyond the shared descendant-prefix union. Owner must equal
+          // the requested route; inherited rows and descendant-covered owned
+          // rows are excluded. Content untouched; metadata only, not persisted.
+          const requestedOwner = this.normalizeBranchId(request.branchId)
+          const protectedIds = this.collectProtectedMessageIdsInTx(repos, request.topicId, requestedOwner)
+          const mutableMessageIds = windowMessages
+            .filter((m) => (m.branchId ?? null) === requestedOwner && !protectedIds.has(m.id))
+            .map((m) => m.id)
           return {
             messages: messagesWithBlocks,
             blocks: wireBlocks,
+            mutableMessageIds,
             window: {
               kind: meta.kind,
               completeness: 'window' as const,
@@ -2585,6 +2596,32 @@ export class ChatDbAggregateService {
           const resolvedInsertIndex = anchorOwned
             ? this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData)
             : ownerMessages.length
+
+          // PROJ-13 join-group guard: a genuinely new assistant message that
+          // joins an EXISTING answer group (same askId already has assistant
+          // members in the addressed route) mutates that group (order,
+          // selection, context head), so the full existing group must be
+          // private through this route. A fresh askId (new private suffix
+          // that changes no existing group) keeps the original semantics.
+          {
+            const dbForJoinGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+            const joinedAskIds = new Set<string>()
+            for (const entry of entries) {
+              const raw = entry.message as Record<string, unknown>
+              if (raw.role !== 'assistant') continue
+              const askId = raw.askId
+              if (typeof askId !== 'string' || askId.length === 0) continue
+              const mid = raw.id
+              if (typeof mid !== 'string' || mid.length === 0) continue
+              if (repos.messages.getById(mid).found) continue
+              if (joinedAskIds.has(askId)) continue
+              joinedAskIds.add(askId)
+              const existingGroup = routeMessages.filter((m) => m.role === 'assistant' && m.askId === askId)
+              if (existingGroup.length > 0) {
+                this.assertAnswerGroupMutableInTx(repos, dbForJoinGuard, topicId, route, askId, routeMessages)
+              }
+            }
+          }
 
           // Phase 1 — convert every entry, enforce block ownership, classify new vs existing
           // (DB-existence classification preserved exactly for chat writes).
@@ -4478,18 +4515,20 @@ export class ChatDbAggregateService {
         }
         // Route answer groups: the selection flips every group member
         // atomically, so a group spanning inherited messages rejects instead
-        // of half-flipping shared state (no copy-on-write).
+        // of half-flipping shared state (no copy-on-write). PROJ-13: the
+        // user root joins the group when present in the topic.
         {
           const dbForSelectGuard = tx as unknown as BetterSQLite3Database<typeof schema>
-          for (const m of routeMessages) {
-            if (m.role === 'assistant' && m.askId === askId && (m.branchId ?? null) !== route) {
-              throw new ChatDbValidationError(
-                `Message ${m.id} is shared with another route and its answer group is immutable through this route`
-              )
-            }
-          }
-          for (const id of groupIds) {
-            this.assertNoLiveDescendantIncludesInTx(repos, dbForSelectGuard, topicId, route, id)
+          const resolved = this.assertAnswerGroupMutableInTx(
+            repos,
+            dbForSelectGuard,
+            topicId,
+            route,
+            askId,
+            routeMessages
+          )
+          if (resolved.length !== groupIds.length || !resolved.includes(selectedMessageId)) {
+            throw new ChatDbNotFoundError(`Message ${selectedMessageId} has no actionable answer group`)
           }
         }
         for (const id of groupIds) {
@@ -4503,6 +4542,74 @@ export class ChatDbAggregateService {
         }
       })
     }, `selectAnswerMessage(${topicId})`)
+  }
+
+  /**
+   * PROJ-13: atomic group-level `useful` selection.
+   *
+   * The renderer supplies ONLY the toggled message ID; Main resolves the
+   * complete answer group (including window-outside members) in the same
+   * SQLite transaction, requires the full group private through the
+   * addressed route (no copy-on-write), then persists exactly one
+   * `useful=true` atomically: when the target is already the useful member
+   * it is cleared (all false), otherwise the target becomes the single
+   * useful member and every other member is cleared. No partial write.
+   */
+  selectUsefulAnswer(
+    topicId: string,
+    messageId: string,
+    branchId?: string | null
+  ): ChatDbResult<SelectUsefulAnswerResponse> {
+    return wrapResult(() => {
+      syncService.throwIfPublishBarrierHeld('selectUsefulAnswer')
+      const route = this.normalizeBranchId(branchId)
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+        }
+        const routeMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+        const target = routeMessages.find((m) => m.id === messageId)
+        if (!target) {
+          throw new ChatDbNotFoundError(`Message ${messageId} does not belong to topic ${topicId}`)
+        }
+        const askId = target.askId
+        if (target.role !== 'assistant' || typeof askId !== 'string' || askId.length === 0) {
+          throw new ChatDbNotFoundError(`Message ${messageId} has no actionable answer group`)
+        }
+        const dbForUsefulGuard = tx as unknown as BetterSQLite3Database<typeof schema>
+        const groupIds = this.assertAnswerGroupMutableInTx(
+          repos,
+          dbForUsefulGuard,
+          topicId,
+          route,
+          askId,
+          routeMessages
+        )
+        if (!groupIds.includes(messageId)) {
+          throw new ChatDbNotFoundError(`Message ${messageId} has no actionable answer group`)
+        }
+        // Toggle: an already-useful target clears the group; otherwise the
+        // target becomes the single useful member. Read current flags from
+        // the same transaction snapshot.
+        const currentUseful = new Set<string>()
+        for (const id of groupIds) {
+          const row = repos.messages.getInTopic(id, topicId)
+          if (row.found && (row.data as { useful?: unknown }).useful === true) currentUseful.add(id)
+        }
+        const nextUseful: string | null = currentUseful.size === 1 && currentUseful.has(messageId) ? null : messageId
+        for (const id of groupIds) {
+          repos.messages.update(topicId, id, { overflow: { useful: id === nextUseful } })
+        }
+        return {
+          topicId,
+          askId,
+          usefulMessageId: nextUseful,
+          messageIds: groupIds
+        }
+      })
+    }, `selectUsefulAnswer(${topicId})`)
   }
 
   /**
@@ -5892,18 +5999,20 @@ export class ChatDbAggregateService {
           // Route immutability: answer groups spanning inherited/shared
           // messages reject (slots cannot permute across route owners
           // without mutating shared prefixes); owned members included in
-          // any live descendant prefix reject. Slot permutation persists
+          // any live descendant prefix reject. PROJ-13: the user root joins
+          // the group when present in the topic. Slot permutation persists
           // within the addressed route owner's rows only.
           const dbForAnswerGuard = tx as unknown as BetterSQLite3Database<typeof schema>
-          const ownerRows = repos.messages.listByTopic(topicId, route)
-          const ownedSet = new Set(ownerRows.map((m) => m.id))
-          for (const id of groupIds) {
-            if (!ownedSet.has(id)) {
-              throw new ChatDbValidationError(
-                `Message ${id} is shared with another route and its answer group is immutable through this route`
-              )
-            }
-            this.assertNoLiveDescendantIncludesInTx(repos, dbForAnswerGuard, topicId, route, id)
+          const resolvedGroup = this.assertAnswerGroupMutableInTx(
+            repos,
+            dbForAnswerGuard,
+            topicId,
+            route,
+            askId,
+            allMessages
+          )
+          if (resolvedGroup.length !== groupIds.length || !resolvedGroup.every((id) => groupSet.has(id))) {
+            throw new ChatDbConflictError('Answer-group slot resolution mismatch')
           }
           for (const id of orderedMessageIds) {
             if (!groupSet.has(id)) {
@@ -5915,6 +6024,7 @@ export class ChatDbAggregateService {
               throw new ChatDbNotFoundError(`Message ${id} does not belong to topic ${topicId}`)
             }
           }
+          const ownerRows = repos.messages.listByTopic(topicId, route)
           const ownerOrder = ownerRows.map((m) => m.id)
           const groupPositions: number[] = []
           for (let i = 0; i < ownerOrder.length; i++) {
@@ -6851,6 +6961,49 @@ export class ChatDbAggregateService {
   }
 
   /**
+   * Protected ID union for one owner route: every message covered by at least
+   * one live descendant effective prefix (parent route sliced through the
+   * child anchor, inclusive). Anchor-inclusive, grandchild-covering, sibling-
+   * excluding; main-null correct. Pre-016 databases yield an empty set (owned
+   * main rows stay mutable). Read-only, same-tx consistent view; never
+   * persists.
+   */
+  private collectProtectedMessageIdsInTx(
+    repos: ChatDbRepositories,
+    topicId: string,
+    ownerBranchId: string | null
+  ): Set<string> {
+    const protectedIds = new Set<string>()
+    let descendants: string[]
+    try {
+      descendants = this.collectBranchSubtreeIdsInTx(repos, topicId, ownerBranchId)
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return protectedIds
+      throw e
+    }
+    for (const descendant of descendants) {
+      let branchRow: { found: boolean; data?: TopicBranchData }
+      try {
+        branchRow = repos.branches.getById(descendant)
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) return protectedIds
+        throw e
+      }
+      if (!branchRow.found) continue
+      let parentRoute: { messages: MessageData[] }
+      try {
+        parentRoute = this.resolveRouteMessagesInTx(repos, topicId, branchRow.data!.parentBranchId ?? null)
+      } catch {
+        continue
+      }
+      const anchorIdx = parentRoute.messages.findIndex((m) => m.id === branchRow.data!.anchorMessageId)
+      if (anchorIdx === -1) continue
+      for (let i = 0; i <= anchorIdx; i++) protectedIds.add(parentRoute.messages[i].id)
+    }
+    return protectedIds
+  }
+
+  /**
    * Resolve the effective ordered messages for one route: recursively take
    * each ancestor route only through the child anchor, then append messages
    * owned by the current branch. Deterministic sort_order ASC, id ASC order
@@ -6996,6 +7149,57 @@ export class ChatDbAggregateService {
       return this.assertMutableMessageInTx(repos, db, topicId, branchId, parentId)
     }
     return this.assertMutableMessageInTx(repos, db, parent.data.topicId, parent.data.branchId ?? null, parentId)
+  }
+
+  /**
+   * PROJ-13: answer-group mutability guard (shared by selectAnswer,
+   * selectUseful, reorder, and join-group append).
+   *
+   * Resolves the complete answer group for `askId` in the addressed route
+   * (assistant members in route order) and requires every member to be
+   * private through this route: owned by the route AND not covered by any
+   * live descendant effective prefix (anchor-inclusive). The user root
+   * (`id == askId`) is part of the group when it exists in the topic: a
+   * root owned by another route (inherited/shared) or covered by a live
+   * descendant prefix rejects the whole group. A missing root (orphan
+   * group) does not reject on its own.
+   *
+   * Returns the ordered member IDs. Throws (no partial write) on any
+   * non-private member. Call inside the caller's root transaction.
+   */
+  private assertAnswerGroupMutableInTx(
+    repos: ChatDbRepositories,
+    db: BetterSQLite3Database<typeof schema>,
+    topicId: string,
+    route: string | null,
+    askId: string,
+    routeMessages: MessageData[]
+  ): string[] {
+    const groupIds = routeMessages.filter((m) => m.role === 'assistant' && m.askId === askId).map((m) => m.id)
+    if (groupIds.length === 0) {
+      throw new ChatDbNotFoundError(`Answer group ${askId} has no actionable members in topic ${topicId}`)
+    }
+    const ownedRows = repos.messages.listByTopic(topicId, route)
+    const ownedSet = new Set(ownedRows.map((m) => m.id))
+    for (const id of groupIds) {
+      if (!ownedSet.has(id)) {
+        throw new ChatDbValidationError(
+          `Message ${id} is shared with another route and its answer group is immutable through this route`
+        )
+      }
+      this.assertNoLiveDescendantIncludesInTx(repos, db, topicId, route, id)
+    }
+    // User root joins the group when present in the topic.
+    const rootRow = repos.messages.getById(askId)
+    if (rootRow.found && rootRow.data.topicId === topicId) {
+      if ((rootRow.data.branchId ?? null) !== route) {
+        throw new ChatDbValidationError(
+          `Message ${askId} is shared with another route and its answer group is immutable through this route`
+        )
+      }
+      this.assertNoLiveDescendantIncludesInTx(repos, db, topicId, route, askId)
+    }
+    return groupIds
   }
 
   /**
@@ -8228,6 +8432,18 @@ export class ChatDbAggregateService {
         if (!userRow.found || userRow.data.role !== 'user' || (userRow.data.branchId ?? null) !== route) {
           throw new ChatDbNotFoundError(`User message ${userMessageId} does not belong to topic ${topicId}`)
         }
+        // PROJ-13: resend regenerates the whole answer group anchored at the
+        // user message — the user root itself must be private through the
+        // addressed route (owned AND not covered by any live descendant
+        // effective prefix). A shared root rejects the whole resend even
+        // when its answers are post-anchor rows.
+        this.assertMutableMessageInTx(
+          repos,
+          tx as unknown as BetterSQLite3Database<typeof schema>,
+          topicId,
+          route,
+          userMessageId
+        )
         const userWireBefore = messageToWire(userRow.data)
         const userBlocksBefore = blocksToWire(repos.blocks.listByMessage(userMessageId))
         const userWithBlocks = reconstructMessageBlockRelations([userWireBefore], userBlocksBefore)[0]

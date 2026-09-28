@@ -21,6 +21,8 @@ interface MessageGroupModelListProps {
   selectMessageId: string
   setSelectedMessage: (message: Message) => void
   onReorderMessages?: (messages: Message[]) => void
+  /** PROJ-13: group-immutable groups render an inert list (no select, no drag). */
+  disabled?: boolean
 }
 
 type DisplayMode = 'compact' | 'expanded'
@@ -29,7 +31,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
   messages,
   selectMessageId,
   setSelectedMessage,
-  onReorderMessages
+  onReorderMessages,
+  disabled = false
 }) => {
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
@@ -58,6 +61,9 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
     (message: Message) => {
       const modelTip = message.model?.name
       const isProcessing = isMessageProcessing(message)
+      // PROJ-13 (A3): the whole selector is inert when the group is
+      // immutable — clicks never reach selection.
+      const handleSelect = disabled ? undefined : () => setSelectedMessage(message)
 
       if (isCompact) {
         return (
@@ -67,9 +73,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
               $isSelected={message.id === selectMessageId}
               data-testid="answer-group-selector"
               data-message-id={message.id}
-              onClick={() => {
-                setSelectedMessage(message)
-              }}>
+              aria-disabled={disabled}
+              onClick={handleSelect}>
               <motion.span variants={lightbulbSoftVariants} animate={isProcessing ? 'active' : 'idle'} initial="idle">
                 <ModelAvatar model={message.model as Model} size={22} />
               </motion.span>
@@ -82,9 +87,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
           $isSelected={message.id === selectMessageId}
           data-testid="answer-group-selector"
           data-message-id={message.id}
-          onClick={() => {
-            setSelectedMessage(message)
-          }}>
+          aria-disabled={disabled}
+          onClick={handleSelect}>
           <SegmentedLabel>
             <ModelAvatar className={isProcessing ? 'animation-pulse' : ''} model={message.model as Model} size={20} />
             <ModelName>{message.model?.name}</ModelName>
@@ -92,7 +96,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
         </SegmentedItem>
       )
     },
-    [isCompact, isMessageProcessing, selectMessageId, setSelectedMessage]
+    [disabled, isCompact, isMessageProcessing, selectMessageId, setSelectedMessage]
   )
 
   return (
@@ -113,15 +117,25 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
         </DisplayModeToggle>
       </Tooltip>
       <ModelsContainer $displayMode={foldDisplayMode}>
-        <Sortable
-          items={messages}
-          itemKey="id"
-          onSortEnd={handleSortEnd}
-          renderItem={(message) => renderLabel(message)}
-          horizontal
-          useDragOverlay
-          className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'}
-        />
+        {disabled ? (
+          // PROJ-13 (A4): immutable/incomplete groups render an inert list —
+          // Sortable stays disabled (no drag reorder through shared prefixes).
+          <div className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'} aria-disabled="true">
+            {messages.map((message) => (
+              <span key={message.id}>{renderLabel(message)}</span>
+            ))}
+          </div>
+        ) : (
+          <Sortable
+            items={messages}
+            itemKey="id"
+            onSortEnd={handleSortEnd}
+            renderItem={(message) => renderLabel(message)}
+            horizontal
+            useDragOverlay
+            className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'}
+          />
+        )}
       </ModelsContainer>
     </Container>
   )

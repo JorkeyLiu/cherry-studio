@@ -114,6 +114,10 @@ export const canHandleUserViewportScroll = (state: Pick<MessageViewportState, 'n
 export interface SavedScrollPositionSnapshot {
   scrollTop: number
   anchorId: string | null
+  /** Canonical route-saved-row-anchor (alias of anchorId for legacy data). */
+  messageId?: string | null
+  /** anchorTop - containerTop; null = legacy snapshot without offset. */
+  intraRowOffset?: number | null
   isAtBottom: boolean
 }
 
@@ -151,12 +155,14 @@ export const resolveBootstrapDecision = (input: BootstrapDecisionInput): Bootstr
     return { action: 'pending', intent: { kind: 'message', targetId: pending.messageId, source: 'pending' } }
   }
 
-  // Priority 2: saved restore (only when no matching pending exists)
+  // Priority 2: saved restore (only when no matching pending exists).
+  // Route-saved-row-anchor: messageId canonical, anchorId legacy alias.
   if (!savedRestoreHandled && savedPosition) {
+    const rowAnchor = savedPosition.messageId ?? savedPosition.anchorId
     const intent: MessageNavigationIntent | null = savedPosition.isAtBottom
       ? { kind: 'bottom', source: 'restore' }
-      : savedPosition.anchorId
-        ? { kind: 'message', targetId: savedPosition.anchorId, source: 'restore' }
+      : rowAnchor
+        ? { kind: 'message', targetId: rowAnchor, source: 'restore' }
         : savedPosition.scrollTop !== undefined
           ? { kind: 'scrollTop', scrollTop: savedPosition.scrollTop, source: 'restore' }
           : null

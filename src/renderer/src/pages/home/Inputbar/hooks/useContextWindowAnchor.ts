@@ -1,3 +1,4 @@
+import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
 import {
   getClosureLoadGeneration,
@@ -60,13 +61,25 @@ export function useContextWindowAnchor(
         : () => {}
 
   const onReanchor = useCallback(async () => {
+    // Route-scoped anchor: branch routes anchor under their own route key.
+    let route: string | null = null
+    try {
+      const st = store.getState() as unknown as {
+        topicBranch?: { activeBranchIdByTopic?: Record<string, string | null> }
+      }
+      const active = st.topicBranch?.activeBranchIdByTopic?.[topicId]
+      route = typeof active === 'string' && active.length > 0 ? active : null
+    } catch {
+      route = null
+    }
+    const anchorKey = anchorKeyForRoute(topicId, route)
     const settings = getAssistantSettings(assistant)
-    const preAnchor = settings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+    const preAnchor = settings.contextWindowAnchor?.[anchorKey] as unknown as ContextWindowAnchor | undefined
     const preKey = preAnchor?.kind === 'active' ? preAnchor.groupKey : null
     const contextCount = settings.contextCount ?? null
     // In-flight freshness guards (mirrors useContextClosure): a mutation or
     // hard-deletion during the resolve discards cache publication.
-    const generationAtFetch = getClosureLoadGeneration(topicId)
+    const generationAtFetch = getClosureLoadGeneration(topicId, route)
     const globalAtFetch = getGlobalBlockGeneration()
     const deletionGenAtFetch = captureDeletionGeneration(topicId)
     let resolved: string | null | undefined
@@ -74,6 +87,7 @@ export function useContextWindowAnchor(
     try {
       const response = await dbService.resolveContextClosure({
         topicId,
+        branchId: route,
         intent: 'reanchor-default',
         contextCount,
         currentAnchorGroupKey: preKey,
@@ -109,7 +123,7 @@ export function useContextWindowAnchor(
       ).assistants.assistants.find((a) => a.id === assistant.id)
       if (freshAssistant) {
         const freshSettings = getAssistantSettings(freshAssistant)
-        const freshAnchor = freshSettings.contextWindowAnchor?.[topicId] as unknown as ContextWindowAnchor | undefined
+        const freshAnchor = freshSettings.contextWindowAnchor?.[anchorKey] as unknown as ContextWindowAnchor | undefined
         freshKey = freshAnchor?.kind === 'active' ? freshAnchor.groupKey : null
       }
     } catch {
@@ -136,7 +150,7 @@ export function useContextWindowAnchor(
         ? (getAssistantSettings(latestAssistant).contextWindowAnchor ?? {})
         : (settings.contextWindowAnchor ?? {})
       const updated = { ...baseMap }
-      delete updated[topicId]
+      delete updated[anchorKey]
       updateAssistantSettings({ contextWindowAnchor: updated })
       return
     }
@@ -154,7 +168,7 @@ export function useContextWindowAnchor(
         ? (getAssistantSettings(latestAssistant).contextWindowAnchor ?? {})
         : (settings.contextWindowAnchor ?? {})
       updateAssistantSettings({
-        contextWindowAnchor: { ...baseMap, [topicId]: { kind: 'active', groupKey: resolved } }
+        contextWindowAnchor: { ...baseMap, [anchorKey]: { kind: 'active', groupKey: resolved } }
       })
     }
     // Fail-closed synchronous publish, anchor LAST with no await between
@@ -170,9 +184,9 @@ export function useContextWindowAnchor(
         closure: closureResponse.closure
       } as unknown as FetchContextClosureResponse
       // All fallible validation/preparation before any dispatch.
-      const valid = isValidContextClosureResponse({ topicId, anchorGroupKey: resolved }, fullResponse)
+      const valid = isValidContextClosureResponse({ topicId, branchId: route, anchorGroupKey: resolved }, fullResponse)
       if (!valid) return
-      if (getClosureLoadGeneration(topicId) !== generationAtFetch) return
+      if (getClosureLoadGeneration(topicId, route) !== generationAtFetch) return
       if (getGlobalBlockGeneration() !== globalAtFetch) return
       if (isDeletionStale(topicId, deletionGenAtFetch)) return
       let blocksAction: unknown = null
@@ -185,7 +199,7 @@ export function useContextWindowAnchor(
       }
       // Re-read immediately before the synchronous publish (covers races
       // between validation and publish with no await in between).
-      if (getClosureLoadGeneration(topicId) !== generationAtFetch) return
+      if (getClosureLoadGeneration(topicId, route) !== generationAtFetch) return
       if (getGlobalBlockGeneration() !== globalAtFetch) return
       if (isDeletionStale(topicId, deletionGenAtFetch)) return
       // Synchronous publish: blocks (bumps/invalidates via middleware) →
@@ -199,13 +213,13 @@ export function useContextWindowAnchor(
         return
       }
       try {
-        setCachedContextClosure(topicId, fullResponse)
+        setCachedContextClosure(topicId, fullResponse, route)
       } catch {
         return
       }
       // The authoritative closure must be readable for the new anchor in this
       // same boundary; otherwise the anchor stays invisible (fail-closed).
-      if (!getFreshValidatedClosure(topicId, resolved)) return
+      if (!getFreshValidatedClosure(topicId, resolved, undefined, route)) return
       persistAnchor()
       return
     }

@@ -69,6 +69,8 @@ import type {
   SearchMessagesResponse,
   SelectAnswerMessageRequest,
   SelectAnswerMessageResponse,
+  SelectUsefulAnswerRequest,
+  SelectUsefulAnswerResponse,
   SoftDeleteTopicRequest,
   TopicExistsRequest,
   UpdateBlocksRequest,
@@ -124,6 +126,8 @@ function makeApiSpy() {
       vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
     selectAnswerMessage:
       vi.fn<(request: SelectAnswerMessageRequest) => Promise<ChatDbResult<SelectAnswerMessageResponse>>>(),
+    selectUsefulAnswer:
+      vi.fn<(request: SelectUsefulAnswerRequest) => Promise<ChatDbResult<SelectUsefulAnswerResponse>>>(),
     deleteMessage: vi.fn<(request: DeleteMessageRequest) => Promise<ChatDbResult<null>>>(),
     deleteMessages: vi.fn<(request: DeleteMessagesRequest) => Promise<ChatDbResult<null>>>(),
     updateBlocks: vi.fn<(request: UpdateBlocksRequest) => Promise<ChatDbResult<null>>>(),
@@ -282,6 +286,24 @@ describe('SqliteMessageDataSource', () => {
     it('selectAnswerMessage propagates structured failure as ChatDbResultError', async () => {
       api.selectAnswerMessage.mockResolvedValue(failureResult('NOT_FOUND', 'Message does not belong to topic'))
       await expect(ds.selectAnswerMessage('topic-1', 'a-2')).rejects.toBeInstanceOf(ChatDbResultError)
+    })
+
+    it('selectUsefulAnswer calls api.selectUsefulAnswer with the toggled-only request', async () => {
+      const response = { topicId: 'topic-1', askId: 'ask-1', usefulMessageId: 'a-2', messageIds: ['a-1', 'a-2'] }
+      api.selectUsefulAnswer.mockResolvedValue(successResult(response))
+      const result = await ds.selectUsefulAnswer('topic-1', 'a-2')
+      expect(api.selectUsefulAnswer).toHaveBeenCalledOnce()
+      expect(api.selectUsefulAnswer).toHaveBeenCalledWith({
+        topicId: 'topic-1',
+        branchId: null,
+        messageId: 'a-2'
+      })
+      expect(result).toEqual(response)
+    })
+
+    it('selectUsefulAnswer propagates structured failure as ChatDbResultError', async () => {
+      api.selectUsefulAnswer.mockResolvedValue(failureResult('NOT_FOUND', 'Message does not belong to topic'))
+      await expect(ds.selectUsefulAnswer('topic-1', 'a-2')).rejects.toBeInstanceOf(ChatDbResultError)
     })
 
     it('deleteMessagesWithDependents calls api with plural stable roots and returns the semantic response', async () => {

@@ -22,6 +22,7 @@ import type {
   ResolveContextClosureRequest,
   ResolveContextClosureResult,
   SelectAnswerMessageResponse,
+  SelectUsefulAnswerResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
@@ -181,6 +182,13 @@ class DbService implements MessageDataSource {
     branchId?: string | null
   ): Promise<SelectAnswerMessageResponse> {
     return this.ordinarySource.selectAnswerMessage(topicId, selectedMessageId, branchId)
+  }
+  selectUsefulAnswer(
+    topicId: string,
+    messageId: string,
+    branchId?: string | null
+  ): Promise<SelectUsefulAnswerResponse> {
+    return this.ordinarySource.selectUsefulAnswer(topicId, messageId, branchId)
   }
   deleteMessagesWithDependents(
     topicId: string,

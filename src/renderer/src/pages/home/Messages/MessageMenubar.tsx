@@ -26,6 +26,8 @@ import { translateText } from '@renderer/services/TranslateService'
 import type { RootState } from '@renderer/store'
 import store, { useAppDispatch } from '@renderer/store'
 import { type messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer/store/messageBlock'
+import { selectIsMessageMutable } from '@renderer/store/newMessage'
+import { isLoadedAnswerGroupMutable, resolveLoadedAnswerGroup } from '@renderer/store/routeAnswerGroup'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { TraceIcon } from '@renderer/trace/pages/Component'
@@ -158,6 +160,12 @@ type MessageMenubarButtonContext = {
   // locally: edit/delete/regenerate/translate renderers return null; Main
   // rejects.
   isInherited: boolean
+  // PROJ-13: group-level mutability for the loaded answer group this
+  // message belongs to (members + loaded user root, all mutable through
+  // the active route). False hides/disables group mutations
+  // (mention-model append, useful toggle); Main stays final for
+  // window-outside members. True for non-grouped messages.
+  isGroupMutable: boolean
   message: Message
   notesPath: string
   onCopy: (e: React.MouseEvent) => void
@@ -717,10 +725,6 @@ const MessageMenubar: FC<Props> = (props) => {
     void appendAssistantResponse(message, selectedModel, { ...assistant, model: selectedModel })
   }, [appendAssistantResponse, assistant, mentionModelFilter, message, model])
 
-  const onUseful = useCallback(() => {
-    onUpdateUseful?.(message.id)
-  }, [message.id, onUpdateUseful])
-
   const hasTranslationBlocks = useMemo(() => {
     const translationBlocks = findTranslationBlocks(message)
     return translationBlocks.length > 0
@@ -729,11 +733,36 @@ const MessageMenubar: FC<Props> = (props) => {
   const softHoverBg = isBubbleStyle && isUserMessage && !isLastMessage
   const isUserBubbleStyleMessage = isBubbleStyle && isUserMessage
   const showMessageTokens = !isBubbleStyle || isAssistantMessage || isUserBubbleStyleMessage
-  // Inherited shared-prefix rows (stable IDs owned by another route of the
-  // same logical topic) are immutable locally: mutating toolbar actions
-  // hide, Main rejects. Owned = message route matches the active route.
+  // Mutation capability is Main-authoritative per window (mutableMessageIds):
+  // the renderer never guesses from branchId alone. Unknown/stale capability
+  // is fail-closed (hidden), matching the Main guard. The `isInherited` prop
+  // name is retained to reuse the existing hide/disable pattern with no new copy.
   const activeBranchIdForMenu = useSelector((state: RootState) => selectActiveBranchId(state, topic.id))
-  const isInherited = (message.branchId ?? null) !== activeBranchIdForMenu
+  const isMutableForMenu = useSelector((state: RootState) =>
+    selectIsMessageMutable(state, topic.id, message.id, activeBranchIdForMenu)
+  )
+  const isInherited = !isMutableForMenu
+  // PROJ-13 group capability for assistant answer members: the loaded group
+  // (members + loaded user root) must be fully mutable, otherwise
+  // group-mutating buttons (mention-model append, useful) hide fail-closed.
+  // Non-assistant messages and assistants without a group key are unaffected.
+  const isGroupMutableForMenu = useSelector((state: RootState) => {
+    try {
+      if (message.role !== 'assistant' || typeof message.askId !== 'string' || message.askId.length === 0) return true
+      const group = resolveLoadedAnswerGroup(state, topic.id, message.id)
+      if (!group) return false
+      return isLoadedAnswerGroupMutable(state, topic.id, group)
+    } catch {
+      return false
+    }
+  })
+
+  const onUseful = useCallback(() => {
+    // PROJ-13: group-immutable useful toggles are inert (the button hides,
+    // this is defense-in-depth for keyboard/programmatic callers).
+    if (!isGroupMutableForMenu) return
+    onUpdateUseful?.(message.id)
+  }, [isGroupMutableForMenu, message.id, onUpdateUseful])
 
   const buttonContext: MessageMenubarButtonContext = {
     assistant,
@@ -755,6 +784,7 @@ const MessageMenubar: FC<Props> = (props) => {
     isEditable,
     isGrouped,
     isInherited,
+    isGroupMutable: isGroupMutableForMenu,
     isLastMessage,
     isTranslating,
     isUserMessage,
@@ -993,8 +1023,15 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'assistant-mention-model': ({ isAssistantMessage, onMentionModel, softHoverBg, t }) => {
+  'assistant-mention-model': ({ isAssistantMessage, isGroupMutable, onMentionModel, softHoverBg, t }) => {
     if (!isAssistantMessage) {
+      return null
+    }
+    // PROJ-13 (A1): appending a multi-model answer joins the existing
+    // answer group — hide when any loaded group member (or its user root)
+    // is non-private through the active route. Main join-group guard stays
+    // final for window-outside members.
+    if (!isGroupMutable) {
       return null
     }
 
@@ -1123,14 +1160,23 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Dropdown>
     )
   },
-  useful: ({ isAssistantMessage, isGrouped, onUseful, softHoverBg, message, t }) => {
+  useful: ({ isAssistantMessage, isGrouped, isGroupMutable, onUseful, softHoverBg, message, t }) => {
     if (!isAssistantMessage || !isGrouped) {
+      return null
+    }
+    // PROJ-13 (A2): the useful toggle clears/sets the whole group
+    // atomically — hide when the loaded group is not fully private.
+    if (!isGroupMutable) {
       return null
     }
 
     return (
       <Tooltip title={t('chat.message.useful.label')} mouseEnterDelay={0.8}>
-        <ActionButton className="message-action-button" onClick={onUseful} $softHoverBg={softHoverBg}>
+        <ActionButton
+          className="message-action-button"
+          data-testid="msg-useful-btn"
+          onClick={onUseful}
+          $softHoverBg={softHoverBg}>
           {message.useful ? (
             <ThumbsUp size={17.5} fill="var(--color-primary)" strokeWidth={0} />
           ) : (

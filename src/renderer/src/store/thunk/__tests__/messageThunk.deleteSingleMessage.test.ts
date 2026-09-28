@@ -157,6 +157,11 @@ interface StoreState {
   messages: {
     entities: Record<string, Message>
     messageIdsByTopic: Record<string, string[]>
+    mutableMessageIdsByTopic: Record<string, string[]>
+    mutableRouteByTopic: Record<string, string | null>
+  }
+  topicBranch: {
+    activeBranchIdByTopic: Record<string, string>
   }
 }
 
@@ -192,8 +197,11 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
     storeState = {
       messages: {
         entities: {},
-        messageIdsByTopic: {}
-      }
+        messageIdsByTopic: {},
+        mutableMessageIdsByTopic: {},
+        mutableRouteByTopic: {}
+      },
+      topicBranch: { activeBranchIdByTopic: {} }
     }
   })
 
@@ -209,6 +217,10 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
       storeState.messages.messageIdsByTopic = {
         'topic-1': ['msg-1', 'asst-1']
       }
+      // Main-authoritative window capability for the main route: the root is
+      // private, so the renderer precheck passes and Main is reached.
+      storeState.messages.mutableMessageIdsByTopic = { 'topic-1': ['msg-1', 'asst-1'] }
+      storeState.messages.mutableRouteByTopic = { 'topic-1': null }
       mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
 
       const { deleteSingleMessageThunk } = await import('../messageThunk')
@@ -234,6 +246,8 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
       const userMsg = createMessage()
       storeState.messages.entities = { 'msg-1': userMsg }
       storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
+      storeState.messages.mutableMessageIdsByTopic = { 'topic-1': ['msg-1'] }
+      storeState.messages.mutableRouteByTopic = { 'topic-1': null }
 
       const dbCalled = vi.fn()
       const cleanupCalled = vi.fn()
@@ -260,11 +274,15 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
       expect(cleanupCalled.mock.invocationCallOrder[0]).toBeLessThan(reduxCalled.mock.invocationCallOrder[0])
     })
 
-    it('DB failure leaves Redux and anchors unchanged', async () => {
+    it('DB failure leaves Redux and anchors unchanged, and toasts', async () => {
       const userMsg = createMessage()
       storeState.messages.entities = { 'msg-1': userMsg }
       storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
+      storeState.messages.mutableMessageIdsByTopic = { 'topic-1': ['msg-1'] }
+      storeState.messages.mutableRouteByTopic = { 'topic-1': null }
       mocks.deleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+      const toastError = vi.fn()
+      window.toast = { error: toastError, success: vi.fn(), warning: vi.fn(), info: vi.fn() } as never
 
       const { deleteSingleMessageThunk } = await import('../messageThunk')
       const dispatch = vi.fn()
@@ -275,6 +293,7 @@ describe('deleteSingleMessageThunk (thin plural wrapper)', () => {
       expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
       expect(mocks.transferAnchorsWithAuthorityGroupKeys).not.toHaveBeenCalled()
       expect(mocks.replaceSegmentsForTopic).not.toHaveBeenCalled()
+      expect(toastError).toHaveBeenCalledWith('common.delete_failed')
     })
   })
 })
@@ -285,24 +304,35 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
     storeState = {
       messages: {
         entities: {},
-        messageIdsByTopic: {}
-      }
+        messageIdsByTopic: {},
+        mutableMessageIdsByTopic: {},
+        mutableRouteByTopic: {}
+      },
+      topicBranch: { activeBranchIdByTopic: {} }
     }
   })
 
   it('passes stable root IDs without reading the loaded cascade and returns undo parts', async () => {
     mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
+    // Fail-closed precheck needs loaded + capability-covered roots: unknown
+    // roots never reach Main. Loaded roots still pass through untouched (no
+    // loaded expansion, no cascade derivation).
+    const userMsg = createMessage()
+    const asstMsg = createAssistantMessage()
+    storeState.messages.entities = { 'msg-1': userMsg, 'asst-1': asstMsg }
     storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1', 'asst-1'] }
+    storeState.messages.mutableMessageIdsByTopic = { 'topic-1': ['msg-1', 'asst-1'] }
+    storeState.messages.mutableRouteByTopic = { 'topic-1': null }
 
     const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
     const getState = () => storeState as any
 
-    const result = await deleteMessagesWithDependentsThunk('topic-1', ['msg-1', 'other-root'])(dispatch, getState)
+    const result = await deleteMessagesWithDependentsThunk('topic-1', ['msg-1', 'asst-1'])(dispatch, getState)
 
     // Roots pass through untouched — no loaded expansion, no cascade derivation.
     // Main route resolves to the null route owner.
-    expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'other-root'], null)
+    expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith('topic-1', ['msg-1', 'asst-1'], null)
     expect(mocks.selectLoadedMessagesForTopic).not.toHaveBeenCalled()
     expect(mocks.buildGroupList).not.toHaveBeenCalled()
     // Authority convergence.
@@ -332,7 +362,10 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
   it('captures the pre-delete loaded set so partly-loaded groups record only the loaded intersection', async () => {
     mocks.deleteMessagesWithDependents.mockResolvedValue(semanticResponse)
     // asst-1 was outside the loaded projection before delete.
+    storeState.messages.entities = { 'msg-1': createMessage() }
     storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
+    storeState.messages.mutableMessageIdsByTopic = { 'topic-1': ['msg-1'] }
+    storeState.messages.mutableRouteByTopic = { 'topic-1': null }
 
     const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
     const dispatch = vi.fn()
@@ -345,6 +378,10 @@ describe('deleteMessagesWithDependentsThunk (plural roots)', () => {
 
   it('DB failure propagates with no dispatch and no undo parts', async () => {
     mocks.deleteMessagesWithDependents.mockRejectedValue(new Error('SQLITE_FAILURE'))
+    storeState.messages.entities = { 'msg-1': createMessage() }
+    storeState.messages.messageIdsByTopic = { 'topic-1': ['msg-1'] }
+    storeState.messages.mutableMessageIdsByTopic = { 'topic-1': ['msg-1'] }
+    storeState.messages.mutableRouteByTopic = { 'topic-1': null }
 
     const { deleteMessagesWithDependentsThunk } = await import('../messageThunk')
     const dispatch = vi.fn()

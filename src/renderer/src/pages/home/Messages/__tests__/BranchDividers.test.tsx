@@ -155,7 +155,11 @@ describe('ForkDivider', () => {
     fireEvent.click(screen.getByTestId('branch-fork-selected-m1'))
     await waitFor(() => expect(screen.getByTestId('branch-fork-list-m1')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('branch-fork-item-parent-m1'))
-    expect(onSelectRoute).toHaveBeenCalledWith(null, 'm1')
+    expect(onSelectRoute).toHaveBeenCalledWith(
+      null,
+      'm1',
+      expect.objectContaining({ anchorMessageId: 'm1', dividerKey: 'm1::main', parentBranchId: null })
+    )
   })
 
   it('switching targets the shared anchor (never bottom) via the callback', async () => {
@@ -172,7 +176,11 @@ describe('ForkDivider', () => {
     fireEvent.click(screen.getByTestId('branch-fork-toggle-m1'))
     await waitFor(() => expect(screen.getByTestId('branch-fork-list-m1')).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('branch-fork-item-b-2'))
-    expect(onSelectRoute).toHaveBeenCalledWith('b-2', 'm1')
+    expect(onSelectRoute).toHaveBeenCalledWith(
+      'b-2',
+      'm1',
+      expect.objectContaining({ anchorMessageId: 'm1', dividerKey: 'm1::main', parentBranchId: null })
+    )
   })
 
   it('open popup overlays content and never pushes in-flow layout (stable closed/open height)', async () => {
@@ -320,6 +328,10 @@ describe('ForkDivider', () => {
     expect(screen.queryByTestId('branch-fork-list-m1')).not.toBeInTheDocument()
     expect(screen.getByTestId('branch-fork-toggle-m1')).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(screen.getByTestId('branch-fork-item-b-0'))
-    expect(onSelectRoute).toHaveBeenCalledWith('b-0', 'm0')
+    expect(onSelectRoute).toHaveBeenCalledWith(
+      'b-0',
+      'm0',
+      expect.objectContaining({ anchorMessageId: 'm0', dividerKey: 'm0::main', parentBranchId: null })
+    )
   })
 })

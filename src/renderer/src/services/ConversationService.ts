@@ -60,14 +60,20 @@ export class ConversationService {
       const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorKey]?.groupKey ?? null
       if (anchorGroupKey) {
         const currentFp = computeClosureFingerprint(effectiveMessages as any)
-        const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp)
+        const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp, branchId ?? null)
         if (fresh) {
           contextMessages = fresh.messages as unknown as Message[]
         }
       }
     }
     // Use the unified pipeline — same filtering as computeContextInfo
-    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(contextMessages, assistant, topicId, overlay)
+    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(
+      contextMessages,
+      assistant,
+      topicId,
+      overlay,
+      branchId ?? null
+    )
     const model = assistant.model || getDefaultModel()
     if (!model) {
       // Unconfigured model slot: emit the stable NoModelError marker so

@@ -1,6 +1,8 @@
 import * as fs from 'node:fs'
 
+import { combineReducers } from '@reduxjs/toolkit'
 import type { TopicBranchWire } from '@renderer/services/db/types'
+import { persistReducer, REHYDRATE, type Storage as PersistStorage } from 'redux-persist'
 import { describe, expect, it } from 'vitest'
 
 import reducer, {
@@ -9,7 +11,10 @@ import reducer, {
   branchesReceived,
   branchesRemoved,
   selectActiveBranchId,
-  selectBranchPath
+  selectBranchPath,
+  type TopicBranchPersistedState,
+  topicBranchPersistTransform,
+  type TopicBranchState
 } from '../topicBranch'
 
 const wire = (id: string, anchorMessageId: string, parentBranchId: string | null, name: string): TopicBranchWire =>
@@ -23,16 +28,17 @@ const wire = (id: string, anchorMessageId: string, parentBranchId: string | null
     updatedAt: '2026-01-01T00:00:00.000Z'
   }) as TopicBranchWire
 
-function stateWith(overrides: Record<string, unknown> = {}): Parameters<typeof reducer>[0] {
+function stateWith(overrides: Partial<TopicBranchState> = {}): TopicBranchState {
   return {
     branchesByTopic: {},
     activeBranchIdByTopic: {},
     routeGenerationByTopic: {},
+    deletionFallbackByTopic: {},
     ...overrides
-  } as Parameters<typeof reducer>[0]
+  }
 }
 
-const rootWith = (s: Parameters<typeof reducer>[0]): unknown => ({ topicBranch: s })
+const rootWith = (s: TopicBranchState): unknown => ({ topicBranch: s })
 
 describe('per-topic selected branch restore', () => {
   it('switching branches on one topic never touches another topic selection', () => {
@@ -97,5 +103,85 @@ describe('per-topic selected branch restore', () => {
     let s = stateWith({ activeBranchIdByTopic: { 't-1': 'b-1' } })
     s = reducer(s, activeBranchReset({ topicId: 't-1' }))
     expect(selectActiveBranchId(rootWith(s) as never, 't-1')).toBeNull()
+  })
+})
+
+describe('topicBranch persist boundary (transform + reconciler)', () => {
+  const liveState = (): TopicBranchState => ({
+    branchesByTopic: { 't-1': [wire('b-1', 'm1', null, 'B1')] },
+    activeBranchIdByTopic: { 't-1': 'b-1' },
+    routeGenerationByTopic: { 't-1': 2 },
+    deletionFallbackByTopic: { 't-1': { route: null, intentId: 1, deletedBranchIds: ['b-x'] } }
+  })
+
+  it('strips the one-shot fallback on the way to storage, keeps branches/active/generation', () => {
+    const live = liveState()
+    const stored = topicBranchPersistTransform.in(live, 'topicBranch', { topicBranch: live })
+    expect(stored).not.toHaveProperty('deletionFallbackByTopic')
+    expect(stored.branchesByTopic).toEqual(live.branchesByTopic)
+    expect(stored.activeBranchIdByTopic).toEqual({ 't-1': 'b-1' })
+    expect(stored.routeGenerationByTopic).toEqual({ 't-1': 2 })
+  })
+
+  it('discards a persisted fallback on rehydrate but retains branches/active/generation', () => {
+    const live = liveState()
+    const wireState = topicBranchPersistTransform.in(live, 'topicBranch', { topicBranch: live })
+    // Old wires may still carry the one-shot intent: it must never rehydrate.
+    const storedWithFallback = { ...wireState, deletionFallbackByTopic: live.deletionFallbackByTopic }
+    const rehydrated = topicBranchPersistTransform.out(storedWithFallback, 'topicBranch', {
+      topicBranch: storedWithFallback
+    })
+    expect(rehydrated.branchesByTopic).toEqual(live.branchesByTopic)
+    expect(rehydrated.activeBranchIdByTopic).toEqual({ 't-1': 'b-1' })
+    expect(rehydrated.routeGenerationByTopic).toEqual({ 't-1': 2 })
+    expect(rehydrated.deletionFallbackByTopic).toEqual({})
+  })
+
+  it('tolerates legacy wires missing new maps', () => {
+    const legacyWire: unknown = { branchesByTopic: { 't-1': [] } }
+    const rehydrated = topicBranchPersistTransform.out(
+      legacyWire as TopicBranchPersistedState,
+      'topicBranch',
+      legacyWire as TopicBranchPersistedState
+    )
+    expect(rehydrated.branchesByTopic).toEqual({ 't-1': [] })
+    expect(rehydrated.activeBranchIdByTopic).toEqual({})
+    expect(rehydrated.routeGenerationByTopic).toEqual({})
+    expect(rehydrated.deletionFallbackByTopic).toEqual({})
+  })
+
+  it('REHYDRATE through the real persistReducer merges inbound branches/active (slice leaves REHYDRATE untouched)', () => {
+    const memoryStorage: PersistStorage = {
+      getItem: () => Promise.resolve(null),
+      setItem: () => Promise.resolve(),
+      removeItem: () => Promise.resolve()
+    }
+    type TestRootState = { topicBranch: TopicBranchState }
+    const baseReducer = combineReducers({ topicBranch: reducer })
+    const persistedTopicBranch = persistReducer<TestRootState>(
+      { key: 'topicBranch-restore-test', storage: memoryStorage, transforms: [topicBranchPersistTransform] },
+      baseReducer
+    )
+    let state = persistedTopicBranch(undefined, { type: '@@INIT' } as never)
+
+    // The slice must not touch state on REHYDRATE: otherwise autoMergeLevel1
+    // treats the slice as reducer-modified and drops the whole inbound slice.
+    const reduced = reducer(state.topicBranch, { type: REHYDRATE } as never)
+    expect(reduced).toBe(state.topicBranch)
+
+    // Production pipeline: live slice -> storage wire (in) -> rehydrated
+    // slice (out) -> REHYDRATE payload.
+    const live = liveState()
+    const wireState = topicBranchPersistTransform.in(live, 'topicBranch', { topicBranch: live })
+    const rehydratedSlice = topicBranchPersistTransform.out(wireState, 'topicBranch', { topicBranch: wireState })
+    state = persistedTopicBranch(state, {
+      type: REHYDRATE,
+      key: 'topicBranch-restore-test',
+      payload: { topicBranch: rehydratedSlice }
+    } as never)
+    expect(state.topicBranch.branchesByTopic).toEqual(live.branchesByTopic)
+    expect(state.topicBranch.activeBranchIdByTopic).toEqual({ 't-1': 'b-1' })
+    expect(state.topicBranch.routeGenerationByTopic).toEqual({ 't-1': 2 })
+    expect(state.topicBranch.deletionFallbackByTopic).toEqual({})
   })
 })

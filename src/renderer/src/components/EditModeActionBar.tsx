@@ -12,6 +12,7 @@ const EditModeActionBar = () => {
     hasClipboard,
     canUndo,
     canRedo,
+    isSelectionMutable,
     handleCopy,
     handleCut,
     handlePaste,
@@ -38,6 +39,7 @@ const EditModeActionBar = () => {
               color="default"
               variant="text"
               icon={<Copy size={16} />}
+              data-testid="edit-copy-btn"
               onClick={handleCopy}
             />
           </Tooltip>
@@ -47,6 +49,9 @@ const EditModeActionBar = () => {
               color="default"
               variant="text"
               icon={<Scissors size={16} />}
+              data-testid="edit-cut-btn"
+              // PROJ-13 (B2): 选集不可变时剪切禁用；Copy 保持允许。
+              disabled={!isSelectionMutable}
               onClick={handleCut}
             />
           </Tooltip>
@@ -56,6 +61,7 @@ const EditModeActionBar = () => {
               color="default"
               variant="text"
               icon={<Clipboard size={16} />}
+              data-testid="edit-paste-btn"
               disabled={!hasClipboard}
               onClick={() => void handlePaste()}
             />
@@ -67,6 +73,9 @@ const EditModeActionBar = () => {
               variant="text"
               danger
               icon={<Trash2 size={16} />}
+              data-testid="edit-delete-btn"
+              // PROJ-13 (B2): 选集不可变时删除禁用（含一个 shared 即整体）。
+              disabled={!isSelectionMutable}
               onClick={() => void handleDelete()}
             />
           </Tooltip>

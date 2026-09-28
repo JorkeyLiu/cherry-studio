@@ -778,6 +778,20 @@ describe('ChatDbAggregateService', () => {
       const result = agg.selectAnswerMessage(topicId, m1.id as string)
       expect(() => validateChatDbResult('chatdb:select-answer-message', result)).not.toThrow()
     })
+
+    it('PROJ-13 selectUsefulAnswer response validates against the shared result contract', () => {
+      const topicId = `t-${uid()}`
+      const askId = `ask-${uid()}`
+      const m1 = makeMessageJson(topicId, { role: 'assistant', askId })
+      const m2 = makeMessageJson(topicId, { role: 'assistant', askId })
+      agg.appendMessage(topicId, m1 as any, [])
+      agg.appendMessage(topicId, m2 as any, [])
+      const setResult = agg.selectUsefulAnswer(topicId, m1.id as string)
+      expect(() => validateChatDbResult('chatdb:select-useful-answer', setResult)).not.toThrow()
+      const clearResult = agg.selectUsefulAnswer(topicId, m1.id as string)
+      expect(() => validateChatDbResult('chatdb:select-useful-answer', clearResult)).not.toThrow()
+      if (clearResult.ok) expect(clearResult.value.usefulMessageId).toBeNull()
+    })
   })
 
   describe('deleteMessagesWithDependents', () => {

@@ -208,6 +208,38 @@ describe('Message Filter Utils', () => {
       expect(result.find((m) => m.id === 'assistant-1')).toBeDefined()
       expect(result.find((m) => m.id === 'assistant-2')).toBeUndefined()
     })
+
+    it('PROJ-14: after reorder without useful, the new order head enters context', () => {
+      const userId = 'user-1'
+      const userMsg = createMessage('user', 'topic-1', 'assistant-1', { id: userId })
+      const assistant1 = createMessage('assistant', 'topic-1', 'assistant-1', { id: 'assistant-1', askId: userId })
+      const assistant2 = createMessage('assistant', 'topic-1', 'assistant-1', { id: 'assistant-2', askId: userId })
+
+      // Authority order after reorderAnswerGroup([assistant-2, assistant-1]).
+      const result = filterUsefulMessages([userMsg, assistant2, assistant1])
+
+      expect(result).toHaveLength(2)
+      expect(result.find((m) => m.id === 'assistant-2')).toBeDefined()
+      expect(result.find((m) => m.id === 'assistant-1')).toBeUndefined()
+    })
+
+    it('PROJ-14: useful wins over the reorder head', () => {
+      const userId = 'user-1'
+      const userMsg = createMessage('user', 'topic-1', 'assistant-1', { id: userId })
+      const assistant1 = createMessage('assistant', 'topic-1', 'assistant-1', {
+        id: 'assistant-1',
+        askId: userId,
+        useful: true
+      })
+      const assistant2 = createMessage('assistant', 'topic-1', 'assistant-1', { id: 'assistant-2', askId: userId })
+
+      // Reordered head is assistant-2, but the useful member stays the context answer.
+      const result = filterUsefulMessages([userMsg, assistant2, assistant1])
+
+      expect(result).toHaveLength(2)
+      expect(result.find((m) => m.id === 'assistant-1')).toBeDefined()
+      expect(result.find((m) => m.id === 'assistant-2')).toBeUndefined()
+    })
   })
 
   describe('filterLastAssistantMessage', () => {
