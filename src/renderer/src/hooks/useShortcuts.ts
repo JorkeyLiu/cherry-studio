@@ -23,6 +23,7 @@ import { useHotkeys } from 'react-hotkeys-hook'
 interface UseShortcutOptions {
   preventDefault?: boolean
   enableOnFormTags?: boolean
+  enableOnContentEditable?: boolean
   enabled?: boolean
   description?: string
 }
@@ -69,6 +70,7 @@ export const useShortcut = (
     },
     {
       enableOnFormTags: options.enableOnFormTags,
+      enableOnContentEditable: options.enableOnContentEditable,
       description: options.description || shortcutConfig?.key,
       enabled: !!shortcutConfig?.enabled
     }

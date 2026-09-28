@@ -7,7 +7,6 @@ import { styled } from 'styled-components'
 const EditModeActionBar = () => {
   const { t } = useTranslation()
   const {
-    selectedGroupIds,
     selectedGroups,
     hasClipboard,
     canUndo,
@@ -19,11 +18,20 @@ const EditModeActionBar = () => {
     handleDelete,
     handleUndo,
     handleRedo,
-    handleClearSelection
+    handleClearSelection,
+    toggleEditMode
   } = useEditMode()
 
-  if (selectedGroupIds.length === 0) {
-    return null
+  // Toolbar stays visible at zero selection while edit mode is enabled
+  // (mode state is the single source of truth; the parent mounts this bar
+  // only when enabled). Closing exits edit mode, which clears the selection
+  // through the existing mode-exit semantics (toggleEditMode(false)).
+  const handleClose = () => {
+    if (typeof toggleEditMode === 'function') {
+      toggleEditMode(false)
+    } else {
+      handleClearSelection()
+    }
   }
 
   const totalSelectedMessages = selectedGroups.reduce((sum, g) => sum + g.messages.length, 0)
@@ -106,7 +114,8 @@ const EditModeActionBar = () => {
             color="default"
             variant="text"
             icon={<X size={16} />}
-            onClick={handleClearSelection}
+            data-testid="edit-close-btn"
+            onClick={handleClose}
           />
         </Tooltip>
       </ActionBar>

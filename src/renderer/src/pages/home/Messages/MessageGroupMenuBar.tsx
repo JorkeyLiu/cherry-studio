@@ -22,6 +22,13 @@ interface Props {
   topic: Topic
   /** BRANCH-12: non-owned/incomplete groups disable selector/reorder/retry-all. */
   disabled?: boolean
+  /**
+   * Edit-mode forced hide: the bar keeps its DOM structure and occupied
+   * height (no layout shift when toggling edit mode) while staying
+   * invisible, noninteractive, and inaccessible. Ordinary capability
+   * gating via `disabled` is untouched.
+   */
+  isEditMode?: boolean
 }
 
 // LOCK-105: the multi-model group menu bar always renders in fold/tag mode;
@@ -33,7 +40,8 @@ const MessageGroupMenuBar: FC<Props> = ({
   setSelectedMessage,
   onReorderMessages,
   topic,
-  disabled = false
+  disabled = false,
+  isEditMode = false
 }) => {
   const { t } = useTranslation()
   const { regenerateAssistant } = useMessageActionController()
@@ -101,7 +109,11 @@ const MessageGroupMenuBar: FC<Props> = ({
   const barDisabled = disabled
 
   return (
-    <GroupMenuBar className="group-menu-bar" aria-disabled={barDisabled}>
+    <GroupMenuBar
+      className={isEditMode ? 'group-menu-bar edit-mode-toolbar-hidden' : 'group-menu-bar'}
+      aria-disabled={barDisabled}
+      inert={isEditMode ? true : undefined}
+      aria-hidden={isEditMode ? true : undefined}>
       <HStack style={{ alignItems: 'center', flex: 1, overflow: 'hidden' }}>
         <MessageGroupModelList
           messages={messages}
@@ -140,6 +152,12 @@ const GroupMenuBar = styled.div`
   border: 0.5px solid var(--color-border);
   height: 40px;
   user-select: none;
+  // Edit-mode forced hide: keeps DOM structure and occupied height while
+  // the bar stays invisible, noninteractive, and inaccessible.
+  &.edit-mode-toolbar-hidden {
+    visibility: hidden;
+    pointer-events: none;
+  }
 `
 
 export default memo(MessageGroupMenuBar)

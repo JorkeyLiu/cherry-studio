@@ -69,7 +69,6 @@ import type { computeContextInfo } from '@renderer/services/contextInfoService'
 import { dbService } from '@renderer/services/db/DbService'
 import { ensureOrdinaryTopicOwnership } from '@renderer/services/db/topicTrashLifecycle'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
-import type { TopicBranchWire } from '@renderer/services/db/types'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { clearPendingNavigate, getPendingNavigate } from '@renderer/services/MessagesService'
 import {
@@ -119,16 +118,7 @@ import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { last } from 'lodash'
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useLayoutEffect,
-  useMemo,
-  useReducer,
-  useRef
-} from 'react'
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -141,65 +131,21 @@ import {
   dividerRowTestId,
   type DividerSwitchInfo,
   findAnchorsWithChildren,
-  ForkDivider,
-  takenChildAtAnchor
+  ForkDivider
 } from './BranchDividers'
-import {
-  armStabilizerSuppress,
-  createStabilizerScrollSuppress,
-  isRestoreTargetValid,
-  isSelfInducedStabilizerScroll,
-  runBoundedPositionStabilizer,
-  shouldCancelStabilizerForKeyDown,
-  type StabilizerHandle
-} from './positionStabilizer'
-import {
-  type ActiveRestoreAnchor,
-  createDividerRestoreAnchor,
-  createMessageRestoreAnchor,
-  decidePaginationCompensation,
-  type PreferredRestoreAnchorSnapshot,
-  shouldStartPaginationStabilizer,
-  snapshotRestoreAnchor
-} from './routeRestoreAnchor'
-
 /**
  * Loaded-route tracking uses the tagged `LoadedRouteState` from
  * `messageWindow` (renderer-local, no persistence): `{ route, loadFailed }`.
  * The double-failed signal is the explicit boolean, never a magic branchId
  * string, so it can never collide with a real route key.
  */
-
-/** Group one anchor's direct children by their parent route (null = main route). */
-function groupForkChildrenByParent(children: readonly TopicBranchWire[]): {
-  parentBranchId: string | null
-  children: TopicBranchWire[]
-}[] {
-  const byParent = new Map<string | null, TopicBranchWire[]>()
-  for (const c of children) {
-    const key = c.parentBranchId ?? null
-    const list = byParent.get(key) ?? []
-    list.push(c)
-    byParent.set(key, list)
-  }
-  const out: { parentBranchId: string | null; children: TopicBranchWire[] }[] = []
-  for (const [parentBranchId, list] of byParent) {
-    list.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id))
-    out.push({ parentBranchId, children: list })
-  }
-  // Deterministic group order: main-route forks first, then by first child.
-  out.sort((a, b) => {
-    if ((a.parentBranchId === null) !== (b.parentBranchId === null)) return a.parentBranchId === null ? -1 : 1
-    const aid = a.children[0]?.id ?? ''
-    const bid = b.children[0]?.id ?? ''
-    return aid.localeCompare(bid)
-  })
-  return out
-}
 import MessageContextMenu from './MessageContextMenu'
+import { renderEditFlowNodes } from './messageEditSelectionLayout'
+import { buildMessageFlowNodes, resolveContextDividerGroupKey } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
 import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
-import { buildRenderLayers, buildRenderSegments, deriveStableGroupId } from './messageRenderLayers'
+import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
+import { useCrossMessageSelectionGuard, useEditModeNativeSelectionSuppression } from './messageSelectionGuard'
 import {
   buildRouteViewport,
   chooseRouteWindowRequest,
@@ -210,7 +156,25 @@ import {
   isLoadedRouteCurrent,
   markLoadedRouteFailed
 } from './messageWindow'
+import {
+  armStabilizerSuppress,
+  createStabilizerScrollSuppress,
+  isRestoreTargetValid,
+  isSelfInducedStabilizerScroll,
+  runBoundedPositionStabilizer,
+  shouldCancelStabilizerForKeyDown,
+  type StabilizerHandle
+} from './positionStabilizer'
 import Prompt from './Prompt'
+import {
+  type ActiveRestoreAnchor,
+  createDividerRestoreAnchor,
+  createMessageRestoreAnchor,
+  decidePaginationCompensation,
+  type PreferredRestoreAnchorSnapshot,
+  shouldStartPaginationStabilizer,
+  snapshotRestoreAnchor
+} from './routeRestoreAnchor'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
 import { requestTopicBranches, useBranchTree } from './useBranchTree'
@@ -288,6 +252,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   const { isEnabled: isEditMode, selectedGroupIds, handleGroupClick } = useEditMode()
   const { isMessageFirstInSegment, isMessageLastInSegment, isMessageInSegment } = useTopicSegments(topic.id)
   useClipboardKeyboard()
+  // Boundary-aware native selection: ordinary within-message selection is
+  // preserved; cross-message native ranges are cleared. In edit mode native
+  // text selection inside messages is suppressed (selection-only semantics).
+  useCrossMessageSelectionGuard()
+  useEditModeNativeSelectionSuppression(isEditMode, scrollContainerRef)
 
   // Branch fork dividers for the active route: catalog for the logical
   // topic, breadcrumb path, and direct children across the addressed route
@@ -336,122 +305,81 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // Context window boundary: find the legacy projected group key where the boundary message renders.
   // The legacy key is retained for context-divider semantics while stable entity-derived
   // keys are used for React reconciliation (LOCK-S3.3-007).
-  const contextDividerGroupKey = useMemo(() => {
-    if (!contextBoundaryMessageId) return null
-    for (const [key, groupMessages] of groupedMessages) {
-      if (groupMessages.some((m) => m.id === contextBoundaryMessageId)) {
-        return key
-      }
-    }
-    // Boundary message not in the current display window — don't show a divider
-    return null
-  }, [groupedMessages, contextBoundaryMessageId])
+  const contextDividerGroupKey = useMemo(
+    () => resolveContextDividerGroupKey(groupedMessages, contextBoundaryMessageId),
+    [groupedMessages, contextBoundaryMessageId]
+  )
 
   const renderMessageSegments = () => {
-    const result: React.ReactNode[] = []
+    // Mounted message flow in newest→oldest render order: turn bodies and
+    // independent boundary nodes as siblings. Turn runs are grouped
+    // downstream in renderEditFlowNodes with boundary flush, so a boundary
+    // always splits turns (even same askId) and stays outside turn click
+    // capture — liveness stays on the child body nodes.
+    // Flow-node construction (group order, fork/context placement, stable
+    // identity, askIds, selection, layer identity) is the production builder
+    // in messageFlowNodes; only the React pixels are supplied here.
+    const nodes = buildMessageFlowNodes({
+      layerRuns,
+      contextDividerGroupKey,
+      forkAnchorIds,
+      childrenByAnchor: branchTree.childrenByAnchor,
+      branchPath: branchTree.path,
+      branches: branchTree.branches,
+      topicDisplayName,
+      isMessageInSegment,
+      isMessageFirstInSegment,
+      isMessageLastInSegment,
+      renderForkBoundary: ({ anchorMessageId, taken, children, parentBranchId, parentLabel }) => (
+        <ForkDivider
+          topicId={topic.id}
+          anchorMessageId={anchorMessageId}
+          taken={taken}
+          children={children}
+          parentBranchId={parentBranchId}
+          parentLabel={parentLabel}
+          activeBranchId={activeBranchId}
+          countLabel={t('chat.topics.branch.children_here', { count: children.length })}
+          onSelectRoute={onSelectRoute}
+        />
+      ),
+      renderBody: ({ kind, stableGroupId, layerRunId, segment, isFirst, isLast, groupMessages }) => (
+        <div
+          style={{ position: 'relative' }}
+          data-layer-kind={kind}
+          data-stable-group-id={stableGroupId}
+          data-layer-run-id={layerRunId}>
+          {segment && (
+            <TopicSegmentLine
+              segment={segment}
+              isFirst={isFirst}
+              isLast={isLast}
+              messageCount={isFirst ? segment.messageCount : undefined}
+            />
+          )}
+          <MessageGroup
+            messages={groupMessages}
+            topic={topic}
+            registerMessageElement={registerMessageElement}
+            isEditMode={isEditMode}
+            onGroupClick={handleGroupClick}
+          />
+        </div>
+      ),
+      renderContextBoundary: (legacyKey) => (
+        <ContextWindowDivider data-context-boundary data-testid="context-boundary" data-context-legacy-key={legacyKey}>
+          <ContextWindowDividerLine />
+          <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
+          <ContextWindowDividerLine />
+        </ContextWindowDivider>
+      )
+    })
 
-    // LOCK-S3.3-FIX-003: no outer React key whose identity changes with layer
-    // membership/composition. Groups/selection blocks are stable entity-derived
-    // siblings so overlapping history DOM survives live updates, live→history
-    // transitions, and viewport expansion. Layer kind/run identity is exposed
-    // only via data-* on existing elements (LOCK-S3.3-FIX-004).
-    for (const layer of layerRuns) {
-      for (const seg of layer.segments) {
-        const kind = seg.isLive ? 'live' : 'history'
-        const content = seg.items.map(([legacyKey, groupMessages]) => {
-          const firstMsg = groupMessages[0]
-          const segment = firstMsg ? isMessageInSegment(firstMsg.id) : undefined
-          const isFirst = firstMsg ? !!isMessageFirstInSegment(firstMsg.id) : false
-          const lastMsg = groupMessages[groupMessages.length - 1]
-          const isLast = lastMsg ? !!isMessageLastInSegment(lastMsg.id) : false
-          const stableGroupId = deriveStableGroupId(groupMessages as readonly Message[])
-          // Fork-divider placement (DOM order is newest→oldest under
-          // column-reverse): the divider renders BEFORE the anchor group
-          // (visually directly below the anchor). One divider per
-          // (anchor, parent-route) fork: taken forks (the viewed route
-          // passes through a child here) render the selected branch name
-          // as the switcher; untaken forks render the branch-count form
-          // whose menu includes the current route plus children.
-          const groupIdSet = new Set(groupMessages.map((m) => (m as Message).id))
-          const forkAnchorHere = forkAnchorIds.find((id) => groupIdSet.has(id))
-          const forkGroupsHere =
-            forkAnchorHere !== undefined
-              ? groupForkChildrenByParent(branchTree.childrenByAnchor.get(forkAnchorHere) ?? [])
-              : []
-          return (
-            <Fragment key={stableGroupId}>
-              {forkGroupsHere.map((group) => {
-                const takenHere = takenChildAtAnchor(branchTree.path, forkAnchorHere as string, group.children)
-                const parentLabel =
-                  group.parentBranchId === null
-                    ? topicDisplayName
-                    : (branchTree.branches.find((b) => b.id === group.parentBranchId)?.name ?? group.parentBranchId)
-                return (
-                  <ForkDivider
-                    key={`branch-fork-${forkAnchorHere}-${group.parentBranchId ?? 'main'}`}
-                    topicId={topic.id}
-                    anchorMessageId={forkAnchorHere as string}
-                    taken={takenHere}
-                    children={group.children}
-                    parentBranchId={group.parentBranchId}
-                    parentLabel={parentLabel}
-                    activeBranchId={activeBranchId}
-                    countLabel={t('chat.topics.branch.children_here', { count: group.children.length })}
-                    onSelectRoute={onSelectRoute}
-                  />
-                )
-              })}
-              <div
-                style={{ position: 'relative' }}
-                data-layer-kind={kind}
-                data-stable-group-id={stableGroupId}
-                data-layer-run-id={layer.stableLayerId}>
-                {segment && (
-                  <TopicSegmentLine
-                    segment={segment}
-                    isFirst={isFirst}
-                    isLast={isLast}
-                    messageCount={isFirst ? segment.messageCount : undefined}
-                  />
-                )}
-                <MessageGroup
-                  messages={groupMessages}
-                  topic={topic}
-                  registerMessageElement={registerMessageElement}
-                  isEditMode={isEditMode}
-                  onGroupClick={handleGroupClick}
-                />
-              </div>
-              {/* Divider uses the retained legacy projected key for semantics;
-                  reconciliation uses stableGroupId above. */}
-              {legacyKey === contextDividerGroupKey && (
-                <ContextWindowDivider data-context-boundary data-testid="context-boundary">
-                  <ContextWindowDividerLine />
-                  <ContextWindowDividerText>{t('chat.context_window_start')}</ContextWindowDividerText>
-                  <ContextWindowDividerLine />
-                </ContextWindowDivider>
-              )}
-            </Fragment>
-          )
-        })
-
-        if (seg.selected) {
-          result.push(
-            <SelectionBlock
-              key={seg.stableSegmentId}
-              data-layer-kind={kind}
-              data-stable-segment-id={seg.stableSegmentId}
-              data-layer-run-id={layer.stableLayerId}>
-              {content}
-            </SelectionBlock>
-          )
-        } else {
-          result.push(...content)
-        }
-      }
-    }
-
-    return result
+    // Turn runs group adjacent mounted bodies of one Q&A turn under a
+    // single interaction container with boundary flush; selected
+    // contiguous ranges keep one atomic outline that wraps interior
+    // boundaries — see renderEditFlowNodes.
+    return renderEditFlowNodes({ nodes, isEditMode, onTurnClick: handleGroupClick })
   }
 
   return (
@@ -3182,13 +3110,6 @@ const LoaderContainer = styled.div`
   width: 100%;
   background: var(--color-background);
   pointer-events: none;
-`
-
-const SelectionBlock = styled.div`
-  display: flex;
-  flex-direction: column-reverse;
-  box-shadow: 0 0 0 1.5px var(--color-primary);
-  border-radius: 10px;
 `
 
 const ContextWindowDivider = styled.div`

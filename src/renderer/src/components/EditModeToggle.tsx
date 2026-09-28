@@ -21,7 +21,7 @@ const EditModeToggle = () => {
     () => {
       dispatch(toggleEditMode(!isEnabled))
     },
-    { preventDefault: true }
+    { preventDefault: true, enableOnFormTags: true, enableOnContentEditable: true }
   )
 
   return (

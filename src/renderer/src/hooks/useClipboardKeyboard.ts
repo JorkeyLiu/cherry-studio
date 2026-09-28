@@ -1,4 +1,5 @@
 import { useEditMode } from '@renderer/context/EditModeContext'
+import { type MarkedKeyboardEvent, TOOL_POPOVER_ESCAPE_CONSUMED } from '@renderer/utils/toolPopoverEscape'
 import { useEffect, useRef } from 'react'
 
 /**
@@ -28,8 +29,19 @@ function isTextInputFocused(): boolean {
 }
 
 /**
+ * Capture-phase consumed marker contract lives in the dependency-free neutral
+ * module `@renderer/utils/toolPopoverEscape` (imported above): the open
+ * Inputbar ToolPopover sets it when handling an Escape keydown and this hook
+ * reads it. Re-exported here so existing hook-path importers keep working.
+ */
+export { TOOL_POPOVER_ESCAPE_CONSUMED } from '@renderer/utils/toolPopoverEscape'
+
+/**
  * 注册编辑模式的键盘快捷键
- * 当焦点在文本输入框时，所有快捷键让渡给浏览器原生处理。
+ * 当焦点在文本输入框时，除 Escape 外的所有快捷键让渡给浏览器原生处理。
+ * Escape 始终是编辑模式命令（与工具栏关闭行为一致）：
+ * - 选区非空：清空选区，保持编辑模式；
+ * - 选区为空：退出编辑模式。
  * - Ctrl+C / Cmd+C: 复制
  * - Ctrl+X / Cmd+X: 剪切
  * - Ctrl+V / Cmd+V: 粘贴
@@ -51,7 +63,9 @@ export function useClipboardKeyboard() {
     handleRedo: editMode.handleRedo,
     handleMoveFocus: editMode.handleMoveFocus,
     handleExtendSelection: editMode.handleExtendSelection,
-    handleClearSelection: editMode.handleClearSelection
+    handleClearSelection: editMode.handleClearSelection,
+    toggleEditMode: editMode.toggleEditMode,
+    selectedGroupIds: (editMode as { selectedGroupIds?: readonly string[] }).selectedGroupIds ?? []
   })
 
   // 每次渲染更新 ref
@@ -65,7 +79,9 @@ export function useClipboardKeyboard() {
       handleRedo: editMode.handleRedo,
       handleMoveFocus: editMode.handleMoveFocus,
       handleExtendSelection: editMode.handleExtendSelection,
-      handleClearSelection: editMode.handleClearSelection
+      handleClearSelection: editMode.handleClearSelection,
+      toggleEditMode: editMode.toggleEditMode,
+      selectedGroupIds: (editMode as { selectedGroupIds?: readonly string[] }).selectedGroupIds ?? []
     }
   })
 
@@ -76,7 +92,32 @@ export function useClipboardKeyboard() {
       const isMod = e.metaKey || e.ctrlKey
       const cbs = callbacksRef.current
 
-      // 统一守卫：焦点在文本输入框时，让浏览器原生处理所有快捷键
+      // Escape coheres with "toolbar close exits mode": a non-empty
+      // selection is cleared (edit mode stays, toolbar remains visible at
+      // zero); an already-empty selection exits edit mode, which clears
+      // through the existing mode-exit semantics.
+      // Escape stays an edit-mode command even while an editable element
+      // (chat composer, contenteditable/ProseMirror/Tiptap) is focused, with
+      // two higher-priority owners: an IME composition owns Escape first
+      // (yield to the IME: no preventDefault, no edit-mode call), and an open
+      // Inputbar ToolPopover dismissal owns it next (capture-phase consumed
+      // marker set by ToolPopover; one Escape closes the popover only).
+      if (e.key === 'Escape') {
+        if (e.isComposing) return
+        if ((e as MarkedKeyboardEvent)[TOOL_POPOVER_ESCAPE_CONSUMED]) return
+        e.preventDefault()
+        if ((cbs.selectedGroupIds?.length ?? 0) > 0) {
+          cbs.handleClearSelection()
+        } else if (typeof cbs.toggleEditMode === 'function') {
+          cbs.toggleEditMode(false)
+        } else {
+          cbs.handleClearSelection()
+        }
+        return
+      }
+
+      // 统一守卫：焦点在文本输入框时，除 Escape 外的所有快捷键
+      // 让浏览器原生处理（不 preventDefault，不触发消息动作）。
       if (isTextInputFocused()) return
 
       // Ctrl+Z / Cmd+Z: 撤销
@@ -146,13 +187,6 @@ export function useClipboardKeyboard() {
       if (e.key === 'ArrowUp' && e.shiftKey && !isMod) {
         e.preventDefault()
         cbs.handleExtendSelection('up')
-        return
-      }
-
-      // Escape: 清除选区（不退出编辑模式）
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        cbs.handleClearSelection()
         return
       }
     }

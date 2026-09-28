@@ -132,43 +132,20 @@ const MessageItem: FC<Props> = ({
   const isLastMessage = index === 0 || !!isGrouped
   const isAssistantMessage = message.role === 'assistant'
   const isProcessing = isMessageProcessing(message)
+  // Edit mode is selection-only: the ordinary message toolbar keeps its
+  // DOM/layout structure and occupied height but is forcibly hidden (never
+  // hover-revealed) and noninteractive/inaccessible — see the
+  // edit-mode-toolbar-hidden treatment on MessageFooter. The floating
+  // edit-mode selection action bar is a separate overlay and is unaffected.
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
   // LOCK-105: message style is always bubble; every assistant-message
   // toolbar sits on the LEFT side (not only the last assistant message).
   // User-message positioning is unchanged.
   const shouldReverseFooter = isAssistantMessage
 
-  // 编辑模式下点击消息内容区域触发组选择
-  const handleMessageClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (!isEditMode || !onGroupClick) return
-      // 排除 Footer（菜单栏）区域，按钮有自己的 handler
-      if (
-        (e.target as HTMLElement).closest(
-          '.menubar, ' +
-            '.message-editor-area, ' +
-            '.message-header > :first-child, ' +
-            '.ant-image, ' +
-            '.ant-collapse-header, ' +
-            '.message-attachments, ' +
-            'video, ' +
-            '.message-action-button, ' +
-            '.ant-dropdown, ' +
-            '.ant-dropdown-menu-submenu-popup, ' +
-            '.ant-image-preview-root, ' +
-            '.ant-popover, ' +
-            '.ant-modal'
-        )
-      )
-        return
-      const askId = message.role === 'user' ? message.id : message.askId || message.id
-      if (!askId) return
-      const isCtrl = e.metaKey || e.ctrlKey
-      const isShift = e.shiftKey
-      onGroupClick(askId, isCtrl, isShift)
-    },
-    [isEditMode, message, onGroupClick]
-  )
+  // Neutral hover preview lives at the turn interaction owner
+  // (EditTurn), covering the whole Q&A turn — never per MessageItem.
+  // Selected turns sit inside the selected outline with no preview ring.
 
   // 编辑模式下右键消息内容区域自动选中消息组，不在可选区域时抑制菜单弹出
   const handleContextMenu = useCallback(
@@ -271,7 +248,6 @@ const MessageItem: FC<Props> = ({
           'edit-mode-message': isEditMode
         })}
         ref={messageContainerRef}
-        onClick={isEditMode ? handleMessageClick : undefined}
         onContextMenu={isEditMode ? handleContextMenu : undefined}>
         <MessageHeader
           message={message}
@@ -306,7 +282,13 @@ const MessageItem: FC<Props> = ({
               </MessageErrorBoundary>
             </MessageContentContainer>
             {showMenubar && (
-              <MessageFooter className="MessageFooter">
+              <MessageFooter
+                className={classNames({
+                  MessageFooter: true,
+                  'edit-mode-toolbar-hidden': isEditMode
+                })}
+                inert={isEditMode ? true : undefined}
+                aria-hidden={isEditMode ? true : undefined}>
                 <HorizontalScrollContainer
                   classNames={{
                     content: cn(
@@ -362,6 +344,11 @@ const MessageContainer = styled.div`
     }
   }
   &.edit-mode-message {
+    cursor: pointer;
+    user-select: none;
+    .markdown {
+      user-select: none;
+    }
   }
 `
 
@@ -380,6 +367,22 @@ const MessageFooter = styled.div`
   margin-left: 46px;
   margin-top: 3px;
   user-select: none;
+  // Edit-mode forced hide: keeps DOM structure and occupied height (no
+  // layout shift when toggling edit mode) while defeating the
+  // container-hover opacity reveal above. visibility:hidden removes the
+  // subtree from mouse hit-testing, sequential keyboard focus, and the
+  // accessibility tree; pointer-events and inert/aria-hidden belt it. The
+  // metadata rule below additionally defeats the bubble user-message hover
+  // reveal, which sets opacity/visibility directly on the metadata child
+  // with higher specificity than inheritance.
+  &.edit-mode-toolbar-hidden {
+    visibility: hidden;
+    pointer-events: none;
+    .message-footer-metadata {
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+  }
 `
 
 export default memo(MessageItem)

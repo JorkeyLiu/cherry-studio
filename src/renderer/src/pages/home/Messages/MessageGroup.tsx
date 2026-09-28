@@ -143,6 +143,13 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
     [dispatch, groupMutable, topic.id]
   )
 
+  // Edit-mode selection ownership lives one layer up at the turn
+  // container (EditTurn): it captures the click once per gesture for the
+  // whole Q&A turn and draws the single hover ring. MessageGroup owns no
+  // click/hover handler, keeps no hover state or timer, and exposes no
+  // geometry query attribute — MessageItem keeps only the right-click
+  // auto-select path via onGroupClick.
+
   const groupContextMessageId = useMemo(() => {
     // NOTE: 旧数据可能存在一组消息有多个useful的情况，只取第一个，不再另作迁移
     // find first useful
@@ -207,6 +214,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         <GridContainer className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
           {messages.map(renderMessage)}
         </GridContainer>
+        {/* Edit-mode forced hide (not non-render): the bar keeps its DOM
+            structure and occupied height while staying invisible,
+            noninteractive, and inaccessible — see MessageGroupMenuBar.
+            Group selection still flows through the group-level capture
+            interaction. */}
         {isGrouped && (
           <MessageGroupMenuBar
             messages={messages}
@@ -215,6 +227,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
             onReorderMessages={handleReorderMessages}
             topic={topic}
             disabled={!groupMutable}
+            isEditMode={isEditMode}
           />
         )}
       </GroupContainer>

@@ -1,3 +1,4 @@
+import { TOOL_POPOVER_ESCAPE_CONSUMED } from '@renderer/utils/toolPopoverEscape'
 import { Popover } from 'antd'
 import { type FC, type ReactNode, useEffect } from 'react'
 import styled from 'styled-components'
@@ -19,12 +20,27 @@ const ToolPopover: FC<ToolPopoverProps> = ({ open, onOpenChange, content, childr
   useEffect(() => {
     if (!open) return
     const handleKeyDown = (e: KeyboardEvent) => {
+      // IME composition owns Escape first: never dismiss the popover while
+      // the user is composing text.
+      if (e.isComposing) return
       if (e.key === 'Escape' || e.key === 'Esc') {
+        // A cooperating Escape already consumed by another open popover on
+        // this same event owns it: one Escape closes one popover only.
+        if ((e as KeyboardEvent & { [TOOL_POPOVER_ESCAPE_CONSUMED]?: boolean })[TOOL_POPOVER_ESCAPE_CONSUMED]) return
         onOpenChange(false)
+        // Capture-phase consumed marker for the edit-mode Escape layer
+        // (useClipboardKeyboard): one Escape closes the popover only and must
+        // not simultaneously clear selection or exit edit mode. Only the
+        // cooperating edit-mode layer reads this marker; no stopPropagation
+        // so unrelated Escape handlers are unaffected.
+        ;(e as KeyboardEvent & { [TOOL_POPOVER_ESCAPE_CONSUMED]?: boolean })[TOOL_POPOVER_ESCAPE_CONSUMED] = true
       }
     }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    // Capture phase: runs before the edit-mode bubble-phase listener
+    // regardless of mount/registration order, so the marker above is always
+    // visible to it on the same keydown event.
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [open, onOpenChange])
 
   const stopPropagation = (e: React.SyntheticEvent) => {
