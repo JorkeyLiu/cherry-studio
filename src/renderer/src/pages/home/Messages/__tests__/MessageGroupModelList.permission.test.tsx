@@ -10,6 +10,8 @@ import type { Message } from '@renderer/types/newMessage'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
+const { displayMode } = vi.hoisted(() => ({ displayMode: { value: 'compact' } }))
+
 vi.mock('@logger', () => ({
   loggerService: { withContext: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), silly: vi.fn() }) }
 }))
@@ -29,7 +31,7 @@ vi.mock('@renderer/components/dnd', () => ({
 }))
 
 vi.mock('@renderer/hooks/useSettings', () => ({
-  useSettings: () => ({ foldDisplayMode: 'compact' })
+  useSettings: () => ({ foldDisplayMode: displayMode.value })
 }))
 
 vi.mock('@renderer/store', () => ({
@@ -81,4 +83,43 @@ describe('MessageGroupModelList permission gating', () => {
     fireEvent.click(selectors[1])
     expect(setSelectedMessage).toHaveBeenCalledExactlyOnceWith(messages[1])
   })
+
+  it.each([
+    { mode: 'compact', containerSelector: '.avatar-group.ant-avatar-group' },
+    { mode: 'expanded', containerSelector: '.segmented-list' }
+  ])(
+    'disabled $mode keeps selectors as direct children of the layout container (no nested wrapper)',
+    ({ mode, containerSelector }) => {
+      displayMode.value = mode
+      try {
+        const messages = [makeAssistant('a1', 'u1'), makeAssistant('a2', 'u1')]
+        const setSelectedMessage = vi.fn()
+        const { container } = render(
+          <MessageGroupModelList
+            messages={messages}
+            selectMessageId="a1"
+            setSelectedMessage={setSelectedMessage}
+            disabled
+          />
+        )
+        // No drag reorder in read-only state.
+        expect(screen.queryByTestId('sortable-mock')).toBeNull()
+        const layout = container.querySelector(containerSelector)
+        expect(layout).not.toBeNull()
+        expect(layout?.getAttribute('aria-disabled')).toBe('true')
+        const selectors = screen.getAllByTestId('answer-group-selector')
+        expect(selectors).toHaveLength(2)
+        for (const el of selectors) {
+          // Fails on the old `div > span > selector` structure: the extra
+          // span broke the avatar-group/segmented-list direct-child layout.
+          expect(el.parentElement).toBe(layout)
+          expect(el.getAttribute('aria-disabled')).toBe('true')
+        }
+        fireEvent.click(selectors[0])
+        expect(setSelectedMessage).not.toHaveBeenCalled()
+      } finally {
+        displayMode.value = 'compact'
+      }
+    }
+  )
 })

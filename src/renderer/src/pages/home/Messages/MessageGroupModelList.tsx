@@ -12,7 +12,7 @@ import { lightbulbSoftVariants } from '@renderer/utils/motionVariants'
 import { Tooltip } from 'antd'
 import { motion } from 'motion/react'
 import type { FC } from 'react'
-import { memo, useCallback } from 'react'
+import { Fragment, memo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
@@ -120,9 +120,13 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
         {disabled ? (
           // PROJ-13 (A4): immutable/incomplete groups render an inert list —
           // Sortable stays disabled (no drag reorder through shared prefixes).
+          // Fragment keeps each selector a direct child of the layout
+          // container, matching the enabled Sortable structure (no extra
+          // span wrapper that would break the avatar-group/segmented-list
+          // direct-child selectors).
           <div className={isCompact ? 'avatar-group ant-avatar-group' : 'segmented-list'} aria-disabled="true">
             {messages.map((message) => (
-              <span key={message.id}>{renderLabel(message)}</span>
+              <Fragment key={message.id}>{renderLabel(message)}</Fragment>
             ))}
           </div>
         ) : (
