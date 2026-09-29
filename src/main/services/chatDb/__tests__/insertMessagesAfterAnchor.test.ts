@@ -358,7 +358,7 @@ describe('insertMessagesAfterAnchor — S6.2c-2 Main-authoritative anchor insert
     expect(value.mutableMessageIds).toEqual([newId])
   })
 
-  it('inherited branch anchor inserts at owned suffix start with authoritative placement + capability', () => {
+  it('exact fork-anchor inherited insertion lands at owned suffix start with authoritative placement + capability', () => {
     const topic = `t-${uid()}`
     const m0 = `m0-${uid()}`
     const m1 = `m1-${uid()}`
@@ -371,11 +371,13 @@ describe('insertMessagesAfterAnchor — S6.2c-2 Main-authoritative anchor insert
     agg.appendMessage(topic, makeMessageJson(topic, { id: c0, role: 'user' }) as any, [], undefined, undefined, {
       branchId
     })
+    // Sole fork-boundary exception: the inherited anchor is exactly the
+    // addressed branch's immutable anchorMessageId (BRANCH-3).
     const n1 = `n1-${uid()}`
     const n2 = `n2-${uid()}`
     const res = agg.insertMessagesAfterAnchor(
       topic,
-      m0,
+      m1,
       [
         { message: makeMessageJson(topic, { id: n1, role: 'user' }) as any, blocks: [] },
         { message: makeMessageJson(topic, { id: n2, role: 'user' }) as any, blocks: [] }
@@ -389,7 +391,7 @@ describe('insertMessagesAfterAnchor — S6.2c-2 Main-authoritative anchor insert
     expect(value.patchedMessageIds).toEqual([])
     expect(value.mutableMessageIds).toEqual([n1, n2])
     expect(value.branchId).toBe(branchId)
-    expect(value.afterMessageId).toBe(m0)
+    expect(value.afterMessageId).toBe(m1)
     // Owner stamping: canonical wire carries the branch owner.
     for (const wire of value.insertedMessages as Array<Record<string, unknown>>) {
       expect(wire.branchId).toBe(branchId)
@@ -404,6 +406,34 @@ describe('insertMessagesAfterAnchor — S6.2c-2 Main-authoritative anchor insert
     expect(effective.messages.map((m: any) => m.id)).toEqual([m0, m1, n1, n2, c0])
     // Main-authoritative window capability carries the new owned suffix rows.
     expect(new Set(effective.mutableMessageIds)).toEqual(new Set([c0, n1, n2]))
+  })
+
+  it('older inherited anchor insertion rejects atomically with zero writes (BRANCH-3)', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    const m2 = `m2-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0, role: 'user' }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1, role: 'user' }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m2, role: 'user' }) as any, [])
+    const branchId = (okValue(agg.createBranch(topic, null, m1, 'B1')).branch as { id: string }).id
+    const c0 = `c0-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: c0, role: 'user' }) as any, [], undefined, undefined, {
+      branchId
+    })
+    const before = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: topic, branchId, limit: 20 }))
+    // m0 is an older ancestor reference (not the branch fork anchor): read-only.
+    const res = agg.insertMessagesAfterAnchor(
+      topic,
+      m0,
+      [{ message: makeMessageJson(topic, { id: `n-${uid()}`, role: 'user' }) as any, blocks: [] }],
+      branchId
+    )
+    expect(res.ok).toBe(false)
+    expect(failError(res).code).toBe('VALIDATION_ERROR')
+    const after = okValue(agg.fetchMessagesWindow({ kind: 'latest', topicId: topic, branchId, limit: 20 }))
+    expect(after.messages.map((m: any) => m.id)).toEqual(before.messages.map((m: any) => m.id))
+    expect(new Set(after.mutableMessageIds)).toEqual(new Set(before.mutableMessageIds))
   })
 
   it('F-1: duplicate fresh ID in same batch stays inserted-only with disjoint validated result', () => {

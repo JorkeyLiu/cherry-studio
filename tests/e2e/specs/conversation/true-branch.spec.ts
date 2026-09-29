@@ -12,7 +12,11 @@
  *    IDs, top breadcrumb shows `Topic / <default name>`, sidebar stays one.
  * 3. Real top-selector rename (branch-rename-btn-*) renames DB-first; the
  *    divider + breadcrumb show the new name; the topic name is untouched.
- * 4. Real toolbar click on an INHERITED message forks L2 (parent = L1).
+ * 4. Bounded nested fork (parent = L1): an IPC createBranch on an
+ *    INHERITED message rejects (parent-owned anchors only, including the
+ *    parent fork anchor itself); an IPC createBranch on the L1-owned suffix
+ *    succeeds and includes the parent-owned prefix. The inherited toolbar
+ *    true-branch button stays hidden (no UI fork from inherited).
  * 5. Windowed parent restore: fork-divider switch (branch-fork-selected-*)
  *    to the parent/original route reloads main around the shared fork
  *    anchor (older 10 / newer 19 groups → deterministic 25-resident
@@ -624,29 +628,102 @@ test.describe('Topic-internal branches end-to-end', () => {
     }, sourceTopicId)
     expect(topicNameAfter).toBe(topicName)
 
-    // 4. Second level from an INHERITED message (parent route = L1).
-    await clickToolbarBranch(page, inheritedAnchorId)
-    await page.waitForFunction(
-      ({ tid }: { tid: string }) => {
-        const s = (window as any).store.getState()
-        return (s.topicBranch?.branchesByTopic?.[tid] ?? []).length === 2
-      },
-      { tid: sourceTopicId },
-      { timeout: 30000 }
+    // 4. Bounded nested fork (BRANCH-7 owner-only, parent route = L1).
+    // Setup-only IPC: one L1-owned suffix row through the fork-boundary
+    // insert (branch anchor -> suffix start), so a parent-owned anchor exists.
+    const l1SuffixId = `${sourceTopicId}-msg-l1suf`
+    const l1SuffixSeed: any = await page.evaluate(
+      async ({
+        tid,
+        bid,
+        anchor,
+        mid,
+        asstId
+      }: {
+        tid: string
+        bid: string
+        anchor: string
+        mid: string
+        asstId: string
+      }) =>
+        await (window as any).api.chatDb.insertMessagesAfterAnchor({
+          topicId: tid,
+          branchId: bid,
+          afterMessageId: anchor,
+          entries: [
+            {
+              message: {
+                id: mid,
+                topicId: tid,
+                role: 'user',
+                assistantId: asstId,
+                status: 'success',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              },
+              blocks: []
+            }
+          ]
+        }),
+      { tid: sourceTopicId, bid: branch1Id, anchor: anchorId, mid: l1SuffixId, asstId: assistantId }
     )
+    expect(l1SuffixSeed?.ok, `L1 suffix seed failed: ${JSON.stringify(l1SuffixSeed)}`).toBe(true)
+    // Inherited references never fork: older ancestor + parent fork anchor.
+    const nestedInherited: any = await page.evaluate(
+      async ({ tid, bid, anchor }: { tid: string; bid: string; anchor: string }) =>
+        await (window as any).api.chatDb.createBranch({ topicId: tid, parentBranchId: bid, anchorMessageId: anchor }),
+      { tid: sourceTopicId, bid: branch1Id, anchor: inheritedAnchorId }
+    )
+    expect(nestedInherited?.ok, 'nested branch from inherited must reject').toBe(false)
+    const nestedForkAnchor: any = await page.evaluate(
+      async ({ tid, bid, anchor }: { tid: string; bid: string; anchor: string }) =>
+        await (window as any).api.chatDb.createBranch({ topicId: tid, parentBranchId: bid, anchorMessageId: anchor }),
+      { tid: sourceTopicId, bid: branch1Id, anchor: anchorId }
+    )
+    expect(nestedForkAnchor?.ok, 'nested branch from parent fork anchor must reject').toBe(false)
+    branches = await listBranches(page, sourceTopicId)
+    expect(branches).toHaveLength(1)
+    // Parent-owned anchor succeeds and includes the parent-owned prefix.
+    const nestedOwned: any = await page.evaluate(
+      async ({ tid, bid, anchor }: { tid: string; bid: string; anchor: string }) =>
+        await (window as any).api.chatDb.createBranch({ topicId: tid, parentBranchId: bid, anchorMessageId: anchor }),
+      { tid: sourceTopicId, bid: branch1Id, anchor: l1SuffixId }
+    )
+    expect(nestedOwned?.ok, `nested branch from parent-owned failed: ${JSON.stringify(nestedOwned)}`).toBe(true)
     branches = await listBranches(page, sourceTopicId)
     expect(branches).toHaveLength(2)
     const branch2 = branches.find((b: any) => b.id !== branch1Id)
     expect(branch2.parentBranchId).toBe(branch1Id)
-    expect(branch2.anchorMessageId).toBe(inheritedAnchorId)
+    expect(branch2.anchorMessageId).toBe(l1SuffixId)
     const branch2Id = branch2.id as string
+    const l2AnchorId = l1SuffixId
+    const l2ExpectedIds = [...sourceIds.slice(0, ANCHOR_IDX + 1), l1SuffixId]
     expect(await sidebarTopicIds(page)).toEqual(topicsBefore)
+    // UI fail-closed: the inherited toolbar true-branch button stays hidden
+    // (no UI fork from inherited); the L1 fork anchor keeps no true-branch
+    // button (inherited through L1) while its insert button stays visible
+    // (sole fork-boundary exception). Older inherited refs show neither.
+    const inheritedSel = `[id="message-${inheritedAnchorId}"][data-message-id="${inheritedAnchorId}"]`
+    const inheritedContainer = page.locator(inheritedSel).first()
+    await expect(inheritedContainer, 'inherited container must be visible on L1').toBeVisible({ timeout: 15000 })
+    try {
+      await inheritedContainer.hover({ timeout: 8000 })
+    } catch {}
+    await expect(
+      inheritedContainer.locator('[data-testid="msg-true-branch-btn"]'),
+      'true-branch must hide on inherited messages'
+    ).toHaveCount(0, { timeout: 10000 })
+    await expect(
+      inheritedContainer.locator('[data-testid="msg-insert-btn"]'),
+      'insert must hide on older inherited refs'
+    ).toHaveCount(0, { timeout: 10000 })
 
     // 5. Fork-divider switch on the L1 route: its anchor fork is taken
     // (selected branch name shown); switching to the parent/original route
     // lands on the SAME shared anchor, never a bottom jump. (The fresh L2
-    // route only spans main[0..m5], so its anchor fork is not in view —
-    // return to L1 via the top selector first.)
+    // route spans main[0..anchor] plus the L1-owned suffix, so its anchor
+    // fork is not in view — return to L1 via the top selector first. L1 now
+    // carries one owned suffix row from the bounded setup seed.)
     await page.locator('[data-testid="branch-selector-entry"]').first().click()
     await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
     await page.locator(`[data-testid="branch-cascader-item-${branch1Id}"]`).first().click()
@@ -656,7 +733,7 @@ test.describe('Topic-internal branches end-to-end', () => {
         const ids = s.messages?.messageIdsByTopic?.[tid]
         return Array.isArray(ids) && ids.length === len
       },
-      { tid: sourceTopicId, len: ANCHOR_IDX + 1 },
+      { tid: sourceTopicId, len: ANCHOR_IDX + 2 },
       { timeout: 30000 }
     )
     const takenToggle = page.locator(`[data-testid="branch-fork-selected-${anchorId}"]`).first()
@@ -939,27 +1016,26 @@ test.describe('Topic-internal branches end-to-end', () => {
       { timeout: 30000 }
     )
     // L2 top-switch restore contract (windowed): the L2 route is exactly
-    // main[0..5] (stable IDs, no clone), breadcrumb keeps the branch path,
-    // and the stored active branch is L2. The saved-position scroll restore
-    // is production-owned and deterministically lands on the window head —
-    // so the test asserts the exact resident first, then performs the
-    // user-visible anchor scroll explicitly and asserts it.
+    // main[0..anchor] plus the L1-owned suffix (stable IDs, no clone),
+    // breadcrumb keeps the branch path, and the stored active branch is L2.
+    // The saved-position scroll restore is production-owned and
+    // deterministically lands on the window head — so the test asserts the
+    // exact resident first, then performs the user-visible anchor scroll
+    // explicitly and asserts it.
     await page.waitForFunction(
       ({ tid, len }: { tid: string; len: number }) => {
         const s = (window as any).store.getState()
         const ids = s.messages?.messageIdsByTopic?.[tid]
         return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
       },
-      { tid: sourceTopicId, len: INHERITED_ANCHOR_IDX + 1 },
+      { tid: sourceTopicId, len: l2ExpectedIds.length },
       { timeout: 30000 }
     )
     const l2ResidentIds: string[] = await page.evaluate(
       (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
       sourceTopicId
     )
-    expect(l2ResidentIds, 'L2 restore resident must be exactly main[0..5]').toEqual(
-      sourceIds.slice(0, INHERITED_ANCHOR_IDX + 1)
-    )
+    expect(l2ResidentIds, 'L2 restore resident must be exactly main prefix plus L1-owned suffix').toEqual(l2ExpectedIds)
     const activeAfterL2: string | null = await page.evaluate(
       (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
       sourceTopicId
@@ -969,7 +1045,7 @@ test.describe('Topic-internal branches end-to-end', () => {
       const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
       const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
       if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
-    }, inheritedAnchorId)
+    }, l2AnchorId)
     await page.waitForFunction(
       (id: string) => {
         const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
@@ -980,10 +1056,10 @@ test.describe('Topic-internal branches end-to-end', () => {
         const r = el.getBoundingClientRect()
         return r.bottom > c.top && r.top < c.bottom
       },
-      inheritedAnchorId,
+      l2AnchorId,
       { timeout: 30000 }
     )
-    expect(await isVisibleInMessagesViewport(page, inheritedAnchorId)).toBe(true)
+    expect(await isVisibleInMessagesViewport(page, l2AnchorId)).toBe(true)
 
     // 6b. Topic switch away/back restores the logical topic's previously
     // active branch (no reset to main). Sidebar stays logical-topic-only.
@@ -994,7 +1070,7 @@ test.describe('Topic-internal branches end-to-end', () => {
     expect(topicsWithOther).toContain(otherTopicId)
     expect(topicsWithOther).toEqual([...topicsBefore, otherTopicId].sort())
     await activateTopic(page, otherTopicId, 4)
-    await activateTopic(page, sourceTopicId, INHERITED_ANCHOR_IDX + 1)
+    await activateTopic(page, sourceTopicId, l2ExpectedIds.length)
     // The L2 route is restored: breadcrumb keeps the branch path and the
     // stored active branch is L2 (not main).
     await expect(page.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
@@ -1006,7 +1082,7 @@ test.describe('Topic-internal branches end-to-end', () => {
       sourceTopicId
     )
     expect(restoredBranchId).toBe(branch2Id)
-    expect(await isVisibleInMessagesViewport(page, inheritedAnchorId)).toBe(true)
+    expect(await isVisibleInMessagesViewport(page, l2AnchorId)).toBe(true)
     expect(await sidebarTopicIds(page)).toEqual(topicsWithOther)
 
     // 6c. Top selector repeated open at depth: current L2 opens through the
@@ -1114,7 +1190,7 @@ test.describe('Topic-internal branches end-to-end', () => {
         { tid: sourceTopicId, bid: branch2Id },
         { timeout: 30000 }
       )
-      await waitActiveRouteWindowStable(page2, sourceTopicId, INHERITED_ANCHOR_IDX + 1)
+      await waitActiveRouteWindowStable(page2, sourceTopicId, l2ExpectedIds.length)
       await expect(page2.locator('[data-testid="branch-selector-breadcrumb"]').first()).toContainText(
         'E2E Renamed Branch',
         { timeout: 30000 }
@@ -1124,8 +1200,8 @@ test.describe('Topic-internal branches end-to-end', () => {
         sourceTopicId
       )
       expect(relaunchedBranchId).toBe(branch2Id)
-      // The L2 route's own taken fork (at its anchor) is back as well.
-      await expect(page2.locator(`[data-testid="branch-fork-selected-${inheritedAnchorId}"]`).first()).toBeVisible({
+      // The L2 route's own taken fork (at its parent-owned anchor) is back as well.
+      await expect(page2.locator(`[data-testid="branch-fork-selected-${l2AnchorId}"]`).first()).toBeVisible({
         timeout: 30000
       })
 
@@ -2072,6 +2148,78 @@ test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
     expect(branchWin?.ok).toBe(true)
     expect((branchWin.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds)
     expect(new Set(branchWin.value.mutableMessageIds as string[])).toEqual(new Set([suffixId, ...freshIds]))
+    // Bounded UI contract on the branch route: true-branch hides on every
+    // inherited ref (including the fork anchor); insert shows only at the
+    // exact fork anchor among inherited refs.
+    const olderSel = `[id="message-${seedIds[0]}"][data-message-id="${seedIds[0]}"]`
+    const olderContainer = page.locator(olderSel).first()
+    await expect(olderContainer, 'older inherited container must be visible').toBeVisible({ timeout: 15000 })
+    try {
+      await olderContainer.hover({ timeout: 8000 })
+    } catch {}
+    await expect(
+      olderContainer.locator('[data-testid="msg-true-branch-btn"]'),
+      'true-branch must hide on older inherited refs'
+    ).toHaveCount(0, { timeout: 10000 })
+    await expect(
+      olderContainer.locator('[data-testid="msg-insert-btn"]'),
+      'insert must hide on older inherited refs'
+    ).toHaveCount(0, { timeout: 10000 })
+    await page.evaluate((id: string) => {
+      const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+      const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+      if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+    }, branchAnchor)
+    const forkContainer = page.locator(anchorSel).first()
+    await expect(forkContainer, 'fork-anchor container must be visible').toBeVisible({ timeout: 15000 })
+    try {
+      await forkContainer.hover({ timeout: 8000 })
+    } catch {}
+    await expect(
+      forkContainer.locator('[data-testid="msg-true-branch-btn"]'),
+      'true-branch must hide even at the fork anchor (inherited)'
+    ).toHaveCount(0, { timeout: 10000 })
+    await expect(
+      forkContainer.locator('[data-testid="msg-insert-btn"]'),
+      'insert must stay visible at the exact fork anchor'
+    ).toHaveCount(1, { timeout: 10000 })
+    // Bounded Main contract: an older inherited anchor rejects atomically
+    // with zero writes; the effective order and capability are unchanged.
+    const staleInsert: any = await page.evaluate(
+      async ({ tid, bid, anchor }: { tid: string; bid: string; anchor: string }) =>
+        await (window as any).api.chatDb.insertMessagesAfterAnchor({
+          topicId: tid,
+          branchId: bid,
+          afterMessageId: anchor,
+          entries: [
+            {
+              message: {
+                id: `${tid}-msg-stale-reject`,
+                topicId: tid,
+                role: 'user',
+                status: 'success',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              },
+              blocks: []
+            }
+          ]
+        }),
+      { tid: topicId, bid: branchId, anchor: seedIds[0] }
+    )
+    expect(staleInsert?.ok, 'older inherited insert must reject').toBe(false)
+    const branchWinAfter: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: tid,
+          branchId: bid,
+          limit: 20
+        }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(branchWinAfter?.ok).toBe(true)
+    expect((branchWinAfter.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds)
     // Durable post-exit SQLite proof via the established helper (ownership
     // scope: this disposable topic only; the profile may own other topics).
     await electronApp.close()

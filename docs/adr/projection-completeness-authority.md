@@ -133,8 +133,8 @@
 | 编辑选集 cut/delete/segment 写 | 选集能力门禁（当前 loaded 可解析成员须在 Main 能力中；混合整体阻断；路由切换清选择）；窗口外/依赖展开成员由 Main 最终裁决。权限由 [Topic Branches ADR](./topic-branches.md)（BRANCH-12）治理 | 是（Main 事务） |
 | cut-paste 源删除 | 创建 cut clipboard 时预检（服务入口与 UI 调用方双层门禁）；执行经现有 renderer 预检加 Main 最终守卫的权威删除路径。权限由 [Topic Branches ADR](./topic-branches.md) 治理 | 是（Main 事务） |
 | undo/redo | 非 owner 目标由 Main 拒绝；redo 删除类路径预检零调用；恢复类路径新建 owned 行、由 Main 裁决 | 是（Main 事务） |
-| 分支创建/删除 | 分支路由能力与删除语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-6/9）唯一治理（创建不收缩 owner 权限）；当前路由能力随窗口重发 | 否（能力发布；分支行变更是） |
-| 稳定插入/分支/粘贴 | 稳定锚点意图发往 Main；Main 原子解析位置后写入；Renderer 提交已加载交集 | 是（Main 事务） |
+| 分支创建/删除 | 分支路由能力、bounded 创建锚点（owner-only，继承引用拒绝）与删除语义由 [Topic Branches ADR](./topic-branches.md)（BRANCH-3/6/7/9）唯一治理（创建不收缩 owner 权限）；当前路由能力随窗口重发 | 否（能力发布；分支行变更是） |
+| 稳定插入/分支/粘贴 | 稳定锚点意图发往 Main；Main 按 [Topic Branches ADR](./topic-branches.md)（BRANCH-3/7 bounded：自有锚点 + 唯一 fork 边界例外，老祖先拒绝）原子解析位置后写入；Renderer 提交已加载交集 | 是（Main 事务） |
 | 语义删除 | 根 ID 发往 Main；Main 返回完整展开、撤销物化与删除后 Segment 目录；Renderer 收敛已加载交集并替换 Segment 目录 | 是（Main 事务） |
 | 重发/重新生成 | 稳定 ID 加执行标识；请求本地覆盖存活至终态原子落盘；Redux 仅为镜像 | 是（Main 终态检查点） |
 | 上下文锚点建立/重锚定/移动/继承 | Main 解析器在同一快照内解析锚点并返回闭包；调用者仅持久化解析出的锚点键 | 是（锚点键持久化；聊天权威行不变） |

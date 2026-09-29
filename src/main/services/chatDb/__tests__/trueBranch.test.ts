@@ -233,22 +233,30 @@ describe('createBranch + effective route reads', () => {
     expect(catalog.branches.map((b) => (b as { id: string }).id)).toEqual([branchId])
   })
 
-  it('supports multi-level branches and fork-from-inherited anchors', () => {
+  it('nested branches require parent-owned anchors; inherited references reject (BRANCH-7)', () => {
     seedTopic(agg, 't-root', ['m0', 'm1', 'm2'])
     const b1 = (okValue(agg.createBranch('t-root', null, 'm1', 'B1')).branch as { id: string }).id
     seedBranchSuffix(agg, 't-root', b1, ['m-b1-0'])
-    // Second level forks from an inherited message (m0, owned by the main route).
-    const b2res = agg.createBranch('t-root', b1, 'm0', 'B2')
+    // Inherited references never fork — including an older main-owned
+    // ancestor (m0) and the parent's own inherited fork anchor (m1).
+    const branchesBefore = okValue(agg.listBranches('t-root')).branches.length
+    const inheritedRes = agg.createBranch('t-root', b1, 'm0', 'B2-bad')
+    expect(inheritedRes.ok).toBe(false)
+    const forkAnchorRes = agg.createBranch('t-root', b1, 'm1', 'B2-bad-fork')
+    expect(forkAnchorRes.ok).toBe(false)
+    expect(okValue(agg.listBranches('t-root')).branches.length).toBe(branchesBefore)
+    // Parent-owned anchor succeeds and includes the parent-owned prefix.
+    const b2res = agg.createBranch('t-root', b1, 'm-b1-0', 'B2')
     expect(b2res.ok).toBe(true)
     const b2 = (okValue(b2res).branch as { id: string }).id
     const b2view = okValue(agg.fetchMessages('t-root', b2))
-    expect(b2view.messages.map((m) => (m as { id: string }).id)).toEqual(['m0'])
+    expect(b2view.messages.map((m) => (m as { id: string }).id)).toEqual(['m0', 'm1', 'm-b1-0'])
     const b1view = okValue(agg.fetchMessages('t-root', b1))
     expect(b1view.messages.map((m) => (m as { id: string }).id)).toEqual(['m0', 'm1', 'm-b1-0'])
     // Writes append to the branch-owned suffix.
     seedBranchSuffix(agg, 't-root', b2, ['m-b2-0'])
     const b2after = okValue(agg.fetchMessages('t-root', b2))
-    expect(b2after.messages.map((m) => (m as { id: string }).id)).toEqual(['m0', 'm-b2-0'])
+    expect(b2after.messages.map((m) => (m as { id: string }).id)).toEqual(['m0', 'm1', 'm-b1-0', 'm-b2-0'])
     // Branch-owned rows carry the owner.
     const owner = sqlite.prepare('SELECT branch_id AS branchId FROM messages WHERE id=?').get('m-b2-0') as {
       branchId: string

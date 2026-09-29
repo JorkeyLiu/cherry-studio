@@ -44,16 +44,16 @@
 |---|---|---|
 | **BRANCH-1** | **消息实体唯一**：同一逻辑 topic 内每条消息只有一个权威实体与稳定 ID。true branch 不复制、不覆盖、不创建投影、不做 COW。分支有效路由共享稳定 ID，无前缀拷贝 | **Locked** |
 | **BRANCH-2** | **永久所属**：消息在哪个 route 创建，就永久属于该 route。main route owner = `branch_id null`；分支 owner = `branch_id`。分叉只建立祖先消息引用，不转移/分享/继承所属权 | **Locked** |
-| **BRANCH-3** | **引用只读**：当前 route 只能 mutation 自己拥有的消息；祖先消息在后代 route 中仅作为构成完整会话与上下文的只读引用。不再使用 public/private/owned-unshared 作为权限模型 | **Locked** |
-| **BRANCH-4** | **Owner 完整控制**：后代是否引用、引用数量、是否位于后代有效前缀都不得收缩 owner 的变更权限。内容编辑、blocks、删除、批量删除、重排、回答组字段、segment 关系、resend/regenerate 等均只按实际 mutation target 的 owner 判权；不得因 live descendants 拒绝 owner。非 owner 仍 fail-closed。跨实体命令只允许写/删/重排当前 route owned 的实际目标；读取祖先引用本身不构成 mutation。保留事务原子性 | **Locked** |
+| **BRANCH-3** | **引用只读**：当前 route 只能 mutation 自己拥有的消息；祖先消息在后代 route 中仅作为构成完整会话与上下文的只读引用。祖先引用对插入与子分支创建只读：`insertMessagesAfterAnchor` 在分支上仅接受自有锚点，以及唯一例外——ID 恰好等于被寻址分支不可变 `anchorMessageId` 的继承锚点（fork 边界/父引用终答），新行盖章为当前分支自有并落自有后缀起始；更老的祖先引用 fail-closed 零写。`createBranch` 见 BRANCH-7 owner-only。不再使用 public/private/owned-unshared 作为权限模型 | **Locked** |
+| **BRANCH-4** | **Owner 完整控制**：后代是否引用、引用数量、是否位于后代有效前缀都不得收缩 owner 的变更权限。内容编辑、blocks、删除、批量删除、重排、回答组字段、segment 关系、resend/regenerate 等均只按实际 mutation target 的 owner 判权；不得因 live descendants 拒绝 owner。非 owner 仍 fail-closed。跨实体命令只允许写/删/重排当前 route owned 的实际目标；读取祖先引用本身不构成 mutation，但祖先引用永不构成插入/分支锚点授权（BRANCH-3/7 bounded 例外除外）。保留事务原子性 | **Locked** |
 | **BRANCH-5** | **蝴蝶效应与缺 anchor fail-closed**：owner 对唯一实体的内容修改被所有引用 route 立即看到；删除前缀行改变后代前缀；重排 owner 行改变所有引用该 owner 序列的后代有效路由；若 owner 删除某 branch anchor，依赖该 anchor 的后代 route 保持 branch metadata 但解析 fail-closed 为 missing anchor/NOT_FOUND。不得暗中修复、clamp、复制、快照、转移 owner、级联删后代或重新收缩 owner 权限。保护集对坏 anchor silent-continue 的旧逻辑已移除，route resolver 保持明确 throw | **Locked** |
 | **BRANCH-6** | **分支删除即 subtree 删除**：删除 branch 即删除其整个 descendant subtree（含各自分支的 owned messages/blocks/file refs 与分支行），祖先引用与 sibling 保留。删后 topic 与从未分支不可区分（当删除全部的分支持） | **Locked** |
-| **BRANCH-7** | **Branch anchor immutable；创建规则**：branch anchor immutable；branch 可从 parent effective route 中任一消息（含祖先引用）创建；nested（parent = 分支）与 sibling（同 parent 同 anchor 或同 parent 不同 anchor）维持现状；创建只插入一行 `topic_branches`，不触碰父路由、共享消息与 topic 状态 | **Locked** |
+| **BRANCH-7** | **Branch anchor immutable；owner-only 创建规则**：branch anchor immutable；子分支锚点必须由父路由自有（owner equality）：main 父接受 main 自有消息，非 main 父要求锚点消息 owner == parentBranchId；任何继承引用（含父自身继承的 fork 锚点）一律拒绝 fail-closed。nested 分支因此必含父分支经所选锚点的自有路由；sibling（同 parent 同 anchor 或同 parent 不同 anchor）维持现状；创建只插入一行 `topic_branches`，不触碰父路由、共享消息与 topic 状态 | **Locked** |
 | **BRANCH-8** | **上下文窗口关系**：上下文算法/消息选择语义 branch-neutral，只关注当前 route 的 effective message sequence 与稳定 IDs，不参与 ownership/permission；但每个 route 可有独立 context-window anchor/state，不同分支可有不同窗口。Branch anchor 与 context-window anchor 严格区分。保留现有 route-scoped key（main `topicId`，分支 `topicId:branchId`）与 context ADR 的建立/继承规则；context capability 永不作为 mutation permission | **Locked** |
 | **BRANCH-9** | **Main 权威与 Renderer fail-closed**：Main SQLite 是变更权限的唯一权威（含 `mutableMessageIds` 发布者）；Renderer capability 仅预检，unknown/stale/route mismatch fail-closed。`mutableMessageIds` 定义为当前 window 中 `message.branchId == addressed route` 的精确子集，不再排除被后代引用的行。Renderer 继续不猜 branchId，只消费 Main capability | **Locked** |
 | **BRANCH-10** | **Local-only 与 clone 区分**：true branches 维持 local-only / excluded from sync（分支行、分支-owned 消息/块/操作永不进 sync outbox/membership/frame clocks/baseline；main 行保持 syncable）。旧 `branchMessagesToTopic` 跨-topic clone（fresh IDs）不是 true branch；ADR 明确区分但本任务不重命名 API | **Locked** |
 | **BRANCH-11** | **有效路由递归算法**：anchor-inclusive 递归合成、稳定 IDs、无 clone。main = owned rows；分支 = 递归取每层祖先路由经子 anchor（含锚点）的前缀，加当前分支 owned 后缀；每层确定性 `sort_order ASC, id ASC`。任一 anchor 缺失明确 fail-closed（NOT_FOUND），不得自动修复 | **Locked** |
-| **BRANCH-12** | **复合变更实际写目标与原子性**：answer-group（select/fold、reorder、useful、append）、segment（upsert/replace）、批量删除、语义删除、resend/regenerate、reset-core 均只验证实际写/删/重排的目标 owner；读取的 user root/组成员/anchor 不要求可变。一条命令实际 mutation 多个消息时全体目标须 owner match，先验证后写，失败零部分写（同一根事务） | **Locked** |
+| **BRANCH-12** | **复合变更实际写目标与原子性**：answer-group（select/fold、reorder、useful、append）、segment（upsert/replace）、批量删除、语义删除、resend/regenerate、reset-core 均只验证实际写/删/重排的目标 owner；读取的 user root/组成员/anchor 不要求可变，但 `insertMessagesAfterAnchor` 的 anchor 选择受 BRANCH-3 bounded 约束（仅自有锚点 + 唯一 fork 边界例外）。一条命令实际 mutation 多个消息时全体目标须 owner match，先验证后写，失败零部分写（同一根事务） | **Locked** |
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：BRANCH-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
 
@@ -72,7 +72,7 @@
 
 - 每条消息有且仅有一个 `(topicId, branchId)` owner；`branchId null` = main。
 - `messages.branch_id` 是 ownership only；`topic_branches` 定义 ancestry（`parentBranchId`、`anchorMessageId`）。
-- 后代有效路由中的祖先行是只读引用：可渲染、可组成上下文、可作为 branch anchor（BRANCH-7），不可经后代路由 mutation，不 COW。
+- 后代有效路由中的祖先行是只读引用：可渲染、可组成上下文，不可经后代路由 mutation，不 COW；不可作为子分支锚点（BRANCH-7 owner-only），仅当 ID 恰好等于被寻址分支不可变 `anchorMessageId` 时可作为 `insertMessagesAfterAnchor` 的 fork 边界例外（BRANCH-3）。
 - 身份字段（`id`、`topicId`、`branchId`、`sortOrder`）永不经 patch 变更；Main 在写入时按 route 上下文 authoritative stamping（wire `branchId` 永不信任）。
 
 ---
@@ -94,16 +94,16 @@ effective(topic, branch):
 
 - Anchor-inclusive；稳定 ID 共享；无克隆；每层 `sort_order ASC, id ASC`。
 - 任一 anchor 缺失（owner 删除了 anchor，或 anchor 不在父有效路由）→ 明确 `ChatDbNotFoundError`（NOT_FOUND），调用方 fail-closed；不得 silent-continue、clamp、截断、复制或修复。
-- `forkBoundaryIndex = effective.length - ownedCount` 仅为构成描述，不携带权限。
+- `forkBoundaryIndex = effective.length - ownedCount` 仅为构成描述，不携带权限；bounded 插入/分支权限由 BRANCH-3/7 另行定义，不由边界索引推导。
 
 ---
 
 ## 7. Branch Anchor 与创建/嵌套/同级（BRANCH-7）
 
 - Anchor immutable：分支行创建后 `anchorMessageId`、`parentBranchId` 永不变更；仅 `name` 可改。
-- 创建验证（同一根事务）：逻辑 topic 存在且非 trash；parent route 存在（null = main，否则为本 topic 分支）；anchor 属于 parent 有效路由（允许从继承的祖先引用创建）。
+- 创建验证（同一根事务）：逻辑 topic 存在且非 trash；parent route 存在（null = main，否则为本 topic 分支）；anchor 属于 parent 有效路由 **且** 由 parent 路由自有（`owner == parentBranchId`，main 父要求 main 自有；任何继承引用——含父自身继承的 fork 锚点——以 `ChatDbValidationError` 拒绝，零写）。
 - 创建效果：恰好插入一行 `topic_branches`（`id/topicId/parentBranchId/anchorMessageId/name`）；无 sync intent；返回创建节点加有效 wire（共享前缀 + 空后缀）供渲染投影，不存储行。
-- Nested：parent 可为分支；sibling：同 parent 下多分支互不锁定，后缀独立；post-anchor main 行保持可变（它们不在任何后代前缀中）。
+- Nested：parent 可为分支，但锚点必须取自父分支自有后缀，因此 nested 分支必含父分支经所选锚点的自有路由；sibling：同 parent 下多分支互不锁定，后缀独立；post-anchor main 行保持可变（它们不在任何后代前缀中）。
 - 重命名仅改名；删除见 BRANCH-6。
 
 ---
@@ -117,7 +117,7 @@ effective(topic, branch):
 | `deleteMessage` / `deleteMessages` / `deleteMessagesWithSegments` | 列出的 messages | 全体目标 owner match，先验证后删，失败零部分写；missing no-op（单条）/按 guard 语义；非 owner fail-closed |
 | `reorderMessages` | 列出的 messages（owner 序列） | 全体 owner match；后代观察蝴蝶效应，不阻断 owner |
 | `selectAnswerMessage` / `selectUsefulAnswer` / `reorderAnswerGroup` | 实际写的 assistant 成员（整组原子） | 整组 assistant 成员 owner match；读取 user root 不要求可变；任一非 owner 整批拒绝、无部分写 |
-| `insertMessagesAfterAnchor`（含 append） | 新行（owned 后缀）+ 被 patch 的既有行 | 新行按 route stamping 落后缀；既有行按单行 owner 判权； genuinely new suffix 永不要求既有组可变；anchor 可为祖先引用 |
+| `insertMessagesAfterAnchor`（含 append） | 新行（owned 后缀）+ 被 patch 的既有行 | 新行按 route stamping 落后缀；既有行按单行 owner 判权； genuinely new suffix 永不要求既有组可变；自有锚点走组尾，分支上继承锚点仅当 ID 恰好等于被寻址分支不可变 `anchorMessageId` 时允许并落自有后缀起始（fork 边界例外），更老祖先引用以 `VALIDATION_ERROR` 拒绝零写 |
 | `cloneMessagesToTopic` / `pasteMessagesToTopic` | 新行 + 被 patch 的既有行 | 新行落目标 route；既有行 owner 判权；跨 topic 冲突 fail-closed |
 | `upsertSegment` / `replaceSegmentMembership` | segment 行（成员为引用） | 每成员 `owner == addressed route`（non-owner 拒绝，含祖先引用）；owned 行即使被后代引用仍可 segment；原子替换 |
 | `resendUserMessages` | 实际 reset 的 assistants + 新建成员 | user root 仅要求在有效路由可读（不要求可变）；每个实际 reset 的 assistant 须 owned；非 owned 整批拒绝；新建落 owned 后缀 |
@@ -150,7 +150,8 @@ effective(topic, branch):
 
 - Main 随每次窗口响应发布 `mutableMessageIds`：该窗口 messages 中 `branchId == addressed route` 的精确集合。即使被后代引用，owned 行仍在集合中；后代窗口不含祖先 refs（它们 `branchId != route`）。
 - Renderer 只消费 Main capability：`isMutableForActiveRoute` 要求 `mutableRoute == activeRoute`、ID 在 `mutableIds` 且在 loaded 投影中；未知/过期/路由不匹配/非 resident 一律不可变（隐藏/禁用/零调用）。
-- 回答组/选集预检只覆盖 loaded 可解析成员；窗口外/依赖展开成员由 Main 同一事务最终裁决。`mutableMessageIds` 永不替代 Main 守卫。
+- Bounded 创建动作门禁（Main 守卫之外的 Renderer 预检）：true-branch 仅在自有（owned/mutable）assistant 消息上可见，任何继承消息（含 fork 锚点自身）隐藏；insert 仅在自有 assistant 消息与恰好等于活跃分支 `anchorMessageId` 的 fork 锚点上可见，继承链上更老引用隐藏；活跃分支在 catalog 中未知/过期/缺失时两者均隐藏且零调用。窗口外锚点不做本地投影门禁，由 Main 同一事务最终裁决。`mutableMessageIds` 永不替代 Main 守卫。
+- 回答组/选集预检只覆盖 loaded 可解析成员；窗口外/依赖展开成员由 Main 同一事务最终裁决。
 
 ---
 
@@ -185,10 +186,12 @@ effective(topic, branch):
 
 - **Main owner-only**：main owner 行被 live child/grandchild 引用时，main 可 update content/blocks/delete/reorder；child 对同 ID mutation 拒绝；内容更新在 child 有效路由同稳定 ID 可见；删除普通前缀后 child 路由自然缩短；重排后 child 有效前缀自然变化；删除 child anchor 后 child/grandchild 路由明确 NOT_FOUND/fail-closed，branch metadata 不自动删除。
 - **Branch owner**：branch-owned suffix 被 nested descendant 引用时 owner branch 同样可 mutation，descendant 不可。
-- **Window capability**：owner route 包含窗口内全部 owned IDs（即使被后代引用）；descendant window 只含 descendant-owned suffix，不含 ancestor refs。
-- **复合路径**：answer-group/segment/resend/regenerate/批量按实际写目标判定；保留非 owner 拒绝与原子性；ancestor root 只读引用不得阻断 branch-owned targets。
-- **Renderer**：main owner 共享可见消息有 mutation UI；child ancestor ref 无 mutation UI；unknown/stale 仍 fail-closed。
-- **E2E（SQLite/IPC/UI 稳定合同）**：扩展 `tests/e2e/specs/conversation/true-branch.spec.ts` 聚焦场景（owner main 修改、child 引用只读、child 看到唯一实体更新），使用现有 fixture；本轮只编写，由验证阶段决定执行。
+- **Bounded 插入**：分支上自有锚点组尾插入成功；ID 恰好等于分支 `anchorMessageId` 的 fork 边界继承插入成功（盖章当前分支自有、落自有后缀起始、before 为 fork 锚点）；更老祖先引用插入以 `VALIDATION_ERROR` 拒绝且零写（有效路由与 capability 不变）。
+- **Bounded 分支创建**：非 main 父以继承引用（含父自身 fork 锚点）创建子分支拒绝（`VALIDATION_ERROR`、零分支行）；以父自有后缀锚点创建成功且新路由含父自有前缀；main 父仍接受 main 自有消息。
+- **Window capability**：owner route 包含窗口内全部 owned IDs（即使被后代引用）；descendant window 只含 descendant-owned suffix，不含 ancestor refs.
+- **复合路径**：answer-group/segment/resend/regenerate/批量按实际写目标判定；保留非 owner 拒绝与原子性；ancestor root 只读引用不得阻断 branch-owned targets，但永不授权插入/分支锚点（BRANCH-3/7 bounded 例外除外）。
+- **Renderer**：main owner 共享可见消息有 mutation UI；child ancestor ref 无 mutation UI；true-branch 在任何继承消息上隐藏（含 fork 锚点），insert 仅在自有消息与精确 fork 锚点上可见；unknown/stale/missing 分支元数据隐藏 true-branch/insert 且零调用；unknown/stale capability 仍 fail-closed.
+- **E2E（SQLite/IPC/UI 稳定合同）**：扩展 `tests/e2e/specs/conversation/true-branch.spec.ts` 聚焦场景（owner main 修改、child 引用只读、child 看到唯一实体更新、fork 边界插入成功、老祖先插入拒绝、继承 nested 拒绝、自有 nested 成功、UI 在继承上隐藏 true-branch 且仅在 fork 锚点显示 insert），使用现有 fixture；本轮只编写，由验证阶段决定执行。
 - **证据层级**：按 `AGENTS.md` 路由；跨组件/IPC/持久化行为以 Playwright E2E 为合同级回归，隔离逻辑以 Vitest 为先；`pnpm ui:observe` 仅诊断。
 
 ---
@@ -206,7 +209,7 @@ effective(topic, branch):
 ## 17. 验收标准（Acceptance Criteria）
 
 - **AC-1**：本文档完整覆盖 BRANCH-1…BRANCH-12 决策表、术语（§2）、权威模型（§4）、实体/owner/引用（§5）、递归算法（§6）、anchor/创建（§7）、全部 mutation 权限表（§8）、蝴蝶效应与缺 anchor（§9）、删除（§10）、capability（§11）、复合原子性（§12）、上下文关系（§13）、同步/导出/导入边界（§14）、测试契约（§15）、非目标（§16）。
-- **AC-2**：全文内部一致——同一 topic 同一消息只有一个权威实体；当前路由只能 mutation owned 行；owner 权限永不因后代引用收缩；`mutableMessageIds` 为窗口 owned 精确子集；缺 anchor 明确 NOT_FOUND；branch anchor 与 context anchor 严格区分；`branchMessagesToTopic` 明确不是 true branch。
-- **AC-3**：`docs/adr/projection-completeness-authority.md` 已迁出 PROJ-13…PROJ-16 并链接本文档，无悬空编号与旧语义；`docs/adr/context-window.md` 仅有必要澄清/链接；`docs/architecture/architecture.md` 与 `AGENTS.md` 仅有高价值链接，无决策表复制；`CLAUDE.md` 仍为符号链接。
-- **AC-4**：代码已按 owner-only 实施（保护集与 descendant 守卫移除，capability 为 owned 精确子集），全部 mutation 路径按实际写目标判权，事务原子性保留，无 schema migration。
+- **AC-2**：全文内部一致——同一 topic 同一消息只有一个权威实体；当前路由只能 mutation owned 行；owner 权限永不因后代引用收缩；祖先引用对插入/子分支创建只读，唯一例外是分支上 ID 恰好等于该分支 `anchorMessageId` 的 fork 边界插入；子分支锚点必须父路由自有；`mutableMessageIds` 为窗口 owned 精确子集；缺 anchor 明确 NOT_FOUND；branch anchor 与 context anchor 严格区分；`branchMessagesToTopic` 明确不是 true branch；无 branch-from-any-ancestor / insert-after-any-ancestor 授权残留。
+- **AC-3**：`docs/adr/projection-completeness-authority.md` 已迁出 PROJ-13…PROJ-16 并链接本文档，无悬空编号与旧语义，且直接冲突的分支/插入行已收敛到本文档 bounded 语义；`docs/adr/context-window.md` 仅有必要澄清/链接；`docs/architecture/architecture.md` 与 `AGENTS.md` 仅有高价值链接，无决策表复制；`CLAUDE.md` 仍为符号链接。
+- **AC-4**：代码已按 owner-only + bounded 实施（保护集与 descendant 守卫移除，capability 为 owned 精确子集；插入限自有 + 唯一 fork 边界例外，老祖先零写；分支创建限父自有，继承零写；Renderer 在继承上隐藏 true-branch、仅在精确 fork 锚点显示 insert、缺元数据零调用），全部 mutation 路径按实际写目标判权，事务原子性保留，无 schema migration.
 - **AC-5**：Focused Main + renderer Vitest 通过（canonical lane，无手工 ABI rebuild）；E2E 只编写不运行，由独立 Validation 决定执行。

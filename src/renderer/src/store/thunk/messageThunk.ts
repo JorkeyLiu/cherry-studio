@@ -97,8 +97,12 @@ import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
 import { bumpGeneration, publishResidentComplete } from '../residentRegistry'
-import { requireAnswerGroupForMember, requireLoadedAnswerMembersMutable } from '../routeAnswerGroup'
-import { selectRouteGeneration } from '../topicBranch'
+import {
+  isMutableForActiveRoute,
+  requireAnswerGroupForMember,
+  requireLoadedAnswerMembersMutable
+} from '../routeAnswerGroup'
+import { selectActiveBranchId, selectBranchNode, selectRouteGeneration } from '../topicBranch'
 import { replaceSegmentsForTopic } from '../topicSegment'
 // import {
 //   bulkAddBlocksV2,
@@ -1574,6 +1578,34 @@ export const appendAssistantResponseThunk =
 export const insertMessagesThunk =
   (topicId: string, afterMessageId: string, assistantId: string) =>
   async (dispatch: AppDispatch, getState: () => RootState): Promise<void> => {
+    // BRANCH-3 bounded insertion precheck (renderer fail-closed, zero IPC on
+    // proven rejection): unknown/stale/missing branch metadata rejects;
+    // a loaded-but-immutable anchor rejects unless it is exactly the
+    // active-branch fork anchor. Unloaded anchors stay Main-decided (no
+    // local projection gating). Main stays final authority.
+    {
+      const state = getState()
+      const active = selectActiveBranchId(state, topicId)
+      if (active !== null) {
+        const node = selectBranchNode(state, topicId, active)
+        if (node == null || node.topicId !== topicId) {
+          logger.error(`[insertMessagesThunk] Unknown branch metadata; failing closed without IPC.`)
+          throw new Error(`Branch metadata for topic ${topicId} is unknown through this route`)
+        }
+      }
+      const loaded = (state as unknown as { messages?: { messageIdsByTopic?: Record<string, string[]> } }).messages
+        ?.messageIdsByTopic?.[topicId]
+      const isLoaded = Array.isArray(loaded) && loaded.includes(afterMessageId)
+      if (isLoaded && !isMutableForActiveRoute(state, topicId, afterMessageId)) {
+        const node = active !== null ? selectBranchNode(state, topicId, active) : undefined
+        const isForkAnchor =
+          active !== null && node != null && node.topicId === topicId && node.anchorMessageId === afterMessageId
+        if (!isForkAnchor) {
+          logger.error(`[insertMessagesThunk] Anchor ${afterMessageId} is immutable through this route.`)
+          throw new Error(`Anchor ${afterMessageId} is immutable through this route`)
+        }
+      }
+    }
     const now = new Date().toISOString()
 
     // Create user message with block
@@ -1621,8 +1653,8 @@ export const insertMessagesThunk =
 
     try {
       // Primary path: Main-authoritative batch insert after stable anchor (no renderer index).
-      // Main resolves durable placement (owned anchor: group tail; inherited
-      // branch anchor: suffix start) and returns canonical wire + stable
+      // Main resolves durable placement (owned anchor: group tail; exact
+      // fork-anchor inherited exception: suffix start) and returns canonical wire + stable
       // neighbors + mutability delta. The renderer applies that authority
       // verbatim — never local splices, never branchId-guessed capability.
       const insertRoute = activeRouteOf(getState, topicId)
@@ -1750,10 +1782,11 @@ export const branchMessagesToTopicThunk =
  *
  * No prefix cloning: Main inserts one branch row (topic + parent route +
  * anchor + name) and returns the effective wire (shared prefix + empty
- * suffix) for the renderer projection. The anchor may itself be inherited
- * (branch-from-inherited). Local-only: no sync intent is minted. No topics
- * are created: the caller selects the new route via activeBranchSet on the
- * SAME logical topic (never addTopic/setActiveTopic).
+ * suffix) for the renderer projection. BRANCH-7 owner-only anchors: the
+ * anchor must be owned by the parent route (inherited references reject).
+ * Local-only: no sync intent is minted. No topics are created: the caller
+ * selects the new route via activeBranchSet on the SAME logical topic
+ * (never addTopic/setActiveTopic).
  */
 export const createBranchThunk =
   (topicId: string, parentBranchId: string | null, anchorMessageId: string, name: string) =>
@@ -1764,6 +1797,34 @@ export const createBranchThunk =
     if (!topicId || !anchorMessageId) {
       logger.error(`[createBranchThunk] Invalid topicId/anchorMessageId provided.`)
       return null
+    }
+    // BRANCH-7 owner-only precheck (renderer fail-closed, zero IPC on proven
+    // reject): parent/active mismatch or unknown parent metadata rejects; a
+    // loaded-but-immutable anchor rejects (inherited, including the fork
+    // anchor itself). Unloaded anchors stay Main-decided (no local
+    // projection gating). Main stays final authority.
+    {
+      const state = getState()
+      const normalizedParent = typeof parentBranchId === 'string' && parentBranchId.length > 0 ? parentBranchId : null
+      const active = selectActiveBranchId(state, topicId)
+      if ((active ?? null) !== normalizedParent) {
+        logger.error(`[createBranchThunk] Parent route mismatch; failing closed without IPC.`)
+        return null
+      }
+      if (normalizedParent !== null) {
+        const node = selectBranchNode(state, topicId, normalizedParent)
+        if (node == null || node.topicId !== topicId) {
+          logger.error(`[createBranchThunk] Unknown parent branch metadata; failing closed without IPC.`)
+          return null
+        }
+      }
+      const loaded = (state as unknown as { messages?: { messageIdsByTopic?: Record<string, string[]> } }).messages
+        ?.messageIdsByTopic?.[topicId]
+      const isLoaded = Array.isArray(loaded) && loaded.includes(anchorMessageId)
+      if (isLoaded && !isMutableForActiveRoute(state, topicId, anchorMessageId)) {
+        logger.error(`[createBranchThunk] Anchor ${anchorMessageId} is immutable through the parent route.`)
+        return null
+      }
     }
     try {
       const result = await dbService.createBranch(topicId, parentBranchId, anchorMessageId, name)

@@ -2554,11 +2554,15 @@ export class ChatDbAggregateService {
    * One atomic Main SQLite transaction:
    * - Validates topic exists, anchor belongs to the addressed effective route.
    * - Owned anchor: group-tail index inside the owner rows (established behavior).
-   * - Inherited (ancestor-reference) anchor on a branch route: durable insert
-   *   at the START of the branch owned suffix (index 0), so the effective
-   *   order is ancestor prefix through branch anchor, then new rows, then the
-   *   previous suffix. Main-route inherited anchors cannot occur (main has no
-   *   ancestors); main inserts keep owned group-tail behavior.
+   * - Inherited (ancestor-reference) anchor on a branch route: allowed ONLY
+   *   when the anchor ID exactly equals the addressed branch's immutable
+   *   anchorMessageId (the fork boundary / parent-reference final answer).
+   *   That sole exception inserts durably at the START of the branch owned
+   *   suffix (index 0), so the effective order is ancestor prefix through
+   *   branch anchor, then new rows, then the previous suffix. Any older
+   *   ancestor reference rejects fail-closed (BRANCH-3) with zero writes.
+   *   Main-route inherited anchors cannot occur (main has no ancestors);
+   *   main inserts keep owned group-tail behavior.
    * - Inserts supplied entries with existing dense-order repository logic
    *   (batch insertManyAt, existing IDs preserve position via patch-only).
    * - Upserts blocks + syncs file references in original entry order.
@@ -2589,11 +2593,14 @@ export class ChatDbAggregateService {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
           }
           // Validate anchor membership inside the addressed effective route.
-          // An inherited ancestor reference is valid on a branch route: new
-          // rows land at the START of the route owner's suffix (BRANCH-11
+          // BRANCH-3 bounded insertion: ancestor references are read-only.
+          // The sole fork-boundary exception is an inherited anchor whose ID
+          // exactly equals the addressed branch's immutable anchorMessageId;
+          // new rows land at the START of the route owner's suffix (BRANCH-11
           // effective order: prefix through branch anchor, then owned
           // suffix). Ordered authority for owner sequencing is the route
-          // owner's rows — ordering never crosses route owners.
+          // owner's rows — ordering never crosses route owners. Older
+          // ancestor references reject fail-closed with zero writes.
           const routeMessages = this.resolveRouteMessagesInTx(repos, topicId, route).messages
           const anchorData = routeMessages.find((m) => m.id === afterMessageId)
           if (!anchorData) {
@@ -2601,7 +2608,26 @@ export class ChatDbAggregateService {
           }
           const ownerMessages = repos.messages.listByTopic(topicId, route)
           const anchorOwned = (anchorData.branchId ?? null) === route
-          const resolvedInsertIndex = anchorOwned ? this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData) : 0
+          let resolvedInsertIndex: number
+          if (anchorOwned) {
+            resolvedInsertIndex = this.resolveInsertIndexAfterAnchor(ownerMessages, anchorData)
+          } else {
+            if (route === null) {
+              throw new ChatDbValidationError(
+                `Anchor message ${afterMessageId} is not owned by this route and insertion is read-only`
+              )
+            }
+            const addressedBranch = repos.branches.getById(route)
+            if (!addressedBranch.found || addressedBranch.data.topicId !== topicId) {
+              throw new ChatDbNotFoundError(`Branch ${route} does not exist in topic ${topicId}`)
+            }
+            if (afterMessageId !== addressedBranch.data.anchorMessageId) {
+              throw new ChatDbValidationError(
+                `Anchor message ${afterMessageId} is an ancestor reference and is read-only through this route`
+              )
+            }
+            resolvedInsertIndex = 0
+          }
 
           // BRANCH-4/11: genuinely new suffixes never require existing-group
           // mutability. Reading an ancestor root/group to resolve placement
@@ -7370,7 +7396,10 @@ export class ChatDbAggregateService {
    * - validates the logical topic exists (trash rejects) and the parent
    *   route exists (null = main route, otherwise a branch of this topic);
    * - validates the anchor belongs to the parent route's current effective
-   *   route (branch-from-inherited-anchor allowed);
+   *   route AND is owned by the parent route (BRANCH-7 owner-only anchors:
+   *   main parent accepts main-owned messages; non-main parent requires
+   *   anchor owner == parentBranchId; any inherited reference — including
+   *   the parent's own inherited fork anchor — rejects fail-closed);
    * - inserts exactly one `topic_branches` row with the requested name
    *   (default applied by the renderer; Main stores verbatim);
    * - emits NO sync outbox/frame/membership intent and touches no parent
@@ -7410,11 +7439,25 @@ export class ChatDbAggregateService {
           if (parentRoute !== null) {
             this.requireBranchInTx(repos, topicId, parentRoute)
           }
-          // Anchor must resolve inside the parent route's effective route.
+          // Anchor must resolve inside the parent route's effective route AND
+          // be owned by the parent route (BRANCH-7). A nested branch therefore
+          // always includes the parent branch's owned route through the
+          // selected anchor; inherited references never fork.
           const parentEffective = this.resolveRouteMessagesInTx(repos, topicId, parentRoute).messages
           if (!parentEffective.some((m) => m.id === anchorMessageId)) {
             throw new ChatDbNotFoundError(
               `Anchor message ${anchorMessageId} does not belong to the parent route of topic ${topicId}`
+            )
+          }
+          const anchorRow = repos.messages.getById(anchorMessageId)
+          if (!anchorRow.found || anchorRow.data.topicId !== topicId) {
+            throw new ChatDbNotFoundError(
+              `Anchor message ${anchorMessageId} does not belong to the parent route of topic ${topicId}`
+            )
+          }
+          if ((anchorRow.data.branchId ?? null) !== parentRoute) {
+            throw new ChatDbValidationError(
+              `Anchor message ${anchorMessageId} is not owned by the parent route and cannot fork a child branch`
             )
           }
           const now = new Date().toISOString()

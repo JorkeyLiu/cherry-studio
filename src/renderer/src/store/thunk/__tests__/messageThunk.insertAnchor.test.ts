@@ -209,4 +209,96 @@ describe('insertMessagesThunk — S6.2c-2 Main-authoritative anchor insert', () 
     const src = fs.readFileSync('src/renderer/src/store/thunk/messageThunk.ts', 'utf8')
     expect(src).not.toContain('insertMessagesThunkLegacy')
   })
+
+  it('bounded insert precheck: loaded older inherited anchor makes zero IPC calls', async () => {
+    const { insertMessagesThunk } = await import('../messageThunk')
+    const thunk = insertMessagesThunk('t-1', 'm-old', 'assistant-1')
+    const state = {
+      topicBranch: {
+        branchesByTopic: {
+          't-1': [
+            {
+              id: 'b1',
+              topicId: 't-1',
+              parentBranchId: null,
+              anchorMessageId: 'm-fork',
+              name: 'B1',
+              createdAt: null,
+              updatedAt: null
+            }
+          ]
+        },
+        activeBranchIdByTopic: { 't-1': 'b1' },
+        routeGenerationByTopic: {},
+        deletionFallbackByTopic: {}
+      },
+      messages: {
+        entities: {},
+        ids: [],
+        messageIdsByTopic: { 't-1': ['m-old', 'm-fork', 'c0'] },
+        mutableMessageIdsByTopic: { 't-1': ['c0'] },
+        mutableRouteByTopic: { 't-1': 'b1' }
+      }
+    }
+    await expect(thunk(mocks.dispatch as any, (() => state) as any)).rejects.toThrow()
+    expect(mocks.insertMessagesAfterAnchor).not.toHaveBeenCalled()
+    expect(mocks.dispatch).not.toHaveBeenCalled()
+  })
+
+  it('bounded insert precheck: exact fork anchor allows IPC', async () => {
+    mocks.insertMessagesAfterAnchor.mockResolvedValue({ ...authoritativeResult(), branchId: 'b1' })
+    const { insertMessagesThunk } = await import('../messageThunk')
+    const thunk = insertMessagesThunk('t-1', 'm-fork', 'assistant-1')
+    const state = {
+      topicBranch: {
+        branchesByTopic: {
+          't-1': [
+            {
+              id: 'b1',
+              topicId: 't-1',
+              parentBranchId: null,
+              anchorMessageId: 'm-fork',
+              name: 'B1',
+              createdAt: null,
+              updatedAt: null
+            }
+          ]
+        },
+        activeBranchIdByTopic: { 't-1': 'b1' },
+        routeGenerationByTopic: {},
+        deletionFallbackByTopic: {}
+      },
+      messages: {
+        entities: {},
+        ids: [],
+        messageIdsByTopic: { 't-1': ['m-old', 'm-fork', 'c0'] },
+        mutableMessageIdsByTopic: { 't-1': ['c0'] },
+        mutableRouteByTopic: { 't-1': 'b1' }
+      }
+    }
+    await thunk(mocks.dispatch as any, (() => state) as any)
+    expect(mocks.insertMessagesAfterAnchor).toHaveBeenCalledOnce()
+  })
+
+  it('bounded insert precheck: stale branch metadata makes zero IPC calls', async () => {
+    const { insertMessagesThunk } = await import('../messageThunk')
+    const thunk = insertMessagesThunk('t-1', 'm-fork', 'assistant-1')
+    const state = {
+      topicBranch: {
+        branchesByTopic: { 't-1': [] },
+        activeBranchIdByTopic: { 't-1': 'b-stale' },
+        routeGenerationByTopic: {},
+        deletionFallbackByTopic: {}
+      },
+      messages: {
+        entities: {},
+        ids: [],
+        messageIdsByTopic: { 't-1': ['m-fork'] },
+        mutableMessageIdsByTopic: { 't-1': ['m-fork'] },
+        mutableRouteByTopic: { 't-1': 'b-stale' }
+      }
+    }
+    await expect(thunk(mocks.dispatch as any, (() => state) as any)).rejects.toThrow()
+    expect(mocks.insertMessagesAfterAnchor).not.toHaveBeenCalled()
+  })
 })

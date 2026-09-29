@@ -442,21 +442,25 @@ describe('branch mutation guard matrix', () => {
     // Referenced owner group stays reorderable/appendable through the owner (BRANCH-4 butterfly).
     expect(agg.reorderAnswerGroup(t, 'a1', ['a1', 'a2', 'a3'], null).ok).toBe(true)
     expect(agg.insertMessagesAfterAnchor(t, 'a1', [joinEntry('a4', 'u1') as never], null).ok).toBe(true)
-    // Appending onto the inherited group from the child lands as an owned
-    // suffix (anchor u1 is readable in the child effective route; read does
-    // not block write). Under the removed join-group descendant/private
-    // guard this would reject (existing group members non-owned through the
-    // child); BRANCH-4/12 allows it as a genuinely new suffix row.
-    expect(agg.insertMessagesAfterAnchor(t, 'u1', [joinEntry('a5', 'u1') as never], b1).ok).toBe(true)
+    // BRANCH-3 bounded insertion: an older inherited anchor (u1 is not the
+    // branch fork anchor a3) is read-only through the child route and
+    // rejects atomically with zero writes.
+    expect(agg.insertMessagesAfterAnchor(t, 'u1', [joinEntry('a5', 'u1') as never], b1).ok).toBe(false)
+    expect(contentOf(sqlite, 'a5')).toBeNull()
+    // The sole fork-boundary exception (anchor == branch anchorMessageId a3)
+    // lands as an owned suffix at suffix start.
+    expect(agg.insertMessagesAfterAnchor(t, 'a3', [joinEntry('a5', 'u1') as never], b1).ok).toBe(true)
     expect(contentOf(sqlite, 'a4')).not.toBeNull()
     expect(contentOf(sqlite, 'a5')).not.toBeNull()
     const a5branch = sqlite.prepare('SELECT branch_id AS b FROM messages WHERE id=?').get('a5') as {
       b: string | null
     }
     expect(a5branch.b).toBe(b1)
-    // Fresh askId (new suffix changing no existing group) stays allowed on both routes.
+    // Fresh askId (new suffix changing no existing group) stays allowed on the
+    // owner route; on the child it is allowed only through the fork anchor.
     expect(agg.insertMessagesAfterAnchor(t, 'a2', [joinEntry('n1', 'u-new') as never], null).ok).toBe(true)
-    expect(agg.insertMessagesAfterAnchor(t, 'u1', [joinEntry('n2', 'u-new2') as never], b1).ok).toBe(true)
+    expect(agg.insertMessagesAfterAnchor(t, 'u1', [joinEntry('n2', 'u-new2') as never], b1).ok).toBe(false)
+    expect(agg.insertMessagesAfterAnchor(t, 'a3', [joinEntry('n2', 'u-new2') as never], b1).ok).toBe(true)
   })
 
   it('batch delete/segment atomicity keeps non-owner rejection without descendant locks (BRANCH-12)', () => {

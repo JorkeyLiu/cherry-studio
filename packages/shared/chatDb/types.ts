@@ -1131,8 +1131,10 @@ export interface TopicBranchWire {
 /**
  * @see IpcChannel.ChatDb_CreateBranch — create one internal branch node.
  *
- * The anchor must belong to the parent route's current effective route
- * (branch-from-inherited-anchor allowed). Multi-level branches supported.
+ * The anchor must belong to the parent route's current effective route AND
+ * be owned by the parent route (owner-only child-branch anchors; inherited
+ * references — including the parent's own inherited fork anchor — reject).
+ * Main parent accepts main-owned messages. Multi-level branches supported.
  * Returns the created node plus the effective wire of the new (empty-suffix)
  * route for projection.
  */
@@ -1209,11 +1211,14 @@ export interface DeleteBranchResponse extends FileCleanupResult {
  * One atomic Main transaction:
  * - Validates topic exists, anchor belongs to the addressed effective route.
  * - Owned anchor: group-tail index inside the route owner rows (established behavior).
- * - Inherited (ancestor-reference) anchor on a branch route: durable insert
- *   at the START of the branch owned suffix (index 0), so the effective
- *   order is ancestor prefix through branch anchor, then new rows, then the
- *   previous suffix. Main-route inherited anchors cannot occur (main has no
- *   ancestors); main inserts keep owned group-tail behavior.
+ * - Inherited (ancestor-reference) anchor on a branch route: allowed ONLY when
+ *   the anchor ID exactly equals the addressed branch's immutable
+ *   anchorMessageId (fork-boundary exception); durable insert at the START of
+ *   the branch owned suffix (index 0), so the effective order is ancestor
+ *   prefix through branch anchor, then new rows, then the previous suffix.
+ *   Older ancestor references reject fail-closed with zero writes.
+ *   Main-route inherited anchors cannot occur (main has no ancestors);
+ *   main inserts keep owned group-tail behavior.
  * - Resolves ordered authority messages sort_order ASC, id ASC.
  * - Advances past contiguous assistant messages with same non-empty ask_id as anchor
  *   (group-tail insertion) when anchor is an owned assistant with askId.

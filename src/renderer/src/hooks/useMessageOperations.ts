@@ -322,8 +322,9 @@ export function useMessageOperations(topic: Topic) {
 
   /**
    * True branch creation (the ONLY true-branch creation method): fork one
-   * internal branch node at the anchor message of a parent route (which may
-   * itself be inherited). No prefix cloning, no sync intent, no new topic.
+   * internal branch node at an anchor message owned by the parent route
+   * (BRANCH-7 owner-only; inherited references reject). No prefix cloning,
+   * no sync intent, no new topic.
    */
   const createBranch = useCallback(
     (topicId: string, parentBranchId: string | null, anchorMessageId: string, name: string) => {

@@ -1334,9 +1334,10 @@ const Messages = ({
         })
       }),
       // Distinct TRUE branch creation (the ONLY true-branch creation method).
-      // Forks one internal branch node at the anchor message of the ACTIVE
-      // route (which may itself be inherited) with no prefix cloning and no
-      // sync intent. New branches default to the localized New Branch name;
+      // Forks one internal branch node at an anchor message owned by the
+      // ACTIVE route (BRANCH-7 owner-only; inherited references reject
+      // fail-closed with zero writes) with no prefix cloning and no sync
+      // intent. New branches default to the localized New Branch name;
       // no auto-rename (the name is the branch identity shown on its fork
       // divider and the top breadcrumb). No edit-and-branch. Creating a
       // branch immediately selects it; the topic stays fixed (never

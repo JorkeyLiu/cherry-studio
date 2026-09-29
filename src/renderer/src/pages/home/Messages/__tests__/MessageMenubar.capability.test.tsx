@@ -240,8 +240,9 @@ function setFakeState(opts: {
   mutableRoute?: string | null
   resident?: boolean
   entities?: Record<string, Message>
+  branches?: Array<{ id: string; parentBranchId: string | null; anchorMessageId: string }>
 }) {
-  const { activeRoute, loadedIds, mutableIds, mutableRoute, resident = true, entities } = opts
+  const { activeRoute, loadedIds, mutableIds, mutableRoute, resident = true, entities, branches = [] } = opts
   fakeState.current = {
     settings: {
       exportMenuOptions: {},
@@ -251,7 +252,17 @@ function setFakeState(opts: {
     assistants: { assistants: [] },
     messageBlocks: { entities: {}, ids: [] },
     topicBranch: {
-      branchesByTopic: {},
+      branchesByTopic: {
+        'topic-1': branches.map((b) => ({
+          id: b.id,
+          topicId: 'topic-1',
+          parentBranchId: b.parentBranchId,
+          anchorMessageId: b.anchorMessageId,
+          name: b.id,
+          createdAt: null,
+          updatedAt: null
+        }))
+      },
       activeBranchIdByTopic: activeRoute === null ? {} : { 'topic-1': activeRoute },
       routeGenerationByTopic: {},
       deletionFallbackByTopic: {}
@@ -398,6 +409,77 @@ describe('MessageMenubar capability gating (real component)', () => {
     const { unmount } = renderMenubar(entities.a1, { isAssistantMessage: true, isGrouped: true })
     expect(screen.queryByTestId('assistant-mention-model')).toBeNull()
     expect(screen.queryByTestId('msg-useful-btn')).toBeNull()
+    unmount()
+  })
+
+  it('true-branch hides on inherited messages including the fork anchor (BRANCH-7)', () => {
+    const entities: Record<string, Message> = {
+      m0: makeAssistantMessage('m0', 'u0'),
+      m1: makeAssistantMessage('m1', 'u0'),
+      c0: makeAssistantMessage('c0', 'u9')
+    }
+    // Active branch b1 anchored at m1; owned suffix is c0 only.
+    setFakeState({
+      activeRoute: 'b1',
+      loadedIds: ['m0', 'm1', 'c0'],
+      mutableIds: ['c0'],
+      mutableRoute: 'b1',
+      entities,
+      branches: [{ id: 'b1', parentBranchId: null, anchorMessageId: 'm1' }]
+    })
+    const owned = renderMenubar(entities.c0, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-true-branch-btn')).not.toBeNull()
+    owned.unmount()
+    const inherited = renderMenubar(entities.m0, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-true-branch-btn')).toBeNull()
+    inherited.unmount()
+    const forkAnchor = renderMenubar(entities.m1, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-true-branch-btn')).toBeNull()
+    forkAnchor.unmount()
+  })
+
+  it('insert shows only at the exact fork anchor among inherited refs (BRANCH-3)', () => {
+    const entities: Record<string, Message> = {
+      m0: makeAssistantMessage('m0', 'u0'),
+      m1: makeAssistantMessage('m1', 'u0'),
+      c0: makeAssistantMessage('c0', 'u9')
+    }
+    setFakeState({
+      activeRoute: 'b1',
+      loadedIds: ['m0', 'm1', 'c0'],
+      mutableIds: ['c0'],
+      mutableRoute: 'b1',
+      entities,
+      branches: [{ id: 'b1', parentBranchId: null, anchorMessageId: 'm1' }]
+    })
+    const owned = renderMenubar(entities.c0, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-insert-btn')).not.toBeNull()
+    owned.unmount()
+    const forkAnchor = renderMenubar(entities.m1, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-insert-btn')).not.toBeNull()
+    forkAnchor.unmount()
+    const older = renderMenubar(entities.m0, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-insert-btn')).toBeNull()
+    older.unmount()
+  })
+
+  it('unknown/stale branch metadata hides true-branch and insert (fail-closed)', () => {
+    const entities: Record<string, Message> = {
+      m1: makeAssistantMessage('m1', 'u0'),
+      c0: makeAssistantMessage('c0', 'u9')
+    }
+    // Active route b-stale has no catalog node: both creation actions hide.
+    setFakeState({
+      activeRoute: 'b-stale',
+      loadedIds: ['m1', 'c0'],
+      mutableIds: ['m1', 'c0'],
+      mutableRoute: 'b-stale',
+      entities,
+      branches: []
+    })
+    const { unmount } = renderMenubar(entities.c0, { isAssistantMessage: true })
+    expect(screen.queryByTestId('msg-true-branch-btn')).toBeNull()
+    expect(screen.queryByTestId('msg-insert-btn')).toBeNull()
     unmount()
   })
 })

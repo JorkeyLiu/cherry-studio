@@ -29,7 +29,7 @@ import { type messageBlocksSelectors, selectMessageBlocksByIds } from '@renderer
 import { selectIsMessageMutable } from '@renderer/store/newMessage'
 import { isLoadedAnswerGroupMutable, resolveLoadedAnswerGroup } from '@renderer/store/routeAnswerGroup'
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
-import { selectActiveBranchId } from '@renderer/store/topicBranch'
+import { selectActiveBranchId, selectBranchNode } from '@renderer/store/topicBranch'
 import { TraceIcon } from '@renderer/trace/pages/Component'
 import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
 import { type Message, type MessageBlock, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
@@ -78,7 +78,7 @@ import {
   Upload
 } from 'lucide-react'
 import type { Dispatch, FC, ReactNode, SetStateAction } from 'react'
-import { Fragment, memo, useCallback, useMemo, useState } from 'react'
+import { Fragment, memo, useCallback, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { shallowEqual, useSelector } from 'react-redux'
 import styled from 'styled-components'
@@ -160,6 +160,14 @@ type MessageMenubarButtonContext = {
   // locally: edit/delete/regenerate/translate renderers return null; Main
   // rejects.
   isInherited: boolean
+  // True only when this message ID exactly equals the active branch's
+  // immutable anchorMessageId (fork boundary). The sole inherited-insert
+  // exception (BRANCH-3): insert stays available at the fork anchor.
+  isForkAnchor: boolean
+  // True when a non-main active route has no matching branch node in the
+  // catalog (unknown/stale/missing metadata). All branch-gated creation
+  // actions hide fail-closed while set; Main stays final authority.
+  isBranchMetadataMissing: boolean
   // BRANCH-12: group-level mutability for the loaded answer group this
   // message belongs to (every loaded assistant member owned through the
   // active route; reading the loaded user root never blocks). False
@@ -388,14 +396,25 @@ const MessageMenubar: FC<Props> = (props) => {
     await emitNewBranch(message.id)
   }, [message.id])
 
+  // Bounded true-branch gating (BRANCH-3/7) is computed below from the
+  // Main-authoritative capability + branch catalog; these refs let the
+  // callbacks fail closed with zero calls when the button would hide.
+  const trueBranchGateRef = useRef(false)
+  const insertGateRef = useRef(false)
+
   const onTrueBranch = useCallback(async () => {
     // NEW_TRUE_BRANCH contract is ID-based (fork/anchor message ID); the
     // listener reports success/failure toasts only after completion. This
-    // toolbar button is the ONLY true-branch creation method.
+    // toolbar button is the ONLY true-branch creation method. Defense in
+    // depth: inherited messages never emit (the button hides; Main rejects).
+    if (!trueBranchGateRef.current) return
     await emitTrueBranch(message.id)
   }, [message.id])
 
   const onInsertMessages = useCallback(async () => {
+    // Defense in depth: inherited non-fork-anchor messages never dispatch
+    // (the button hides; the thunk precheck + Main guard reject).
+    if (!insertGateRef.current) return
     await dispatch(insertMessagesThunk(topic.id, message.id, assistant.id))
     window.toast.success(t('chat.message.insert.success'))
   }, [dispatch, topic.id, message.id, assistant.id, t])
@@ -743,6 +762,26 @@ const MessageMenubar: FC<Props> = (props) => {
     selectIsMessageMutable(state, topic.id, message.id, activeBranchIdForMenu)
   )
   const isInherited = !isMutableForMenu
+  // Bounded fork-boundary metadata (BRANCH-3/7): the active branch node
+  // carries the immutable anchorMessageId. Unknown/stale/missing catalog
+  // for a non-main route fails closed (both creation actions hide).
+  const activeBranchNodeForMenu = useSelector((state: RootState) =>
+    selectBranchNode(state, topic.id, activeBranchIdForMenu)
+  )
+  const isBranchMetadataMissing =
+    activeBranchIdForMenu !== null && (activeBranchNodeForMenu == null || activeBranchNodeForMenu.topicId !== topic.id)
+  const isForkAnchor =
+    !isBranchMetadataMissing &&
+    activeBranchIdForMenu !== null &&
+    activeBranchNodeForMenu != null &&
+    activeBranchNodeForMenu.anchorMessageId === message.id
+  // True-branch is owner-only (BRANCH-7): unavailable on any inherited
+  // message, including the fork anchor itself. Insert is owner-only except
+  // the exact fork anchor among inherited refs (BRANCH-3 exception).
+  const canTrueBranch = isAssistantMessage && isMutableForMenu && !isBranchMetadataMissing
+  const canInsert = isAssistantMessage && !isBranchMetadataMissing && (isMutableForMenu || isForkAnchor)
+  trueBranchGateRef.current = canTrueBranch
+  insertGateRef.current = canInsert
   // BRANCH-12 group capability for assistant answer members: every loaded
   // assistant member must be owned, otherwise
   // group-mutating buttons (mention-model append, useful) hide fail-closed.
@@ -786,6 +825,8 @@ const MessageMenubar: FC<Props> = (props) => {
     isEditable,
     isGrouped,
     isInherited,
+    isForkAnchor,
+    isBranchMetadataMissing,
     isGroupMutable: isGroupMutableForMenu,
     isLastMessage,
     isTranslating,
@@ -1208,12 +1249,17 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'true-branch': ({ isAssistantMessage, onTrueBranch, softHoverBg, t }) => {
+  'true-branch': ({ isAssistantMessage, isInherited, isBranchMetadataMissing, onTrueBranch, softHoverBg, t }) => {
     // Visible assistant-message toolbar button, immediately left of Delete
     // (registry order). The ONLY true-branch creation method: forks a
-    // local-only lineage branch at this (anchor) message, which may itself
-    // be inherited (branch-from-inherited). No edit-and-branch.
+    // local-only lineage branch at this owned (anchor) message. BRANCH-7
+    // owner-only anchors: hidden on any inherited message (including the
+    // fork anchor itself) and on unknown/stale/missing branch metadata;
+    // Main rejects inherited anchors fail-closed. No edit-and-branch.
     if (!isAssistantMessage) {
+      return null
+    }
+    if (isInherited || isBranchMetadataMissing) {
       return null
     }
 
@@ -1229,11 +1275,27 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Tooltip>
     )
   },
-  'assistant-insert': ({ isAssistantMessage, onInsertMessages, softHoverBg, t }) => {
+  'assistant-insert': ({
+    isAssistantMessage,
+    isInherited,
+    isForkAnchor,
+    isBranchMetadataMissing,
+    onInsertMessages,
+    softHoverBg,
+    t
+  }) => {
     // Visible assistant-message toolbar button between Branch and Delete
-    // (registry order). Insert follows current authority constraints
-    // (Main-authoritative insert thunk); no inherited hide.
+    // (registry order). BRANCH-3 bounded insertion: hidden on inherited
+    // messages except the exact active-branch fork anchor (the sole
+    // fork-boundary insertion exception); hidden on unknown/stale/missing
+    // branch metadata. Main guard stays final authority.
     if (!isAssistantMessage) {
+      return null
+    }
+    if (isBranchMetadataMissing) {
+      return null
+    }
+    if (isInherited && !isForkAnchor) {
       return null
     }
     return (
