@@ -100,6 +100,20 @@ const mocks = vi.hoisted(() => {
     // behavior (used by S3.2 key-aware tests).
     savePosition: savePositionSpy,
     getSavedPosition: getSavedPositionSpy,
+    // Stable-commit spy for the displayed-route coordinator: bootstrap and
+    // route-switch completions persist via the trusted commit
+    // (a programmatic restore needs no user input to become stable).
+    commitStableViewport: vi.fn(() => true),
+    // Live-viewport capture for stable commits: the coordinator measures the
+    // final visible viewport and commits it under the target route key.
+    captureSnapshot: vi.fn(() => ({
+      scrollTop: -100,
+      anchorId: 'm1',
+      messageId: 'm1',
+      intraRowOffset: -10,
+      rawScrollTop: -100,
+      isAtBottom: false
+    })),
 
     // S3.2: key-aware infrastructure — exposed for setup/teardown/assertion
     scrollKeyStore,
@@ -209,6 +223,10 @@ vi.mock('@renderer/hooks/useMessageActionController', () => ({
 }))
 
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
+  // Named exports used by the displayed-route coordinator. The single
+  // controller owns transition truth; the mock keeps timing isolated.
+  commitSnapshotForRoute: mocks.commitStableViewport,
+  routeScrollKey: (topicId: string, branchId: string | null) => `topic-${topicId}::${branchId ?? 'main'}`,
   default: (_key: string) => {
     // S3.2: Model production useScrollPosition key timing.
     //
@@ -231,8 +249,10 @@ vi.mock('@renderer/hooks/useScrollPosition', () => ({
       containerRef: mocks.scrollContainerRef,
       handleScroll: vi.fn(),
       getSavedPosition: mocks.getSavedPosition,
+      getSnapshotForRoute: vi.fn(() => null),
       clearSavedPosition: vi.fn(),
-      savePosition: mocks.savePosition
+      savePosition: mocks.savePosition,
+      captureSnapshot: mocks.captureSnapshot
     }
   }
 }))
@@ -1327,8 +1347,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // Same epoch: clearPendingNavigate SHOULD have been called
     expect(mocks.clearPendingNavigate).toHaveBeenCalled()
-    // Same epoch: savePosition SHOULD have been called
-    expect(mocks.savePosition).toHaveBeenCalled()
+    // Same epoch: the stable completion commits the restored viewport
+    // (programmatic restore needs no user input to become stable).
+    expect(mocks.commitStableViewport).toHaveBeenCalled()
   })
 
   it('S3.1 Blocker 1: pending bootstrap A→B→A — stale epoch-0 does not clear at epoch 2', async () => {
@@ -1398,10 +1419,12 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     // clearPendingNavigate called exactly once (epoch-2 bootstrap only)
     expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1)
-    // S3.2: savePosition called exactly three times — two from transition
-    // coordinators (A→B, B→A) and one from the epoch-2 bootstrap completion.
-    // The stale epoch-0 completion must NOT add a call.
-    expect(mocks.savePosition).toHaveBeenCalledTimes(3)
+    // S3.2: savePosition called exactly twice — two from transition
+    // coordinators (A→B, B→A). The epoch-2 bootstrap completion persists
+    // via the stable commit (not savePosition). The stale epoch-0
+    // completion must add neither call.
+    expect(mocks.savePosition).toHaveBeenCalledTimes(2)
+    expect(mocks.commitStableViewport).toHaveBeenCalledTimes(1)
   })
 
   // -----------------------------------------------------------------------
@@ -1487,8 +1510,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
       pendingTransactionResolvers[0]?.('success')
     })
 
-    // Same epoch: savePosition SHOULD have been called
-    expect(mocks.savePosition).toHaveBeenCalled()
+    // Same epoch: the stable completion commits the restored viewport
+    // (programmatic restore needs no user input to become stable).
+    expect(mocks.commitStableViewport).toHaveBeenCalled()
   })
 
   // -----------------------------------------------------------------------

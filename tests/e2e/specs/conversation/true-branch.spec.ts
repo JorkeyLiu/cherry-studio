@@ -858,6 +858,26 @@ test.describe('Topic-internal branches end-to-end', () => {
       Math.abs((offsetAfter as number) - (offsetBefore as number)),
       'divider switch must preserve the visual reference (viewport offset stable)'
     ).toBeLessThanOrEqual(12)
+    // Atomic reveal: the target window commits hidden and is revealed only
+    // after pre-paint first positioning, so the switch never paints the
+    // target route at a wrong scroll position. The transition must settle to
+    // a visible phase (never stuck positioning/hidden).
+    await page.waitForFunction(
+      () => {
+        const el = document.getElementById('messages')
+        const phase = el?.getAttribute('data-viewport-phase')
+        return phase === 'revealed' || phase === 'idle'
+      },
+      undefined,
+      { timeout: 30000 }
+    )
+    const viewportPhase = await page.evaluate(
+      () => document.getElementById('messages')?.getAttribute('data-viewport-phase') ?? null
+    )
+    expect(
+      viewportPhase === 'revealed' || viewportPhase === 'idle',
+      `viewport must settle visible after divider switch (got ${viewportPhase})`
+    ).toBe(true)
     const after = await scrollMetrics(page)
     if (after.scrollHeight > after.clientHeight + 200) {
       expect(
@@ -1309,7 +1329,7 @@ test.describe('Topic-internal branches end-to-end', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'VISUAL-CONTRACT E2E: new true branch lands at latest/bottom; fork-divider keeps the same row offset across real divider-switch round-trips at multiple viewport positions; top selector round-trips through another route twice with no scrolling in the target route and restores the same stable messageId/intraRowOffset (pixel threshold).'
+        'VISUAL-CONTRACT E2E: new true branch lands at latest/bottom; fork-divider keeps the same row offset across real divider-switch round-trips at multiple viewport positions; top selector round-trips through another route twice with no scrolling in the target route and restores the same stable messageId/intraRowOffset (pixel threshold); route-local A→B→A→B→A switching with distinct real-wheel established route-exclusive positions on both routes and zero scrolling of any kind in the measured loop asserts every return restores its own anchor identity + offset.'
     })
     const page = mainWindow
     await waitForAppReady(page)
@@ -1428,49 +1448,533 @@ test.describe('Topic-internal branches end-to-end', () => {
         if (!container || !row) return null
         return row.getBoundingClientRect().top - container.getBoundingClientRect().top
       }, anchorId)
-    const scrollAnchorTo = async (block: ScrollLogicalPosition): Promise<void> => {
-      await page.evaluate(
-        ({ id, block }: { id: string; block: ScrollLogicalPosition }) => {
-          const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
-          const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
-          if (el) el.scrollIntoView({ block, inline: 'nearest', behavior: 'instant' as ScrollBehavior })
-        },
-        { id: anchorId, block }
-      )
-      await rafSettle()
-    }
+    // NOTE (round-1): no programmatic divider pre-position helper remains.
+    // The new single-model source auth leaves scrollIntoView/scrollTop writes
+    // without a live interaction token, so the keeper compensates them and the
+    // divider intent never observes the intended position. Per contract the
+    // divider setup therefore takes the real-wheel path as well
+    // (`vcWheelPositionDivider` below) — no production exception. The measured
+    // divider round-trip legs themselves still perform zero scrolling.
 
-    // True top-selector round-trip (twice, no scrolling in the target route):
-    // L1 (target) -> main (other route, window stable) -> L1. The stable
-    // anchor identity + intra-row offset must repeat within pixels.
-    await scrollAnchorTo('center')
-    await waitRouteWindowStable(ANCHOR_IDX + 1)
-    const targetBefore = await readStableAnchor()
-    expect(targetBefore, 'target route must expose a stable viewport-top anchor').not.toBeNull()
-    for (let round = 0; round < 2; round += 1) {
-      await openTopSelector()
-      await page.locator('[data-testid="branch-cascader-item-main"]').first().click()
-      await waitActiveBranch(null)
-      await waitRouteWindowStable(1)
-      // No scrolling while away or after returning: the restore itself must
-      // place the viewport; any explicit scroll here would mask regression.
-      await openTopSelector()
-      await page.locator(`[data-testid="branch-cascader-item-${visualBranchId}"]`).first().click()
-      await waitActiveBranch(visualBranchId)
-      await waitRouteWindowStable(ANCHOR_IDX + 1)
-      expect(await readActiveBranch()).toBe(visualBranchId)
-      const targetAfter = await readStableAnchor()
-      expect(targetAfter, `round ${round}: stable anchor must be measurable after return`).not.toBeNull()
-      expect(targetAfter?.id, `round ${round}: same stable message must anchor the viewport`).toBe(targetBefore?.id)
-      expect(
-        Math.abs((targetAfter?.intra ?? 0) - (targetBefore?.intra ?? 0)),
-        `round ${round}: intra-row offset must repeat within pixels`
-      ).toBeLessThanOrEqual(12)
-      expect(
-        Math.abs((targetAfter?.offset ?? 0) - (targetBefore?.offset ?? 0)),
-        `round ${round}: pixel offset must repeat within threshold`
-      ).toBeLessThanOrEqual(12)
+    // Exclusive-suffix contract (replaces the obsolete shared-prefix proof):
+    // the prior revision created main with 14 post-fork owned messages but
+    // ZERO branch-owned post-fork messages, and both A/B anchors were
+    // positions of the SAME shared fork anchor (`start` vs `center`) — that
+    // proved only shared-prefix continuity and could pass with partial
+    // windows/stale overlap. This contract seeds ≥12 owned suffix messages
+    // on EACH route and pins each route's stable viewport to its OWN
+    // exclusive suffix ID.
+    const SUFFIX_COUNT = 12
+    const branchSuffixIds: string[] = []
+    let suffixAfter: string = anchorId
+    for (let i = 0; i < SUFFIX_COUNT; i++) {
+      const suffixId = `${topicId}-msg-bexcl-${pad(i, 5)}`
+      branchSuffixIds.push(suffixId)
+      const seedRes: any = await page.evaluate(
+        async ({
+          tid,
+          bid,
+          after,
+          mid,
+          asstId,
+          idx
+        }: {
+          tid: string
+          bid: string
+          after: string
+          mid: string
+          asstId: string
+          idx: number
+        }) =>
+          await (window as any).api.chatDb.insertMessagesAfterAnchor({
+            topicId: tid,
+            branchId: bid,
+            afterMessageId: after,
+            entries: [
+              {
+                message: {
+                  id: mid,
+                  topicId: tid,
+                  role: idx % 2 === 0 ? 'user' : 'assistant',
+                  assistantId: asstId,
+                  status: 'success',
+                  createdAt: '2026-01-01T00:00:00.000Z',
+                  updatedAt: '2026-01-01T00:00:00.000Z'
+                },
+                blocks: []
+              }
+            ]
+          }),
+        { tid: topicId, bid: visualBranchId, after: suffixAfter, mid: suffixId, asstId: assistantId, idx: i }
+      )
+      expect(seedRes?.ok, `branch suffix seed ${suffixId} failed: ${JSON.stringify(seedRes)}`).toBe(true)
+      suffixAfter = suffixId
     }
+    // Main post-fork exclusives are the seeded tail (14 owned rows after the
+    // fork anchor); branch exclusives are the 12 rows above. Pick interior
+    // exclusives so around-windows (before 10 / after 19 groups) stay partial.
+    const mainExclusiveId = ids[ANCHOR_IDX + 10]
+    const mainExclusiveAltId = ids[ANCHOR_IDX + 5]
+    // Main post-fork exclusive set: seeded tail after the fork anchor. By
+    // construction this excludes the shared prefix (ids[0..ANCHOR_IDX]) and
+    // the branch-owned suffix (branchSuffixIds) — asserted explicitly below.
+    // Both interior exclusives below belong to that set (topology reference
+    // only; viewport establishment uses real-wheel seeks over the full set,
+    // never these fixed IDs).
+    const mainPostForkExclusiveIds = ids.slice(ANCHOR_IDX + 1)
+    expect(mainPostForkExclusiveIds, 'exclusive set must contain the interior topology references').toEqual(
+      expect.arrayContaining([mainExclusiveId, mainExclusiveAltId])
+    )
+    const branchExclusiveId = branchSuffixIds[SUFFIX_COUNT - 3]
+    expect(mainExclusiveId).not.toBe(branchExclusiveId)
+    // Topology proof BEFORE any viewport assertion: each effective route
+    // contains its own exclusive anchor and excludes the foreign exclusive.
+    const mainTopo: any = await page.evaluate(
+      async ({ topicId, limit }: { topicId: string; limit: number }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId, limit }),
+      { topicId, limit: 100 }
+    )
+    expect(mainTopo?.ok, `main topology probe failed: ${JSON.stringify(mainTopo)}`).toBe(true)
+    const mainTopoIds = (mainTopo.value.messages as any[]).map((m: any) => m.id) as string[]
+    expect(mainTopoIds, 'main effective route must contain its exclusive anchor').toContain(mainExclusiveId)
+    expect(mainTopoIds, 'main effective route must exclude the branch exclusive').not.toContain(branchExclusiveId)
+    const branchTopo: any = await page.evaluate(
+      async ({ topicId, branchId, limit }: { topicId: string; branchId: string; limit: number }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId, branchId, limit }),
+      { topicId, branchId: visualBranchId, limit: 100 }
+    )
+    expect(branchTopo?.ok, `branch topology probe failed: ${JSON.stringify(branchTopo)}`).toBe(true)
+    const branchTopoIds = (branchTopo.value.messages as any[]).map((m: any) => m.id) as string[]
+    expect(branchTopoIds, 'branch effective route must contain its exclusive anchor').toContain(branchExclusiveId)
+    expect(branchTopoIds, 'branch effective route must exclude the main post-fork exclusive').not.toContain(
+      mainExclusiveId
+    )
+    expect(branchTopoIds, 'branch effective route must share the fork anchor').toContain(anchorId)
+    const mainFullLen = mainTopoIds.length
+    const branchFullLen = branchTopoIds.length
+    expect(mainFullLen, 'main effective route must hold ≥12 post-fork owned rows').toBeGreaterThanOrEqual(
+      ANCHOR_IDX + 1 + 12
+    )
+    expect(branchFullLen, 'branch effective route must hold prefix + ≥12 owned rows').toBeGreaterThanOrEqual(
+      ANCHOR_IDX + 1 + SUFFIX_COUNT
+    )
+
+    const waitViewportVisible = async (): Promise<void> => {
+      await page.waitForFunction(
+        () => {
+          const el = document.getElementById('messages')
+          const phase = el?.getAttribute('data-viewport-phase')
+          return phase === 'revealed' || phase === 'idle'
+        },
+        undefined,
+        { timeout: 30000 }
+      )
+    }
+    const scrollKeyFor = (branchId: string | null): string => `scroll:topic-${topicId}::${branchId ?? 'main'}`
+    const readRouteSnapshotId = async (branchId: string | null): Promise<string> =>
+      page.evaluate((key: string) => {
+        try {
+          const raw = (window as any).keyv?.get?.(key) as Record<string, unknown> | undefined
+          if (!raw || typeof raw !== 'object') return ''
+          const mid = typeof raw.messageId === 'string' ? raw.messageId : ''
+          if (mid.length > 0) return mid
+          const aid = typeof raw.anchorId === 'string' ? raw.anchorId : ''
+          return aid
+        } catch {
+          return ''
+        }
+      }, scrollKeyFor(branchId))
+    // Post-hoc stable-persistence proof (never a pre-switch gate, never a
+    // scroll-stop control): the route-keyed snapshot must carry a non-empty
+    // exclusive ID that exactly equals the live crossing-first anchor. The
+    // wheel seek below stops on LIVE geometry only; this waiter only proves
+    // the production saver flushed that live anchor afterwards.
+    const waitSnapshotMatchesLiveExclusive = async (branchId: string | null, exclusiveIds: string[]): Promise<void> => {
+      await page.waitForFunction(
+        ({ key, allowed }: { key: string; allowed: string[] }) => {
+          try {
+            const raw = (window as any).keyv?.get?.(key) as Record<string, unknown> | undefined
+            if (!raw || typeof raw !== 'object') return false
+            const snapId =
+              typeof raw.messageId === 'string' && (raw.messageId as string).length > 0
+                ? (raw.messageId as string)
+                : typeof raw.anchorId === 'string' && (raw.anchorId as string).length > 0
+                  ? (raw.anchorId as string)
+                  : ''
+            if (!snapId || !allowed.includes(snapId)) return false
+            const container = document.querySelector('#messages') as HTMLElement | null
+            if (!container) return false
+            const c = container.getBoundingClientRect()
+            const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+            const cands: { id: string; top: number; bottom: number }[] = []
+            for (const row of rows) {
+              const r = row.getBoundingClientRect()
+              const id = row.getAttribute('data-message-id')
+              if (id) cands.push({ id, top: r.top, bottom: r.bottom })
+            }
+            if (cands.length === 0) return false
+            const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
+            const picked = crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+            return picked.id === snapId
+          } catch {
+            return false
+          }
+        },
+        { key: scrollKeyFor(branchId), allowed: exclusiveIds },
+        { timeout: 30000 }
+      )
+    }
+    // Real-wheel establishment only (single-model snapshot sources):
+    // `user-scroll` snapshots require a live interaction token (genuine
+    // wheel/touch/pointer/key/scrollbar input); programmatic scrollIntoView /
+    // scrollTop writes never commit. All route-exclusive initial positions
+    // and the ordinary-scroll supplement below therefore use real
+    // `page.mouse.wheel` with the mouse over #messages, then record the
+    // settled live crossing-first anchor (same `pickViewportTopAnchor` core
+    // as `readStableAnchor`). Keyv is read only as a post-hoc proof that the
+    // saver flushed that live anchor — never to decide when to stop wheeling
+    // and never as a pre-switch qualification.
+    // `scrollAnchorTo` below is intentionally NOT a user-snapshot helper: it
+    // program-matically sets the divider pre-switch viewport, and the divider
+    // intent path freezes that live position synchronously at click time
+    // (controller-owned freeze, not a user-scroll snapshot). It must never be
+    // used for route-exclusive establishment.
+    const vcFocus = async (): Promise<void> => {
+      const box = await page.locator('#messages').first().boundingBox()
+      if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+      }
+    }
+    const vcWheel = async (deltaY: number): Promise<void> => {
+      await vcFocus()
+      await page.mouse.wheel(0, deltaY)
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      )
+      await page.waitForTimeout(220)
+    }
+    const vcSettled = async (): Promise<{ id: string; intra: number; offset: number } | null> => {
+      let prev: { id: string; intra: number; offset: number } | null = null
+      let stable = 0
+      const start = Date.now()
+      let cur: { id: string; intra: number; offset: number } | null = null
+      while (Date.now() - start < 10000) {
+        cur = await readStableAnchor()
+        if (cur && prev && cur.id === prev.id && Math.abs(cur.offset - prev.offset) <= 2) {
+          stable += 1
+          if (stable >= 2) return cur
+        } else {
+          stable = 0
+        }
+        prev = cur
+        await page.waitForTimeout(140)
+      }
+      return cur
+    }
+    const vcWheelSearchExclusive = async (
+      exclusiveIds: string[],
+      maxSteps = 30
+    ): Promise<{ id: string; intra: number; offset: number } | null> => {
+      // Wheel-assisted deterministic seek: always wheel first via real wheel
+      // input, then record the settled crossing-first anchor. Stops on LIVE
+      // geometry only (settled anchor in the exclusive set); never on keyv.
+      for (let i = 0; i < 4; i++) {
+        await vcWheel(-560)
+      }
+      let settled = await vcSettled()
+      if (settled && exclusiveIds.includes(settled.id)) return settled
+      for (let i = 0; i < maxSteps; i++) {
+        await vcWheel(560)
+        settled = await vcSettled()
+        if (settled && exclusiveIds.includes(settled.id)) return settled
+      }
+      for (let i = 0; i < maxSteps; i++) {
+        await vcWheel(-560)
+        settled = await vcSettled()
+        if (settled && exclusiveIds.includes(settled.id)) return settled
+      }
+      return await vcSettled()
+    }
+    const vcWheelSearchExclusiveExcluding = async (
+      exclusiveIds: string[],
+      excludeId: string,
+      maxSteps = 30
+    ): Promise<{ id: string; intra: number; offset: number } | null> => {
+      // Ordinary-scroll supplement seek: real-wheel move to a DIFFERENT
+      // exclusive crossing-first than the established one. Live-geometry stop
+      // only; snapshot is asserted post-hoc by the caller.
+      for (let i = 0; i < 6; i++) {
+        await vcWheel(560)
+        const settled = await vcSettled()
+        if (settled && exclusiveIds.includes(settled.id) && settled.id !== excludeId) return settled
+      }
+      for (let i = 0; i < maxSteps; i++) {
+        await vcWheel(-560)
+        const settled = await vcSettled()
+        if (settled && exclusiveIds.includes(settled.id) && settled.id !== excludeId) return settled
+      }
+      for (let i = 0; i < maxSteps; i++) {
+        await vcWheel(560)
+        const settled = await vcSettled()
+        if (settled && exclusiveIds.includes(settled.id) && settled.id !== excludeId) return settled
+      }
+      return await vcSettled()
+    }
+    const vcDividerVisible = async (): Promise<boolean> =>
+      page.evaluate((a: string) => {
+        const row =
+          (document.querySelector(`[data-testid="branch-fork-divider-${a}-main"]`) as HTMLElement | null) ??
+          (document.querySelector(`[data-testid="branch-fork-divider-${a}"]`) as HTMLElement | null)
+        if (!row) return false
+        const container = document.querySelector('#messages') as HTMLElement | null
+        if (!container) return false
+        const c = container.getBoundingClientRect()
+        const r = row.getBoundingClientRect()
+        return r.bottom > c.top && r.top < c.bottom
+      }, anchorId)
+    const vcForkOffset = async (): Promise<number | null> =>
+      page.evaluate((id: string) => {
+        const container = document.querySelector('#messages') as HTMLElement | null
+        const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+        const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+        if (!container || !el) return null
+        return el.getBoundingClientRect().top - container.getBoundingClientRect().top
+      }, anchorId)
+    // Divider pre-position via real wheel only (round-1 contract choice, see
+    // NOTE above): coarse sweep until the divider row is visible, then small
+    // real-wheel fine-tune toward the nominal block using live geometry only
+    // (never keyv, never a fixed scroll-direction assumption — the sign is
+    // probed once). The two nominal blocks stay distinct viewport positions;
+    // each round-trip still asserts its own ≤12px offset stability with real
+    // divider clicks and zero scrolling on the measured legs.
+    const vcWheelPositionDivider = async (block: 'center' | 'start'): Promise<void> => {
+      let vis = await vcDividerVisible()
+      for (let i = 0; i < 24 && !vis; i++) {
+        await vcWheel(-560)
+        vis = await vcDividerVisible()
+      }
+      for (let i = 0; i < 24 && !vis; i++) {
+        await vcWheel(560)
+        vis = await vcDividerVisible()
+      }
+      expect(vis, `divider row must be reachable via real wheel at ${block}`).toBe(true)
+      const targetOf = async (): Promise<number> => {
+        const h = await page.evaluate(() => document.querySelector('#messages')?.getBoundingClientRect().height ?? 0)
+        return block === 'start' ? 40 : h / 2
+      }
+      // Probe the wheel sign once (column-reverse safe): +140 then compare.
+      const off0 = await vcForkOffset()
+      await vcWheel(140)
+      await vcSettled()
+      const off1 = await vcForkOffset()
+      let sign = 1
+      if (off0 !== null && off1 !== null) {
+        const t = await targetOf()
+        if (Math.abs(off1 - t) >= Math.abs(off0 - t)) sign = -1
+      }
+      let lastErr: number | null = null
+      let stale = 0
+      for (let i = 0; i < 18; i++) {
+        const off = await vcForkOffset()
+        if (off === null) break
+        const target = await targetOf()
+        const err = Math.abs(off - target)
+        if (err <= 90) break
+        if (lastErr !== null && err >= lastErr) {
+          stale += 1
+          if (stale >= 2) break
+        } else {
+          stale = 0
+        }
+        lastErr = err
+        await vcWheel(sign * 140)
+        await vcSettled()
+      }
+      await vcSettled()
+      await waitViewportVisible()
+      expect(await vcDividerVisible(), `divider must stay visible after wheel positioning at ${block}`).toBe(true)
+    }
+    const residentIds = async (): Promise<string[]> =>
+      page.evaluate((tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [], topicId)
+    const domCount = async (messageId: string): Promise<number> =>
+      page.evaluate((id: string) => document.querySelectorAll(`#messages [data-message-id="${id}"]`).length, messageId)
+    // Establish distinct route-local stable viewports on EXCLUSIVE suffix IDs
+    // via real wheel only (explicit pre-loop positioning; establishment
+    // scrolling happens here only): wheel-seek main (B) to its own post-fork
+    // exclusive crossing-first, then wheel-seek branch (A) to its own owned
+    // exclusive crossing-first. No specific fixture ID and no center/start
+    // requirement — the core is a route-exclusive stable position. Afterwards
+    // prove each route's stable snapshot flushed that live anchor (post-hoc).
+    await waitActiveBranch(visualBranchId)
+    await openTopSelector()
+    await page.locator('[data-testid="branch-cascader-item-main"]').first().click()
+    await waitActiveBranch(null)
+    await waitRouteWindowStable(1)
+    await waitViewportVisible()
+    let mainBefore = await vcWheelSearchExclusive(mainPostForkExclusiveIds)
+    expect(mainBefore, 'main route must expose a stable viewport-top anchor via real wheel').not.toBeNull()
+    expect(mainBefore?.id, 'main stable anchor id must be non-empty').not.toBe('')
+    expect(mainPostForkExclusiveIds, 'main stable viewport must pin its own post-fork exclusive ID').toContain(
+      mainBefore?.id
+    )
+    expect(ids.slice(0, ANCHOR_IDX + 1), 'main stable viewport must exclude the shared prefix').not.toContain(
+      mainBefore?.id
+    )
+    expect(branchSuffixIds, 'main stable viewport must exclude the branch suffix').not.toContain(mainBefore?.id)
+    expect(await isVisibleInMessagesViewport(page, mainBefore?.id as string), 'main anchor must be visible').toBe(true)
+    await waitViewportVisible()
+    mainBefore = await vcSettled()
+    expect(mainBefore, 'main live anchor must stay measurable after settle').not.toBeNull()
+    expect(mainPostForkExclusiveIds, 'settled main anchor must stay main-exclusive').toContain(mainBefore?.id)
+    await waitSnapshotMatchesLiveExclusive(null, mainPostForkExclusiveIds)
+    expect(await readRouteSnapshotId(null), 'main stable snapshot must equal the live crossing-first anchor').toBe(
+      mainBefore?.id
+    )
+    await openTopSelector()
+    await page.locator(`[data-testid="branch-cascader-item-${visualBranchId}"]`).first().click()
+    await waitActiveBranch(visualBranchId)
+    await waitRouteWindowStable(1)
+    await waitViewportVisible()
+    let branchBefore = await vcWheelSearchExclusive(branchSuffixIds)
+    expect(branchBefore, 'branch route must expose a stable viewport-top anchor via real wheel').not.toBeNull()
+    expect(branchBefore?.id, 'branch stable anchor id must be non-empty').not.toBe('')
+    expect(branchSuffixIds, 'branch stable viewport must pin its own route-exclusive suffix ID').toContain(
+      branchBefore?.id
+    )
+    expect(await isVisibleInMessagesViewport(page, branchBefore?.id as string), 'branch anchor must be visible').toBe(
+      true
+    )
+    await waitViewportVisible()
+    branchBefore = await vcSettled()
+    expect(branchBefore, 'branch live anchor must stay measurable after settle').not.toBeNull()
+    expect(branchSuffixIds, 'settled branch anchor must stay branch-exclusive').toContain(branchBefore?.id)
+    await waitSnapshotMatchesLiveExclusive(visualBranchId, branchSuffixIds)
+    const branchSnapId = await readRouteSnapshotId(visualBranchId)
+    expect(branchSnapId, 'branch stable snapshot messageId/anchorId must be non-empty').not.toBe('')
+    expect(branchSuffixIds, 'branch stable snapshot must be route-exclusive').toContain(branchSnapId)
+    expect(branchSnapId, 'branch stable snapshot must equal the live crossing-first anchor').toBe(branchBefore?.id)
+    expect(await readActiveBranch(), 'established route must be the branch').toBe(visualBranchId)
+    expect(mainBefore?.id !== branchBefore?.id, 'established A/B viewports must be distinct exclusive IDs').toBe(true)
+    const assertAnchorRepeat = (
+      label: string,
+      before: { id: string; intra: number; offset: number } | null,
+      after: { id: string; intra: number; offset: number } | null,
+      threshold: number
+    ): void => {
+      expect(after, `${label}: stable anchor must be measurable after return`).not.toBeNull()
+      expect(after?.id, `${label}: same stable message must anchor the viewport`).toBe(before?.id)
+      expect(
+        Math.abs((after?.intra ?? 0) - (before?.intra ?? 0)),
+        `${label}: intra-row offset must repeat within pixels`
+      ).toBeLessThanOrEqual(threshold)
+      expect(
+        Math.abs((after?.offset ?? 0) - (before?.offset ?? 0)),
+        `${label}: pixel offset must repeat within threshold`
+      ).toBeLessThanOrEqual(threshold)
+    }
+    const switchTopRoute = async (branchId: string | null, itemTestId: string, minDom: number): Promise<void> => {
+      await openTopSelector()
+      await page.locator(`[data-testid="${itemTestId}"]`).first().click()
+      await waitActiveBranch(branchId)
+      await waitRouteWindowStable(minDom)
+      await waitViewportVisible()
+    }
+    const assertExclusiveResident = async (
+      label: string,
+      targetId: string,
+      foreignId: string,
+      fullLen: number
+    ): Promise<void> => {
+      // Partial windows are valid: require the requested exclusive anchor
+      // covered, never the full effective route resident. Record both.
+      const resident = await residentIds()
+      expect(resident, `${label}: window must contain the target exclusive ID`).toContain(targetId)
+      expect(resident, `${label}: window must exclude the foreign exclusive ID`).not.toContain(foreignId)
+      expect(
+        resident.length <= fullLen,
+        `${label}: resident (${resident.length}) never exceeds the effective route (${fullLen})`
+      ).toBe(true)
+      expect(await domCount(targetId), `${label}: target exclusive must be attached`).toBeGreaterThan(0)
+      expect(await domCount(foreignId), `${label}: foreign exclusive must be absent from DOM`).toBe(0)
+      expect(await isVisibleInMessagesViewport(page, targetId), `${label}: target must be in viewport`).toBe(true)
+    }
+    // Measured A→B→A→B→A from here (currently on A): each return asserts
+    // its own route-exclusive snapshot. NO scrolling of any kind in this loop
+    // — no wheel, touch, pointer, keyboard, scrollbar, scrollIntoView, or
+    // scrollTop writes: restores must place the viewport on their own.
+    await switchTopRoute(null, 'branch-cascader-item-main', 1)
+    assertAnchorRepeat('B return 1', mainBefore, await readStableAnchor(), 12)
+    await assertExclusiveResident('B return 1', mainBefore?.id as string, branchBefore?.id as string, mainFullLen)
+    await switchTopRoute(visualBranchId, `branch-cascader-item-${visualBranchId}`, 1)
+    assertAnchorRepeat('A return 1', branchBefore, await readStableAnchor(), 12)
+    await assertExclusiveResident('A return 1', branchBefore?.id as string, mainBefore?.id as string, branchFullLen)
+    await switchTopRoute(null, 'branch-cascader-item-main', 1)
+    assertAnchorRepeat('B return 2', mainBefore, await readStableAnchor(), 12)
+    await assertExclusiveResident('B return 2', mainBefore?.id as string, branchBefore?.id as string, mainFullLen)
+    await switchTopRoute(visualBranchId, `branch-cascader-item-${visualBranchId}`, 1)
+    assertAnchorRepeat('A return 2', branchBefore, await readStableAnchor(), 12)
+    await assertExclusiveResident('A return 2', branchBefore?.id as string, mainBefore?.id as string, branchFullLen)
+
+    // Ordinary-scroll supplement: from the established main anchor, move via
+    // real wheel to a DIFFERENT main-exclusive crossing-first anchor, record
+    // the live anchor plus its post-hoc snapshot, then switch away/back with
+    // zero scrolling during the switch and verify the NEW position restores
+    // exact ID + ≤12px (ordinary scroll persistence retained). The wheel seek
+    // stops on live geometry only; keyv is a post-hoc proof, never a gate.
+    await switchTopRoute(null, 'branch-cascader-item-main', 1)
+    await waitViewportVisible()
+    let scrolledMainBefore = await vcWheelSearchExclusiveExcluding(mainPostForkExclusiveIds, mainBefore?.id as string)
+    expect(scrolledMainBefore, 'scrolled main must expose a stable viewport-top anchor via real wheel').not.toBeNull()
+    await waitViewportVisible()
+    scrolledMainBefore = await vcSettled()
+    expect(scrolledMainBefore, 'scrolled main live anchor must stay measurable after settle').not.toBeNull()
+    await waitSnapshotMatchesLiveExclusive(null, mainPostForkExclusiveIds)
+    expect(scrolledMainBefore, 'scrolled main must expose a stable viewport-top anchor').not.toBeNull()
+    expect(scrolledMainBefore?.id, 'scrolled main stable anchor id must be non-empty').not.toBe('')
+    expect(mainPostForkExclusiveIds, 'scrolled main stable anchor must be a main post-fork exclusive ID').toContain(
+      scrolledMainBefore?.id
+    )
+    expect(ids.slice(0, ANCHOR_IDX + 1), 'scrolled main stable anchor must exclude the shared prefix').not.toContain(
+      scrolledMainBefore?.id
+    )
+    expect(branchSuffixIds, 'scrolled main stable anchor must exclude the branch suffix').not.toContain(
+      scrolledMainBefore?.id
+    )
+    expect(
+      scrolledMainBefore?.id,
+      'scrolled main must move to a different exclusive anchor than the established main viewport'
+    ).not.toBe(mainBefore?.id)
+    expect(await readRouteSnapshotId(null), 'main stable snapshot must equal the live crossing-first anchor').toBe(
+      scrolledMainBefore?.id
+    )
+    await switchTopRoute(visualBranchId, `branch-cascader-item-${visualBranchId}`, 1)
+    await assertExclusiveResident(
+      'away on branch',
+      branchBefore?.id as string,
+      scrolledMainBefore?.id as string,
+      branchFullLen
+    )
+    await switchTopRoute(null, 'branch-cascader-item-main', 1)
+    assertAnchorRepeat('scrolled main return', scrolledMainBefore, await readStableAnchor(), 12)
+    await assertExclusiveResident(
+      'scrolled main return',
+      scrolledMainBefore?.id as string,
+      branchBefore?.id as string,
+      mainFullLen
+    )
+    // Return the branch leg to a route-exclusive anchor for the divider
+    // section below via real wheel (establishment scroll, outside the
+    // measured loop). Divider pre-positions in the loop below likewise use
+    // real wheel (`vcWheelPositionDivider`, round-1 contract choice) — the
+    // divider intent then observes a genuine user-established position.
+    await switchTopRoute(visualBranchId, `branch-cascader-item-${visualBranchId}`, 1)
+    await waitViewportVisible()
+    const dividerPrepAnchor = await vcWheelSearchExclusive(branchSuffixIds)
+    expect(dividerPrepAnchor, 'divider-prep branch anchor must be measurable via real wheel').not.toBeNull()
+    expect(branchSuffixIds, 'divider-prep branch anchor must stay branch-exclusive').toContain(dividerPrepAnchor?.id)
+    await waitRouteWindowStable(1)
+    await waitViewportVisible()
+    await waitSnapshotMatchesLiveExclusive(visualBranchId, branchSuffixIds)
 
     // Divider round-trips at two viewport positions with real clicks: measure
     // the SAME logical divider row offset, switch to the parent route via the
@@ -1478,7 +1982,7 @@ test.describe('Topic-internal branches end-to-end', () => {
     // and compare again. Never a bare finite check.
     for (const block of ['center', 'start'] as const) {
       await waitActiveBranch(visualBranchId)
-      await scrollAnchorTo(block)
+      await vcWheelPositionDivider(block)
       const dividerBefore = await measureDivider()
       expect(dividerBefore, `divider must be measurable at ${block}`).not.toBeNull()
       const takenToggle = page.locator(`[data-testid="branch-fork-selected-${anchorId}"]`).first()
@@ -1505,70 +2009,47 @@ test.describe('Topic-internal branches end-to-end', () => {
       })
       await page.locator(`[data-testid="branch-fork-item-${visualBranchId}"]`).first().click()
       await waitActiveBranch(visualBranchId)
-      // True-branch visual divider return: resident-first, no unconditional
-      // oldest-edge scroll. The windowed return may first commit the around
-      // window (main[5..15], 11 msgs) and then auto-page the head (msgs 0..4)
-      // via the production InfiniteScroll → pending-replay → around → merge
-      // path. Read the resident first: when auto replay already converged to
-      // the full 16, skip the oldest-edge scroll and settle the DOM directly;
-      // only when the resident is still the 11-window, perform exactly one
-      // oldest-edge scroll to trigger pagination. Either way the final
-      // contract is the SAME divider row absolute offset repeating within
-      // pixels (preferred divider anchor). No `visualHeadId`/fork-anchor
-      // visibility assertion (resident membership + DOM attached only).
+      // True-branch visual divider return: zero synthesized scrolling. The
+      // windowed return commits the around window and the restore-owned
+      // search finishes it: a resident divider is aligned to the captured
+      // offset and committed; an absent one drives its own pages explicitly
+      // until resident/aligned/quiet. A synthetic oldest-edge scroll here
+      // would cancel a healthy in-flight align as user input, record the
+      // edge as the stable snapshot, and drift by exactly the paged height —
+      // so the leg only waits for the divider offset itself to settle and
+      // then asserts the SAME divider row absolute offset repeating within
+      // pixels. No `visualHeadId`/fork-anchor visibility assertion (resident
+      // membership + DOM attached only).
       await waitRouteWindowStable(1)
       await rafSettle()
-      let returnResident: string[] = await page.evaluate(
-        (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
-        topicId
-      )
-      if (returnResident.length === ANCHOR_IDX + 1) {
-        // Auto replay already complete: no oldest-edge scroll. Wait for DOM
-        // settle to the full prefix, then verify the divider contract.
-        await page.waitForFunction(
-          (len: number) => document.querySelectorAll('#messages [data-message-id]').length === len,
-          ANCHOR_IDX + 1,
-          { timeout: 30000 }
-        )
-        await rafSettle()
-      } else {
-        // Still the 11-window: exactly one oldest-edge scroll triggers
-        // pagination, then wait for the final resident (full 16).
-        await page.evaluate(() => {
-          const el = document.getElementById('messages') as HTMLElement | null
-          if (!el) throw new Error('#messages not found')
-          const targetTop = Math.min(0, el.clientHeight - el.scrollHeight)
-          el.scrollTop = targetTop
-          el.dispatchEvent(new Event('scroll', { bubbles: true }))
-        })
-        await page.waitForFunction(
-          ({ tid, len, anchor }: { tid: string; len: number; anchor: string }) => {
-            const s = (window as any).store.getState()
-            const rids = s.messages?.messageIdsByTopic?.[tid]
-            return (
-              Array.isArray(rids) &&
-              rids.length === len &&
-              rids.includes(anchor) &&
-              s.messages?.loadingByTopic?.[tid] !== true
-            )
-          },
-          { tid: topicId, len: ANCHOR_IDX + 1, anchor: anchorId },
-          { timeout: 30000 }
-        )
-        await page.waitForFunction(
-          (len: number) => document.querySelectorAll('#messages [data-message-id]').length === len,
-          ANCHOR_IDX + 1,
-          { timeout: 30000 }
-        )
-        await rafSettle()
+      // Settle with zero scrolling: the placed path already holds the
+      // divider at the captured offset; the searching path drives its own
+      // pages and aligns before committing. Poll the divider offset until
+      // two consecutive reads agree within 2px (20s bound) — this converges
+      // for both completions without ever teleporting the viewport.
+      await waitViewportVisible()
+      let prevDiv: number | null = null
+      let stableDivReads = 0
+      const divSettleStart = Date.now()
+      while (Date.now() - divSettleStart < 20000) {
+        const curDiv = await measureDivider()
+        if (curDiv !== null && prevDiv !== null && Math.abs(curDiv - prevDiv) <= 2) {
+          stableDivReads += 1
+          if (stableDivReads >= 2) break
+        } else {
+          stableDivReads = 0
+        }
+        prevDiv = curDiv
+        await page.waitForTimeout(150)
       }
+      // The returned route keeps the fork anchor reachable (the around
+      // window is the valid restore result; full-prefix convergence is owned
+      // by restore-driven paging only when the anchor starts outside it).
       const pagedResident: string[] = await page.evaluate(
         (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
         topicId
       )
-      expect(pagedResident, `visual return must converge the resident to the full prefix at ${block}`).toEqual(
-        ids.slice(0, ANCHOR_IDX + 1)
-      )
+      expect(pagedResident, `fork anchor must stay resident after return at ${block}`).toContain(anchorId)
       const dividerBack = await measureDivider()
       expect(dividerBack, `divider row must be measurable after return at ${block}`).not.toBeNull()
       expect(
@@ -1594,6 +2075,611 @@ test.describe('Topic-internal branches end-to-end', () => {
         ),
         `fork anchor must stay attached after return at ${block}`
       ).toBeGreaterThan(0)
+    }
+  })
+
+  test('user journey black-box continuous main/A/B with real wheel and top/divider/creation UI', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'USER-JOURNEY BLACK-BOX: single resident window user interaction journey over main + branch A + branch B (displayCount=100 keeps full routes in one resident window; windowed pagination covered by visual contracts/divider search tests); movement only via real wheel plus top selector plus divider UI plus creation UI; geometry-only acceptance (crossing-first anchor identity plus offset, divider offset, DOM attach and absence).'
+    })
+    const page = mainWindow
+    await waitForAppReady(page)
+    const assistantId = await prepareAssistant(page)
+    // Single resident window user interaction journey (displayCount=100 keeps
+    // full routes in one resident window; fixture prep only). Windowed
+    // pagination is covered by visual contracts/divider search tests. All
+    // actual switches/scrolls/creations below are real UI (wheel/top/divider/
+    // message-button); API only inserts owned suffix rows.
+    await page.evaluate((limit: number) => {
+      ;(window as any).store.dispatch({ type: 'newMessages/setDisplayCount', payload: limit })
+    }, 100)
+    const topicId = `journey-src-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const ids = await seedSourceTopic(page, assistantId, topicId, `Journey ${topicId}`)
+    const anchorA = ids[ANCHOR_IDX]
+    const anchorB = ids[ANCHOR_IDX + 6]
+    await activateTopic(page, topicId, TOTAL)
+
+    type BbAnchor = { id: string; offset: number }
+    const bbAnchor = (): Promise<BbAnchor | null> =>
+      page.evaluate(() => {
+        const container = document.querySelector('#messages') as HTMLElement | null
+        if (!container) return null
+        const c = container.getBoundingClientRect()
+        const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+        const cands: { id: string; top: number; bottom: number }[] = []
+        for (const row of rows) {
+          const r = row.getBoundingClientRect()
+          const id = row.getAttribute('data-message-id')
+          if (id) cands.push({ id, top: r.top, bottom: r.bottom })
+        }
+        if (cands.length === 0) return null
+        const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
+        const picked = crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+        return { id: picked.id, offset: picked.top - c.top }
+      })
+    const bbVisible = (messageId: string): Promise<boolean> =>
+      page.evaluate((id: string) => {
+        const container = document.querySelector('#messages') as HTMLElement | null
+        const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+        const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+        if (!container || !el) return false
+        const c = container.getBoundingClientRect()
+        const r = el.getBoundingClientRect()
+        return r.bottom > c.top && r.top < c.bottom
+      }, messageId)
+    const bbCount = (messageId: string): Promise<number> =>
+      page.evaluate((id: string) => document.querySelectorAll(`#messages [data-message-id="${id}"]`).length, messageId)
+    const bbDividerOffset = (anchorId: string): Promise<number | null> =>
+      page.evaluate((a: string) => {
+        const container = document.querySelector('#messages') as HTMLElement | null
+        if (!container) return null
+        const row =
+          (document.querySelector(`[data-testid="branch-fork-divider-${a}-main"]`) as HTMLElement | null) ??
+          (document.querySelector(`[data-testid="branch-fork-divider-${a}"]`) as HTMLElement | null)
+        if (!row) return null
+        return row.getBoundingClientRect().top - container.getBoundingClientRect().top
+      }, anchorId)
+    const bbFocus = async (): Promise<void> => {
+      const box = await page.locator('#messages').first().boundingBox()
+      if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+      }
+    }
+    // Real wheel only: production InfiniteScroll ownership stays with the
+    // wheel input (no direct scrollTop/scrollIntoView/keyv/snapshot writes).
+    const bbWheel = async (deltaY: number): Promise<void> => {
+      await bbFocus()
+      await page.mouse.wheel(0, deltaY)
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      )
+      await page.waitForTimeout(220)
+    }
+    const bbSettled = async (): Promise<BbAnchor | null> => {
+      let prev: BbAnchor | null = null
+      let stable = 0
+      const start = Date.now()
+      let cur: BbAnchor | null = null
+      while (Date.now() - start < 10000) {
+        cur = await bbAnchor()
+        if (cur && prev && cur.id === prev.id && Math.abs(cur.offset - prev.offset) <= 2) {
+          stable += 1
+          if (stable >= 2) return cur
+        } else {
+          stable = 0
+        }
+        prev = cur
+        await page.waitForTimeout(140)
+      }
+      return cur
+    }
+    // Ready sync only: data-viewport-phase gates route readiness (revealed/idle)
+    // plus geometry settle; never a pass assertion — acceptance stays DOM
+    // geometry (anchor identity + offset, attach/absence).
+    const bbWaitDomRoute = async (): Promise<void> => {
+      await page.waitForFunction(
+        () => document.querySelectorAll('#messages [data-message-id]').length >= 1,
+        undefined,
+        { timeout: 30000 }
+      )
+      await page.waitForFunction(
+        () => {
+          const el = document.getElementById('messages')
+          const phase = el?.getAttribute('data-viewport-phase')
+          return phase === 'revealed' || phase === 'idle'
+        },
+        undefined,
+        { timeout: 30000 }
+      )
+      await bbSettled()
+    }
+    const bbWheelUntilVisible = async (messageId: string, maxSteps = 28): Promise<boolean> => {
+      if (await bbVisible(messageId)) return true
+      for (let i = 0; i < maxSteps; i++) {
+        await bbWheel(-620)
+        if (await bbVisible(messageId)) return true
+        await page.waitForTimeout(80)
+      }
+      for (let i = 0; i < maxSteps; i++) {
+        await bbWheel(620)
+        if (await bbVisible(messageId)) return true
+        await page.waitForTimeout(80)
+      }
+      return await bbVisible(messageId)
+    }
+    const bbWheelSearchExclusive = async (exclusiveIds: string[], maxSteps = 30): Promise<BbAnchor | null> => {
+      // Wheel-assisted deterministic seek: always wheel first via real wheel
+      // input, then record the settled crossing-first anchor. Deterministic
+      // seek helper, not a claim of fully natural free exploration.
+      for (let i = 0; i < 4; i++) {
+        await bbWheel(-560)
+      }
+      let settled = await bbSettled()
+      if (settled && exclusiveIds.includes(settled.id)) return settled
+      for (let i = 0; i < maxSteps; i++) {
+        await bbWheel(560)
+        settled = await bbSettled()
+        if (settled && exclusiveIds.includes(settled.id)) return settled
+      }
+      for (let i = 0; i < maxSteps; i++) {
+        await bbWheel(-560)
+        settled = await bbSettled()
+        if (settled && exclusiveIds.includes(settled.id)) return settled
+      }
+      return await bbSettled()
+    }
+    const bbTopTo = async (branchId: string | null): Promise<void> => {
+      await page.locator('[data-testid="branch-selector-entry"]').first().click()
+      await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+      if (branchId === null) {
+        await page.locator('[data-testid="branch-cascader-item-main"]').first().click()
+      } else {
+        await page.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first().click()
+      }
+      await bbWaitDomRoute()
+    }
+    const bbClickBranchBtn = async (messageId: string): Promise<void> => {
+      const e = messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+      const sel = `[id="message-${e}"][data-message-id="${e}"]`
+      const container = page.locator(sel).first()
+      await expect(container, `message ${messageId} must be visible for creation`).toBeVisible({ timeout: 15000 })
+      try {
+        await container.hover({ timeout: 8000 })
+      } catch {
+        // Hover flakiness; click below uses force fallback.
+      }
+      const btn = container.locator('[data-testid="msg-true-branch-btn"]')
+      await expect(btn, `branch button for ${messageId} must attach`).toBeAttached({ timeout: 15000 })
+      try {
+        await btn.click({ timeout: 8000 })
+      } catch {
+        await btn.click({ force: true } as any)
+      }
+    }
+    const assertSameAnchor = (label: string, before: BbAnchor | null, after: BbAnchor | null): void => {
+      expect(before, `${label}: baseline anchor must exist`).not.toBeNull()
+      expect(after, `${label}: return anchor must exist`).not.toBeNull()
+      expect(after?.id, `${label}: same message must anchor`).toBe(before?.id)
+      expect(
+        Math.abs((after?.offset ?? 0) - (before?.offset ?? 0)),
+        `${label}: offset must repeat within 12px`
+      ).toBeLessThanOrEqual(12)
+    }
+    const attachFailure = async (reason: string): Promise<void> => {
+      try {
+        const dump = await page.evaluate(
+          async ({ tid }: { tid: string }) => {
+            const pick = (b: any) => ({
+              id: typeof b?.id === 'string' ? b.id : '',
+              anchorMessageId: typeof b?.anchorMessageId === 'string' ? b.anchorMessageId : ''
+            })
+            let live: unknown = null
+            try {
+              const s = (window as any).store.getState()
+              live = {
+                active: s.topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+                catalog: ((s.topicBranch?.branchesByTopic?.[tid] ?? []) as any[]).map(pick)
+              }
+            } catch (e) {
+              live = { error: e instanceof Error ? e.message : String(e) }
+            }
+            let dom: unknown = null
+            try {
+              const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+              const c = (document.querySelector('#messages') as HTMLElement | null)?.getBoundingClientRect() ?? null
+              dom = {
+                count: rows.length,
+                ids: rows.map((r) => r.getAttribute('data-message-id')),
+                tops: rows.slice(0, 8).map((r) => {
+                  const rect = r.getBoundingClientRect()
+                  return { id: r.getAttribute('data-message-id'), top: c ? rect.top - c.top : rect.top }
+                })
+              }
+            } catch (e) {
+              dom = { error: e instanceof Error ? e.message : String(e) }
+            }
+            return { reason, live, dom }
+          },
+          { tid: topicId }
+        )
+        await test.info().attach('user-journey-failure', {
+          body: JSON.stringify(dump, null, 2),
+          contentType: 'application/json'
+        })
+      } catch {
+        // Best-effort only; never masks the original failure.
+      }
+    }
+
+    try {
+      // Setup: real main + branch A + exclusive suffixes (fixture prep via API).
+      const foundA = await bbWheelUntilVisible(anchorA)
+      expect(foundA, 'fork anchor A must be reachable via wheel').toBe(true)
+      await bbClickBranchBtn(anchorA)
+      await expect(page.locator('[data-testid="branch-selector-entry"]').first()).toBeVisible({ timeout: 30000 })
+      let branches = await listBranches(page, topicId)
+      expect(branches).toHaveLength(1)
+      const branchAId = branches[0].id as string
+      const A_SUFFIX = 12
+      const aExcl: string[] = []
+      let afterA: string = anchorA
+      for (let i = 0; i < A_SUFFIX; i++) {
+        const mid = `${topicId}-msg-aexcl-${pad(i, 5)}`
+        aExcl.push(mid)
+        const res: any = await page.evaluate(
+          async ({
+            tid,
+            bid,
+            after,
+            m,
+            asst,
+            idx
+          }: {
+            tid: string
+            bid: string
+            after: string
+            m: string
+            asst: string
+            idx: number
+          }) =>
+            await (window as any).api.chatDb.insertMessagesAfterAnchor({
+              topicId: tid,
+              branchId: bid,
+              afterMessageId: after,
+              entries: [
+                {
+                  message: {
+                    id: m,
+                    topicId: tid,
+                    role: idx % 2 === 0 ? 'user' : 'assistant',
+                    assistantId: asst,
+                    status: 'success',
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z'
+                  },
+                  blocks: []
+                }
+              ]
+            }),
+          { tid: topicId, bid: branchAId, after: afterA, m: mid, asst: assistantId, idx: i }
+        )
+        expect(res?.ok, `A suffix ${mid} must insert`).toBe(true)
+        afterA = mid
+      }
+      // Setup topology proof (prep only, never a scroll-position claim).
+      const mainTopo: any = await page.evaluate(
+        async ({ tid }: { tid: string }) =>
+          await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId: tid, limit: 100 }),
+        { tid: topicId }
+      )
+      expect(mainTopo?.ok).toBe(true)
+      const branchTopo: any = await page.evaluate(
+        async ({ tid, bid }: { tid: string; bid: string }) =>
+          await (window as any).api.chatDb.fetchMessagesWindow({
+            kind: 'latest',
+            topicId: tid,
+            branchId: bid,
+            limit: 100
+          }),
+        { tid: topicId, bid: branchAId }
+      )
+      expect(branchTopo?.ok).toBe(true)
+      // Load full A route through real top UI (prep, outside the measured
+      // journey). Main was already user-browsed before creation (activate plus
+      // wheel to anchorA), so no artificial no-snapshot premise: no extra
+      // wheel parking here, only the UI reload needed to resident the suffix.
+      await bbTopTo(null)
+      await bbTopTo(branchAId)
+      const mainExclAll = ids.slice(ANCHOR_IDX + 1)
+      const mainTail = ids[ids.length - 1]
+      const aTailForeignProbe = mainTail
+
+      // 1) Continuous journey: from branch A wheel to an A-exclusive live
+      // anchor; record the settled crossing-first anchor.
+      let anchorA1 = await bbWheelSearchExclusive(aExcl)
+      expect(anchorA1, 'A must settle on an exclusive anchor').not.toBeNull()
+      expect(aExcl, 'A anchor must be A-exclusive').toContain(anchorA1?.id as string)
+      expect(await bbVisible(anchorA1?.id as string), 'A anchor must be visible').toBe(true)
+      expect(await bbCount(aTailForeignProbe), 'foreign main tail must be absent from A DOM').toBe(0)
+      // Ready-sync stabilization only (phase + geometry settle; no keyv or
+      // internal snapshot read): lets the production wheel saver flush the
+      // live anchor before the top switch. No extra wheel. Re-pin the baseline
+      // to the stabilized live anchor.
+      await bbWaitDomRoute()
+      anchorA1 = await bbSettled()
+      expect(anchorA1, 'A live anchor must stay measurable after ready settle').not.toBeNull()
+      expect(aExcl, 'stabilized A anchor must stay A-exclusive').toContain(anchorA1?.id as string)
+
+      // 2) Immediate return: top to main then immediately top back to A with
+      // no wheel and no ready wait on the intermediate main (rapid switch:
+      // the pending main transition tears down without committing, so the
+      // transient main visit leaves no trace). A restores its exact live
+      // anchor within 12px with foreign absent — this directly covers the
+      // screenshot continuity (no bottom/tail assertion; main keeps its real
+      // user-browsed position).
+      await page.locator('[data-testid="branch-selector-entry"]').first().click()
+      await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+      await page.locator('[data-testid="branch-cascader-item-main"]').first().click()
+      // Immediate departure: no wheel, no bbWaitDomRoute on the transient main.
+      await page.locator('[data-testid="branch-selector-entry"]').first().click()
+      await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+      await page.locator(`[data-testid="branch-cascader-item-${branchAId}"]`).first().click()
+      await bbWaitDomRoute()
+      const anchorA1Back = await bbSettled()
+      assertSameAnchor('A immediate return', anchorA1, anchorA1Back)
+      expect(await bbCount(aTailForeignProbe), 'foreign main tail must stay absent after A return').toBe(0)
+
+      // 3) Cut to main, form a main-exclusive anchor with real wheel, then at
+      // least 2 A/main top round-trips with zero scrolling between switches.
+      // The A round-1 visit departs immediately without scrolling, proving a
+      // no-scroll visit leaves no trace (no pollution).
+      await bbTopTo(null)
+      let anchorM1 = await bbWheelSearchExclusive(mainExclAll)
+      expect(anchorM1, 'main must settle on an exclusive anchor').not.toBeNull()
+      expect(mainExclAll, 'main anchor must be main-exclusive').toContain(anchorM1?.id as string)
+      expect(aExcl, 'main anchor must exclude the A suffix').not.toContain(anchorM1?.id as string)
+      expect(await bbVisible(anchorM1?.id as string), 'main anchor must be visible').toBe(true)
+      const aForeignForMain = aExcl[aExcl.length - 1]
+      expect(await bbCount(aForeignForMain), 'foreign A tail must be absent from main DOM').toBe(0)
+      await bbWaitDomRoute()
+      anchorM1 = await bbSettled()
+      expect(anchorM1, 'main live anchor must stay measurable after ready settle').not.toBeNull()
+      expect(mainExclAll, 'stabilized main anchor must stay main-exclusive').toContain(anchorM1?.id as string)
+      await bbTopTo(branchAId)
+      assertSameAnchor('A round 1', anchorA1, await bbSettled())
+      expect(await bbCount(aTailForeignProbe), 'A round 1 foreign must stay absent').toBe(0)
+      // No wheel on A round 1: immediate departure without scrolling.
+      await bbTopTo(null)
+      assertSameAnchor('main round 1', anchorM1, await bbSettled())
+      expect(await bbCount(aForeignForMain), 'main round 1 foreign must stay absent').toBe(0)
+      await bbTopTo(branchAId)
+      assertSameAnchor('A round 2', anchorA1, await bbSettled())
+      expect(await bbCount(aTailForeignProbe), 'A round 2 foreign must stay absent').toBe(0)
+      await bbTopTo(null)
+      assertSameAnchor('main round 2', anchorM1, await bbSettled())
+      expect(await bbCount(aForeignForMain), 'main round 2 foreign must stay absent').toBe(0)
+
+      // 4) Fork-divider UI from the current route to the other route; divider screen offset repeats.
+      const dividerVisible = async (anchorId: string): Promise<boolean> =>
+        page.evaluate((a: string) => {
+          const row =
+            (document.querySelector(`[data-testid="branch-fork-divider-${a}-main"]`) as HTMLElement | null) ??
+            (document.querySelector(`[data-testid="branch-fork-divider-${a}"]`) as HTMLElement | null)
+          if (!row) return false
+          const container = document.querySelector('#messages') as HTMLElement | null
+          if (!container) return false
+          const c = container.getBoundingClientRect()
+          const r = row.getBoundingClientRect()
+          return r.bottom > c.top && r.top < c.bottom
+        }, anchorId)
+      let dividerSeen = await dividerVisible(anchorA)
+      for (let i = 0; i < 24 && !dividerSeen; i++) {
+        await bbWheel(-560)
+        dividerSeen = await dividerVisible(anchorA)
+      }
+      expect(dividerSeen, 'divider row must be reachable via wheel').toBe(true)
+      const dividerBefore = await bbDividerOffset(anchorA)
+      expect(dividerBefore, 'divider must be measurable before switch').not.toBeNull()
+      // Source-route departure position (black-box geometry only): the real
+      // wheel search above necessarily moves main to the divider vicinity, and
+      // production saves that departure position on the source route. Pin it
+      // here so post-divider top returns assert the true current main stable
+      // (still a real wheel-established position on the main valid route —
+      // shared divider vicinity is legal), not the stale pre-search anchorM1.
+      const anchorMBeforeDivider = await bbSettled()
+      expect(anchorMBeforeDivider, 'main departure anchor must be measurable before divider switch').not.toBeNull()
+      expect(ids, 'main departure anchor must sit on the main valid route').toContain(
+        anchorMBeforeDivider?.id as string
+      )
+      expect(await bbVisible(anchorMBeforeDivider?.id as string), 'main departure anchor must be visible').toBe(true)
+      const taken = page.locator(`[data-testid="branch-fork-selected-${anchorA}"]`).first()
+      const untaken = page.locator(`[data-testid="branch-fork-toggle-${anchorA}"]`).first()
+      if (await taken.count()) {
+        await expect(taken, 'taken divider must be visible').toBeVisible({ timeout: 15000 })
+        await taken.click()
+        await expect(page.locator(`[data-testid="branch-fork-list-${anchorA}"]`).first()).toBeVisible({
+          timeout: 15000
+        })
+        await page.locator(`[data-testid="branch-fork-item-parent-${anchorA}"]`).first().click()
+      } else {
+        await expect(untaken, 'untaken divider must be visible').toBeVisible({ timeout: 15000 })
+        await untaken.click()
+        await expect(page.locator(`[data-testid="branch-fork-list-${anchorA}"]`).first()).toBeVisible({
+          timeout: 15000
+        })
+        await page.locator(`[data-testid="branch-fork-item-${branchAId}"]`).first().click()
+      }
+      await bbWaitDomRoute()
+      expect(await dividerVisible(anchorA), 'divider must stay visible after switch').toBe(true)
+      const dividerAfter = await bbDividerOffset(anchorA)
+      expect(dividerAfter, 'divider must be measurable after switch').not.toBeNull()
+      expect(
+        Math.abs((dividerAfter as number) - (dividerBefore as number)),
+        'divider screen offset must repeat within 12px'
+      ).toBeLessThanOrEqual(12)
+      // Divider switching deliberately supersedes target route's prior stable
+      // viewport with the maintained current visual position (shared fork
+      // vicinity); top switching thereafter restores this new stable position.
+      // Black-box acceptance only: DOM geometry + attach/absence, no keyv /
+      // snapshot / Redux reads, no internal snapshot wait.
+      expect(await bbVisible(anchorA), 'shared fork anchor must stay visible after divider switch').toBe(true)
+      expect(await bbCount(mainTail), 'divider-switched A must still exclude the main-exclusive tail').toBe(0)
+      const aRouteIds = [...ids.slice(0, ANCHOR_IDX + 1), ...aExcl]
+      const anchorAAfterDivider = await bbSettled()
+      expect(anchorAAfterDivider, 'A stable visual anchor must be measurable after divider switch').not.toBeNull()
+      expect(aRouteIds, 'A post-divider anchor must sit on the A valid route').toContain(
+        anchorAAfterDivider?.id as string
+      )
+      expect(await bbVisible(anchorAAfterDivider?.id as string), 'A post-divider anchor must be visible').toBe(true)
+      // Shared current position is legal: the post-divider anchor may be the
+      // shared fork message itself (divider semantics share the current visual
+      // position), so no exclusive-membership claim here — only that it sits
+      // near the divider in the same viewport.
+      expect(
+        Math.abs((anchorAAfterDivider?.offset ?? 0) - (dividerAfter as number)),
+        'A post-divider anchor must sit near the divider visual position'
+      ).toBeLessThanOrEqual(1200)
+
+      // 5) Real message UI creates branch B; reasonable landing (selector + fork anchor visible).
+      // Ensure the owner main route is active for the creation click.
+      await bbTopTo(null)
+      const reachedB = await bbWheelUntilVisible(anchorB)
+      expect(reachedB, 'B fork anchor must be reachable via wheel').toBe(true)
+      // Final main departure position before creation (black-box only): the
+      // B-search wheel above necessarily moves main again (divider-vicinity
+      // 00015 -> B-vicinity), and production saves that departure on main.
+      // Post-B top returns assert this true current main stable, not the
+      // stale pre-divider anchorM1 nor the intermediate anchorMBeforeDivider.
+      const anchorMBeforeBCreation = await bbSettled()
+      expect(anchorMBeforeBCreation, 'main pre-creation anchor must be measurable').not.toBeNull()
+      expect(ids, 'main pre-creation anchor must sit on the main valid route').toContain(
+        anchorMBeforeBCreation?.id as string
+      )
+      expect(await bbVisible(anchorMBeforeBCreation?.id as string), 'main pre-creation anchor must be visible').toBe(
+        true
+      )
+      await bbClickBranchBtn(anchorB)
+      await expect(page.locator('[data-testid="branch-selector-entry"]').first()).toBeVisible({ timeout: 30000 })
+      expect(await bbVisible(anchorB), 'new branch must land with its fork anchor visible').toBe(true)
+      branches = await listBranches(page, topicId)
+      expect(branches.length, 'branch B must exist alongside A').toBe(2)
+      const branchB = branches.find((b: any) => b.id !== branchAId)
+      const branchBId = branchB.id as string
+      const B_SUFFIX = 12
+      const bExcl: string[] = []
+      let afterB: string = anchorB
+      for (let i = 0; i < B_SUFFIX; i++) {
+        const mid = `${topicId}-msg-bexcl-${pad(i, 5)}`
+        bExcl.push(mid)
+        const res: any = await page.evaluate(
+          async ({
+            tid,
+            bid,
+            after,
+            m,
+            asst,
+            idx
+          }: {
+            tid: string
+            bid: string
+            after: string
+            m: string
+            asst: string
+            idx: number
+          }) =>
+            await (window as any).api.chatDb.insertMessagesAfterAnchor({
+              topicId: tid,
+              branchId: bid,
+              afterMessageId: after,
+              entries: [
+                {
+                  message: {
+                    id: m,
+                    topicId: tid,
+                    role: idx % 2 === 0 ? 'user' : 'assistant',
+                    assistantId: asst,
+                    status: 'success',
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z'
+                  },
+                  blocks: []
+                }
+              ]
+            }),
+          { tid: topicId, bid: branchBId, after: afterB, m: mid, asst: assistantId, idx: i }
+        )
+        expect(res?.ok, `B suffix ${mid} must insert`).toBe(true)
+        afterB = mid
+      }
+      // Load the full B route through real top UI (prep, outside the measured
+      // multi-route loop). Suffix rows above are API-inserted owned rows only;
+      // route loading and all viewport moves stay real UI.
+      await bbTopTo(null)
+      await bbTopTo(branchBId)
+      // Top-selector UI must offer both A and B as cascader items (API only
+      // discovered the IDs above via listBranches; visibility is a UI claim).
+      await page.locator('[data-testid="branch-selector-entry"]').first().click()
+      await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+      await expect(page.locator(`[data-testid="branch-cascader-item-${branchAId}"]`).first()).toBeVisible({
+        timeout: 15000
+      })
+      await expect(page.locator(`[data-testid="branch-cascader-item-${branchBId}"]`).first()).toBeVisible({
+        timeout: 15000
+      })
+      await page.locator(`[data-testid="branch-cascader-item-${branchBId}"]`).first().click()
+      await bbWaitDomRoute()
+
+      // 6) In B wheel to a B-exclusive anchor; multi-route top restores for A/main/B.
+      let anchorB1 = await bbWheelSearchExclusive(bExcl)
+      expect(anchorB1, 'B must settle on an exclusive anchor').not.toBeNull()
+      expect(bExcl, 'B anchor must be B-exclusive').toContain(anchorB1?.id as string)
+      expect(aExcl, 'B anchor must exclude the A suffix').not.toContain(anchorB1?.id as string)
+      expect(mainExclAll, 'B anchor must exclude the main post-fork tail').not.toContain(anchorB1?.id as string)
+      await bbWaitDomRoute()
+      anchorB1 = await bbSettled()
+      expect(anchorB1, 'B live anchor must stay measurable after ready settle').not.toBeNull()
+      expect(bExcl, 'stabilized B anchor must stay B-exclusive').toContain(anchorB1?.id as string)
+      const bForeignForOthers = bExcl[bExcl.length - 1]
+      // Top switching restores the divider-superseded stable position: A now
+      // restores anchorAAfterDivider (not the pre-divider anchorA1); main
+      // restores its pre-creation departure anchorMBeforeBCreation (source
+      // saves on departure through divider search + B search, not the stale
+      // pre-search anchorM1).
+      await bbTopTo(branchAId)
+      assertSameAnchor('A after B', anchorAAfterDivider, await bbSettled())
+      expect(await bbCount(mainTail), 'A must still exclude the main tail').toBe(0)
+      expect(await bbCount(bForeignForOthers), 'A must still exclude the B tail').toBe(0)
+      await bbTopTo(null)
+      assertSameAnchor('main after B', anchorMBeforeBCreation, await bbSettled())
+      expect(await bbCount(aForeignForMain), 'main must still exclude the A tail').toBe(0)
+      expect(await bbCount(bForeignForOthers), 'main must still exclude the B tail').toBe(0)
+      await bbTopTo(branchBId)
+      assertSameAnchor('B return', anchorB1, await bbSettled())
+      expect(await bbCount(mainTail), 'B must exclude the main tail').toBe(0)
+      expect(await bbCount(aForeignForMain), 'B must exclude the A tail').toBe(0)
+
+      // 7) Transient visit without scrolling must not pollute either side.
+      // Each route keeps its current stable position (A keeps the
+      // divider-superseded anchorAAfterDivider; main keeps the pre-creation
+      // departure anchorMBeforeBCreation; B keeps its exclusive anchorB1).
+      await bbTopTo(null)
+      assertSameAnchor('main pre-transient', anchorMBeforeBCreation, await bbSettled())
+      await bbTopTo(branchAId)
+      // No wheel here: immediate departure proves a no-scroll visit leaves no trace.
+      await bbTopTo(branchBId)
+      assertSameAnchor('B after transient A', anchorB1, await bbSettled())
+      await bbTopTo(null)
+      assertSameAnchor('main after transient A', anchorMBeforeBCreation, await bbSettled())
+      await bbTopTo(branchAId)
+      assertSameAnchor('A after transient', anchorAAfterDivider, await bbSettled())
+    } catch (err) {
+      await attachFailure(err instanceof Error ? err.message : String(err))
+      throw err
     }
   })
 

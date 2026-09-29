@@ -18,7 +18,10 @@ describe('Messages NEW_TRUE_BRANCH listener (internal branch creation)', () => {
 
   it('true-branch path creates via createBranch with the localized default name and no auto-rename', () => {
     const trueIdx = source.indexOf('EVENT_NAMES.NEW_TRUE_BRANCH')
-    const handlerSlice = source.slice(trueIdx, trueIdx + 2500)
+    // Handler grew with new-branch-landing provenance rebase (window proof);
+    // window must cover the onSuccess toast without spilling into the next
+    // handler. 4500 matches the visual-contract window for the same handler.
+    const handlerSlice = source.slice(trueIdx, trueIdx + 4500)
     expect(handlerSlice).toMatch(/createBranch/)
     expect(handlerSlice).toMatch(/branchFromAnchorMessage/)
     expect(handlerSlice).toMatch(/chat\.topics\.branch\.default_name/)
@@ -49,8 +52,11 @@ describe('Messages NEW_TRUE_BRANCH listener (internal branch creation)', () => {
     const switchIdx = source.indexOf('handleSelectRoute')
     expect(switchIdx).toBeGreaterThanOrEqual(0)
     const switchSlice = source.slice(switchIdx, switchIdx + 7000)
-    expect(switchSlice).toMatch(/savePosition/)
-    expect(switchSlice).toMatch(/findFirstVisibleMessage/)
+    // Outgoing freeze under the displayed route before the switch, then a
+    // divider session carrying only the clicked offset.
+    expect(switchSlice).toMatch(/saveDisplayedSnapshot/)
+    expect(switchSlice).toMatch(/beginFetchHold/)
+    expect(switchSlice).toMatch(/findViewportTopAnchorWithOffset/)
     expect(switchSlice).toMatch(/visualOffset|visual-anchor/)
     expect(switchSlice).not.toMatch(/setPendingAnchorNavigate/)
     expect(switchSlice).not.toMatch(/NAVIGATE_TO_MESSAGE/)

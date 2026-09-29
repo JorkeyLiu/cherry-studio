@@ -1,21 +1,20 @@
 /**
- * Route-restore preferred visual anchor.
+ * Pagination-compensation anchor (NOT route-transition truth).
  *
- * A route restore (divider switch or top-selector switch) declares which row
- * must stay visually still: either the logical divider row
- * (`{ kind: 'divider-row', dividerKey, targetOffset }`) or a saved message row
- * (`{ kind: 'message-row', messageId, targetOffset }`). The anchor is bound to
- * `topicId / routeId / restoreEpoch` and has an explicit lifecycle: route,
- * topic, deletion, unmount, or user-cancel clears the active anchor. A queued
- * older-edge pagination intent carries only a detached snapshot (stable
- * identity + targetOffset, never a live ref) so it cannot cross generations —
- * the existing intent five-tuple guard (topic/route/generation/deletion/
- * resident) still discards stale intents.
+ * A queued older-edge pagination intent may carry a detached preferred
+ * snapshot (`PreferredRestoreAnchorSnapshot`: stable identity + targetOffset,
+ * never a live ref) so the immediate compensation prefers the restore row
+ * and only falls back to the viewport-top message when the target is
+ * missing/disconnected. Ordinary user pagination carries null and behaves
+ * exactly as before.
  *
- * Pagination compensation prefers the snapshot's current element offset and
- * keeps its targetOffset; only when the target is missing or disconnected does
- * it fall back to the existing viewport-top message path. Ordinary user
- * pagination carries no preferred anchor and behaves exactly as before.
+ * Ownership note: route-transition truth (epoch/intent/phase/displayed/
+ * rendered/anchor) lives SOLELY in `RouteViewportController`. This module
+ * owns no lifecycle, no epoch, no session — it is a pure pagination helper
+ * and must never compete with the controller. The former `ActiveRestoreAnchor`
+ * lifecycle helpers were removed as dead second truth (zero production
+ * callers); pagination snapshots are built directly from
+ * `controller.activeAnchor` at queue time in Messages.
  */
 
 /** Detached snapshot attached to a queued older-edge intent (no epoch binding). */
@@ -23,82 +22,7 @@ export type PreferredRestoreAnchorSnapshot =
   | { kind: 'divider-row'; dividerKey: string; targetOffset: number }
   | { kind: 'message-row'; messageId: string; targetOffset: number }
 
-/** Active restore anchor with explicit topic/route/epoch lifecycle binding. */
-export type ActiveRestoreAnchor =
-  | {
-      kind: 'divider-row'
-      dividerKey: string
-      targetOffset: number
-      topicId: string
-      routeId: string | null
-      restoreEpoch: number
-    }
-  | {
-      kind: 'message-row'
-      messageId: string
-      targetOffset: number
-      topicId: string
-      routeId: string | null
-      restoreEpoch: number
-    }
-
-export const createDividerRestoreAnchor = (input: {
-  dividerKey: string
-  targetOffset: number
-  topicId: string
-  routeId: string | null
-  restoreEpoch: number
-}): ActiveRestoreAnchor => ({
-  kind: 'divider-row',
-  dividerKey: input.dividerKey,
-  targetOffset: input.targetOffset,
-  topicId: input.topicId,
-  routeId: input.routeId,
-  restoreEpoch: input.restoreEpoch
-})
-
-export const createMessageRestoreAnchor = (input: {
-  messageId: string
-  targetOffset: number
-  topicId: string
-  routeId: string | null
-  restoreEpoch: number
-}): ActiveRestoreAnchor => ({
-  kind: 'message-row',
-  messageId: input.messageId,
-  targetOffset: input.targetOffset,
-  topicId: input.topicId,
-  routeId: input.routeId,
-  restoreEpoch: input.restoreEpoch
-})
-
-/** Pure validity: topic + route + restore epoch must all still match. */
-export const isActiveRestoreAnchorCurrent = (
-  anchor: ActiveRestoreAnchor | null | undefined,
-  live: { topicId: string; routeId: string | null; restoreEpoch: number }
-): boolean => {
-  if (!anchor) return false
-  return anchor.topicId === live.topicId && anchor.routeId === live.routeId && anchor.restoreEpoch === live.restoreEpoch
-}
-
-/**
- * Detach a snapshot for a queued intent. Copies only the stable identity plus
- * `targetOffset` (never the live ref/object), and only when the anchor is
- * still current for this topic/route/epoch. Returns null for ordinary user
- * pagination (no active anchor) so its behavior is unchanged.
- */
-export const snapshotRestoreAnchor = (
-  anchor: ActiveRestoreAnchor | null | undefined,
-  live: { topicId: string; routeId: string | null; restoreEpoch: number }
-): PreferredRestoreAnchorSnapshot | null => {
-  if (!isActiveRestoreAnchorCurrent(anchor, live) || !anchor) return null
-  if (anchor.kind === 'divider-row') {
-    return { kind: 'divider-row', dividerKey: anchor.dividerKey, targetOffset: anchor.targetOffset }
-  }
-  return { kind: 'message-row', messageId: anchor.messageId, targetOffset: anchor.targetOffset }
-}
-
-export type PaginationCompensationDecision =
+type PaginationCompensationDecision =
   | { kind: 'preferred'; delta: number }
   | { kind: 'fallback'; delta: number }
   | { kind: 'none' }
@@ -138,14 +62,3 @@ export const decidePaginationCompensation = (input: {
   }
   return { kind: 'none' }
 }
-
-/**
- * Pure second-stabilizer guard: pagination must never start a stabilizer that
- * conflicts with an active route-restore stabilizer. Returns true only when a
- * short bounded pagination stabilizer is allowed (preferred anchor was used
- * for the immediate delta and no restore stabilizer is active).
- */
-export const shouldStartPaginationStabilizer = (input: {
-  hasActiveRestoreStabilizer: boolean
-  usedPreferredAnchor: boolean
-}): boolean => !input.hasActiveRestoreStabilizer && input.usedPreferredAnchor

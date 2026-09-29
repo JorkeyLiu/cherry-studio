@@ -115,6 +115,7 @@ vi.mock('antd', () => ({
   )
 }))
 
+import { RouteViewportProvider } from '@renderer/pages/home/Messages/routeViewportContext'
 import type { Assistant, Topic } from '@renderer/types'
 
 import TopicContent from '../TopicContent'
@@ -135,6 +136,23 @@ function setTree(branches: TopicBranchWire[], path: TopicBranchWire[], activeBra
   mockTree.childrenByAnchor = map
 }
 
+/**
+ * Unified render harness: production mounts TopicContent under Chat's
+ * RouteViewportProvider (topicId + active route). The provider initialRoute
+ * must match the mocked store active branch per case, otherwise the test
+ * would assert with wrong route provenance. Route switches go through the
+ * real provider `requestTopRoute` (freeze + controller + activeBranchSet
+ * dispatch) — never mocked.
+ */
+function renderTopicContent(setActiveTopic: (t: Topic) => void) {
+  const initialRoute = (mockTree as unknown as { activeBranchId?: string | null }).activeBranchId ?? null
+  return render(
+    <RouteViewportProvider topicId={topic.id} initialRoute={initialRoute}>
+      <TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />
+    </RouteViewportProvider>
+  )
+}
+
 describe('TopicContent unified branch selector', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -144,28 +162,28 @@ describe('TopicContent unified branch selector', () => {
 
   it('hides the entry entirely when the topic was never branched', () => {
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     expect(screen.queryByTestId('branch-selector-entry')).not.toBeInTheDocument()
   })
 
   it('shows the topic-only breadcrumb on the main route', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     expect(screen.getByTestId('branch-selector-breadcrumb')).toHaveTextContent('Root')
   })
 
   it('shows the branch path breadcrumb on a branch route', () => {
     setTree([b1(), b3()], [b1(), b3()], 'b-3')
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     expect(screen.getByTestId('branch-selector-breadcrumb')).toHaveTextContent('Root / B1 / B1-Child')
   })
 
   it('cascader column 0 lists the main route plus level-1 branches', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     expect(screen.getByTestId('branch-cascader-col-0')).toBeInTheDocument()
     expect(screen.getByTestId('branch-cascader-item-main')).toHaveTextContent('Root')
     expect(screen.getByTestId('branch-cascader-item-b-1')).toHaveTextContent('B1')
@@ -175,7 +193,7 @@ describe('TopicContent unified branch selector', () => {
   it('current L1 with children opens col-0 only (no child over-expansion) until hover/focus on L1', () => {
     setTree([b1(), b2(), b3()], [b1()], 'b-1')
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     // Default expansion shows the current branch in its own column only:
     // L1 highlighted in col-0, no L1-child column yet.
     expect(screen.getByTestId('branch-cascader-col-0')).toBeInTheDocument()
@@ -196,7 +214,7 @@ describe('TopicContent unified branch selector', () => {
     const b4 = { ...b3(), id: 'b-4', parentBranchId: 'b-3', anchorMessageId: 'm3', name: 'B1-Grandchild' }
     setTree([b1(), b2(), b3(), b4], [b1(), b3()], 'b-3')
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     // Columns needed to place the current branch: col-0 (main/L1) + col-1
     // (L1 children incl. current L2). No col-2 for L2's own children.
     expect(screen.getByTestId('branch-cascader-col-0')).toBeInTheDocument()
@@ -209,7 +227,7 @@ describe('TopicContent unified branch selector', () => {
   it('repeat close/open preserves the same no-over-expansion behavior', () => {
     setTree([b1(), b2(), b3()], [b1()], 'b-1')
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     // Hover reveals children, then close/open resets to the default.
     fireEvent.mouseEnter(screen.getByTestId('branch-cascader-row-b-1'))
     expect(screen.getByTestId('branch-cascader-item-b-3')).toBeInTheDocument()
@@ -224,7 +242,7 @@ describe('TopicContent unified branch selector', () => {
   it('selected options use highlighted background only (no checkmark icons)', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     expect(screen.getByTestId('branch-cascader-item-main')).not.toHaveTextContent('✓')
     expect(screen.getByTestId('branch-cascader-item-b-1')).not.toHaveTextContent('✓')
     expect(document.body.textContent ?? '').not.toContain('✓')
@@ -233,7 +251,7 @@ describe('TopicContent unified branch selector', () => {
   it('removes the redundant left breadcrumb while retaining model + branch selectors', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     // Redundant assistant chip removed.
     expect(screen.queryByTestId('mock-emoji')).not.toBeInTheDocument()
     // Model selector and unified branch selector retained (with own path display).
@@ -245,7 +263,7 @@ describe('TopicContent unified branch selector', () => {
   it('pins Edit/Settings tools at the far right', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     const toolsRight = screen.getByTestId('navbar-tools-right')
     expect(toolsRight.className).toMatch(/ml-auto/)
     expect(screen.getByTestId('mock-tools')).toBeInTheDocument()
@@ -254,7 +272,7 @@ describe('TopicContent unified branch selector', () => {
   it('keeps the navbar entry default-aligned while left-aligning every cascader option row', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     expect(screen.getByTestId('branch-selector-entry').style.justifyContent).not.toBe('flex-start')
     expect(screen.getByTestId('branch-cascader-item-main').style.justifyContent).toBe('flex-start')
     expect(screen.getByTestId('branch-cascader-item-b-1').style.justifyContent).toBe('flex-start')
@@ -264,7 +282,7 @@ describe('TopicContent unified branch selector', () => {
   it('switching dispatches the route change for the SAME topic (never setActiveTopic, never addTopic)', () => {
     setTree([b1(), b2()], [], null)
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     fireEvent.click(screen.getByTestId('branch-cascader-item-b-2'))
     expect(setActiveTopic).not.toHaveBeenCalled()
     expect(dispatchMock).toHaveBeenCalledWith(
@@ -276,7 +294,7 @@ describe('TopicContent unified branch selector', () => {
     setTree([b1()], [], null)
     renameBranchMock.mockResolvedValue({ branch: b1() })
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     fireEvent.click(screen.getByTestId('branch-rename-btn-b-1'))
     const input = screen.getByTestId('branch-selector-rename-input')
     fireEvent.change(input, { target: { value: 'Renamed' } })
@@ -288,7 +306,7 @@ describe('TopicContent unified branch selector', () => {
     setTree([b1()], [b1()], 'b-1')
     deleteBranchSubtreeMock.mockResolvedValue({ deletedBranchIds: ['b-1'], fallbackBranchId: null })
     const setActiveTopic = vi.fn()
-    render(<TopicContent assistant={assistant} activeTopic={topic} setActiveTopic={setActiveTopic} />)
+    renderTopicContent(setActiveTopic)
     fireEvent.click(screen.getByTestId('mock-confirm'))
     await vi.waitFor(() => expect(deleteBranchSubtreeMock).toHaveBeenCalledWith('t-1', 'b-1', 'b-1'))
     expect(setActiveTopic).not.toHaveBeenCalled()

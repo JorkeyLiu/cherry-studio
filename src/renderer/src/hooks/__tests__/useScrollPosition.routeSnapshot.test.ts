@@ -1,15 +1,17 @@
 /**
  * Route-local snapshot: old-schema compat, sync OLD-route save, and
- * programmatic-ownership guard. Covers contract (3).
+ * controller-gated writes. Covers contract (3).
+ *
+ * Ownership lives in the single route viewport transition controller; this
+ * hook only accepts a `canWrite` gate. Transition-period scrolls never
+ * persist — only displayed-stable user scrolls (plus explicit stable
+ * commits via `commitSnapshotForRoute`).
  */
+import { RouteViewportController } from '@renderer/pages/home/Messages/routeViewportController'
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import useScrollPosition, {
-  holdProgrammaticScrollOwnership,
-  registerRouteScrollSaver,
-  saveRouteScrollSync
-} from '../useScrollPosition'
+import useScrollPosition from '../useScrollPosition'
 
 let store: Map<string, unknown>
 
@@ -30,7 +32,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  registerRouteScrollSaver(null)
   vi.restoreAllMocks()
   vi.useRealTimers()
 })
@@ -99,32 +100,37 @@ describe('route-local snapshot schema', () => {
     expect('intraRowOffset' in saved).toBe(true)
   })
 
-  it('saveRouteScrollSync persists the OLD route without throttle/effect flush', () => {
+  it('sync freeze persists the OLD route without throttle/effect flush', () => {
     vi.useFakeTimers()
     const container = mockContainer(-350)
+    // Hook keyed to the DISPLAYED (old) route: savePosition freezes it
+    // synchronously, independent of the throttle trailing.
     const { result } = renderHook(() => useScrollPosition('topic-a::main'))
     act(() => {
       result.current.containerRef.current = container as unknown as HTMLDivElement
     })
-    // Throttled handleScroll schedules a trailing write; the sync saver must
-    // write immediately without advancing timers.
     act(() => {
       result.current.handleScroll()
     })
     Object.defineProperty(container, 'scrollTop', { value: -999 })
-    saveRouteScrollSync()
+    act(() => {
+      result.current.savePosition()
+    })
     expect((store.get('scroll:topic-a::main') as { scrollTop: number }).scrollTop).toBe(-999)
     vi.useRealTimers()
   })
 
-  it('programmatic ownership blocks scroll recording (not stored as user scroll)', () => {
+  it('controller ownership blocks scroll recording (not stored as user scroll)', () => {
     vi.useFakeTimers()
+    const controller = new RouteViewportController({ topicId: 't', route: null })
     const container = mockContainer(-200)
-    const { result } = renderHook(() => useScrollPosition('topic-own'))
+    const { result } = renderHook(() =>
+      useScrollPosition('topic-own', { canWrite: () => controller.canAcceptUserScrollWrite() })
+    )
     act(() => {
       result.current.containerRef.current = container as unknown as HTMLDivElement
     })
-    const release = holdProgrammaticScrollOwnership()
+    const { epoch } = controller.request({ kind: 'top', topicId: 't', targetRoute: 'branchB' })
     try {
       Object.defineProperty(container, 'scrollTop', { value: -900 })
       act(() => {
@@ -135,9 +141,9 @@ describe('route-local snapshot schema', () => {
       })
       expect(store.get('scroll:topic-own')).toBeUndefined()
     } finally {
-      release()
+      controller.terminate(epoch, 'superseded')
     }
-    // After release, user scrolls record again.
+    // After release to idle, user scrolls record again.
     act(() => {
       result.current.handleScroll()
     })

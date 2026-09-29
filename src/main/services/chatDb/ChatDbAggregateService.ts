@@ -917,7 +917,10 @@ export class ChatDbAggregateService {
    * - Complete groups returned (never split a consecutive same-askId assistant run,
    *   even when that run is pathologically large — the run itself is read fully).
    * - Window metadata declares intent, bounds, and hasMore flags; completeness is 'window'.
-   * - Missing topic → ERR_NOT_FOUND; missing anchor → ERR_NOT_FOUND; empty topic → empty window success.
+   * - Missing topic → ERR_NOT_FOUND; missing anchor → ERR_NOT_FOUND; anchor
+   *   outside the addressed route's effective sequence (branch-owned ID on
+   *   main, or main-exclusive post-fork ID on a descendant branch that does
+   *   not reference it) → ERR_NOT_FOUND; empty topic → empty window success.
    * - hasMoreBefore/After derived from group boundaries, not raw message indexes.
    */
   fetchMessagesWindow(request: FetchMessagesWindowRequest): ChatDbResult<FetchMessagesWindowResponse> {
@@ -1141,6 +1144,16 @@ export class ChatDbAggregateService {
           if (!anchor.found) {
             throw new ChatDbNotFoundError(
               `Anchor message ${request.anchorMessageId} does not belong to topic ${request.topicId}`
+            )
+          }
+          // Main-route ownership symmetry (branch path validates against the
+          // effective sequence via findIndex): a branch-owned suffix ID must
+          // fail when addressing main, otherwise a mixed main window would be
+          // admitted. Main effective membership is owner equality (branchId
+          // null); any branch-owned row is out-of-route here.
+          if ((anchor.data.branchId ?? null) !== null) {
+            throw new ChatDbNotFoundError(
+              `Anchor message ${request.anchorMessageId} does not belong to the main route of topic ${request.topicId}`
             )
           }
           const anchorMsg = anchor.data

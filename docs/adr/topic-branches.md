@@ -170,6 +170,7 @@ effective(topic, branch):
 - 每 route 独立 anchor/state：`routeKey = topicId`（main）与 `topicId:branchId`（分支）严格隔离、互不写入；不同分支可有不同窗口。
 - Branch anchor（fork 消息）与 context-window anchor（起始 turn 的 group key）严格区分：前者定义路由构成，后者定义上下文窗口起点。分支继承映射（父锚点索引 → 新分支）不使用 `contextCount` 重算；`contextCount` 变更永不移动既有锚点。
 - Context capability（`context-closure` 等）永不作为 mutation permission；需要分支 capability 的地方链接本文档，不复制决策表。
+- **视口归属**：路由切换时的稳定视口归属、恢复意图/所有权生命周期与揭示守卫由 [Route Viewport Position](./route-viewport-position.md)（VIEWPORT-1…VIEWPORT-12）治理；路由切换永不改变 topic 身份（BRANCH-2/11），视口快照按路由键隔离——本文档不定义视口语义。
 
 ---
 

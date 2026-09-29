@@ -163,6 +163,7 @@
 - 锚点与 `contextCount` 同属**普通 renderer assistant-settings 持久化**（Redux `assistants` slice + redux-persist），不是 SQLite/Dexie 聊天权威、不是 IPC 聊天存储、不是渲染投影（CW-2/CW-7）。
 - 聊天数据权威由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理；本文档不改变这两个治理域的边界，也不把锚点移入任何聊天权威存储。
 - **迁移**：`contextStartOverride` → `contextWindowAnchor` 的字段演进由**迁移测试**覆盖（§13）；**不需要**锚点专用重启 E2E（CW-7）。
+- **视口区分**：路由切换时的滚动位置（路由本地稳定视口、恢复意图/所有权、快照/默认定位、分隔线稳定完成、可见性原子性）由 [Route Viewport Position](./route-viewport-position.md)（VIEWPORT-1…VIEWPORT-12）治理；视口变化永不移动上下文锚点，锚点变化永不提交视口快照——本文档不定义视口语义。
 
 ---
 

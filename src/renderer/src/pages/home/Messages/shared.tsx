@@ -36,4 +36,10 @@ export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   min-height: 0;
   z-index: 1;
   position: relative;
+  // Atomic route transition: while the target window is positioning, the
+  // container stays hidden but measurable (visibility keeps layout so the
+  // first scroll can be applied pre-paint; never display:none).
+  &[data-viewport-phase='positioning'] {
+    visibility: hidden;
+  }
 `

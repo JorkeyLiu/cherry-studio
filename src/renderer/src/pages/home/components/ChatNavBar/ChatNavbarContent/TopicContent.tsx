@@ -1,12 +1,12 @@
 import { loggerService } from '@logger'
-import { saveRouteScrollSync } from '@renderer/hooks/useScrollPosition'
 import { BranchRouteOptionRow } from '@renderer/pages/home/Messages/branchRouteOption'
+import { useRouteViewport } from '@renderer/pages/home/Messages/routeViewportContext'
 import { requestTopicBranches, useBranchTree } from '@renderer/pages/home/Messages/useBranchTree'
 import { deleteBranchSubtree } from '@renderer/services/db/branchSubtree'
 import { dbService } from '@renderer/services/db/DbService'
 import type { TopicBranchWire } from '@renderer/services/db/types'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { activeBranchSet, selectActiveBranchId } from '@renderer/store/topicBranch'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { Button, Popover } from 'antd'
 import { ChevronDown, ChevronRight, GitFork } from 'lucide-react'
@@ -74,6 +74,7 @@ interface CascaderOption {
 const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
+  const viewport = useRouteViewport()
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, activeTopic.id))
   const branchTree = useBranchTree(activeTopic.id, activeBranchId)
   const [open, setOpen] = useState(false)
@@ -175,18 +176,18 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
       setOpen(false)
       return
     }
-    // Synchronously persist the OLD route's viewport-top snapshot before the
-    // active route changes. Never rely on the 100ms throttle trailing or the
-    // key-change effect flush; never touch the target route's snapshot here.
-    // The target window is chosen from the NEW route's own saved
-    // route-saved-row-anchor (`messageId` + `intraRowOffset`, `isAtBottom` →
-    // latest + bottom, else around + precise offset).
+    // Single controller entry: synchronously freeze the outgoing DISPLAYED
+    // route's snapshot, open the top transition session, then dispatch. The
+    // target window is chosen from the NEW route's own saved anchor
+    // (`messageId` + `intraRowOffset`); a target with no snapshot takes its
+    // deterministic route-local default (bottom); never outgoing geometry.
+    // The message list adopts this session (same epoch) for fetch/position/
+    // reveal/commit — no second request, no second epoch.
     try {
-      saveRouteScrollSync()
+      viewport.requestTopRoute(activeTopic.id, branchId)
     } catch {
-      // fail-closed: route switch proceeds; target falls back to vicinity/tail
+      // fail-closed: route switch proceeds; target falls back to its default
     }
-    dispatch(activeBranchSet({ topicId: activeTopic.id, branchId }))
     setOpen(false)
     setHoverPath(null)
   }

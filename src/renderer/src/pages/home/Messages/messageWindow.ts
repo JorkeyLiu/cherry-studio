@@ -623,7 +623,14 @@ export function rebaseRouteWindow(
 }
 
 /**
- * Loaded-route state (renderer-local, no persistence).
+ * Loaded-route state (renderer-local projection request currency, no
+ * persistence) — NOT rendered/displayed truth.
+ *
+ * Rendered/displayed route truth lives SOLELY in `RouteViewportController`
+ * (rendered provenance + displayed route + epoch). This marker only answers
+ * "did the projection loader already issue a request for this route" so
+ * route effects skip duplicate loads; it never decides what the DOM shows,
+ * never gates snapshots, and never competes with the controller.
  *
  * Type-safe replacement for the former magic `branchId` marker string: the
  * load-failed signal is an explicit `loadFailed` boolean on a tagged object,
@@ -719,25 +726,146 @@ export function decideExternalDoubleFailureRecovery(snapshot: ExternalDoubleFail
 export type RouteWindowSavedPosition = {
   scrollTop: number
   anchorId: string | null
+  /** Canonical route saved ROW anchor; legacy `anchorId` is the fallback. */
+  messageId?: string | null
+  intraRowOffset?: number | null
+  rawScrollTop?: number
   isAtBottom: boolean
 } | null
 
 /**
+ * Canonical saved anchor: `messageId` wins, legacy `anchorId` fills when the
+ * canonical field is absent/empty. Empty string never selects an around read.
+ */
+export function canonicalSavedAnchorId(saved: RouteWindowSavedPosition): string | null {
+  if (!saved) return null
+  const canonical = typeof saved.messageId === 'string' && saved.messageId.length > 0 ? saved.messageId : null
+  if (canonical) return canonical
+  return typeof saved.anchorId === 'string' && saved.anchorId.length > 0 ? saved.anchorId : null
+}
+
+/**
  * Top-selector window choice (pure, production path): which windowed read the
  * NEW route needs from its own saved browsing position.
- * - `isAtBottom` → latest (bottom vicinity; caller restores bottom naturally).
- * - valid `anchorId` → around it (restores the saved vicinity, never a jump).
- * - otherwise → latest (deterministic tail + vicinity fallback below).
+ * - valid canonical anchor (`messageId`, legacy `anchorId` fallback) → around it,
+ *   even when `isAtBottom` is true: the exact messageId + intra-row offset is
+ *   the route-local stable viewport (VIEWPORT-5) and outranks bottom vicinity.
+ * - otherwise (`null`/anchorless snapshot) → latest; `isAtBottom` only selects
+ *   here (bottom vicinity; caller restores bottom naturally).
+ * - otherwise → latest (deterministic tail + route-local default below).
  * Never reads the OLD route's snapshot; never overwrites any snapshot here.
+ * An around read that fails typed NOT_FOUND means the saved snapshot is
+ * invalid for this route (deleted/out-of-route): the caller must take the
+ * explicit route-local terminal default and may replace the stale snapshot
+ * only after that default is placed/stable. Transport/load failure or
+ * supersession must fail visible and preserve the prior snapshot (never a
+ * fallback commit).
  */
 export function chooseRouteWindowRequest(
   saved: RouteWindowSavedPosition
 ): { kind: 'latest' } | { kind: 'around'; anchorMessageId: string } {
-  if (saved?.isAtBottom) return { kind: 'latest' }
-  if (typeof saved?.anchorId === 'string' && saved.anchorId.length > 0) {
-    return { kind: 'around', anchorMessageId: saved.anchorId }
+  const anchor = canonicalSavedAnchorId(saved)
+  if (anchor) {
+    return { kind: 'around', anchorMessageId: anchor }
   }
   return { kind: 'latest' }
+}
+
+const TOP_RESTORE_NOT_FOUND_CODES = new Set(['NOT_FOUND', 'ERR_NOT_FOUND', 'TOPIC_NOT_FOUND'])
+
+/**
+ * Structural typed-NOT_FOUND check for around-window failures (code family,
+ * never message matching): invalid saved snapshot for this route
+ * (deleted/out-of-route). Any other rejection is environmental/transport and
+ * must preserve the prior snapshot.
+ */
+export function isTopRestoreNotFoundError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code
+  return typeof code === 'string' && TOP_RESTORE_NOT_FOUND_CODES.has(code)
+}
+
+export interface TopRestoreAnchorDecision {
+  /** Resident route anchor to restore, or null for the terminal/default path. */
+  routeSavedRowAnchor: string | null
+  /** True only for the invalid-snapshot terminal default (may replace stale). */
+  snapshotInvalidForRoute: boolean
+  /** True when the caller must fail visible and preserve the snapshot. */
+  mustFailVisible: boolean
+}
+
+/**
+ * Pure top-restore anchor decision: valid saved anchors never degrade to
+ * vicinity/tail/raw. Only the invalid-snapshot (NOT_FOUND) and no-snapshot
+ * paths take the deterministic route-local default (`null` anchor → tail).
+ */
+export function decideTopRestoreAnchor(input: {
+  canonicalAnchor: string | null
+  snapshotInvalidForRoute: boolean
+  loadedIds: ReadonlySet<string>
+}): TopRestoreAnchorDecision {
+  if (input.snapshotInvalidForRoute || !input.canonicalAnchor) {
+    return { routeSavedRowAnchor: null, snapshotInvalidForRoute: input.snapshotInvalidForRoute, mustFailVisible: false }
+  }
+  if (input.loadedIds.has(input.canonicalAnchor)) {
+    return { routeSavedRowAnchor: input.canonicalAnchor, snapshotInvalidForRoute: false, mustFailVisible: false }
+  }
+  return { routeSavedRowAnchor: null, snapshotInvalidForRoute: false, mustFailVisible: true }
+}
+
+/**
+ * Pure stable-commit gate: a valid requested anchor commits only when it is
+ * covered/resident (projection + connected DOM) — quiet/alignment is owned by
+ * the caller's stabilizer. Terminal defaults, anchorless bottom restores, and
+ * anchorless defaults carry no anchor requirement. `isAtBottom` never waives a
+ * valid requested anchor: exact messageId + intra-row offset outranks bottom
+ * vicinity (VIEWPORT-5).
+ */
+export function isTopStableCommittable(input: {
+  isAtBottom: boolean
+  snapshotInvalidForRoute: boolean
+  requestedAnchor: string | null
+  projectionContains: boolean
+  domConnected: boolean
+}): boolean {
+  if (input.snapshotInvalidForRoute) return true
+  if (!input.requestedAnchor) return true
+  return input.projectionContains && input.domConnected
+}
+
+/**
+ * Pure top first-position plan (route-local stable viewport, VIEWPORT-5):
+ * a resolved saved-row anchor always selects `message` with the saved
+ * intra-row offset — even when `isAtBottom` is true. `isAtBottom` selects
+ * `bottom` only when no anchor is available; invalid snapshots take the
+ * terminal `none` default; anchorless raw scrollTop is a same-route local
+ * fallback only; anchorless no-snapshot takes the deterministic route-local
+ * default `bottom` (never outgoing geometry, never `none`).
+ */
+export function chooseTopFirstPositionPlan(input: {
+  saved: RouteWindowSavedPosition
+  snapshotInvalidForRoute: boolean
+  routeSavedRowAnchor: string | null
+}):
+  | { kind: 'bottom' }
+  | { kind: 'none' }
+  | { kind: 'message'; messageId: string; wantOffset: number | null; fallbackScrollTop: null }
+  | { kind: 'scrollTop'; scrollTop: number } {
+  if (input.snapshotInvalidForRoute) return { kind: 'none' }
+  if (input.routeSavedRowAnchor) {
+    const wantOffset =
+      typeof input.saved?.intraRowOffset === 'number' && Number.isFinite(input.saved.intraRowOffset)
+        ? input.saved.intraRowOffset
+        : null
+    return { kind: 'message', messageId: input.routeSavedRowAnchor, wantOffset, fallbackScrollTop: null }
+  }
+  if (input.saved?.isAtBottom) return { kind: 'bottom' }
+  const canonicalAnchor = canonicalSavedAnchorId(input.saved)
+  const sameRouteScrollTop =
+    input.saved && typeof input.saved.scrollTop === 'number' && Number.isFinite(input.saved.scrollTop)
+      ? input.saved.scrollTop
+      : null
+  if (!canonicalAnchor && sameRouteScrollTop !== null) return { kind: 'scrollTop', scrollTop: sameRouteScrollTop }
+  return { kind: 'bottom' }
 }
 
 /**

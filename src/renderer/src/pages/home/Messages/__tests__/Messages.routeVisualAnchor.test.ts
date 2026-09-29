@@ -23,7 +23,10 @@ describe('route-switch scroll + footer contract', () => {
 
   it('uses route-keyed scroll snapshots with legacy main-route fallback', () => {
     expect(messagesSource).toMatch(/topic-\$\{topic\.id\}::\$\{activeBranchId/)
-    expect(messagesSource).toMatch(/getRouteSavedPosition/)
+    // Provenance-aware target read (explicit target key, never the hook's
+    // current key while old DOM remains); `getRouteSavedPosition` was renamed
+    // in the displayed-route refactor.
+    expect(messagesSource).toMatch(/readTargetSnapshot|getSnapshotForRoute/)
     expect(messagesSource).toMatch(/getLegacyMainSavedPosition/)
     expect(messagesSource).toMatch(/scroll:topic-\$\{topic\.id\}/)
   })
@@ -32,7 +35,7 @@ describe('route-switch scroll + footer contract', () => {
     const effectIdx = messagesSource.indexOf('Top-selector route switch')
     expect(effectIdx).toBeGreaterThanOrEqual(0)
     const effect = messagesSource.slice(effectIdx, effectIdx + 6000)
-    expect(effect).toMatch(/getRouteSavedPosition/)
+    expect(effect).toMatch(/readTargetSnapshot/)
     expect(effect).toMatch(/isAtBottom/)
     expect(effect).toMatch(/anchorId/)
     expect(effect).toMatch(/vicinity/)

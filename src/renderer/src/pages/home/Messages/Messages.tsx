@@ -8,15 +8,17 @@ import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useClipboardKeyboard } from '@renderer/hooks/useClipboardKeyboard'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useLoadedTopicMessages, useMessageOperations, useTopicLoading } from '@renderer/hooks/useMessageOperations'
-import useScrollPosition, { holdProgrammaticScrollOwnership } from '@renderer/hooks/useScrollPosition'
+import useScrollPosition, { commitSnapshotForRoute, routeScrollKey } from '@renderer/hooks/useScrollPosition'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useTopicTransition } from '@renderer/hooks/useTopicTransition'
 import {
+  COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
   COLUMN_REVERSE_NEWER_PREFETCH_PX,
-  distanceFromBottom
+  distanceFromBottom,
+  isAtBottom as isColumnReverseAtBottom
 } from '@renderer/pages/home/Messages/columnReverseGeometry'
 import { findFirstVisibleMessage, findViewportTopAnchorWithOffset } from '@renderer/pages/home/Messages/domVisibility'
 import { branchFromAnchorMessage } from '@renderer/pages/home/Messages/messageBranch'
@@ -118,7 +120,16 @@ import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { last } from 'lodash'
-import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useReducer, useRef } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import InfiniteScroll from 'react-infinite-scroll-component'
 import styled from 'styled-components'
@@ -127,12 +138,12 @@ import { AnchorGroupProvider } from './anchorGroupContext'
 import {
   buildDividerKey,
   captureDividerOffset,
-  decideDividerRestoreTarget,
   dividerRowTestId,
   type DividerSwitchInfo,
   findAnchorsWithChildren,
   ForkDivider
 } from './BranchDividers'
+import { decideDividerRestoreSearchStep, type DividerSearchTerminalReason } from './dividerRestoreSearch'
 /**
  * Loaded-route tracking uses the tagged `LoadedRouteState` from
  * `messageWindow` (renderer-local, no persistence): `{ route, loadFailed }`.
@@ -148,37 +159,40 @@ import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
 import { useCrossMessageSelectionGuard, useEditModeNativeSelectionSuppression } from './messageSelectionGuard'
 import {
   buildRouteViewport,
+  canonicalSavedAnchorId,
   chooseRouteWindowRequest,
+  chooseTopFirstPositionPlan,
   claimLoadedRoute,
   decideDividerDoubleFailureRecovery,
   decideExternalDoubleFailureRecovery,
+  decideTopRestoreAnchor,
   initLoadedRouteState,
   isLoadedRouteCurrent,
+  isTopRestoreNotFoundError,
+  isTopStableCommittable,
   markLoadedRouteFailed
 } from './messageWindow'
-import {
-  armStabilizerSuppress,
-  createStabilizerScrollSuppress,
-  isRestoreTargetValid,
-  isSelfInducedStabilizerScroll,
-  runBoundedPositionStabilizer,
-  shouldCancelStabilizerForKeyDown,
-  type StabilizerHandle
-} from './positionStabilizer'
+import { isRestoreTargetValid, shouldCancelStabilizerForKeyDown } from './positionStabilizer'
 import Prompt from './Prompt'
+import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
 import {
-  type ActiveRestoreAnchor,
-  createDividerRestoreAnchor,
-  createMessageRestoreAnchor,
-  decidePaginationCompensation,
-  type PreferredRestoreAnchorSnapshot,
-  shouldStartPaginationStabilizer,
-  snapshotRestoreAnchor
-} from './routeRestoreAnchor'
+  buildContainerCapturer,
+  useOptionalRouteViewport,
+  useStableVisualAnchor,
+  viewportPhaseAttrFor
+} from './routeViewportContext'
+import { displayedRouteKey, RouteViewportController } from './routeViewportController'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
 import { requestTopicBranches, useBranchTree } from './useBranchTree'
 import { createViewportCommitWaiter } from './viewportCommitWaiter'
+import {
+  applyViewportFirstPosition,
+  isViewportTransitionCurrent,
+  type ViewportFirstPositionOutcome,
+  type ViewportFirstPositionPlan,
+  type ViewportTransitionPhase
+} from './viewportTransition'
 
 interface MessagesProps {
   assistant: Assistant
@@ -228,6 +242,8 @@ interface MessagesContentProps {
   onStabilizerUserInput?: () => void
   /** Keyboard scroll pre-cancel (Arrow/PageUp/PageDown/Home/End/Space, inputs excluded). */
   onStabilizerKeyDown?: (e: React.KeyboardEvent) => void
+  /** Atomic viewport transition phase (diagnostic `data-viewport-phase`; hidden while positioning). */
+  viewportPhase: ViewportTransitionPhase
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -245,7 +261,8 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   registerMessageElement,
   onSelectRoute,
   onStabilizerUserInput,
-  onStabilizerKeyDown
+  onStabilizerKeyDown,
+  viewportPhase
 }) => {
   const { t } = useTranslation()
 
@@ -388,6 +405,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       <MessagesContainer
         id="messages"
         className="messages-container"
+        data-viewport-phase={viewportPhase}
         ref={scrollContainerRef}
         onScroll={handleScrollPosition}
         onWheel={onStabilizerUserInput}
@@ -447,16 +465,65 @@ const Messages = ({
   // fallback). Consumed exactly once by the deletion effect below with an
   // explicit `latest` reload; never the generic snapshot-around path.
   const deletionFallbackIntent = useAppSelector((state) => selectDeletionFallbackIntent(state, topic.id))
+  // Single route viewport transition controller: component-scoped via the
+  // conversation-surface provider (Chat), with a per-instance fallback so
+  // isolated tests render without a provider. The controller SOLELY owns the
+  // route transition epoch, intent, phase, programmatic ownership
+  // (released exactly once), displayed-route provenance, and the active
+  // visual anchor. Redux still owns only the SELECTED activeBranch;
+  // messageViewportReducer still owns projection/window.
+  const viewportCtx = useOptionalRouteViewport()
+  const [localViewportVersion, setLocalViewportVersion] = useState(0)
+  const localControllerRef = useRef<RouteViewportController | null>(null)
+  if (!localControllerRef.current && !viewportCtx) {
+    localControllerRef.current = new RouteViewportController({ topicId: topic.id, route: activeBranchId })
+  }
+  const controller = viewportCtx?.controller ?? (localControllerRef.current as RouteViewportController)
+  // Live context ref: adapter callbacks below read the CURRENT context at
+  // call time under stable useCallback identities, so controller version
+  // bumps never recreate them — otherwise the route effect would re-run
+  // mid-transition, open duplicate sessions, and ping-pong epochs. The
+  // route effect must run only on selected/topic change.
+  const viewportCtxRef = useRef(viewportCtx)
+  viewportCtxRef.current = viewportCtx
+  const notifyViewport = useCallback(() => {
+    const live = viewportCtxRef.current
+    if (live) {
+      live.notifyChanged()
+      return
+    }
+    setLocalViewportVersion((v) => v + 1)
+  }, [])
+  // Local suppression for imperative programmatic scrolls that are NOT route
+  // transitions (e.g. new-branch landing bottom snap): while set, ordinary
+  // scroll capture is dropped so the snap is never recorded as a user scroll.
+  const suppressUserWriteRef = useRef(false)
+  const viewportPhaseAttr = viewportCtx?.viewportPhaseAttr ?? viewportPhaseAttrFor(controller.currentPhase)
+  void localViewportVersion
   // Route-keyed scroll snapshots: each branch route keeps its own browsing
-  // position under `topic-<id>::<branch|main>`. The legacy topic-only key
-  // (`topic-<id>`) is the main-route fallback when no route snapshot exists.
+  // position under `topic-<id>::<branch|main>`. User scrolls are adopted
+  // SOLELY via the atomic `controller.userTakeover()` in `handleScroll`
+  // below (single writer → `commitSnapshotForRoute` with the returned key).
+  // The hook keeps only explicit non-scroll duties (saved reads, topic-change
+  // save, capture); its throttled scroll writer is never called for route
+  // viewports (no double write with the takeover path).
   const {
     containerRef: scrollContainerRef,
-    handleScroll: handleScrollPosition,
     getSavedPosition,
-    savePosition
-  } = useScrollPosition(`topic-${topic.id}::${activeBranchId ?? 'main'}`)
-  const getRouteSavedPosition = getSavedPosition
+    getSnapshotForRoute,
+    savePosition,
+    captureSnapshot
+  } = useScrollPosition(`topic-${topic.id}::${activeBranchId ?? 'main'}`, {
+    canWrite: () => {
+      if (suppressUserWriteRef.current) return false
+      // Explicit-save gate only (topic change / navigation persist): selected
+      // must equal displayed and the controller must be unowned-clean, so no
+      // key-change/stale-DOM gap can persist under the incoming key.
+      const displayed = controller.displayedRoute
+      if (displayed.topicId !== topic.id || displayed.route !== activeBranchId) return false
+      return controller.canAcceptUserScrollWrite()
+    }
+  })
   const getLegacyMainSavedPosition = useCallback(() => {
     try {
       const saved = window.keyv.get(`scroll:topic-${topic.id}`)
@@ -515,10 +582,43 @@ const Messages = ({
   // the loaded-route marker so a stale route from the previous topic never
   // triggers an invalidation reload for the new topic.
   const lastTopicForRouteRef = useRef(topic.id)
+  // Displayed-route provenance is owned SOLELY by the controller (which route
+  // the current committed DOM/window belongs to). Selected route is Redux
+  // intent (`activeBranchId`/`routeRef`); the displayed route advances only
+  // when the target is positioned and visible. Outgoing saves always write
+  // under the DISPLAYED key, never the incoming selected route while old DOM
+  // remains. During the incoming fetch the outgoing viewport stays visible;
+  // controller ownership suppresses any write under the incoming identity.
   if (lastTopicForRouteRef.current !== topic.id) {
     lastTopicForRouteRef.current = topic.id
     loadedRouteRef.current = claimLoadedRoute(activeBranchId)
+    // A topic change is not a route transition: sync the displayed route when
+    // no transition owns it (a no-op while a transition is in flight).
+    controller.syncDisplayed({ topicId: topic.id, route: activeBranchId })
+    notifyViewport()
   }
+  // Live container capturer for the controller's outgoing freeze (scoped to
+  // this instance; unregistered on unmount). Persistent stable anchoring runs
+  // in the keeper below (scoped observers, no polling).
+  useEffect(() => {
+    const register = viewportCtxRef.current?.registerCapturer
+    if (register) {
+      const capturer = buildContainerCapturer(scrollContainerRef)
+      register(capturer)
+      return () => register(null)
+    }
+    return undefined
+    // Register once per mount: the capturer reads the live container at call
+    // time, so context version bumps must not re-register (stable identity).
+  }, [scrollContainerRef])
+  // Persistent stable visual anchor maintainer (component-scoped keeper):
+  // the keeper never takes over, never writes snapshots, never changes the
+  // anchor — it only compensates `scrollTop` to hold the active anchor
+  // offset. Messages calls `requestHold` for no-intent scrolls (visual
+  // compensation only); the atomic `userTakeover` path stays sole writer.
+  const anchorMaintainer = useStableVisualAnchor(scrollContainerRef)
+  const anchorMaintainerRef = useRef(anchorMaintainer)
+  anchorMaintainerRef.current = anchorMaintainer
   // Live translation ref so `navigate` stays stable across renders (production
   // `t` is stable; test mocks return a new closure per render).
   const tRef = useRef(t)
@@ -562,30 +662,14 @@ const Messages = ({
   // topic.id.
   const transitionEpochRef = useRef(0)
 
-  // Divider/top restore generation: independent of the viewport scroll token.
-  // `beginScroll('anchoring'/'programmatic')` suspends user-scroll handling by
-  // design, so target validity must NEVER consult `canHandleUserViewportScroll`
-  // (it would self-cancel). Validity is topic + route + mounted + this restore
-  // generation still current. User input cancels via the active stabilizer
-  // session below; the stabilizer's own programmatic deltas are guarded by a
-  // precise single-frame suppress (`stabilizerSuppressRef`: post-apply
-  // expected scrollTop + armed + generation, cleared on the next frame) so
-  // they never self-cancel and never swallow real keyboard/scrollbar scrolls.
-  const restoreEpochRef = useRef(0)
-  const activeStabilizerRef = useRef<{
-    handle: StabilizerHandle
-    scrollToken: object
-    release: () => void
-    epoch: number
-  } | null>(null)
-  const stabilizerSuppressRef = useRef(createStabilizerScrollSuppress())
-  // Route-restore preferred visual anchor: the row that must stay visually
-  // still across a divider/top restore (divider-row or saved message-row),
-  // bound to topicId/routeId/restoreEpoch with an explicit lifecycle. Route,
-  // topic, deletion, unmount, or user-cancel clears it. Queued older-edge
-  // intents carry only a detached snapshot (stable identity + targetOffset),
-  // never this live ref.
-  const activeRestoreAnchorRef = useRef<ActiveRestoreAnchor | null>(null)
+  // Route transition truth lives SOLELY in `controller` (epoch, intent,
+  // phase, ownership, displayed route, visual anchor). Validity is topic +
+  // route + mounted + controller epoch still current — NEVER
+  // `canHandleUserViewportScroll` (the anchoring token closes that gate by
+  // design and would self-cancel). Genuine user input declares pending via
+  // `controller.declareUserIntent()` and the scroll itself is adopted once via
+  // `controller.userTakeover()`; programmatic compensation writes are
+  // recognized by the stable-anchor keeper, never by timestamp windows.
   // Pending older-edge intent (InfiniteScroll latch fix): queued when `next`
   // fires while the viewport is temporarily non-user (anchoring/programmatic
   // restore or active navigation). Replayed once from the committed viewport
@@ -593,34 +677,384 @@ const Messages = ({
   // on library internals.
   const pendingOlderIntentRef = useRef<PendingOlderEdgeIntent | null>(null)
   const unmountedRef = useRef(false)
+  // In-flight top fetch pipeline marker (same-session duplicate-run guard).
+  const routeFetchEpochRef = useRef<number | null>(null)
+  // First-position plan payload for the pre-paint layout reveal. Single
+  // writer (the arm helpers below), never decision truth: every reader
+  // re-gates on `controller.isSessionCurrent(epoch)`. Cleared only after the
+  // owning session committed or terminated.
+  const transitionPlanRef = useRef<{
+    topicId: string
+    routeId: string | null
+    epoch: number
+    plan: ViewportFirstPositionPlan
+    /** Pre-paint first-position outcome (`searching` = intermediate edge parking). */
+    outcome: ViewportFirstPositionOutcome | null
+  } | null>(null)
+  // Divider restore search progress (binding invariant): while the requested
+  // divider/shared anchor is outside the resident window, the restore stays in
+  // a restoring/searching state under the owning session. Only the
+  // resident→aligned→quiet path may commit the target route's stable
+  // snapshot; terminal paths release exactly once with NO commit, preserving
+  // the pre-existing target snapshot. Epoch truth is the controller's;
+  // `ownerEpoch` is re-gated on every step — stale completions can never
+  // commit. The new arm re-establishes the progress below.
+  const dividerProgressRef = useRef<{
+    ownerEpoch: number
+    topicId: string
+    routeId: string | null
+    dividerKey: string
+    anchorMessageId: string
+    parentOfDivider: string | null
+    sharedMessageId: string | null
+    sharedOffset: number | null
+    wantOffset: number | null
+    pagesDriven: number
+    lastLoadFailed: boolean
+    drivenWindowKey: string | null
+  } | null>(null)
+  /** End the viewport's current scroll token (single anchoring owner at a time). */
+  const endViewportScrollToken = useCallback(() => {
+    const token = viewportStateRef.current.scrollToken
+    if (!token) return
+    try {
+      viewportDispatch({ type: 'scroll/end', token })
+    } catch {}
+  }, [viewportDispatch])
+  const failVisibleTransition = useCallback(
+    (epoch: number) => {
+      // Stale sessions are inert: never touch the new session's token/phase.
+      if (!controller.isSessionCurrent(epoch)) return
+      controller.terminate(epoch, 'fail-visible')
+      dividerProgressRef.current = null
+      transitionPlanRef.current = null
+      endViewportScrollToken()
+      notifyViewport()
+    },
+    [controller, endViewportScrollToken, notifyViewport]
+  )
+  // Superseding teardown: terminate the current session (release exactly
+  // once) so the next request starts clean. Never hides: callers own the
+  // phase decision (arm re-hides, cancel fails visible).
+  const tearDownViewportTransition = useCallback(() => {
+    const epoch = controller.currentEpoch
+    if (controller.programmaticOwned) {
+      controller.terminate(epoch, 'superseded')
+    }
+    dividerProgressRef.current = null
+    transitionPlanRef.current = null
+    endViewportScrollToken()
+    notifyViewport()
+  }, [controller, endViewportScrollToken, notifyViewport])
+  // NOTE: the former `armRouteTransition(plan, tid, route)` two-step arm has
+  // been removed. Route-switch windows now commit ONLY via the single atomic
+  // entry `commitRouteWindowAtomic` defined after `windowIdentityKey` below:
+  // controller mark (epoch + target route + window identity → rendered) +
+  // reducer dispatch + plan ref in ONE sync call; stale epochs refuse with no
+  // dispatch, never tearing down the new session. Ordinary message
+  // navigation / edit mode never enters that entry (not a route transition).
+  // Bootstrap arm: same hidden-until-positioned contract without claiming the
+  // viewport scroll token (the navigation transaction owns its own token).
+  // Controller ownership alone suppresses transient capture pre-paint; the
+  // stable completion commits explicitly without requiring user input.
+  const armBootstrapTransition = useCallback(
+    (plan: ViewportFirstPositionPlan, topicIdAtStart: string, routeAtStart: string | null) => {
+      tearDownViewportTransition()
+      const epoch = controller.request({ kind: 'generic', topicId: topicIdAtStart, targetRoute: routeAtStart }).epoch
+      controller.appliedWindow(epoch)
+      transitionPlanRef.current = { topicId: topicIdAtStart, routeId: routeAtStart, epoch, plan, outcome: null }
+      notifyViewport()
+      return epoch
+    },
+    [controller, tearDownViewportTransition, notifyViewport]
+  )
+  // Displayed-route/stable-snapshot coordinator (route-local viewports).
+  // - Selected route = Redux intent (`routeRef`); displayed route =
+  //   `controller.displayedRoute` (which route the current committed DOM
+  //   belongs to).
+  // - `saveDisplayedSnapshot` freezes the outgoing viewport under the
+  //   DISPLAYED key synchronously before selected changes. Dropped while
+  //   owned (transient): the existing stable snapshot stands.
+  // - `beginFetchHold` opens the transition session (fetch-hold) across the
+  //   incoming fetch (old viewport stays visible; no write may land under
+  //   the incoming key). The positioning arm adopts it; rapid supersession
+  //   terminates the old session (release exactly once) so stale fetches
+  //   cannot arm or commit.
+  // - `commitDisplayedStable` stores the final visible viewport under the
+  //   target key on stable completion and advances the displayed route. A
+  //   programmatic restore with no user input is itself a valid stable
+  //   snapshot. Stale callers must gate on epoch (this helper re-checks
+  //   topic/route/mounted/session currency).
+  const displayedKeyFor = useCallback((tid: string, route: string | null): string => {
+    return routeScrollKey(tid, route)
+  }, [])
+  const saveDisplayedSnapshot = useCallback((): boolean => {
+    try {
+      const live = viewportCtxRef.current
+      if (live) return live.freezeDisplayed()
+      // Isolated-render adapter for focused component tests (bare mount with
+      // no provider): same controller-owned clean gate — dirty/owned states
+      // preserve, never capture live DOM. Not a second production truth;
+      // production Chat always provides the viewport context above.
+      if (!controller.shouldCaptureOutgoing()) return false
+      const snapshot = captureSnapshot()
+      if (!snapshot) return false
+      return commitSnapshotForRoute(displayedRouteKey(controller.displayedRoute), snapshot)
+    } catch {
+      return false
+    }
+  }, [controller, captureSnapshot])
+  const readTargetSnapshot = useCallback(
+    (tid: string, route: string | null) => {
+      try {
+        const live = viewportCtxRef.current
+        if (live) return live.readSnapshot(displayedKeyFor(tid, route))
+        return getSnapshotForRoute(displayedKeyFor(tid, route))
+      } catch {
+        return null
+      }
+    },
+    [displayedKeyFor, getSnapshotForRoute]
+  )
+  const beginFetchHold = useCallback(
+    (
+      topicIdAtStart: string,
+      incomingRoute: string | null,
+      intent?: {
+        kind: 'top' | 'divider' | 'generic'
+        dividerKey?: string
+        clickOffset?: number | null
+        saved?: {
+          scrollTop: number
+          messageId: string | null
+          intraRowOffset: number | null
+          isAtBottom: boolean
+        } | null
+        snapshotInvalid?: boolean
+      }
+    ): number => {
+      tearDownViewportTransition()
+      const raw =
+        intent?.saved !== undefined
+          ? intent.saved
+          : intent?.kind === 'top' || intent === undefined
+            ? readTargetSnapshot(topicIdAtStart, incomingRoute)
+            : null
+      // Normalize the storage snapshot (optional fields) to the controller
+      // snapshot shape (required nullable fields).
+      const saved = raw
+        ? {
+            scrollTop: raw.scrollTop,
+            messageId: raw.messageId ?? null,
+            intraRowOffset: raw.intraRowOffset ?? null,
+            isAtBottom: raw.isAtBottom
+          }
+        : null
+      const { epoch } = controller.request({
+        kind: intent?.kind ?? 'generic',
+        topicId: topicIdAtStart,
+        targetRoute: incomingRoute,
+        dividerKey: intent?.dividerKey,
+        clickOffset: intent?.clickOffset,
+        saved,
+        snapshotInvalid: intent?.snapshotInvalid
+      })
+      notifyViewport()
+      return epoch
+    },
+    [controller, tearDownViewportTransition, notifyViewport, readTargetSnapshot]
+  )
+  /**
+   * Adopt the in-flight fetch-hold session for the same topic/target (opened
+   * by the top selector's controller request) instead of opening a second
+   * one. Returns null when no adoptable session exists (external change,
+   * deletion fallback, bootstrap) so the caller opens its own.
+   */
+  const adoptFetchHold = useCallback(
+    (topicIdAtStart: string, incomingRoute: string | null): number | null => {
+      const intent = controller.currentIntent
+      if (
+        controller.programmaticOwned &&
+        controller.currentPhase === 'fetch-hold' &&
+        intent !== null &&
+        intent.topicId === topicIdAtStart &&
+        intent.targetRoute === incomingRoute
+      ) {
+        return controller.currentEpoch
+      }
+      return null
+    },
+    [controller]
+  )
+  const commitDisplayedStable = useCallback(
+    (tid: string, route: string | null, epoch: number): boolean => {
+      if (unmountedRef.current) return false
+      if (topicIdRef.current !== tid || routeRef.current !== route) return false
+      if (!controller.isSessionCurrent(epoch)) return false
+      const live = scrollContainerRef.current
+      if (!live) return false
+      const measured = captureSnapshot()
+      if (!measured) return false
+      const { commit } = controller.commitStable(epoch, {
+        messageId: measured.messageId ?? null,
+        intraRowOffset: measured.intraRowOffset ?? null,
+        scrollTop: measured.scrollTop,
+        isAtBottom: measured.isAtBottom
+      })
+      if (!commit) return false
+      let stored = false
+      try {
+        stored = commitSnapshotForRoute(commit.routeKey, {
+          scrollTop: commit.snapshot.scrollTop,
+          anchorId: commit.snapshot.messageId,
+          messageId: commit.snapshot.messageId,
+          intraRowOffset: commit.snapshot.intraRowOffset,
+          rawScrollTop: commit.snapshot.scrollTop,
+          isAtBottom: commit.snapshot.isAtBottom
+        })
+      } catch {
+        stored = false
+      }
+      transitionPlanRef.current = null
+      endViewportScrollToken()
+      notifyViewport()
+      return stored
+    },
+    [controller, captureSnapshot, endViewportScrollToken, notifyViewport, scrollContainerRef]
+  )
+  // Top-route identity commit (route-local stable viewport): the stable
+  // snapshot is explicitly constructed from the already-applied anchor
+  // identity + wantOffset. Only scrollTop/rawScrollTop/isAtBottom come from
+  // the final live container measurement. Never a crossing-first capture:
+  // an expanded window may surface a shared/foreign row at the viewport top
+  // while the requested anchor is correctly placed at its offset. Failure
+  // (stale topic/route/epoch/mounted, or unmeasurable container) commits
+  // nothing so the prior snapshot stands. Programmatic restore needs no
+  // user input to become stable. Top-selector path only; the divider path
+  // keeps its own capture commit untouched.
+  const commitDisplayedStableWithAnchor = useCallback(
+    (tid: string, route: string | null, epoch: number, anchorId: string, wantOffset: number | null): boolean => {
+      if (unmountedRef.current) return false
+      if (topicIdRef.current !== tid || routeRef.current !== route) return false
+      if (!controller.isSessionCurrent(epoch)) return false
+      const live = scrollContainerRef.current
+      if (!live) return false
+      let scrollTop = 0
+      try {
+        scrollTop = live.scrollTop
+      } catch {
+        return false
+      }
+      if (typeof scrollTop !== 'number' || !Number.isFinite(scrollTop)) return false
+      let atBottom = false
+      try {
+        atBottom = isColumnReverseAtBottom(scrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+      } catch {
+        atBottom = false
+      }
+      const { commit } = controller.commitStable(epoch, {
+        messageId: anchorId,
+        intraRowOffset: wantOffset,
+        scrollTop,
+        isAtBottom: atBottom
+      })
+      if (!commit) return false
+      let stored = false
+      try {
+        stored = commitSnapshotForRoute(commit.routeKey, {
+          scrollTop,
+          anchorId,
+          messageId: anchorId,
+          intraRowOffset: wantOffset,
+          rawScrollTop: scrollTop,
+          isAtBottom: atBottom
+        })
+      } catch {
+        stored = false
+      }
+      transitionPlanRef.current = null
+      endViewportScrollToken()
+      notifyViewport()
+      return stored
+    },
+    [controller, endViewportScrollToken, notifyViewport, scrollContainerRef]
+  )
+  // The top selector freezes through the controller (context request); this
+  // instance only needs its live capturer registered (done above), so no
+  // module-global saver registration exists anymore.
+  // Pre-paint first-position + reveal: the single atomic step. Runs in the
+  // layout phase so the target window's first paint already carries the
+  // correct scroll. Post-reveal drift is held by the persistent stable
+  // anchor keeper (scoped observers), not a stabilizer loop. Stale/missing
+  // targets fail visible.
+  useLayoutEffect(() => {
+    if (controller.currentPhase !== 'positioning') return
+    const pending = transitionPlanRef.current
+    if (!pending) {
+      return
+    }
+    if (!controller.isSessionCurrent(pending.epoch)) return
+    const live = scrollContainerRef.current
+    const hasWindow = (viewportStateRef.current.window?.displayMessages.length ?? 0) > 0
+    const current = isViewportTransitionCurrent({
+      topicMatch: topicIdRef.current === pending.topicId,
+      routeMatch: routeRef.current === pending.routeId,
+      epochCurrent: controller.isSessionCurrent(pending.epoch),
+      mounted: !unmountedRef.current
+    })
+    if (!current || !live || !hasWindow) {
+      // Missing window yet (commit not observed): stay hidden until the
+      // window lands; only fail visible when this epoch is stale/gone.
+      if (!hasWindow && current && live && !unmountedRef.current) return
+      if (controller.isSessionCurrent(pending.epoch)) {
+        failVisibleTransition(pending.epoch)
+      }
+      return
+    }
+    try {
+      // Record the explicit outcome: `searching` (edge-parked intermediate)
+      // keeps the restore in its searching state — the projection below still
+      // reveals at the safe edge so pagination can run, but no stable commit,
+      // intent clear, or ownership release may follow until the requested
+      // identity is resident/aligned/quiet (divider search coordinator owns
+      // that lifecycle).
+      pending.outcome = applyViewportFirstPosition(live, pending.plan)
+    } catch {
+      // fail-visible below still reveals
+    }
+    if (
+      topicIdRef.current !== pending.topicId ||
+      routeRef.current !== pending.routeId ||
+      !controller.isSessionCurrent(pending.epoch) ||
+      unmountedRef.current
+    ) {
+      failVisibleTransition(pending.epoch)
+      return
+    }
+    controller.firstPositioned(pending.epoch, pending.outcome ?? 'unplaced')
+    // Reveal tied to the same route/epoch: advance displayed only when the
+    // target is positioned and visible. Ownership + scroll token stay held
+    // until stable commit or terminal fallback (release exactly once there).
+    controller.revealed(pending.epoch)
+    notifyViewport()
+  }, [viewportPhaseAttr, viewportState.window, failVisibleTransition, scrollContainerRef, controller, notifyViewport])
   useEffect(() => {
     return () => {
       unmountedRef.current = true
       pendingOlderIntentRef.current = null
-      activeRestoreAnchorRef.current = null
-      // Synchronous unmount teardown: invalidate the restore epoch so late
-      // async continuations stay inert, then synchronously cancel the active
-      // stabilizer (handle.cancel settles `done` without waiting for rAF) and
-      // release the scroll token + hook ownership exactly once. Taking the
-      // session first guarantees a single end/release even if a restore
-      // `finally` runs later (it skips on epoch mismatch).
-      restoreEpochRef.current += 1
-      const active = activeStabilizerRef.current
-      activeStabilizerRef.current = null
-      stabilizerSuppressRef.current.armed = false
-      if (active) {
-        try {
-          active.handle.cancel()
-        } catch {}
-        try {
-          viewportDispatch({ type: 'scroll/end', token: active.scrollToken })
-        } catch {}
-        try {
-          active.release()
-        } catch {}
-      }
+      // Synchronous unmount teardown: invalidate the controller so late async
+      // continuations stay inert (epoch mismatch), end the viewport scroll
+      // token, and release ownership exactly once. Stale `finally` blocks
+      // skip on epoch mismatch. A pending positioning transition is torn
+      // down (never leaves hidden, never leaks ownership). HMR disposes via
+      // the provider effect as well; both paths are idempotent.
+      controller.invalidateAll()
+      dividerProgressRef.current = null
+      transitionPlanRef.current = null
+      endViewportScrollToken()
+      notifyViewport()
     }
-  }, [viewportDispatch])
+  }, [controller, endViewportScrollToken, notifyViewport])
 
   // Deletion epoch subscription — synchronously invalidate the mounted viewport
   // projection for this topic when authoritative hard deletion advances.
@@ -643,7 +1077,15 @@ const Messages = ({
     const invalidate = () => {
       windowCacheRef.current.delete(topicIdAtSubscribe)
       pendingOlderIntentRef.current = null
-      activeRestoreAnchorRef.current = null
+      // Hard deletion invalidates in-flight positioning too: invalidate the
+      // controller (releases ownership exactly once so later saves are not
+      // blocked) and end the scroll token so the emptied viewport is never
+      // left hidden by a stale transition.
+      controller.invalidateAll()
+      dividerProgressRef.current = null
+      transitionPlanRef.current = null
+      endViewportScrollToken()
+      notifyViewport()
       clearTimeoutTimer('loadMoreMessages')
       clearTimeoutTimer('loadNewerMessages')
       viewportCommitWaiterRef.current.cancelAll()
@@ -663,7 +1105,7 @@ const Messages = ({
       invalidate()
     }
     return unsub
-  }, [topic.id, clearTimeoutTimer, viewportDispatch])
+  }, [tearDownViewportTransition, topic.id, clearTimeoutTimer, viewportDispatch])
 
   // S3.1: Explicit topic transition coordinator. Detects topic prop changes
   // and orchestrates deterministic cleanup: save old-topic scroll position,
@@ -678,10 +1120,14 @@ const Messages = ({
     viewportDispatch,
     resetBootstrapPhase: () => {
       bootstrapPhaseRef.current = 'idle'
+      // A topic change invalidates any armed positioning transition: tear it
+      // down (release exactly once) and fail visible so the new topic never
+      // starts hidden. The bootstrap effect below arms a fresh transition.
+      tearDownViewportTransition()
+      notifyViewport()
     },
     clearTimers: () => {
       pendingOlderIntentRef.current = null
-      activeRestoreAnchorRef.current = null
       clearTimeoutTimer('loadMoreMessages')
       clearTimeoutTimer('loadNewerMessages')
     },
@@ -726,11 +1172,42 @@ const Messages = ({
     [viewportDispatch]
   )
 
+  // Ordinary projection apply (bootstrap first-load / reconcile): NOT a route
+  // transition — never switches provenance. Same-route window refreshes bump
+  // the controller window generation (`noteSameRouteWindowUpdate`) and notify
+  // the component-scoped maintainer in the layout phase so it re-resolves the
+  // container-scoped live anchor and holds on the committed DOM. A dirty
+  // topic-switch (rendered unknown after `syncDisplayed`) rebaselines clean
+  // with the applied window as proof (`rebaseClean`) when nothing owns the
+  // viewport (owned bootstrap commits instead). Navigation / edit-mode window
+  // changes never enter the route-transition entry. Route-transition windows
+  // still position programmatically — never keeper preemption.
   const applyMessageWindow = useCallback(
     (window: MessageWindow) => {
       viewportDispatch({ type: 'window/apply', window })
+      try {
+        const len = Array.isArray(window.displayMessages) ? window.displayMessages.length : 0
+        const wid = `${String((window as { oldestMessageId?: unknown }).oldestMessageId ?? '')}::${String((window as { newestMessageId?: unknown }).newestMessageId ?? '')}::${len}`
+        if (wid.length === 0) return
+        const target = { topicId: topicIdRef.current, route: routeRef.current }
+        // Same-route refresh (reconcile/pagination): generation event only.
+        // Notify so the keeper layout effect re-runs after the DOM commit and
+        // reads the new committed rows (ordering: projection dispatch above +
+        // this version bump batch into the same commit).
+        if (controller.noteSameRouteWindowUpdate(target, wid)) {
+          notifyViewport()
+          return
+        }
+        // Dirty bootstrap (topic switch, no owner): rebase clean with proof.
+        if (!controller.programmaticOwned) {
+          controller.rebaseClean(target, wid)
+          notifyViewport()
+        }
+      } catch {
+        // fail-closed: projection already applied above
+      }
     },
-    [viewportDispatch]
+    [controller, notifyViewport, viewportDispatch]
   )
 
   const isCurrentNavigation = useCallback(
@@ -748,7 +1225,6 @@ const Messages = ({
 
   const cancelActiveLoads = useCallback(() => {
     pendingOlderIntentRef.current = null
-    activeRestoreAnchorRef.current = null
     const state = viewportStateRef.current
     for (const direction of ['older', 'newer'] as const) {
       const load = state.loads[direction]
@@ -988,6 +1464,12 @@ const Messages = ({
     []
   )
 
+  // Route-local stable snapshots update from any stable viewport — user
+  // scrolls via `handleScroll`, same-route imperative navigation via
+  // `navigateAndSave` below, and programmatic restores via the explicit
+  // stable commit on completion. No input-gated fence: a successful
+  // programmatic restore is itself a valid stable viewport.
+
   /**
    * Unified stable-ID navigation entry point (single assembly site).
    *
@@ -1122,6 +1604,8 @@ const Messages = ({
       const saveEpoch = transitionEpochRef.current
       void navigate(intent).then((result) => {
         if (transitionEpochRef.current !== saveEpoch) return
+        // Same-route user navigation: the resulting viewport is stable, so
+        // persist it under the current (displayed) route key.
         if (shouldPersistNavigationResult(result)) savePosition()
       })
     },
@@ -1367,18 +1851,45 @@ const Messages = ({
               const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtCreate) ?? []) as Message[]
               if (loaded.length > 0) {
                 const latestWindow = createLatestMessageWindow(loaded, displayCount)
+                // New-branch landing (route switch, no fetch-hold session):
+                // provenance-bound rebase with window proof — never a bare
+                // dispatch bypassing rendered. No snapshot write: the fresh
+                // route keeps its deterministic bottom default until genuine
+                // user scrolling establishes one.
+                const disp = latestWindow.displayMessages ?? []
+                const wid =
+                  `${String((latestWindow as { oldestMessageId?: unknown }).oldestMessageId ?? '')}::${String((latestWindow as { newestMessageId?: unknown }).newestMessageId ?? '')}::${disp.length}` ||
+                  `newbranch-${topicIdAtCreate}`
                 viewportDispatch({ type: 'window/apply', window: latestWindow })
+                try {
+                  if (!controller.programmaticOwned) {
+                    controller.rebaseClean({ topicId: topicIdAtCreate, route: newRoute }, wid)
+                    notifyViewport()
+                  }
+                } catch {
+                  // fail-closed: projection already applied above
+                }
               }
             } catch {
               // fail-closed: loaded projection already rebased; viewport keeps prior window
             }
-            // Explicit latest/bottom positioning under scroll ownership so the
-            // bottom snap is never recorded as a user scroll.
-            const release = holdProgrammaticScrollOwnership()
+            // Explicit latest/bottom positioning with local write suppression
+            // so the bottom snap is never recorded as a user scroll.
+            suppressUserWriteRef.current = true
             try {
               await navigate({ kind: 'bottom', source: 'imperative' })
             } finally {
-              release()
+              suppressUserWriteRef.current = false
+            }
+            // The creation selects the new route outside any fetch-hold session
+            // (existing new-branch-landing semantics preserved): the rebase
+            // above already proved rendered == displayed == new route, so
+            // later freezes/keeper writes use the new route's key — never the
+            // stale outgoing key. No snapshot write: the fresh route keeps
+            // its deterministic bottom default until genuine user scrolling
+            // establishes one.
+            if (topicIdRef.current === topicIdAtCreate && routeRef.current === newRoute) {
+              notifyViewport()
             }
             return true
           },
@@ -1502,14 +2013,72 @@ const Messages = ({
       // start. If the topic changes before the async navigation completes (even
       // to the same topic ID — A→B→A), the stale completion is rejected.
       const bootstrapEpoch = transitionEpochRef.current
+      // Atomic bootstrap: hide the target window until the pre-paint layout
+      // reveal applies the first scroll. The transaction owns its own scroll
+      // token; this arm only holds hook ownership + the hidden phase. Route-
+      // local plan only: a missing pending target reveals at the deterministic
+      // default (bottom) — never outgoing geometry.
+      const pendingTarget = decision.intent.kind === 'message' ? decision.intent.targetId : null
+      const bootstrapRestoreEpoch = armBootstrapTransition(
+        pendingTarget
+          ? { kind: 'message', messageId: pendingTarget, wantOffset: null, fallbackScrollTop: null }
+          : { kind: 'bottom' },
+        topic.id,
+        routeRef.current
+      )
       void navigate(decision.intent).then((result) => {
-        if (transitionEpochRef.current !== bootstrapEpoch) return
+        if (controller.currentEpoch !== bootstrapRestoreEpoch) return
+        if (transitionEpochRef.current !== bootstrapEpoch) {
+          failVisibleTransition(bootstrapRestoreEpoch)
+          return
+        }
+        const pendingTransition = transitionPlanRef.current
+        if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
+          // Synchronously enforce the first position before reveal: when the
+          // pre-paint layout effect already applied it, this re-application
+          // is idempotent (same target/offset); when the transaction never
+          // positioned (cancelled/failed/missing target), the plan's explicit
+          // fallback applies now instead of revealing at an unplaced scroll.
+          // Only while still on the same topic/route/epoch — otherwise the
+          // new owner positions.
+          try {
+            const live = scrollContainerRef.current
+            if (
+              live &&
+              !unmountedRef.current &&
+              topicIdRef.current === topic.id &&
+              routeRef.current === pendingTransition.routeId &&
+              controller.currentEpoch === bootstrapRestoreEpoch
+            ) {
+              applyViewportFirstPosition(live, pendingTransition.plan)
+            }
+          } catch {
+            // fail-visible below still reveals
+          }
+          transitionPlanRef.current = null
+          controller.revealed(bootstrapRestoreEpoch)
+          notifyViewport()
+        }
         if (result !== 'cancelled') {
           clearPendingNavigate(pending)
           bootstrapPhaseRef.current = 'done'
-          if (shouldPersistNavigationResult(result)) savePosition()
+          // The navigation transaction performed the positioning scroll
+          // itself (it owns its token); record it so the stable commit below
+          // is gated on positioned+visible, not on the layout effect having
+          // observed a window. Idempotent when the layout effect already
+          // placed (same session/plan).
+          controller.firstPositioned(bootstrapRestoreEpoch, 'placed')
+          controller.revealed(bootstrapRestoreEpoch)
+          notifyViewport()
+          // Stable completion commit: the final visible viewport is the
+          // route's stable snapshot (no user input required). Gated by the
+          // same epoch; advances displayed provenance.
+          commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
         } else {
           bootstrapPhaseRef.current = 'done'
+          // Cancelled transactions position nothing: terminate visibly
+          // without committing (release exactly once).
+          failVisibleTransition(bootstrapRestoreEpoch)
         }
       })
       return
@@ -1521,11 +2090,90 @@ const Messages = ({
     // S3.1 Blocker 1 correction: capture the transition epoch for the restore
     // navigation so a stale completion does not persist under the wrong epoch.
     const restoreEpoch = transitionEpochRef.current
+    // Atomic bootstrap restore: same hidden-until-positioned contract as route
+    // switches. The saved intra-row offset rides in the plan so the pre-paint
+    // reveal lands precisely; the transaction scroll afterwards converges.
+    // Same-route fallback only: the target's own saved scrollTop, never
+    // outgoing geometry. No snapshot → deterministic default below.
+    const savedForPlan = (() => {
+      try {
+        return getSavedPosition()
+      } catch {
+        return null
+      }
+    })()
+    const restorePlan: ViewportFirstPositionPlan =
+      decision.intent.kind === 'bottom'
+        ? { kind: 'bottom' }
+        : decision.intent.kind === 'message'
+          ? {
+              kind: 'message',
+              messageId: decision.intent.targetId,
+              wantOffset:
+                typeof savedForPlan?.intraRowOffset === 'number' && Number.isFinite(savedForPlan.intraRowOffset)
+                  ? savedForPlan.intraRowOffset
+                  : null,
+              fallbackScrollTop:
+                savedForPlan && typeof savedForPlan.scrollTop === 'number' ? savedForPlan.scrollTop : null
+            }
+          : decision.intent.kind === 'scrollTop'
+            ? { kind: 'scrollTop', scrollTop: decision.intent.scrollTop }
+            : { kind: 'bottom' }
+    const bootstrapRestoreEpoch = armBootstrapTransition(restorePlan, topic.id, routeRef.current)
     void navigate(decision.intent).then((result) => {
-      if (transitionEpochRef.current !== restoreEpoch) return
-      if (shouldPersistNavigationResult(result)) savePosition()
+      if (controller.currentEpoch !== bootstrapRestoreEpoch) return
+      if (transitionEpochRef.current !== restoreEpoch) {
+        failVisibleTransition(bootstrapRestoreEpoch)
+        return
+      }
+      const pendingTransition = transitionPlanRef.current
+      if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
+        // Same synchronous enforce-before-reveal contract as the pending
+        // path above: idempotent when the layout effect already placed the
+        // target, corrective (explicit fallback) when it did not.
+        try {
+          const live = scrollContainerRef.current
+          if (
+            live &&
+            !unmountedRef.current &&
+            topicIdRef.current === topic.id &&
+            routeRef.current === pendingTransition.routeId &&
+            controller.currentEpoch === bootstrapRestoreEpoch
+          ) {
+            applyViewportFirstPosition(live, pendingTransition.plan)
+          }
+        } catch {
+          // fail-visible below still reveals
+        }
+        transitionPlanRef.current = null
+        controller.revealed(bootstrapRestoreEpoch)
+        notifyViewport()
+      }
+      // Stable completion commit (same epoch gate already checked above):
+      // the final visible viewport is the route's stable snapshot even with
+      // no user input. The transaction positioned itself, so record
+      // placed+revealed before committing; a non-persisted result terminates
+      // visibly without committing. Advances displayed provenance.
+      if (shouldPersistNavigationResult(result)) {
+        controller.firstPositioned(bootstrapRestoreEpoch, 'placed')
+        controller.revealed(bootstrapRestoreEpoch)
+        notifyViewport()
+        commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
+      } else {
+        failVisibleTransition(bootstrapRestoreEpoch)
+      }
     })
-  }, [isTopicLoading, messages, navigate, savePosition, topic.id, getSavedPosition])
+  }, [
+    armBootstrapTransition,
+    commitDisplayedStable,
+    failVisibleTransition,
+    isTopicLoading,
+    messages,
+    navigate,
+    topic.id,
+    getSavedPosition,
+    scrollContainerRef
+  ])
 
   // S3.1 Blocker 4: onFirstUpdate fires once per topic, not once ever.
   // useTopicTransition resets onFirstUpdateFiredRef via resetOnFirstUpdate
@@ -1588,6 +2236,20 @@ const Messages = ({
         logger.silly('[loadMoreMessages] coverage hit, still fetching for authoritative window' as never)
       }
 
+      // A failed restore-owned page terminates the divider search
+      // (fail-visible release, no commit) instead of retry-looping: the
+      // watcher re-steps on the load/cancel commit and observes the flag.
+      const markRestoreLoadFailed = (): void => {
+        const owning = dividerProgressRef.current
+        if (
+          owning &&
+          owning.topicId === topicIdAtStart &&
+          owning.routeId === routeAtStart &&
+          controller.isSessionCurrent(owning.ownerEpoch)
+        ) {
+          owning.lastLoadFailed = true
+        }
+      }
       setTimeoutTimer(
         'loadMoreMessages',
         async () => {
@@ -1632,11 +2294,13 @@ const Messages = ({
                 '[loadMoreMessages] malformed window response, fail-closed',
                 response.window as unknown as Error
               )
+              markRestoreLoadFailed()
               viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
               return
             }
             if (response.window.topicId !== topicIdAtStart || response.window.kind !== 'around') {
               logger.error('[loadMoreMessages] window topic/kind mismatch, fail-closed')
+              markRestoreLoadFailed()
               viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
               return
             }
@@ -1733,64 +2397,45 @@ const Messages = ({
                   preferredCurrentOffset: preferredSnapshot ? measurePreferred() : null,
                   fallbackDelta
                 })
-                if (decision.kind === 'none') return
+                if (decision.kind === 'none') {
+                  return
+                }
                 const usedPreferred = decision.kind === 'preferred'
                 const delta = decision.delta
-                // Never start a second stabilizer conflicting with the active
-                // route-restore stabilizer: reuse the restore ownership with a
-                // direct delta + single-frame suppress and return.
-                if (activeStabilizerRef.current) {
+                // Restore-owned pagination (divider search active for this
+                // load's topic/route/session): the search owns the scroll
+                // token and the align step owns completion. Apply the
+                // preferred compensation directly and return — never begin a
+                // competing token. The search watcher re-steps when this
+                // window commits. Post-reveal drift is held by the persistent
+                // stable-anchor keeper, not a stabilizer loop.
+                const owningSearch = dividerProgressRef.current
+                if (
+                  owningSearch &&
+                  owningSearch.topicId === topicIdAtStart &&
+                  owningSearch.routeId === routeAtStart &&
+                  controller.isSessionCurrent(owningSearch.ownerEpoch)
+                ) {
                   try {
                     live.scrollTop += delta
                   } catch {
                     return
                   }
-                  const generation = armStabilizerSuppress(stabilizerSuppressRef.current, live.scrollTop)
+                  return
+                }
+                // A route transition in flight owns compensation: never start
+                // a competing token over it — single direct delta, then leave
+                // the token to its owner.
+                if (controller.programmaticOwned) {
                   try {
-                    requestAnimationFrame(() => {
-                      if (stabilizerSuppressRef.current.generation === generation) {
-                        stabilizerSuppressRef.current.armed = false
-                      }
-                    })
-                  } catch {}
+                    live.scrollTop += delta
+                  } catch {
+                    return
+                  }
                   return
                 }
                 const scrollToken = {}
                 if (!(await beginScroll('anchoring', scrollToken))) return
-                // beginScroll awaited a commit: a route restore may have started
-                // its stabilizer in between, so the pre-await active check above
-                // is stale. Re-read the live session here — this path has not
-                // assigned yet, so any live entry belongs to the other
-                // restore/pagination owner. Never start a second stabilizer over
-                // it: single delta + single-frame suppress, then end our own
-                // scroll token exactly once without touching the other ref.
-                const activeAfterBegin = activeStabilizerRef.current
-                if (activeAfterBegin) {
-                  if (!isCurrentLoad('older', loadToken, topicGeneration)) {
-                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                    return
-                  }
-                  if (!usedPreferred && anchor && !anchor.element.isConnected) {
-                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                    return
-                  }
-                  try {
-                    live.scrollTop += delta
-                  } catch {
-                    viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                    return
-                  }
-                  const contendedGeneration = armStabilizerSuppress(stabilizerSuppressRef.current, live.scrollTop)
-                  try {
-                    requestAnimationFrame(() => {
-                      if (stabilizerSuppressRef.current.generation === contendedGeneration) {
-                        stabilizerSuppressRef.current.armed = false
-                      }
-                    })
-                  } catch {}
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  return
-                }
                 if (!isCurrentLoad('older', loadToken, topicGeneration)) {
                   viewportDispatch({ type: 'scroll/end', token: scrollToken })
                   return
@@ -1805,105 +2450,16 @@ const Messages = ({
                   viewportDispatch({ type: 'scroll/end', token: scrollToken })
                   return
                 }
-                const generation = armStabilizerSuppress(stabilizerSuppressRef.current, live.scrollTop)
-                try {
-                  requestAnimationFrame(() => {
-                    if (stabilizerSuppressRef.current.generation === generation) {
-                      stabilizerSuppressRef.current.armed = false
-                    }
-                  })
-                } catch {}
-                // Bounded short stabilizer for the preferred anchor only:
-                // cancellable, user-input-first via the shared active session.
-                // Live re-read (never hardcoded): start only while still empty.
-                const hasActivePaginationBlocker = activeStabilizerRef.current !== null
-                if (
-                  shouldStartPaginationStabilizer({
-                    hasActiveRestoreStabilizer: hasActivePaginationBlocker,
-                    usedPreferredAnchor: usedPreferred
-                  }) &&
-                  preferredSnapshot &&
-                  !hasActivePaginationBlocker
-                ) {
-                  const paginationEpoch = restoreEpochRef.current
-                  const targetOffset = preferredSnapshot.targetOffset
-                  const getTargetElement = (): HTMLElement | null => {
-                    try {
-                      if (preferredSnapshot.kind === 'divider-row') {
-                        const row = document.querySelector(
-                          `[data-divider-key="${esc(preferredSnapshot.dividerKey)}"]`
-                        ) as HTMLElement | null
-                        return row && row.isConnected ? row : null
-                      }
-                      const el = document.getElementById(`message-${esc(preferredSnapshot.messageId)}`)
-                      return el && el.isConnected ? (el as unknown as HTMLElement) : null
-                    } catch {
-                      return null
-                    }
-                  }
-                  const stabilizer = runBoundedPositionStabilizer(
-                    live,
-                    targetOffset,
-                    {
-                      getCurrentOffset: () => {
-                        if (restoreEpochRef.current !== paginationEpoch) return null
-                        if (!isCurrentLoad('older', loadToken, topicGeneration)) return null
-                        return measurePreferred()
-                      },
-                      applyDelta: (d) => {
-                        try {
-                          live.scrollTop += d
-                        } catch {
-                          return
-                        }
-                        const g = armStabilizerSuppress(stabilizerSuppressRef.current, live.scrollTop)
-                        try {
-                          requestAnimationFrame(() => {
-                            if (stabilizerSuppressRef.current.generation === g) {
-                              stabilizerSuppressRef.current.armed = false
-                            }
-                          })
-                        } catch {}
-                      },
-                      isCancelled: () =>
-                        restoreEpochRef.current !== paginationEpoch ||
-                        !isCurrentLoad('older', loadToken, topicGeneration)
-                    },
-                    { maxMs: 600, quietMs: 80 },
-                    { getTargetElement }
-                  )
-                  activeStabilizerRef.current = {
-                    handle: stabilizer,
-                    scrollToken,
-                    release: () => {},
-                    epoch: paginationEpoch
-                  }
-                  try {
-                    await stabilizer.done
-                  } finally {
-                    // Handle-identity guard: same-epoch concurrent sessions share
-                    // the epoch, so only the owner clears its own ref — never a
-                    // newer restore/pagination session that claimed it meanwhile.
-                    if (
-                      restoreEpochRef.current === paginationEpoch &&
-                      activeStabilizerRef.current?.handle === stabilizer
-                    ) {
-                      stabilizer.cancel()
-                      activeStabilizerRef.current = null
-                    }
-                  }
-                }
-                requestAnimationFrame(() => {
-                  try {
-                    if (restoreEpochRef.current !== undefined)
-                      viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                  } catch {}
-                })
+                // Single compensation only: the persistent keeper holds the
+                // anchor across subsequent layout settling. No bounded rAF
+                // stabilizer, no second session.
+                viewportDispatch({ type: 'scroll/end', token: scrollToken })
               })
             }
           } catch (err) {
             logger.error('[loadMoreMessages] window fetch failed, fail-closed', err as Error)
             if (isCurrentLoad('older', loadToken, topicGeneration)) {
+              markRestoreLoadFailed()
               viewportDispatch({ type: 'load/cancel', direction: 'older', token: loadToken, topicGeneration })
             }
           }
@@ -1917,9 +2473,56 @@ const Messages = ({
   // InfiniteScroll `next` entry (older edge): temporary scroll ownership or
   // active navigation must queue a generation-bound intent instead of dropping
   // it, otherwise the internal latch never releases and later scrolls retry
+  // Preferred restore anchor snapshot for queued/driven pagination: the
+  // controller's active visual anchor as a detached snapshot (stable identity
+  // + targetOffset, never a live ref). Null unless the anchor belongs to the
+  // live topic/route/session, so ordinary user pagination snapshots null and
+  // behaves exactly as before.
+  const snapshotPreferredAnchor = useCallback((): PreferredRestoreAnchorSnapshot | null => {
+    const intent = controller.currentIntent
+    if (!intent || intent.topicId !== topic.id || intent.targetRoute !== routeRef.current) return null
+    if (!controller.isSessionCurrent(controller.currentEpoch)) return null
+    const anchor = controller.activeAnchor
+    if (!anchor) return null
+    if (anchor.kind === 'divider') {
+      return { kind: 'divider-row', dividerKey: anchor.dividerKey, targetOffset: anchor.offset }
+    }
+    return { kind: 'message-row', messageId: anchor.messageId, targetOffset: anchor.offset }
+  }, [controller, topic.id])
   // nothing.
   const loadMoreMessages = useCallback(() => {
     const currentState = viewportStateRef.current
+    // Restore-owned search guard: while a divider restore search is active for
+    // the current topic/route/epoch, the normal/manual pagination path must
+    // never race or steal ownership. Route through the restore-owned protocol
+    // with the preserved preferred anchor (explicit drive when user-idle,
+    // queued intent otherwise) — never a plain anchor-less start.
+    const liveSearch = dividerProgressRef.current
+    if (
+      liveSearch &&
+      liveSearch.topicId === topic.id &&
+      liveSearch.routeId === routeRef.current &&
+      liveSearch.ownerEpoch === controller.currentEpoch
+    ) {
+      const restorePreferred = snapshotPreferredAnchor()
+      if (!currentState.window?.hasMoreOlder || currentState.loading.older) return
+      if (!canHandleUserViewportScroll(currentState)) {
+        if (shouldQueueOlderIntent(currentState)) {
+          pendingOlderIntentRef.current = createPendingOlderIntent({
+            topicId: topic.id,
+            routeId: routeRef.current,
+            topicGeneration: currentState.topicGeneration,
+            deletionGeneration: captureDeletionGeneration(topic.id),
+            residentGeneration: captureResidentGeneration(() => store.getState(), topic.id),
+            preferredAnchor: restorePreferred
+          })
+        }
+        return
+      }
+      pendingOlderIntentRef.current = null
+      startOlderWindowLoad(restorePreferred)
+      return
+    }
     if (!currentState.window?.hasMoreOlder || currentState.loading.older) {
       if (!currentState.window?.hasMoreOlder) pendingOlderIntentRef.current = null
       return
@@ -1930,11 +2533,7 @@ const Messages = ({
         // targetOffset only, never the live ref) so the replayed pagination
         // holds the divider/saved row still. Ordinary user pagination has no
         // active anchor and snapshots null (behavior unchanged).
-        const preferredSnapshot = snapshotRestoreAnchor(activeRestoreAnchorRef.current, {
-          topicId: topic.id,
-          routeId: routeRef.current,
-          restoreEpoch: restoreEpochRef.current
-        })
+        const preferredSnapshot = snapshotPreferredAnchor()
         pendingOlderIntentRef.current = createPendingOlderIntent({
           topicId: topic.id,
           routeId: routeRef.current,
@@ -2144,44 +2743,31 @@ const Messages = ({
     )
   }, [beginScroll, dispatch, isCurrentLoad, setTimeoutTimer, scrollContainerRef, topic.id, viewportDispatch])
 
-  // Synchronously cancel the active stabilizer for genuine user input.
-  // Ends the viewport scroll token and releases hook ownership so the
-  // cancelling scroll (and every later one) is recorded as a normal user
-  // route snapshot. Takes the session first, so end/release happen exactly
-  // once even if a restore `finally` runs later (epoch mismatch skips).
-  // Self-induced deltas never reach here (single-frame expected-scrollTop
-  // suppress below). `handle.cancel` settles `done` synchronously.
+  // Capture-phase declaration (interaction token/session): genuine user
+  // input opens/refreshes the controller-owned session and stops persistent
+  // programmatic compensation until `scrollend` closes it. Never
+  // terminates/releases the transition; multi-scroll gestures stay in one
+  // session (each scroll updates the stable snapshot).
   const cancelActiveStabilizerForUser = useCallback(() => {
-    const active = activeStabilizerRef.current
-    if (!active) return
-    activeStabilizerRef.current = null
-    restoreEpochRef.current += 1
-    activeRestoreAnchorRef.current = null
-    stabilizerSuppressRef.current.armed = false
-    try {
-      active.handle.cancel()
-    } catch {}
-    try {
-      viewportDispatch({ type: 'scroll/end', token: active.scrollToken })
-    } catch {}
-    try {
-      active.release()
-    } catch {}
-  }, [viewportDispatch])
+    controller.declareUserIntent()
+    notifyViewport()
+  }, [controller, notifyViewport])
 
-  // Wheel/touch/pointer input cancels even before the scroll event fires.
-  // Programmatic compensation never emits these, so no self-cancel risk.
-  // Scrollbar drag fires pointerDown first, so it is already covered here.
+  // Wheel/touch/pointer input declares intent even before the scroll event
+  // fires. Programmatic compensation never emits these, so no self-cancel
+  // risk. Scrollbar drag fires pointerDown first, so it is already covered.
+  // The scroll itself is recorded via `handleScroll` below; no input-gated
+  // fence exists — user input never authorizes persistence by itself, the
+  // resulting stable viewport does.
   const handleStabilizerUserInput = useCallback(() => {
-    if (activeStabilizerRef.current) cancelActiveStabilizerForUser()
+    cancelActiveStabilizerForUser()
   }, [cancelActiveStabilizerForUser])
 
   // Keyboard scroll pre-cancel: ArrowUp/Down, PageUp/Down, Home/End, Space.
   // Input targets (input/textarea/select/contentEditable) and modified keys
-  // never cancel so editing and shortcuts keep the stabilizer alive.
+  // never declare intent so editing and shortcuts keep compensation alive.
   const handleStabilizerKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (!activeStabilizerRef.current) return
       let target: { tagName?: string; isContentEditable?: boolean } | null = null
       try {
         target = e.target as unknown as { tagName?: string; isContentEditable?: boolean }
@@ -2201,37 +2787,85 @@ const Messages = ({
     [handleStabilizerUserInput]
   )
 
+  // Single atomic user-scroll path (controller-owned `userTakeover` with a
+  // live interaction token). Capture (wheel/touch/pointer/key/scrollbar)
+  // opens/refreshes the session first; ONLY scrolls inside that live session
+  // may measure + `userTakeover()` + persist (multi-scroll gestures update
+  // the snapshot on every scroll; `scrollend` closes the session). Scrolls
+  // with NO live session are programmatic / window-reconcile layout effects:
+  // they never take over, never commit, never change the stable anchor —
+  // the persistent keeper compensates the active anchor instead. Only the
+  // returned `{taken:true, routeKey, snapshot}` authorizes a
+  // `commitSnapshotForRoute(routeKey, snapshot)` user-source write (never the
+  // selected `topic-${id}::${activeBranchId}` key: fetch-hold outgoing
+  // takeovers write the outgoing route; selected Redux intent is untouched).
+  // Pagination detection below only reads scroll geometry (never authorizes
+  // a snapshot) and the hook throttled writer is never called here.
   const handleScroll = useCallback(() => {
-    // User-scroll cancel sits BEFORE the viewport user-scroll gate: while a
-    // stabilizer holds `beginScroll('anchoring'/'programmatic')` the gate is
-    // closed by design, but a genuine user scroll must still cancel the
-    // stabilizer immediately. The stabilizer's own programmatic deltas arm a
-    // single-frame expected-scrollTop suppress (cleared on the next frame)
-    // and are ignored here — never cancelled, never recorded. Any other
-    // scrollTop (keyboard/scrollbar/wheel on the next frame or with a
-    // different offset) cancels and falls through so the cancelling scroll
-    // is recorded as the route snapshot.
-    const active = activeStabilizerRef.current
-    let userCancelledScroll = false
-    if (active) {
-      const containerForSuppress = scrollContainerRef.current
-      const actualScrollTop = containerForSuppress ? containerForSuppress.scrollTop : null
-      if (actualScrollTop !== null && isSelfInducedStabilizerScroll(stabilizerSuppressRef.current, actualScrollTop)) {
-        return
+    if (!suppressUserWriteRef.current) {
+      const liveToken = controller.activeInteractionToken
+      if (liveToken !== null) {
+        const container = scrollContainerRef.current
+        const measured = captureSnapshot()
+        if (container && measured) {
+          let liveWindowId: string | undefined
+          try {
+            const w = viewportStateRef.current.window
+            if (w && Array.isArray((w as { displayMessages?: unknown }).displayMessages)) {
+              const ww = w as { oldestMessageId?: unknown; newestMessageId?: unknown; displayMessages: unknown[] }
+              liveWindowId = `${String(ww.oldestMessageId ?? '')}::${String(ww.newestMessageId ?? '')}::${ww.displayMessages.length}`
+            }
+          } catch {
+            liveWindowId = undefined
+          }
+          const out = controller.userTakeover(
+            {
+              messageId: measured.messageId ?? null,
+              intraRowOffset: measured.intraRowOffset ?? null,
+              scrollTop: measured.scrollTop,
+              isAtBottom: measured.isAtBottom
+            },
+            liveWindowId,
+            liveToken
+          )
+          if (out.taken) {
+            try {
+              commitSnapshotForRoute(out.routeKey, {
+                scrollTop: out.snapshot.scrollTop,
+                anchorId: out.snapshot.messageId,
+                messageId: out.snapshot.messageId,
+                intraRowOffset: out.snapshot.intraRowOffset,
+                rawScrollTop: out.snapshot.scrollTop,
+                isAtBottom: out.snapshot.isAtBottom
+              })
+            } catch {
+              // fail-closed: controller state already advanced above
+            }
+            // Takeover invalidated the old epoch: stale async continuations
+            // are inert via epoch mismatch/session check. Clear only the old
+            // session's plan/search/token, never a newer owner's. The user
+            // interaction session itself stays live for momentum/drag scrolls
+            // until `scrollend` (keeper) or the next programmatic request.
+            if (out.reason === 'owned-takeover') {
+              transitionPlanRef.current = null
+              dividerProgressRef.current = null
+              endViewportScrollToken()
+            }
+            notifyViewport()
+          }
+        }
+      } else {
+        // No live session: never measure for takeover, never commit, never
+        // change the anchor — visual compensation only via the same keeper
+        // hold (no snapshot write is reopened here).
+        try {
+          anchorMaintainerRef.current.requestHold('messages-scroll')
+        } catch {}
       }
-      cancelActiveStabilizerForUser()
-      userCancelledScroll = true
-      // Fall through: the cancelling scroll is a real user scroll (including
-      // pure keyboard-triggered scroll) and must be recorded below as the
-      // route snapshot. The viewport gate below is bypassed for this event
-      // because `viewportStateRef` still holds the pre-cancel anchoring mode
-      // until the layout effect commits; hook ownership was already released
-      // synchronously so `handleScrollPosition` records normally.
+      // No live session otherwise: programmatic scrolls (first position,
+      // pagination / divider-align compensation, same-route window refresh
+      // layout effects) must never pose as user.
     }
-    const currentState = viewportStateRef.current
-    if (!userCancelledScroll && !canHandleUserViewportScroll(currentState)) return
-
-    handleScrollPosition()
 
     const container = scrollContainerRef.current
     if (container && hasMoreNewer && !isLoadingNewer && !isLoadingMore) {
@@ -2242,12 +2876,14 @@ const Messages = ({
       }
     }
   }, [
-    cancelActiveStabilizerForUser,
-    handleScrollPosition,
+    captureSnapshot,
+    controller,
+    endViewportScrollToken,
     hasMoreNewer,
     isLoadingNewer,
     isLoadingMore,
     loadNewerMessages,
+    notifyViewport,
     scrollContainerRef
   ])
 
@@ -2278,6 +2914,303 @@ const Messages = ({
     // signal that may fire independently.
   }, [onComponentUpdate])
 
+  // Divider restore search driver (binding invariant, single owner).
+  // Exactly one action per invocation, decided purely from the committed
+  // window + anchor residency + epoch liveness — never from a scroll event:
+  // - resident → async align to the captured offset, quiet, then the ONE
+  //   stable commit (the only commit path for divider restores);
+  // - absent + older pages remain + loader idle → explicitly start one
+  //   restore-owned page carrying the preserved preferred anchor;
+  // - absent + loader busy → wait (no-op);
+  // - oldest edge / load failure / page cap / supersession → terminal
+  //   fail-visible release exactly once with NO stable commit (the
+  //   pre-existing target snapshot stands; a false edge commit would poison
+  //   future restores).
+  // The restore identity + captured offset survive every older-window
+  // expansion; expansion compensation uses the preferred anchor while
+  // current. Rapid route/topic/deletion supersession bumps the epoch, which
+  // invalidates stale steps and stale align completions.
+  const searchAligningRef = useRef<number | null>(null)
+  const windowIdentityKey = useCallback(
+    (
+      window: { oldestMessageId?: unknown; newestMessageId?: unknown; displayMessages?: unknown[] } | null | undefined
+    ): string | null => {
+      if (!window || !Array.isArray(window.displayMessages)) return null
+      return `${String(window.oldestMessageId ?? '')}::${String(window.newestMessageId ?? '')}::${window.displayMessages.length}`
+    },
+    []
+  )
+  // Single route-window entry (provenance-bound atomic commit).
+  // Records session epoch + target route + window identity as rendered,
+  // dispatches the window, and stores the first-position plan in the SAME
+  // sync call. Stale/superseded fetch completions (epoch mismatch, intent
+  // mismatch, or phase beyond fetch-hold) refuse with NO dispatch and NEVER
+  // tear down the new session — old `finally` blocks can never mark/reveal/
+  // commit the new session. Ordinary pagination/reconcile never enters here:
+  // same-route window refreshes use `controller.noteSameRouteWindowUpdate`
+  // (windowId only, no provenance switch); message navigation / edit mode
+  // uses its own transaction tokens, never a route transition.
+  const commitRouteWindowAtomic = useCallback(
+    (
+      fetchEpoch: number,
+      topicIdAtStart: string,
+      routeAtStart: string | null,
+      window: MessageWindow,
+      plan: ViewportFirstPositionPlan
+    ): number | null => {
+      if (!controller.isSessionCurrent(fetchEpoch)) return null
+      const intent = controller.currentIntent
+      if (!intent || intent.topicId !== topicIdAtStart || intent.targetRoute !== routeAtStart) return null
+      if (controller.currentPhase !== 'fetch-hold') return null
+      const wid = windowIdentityKey(window) ?? `epoch-${fetchEpoch}`
+      const ok = controller.applyTransitionWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
+      if (!ok) return null
+      viewportDispatch({ type: 'window/apply', window })
+      transitionPlanRef.current = {
+        topicId: topicIdAtStart,
+        routeId: routeAtStart,
+        epoch: fetchEpoch,
+        plan,
+        outcome: null
+      }
+      const scrollToken = {}
+      viewportDispatch({ type: 'scroll/begin', mode: 'anchoring', token: scrollToken })
+      notifyViewport()
+      return fetchEpoch
+    },
+    [controller, notifyViewport, viewportDispatch, windowIdentityKey]
+  )
+  const endDividerSearchTerminal = useCallback(
+    (epoch: number, _reason: DividerSearchTerminalReason): void => {
+      void _reason
+      // Terminal fallback: explicit fail-visible release exactly once, never
+      // a divider-position commit. failVisibleTransition is session-gated: it
+      // releases only while this epoch still owns the transition (superseded
+      // searches are already inert). The pre-existing target route snapshot
+      // is preserved — correct because no verified divider position exists to
+      // persist, and persisting the edge/intermediate scroll would corrupt the
+      // next restore of this route.
+      if (dividerProgressRef.current?.ownerEpoch === epoch) dividerProgressRef.current = null
+      if (searchAligningRef.current === epoch) searchAligningRef.current = null
+      failVisibleTransition(epoch)
+    },
+    [failVisibleTransition]
+  )
+  const alignAndCommitDividerSearch = useCallback(
+    async (
+      epoch: number,
+      topicIdAtStart: string,
+      routeAtStart: string | null,
+      alignKind: 'divider-row' | 'shared-message'
+    ): Promise<void> => {
+      if (searchAligningRef.current === epoch) {
+        return
+      }
+      searchAligningRef.current = epoch
+      try {
+        const search = dividerProgressRef.current
+        if (!search || search.ownerEpoch !== epoch) {
+          return
+        }
+        const live = scrollContainerRef.current
+        if (!live) {
+          endDividerSearchTerminal(epoch, 'missing-window')
+          return
+        }
+        const stillTarget = () =>
+          isRestoreTargetValid({
+            topicMatch: topicIdRef.current === topicIdAtStart,
+            routeMatch: routeRef.current === routeAtStart,
+            mounted: !unmountedRef.current,
+            epochCurrent: controller.isSessionCurrent(epoch)
+          })
+        if (!stillTarget()) {
+          endDividerSearchTerminal(epoch, 'superseded')
+          return
+        }
+        const esc =
+          typeof CSS !== 'undefined' &&
+          typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+            ? (CSS as unknown as { escape: (v: string) => string }).escape
+            : (v: string) => v
+        const getDividerRowEl = (): HTMLElement | null => {
+          const row =
+            (document.querySelector(`[data-divider-key="${esc(search.dividerKey)}"]`) as HTMLElement | null) ??
+            (document.querySelector(
+              `[data-testid="${esc(dividerRowTestId(search.anchorMessageId, search.parentOfDivider))}"]`
+            ) as HTMLElement | null)
+          return row && row.isConnected ? row : null
+        }
+        const getSharedEl = (): HTMLElement | null => {
+          if (!search.sharedMessageId) return null
+          const el = document.getElementById(`message-${esc(search.sharedMessageId)}`)
+          return el && el.isConnected ? el : null
+        }
+        const measureEl = (el: HTMLElement | null): number | null => {
+          if (!el) return null
+          try {
+            return el.getBoundingClientRect().top - live.getBoundingClientRect().top
+          } catch {
+            return null
+          }
+        }
+        const targetEl = alignKind === 'divider-row' ? getDividerRowEl() : getSharedEl()
+        const measured = measureEl(targetEl)
+        if (targetEl === null || measured === null) {
+          // Lost residency between decision and alignment (layout churn):
+          // re-step instead of aligning a ghost.
+          searchAligningRef.current = null
+          return
+        }
+        const capturedTarget =
+          alignKind === 'divider-row'
+            ? search.wantOffset !== null && Number.isFinite(search.wantOffset)
+              ? search.wantOffset
+              : measured
+            : search.sharedOffset !== null && Number.isFinite(search.sharedOffset)
+              ? search.sharedOffset
+              : measured
+        if (!stillTarget()) return
+        // Compensate to the CAPTURED offset (never the outgoing raw
+        // scrollTop, never an arbitrary delay), then settle one frame for
+        // post-alignment layout quiet. ≤12px contract preserved (1px
+        // epsilon). The persistent keeper holds the offset across late
+        // layout; no bounded rAF stabilizer, no second session. The arm's
+        // scroll token stays held until the commit below releases it.
+        const delta = measured - capturedTarget
+        if (Math.abs(delta) > 1) {
+          try {
+            live.scrollTop += delta
+          } catch {
+            return
+          }
+        }
+        try {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        } catch {
+          // fail-closed: commit gated below still verifies currency
+        }
+        if (!stillTarget()) return
+        // The ONE stable commit for this divider restore: resident +
+        // aligned + quiet. Advances displayed provenance, ends
+        // ownership/token (release exactly once inside). Stale epochs
+        // (superseded, user-cancelled, unmounted) never commit: the
+        // cancelling owner already released exactly once.
+        if (controller.isSessionCurrent(epoch)) {
+          commitDisplayedStable(topicIdAtStart, routeAtStart, epoch)
+          if (dividerProgressRef.current?.ownerEpoch === epoch) dividerProgressRef.current = null
+        }
+      } finally {
+        if (searchAligningRef.current === epoch) searchAligningRef.current = null
+      }
+    },
+    [commitDisplayedStable, controller, endDividerSearchTerminal, scrollContainerRef]
+  )
+  const stepDividerSearch = useCallback(() => {
+    const search = dividerProgressRef.current
+    if (!search) return
+    // Supersession: a newer transition already owns the viewport (arming
+    // clears the record, so reaching here with a mismatch is belt-and-braces).
+    if (
+      search.topicId !== topicIdRef.current ||
+      search.routeId !== routeRef.current ||
+      search.ownerEpoch !== controller.currentEpoch ||
+      unmountedRef.current
+    ) {
+      if (search.ownerEpoch === controller.currentEpoch && !unmountedRef.current) {
+        endDividerSearchTerminal(search.ownerEpoch, 'superseded')
+      } else if (dividerProgressRef.current === search) {
+        dividerProgressRef.current = null
+      }
+      return
+    }
+    if (searchAligningRef.current === search.ownerEpoch) return
+    const committed = viewportStateRef.current
+    const live = scrollContainerRef.current
+    const esc =
+      typeof CSS !== 'undefined' && typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+        ? (CSS as unknown as { escape: (v: string) => string }).escape
+        : (v: string) => v
+    let dividerResident = false
+    let sharedResident = false
+    try {
+      if (live) {
+        const row = document.querySelector(`[data-divider-key="${esc(search.dividerKey)}"]`) as HTMLElement | null
+        dividerResident = !!row && row.isConnected
+        if (!dividerResident && search.sharedMessageId) {
+          const el = document.getElementById(`message-${esc(search.sharedMessageId)}`)
+          sharedResident = !!el && el.isConnected
+        } else if (dividerResident) {
+          sharedResident = false
+        }
+      }
+    } catch {
+      dividerResident = false
+      sharedResident = false
+    }
+    const preferred: PreferredRestoreAnchorSnapshot =
+      search.wantOffset !== null
+        ? { kind: 'divider-row', dividerKey: search.dividerKey, targetOffset: search.wantOffset }
+        : search.sharedMessageId !== null && search.sharedOffset !== null
+          ? { kind: 'message-row', messageId: search.sharedMessageId, targetOffset: search.sharedOffset }
+          : { kind: 'divider-row', dividerKey: search.dividerKey, targetOffset: 0 }
+    const decision = decideDividerRestoreSearchStep(
+      {
+        dividerResident,
+        sharedResident,
+        hasMoreOlder: committed.window?.hasMoreOlder ?? false,
+        loadingOlder: committed.loading.older,
+        pagesDriven: search.pagesDriven,
+        targetCurrent: true,
+        mounted: true,
+        hasWindow: (committed.window?.displayMessages.length ?? 0) > 0,
+        lastLoadFailed: search.lastLoadFailed
+      },
+      preferred
+    )
+    if (decision.action === 'align-and-commit') {
+      void alignAndCommitDividerSearch(search.ownerEpoch, search.topicId, search.routeId, decision.alignKind)
+      return
+    }
+    if (decision.action === 'drive-older') {
+      // Explicit restore-owned drive (no scroll event required): short
+      // windows at edge=0 may never fire InfiniteScroll, so the search owns
+      // pagination directly. Dedup on the committed window identity so one
+      // window drives exactly one page.
+      const key = windowIdentityKey(committed.window)
+      if (key !== null && search.drivenWindowKey === key) return
+      search.drivenWindowKey = key
+      search.pagesDriven += 1
+      search.lastLoadFailed = false
+      startOlderWindowLoad(decision.preferred)
+      return
+    }
+    if (decision.action === 'wait-load') {
+      return
+    }
+    endDividerSearchTerminal(search.ownerEpoch, decision.reason)
+  }, [
+    alignAndCommitDividerSearch,
+    endDividerSearchTerminal,
+    scrollContainerRef,
+    startOlderWindowLoad,
+    windowIdentityKey
+  ])
+
+  // Committed-window watcher: after each restore-owned older page lands (or
+  // any window change while searching), re-step the search — continue driving
+  // while the anchor is absent, align+commit once resident, terminate at the
+  // oldest edge. Explicit, scroll-event-independent. Never drives while the
+  // target is still hidden pre-paint, while a page is in flight, or while an
+  // alignment is running for this epoch.
+  useEffect(() => {
+    const search = dividerProgressRef.current
+    if (!search) return
+    if (viewportPhaseAttr !== 'revealed') return
+    if (searchAligningRef.current === search.ownerEpoch) return
+    stepDividerSearch()
+  }, [viewportState.window, viewportState.loading.older, viewportPhaseAttr, stepDividerSearch])
+
   // Divider route switch: reliable visual invariant is "the clicked fork
   // divider row keeps the same pixel offset inside the container".
   // The clicked divider passes its stable identity (anchor + parent) and its
@@ -2288,10 +3221,10 @@ const Messages = ({
   // by a bounded stabilizer for late Markdown/image/divider layout.
   // Fallback chain (never bottom): same anchor+parent divider row → shared
   // message visual anchor → fork message. The nearest-to-top message is NOT
-  // the primary divider anchor. The OLD route's route-saved-row-anchor is
-  // preserved via synchronous savePosition (route-keyed); the target route's
-  // snapshot is never overwritten here. The loaded projection is rebased
-  // atomically (no blank/reset, no mixed route).
+  // the primary divider anchor. The OLD (displayed) route's stable snapshot
+  // is frozen synchronously before the switch (displayed provenance); the
+  // target route's snapshot is committed only on stable completion. The
+  // loaded projection is rebased atomically (no blank/reset, no mixed route).
   //
   // Anchor namespaces (never cross-write): `dividerVisualAnchor` (this path,
   // pixel offset of the divider row), `routeSavedRowAnchor` (route-local
@@ -2332,9 +3265,20 @@ const Messages = ({
       const fallbackTop = findViewportTopAnchorWithOffset(container)
       const sharedVisualMessageId = fallbackTop?.messageId ?? null
       void findFirstVisibleMessage
-      const rawScrollTop = container ? container.scrollTop : null
+      // Outgoing-route freeze: synchronously snapshot the DISPLAYED route
+      // BEFORE the selected route changes. Dropped while owned (transient):
+      // the existing stable snapshot stands. Then open the divider session
+      // (fetch-hold): the outgoing viewport stays visible during the fetch
+      // below and no write may land under the incoming route identity. The
+      // divider intent keeps ONLY the clicked divider's screen offset — the
+      // target route's history is never read.
+      saveDisplayedSnapshot()
+      const fetchEpoch = beginFetchHold(topicIdAtStart, branchId, {
+        kind: 'divider',
+        dividerKey,
+        clickOffset: dividerVisualAnchorOffset
+      })
       loadedRouteRef.current = claimLoadedRoute(branchId)
-      savePosition()
       cancelActiveLoads()
       // Incremental: keep the current viewport visible during the windowed
       // fetch (no topic/reset blank). Only the per-route window cache is
@@ -2360,6 +3304,7 @@ const Messages = ({
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
         window.toast.error(t('message.true_branch.error'))
+        failVisibleTransition(fetchEpoch)
         const dividerRecovery = decideDividerDoubleFailureRecovery({
           prevRoute,
           targetRoute: branchId,
@@ -2373,7 +3318,10 @@ const Messages = ({
         }
         return
       }
-      if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) return
+      if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) {
+        failVisibleTransition(fetchEpoch)
+        return
+      }
       try {
         const loaded = (selectLoadedMessagesForTopic(store.getState(), topicId) ?? []) as Message[]
         const authoritative = routeWindow.window
@@ -2390,219 +3338,166 @@ const Messages = ({
           NAVIGATION_VISUALLY_NEWER_GROUPS
         )
         if (targetWindow) {
-          viewportDispatch({ type: 'window/apply', window: targetWindow })
+          // Atomic route transition: arm hidden-until-positioned together
+          // with the target window commit in the same React batch. The old
+          // viewport stays visible during the fetch above (incremental);
+          // only this commit hides, and the pre-paint layout effect applies
+          // the first scroll synchronously before reveal. First placement
+          // lives ONLY in that layout effect; the async continuation below
+          // runs the bounded stabilizer for post-reveal drift. Route-local
+          // fallbacks only: divider row → shared message → oldest edge
+          // (a partial window still lands near the pagination edge and
+          // auto-pages under the divider anchor during the transition).
+          // Never the outgoing route's raw scrollTop.
+          const firstPlan: ViewportFirstPositionPlan =
+            dividerVisualAnchorOffset !== null
+              ? {
+                  kind: 'divider',
+                  dividerKey,
+                  anchorMessageId,
+                  wantOffset: dividerVisualAnchorOffset,
+                  fallbackMessageId: sharedVisualMessageId,
+                  fallbackOffset: fallbackTop?.intraRowOffset ?? null,
+                  rawScrollTop: null,
+                  edgeFallbackOnMissing: true
+                }
+              : fallbackTop
+                ? {
+                    kind: 'message',
+                    messageId: fallbackTop.messageId,
+                    wantOffset: fallbackTop.intraRowOffset,
+                    fallbackScrollTop: null,
+                    edgeFallbackOnMissing: true
+                  }
+                : { kind: 'none' }
+          // Provenance-bound atomic commit (single entry): stale fetch
+          // completions refuse with no dispatch and never disturb the new
+          // session (rapid supersede safe).
+          const restoreEpoch = commitRouteWindowAtomic(fetchEpoch, topicIdAtStart, branchId, targetWindow, firstPlan)
+          if (restoreEpoch === null) {
+            failVisibleTransition(fetchEpoch)
+            return
+          }
+          // The controller already holds the divider visual anchor from the
+          // fetch-hold request (same divider row at the same targetOffset, or
+          // the shared message row when the divider offset is unmeasurable —
+          // the request falls back to a message anchor only when no divider
+          // key was supplied). Queued intents snapshot only its stable
+          // identity + offset. The anchor + captured offset survive EVERY
+          // older-window expansion until the search coordinator commits or
+          // terminates (never cleared on intermediate pages).
+          // Divider restore search record: the coordinator below (and the
+          // window-watcher effect) drives restore-owned pagination from
+          // window/hasMoreOlder/anchor-residency state — never from a scroll
+          // event — until the requested identity is resident/aligned/quiet.
+          // Only when a restore identity exists (divider offset or shared
+          // fallback); identity-less restores take the deterministic default
+          // single-pass path in the coordinator below.
+          if (dividerVisualAnchorOffset !== null || fallbackTop !== null) {
+            dividerProgressRef.current = {
+              ownerEpoch: restoreEpoch,
+              topicId: topicIdAtStart,
+              routeId: branchId,
+              dividerKey,
+              anchorMessageId,
+              parentOfDivider,
+              sharedMessageId: sharedVisualMessageId,
+              sharedOffset:
+                fallbackTop && Number.isFinite(fallbackTop.intraRowOffset) ? fallbackTop.intraRowOffset : null,
+              wantOffset: dividerVisualAnchorOffset,
+              pagesDriven: 0,
+              lastLoadFailed: false,
+              drivenWindowKey: null
+            }
+          }
         }
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to rebuild viewport window:`, error as Error)
         return
       }
-      // Divider-identity restore after the effective-route render: the SAME
-      // logical divider row returns to the SAME pixel offset; fallback chain
-      // is shared-message → fork message; raw scroll is the last resort.
-      // Held under the viewport scroll token + hook ownership so the
-      // compensation is never recorded as a user scroll, then stabilized
-      // against late layout (bounded, cancellable).
+      // Divider restore search coordinator (binding invariant): route-stable
+      // completion waits for the requested identity (divider row or valid
+      // shared fallback) to be resident/aligned/quiet. The pre-paint layout
+      // reveal already placed the first position — `placed` for a resident
+      // identity, `searching` (safe-edge parking) when it is outside the
+      // resident window. This coordinator runs ONE search step explicitly
+      // (never via scroll event); the committed-window watcher effect drives
+      // subsequent pages as windows land. Intermediate pages never commit,
+      // never clear the intent, never release ownership. Never
+      // `canHandleUserViewportScroll` — the anchoring token closes that gate
+      // by design and would self-cancel.
       try {
         await viewportCommitWaiterRef.current.wait(viewportStateRef.current, (committedState) => {
           if (committedState.window?.displayMessages?.length) return true
           return null
         })
       } catch {
-        // fail-closed: continue to rAF restore attempt
+        // fail-closed: continue to rAF search attempt
       }
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) return
-          const live = scrollContainerRef.current
-          if (!live || dividerVisualAnchorOffset === null) return
-          void (async () => {
-            // Restore generation: topic + route + mounted + this restore still
-            // current. Never `canHandleUserViewportScroll` — the anchoring
-            // token below closes that gate by design and would self-cancel.
-            const restoreEpoch = ++restoreEpochRef.current
-            // Preferred visual anchor for queued pagination: the same divider
-            // row at the same targetOffset (or the shared message row when the
-            // divider offset is unmeasurable). Bound to topic/route/epoch;
-            // queued intents snapshot only its stable identity + offset.
-            if (dividerVisualAnchorOffset !== null) {
-              activeRestoreAnchorRef.current = createDividerRestoreAnchor({
-                dividerKey,
-                targetOffset: dividerVisualAnchorOffset,
-                topicId: topicIdAtStart,
-                routeId: branchId,
-                restoreEpoch
-              })
-            } else if (fallbackTop) {
-              activeRestoreAnchorRef.current = createMessageRestoreAnchor({
-                messageId: fallbackTop.messageId,
-                targetOffset: fallbackTop.intraRowOffset,
-                topicId: topicIdAtStart,
-                routeId: branchId,
-                restoreEpoch
-              })
-            } else {
-              activeRestoreAnchorRef.current = null
-            }
-            const stillTarget = () =>
-              isRestoreTargetValid({
-                topicMatch: topicIdRef.current === topicIdAtStart,
-                routeMatch: routeRef.current === branchId,
-                mounted: !unmountedRef.current,
-                epochCurrent: restoreEpochRef.current === restoreEpoch
-              })
-            const esc =
-              typeof CSS !== 'undefined' &&
-              typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
-                ? (CSS as unknown as { escape: (v: string) => string }).escape
-                : (v: string) => v
-            const targetOffset = dividerVisualAnchorOffset
-            const getDividerRowEl = (): HTMLElement | null => {
-              const row =
-                (document.querySelector(`[data-divider-key="${esc(dividerKey)}"]`) as HTMLElement | null) ??
-                (document.querySelector(
-                  `[data-testid="${esc(dividerRowTestId(anchorMessageId, parentOfDivider))}"]`
-                ) as HTMLElement | null)
-              return row && row.isConnected ? row : null
-            }
-            const getDividerOffset = (): number | null => {
-              const row = getDividerRowEl()
-              if (row) {
-                try {
-                  return row.getBoundingClientRect().top - live.getBoundingClientRect().top
-                } catch {
-                  return null
-                }
-              }
-              return null
-            }
-            const applyCompensation = (delta: number): void => {
-              if (!stillTarget()) return
+          if (topicIdRef.current !== topicIdAtStart || routeRef.current !== branchId) {
+            failVisibleTransition(fetchEpoch)
+            return
+          }
+          const pending = transitionPlanRef.current
+          const armedEpoch =
+            pending && pending.topicId === topicIdAtStart && pending.routeId === branchId
+              ? pending.epoch
+              : controller.currentEpoch
+          if (controller.currentEpoch !== armedEpoch || unmountedRef.current) {
+            failVisibleTransition(armedEpoch)
+            return
+          }
+          const search = dividerProgressRef.current
+          if (!search || search.ownerEpoch !== armedEpoch) {
+            // Identity-less restore (deterministic default): no search to
+            // run. Settle one frame for late layout, then commit the visible
+            // default viewport as stable and release. Superseded searches are
+            // inert (epoch mismatch → fail visible only).
+            void (async () => {
               try {
-                live.scrollTop += delta
+                await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
               } catch {
+                // fail-closed below still releases
+              }
+              if (controller.currentEpoch !== armedEpoch || unmountedRef.current) {
+                failVisibleTransition(armedEpoch)
                 return
               }
-              // Precise single-frame suppress: only the scroll event whose
-              // scrollTop still equals the post-apply value is self-induced.
-              // Cleared on the next frame (generation-guarded) so keyboard or
-              // scrollbar scrolls on the next frame / with a different offset
-              // always cancel instead of being swallowed.
-              const generation = armStabilizerSuppress(stabilizerSuppressRef.current, live.scrollTop)
-              try {
-                requestAnimationFrame(() => {
-                  if (stabilizerSuppressRef.current.generation === generation) {
-                    stabilizerSuppressRef.current.armed = false
-                  }
-                })
-              } catch {}
-            }
-            const restoreDecision = decideDividerRestoreTarget({
-              dividerKeyPresentInTarget: getDividerOffset() !== null,
-              sharedVisualMessageId,
-              forkAnchorMessageId: anchorMessageId
-            })
-            const scrollToken = {}
-            const releaseOwnership = holdProgrammaticScrollOwnership()
-            let committed = false
-            try {
-              committed = await beginScroll('anchoring', scrollToken)
-              if (!committed) return
-              if (!stillTarget()) return
-              if (restoreDecision.kind === 'divider-row') {
-                const current = getDividerOffset()
-                if (current !== null) {
-                  const delta = current - targetOffset
-                  if (Math.abs(delta) > 1) applyCompensation(delta)
-                } else if (restoreDecision.targetId) {
-                  // Unreachable for divider-row; kept for exhaustiveness.
-                  void restoreDecision.targetId
-                } else if (rawScrollTop !== null && Math.abs(live.scrollTop - rawScrollTop) > 1) {
-                  applyCompensation(rawScrollTop - live.scrollTop)
-                }
-              } else if (restoreDecision.kind === 'shared-message' && restoreDecision.targetId) {
-                const el = document.getElementById(`message-${esc(restoreDecision.targetId)}`)
-                if (el && el.isConnected && fallbackTop) {
-                  const want = fallbackTop.intraRowOffset
-                  const have = el.getBoundingClientRect().top - live.getBoundingClientRect().top
-                  const delta = have - want
-                  if (Math.abs(delta) > 1) applyCompensation(delta)
-                } else if (rawScrollTop !== null) {
-                  applyCompensation(rawScrollTop - live.scrollTop)
-                }
-              } else if (restoreDecision.targetId) {
-                const el = document.getElementById(`message-${esc(restoreDecision.targetId)}`)
-                if (el && el.isConnected) {
-                  const have = el.getBoundingClientRect().top - live.getBoundingClientRect().top
-                  const delta = have - targetOffset
-                  if (Math.abs(delta) > 1) applyCompensation(delta)
-                } else if (rawScrollTop !== null && Math.abs(live.scrollTop - rawScrollTop) > 1) {
-                  applyCompensation(rawScrollTop - live.scrollTop)
-                }
-              } else if (rawScrollTop !== null && Math.abs(live.scrollTop - rawScrollTop) > 1) {
-                applyCompensation(rawScrollTop - live.scrollTop)
+              const owner = transitionPlanRef.current
+              const owned = owner !== null && owner.topicId === topicIdAtStart && owner.routeId === branchId
+              if (owned) {
+                // commitDisplayedStable commits, advances displayed, ends the
+                // token, clears the plan, and releases exactly once.
+                commitDisplayedStable(topicIdAtStart, branchId, armedEpoch)
+                notifyViewport()
+              } else {
+                failVisibleTransition(armedEpoch)
               }
-              // Bounded stabilizer for late Markdown/image/divider layout:
-              // re-align the same divider offset; cancels on restore-epoch
-              // invalidation (route/topic/user-input/unmount); quiet + 1500ms
-              // deadline bounded; cancelled sessions never compensate further.
-              const stabilizer = runBoundedPositionStabilizer(
-                live,
-                targetOffset,
-                {
-                  getCurrentOffset: () => {
-                    if (!stillTarget()) return null
-                    // Only stabilize the divider row itself; message fallbacks
-                    // already settled above and must not be dragged further.
-                    if (restoreDecision.kind !== 'divider-row') return targetOffset
-                    return getDividerOffset()
-                  },
-                  applyDelta: (delta) => {
-                    applyCompensation(delta)
-                  },
-                  isCancelled: () => !stillTarget()
-                },
-                { maxMs: 1500, quietMs: 120 },
-                { getTargetElement: () => getDividerRowEl() }
-              )
-              activeStabilizerRef.current = {
-                handle: stabilizer,
-                scrollToken,
-                release: releaseOwnership,
-                epoch: restoreEpoch
-              }
-              try {
-                await stabilizer.done
-              } finally {
-                // Exactly-once session teardown: only the still-current epoch
-                // owns end/release. A user cancel or unmount already took the
-                // session (epoch bumped) and released; skip here to keep a
-                // single cancel/end/release per return/error path.
-                if (restoreEpochRef.current === restoreEpoch) {
-                  stabilizer.cancel()
-                  activeStabilizerRef.current = null
-                }
-              }
-            } finally {
-              // Restore-owned token/ownership: release only while still the
-              // current epoch; user-cancel/unmount already released exactly
-              // once and bumped the epoch. The active restore anchor lifecycle
-              // ends here (queued intents already hold their detached snapshot).
-              if (restoreEpochRef.current === restoreEpoch) {
-                activeRestoreAnchorRef.current = null
-                try {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                } catch {}
-                try {
-                  releaseOwnership()
-                } catch {}
-                if (activeStabilizerRef.current?.epoch === restoreEpoch) activeStabilizerRef.current = null
-              }
-            }
-          })()
+            })()
+            return
+          }
+          // Restore-owned search step: align+commit when resident, explicit
+          // page drive when absent, terminal release (no commit) at the
+          // oldest edge / failure / cap. Ownership stays held across pages.
+          stepDividerSearch()
         })
       })
     },
-    [beginScroll, cancelActiveLoads, dispatch, savePosition, t, topic.id, viewportDispatch]
+    [
+      beginFetchHold,
+      cancelActiveLoads,
+      commitDisplayedStable,
+      commitRouteWindowAtomic,
+      dispatch,
+      failVisibleTransition,
+      saveDisplayedSnapshot,
+      scrollContainerRef,
+      stepDividerSearch,
+      t,
+      topic.id
+    ]
   )
 
   // Route deletion fallback (branch subtree removal with active fallback):
@@ -2642,8 +3537,13 @@ const Messages = ({
     const intentIdAtEffect = intent.intentId
     const deletedIdsAtEffect = [...intent.deletedBranchIds]
     cancelActiveLoads()
-    // Invalidate any in-flight divider/top restores before the latest load.
-    restoreEpochRef.current += 1
+    // Invalidate any in-flight divider/top restores before the latest load
+    // and hold fetch-gap ownership: the outgoing viewport stays visible
+    // during the fetch (incremental) and no write may land under the
+    // fallback identity. The armed transition below tears this hold down
+    // synchronously; stale/failure paths fail visible (release, never hide).
+    const deletionFetchEpoch = beginFetchHold(topicIdAtEffect, routeAtEffect)
+    notifyViewport()
     // Incremental: keep the current viewport during the windowed fetch (no
     // topic/reset blank). Only the per-route window cache is dropped so stale
     // deleted-route windows cannot satisfy the fallback.
@@ -2680,6 +3580,7 @@ const Messages = ({
       } catch (error) {
         logger.error('[deletionFallback] Failed to reload fallback route with latest:', error as Error)
         window.toast.error(t('message.true_branch.error'))
+        failVisibleTransition(deletionFetchEpoch)
         if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) {
           dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
           return
@@ -2690,6 +3591,7 @@ const Messages = ({
       }
       // Stale follow-up switch: never publish, just consume.
       if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) {
+        failVisibleTransition(deletionFetchEpoch)
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
         return
       }
@@ -2697,10 +3599,14 @@ const Messages = ({
       // nothing (void): keep the failed marker retryable instead of applying
       // a half viewport.
       if (!routeWindow || !routeWindow.window) {
+        failVisibleTransition(deletionFetchEpoch)
         loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
         return
       }
+      // `deletionEpoch` is assigned exactly when the transition arms; the
+      // catch below only fails that same epoch visible (never a newer owner).
+      let deletionEpoch: number | null = null
       try {
         const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtEffect) ?? []) as Message[]
         const authoritative = routeWindow.window
@@ -2713,44 +3619,79 @@ const Messages = ({
         // snapshot anchor, never a vicinity fallback). Empty fallback routes
         // atomically clear via the same constructor.
         const latestWindow = createLatestMessageWindow(loaded, displayCount, authoritative)
-        viewportDispatch({ type: 'window/apply', window: latestWindow })
-        // Pin latest/bottom under scroll ownership so the snap is never
-        // recorded as a user scroll.
-        const release = holdProgrammaticScrollOwnership()
+        // Atomic deletion fallback (single entry): provenance-bound commit —
+        // stale completions refuse with no dispatch, never disturbing a
+        // superseding session. No navigation transaction: the window above
+        // already is the tail and the plan already pins bottom.
+        deletionEpoch = commitRouteWindowAtomic(deletionFetchEpoch, topicIdAtEffect, routeAtEffect, latestWindow, {
+          kind: 'bottom'
+        })
+        if (deletionEpoch === null) {
+          failVisibleTransition(deletionFetchEpoch)
+          return
+        }
+        // Post-reveal settle only: one frame for late layout, then stable
+        // commit (releases ownership exactly once) while still current.
+        // Stale paths below fail visible; a superseding transition owns the
+        // phase and must not be disturbed.
         try {
-          await navigate({ kind: 'bottom', source: 'imperative' })
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) {
+            failVisibleTransition(deletionEpoch)
+            return
+          }
+        } catch {
+          // fail-closed: release in finally
         } finally {
-          release()
+          // Epoch-guarded stable completion: stale `finally` blocks never
+          // touch the new session (session currency, not bare epoch equality).
+          if (deletionEpoch !== null && controller.isSessionCurrent(deletionEpoch)) {
+            // Stable completion: the fallback bottom viewport is the route's
+            // stable snapshot (no user input required). commitDisplayedStable
+            // advances displayed provenance, ends the token, clears the plan,
+            // and releases ownership exactly once.
+            commitDisplayedStable(topicIdAtEffect, routeAtEffect, deletionEpoch)
+            notifyViewport()
+          }
         }
       } catch (error) {
         logger.error('[deletionFallback] Failed to rebuild fallback viewport:', error as Error)
+        // Fail the armed epoch visible (no-op when superseded or never armed).
+        if (deletionEpoch !== null) failVisibleTransition(deletionEpoch)
       } finally {
         dispatch(deletionFallbackConsumed({ topicId: topicIdAtEffect, intentId: intentIdAtEffect }))
       }
     })()
   }, [
     activeBranchId,
+    beginFetchHold,
     cancelActiveLoads,
+    commitDisplayedStable,
+    commitRouteWindowAtomic,
     deletionFallbackIntent,
     dispatch,
     displayCount,
-    navigate,
+    failVisibleTransition,
     t,
-    topic.id,
-    viewportDispatch
+    topic.id
   ])
 
   // Top-selector route switch + external route invalidation (branch deleted
   // elsewhere, delete-fallback after subtree removal, catalog prune, topic
   // switch restore): the active route changed without a divider switch, so
-  // the loaded projection is stale. The old route's position was already
-  // snapshotted route-keyed (scroll throttle flush on key change) — never
-  // overwrite the NEW route's snapshot here. The target window is read per
-  // the NEW route's saved browsing position: isAtBottom → latest; saved
-  // anchorId → around it; no valid snapshot → latest + vicinity/tail fallback
-  // below. Never a bottom jump unless the saved position is at bottom, never
-  // a topic transition. Divider-initiated switches claim loadedRouteRef first
-  // and never enter this path.
+  // the loaded projection is stale. Outgoing provenance: the OLD (displayed)
+  // route was frozen synchronously before the switch by the top selector's
+  // displayed-aware saver; this path re-freezes idempotently for external
+  // paths that bypass the selector, then holds fetch-gap ownership so the
+  // still-visible outgoing viewport can never write under the incoming key.
+  // Never overwrite the NEW route's snapshot here. The target window is read
+  // per the NEW route's own saved browsing position: valid canonical anchor
+  // (messageId, legacy anchorId fallback) → around it even when isAtBottom;
+  // no usable anchor → deterministic route-local default (latest + tail
+  // below, bottom when isAtBottom). Never a bottom jump when an anchor is
+  // unless the saved position is at bottom, never outgoing raw scrollTop,
+  // never a topic transition. Divider-initiated switches claim
+  // loadedRouteRef first and never enter this path.
   //
   // Double-failure degradation (around + latest both fail): the active route
   // is external truth and cannot roll back, so the viewport is atomically
@@ -2765,14 +3706,40 @@ const Messages = ({
     // above claims and reloads. Never issue a concurrent snapshot-around here.
     if (deletionFallbackIntent && deletionFallbackIntent.route === activeBranchId) return
     if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) return
-    loadedRouteRef.current = claimLoadedRoute(activeBranchId)
     const topicIdAtEffect = topic.id
     const routeAtEffect = activeBranchId
-    const vicinityIds = messagesRef.current.map((m) => m.id)
-    // Read the NEW route's route-saved-row-anchor snapshot before any fetch
-    // (route-keyed; legacy topic-only key as main-route fallback). Never save
-    // here — the OLD route was saved synchronously before the switch, and
-    // the target snapshot must never be overwritten by this path.
+    // Single-pipeline guard: a transition for this exact target already owns
+    // the controller. Adopt a fetch-hold session to drive the pipeline;
+    // when the pipeline is already driving (beyond fetch-hold) or already
+    // completed (displayed stable on target), never open a duplicate fetch
+    // pipeline, which would ping-pong epochs with the running one.
+    const liveIntent = controller.currentIntent
+    if (
+      liveIntent !== null &&
+      liveIntent.topicId === topicIdAtEffect &&
+      liveIntent.targetRoute === routeAtEffect &&
+      controller.programmaticOwned &&
+      controller.currentPhase !== 'fetch-hold'
+    ) {
+      return
+    }
+    if (
+      !controller.programmaticOwned &&
+      controller.displayedRoute.topicId === topicIdAtEffect &&
+      controller.displayedRoute.route === routeAtEffect &&
+      (controller.currentPhase === 'stable' || controller.currentPhase === 'idle')
+    ) {
+      return
+    }
+    // NOTE: no outgoing `vicinityIds` fallback — the target window is read
+    // from the NEW route's own snapshot (around) or its deterministic
+    // route-local default (latest + tail). Outgoing IDs never position the
+    // target.
+    // Read the NEW route's own route-saved-row-anchor snapshot via the
+    // explicit target key (never the hook's current key while old DOM
+    // remains; legacy topic-only key as main-route fallback). Never save
+    // the target here — the OLD (displayed) route is frozen below and the
+    // target snapshot must never be overwritten by this path.
     let saved: {
       scrollTop: number
       anchorId: string | null
@@ -2782,16 +3749,111 @@ const Messages = ({
       isAtBottom: boolean
     } | null = null
     try {
-      saved = getRouteSavedPosition() ?? (routeAtEffect === null ? getLegacyMainSavedPosition() : null)
+      const raw =
+        readTargetSnapshot(topicIdAtEffect, routeAtEffect) ??
+        (routeAtEffect === null ? getLegacyMainSavedPosition() : null)
+      // Normalize the controller snapshot shape (no anchorId/rawScrollTop)
+      // to the storage snapshot shape consumed below.
+      const asRecord = (raw ?? null) as {
+        scrollTop: number
+        anchorId?: string | null
+        messageId?: string | null
+        intraRowOffset?: number | null
+        rawScrollTop?: number
+        isAtBottom: boolean
+      } | null
+      saved = asRecord
+        ? {
+            scrollTop: asRecord.scrollTop,
+            anchorId: asRecord.messageId ?? asRecord.anchorId ?? null,
+            messageId: asRecord.messageId ?? null,
+            intraRowOffset: asRecord.intraRowOffset ?? null,
+            rawScrollTop: asRecord.rawScrollTop ?? asRecord.scrollTop,
+            isAtBottom: asRecord.isAtBottom
+          }
+        : null
     } catch {
       saved = null
     }
+    // Rapid-return retained anchor (A→main→A where the intermediate main
+    // never displayed): when the incoming target still equals the
+    // controller's displayed route and the controller holds a live message
+    // anchor for it, that retained anchor is provably fresher than the
+    // persisted snapshot (storage freezes while owned/dirty; live tracks the
+    // last retained anchor). Fetch around it and plan to it — never let a
+    // stale persisted snapshot drag the still-visible route to an old
+    // position. Ordinary switches (target != displayed) keep the storage
+    // path untouched below.
+    const retainedLiveAnchor = controller.activeAnchor
+    const useRetainedAnchor =
+      retainedLiveAnchor !== null &&
+      retainedLiveAnchor.kind === 'message' &&
+      controller.displayedRoute.topicId === topicIdAtEffect &&
+      controller.displayedRoute.route === routeAtEffect
+    if (useRetainedAnchor && retainedLiveAnchor.kind === 'message') {
+      saved = {
+        scrollTop: typeof saved?.scrollTop === 'number' ? saved.scrollTop : 0,
+        anchorId: retainedLiveAnchor.messageId,
+        messageId: retainedLiveAnchor.messageId,
+        intraRowOffset: retainedLiveAnchor.offset,
+        rawScrollTop: typeof saved?.rawScrollTop === 'number' ? saved.rawScrollTop : 0,
+        isAtBottom: false
+      }
+    }
+    // Outgoing freeze (idempotent when the selector already saved) + fetch
+    // hold before any fetch: the outgoing viewport stays visible and no
+    // write may land under the incoming identity. Dropped-while-owned saves
+    // preserve the existing stable snapshot (transients never captured).
+    // Adopt the selector's in-flight top session when present (same epoch,
+    // same target) so exactly one session owns the transition; otherwise
+    // open a top session reading the target's own snapshot.
+    saveDisplayedSnapshot()
+    const fetchEpoch =
+      adoptFetchHold(topicIdAtEffect, routeAtEffect) ??
+      beginFetchHold(topicIdAtEffect, routeAtEffect, {
+        kind: 'top',
+        saved: useRetainedAnchor
+          ? {
+              scrollTop: saved?.scrollTop ?? 0,
+              messageId: saved?.messageId ?? null,
+              intraRowOffset: saved?.intraRowOffset ?? null,
+              isAtBottom: false
+            }
+          : undefined
+      })
+    // Same-session duplicate run (effect re-invoked while this session's
+    // fetch is in flight): the running pipeline owns it — never start a
+    // second one on the same epoch. Stale markers are harmless: a new
+    // target/epoch fails the currency check and proceeds.
+    if (routeFetchEpochRef.current !== null && controller.isSessionCurrent(routeFetchEpochRef.current)) return
+    routeFetchEpochRef.current = fetchEpoch
+    loadedRouteRef.current = claimLoadedRoute(activeBranchId)
     cancelActiveLoads()
     // Incremental: keep the current viewport during the windowed fetch (no
     // topic/reset blank). Only the per-route window cache is dropped.
     windowCacheRef.current.clear()
     void (async () => {
+      // Exclusive-anchor restore contract (route-local stable viewport):
+      // - Canonical saved anchor is `messageId` (legacy `anchorId` fallback).
+      // - Valid anchor → around it; the returned window/projection must
+      //   contain it before any placement/stable commit. A delayed
+      //   projection/DOM commit is awaited (bounded); never an immediate
+      //   vicinity/tail/raw fallback.
+      // - Typed NOT_FOUND/out-of-route/deleted → saved snapshot invalid for
+      //   this route: explicit route-local terminal default (latest). Only
+      //   after that default is placed/stable may it replace the stale
+      //   snapshot.
+      // - Transport/load failure or supersession → fail visible, preserve the
+      //   prior snapshot; uncertainty never becomes a new stable fallback.
+      // The current window API guarantees anchor containment on around
+      // success for the addressed effective route (branch: effective
+      // findIndex; main: owner-equality check), so no restore-owned expansion
+      // search is needed beyond the containment gate below — a missing anchor
+      // in a successful around response is malformed and fails visible.
+      const isNotFoundError = isTopRestoreNotFoundError
+      const canonicalAnchor = canonicalSavedAnchorId(saved)
       let routeWindow: FetchMessagesWindowResponse | void
+      let snapshotInvalidForRoute = false
       try {
         const choice = chooseRouteWindowRequest(saved)
         if (choice.kind === 'latest') {
@@ -2806,11 +3868,22 @@ const Messages = ({
                 after: NAVIGATION_VISUALLY_NEWER_GROUPS
               })
             )
-          } catch {
-            // Saved anchor not on the target route (cross-route snapshot):
-            // fall back to latest + vicinity/tail below.
-            if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) return
-            routeWindow = await dispatch(loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect, { kind: 'latest' }))
+          } catch (aroundError) {
+            // Superseded before classification: fail visible, keep snapshot.
+            if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) {
+              failVisibleTransition(fetchEpoch)
+              return
+            }
+            if (isNotFoundError(aroundError)) {
+              // Saved snapshot invalid for this route (deleted/out-of-route):
+              // explicit terminal default. The stale snapshot is replaced
+              // only by the stable commit of that default below.
+              snapshotInvalidForRoute = true
+              routeWindow = await dispatch(loadRouteMessagesThunk(topicIdAtEffect, routeAtEffect, { kind: 'latest' }))
+            } else {
+              // Environmental/transport failure: preserve the prior snapshot.
+              throw aroundError
+            }
           }
         }
       } catch (error) {
@@ -2829,7 +3902,10 @@ const Messages = ({
           currentTopicId: topicIdRef.current,
           currentRoute: routeRef.current
         })
-        if (!externalRecovery.shouldClear) return
+        if (!externalRecovery.shouldClear) {
+          failVisibleTransition(fetchEpoch)
+          return
+        }
         try {
           dispatch(newMessagesActions.rebaseRouteMessages({ topicId: topicIdAtEffect, messages: [] }))
         } catch {
@@ -2839,26 +3915,69 @@ const Messages = ({
         try {
           const emptyWindow = createLatestMessageWindow([], 1, { hasMoreBefore: false, hasMoreAfter: false })
           viewportDispatch({ type: 'window/apply', window: emptyWindow })
+          // Failure clear: the DOM no longer belongs to any route — mark
+          // rendered unknown (dirty) so no freeze/write can proceed until a
+          // successful target rebase. Ownership release alone never reopens.
+          try {
+            controller.markRenderedUnknown()
+          } catch {
+            // fail-closed
+          }
         } catch {
           // fail-closed: loaded projection already cleared above
         }
+        failVisibleTransition(fetchEpoch)
         return
       }
-      if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) return
+      if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) {
+        failVisibleTransition(fetchEpoch)
+        return
+      }
       try {
+        // Superseded/void reads never publish: fail visible, keep snapshot.
+        if (!routeWindow || !routeWindow.window) {
+          failVisibleTransition(fetchEpoch)
+          loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+          return
+        }
         const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtEffect) ?? []) as Message[]
         const loadedIds = new Set(loaded.map((m) => m.id))
-        // Vicinity/tail fallback when no valid snapshot: first still-present
-        // loaded message, else route tail. With a valid snapshot the window
-        // was already read around it; rebuild the same vicinity here so the
-        // viewport apply is deterministic. Empty target routes atomically
-        // clear the viewport (no old-route residual) with authoritative flags.
-        // Route-saved-row-anchor: canonical messageId with legacy anchorId
-        // alias; contextAnchor (contextBoundaryMessageId) never feeds this.
-        const routeSavedRowAnchor =
-          (typeof saved?.messageId === 'string' && loadedIds.has(saved.messageId) ? saved.messageId : null) ??
-          (typeof saved?.anchorId === 'string' && loadedIds.has(saved.anchorId) ? saved.anchorId : null)
-        const anchor = routeSavedRowAnchor ?? vicinityIds.find((id) => loadedIds.has(id)) ?? null
+        // Requested-anchor coverage gate: a valid saved anchor must be in
+        // both the returned window and the rebased projection. Partial
+        // windows are valid only when they cover the anchor; full route
+        // materialization is never required.
+        if (canonicalAnchor && !snapshotInvalidForRoute) {
+          const windowIds = new Set((routeWindow.messages ?? []).map((m) => (m as { id: string }).id))
+          if (!windowIds.has(canonicalAnchor) || !loadedIds.has(canonicalAnchor)) {
+            logger.error('[routeInvalidation] around window omits the requested anchor', {
+              window: routeWindow.window
+            } as unknown as Error)
+            loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+            failVisibleTransition(fetchEpoch)
+            return
+          }
+        }
+        // Route-saved-row-anchor (pure decision helper): canonical messageId
+        // with legacy anchorId alias; contextAnchor never feeds this. Valid
+        // snapshots never fall to vicinity/tail/raw. Empty routes atomically
+        // clear (no old-route residual).
+        const anchorDecision = decideTopRestoreAnchor({
+          canonicalAnchor,
+          snapshotInvalidForRoute,
+          loadedIds
+        })
+        if (anchorDecision.mustFailVisible) {
+          loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+          failVisibleTransition(fetchEpoch)
+          return
+        }
+        const routeSavedRowAnchor = anchorDecision.routeSavedRowAnchor
+        if (canonicalAnchor && !snapshotInvalidForRoute && !routeSavedRowAnchor) {
+          loadedRouteRef.current = markLoadedRouteFailed(routeAtEffect)
+          failVisibleTransition(fetchEpoch)
+          return
+        }
+        const anchor = routeSavedRowAnchor ?? null
         const authoritative =
           routeWindow && routeWindow.window
             ? {
@@ -2873,184 +3992,253 @@ const Messages = ({
           NAVIGATION_VISUALLY_OLDER_GROUPS,
           NAVIGATION_VISUALLY_NEWER_GROUPS
         )
+        let armedTopEpoch: number | null = null
         if (targetWindow) {
-          viewportDispatch({ type: 'window/apply', window: targetWindow })
+          // Atomic route transition: arm hidden-until-positioned together
+          // with the target window commit in the same React batch. The old
+          // viewport stays visible during the fetch above (incremental);
+          // only this commit hides, and the pre-paint layout effect applies
+          // the first scroll synchronously before reveal. First placement
+          // lives ONLY in that layout effect; the async continuation below
+          // runs the bounded stabilizer for post-reveal drift (message
+          // restores) or simply releases (bottom/same-route-raw restores).
+          // Route-local plans only: valid saved message → message + intra-row
+          // offset (even when isAtBottom) with NO missing-row fallback (a
+          // missing row with a valid anchor fails visible and preserves the
+          // snapshot — intermediate raw geometry never poses as stable);
+          // invalid snapshot → terminal default (`none`, the latest window's
+          // natural tail position, committable after placed/stable); no usable
+          // anchor + isAtBottom → bottom; raw-only legacy snapshot
+          // (no anchor) → same-route scrollTop; no snapshot → deterministic
+          // route-local default (`bottom`). Never outgoing geometry.
+          const wantOffset =
+            typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+              ? saved.intraRowOffset
+              : null
+          const firstPlan: ViewportFirstPositionPlan = chooseTopFirstPositionPlan({
+            saved,
+            snapshotInvalidForRoute,
+            routeSavedRowAnchor
+          })
+          // Provenance-bound atomic commit (single entry): stale epochs
+          // refuse with no dispatch, never tearing down the new session.
+          const topRestoreEpoch = commitRouteWindowAtomic(
+            fetchEpoch,
+            topicIdAtEffect,
+            routeAtEffect,
+            targetWindow,
+            firstPlan
+          )
+          if (topRestoreEpoch === null) {
+            failVisibleTransition(fetchEpoch)
+            return
+          }
+          armedTopEpoch = topRestoreEpoch
+          // The controller holds the saved message-row anchor from the
+          // fetch-hold request (adopted top session); queued pagination
+          // snapshots only its stable identity + offset via
+          // snapshotPreferredAnchor. Bottom restores carry no row anchor.
+          void wantOffset
         }
-        // Route-local restore: isAtBottom → latest + bottom; else
-        // around(saved messageId) + precise intra-row offset. Held under the
-        // viewport scroll token + hook ownership so the programmatic restore
-        // is never recorded as a user scroll, then bounded-stabilized for
-        // late layout. Repeated restores converge to the same position.
+        // Route-local restore, post-reveal only (never first placement):
+        // message → fold-reveal when hidden + bounded stabilizer for late
+        // layout drift (even when isAtBottom: exact anchor + offset outranks
+        // bottom vicinity); anchorless isAtBottom → already at bottom
+        // pre-paint, nothing more; same-route raw scrollTop → already set
+        // none → deterministic vicinity default, already committed.
         // Target validity is the restore epoch (topic/route/mounted/epoch),
         // never `canHandleUserViewportScroll` (the programmatic token below
         // closes that gate by design and would self-cancel).
-        const topRestoreEpoch = ++restoreEpochRef.current
+        const ownerAtStart = transitionPlanRef.current
+        const topRestoreEpoch =
+          armedTopEpoch !== null
+            ? armedTopEpoch
+            : ownerAtStart && ownerAtStart.topicId === topicIdAtEffect && ownerAtStart.routeId === routeAtEffect
+              ? ownerAtStart.epoch
+              : controller.currentEpoch
         const stillTopTarget = () =>
           isRestoreTargetValid({
             topicMatch: topicIdRef.current === topicIdAtEffect,
             routeMatch: routeRef.current === routeAtEffect,
             mounted: !unmountedRef.current,
-            epochCurrent: restoreEpochRef.current === topRestoreEpoch
+            epochCurrent: controller.currentEpoch === topRestoreEpoch
           })
-        // Preferred visual anchor for queued pagination: the saved message row
-        // keeps its intra-row offset even when top-selector auto-pagination
-        // inserts older rows. Bottom restores carry no row anchor.
-        if (routeSavedRowAnchor && typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)) {
-          activeRestoreAnchorRef.current = createMessageRestoreAnchor({
-            messageId: routeSavedRowAnchor,
-            targetOffset: saved.intraRowOffset,
-            topicId: topicIdAtEffect,
-            routeId: routeAtEffect,
-            restoreEpoch: topRestoreEpoch
+        // Stable-commit gate (pure helper): a valid requested anchor must be
+        // covered/resident and post-alignment quiet (stabilizer below) before
+        // it may become the route snapshot — even when isAtBottom. Terminal
+        // defaults (invalid snapshot) and anchorless bottom restores carry no
+        // anchor requirement; an unmet valid anchor fails visible and
+        // valid anchor fails visible and preserves the prior snapshot.
+        const isTopAnchorCommittable = (): boolean => {
+          let projectionContains = false
+          try {
+            projectionContains = messagesRef.current.some((m) => m.id === (routeSavedRowAnchor as string))
+          } catch {
+            projectionContains = false
+          }
+          let domConnected = false
+          try {
+            if (routeSavedRowAnchor) {
+              const esc =
+                typeof CSS !== 'undefined' &&
+                typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+                  ? (CSS as unknown as { escape: (v: string) => string }).escape
+                  : (v: string) => v
+              const row = document.getElementById(`message-${esc(routeSavedRowAnchor)}`)
+              domConnected = !!row && row.isConnected
+            }
+          } catch {
+            domConnected = false
+          }
+          return isTopStableCommittable({
+            isAtBottom: !!saved?.isAtBottom,
+            snapshotInvalidForRoute,
+            requestedAnchor: routeSavedRowAnchor,
+            projectionContains,
+            domConnected
           })
-        } else {
-          activeRestoreAnchorRef.current = null
         }
         try {
-          if (saved?.isAtBottom) {
-            const release = holdProgrammaticScrollOwnership()
-            try {
-              await navigate({ kind: 'bottom', source: 'imperative' })
-            } finally {
-              release()
-            }
-          } else if (routeSavedRowAnchor) {
+          if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
             const wantOffset =
               typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
                 ? saved.intraRowOffset
                 : null
-            const release = holdProgrammaticScrollOwnership()
-            const scrollToken = {}
-            let committed = false
+            if (!stillTopTarget()) {
+              failVisibleTransition(topRestoreEpoch)
+              return
+            }
+            // Folded targets stay hidden until revealed; reveal first so the
+            // keeper measures the real row (transaction scroll itself is
+            // skipped — first placement already happened pre-paint).
             try {
-              committed = await beginScroll('programmatic', scrollToken)
-              if (!committed) return
-              if (!stillTopTarget()) return
-              await navigate({ kind: 'message', targetId: routeSavedRowAnchor, source: 'imperative' })
-              if (!stillTopTarget()) return
-              const live = scrollContainerRef.current
-              if (live && wantOffset !== null) {
-                await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-                if (!stillTopTarget()) return
-                try {
-                  const esc =
-                    typeof CSS !== 'undefined' &&
-                    typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
-                      ? (CSS as unknown as { escape: (v: string) => string }).escape
-                      : (v: string) => v
-                  const el = document.getElementById(`message-${esc(routeSavedRowAnchor)}`)
-                  const applyTopCompensation = (delta: number): void => {
-                    if (!stillTopTarget()) return
-                    try {
-                      live.scrollTop += delta
-                    } catch {
-                      return
-                    }
-                    // Precise single-frame suppress (same contract as the
-                    // divider path): only the matching expected scrollTop is
-                    // self-induced; next-frame/different offsets cancel.
-                    const generation = armStabilizerSuppress(stabilizerSuppressRef.current, live.scrollTop)
-                    try {
-                      requestAnimationFrame(() => {
-                        if (stabilizerSuppressRef.current.generation === generation) {
-                          stabilizerSuppressRef.current.armed = false
-                        }
-                      })
-                    } catch {}
-                  }
-                  if (el && el.isConnected) {
+              if (checkElement(routeSavedRowAnchor) === 'hidden') {
+                await selectMessageForFold(routeSavedRowAnchor)
+              }
+            } catch {
+              // fail-closed: keep the pre-paint vicinity
+            }
+            if (!stillTopTarget()) {
+              failVisibleTransition(topRestoreEpoch)
+              return
+            }
+            // Delayed projection/DOM commit: wait (bounded) for the rebased
+            // projection to observably contain the requested anchor before
+            // any placement-dependent work. Never fall back immediately —
+            // an immediate vicinity/tail commit here would poison the valid
+            // unresolved snapshot.
+            try {
+              const projectionReady = await waitForProjectionCommit(routeSavedRowAnchor, () => !stillTopTarget())
+              if (!projectionReady) {
+                failVisibleTransition(topRestoreEpoch)
+                return
+              }
+            } catch {
+              failVisibleTransition(topRestoreEpoch)
+              return
+            }
+            if (!stillTopTarget()) {
+              failVisibleTransition(topRestoreEpoch)
+              return
+            }
+            const live = scrollContainerRef.current
+            if (live && wantOffset !== null) {
+              await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+              if (!stillTopTarget()) {
+                failVisibleTransition(topRestoreEpoch)
+                return
+              }
+              // Direct compensation to the saved intra-row offset (single
+              // synchronous write, no stabilizer session). The persistent
+              // keeper holds this offset across late Markdown/image layout
+              // afterwards; the arm's scroll token stays held until the
+              // commit below releases it.
+              try {
+                const esc =
+                  typeof CSS !== 'undefined' &&
+                  typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+                    ? (CSS as unknown as { escape: (v: string) => string }).escape
+                    : (v: string) => v
+                const settleOnce = (): boolean => {
+                  try {
+                    const el = document.getElementById(`message-${esc(routeSavedRowAnchor)}`)
+                    if (!el || !el.isConnected || !stillTopTarget()) return false
                     const have = el.getBoundingClientRect().top - live.getBoundingClientRect().top
                     const delta = have - wantOffset
-                    if (Math.abs(delta) > 1) applyTopCompensation(delta)
-                    const stabilizer = runBoundedPositionStabilizer(
-                      live,
-                      wantOffset,
-                      {
-                        getCurrentOffset: () => {
-                          if (!stillTopTarget()) return null
-                          if (!el.isConnected) return null
-                          try {
-                            return el.getBoundingClientRect().top - live.getBoundingClientRect().top
-                          } catch {
-                            return null
-                          }
-                        },
-                        applyDelta: (delta) => {
-                          applyTopCompensation(delta)
-                        },
-                        isCancelled: () => !stillTopTarget()
-                      },
-                      { maxMs: 1500, quietMs: 120 },
-                      {
-                        getTargetElement: () => {
-                          try {
-                            const next = document.getElementById(`message-${esc(routeSavedRowAnchor)}`)
-                            return next && next.isConnected ? (next as unknown as HTMLElement) : null
-                          } catch {
-                            return null
-                          }
-                        }
-                      }
-                    )
-                    activeStabilizerRef.current = {
-                      handle: stabilizer,
-                      scrollToken,
-                      release,
-                      epoch: topRestoreEpoch
-                    }
-                    try {
-                      await stabilizer.done
-                    } finally {
-                      // Exactly-once: only the still-current epoch owns
-                      // cancel/end/release; user-cancel/unmount already took
-                      // the session and bumped the epoch.
-                      if (restoreEpochRef.current === topRestoreEpoch) {
-                        stabilizer.cancel()
-                        activeStabilizerRef.current = null
-                      }
-                    }
-                  }
-                } catch {
-                  // fail-closed: keep the navigated vicinity
-                }
-              }
-            } finally {
-              // Restore-owned token/ownership: release only while still the
-              // current epoch so every return/error path releases once. The
-              // saved-row anchor lifecycle ends here (queued intents already
-              // hold their detached snapshot).
-              if (restoreEpochRef.current === topRestoreEpoch) {
-                activeRestoreAnchorRef.current = null
-                try {
-                  viewportDispatch({ type: 'scroll/end', token: scrollToken })
-                } catch {}
-                try {
-                  release()
-                } catch {}
-                if (activeStabilizerRef.current?.epoch === topRestoreEpoch) activeStabilizerRef.current = null
-              }
-            }
-          } else if (saved && typeof saved.scrollTop === 'number') {
-            const live = scrollContainerRef.current
-            if (live) {
-              const release = holdProgrammaticScrollOwnership()
-              try {
-                requestAnimationFrame(() => {
-                  if (topicIdRef.current !== topicIdAtEffect || routeRef.current !== routeAtEffect) return
-                  try {
-                    live.scrollTop = saved.scrollTop
+                    if (Math.abs(delta) > 1) live.scrollTop += delta
+                    return true
                   } catch {
-                    // fail-closed: keep the vicinity window position
+                    return false
                   }
-                })
+                }
+                settleOnce()
                 await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-              } finally {
-                release()
+                if (!stillTopTarget()) {
+                  failVisibleTransition(topRestoreEpoch)
+                  return
+                }
+                settleOnce()
+              } catch {
+                // fail-closed: commit gate below still verifies residency
               }
             }
+          } else if (saved?.isAtBottom) {
+            // Anchorless bottom already applied pre-paint; settle one frame
+            // so late layout lands, then release. No navigation transaction
+            // here: the window above is already the target vicinity and
+            // scrollTop is already 0 — a second transaction would re-scroll
+            // post-reveal.
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          } else if (saved && typeof saved.scrollTop === 'number' && !snapshotInvalidForRoute && !canonicalAnchor) {
+            // Same-route raw scrollTop already applied pre-paint; settle one frame.
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          } else {
+            // Deterministic route-local default (`bottom` plan): the committed
+            // latest window is already at bottom pre-paint; settle one frame
+            // so late layout lands before the stable commit. Invalid
+            // snapshots land here too via the terminal `none` plan — only
+            // this stable default may replace the stale snapshot.
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
           }
         } catch {
           // fail-closed: keep the vicinity window position
+        } finally {
+          // Restore-owned token/ownership: release only while still the
+          // current epoch so every return/error path releases once. The
+          // saved-row anchor lifecycle ends here (queued intents already
+          // hold their detached snapshot). Stable completion commits the
+          // target route's snapshot (no user input required) and advances
+          // displayed provenance — including the deterministic-default path
+          // above, so the next no-scroll round-trip restores that default.
+          // Valid anchors commit by identity (applied anchor + wantOffset,
+          // live scrollTop/bottom; never a crossing-first capture); bottom /
+          // raw / terminal defaults commit the final visible viewport. A
+          // valid unresolved anchor never commits a fallback: the gate below
+          // fails visible and preserves the prior snapshot. Stale `finally`
+          // blocks never touch the new session (session currency gate).
+          if (controller.isSessionCurrent(topRestoreEpoch)) {
+            if (!isTopAnchorCommittable()) {
+              failVisibleTransition(topRestoreEpoch)
+            } else if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
+              const identityOffset =
+                typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+                  ? saved.intraRowOffset
+                  : null
+              // Identity commit (applied anchor + wantOffset, live
+              // scrollTop/bottom). commitDisplayedStableWithAnchor advances
+              // displayed, ends the token, clears the plan, and releases
+              // exactly once.
+              commitDisplayedStableWithAnchor(
+                topicIdAtEffect,
+                routeAtEffect,
+                topRestoreEpoch,
+                routeSavedRowAnchor,
+                identityOffset
+              )
+            } else {
+              commitDisplayedStable(topicIdAtEffect, routeAtEffect, topRestoreEpoch)
+            }
+          }
         }
       } catch (error) {
         logger.error('[routeInvalidation] Failed to rebuild viewport window:', error as Error)
@@ -3058,16 +4246,24 @@ const Messages = ({
     })()
   }, [
     activeBranchId,
+    beginFetchHold,
     beginScroll,
     cancelActiveLoads,
+    checkElement,
+    commitDisplayedStable,
+    commitDisplayedStableWithAnchor,
+    commitRouteWindowAtomic,
     deletionFallbackIntent,
     dispatch,
+    failVisibleTransition,
     getLegacyMainSavedPosition,
-    getRouteSavedPosition,
-    navigate,
+    readTargetSnapshot,
+    saveDisplayedSnapshot,
+    selectMessageForFold,
     t,
     topic.id,
-    viewportDispatch
+    viewportDispatch,
+    waitForProjectionCommit
   ])
 
   return (
@@ -3089,6 +4285,7 @@ const Messages = ({
           onSelectRoute={handleSelectRoute}
           onStabilizerUserInput={handleStabilizerUserInput}
           onStabilizerKeyDown={handleStabilizerKeyDown}
+          viewportPhase={viewportPhaseAttr}
         />
         <SelectionBox
           isMultiSelectMode={isMultiSelectMode}

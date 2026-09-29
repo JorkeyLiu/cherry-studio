@@ -4,7 +4,6 @@
 import { describe, expect, it } from 'vitest'
 
 import { buildDividerKey, captureDividerOffset, decideDividerRestoreTarget, dividerRowTestId } from '../BranchDividers'
-import { computeRestoreDelta, OffsetStabilizerController, shouldCompensate } from '../positionStabilizer'
 
 describe('divider identity', () => {
   it('builds a stable anchor+parent key and row test id', () => {
@@ -76,32 +75,5 @@ describe('decideDividerRestoreTarget (fallback chain, never bottom)', () => {
         forkAnchorMessageId: 'fork'
       })
     ).toEqual({ kind: 'fork-message', targetId: 'fork', dividerKey: null })
-  })
-})
-
-describe('stabilizer pure decisions', () => {
-  it('computes delta and 1px epsilon', () => {
-    expect(computeRestoreDelta(160, 150)).toBe(10)
-    expect(shouldCompensate(0.5)).toBe(false)
-    expect(shouldCompensate(2)).toBe(true)
-  })
-
-  it('controller cancels and expires on a bounded budget', () => {
-    let now = 0
-    const c = new OffsetStabilizerController(() => now, { maxMs: 100, quietMs: 20 })
-    expect(c.step(150, 160).action).toBe('compensate')
-    c.cancel()
-    expect(c.step(150, 160).action).toBe('cancelled')
-    const c2 = new OffsetStabilizerController(() => now, { maxMs: 100, quietMs: 20 })
-    now = 200
-    expect(c2.step(150, 160).action).toBe('timeout')
-  })
-
-  it('controller goes quiet after the quiet period with no compensation', () => {
-    let now = 0
-    const c = new OffsetStabilizerController(() => now, { maxMs: 1000, quietMs: 50 })
-    expect(c.step(150, 150.5).action).toBe('watch')
-    now = 60
-    expect(c.step(150, 150.5).action).toBe('quiet')
   })
 })

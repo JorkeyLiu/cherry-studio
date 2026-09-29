@@ -180,8 +180,20 @@ describe('rebaseRouteMessages reducer (atomic, no blank, production diff path)',
 })
 
 describe('chooseRouteWindowRequest (top-selector choice, behavior)', () => {
-  it('isAtBottom selects latest', () => {
-    expect(chooseRouteWindowRequest({ scrollTop: 100, anchorId: 'u1', isAtBottom: true })).toEqual({ kind: 'latest' })
+  it('valid anchor selects around even when isAtBottom', () => {
+    expect(
+      chooseRouteWindowRequest({
+        scrollTop: -8,
+        anchorId: null,
+        messageId: 'bexcl-00006',
+        intraRowOffset: -51,
+        isAtBottom: true
+      })
+    ).toEqual({ kind: 'around', anchorMessageId: 'bexcl-00006' })
+  })
+
+  it('anchorless isAtBottom selects latest', () => {
+    expect(chooseRouteWindowRequest({ scrollTop: 100, anchorId: null, isAtBottom: true })).toEqual({ kind: 'latest' })
   })
 
   it('saved anchor selects around it', () => {

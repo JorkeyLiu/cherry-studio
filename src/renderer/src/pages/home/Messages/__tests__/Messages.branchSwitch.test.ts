@@ -88,8 +88,13 @@ describe('true branch incremental switch (windowed)', () => {
   it('top-selector switch reads latest/around from the target snapshot (never overwrites it)', () => {
     const idx = messagesSource.indexOf('Top-selector route switch')
     expect(idx).toBeGreaterThanOrEqual(0)
-    const slice = messagesSource.slice(idx, idx + 9000)
-    expect(slice).toMatch(/getRouteSavedPosition/)
+    // Window covers the rapid-return retained-anchor block plus the
+    // windowed fetch choice below it (never overwrites the target snapshot).
+    const slice = messagesSource.slice(idx, idx + 13000)
+    expect(slice).toMatch(/readTargetSnapshot/)
+    // Single session: adopt the selector's in-flight top transition instead
+    // of opening a second one.
+    expect(slice).toMatch(/adoptFetchHold/)
     expect(slice).toMatch(/isAtBottom/)
     expect(slice).toMatch(/anchorId/)
     expect(slice).toMatch(/kind:\s*'latest'/)

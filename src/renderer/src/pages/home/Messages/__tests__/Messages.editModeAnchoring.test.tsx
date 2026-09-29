@@ -83,12 +83,19 @@ vi.mock('@renderer/hooks/useMessageActionController', () => ({
   })
 }))
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
+  // Named exports used by the displayed-route coordinator. The single
+  // controller owns transition truth; the mock keeps anchoring tests
+  // isolated from hook depth.
+  commitSnapshotForRoute: vi.fn(() => true),
+  routeScrollKey: (topicId: string, branchId: string | null) => `topic-${topicId}::${branchId ?? 'main'}`,
   default: (_key: string) => ({
     containerRef: mocks.scrollContainerRef,
     handleScroll: mocks.handleScrollSpy,
     getSavedPosition: vi.fn(() => null),
+    getSnapshotForRoute: vi.fn(() => null),
     clearSavedPosition: vi.fn(),
-    savePosition: vi.fn()
+    savePosition: vi.fn(),
+    captureSnapshot: vi.fn(() => null)
   })
 }))
 vi.mock('@renderer/hooks/useShortcuts', () => ({ useShortcut: vi.fn() }))
