@@ -331,7 +331,68 @@ const appendMessageContract: ChatDbContract = {
       }
     }
   },
-  validateResult: voidResult('chatdb:append-message')
+  validateResult: validateAppendMessageResult
+}
+
+const APPEND_MESSAGE_VALUE_KEYS = new Set([
+  'topicId',
+  'branchId',
+  'messageId',
+  'createdMessageIds',
+  'mutableMessageIds'
+])
+
+/**
+ * Main-issued creation acknowledgment result validation
+ * (`chatdb:append-message`).
+ *
+ * The addressed route echoes normalized (null = main route); the delta is
+ * limited to actual new owned row(s): at most one created id, equal to
+ * `messageId` when present, with the capability delta a subset of created.
+ */
+function validateAppendMessageResult(result: unknown): void {
+  const channel = 'chatdb:append-message'
+  validateResultEnvelope(result, channel)
+  const obj = result as Record<string, unknown>
+  if (obj.ok === true) {
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', `[${channel}] Expected AppendMessageResponse object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Success value must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!APPEND_MESSAGE_VALUE_KEYS.has(key)) {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in success value: "${key}"`)
+      }
+    }
+    validateNonEmptyString(v.topicId, 'result.value.topicId')
+    if (v.branchId !== null) {
+      validateNonEmptyString(v.branchId, 'result.value.branchId')
+    }
+    validateNonEmptyString(v.messageId, 'result.value.messageId')
+    validateStringArray(v.createdMessageIds, 'result.value.createdMessageIds')
+    validateStringArray(v.mutableMessageIds, 'result.value.mutableMessageIds')
+    const created = v.createdMessageIds as string[]
+    if (created.length > 1) {
+      throw new ValidationError('result.value.createdMessageIds', `[${channel}] append creates at most one owned row`)
+    }
+    if (new Set(created).size !== created.length) {
+      throw new ValidationError('result.value.createdMessageIds', `[${channel}] Duplicate createdMessageId`)
+    }
+    if (created.length === 1 && created[0] !== v.messageId) {
+      throw new ValidationError('result.value.createdMessageIds', `[${channel}] createdMessageId must equal messageId`)
+    }
+    const mutable = v.mutableMessageIds as string[]
+    for (const id of mutable) {
+      if (!created.includes(id)) {
+        throw new ValidationError('result.value.mutableMessageIds', `[${channel}] mutable id must be a created id`)
+      }
+    }
+  }
 }
 
 const updateMessageContract: ChatDbContract = {
@@ -1780,12 +1841,14 @@ const SEMANTIC_RESEND_VALUE_KEYS = new Set([
   'affectedFileIds',
   'remainingReferenceCounts',
   'topicId',
+  'branchId',
   'askId',
   'userMessage',
   'userBlocks',
   'executionMessages',
   'removedBlockIds',
   'createdMessageIds',
+  'mutableMessageIds',
   'attempts'
 ])
 
@@ -1830,6 +1893,9 @@ function validateSemanticResendResult(channel: string): (result: unknown) => voi
         validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
       }
       validateNonEmptyString(v.topicId, 'result.value.topicId')
+      if (v.branchId !== null) {
+        validateNonEmptyString(v.branchId, 'result.value.branchId')
+      }
       validateNonEmptyString(v.askId, 'result.value.askId')
       validateJsonObject(v.userMessage, 'result.value.userMessage')
       validateIdField(v.userMessage as any, 'result.value.userMessage')
@@ -1855,6 +1921,13 @@ function validateSemanticResendResult(channel: string): (result: unknown) => voi
       for (const cid of created) {
         if (!execIds.includes(cid)) {
           throw new ValidationError('result.value.createdMessageIds', `[${channel}] createdMessageId not in execution`)
+        }
+      }
+      validateStringArray(v.mutableMessageIds, 'result.value.mutableMessageIds')
+      const mutable = v.mutableMessageIds as string[]
+      for (const id of mutable) {
+        if (!created.has(id)) {
+          throw new ValidationError('result.value.mutableMessageIds', `[${channel}] mutable id must be a created id`)
         }
       }
       if (!Array.isArray(v.attempts)) {

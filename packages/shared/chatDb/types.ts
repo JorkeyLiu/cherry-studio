@@ -167,6 +167,35 @@ export interface AppendMessageRequest extends ResendAttemptIdCarrier {
   diagnostics?: AppendDiagnostics
 }
 
+/**
+ * @see IpcChannel.ChatDb_AppendMessage
+ *
+ * Main-issued typed creation acknowledgment for one append. The Main stamp
+ * stays authoritative: `branchId` is the normalized addressed route
+ * (null = main route), `messageId` is the authoritative row identity, and
+ * the id deltas are limited to actual new owned row(s) created in the same
+ * root transaction. `createdMessageIds` is `[messageId]` when the call
+ * genuinely inserted a new owned row and `[]` when it patched a pre-existing
+ * same-route row; `mutableMessageIds` is the authoritative capability delta
+ * (always a subset of `createdMessageIds`). A failure publishes nothing.
+ */
+export interface AppendMessageResponse {
+  /** Echo of the request topic. */
+  topicId: string
+  /** Normalized addressed route (null = main route). */
+  branchId: string | null
+  /** Authoritative row identity (echo of the created/patched message id). */
+  messageId: string
+  /** Actual new owned row(s): `[messageId]` when genuinely inserted, else `[]`. */
+  createdMessageIds: string[]
+  /**
+   * Main-authoritative mutability delta for this command: the created owned
+   * IDs mutable through the addressed route. Renderer unions same-route only;
+   * never infers from branchId.
+   */
+  mutableMessageIds: string[]
+}
+
 /** @see IpcChannel.ChatDb_UpdateMessage */
 export interface UpdateMessageRequest extends ResendAttemptIdCarrier {
   topicId: string
@@ -1380,6 +1409,8 @@ export interface RegenerateAssistantMessageRequest {
 export interface SemanticResendResponse extends FileCleanupResult {
   /** Echo of the request topic. */
   topicId: string
+  /** Normalized addressed route (null = main route). */
+  branchId: string | null
   /** Authority user id (`askId` shared by all execution messages). */
   askId: string
   /** Authority user message wire (pre-reset, with `blocks` id array). */
@@ -1392,6 +1423,13 @@ export interface SemanticResendResponse extends FileCleanupResult {
   removedBlockIds: string[]
   /** Subset of execution message IDs created by Main in this transaction. */
   createdMessageIds: string[]
+  /**
+   * Main-authoritative mutability delta for this command: the created owned
+   * IDs mutable through the addressed route (always a subset of
+   * `createdMessageIds`). Renderer unions same-route only; never infers
+   * from branchId.
+   */
+  mutableMessageIds: string[]
   /** Per-message attempt mapping, exactly one entry per execution message. */
   attempts: ResendAttemptMapping[]
 }
@@ -1607,7 +1645,7 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:get-raw-topic': { request: GetRawTopicRequest; response: GetRawTopicResponse }
   'chatdb:topic-exists': { request: TopicExistsRequest; response: boolean }
   'chatdb:ensure-topic': { request: EnsureTopicRequest; response: null }
-  'chatdb:append-message': { request: AppendMessageRequest; response: null }
+  'chatdb:append-message': { request: AppendMessageRequest; response: AppendMessageResponse }
   'chatdb:update-message': { request: UpdateMessageRequest; response: null }
   'chatdb:update-message-and-blocks': { request: UpdateMessageAndBlocksRequest; response: FileCleanupResult }
   // Cross-process authority answer selection (Main-resolved full group)

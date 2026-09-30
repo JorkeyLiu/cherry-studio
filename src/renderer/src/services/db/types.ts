@@ -1,5 +1,6 @@
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import type {
+  AppendMessageResponse,
   DeleteBranchResponse,
   DeleteMessagesWithDependentsResponse,
   FetchAnswerGroupResponse,
@@ -83,6 +84,11 @@ export interface MessageDataSource {
   /**
    * Append a single message with its blocks to one route.
    *
+   * Returns the Main-issued typed creation acknowledgment (normalized
+   * addressed route, authoritative row identity, created/capability delta).
+   * Structured failure throws ChatDbResultError; transport rejection
+   * propagates unchanged.
+   *
    * `sendContext` is optional diagnostic-only correlation metadata (LOCK-004):
    * when supplied by the ordinary send path, the append consumes the next
    * ordinal from that send's own context. It never affects persistence.
@@ -95,7 +101,7 @@ export interface MessageDataSource {
     sendContext?: SendDiagnosticsContext,
     resendAttemptId?: string,
     branchId?: BranchRoute
-  ): Promise<void>
+  ): Promise<AppendMessageResponse>
 
   /**
    * Update an existing message in one route

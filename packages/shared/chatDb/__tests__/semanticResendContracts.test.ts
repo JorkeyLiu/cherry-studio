@@ -17,12 +17,14 @@ function validSemanticValue() {
     affectedFileIds: [],
     remainingReferenceCounts: {},
     topicId: 't-1',
+    branchId: null,
     askId: 'u-1',
     userMessage: { id: 'u-1', topicId: 't-1', role: 'user', blocks: ['b-u'] },
     userBlocks: [{ id: 'b-u', messageId: 'u-1', type: 'main_text', content: 'hi' }],
     executionMessages: [{ message: { id: 'a-1', topicId: 't-1', role: 'assistant', blocks: [] }, blocks: [] }],
     removedBlockIds: ['b-old'],
     createdMessageIds: [],
+    mutableMessageIds: [],
     attempts: [{ messageId: 'a-1', attemptId: 'att-1' }]
   }
 }
@@ -90,6 +92,13 @@ describe('semantic resend/regenerate contracts', () => {
     expect(() => validateChatDbResult('chatdb:resend-user-messages', { ok: true, value: badCreated })).toThrow()
     const emptyExec = { ...validSemanticValue(), executionMessages: [], attempts: [] }
     expect(() => validateChatDbResult('chatdb:resend-user-messages', { ok: true, value: emptyExec })).toThrow()
+    const mutableOutsideCreated = { ...validSemanticValue(), mutableMessageIds: ['a-1'] }
+    expect(() =>
+      validateChatDbResult('chatdb:resend-user-messages', { ok: true, value: mutableOutsideCreated })
+    ).toThrow()
+    const missingBranch = { ...validSemanticValue() } as Record<string, unknown>
+    delete missingBranch.branchId
+    expect(() => validateChatDbResult('chatdb:resend-user-messages', { ok: true, value: missingBranch })).toThrow()
   })
 
   it('rejects undefined own props via JSON safety', () => {

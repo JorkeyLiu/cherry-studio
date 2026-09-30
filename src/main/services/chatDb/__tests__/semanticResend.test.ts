@@ -2,7 +2,7 @@ import * as realFs from 'node:fs'
 import * as realOs from 'node:os'
 import * as realPath from 'node:path'
 
-import { isSuccess } from '@shared/chatDb'
+import { isSuccess, validateChatDbResult } from '@shared/chatDb'
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -346,6 +346,39 @@ describe('semantic resend/regenerate', () => {
       expect((bad as unknown as { error: { code: string } }).error.code).toBe('CONFLICT_ERROR')
     }
     const after = okValue(agg.fetchMessages(t2))
+    expect(after.messages.length).toBe(before.messages.length)
+    expect(after.blocks.length).toBe(before.blocks.length)
+  })
+
+  it('resend on a branch reads the ancestor user and echoes route + owned delta', () => {
+    const t = `t-${uid()}`
+    seedTopic(t)
+    agg.appendMessage(t, userMsg(t, 'u1') as any, [])
+    const branch = agg.createBranch(t, null, 'u1', 'B1')
+    if (!isSuccess(branch as any)) throw new Error('expected branch')
+    const b1 = ((branch as any).value.branch as { id: string }).id
+    const res = agg.resendUserMessages(t, 'u1', 'as-1', MODEL_A as any, b1)
+    const v = okValue(res)
+    // Ancestor user is readable through the branch route; the new member is
+    // owned by the branch route with a precise created/mutable delta.
+    expect(v.branchId).toBe(b1)
+    expect(v.createdMessageIds).toHaveLength(1)
+    expect(v.mutableMessageIds).toEqual([...v.createdMessageIds])
+    for (const id of v.mutableMessageIds) {
+      expect(v.createdMessageIds).toContain(id)
+    }
+    expect(() => validateChatDbResult('chatdb:resend-user-messages', res)).not.toThrow()
+  })
+
+  it('resend failure publishes nothing (atomic, zero mutation)', () => {
+    const t = `t-${uid()}`
+    seedTopic(t)
+    agg.appendMessage(t, userMsg(t, 'u1') as any, [blk('u1', 'bu1') as any])
+    agg.appendMessage(t, asstMsg(t, 'a1', 'u1', MODEL_A, 'model-a') as any, [blk('a1', 'ba1') as any])
+    const before = okValue(agg.fetchMessages(t))
+    const bad = agg.resendUserMessages(t, 'missing-user', 'as-1', MODEL_A as any)
+    expect(bad.ok).toBe(false)
+    const after = okValue(agg.fetchMessages(t))
     expect(after.messages.length).toBe(before.messages.length)
     expect(after.blocks.length).toBe(before.blocks.length)
   })

@@ -12,6 +12,7 @@
 export type {
   AppendDiagnostics,
   AppendMessageRequest,
+  AppendMessageResponse,
   BranchMessagesToTopicRequest,
   BranchMessagesToTopicResponse,
   BranchRouteId,

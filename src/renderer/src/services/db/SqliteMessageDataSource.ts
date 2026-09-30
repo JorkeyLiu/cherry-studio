@@ -25,6 +25,7 @@ import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { cloneForWire } from '@renderer/utils/jsonWire'
 import type {
   AppendMessageRequest,
+  AppendMessageResponse,
   BranchMessagesToTopicRequest,
   BranchMessagesToTopicResponse,
   BulkAddBlocksRequest,
@@ -172,7 +173,7 @@ export interface ChatDbApi {
   getRawTopic(request: GetRawTopicRequest): Promise<ChatDbResult<GetRawTopicResponse>>
   topicExists(request: TopicExistsRequest): Promise<ChatDbResult<boolean>>
   ensureTopic(request: EnsureTopicRequest): Promise<ChatDbResult<null>>
-  appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<null>>
+  appendMessage(request: AppendMessageRequest): Promise<ChatDbResult<AppendMessageResponse>>
   updateMessage(request: UpdateMessageRequest): Promise<ChatDbResult<null>>
   updateMessageAndBlocks(request: UpdateMessageAndBlocksRequest): Promise<ChatDbResult<FileCleanupResult>>
   // Cross-process authority answer selection (Main-resolved full group)
@@ -377,7 +378,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     sendContext?: SendDiagnosticsContext,
     resendAttemptId?: string,
     branchId?: string | null
-  ): Promise<void> {
+  ): Promise<AppendMessageResponse> {
     // LOCK-004: when this append belongs to the ordinary send path, consume
     // the ordinal from the CALLER'S OWN send context so renderer + main logs
     // share the correct correlation id even when sends overlap or append
@@ -411,7 +412,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
 
     const tIpc = performance.now()
-    let result: ChatDbResult<null>
+    let result: ChatDbResult<AppendMessageResponse>
     try {
       result = await this.api.appendMessage(request)
     } catch (error) {
@@ -444,7 +445,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       })
     }
 
-    unwrap(result)
+    const ack = unwrap(result)
     if (isDiagnosedAppend) {
       logAppendDiagnostic('renderer.append.total', elapsedMs(t0), {
         correlationId,
@@ -453,6 +454,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
       })
     }
     dispatchTopicUpdatedAt(topicId)
+    return ack
   }
 
   async updateMessage(

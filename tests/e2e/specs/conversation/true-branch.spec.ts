@@ -49,7 +49,10 @@
 import * as fs from 'fs'
 import { expect, test } from '../../fixtures/electron.fixture'
 import {
+  clearRequestLog,
+  findProductRequestAfter,
   getChatDbPath,
+  getRequestSequence,
   getUserDataDir,
   queryChatDbViaElectron,
   queryChatDbViaElectronWithRetry
@@ -3358,5 +3361,402 @@ test.describe('True-branch owner-only focused (BRANCH-4/5/9)', () => {
       expect(durableRows.find((r: any) => r.id === prefixId)?.branch_id).toBeNull()
     }
     // Fixture teardown owns any remaining Electron cleanup after the close above.
+  })
+})
+
+test.describe('Ordinary send immediate mutability (no-reload)', () => {
+  test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
+
+  async function uiSendMessage(page: any, text: string): Promise<void> {
+    const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+    await textarea.waitFor({ state: 'visible', timeout: 15000 })
+    await textarea.click()
+    await page.evaluate(
+      ({ selector, content }: { selector: string; content: string }) => {
+        const el = document.querySelector(selector) as HTMLTextAreaElement | null
+        if (!el) throw new Error('Textarea not found')
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (!nativeSetter) throw new Error('No native textarea setter')
+        nativeSetter.call(el, content)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      { selector: '.inputbar textarea, textarea[placeholder]', content: text }
+    )
+    await expect(textarea).toHaveValue(text, { timeout: 5000 })
+    await textarea.press('Enter')
+  }
+
+  async function assistantCount(page: any, topicId: string): Promise<number> {
+    return page.evaluate((tid: string) => {
+      const s = (window as any).store.getState()
+      const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+      let n = 0
+      for (const id of ids) {
+        if (s.messages?.entities?.[id]?.role === 'assistant') n += 1
+      }
+      return n
+    }, topicId)
+  }
+
+  async function waitForAssistantResponseComplete(
+    page: any,
+    topicId: string,
+    prevAssistantCount: number,
+    timeout = 60000
+  ): Promise<void> {
+    await page.waitForFunction(
+      ({ tid, prev }: { tid: string; prev: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let n = 0
+        for (const id of ids) {
+          if (s.messages?.entities?.[id]?.role === 'assistant') n += 1
+        }
+        return n > prev
+      },
+      { tid: topicId, prev: prevAssistantCount },
+      { timeout }
+    )
+    await page.waitForFunction(
+      ({ tid }: { tid: string }) => {
+        const s = (window as any).store?.getState()
+        if (!s || s.messages?.loadingByTopic?.[tid] === true) return false
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let latest: string | null = null
+        for (let i = ids.length - 1; i >= 0; i--) {
+          if (s.messages?.entities?.[ids[i]]?.role === 'assistant') {
+            latest = ids[i]
+            break
+          }
+        }
+        if (!latest) return false
+        const msg = s.messages.entities[latest]
+        if (msg.status !== 'success' && msg.status !== 'error') return false
+        const blocks = (msg.blocks ?? []) as string[]
+        if (blocks.length === 0) return false
+        for (const b of blocks) {
+          const block = s.messageBlocks?.entities?.[b]
+          if (!block || (block.status !== 'success' && block.status !== 'error')) return false
+        }
+        return true
+      },
+      { tid: topicId },
+      { timeout }
+    )
+  }
+
+  async function reduxIds(page: any, topicId: string): Promise<string[]> {
+    return page.evaluate(
+      (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? [],
+      topicId
+    )
+  }
+
+  async function reduxMutable(page: any, topicId: string): Promise<string[]> {
+    return page.evaluate(
+      (tid: string) => (window as any).store.getState().messages?.mutableMessageIdsByTopic?.[tid] ?? [],
+      topicId
+    )
+  }
+
+  async function expectFreshPairEditable(page: any, freshIds: string[]): Promise<void> {
+    expect(freshIds, 'ordinary send must publish exactly one user + one assistant row').toHaveLength(2)
+    const roles: Record<string, { role: string; askId: string | null }> = await page.evaluate(
+      ({ ids }: { ids: string[] }) => {
+        const entities = (window as any).store.getState().messages?.entities ?? {}
+        const out: Record<string, { role: string; askId: string | null }> = {}
+        for (const id of ids) {
+          out[id] = { role: entities[id]?.role ?? '', askId: (entities[id]?.askId ?? null) as string | null }
+        }
+        return out
+      },
+      { ids: freshIds }
+    )
+    expect(roles[freshIds[0]]?.role).toBe('user')
+    expect(roles[freshIds[1]]?.role).toBe('assistant')
+    expect(roles[freshIds[1]]?.askId).toBe(freshIds[0])
+    for (const freshId of freshIds) {
+      const sel = `[id="message-${freshId}"][data-message-id="${freshId}"]`
+      const container = page.locator(sel).first()
+      await expect(container, `sent message ${freshId} must be rendered`).toBeVisible({ timeout: 15000 })
+      await page.evaluate((id: string) => {
+        const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+        const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
+        if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+      }, freshId)
+      try {
+        await container.hover({ timeout: 8000 })
+      } catch {
+        // Hover flakiness near edges; the count assertions below retry via Playwright.
+      }
+      await expect(
+        container.locator('[data-testid="msg-edit-btn"], [data-testid="msg-assistant-edit-btn"]'),
+        `sent message ${freshId} must immediately expose its edit control without reload`
+      ).toHaveCount(1, { timeout: 15000 })
+      await expect(
+        container.locator('[data-testid="message-delete-button"]'),
+        `sent message ${freshId} must immediately expose its delete control without reload`
+      ).toHaveCount(1, { timeout: 15000 })
+    }
+  }
+
+  test('main route ordinary UI send is immediately mutable without reload', async ({ mainWindow }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'NO-RELOAD SEND MAIN: ordinary textarea send on the main route streams to terminal via the mock provider; the new user+assistant pair is immediately in mutableMessageIdsByTopic and immediately shows real edit/delete controls with zero window reload and zero resident rebase between send and assertion.'
+    })
+    await waitForAppReady(mainWindow)
+    const page = mainWindow
+    const assistantId = await prepareAssistant(page, TOTAL)
+    const topicId = `send-main-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    await seedSmallTopic(page, assistantId, topicId, `SendMain ${topicId}`)
+    const seedIds = [`${topicId}-msg-00000`, `${topicId}-msg-00001`, `${topicId}-msg-00002`, `${topicId}-msg-00003`]
+    await activateTopic(page, topicId, 4)
+
+    const beforeIds = await reduxIds(page, topicId)
+    expect(beforeIds).toEqual(seedIds)
+    const prevAssistants = await assistantCount(page, topicId)
+    expect(prevAssistants).toBe(2)
+    const content = `nrl-main-${topicId}-01`
+
+    await test.step('ordinary UI send to stream complete', async () => {
+      clearRequestLog()
+      const seq = getRequestSequence()
+      await uiSendMessage(page, content)
+      await waitForAssistantResponseComplete(page, topicId, prevAssistants)
+      const productReq: any = findProductRequestAfter(seq)
+      expect(productReq, 'mock must observe the ordinary product send').not.toBeNull()
+      expect(productReq.url).toBe('/v1/chat/completions')
+      expect(productReq.parsed?.model).toBe('mock-model')
+      const sentContents = ((productReq.parsed?.messages ?? []) as any[])
+        .filter((m: any) => m?.role === 'user')
+        .map((m: any) => m?.content)
+      expect(sentContents, 'product request must carry the ordinary typed content').toContain(content)
+    })
+
+    // No window reload, no topic switch, and no Renderer rebase dispatch occur
+    // between the send above and every assertion below: only read-only
+    // store reads, read-only fetchMessagesWindow probes, and visible UI controls.
+    await test.step('immediate mutability without reload', async () => {
+      const postIds = await reduxIds(page, topicId)
+      expect(postIds.length, 'ordinary send must append exactly two rows').toBe(beforeIds.length + 2)
+      expect(postIds.slice(0, beforeIds.length)).toEqual(beforeIds)
+      const freshIds = postIds.filter((id) => !beforeIds.includes(id))
+      const mutable = await reduxMutable(page, topicId)
+      expect(mutable, 'new user row must be immediately mutable').toContain(freshIds[0])
+      expect(mutable, 'new assistant row must be immediately mutable').toContain(freshIds[1])
+      expect(new Set(mutable), 'main route keeps the exact owner set (seed + fresh)').toEqual(new Set(postIds))
+      const mainWin: any = await page.evaluate(
+        async ({ tid }: { tid: string }) =>
+          await (window as any).api.chatDb.fetchMessagesWindow({ kind: 'latest', topicId: tid, limit: 20 }),
+        { tid: topicId }
+      )
+      expect(mainWin?.ok, `main capability probe failed: ${JSON.stringify(mainWin)}`).toBe(true)
+      expect((mainWin.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds)
+      expect(new Set(mainWin.value.mutableMessageIds as string[])).toEqual(new Set(postIds))
+      await expectFreshPairEditable(page, freshIds)
+    })
+  })
+
+  test('branch route ordinary UI sends stay immediately mutable without reload; ancestors readonly', async ({
+    mainWindow
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'NO-RELOAD SEND BRANCH: branch setup via typed IPC + real top-selector load; then two ordinary textarea sends on the same child route each stream to terminal via the mock provider. Each new pair is immediately mutable with real edit/delete controls and zero window reload or resident rebase between send and assertion; ancestors stay excluded from the child capability and both child-ancestor and main-nonowner updates reject.'
+    })
+    await waitForAppReady(mainWindow)
+    const page = mainWindow
+    const assistantId = await prepareAssistant(page, TOTAL)
+    const topicId = `send-branch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    await seedSmallTopic(page, assistantId, topicId, `SendBranch ${topicId}`)
+    const seedIds = [`${topicId}-msg-00000`, `${topicId}-msg-00001`, `${topicId}-msg-00002`, `${topicId}-msg-00003`]
+    const branchAnchor = seedIds[1]
+
+    // Branch setup only (typed IPC + real top-selector load). After this point
+    // the test performs ordinary UI sends with no reload and no mutable-state seeding.
+    const created: any = await page.evaluate(
+      async ({ tid, anchor }: { tid: string; anchor: string }) =>
+        await (window as any).api.chatDb.createBranch({ topicId: tid, parentBranchId: null, anchorMessageId: anchor }),
+      { tid: topicId, anchor: branchAnchor }
+    )
+    expect(created?.ok, `createBranch failed: ${JSON.stringify(created)}`).toBe(true)
+    const branchId = created.value.branch.id as string
+    await activateTopic(page, topicId, 4)
+    await page.locator('[data-testid="branch-selector-entry"]').first().click()
+    await expect(page.locator('[data-testid="branch-selector-popover"]').first()).toBeVisible({ timeout: 15000 })
+    await page.locator(`[data-testid="branch-cascader-item-${branchId}"]`).first().click()
+    await page.waitForFunction(
+      ({ tid, len }: { tid: string; len: number }) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages?.messageIdsByTopic?.[tid]
+        return Array.isArray(ids) && ids.length === len && s.messages?.loadingByTopic?.[tid] !== true
+      },
+      { tid: topicId, len: 2 },
+      { timeout: 30000 }
+    )
+    expect(await reduxIds(page, topicId)).toEqual([seedIds[0], seedIds[1]])
+    const activeBefore: string | null = await page.evaluate(
+      (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+      topicId
+    )
+    expect(activeBefore, 'setup must land the active route on the child branch').toBe(branchId)
+    const preCap: any = await page.evaluate(
+      async ({ tid, bid }: { tid: string; bid: string }) =>
+        await (window as any).api.chatDb.fetchMessagesWindow({
+          kind: 'latest',
+          topicId: tid,
+          branchId: bid,
+          limit: 10
+        }),
+      { tid: topicId, bid: branchId }
+    )
+    expect(preCap?.ok, `pre-send child capability probe failed: ${JSON.stringify(preCap)}`).toBe(true)
+    expect(
+      (preCap.value.mutableMessageIds as string[]).includes(branchAnchor),
+      'ancestor must start readonly on the child route'
+    ).toBe(false)
+
+    const firstContent = `nrl-branch-${topicId}-01`
+    const firstPrev = await assistantCount(page, topicId)
+    await test.step('first ordinary UI send on the branch', async () => {
+      clearRequestLog()
+      const seq = getRequestSequence()
+      await uiSendMessage(page, firstContent)
+      await waitForAssistantResponseComplete(page, topicId, firstPrev)
+      const productReq: any = findProductRequestAfter(seq)
+      expect(productReq, 'mock must observe the first branch send').not.toBeNull()
+      expect(productReq.parsed?.model).toBe('mock-model')
+      expect(
+        ((productReq.parsed?.messages ?? []) as any[])
+          .filter((m: any) => m?.role === 'user')
+          .map((m: any) => m?.content)
+      ).toContain(firstContent)
+    })
+
+    let firstFresh: string[] = []
+    await test.step('first pair immediately mutable; ancestors readonly', async () => {
+      // Read-only inspection only: no reload, no switch, no rebase dispatch.
+      const postIds = await reduxIds(page, topicId)
+      expect(postIds.slice(0, 2)).toEqual([seedIds[0], seedIds[1]])
+      firstFresh = postIds.filter((id) => ![seedIds[0], seedIds[1]].includes(id))
+      const mutable = await reduxMutable(page, topicId)
+      expect(mutable, 'first branch user row must be immediately mutable').toContain(firstFresh[0])
+      expect(mutable, 'first branch assistant row must be immediately mutable').toContain(firstFresh[1])
+      for (const ancestor of seedIds) {
+        expect(mutable, `ancestor ${ancestor} must stay readonly on the child route`).not.toContain(ancestor)
+      }
+      const branchWin: any = await page.evaluate(
+        async ({ tid, bid }: { tid: string; bid: string }) =>
+          await (window as any).api.chatDb.fetchMessagesWindow({
+            kind: 'latest',
+            topicId: tid,
+            branchId: bid,
+            limit: 20
+          }),
+        { tid: topicId, bid: branchId }
+      )
+      expect(branchWin?.ok, `branch capability probe failed: ${JSON.stringify(branchWin)}`).toBe(true)
+      expect((branchWin.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds)
+      expect(new Set(branchWin.value.mutableMessageIds as string[])).toEqual(new Set(firstFresh))
+      await expectFreshPairEditable(page, firstFresh)
+      // Ancestor UI stays readonly on the child route (hover reveals the
+      // menubar, but the mutation controls stay hidden fail-closed).
+      const ancestorSel = `[id="message-${branchAnchor}"][data-message-id="${branchAnchor}"]`
+      const ancestorContainer = page.locator(ancestorSel).first()
+      await expect(ancestorContainer, 'ancestor container must be visible on the child route').toBeVisible({
+        timeout: 15000
+      })
+      try {
+        await ancestorContainer.hover({ timeout: 8000 })
+      } catch {
+        // Hover flakiness; the count assertions below retry via Playwright.
+      }
+      await expect(
+        ancestorContainer.locator('[data-testid="msg-edit-btn"], [data-testid="msg-assistant-edit-btn"]'),
+        'ancestor edit must stay hidden on the child route'
+      ).toHaveCount(0, { timeout: 10000 })
+      await expect(
+        ancestorContainer.locator('[data-testid="message-delete-button"]'),
+        'ancestor delete must stay hidden on the child route'
+      ).toHaveCount(0, { timeout: 10000 })
+      // Authority rejections (existing request shapes only): child scope
+      // cannot mutate the ancestor reference; main scope cannot mutate the
+      // branch-owned row.
+      const childWrite: any = await page.evaluate(
+        async ({ tid, mid, bid }: { tid: string; mid: string; bid: string }) =>
+          await (window as any).api.chatDb.updateMessage({
+            topicId: tid,
+            messageId: mid,
+            updates: { content: 'child-fork-attempt' },
+            branchId: bid
+          }),
+        { tid: topicId, mid: branchAnchor, bid: branchId }
+      )
+      expect(childWrite?.ok, 'child write of an ancestor reference must fail closed').toBe(false)
+      const mainSpoof: any = await page.evaluate(
+        async ({ tid, mid }: { tid: string; mid: string }) =>
+          await (window as any).api.chatDb.updateMessage({
+            topicId: tid,
+            messageId: mid,
+            updates: { content: 'main-spoof-attempt' }
+          }),
+        { tid: topicId, mid: firstFresh[0] }
+      )
+      expect(mainSpoof?.ok, 'main-scope write of a branch-owned row must fail closed').toBe(false)
+    })
+
+    // Second ordinary send on the SAME branch route: still no reload and no
+    // seeded mutable state between the first assertion and this send.
+    const secondContent = `nrl-branch-${topicId}-02`
+    await test.step('second ordinary UI send on the same branch', async () => {
+      const stillActive: string | null = await page.evaluate(
+        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+        topicId
+      )
+      expect(stillActive, 'second send must stay on the same child route').toBe(branchId)
+      const secondPrev = await assistantCount(page, topicId)
+      clearRequestLog()
+      const seq2 = getRequestSequence()
+      await uiSendMessage(page, secondContent)
+      await waitForAssistantResponseComplete(page, topicId, secondPrev)
+      const productReq2: any = findProductRequestAfter(seq2)
+      expect(productReq2, 'mock must observe the second branch send').not.toBeNull()
+      expect(
+        ((productReq2.parsed?.messages ?? []) as any[])
+          .filter((m: any) => m?.role === 'user')
+          .map((m: any) => m?.content)
+      ).toContain(secondContent)
+      const postIds2 = await reduxIds(page, topicId)
+      const secondFresh = postIds2.filter((id) => ![seedIds[0], seedIds[1], ...firstFresh].includes(id))
+      expect(secondFresh, 'second send must append exactly one more pair on the same branch').toHaveLength(2)
+      const mutable2 = await reduxMutable(page, topicId)
+      for (const id of [...firstFresh, ...secondFresh]) {
+        expect(mutable2, `branch-owned ${id} must stay mutable after the second send`).toContain(id)
+      }
+      for (const ancestor of seedIds) {
+        expect(mutable2, `ancestor ${ancestor} must stay readonly after the second send`).not.toContain(ancestor)
+      }
+      const branchWin2: any = await page.evaluate(
+        async ({ tid, bid }: { tid: string; bid: string }) =>
+          await (window as any).api.chatDb.fetchMessagesWindow({
+            kind: 'latest',
+            topicId: tid,
+            branchId: bid,
+            limit: 20
+          }),
+        { tid: topicId, bid: branchId }
+      )
+      expect(branchWin2?.ok, `second branch capability probe failed: ${JSON.stringify(branchWin2)}`).toBe(true)
+      expect((branchWin2.value.messages as any[]).map((m: any) => m.id)).toEqual(postIds2)
+      expect(new Set(branchWin2.value.mutableMessageIds as string[])).toEqual(new Set([...firstFresh, ...secondFresh]))
+      await expectFreshPairEditable(page, secondFresh)
+    })
   })
 })

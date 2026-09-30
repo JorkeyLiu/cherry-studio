@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto'
 import { loggerService } from '@logger'
 import type {
   AppendDiagnostics,
+  AppendMessageResponse,
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
   EmptyTrashTopicsResponse,
@@ -3485,6 +3486,11 @@ export class ChatDbAggregateService {
    * - New message at valid insertIndex, else append at end.
    * - Existing message ID preserves current position.
    * - Full supplied blocks are upserted, ordered, and references synced.
+   * - Returns a Main-issued typed creation acknowledgment: the normalized
+   *   addressed route, the authoritative row identity, and the id delta
+   *   limited to actual new owned row(s) created in the same root
+   *   transaction (plus the matching capability delta). A failure publishes
+   *   nothing.
    *
    * `diagnostics` is optional diagnostic-only correlation metadata
    * (LOCK-004); it never affects persistence semantics. When present, bounded
@@ -3498,7 +3504,7 @@ export class ChatDbAggregateService {
     insertIndex?: number,
     diagnostics?: AppendDiagnostics,
     options?: { resendAttemptId?: string; branchId?: string | null }
-  ): ChatDbResult<null> {
+  ): ChatDbResult<AppendMessageResponse> {
     const correlationId = diagnostics?.correlationId
     const ordinal = diagnostics?.ordinal
     const isDiagnosedAppend = typeof correlationId === 'string' && correlationId.length > 0
@@ -3536,7 +3542,7 @@ export class ChatDbAggregateService {
         const syncCtx = this.syncCtxForTopic('appendMessage', topicId, route)
         let syncNotify = false
         const unsupportedBlockIds: string[] = []
-        let txResult: null
+        let txResult: { created: boolean }
         try {
           txResult = this.db.transaction((tx) => {
             const repos = createRepositories(tx)
@@ -3549,6 +3555,26 @@ export class ChatDbAggregateService {
             const trackedTopicBefore = syncCtx ? syncService.isTrackedEntityInTx(stx, 'topic', topicId) : true
             // Ensure topic exists
             repos.topics.ensure(topicId)
+            // Natural creation authority guard: the addressed route must be
+            // resolvable in the SAME root transaction before any message/block
+            // write. Branch appends fail closed on trashed topics,
+            // unknown/cross-topic branches via requireBranchInTx, and missing
+            // anchors via route resolution (BRANCH-5). Main-route appends
+            // preserve existing success semantics on soft-deleted topics
+            // (frame maintenance covered by syncParentOrderFrame).
+            {
+              const topicRow = repos.topics.getById(topicId)
+              if (!topicRow.found) {
+                throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+              }
+              if (route !== null) {
+                if (topicRow.data.deletedAt != null) {
+                  throw new ChatDbValidationError(`Topic ${topicId} is in trash and cannot accept branch appends`)
+                }
+                this.requireBranchInTx(repos, topicId, route)
+                this.resolveRouteMessagesInTx(repos, topicId, route)
+              }
+            }
 
             // Check if message already exists
             const existing = repos.messages.getById(messageData.id)
@@ -3620,7 +3646,7 @@ export class ChatDbAggregateService {
             // Resend intent (SYNC-DATA-055): a covered message stays
             // local-only — the row mutation above commits, no sync intent
             // or frame op is minted here.
-            if (appendCovered) return null
+            if (appendCovered) return { created: !messageExistedBefore }
             if (syncCtx) {
               const mrow = repos.messages.getById(messageData.id)
               if (!mrow.found) throw new Error(`appendMessage message ${messageData.id} missing in transaction`)
@@ -3639,7 +3665,7 @@ export class ChatDbAggregateService {
                   syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
                   syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageData.id)
                 }
-                return null
+                return { created: !messageExistedBefore }
               }
               if (!trackedTopicBefore) {
                 const trow = repos.topics.getById(topicId)
@@ -3806,7 +3832,7 @@ export class ChatDbAggregateService {
                 }
               }
             }
-            return null
+            return { created: !messageExistedBefore }
           })
         } catch (e) {
           this.recordSyncTxFailure('appendMessage', syncCtx, e)
@@ -3816,7 +3842,17 @@ export class ChatDbAggregateService {
         this.recordUnsupportedBlocksAfterCommit('appendMessage', unsupportedBlockIds)
         txDurationMs = elapsedMs(tTx)
         outcomeOk = true
-        return txResult
+        // Main-issued creation acknowledgment. The created flag is derived
+        // inside the same root transaction above (a throw publishes nothing);
+        // the addressed route and row identity echo the authoritative stamp.
+        const createdMessageIds = txResult.created ? [messageData.id] : []
+        return {
+          topicId,
+          branchId: route,
+          messageId: messageData.id,
+          createdMessageIds,
+          mutableMessageIds: [...createdMessageIds]
+        }
       } catch (error) {
         outcomeOk = false
         throw error
@@ -8352,6 +8388,7 @@ export class ChatDbAggregateService {
 
   private toSemanticResponse(
     topicId: string,
+    branchId: string | null,
     askId: string,
     userWire: JsonObject,
     userBlocksWire: JsonObject[],
@@ -8359,16 +8396,19 @@ export class ChatDbAggregateService {
     createdMessageIds: string[],
     core: { cleanup: FileCleanupResult; attempts: ResendAttemptMapping[]; removedBlockIds: string[] }
   ): SemanticResendResponse {
+    const created = [...createdMessageIds]
     return {
       affectedFileIds: [...core.cleanup.affectedFileIds],
       remainingReferenceCounts: { ...core.cleanup.remainingReferenceCounts },
       topicId,
+      branchId,
       askId,
       userMessage: userWire,
       userBlocks: userBlocksWire,
       executionMessages,
       removedBlockIds: [...core.removedBlockIds],
-      createdMessageIds: [...createdMessageIds],
+      createdMessageIds: created,
+      mutableMessageIds: [...created],
       attempts: core.attempts.map((a) => ({ messageId: a.messageId, attemptId: a.attemptId }))
     }
   }
@@ -8517,6 +8557,7 @@ export class ChatDbAggregateService {
         }
         return this.toSemanticResponse(
           topicId,
+          route,
           userMessageId,
           userWithBlocks,
           userBlocksBefore,
@@ -8599,7 +8640,7 @@ export class ChatDbAggregateService {
         const postBlks = blocksToWire(repos.blocks.listByMessage(assistantMessageId))
         const withRel = reconstructMessageBlockRelations([wire], postBlks)[0]
         const execMessages: MessageBlockEntry[] = [{ message: withRel, blocks: [] }]
-        return this.toSemanticResponse(topicId, askId, userWithBlocks, userBlocksBefore, execMessages, [], core)
+        return this.toSemanticResponse(topicId, route, askId, userWithBlocks, userBlocksBefore, execMessages, [], core)
       })
     }, `regenerateAssistantMessage(${topicId}, ${assistantMessageId})`)
   }

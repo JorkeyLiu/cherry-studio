@@ -44,6 +44,7 @@ const { mocks } = vi.hoisted(() => ({
     })),
     setTopicLoading: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicLoading', payload: p })),
     setCurrentTopicId: vi.fn((p: unknown) => ({ type: 'newMessages/setCurrentTopicId', payload: p })),
+    applyAppendAck: vi.fn((p: unknown) => ({ type: 'newMessages/applyAppendAcknowledgment', payload: p })),
     loadTopicSegmentsThunk: vi.fn(),
     queueAdd: vi.fn(),
     transformMessagesAndFetch: vi.fn(),
@@ -202,7 +203,8 @@ vi.mock('@renderer/store/newMessage', () => ({
     setTopicFulfilled: vi.fn((p: unknown) => ({ type: 'newMessages/setTopicFulfilled', payload: p })),
     setCurrentTopicId: mocks.setCurrentTopicId,
     insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p })),
-    applyInsertedMessagesAfterAnchor: mocks.applyInserted
+    applyInsertedMessagesAfterAnchor: mocks.applyInserted,
+    applyAppendAcknowledgment: mocks.applyAppendAck
   },
   selectLoadedMessagesForTopic: () => []
 }))
@@ -239,6 +241,26 @@ const deepFreeze = <T>(value: T): T => {
 describe('messageThunk anchor hooks', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Ordinary-send appends resolve a Main-issued creation acknowledgment
+    // echoing the request route + identity (the thunk publishes row +
+    // capability atomically from it; failures publish nothing).
+    mocks.appendMessage.mockImplementation(
+      async (
+        topicId: string,
+        message: { id: string },
+        _blocks: unknown,
+        _index: unknown,
+        _sendContext: unknown,
+        _attempt: unknown,
+        branchId: unknown
+      ) => ({
+        topicId,
+        branchId: (branchId as string | null | undefined) ?? null,
+        messageId: message.id,
+        createdMessageIds: [message.id],
+        mutableMessageIds: [message.id]
+      })
+    )
     mocks.insertMessagesAfterAnchor.mockResolvedValue({
       affectedFileIds: [],
       remainingReferenceCounts: {},
@@ -270,21 +292,26 @@ describe('messageThunk anchor hooks', () => {
       'persists the topic anchor AFTER the user message reaches Redux and BEFORE queueing the response',
       { timeout: 60_000 },
       async () => {
-        mocks.appendMessage.mockResolvedValue(undefined)
-
         const { sendMessage } = await import('../messageThunk')
         const dispatch = vi.fn()
         const getState = () => storeState as never
 
         await sendMessage(createUserMessage(), [], makeAssistant() as never, 'topic-1')(dispatch, getState)
 
-        // User message persisted first (SQLite append), then Redux add, then anchor establishment.
+        // User message persisted first (SQLite append), then the atomic
+        // ack publication (row + capability), then anchor establishment.
         expect(mocks.appendMessage).toHaveBeenCalled()
-        expect(mocks.addMessage).toHaveBeenCalledWith({ topicId: 'topic-1', message: expect.anything() })
+        expect(mocks.applyAppendAck).toHaveBeenCalledWith({
+          topicId: 'topic-1',
+          route: null,
+          message: expect.anything(),
+          createdMessageIds: ['user-1'],
+          mutableMessageIds: ['user-1']
+        })
 
-        const addMessageCall = mocks.addMessage.mock.invocationCallOrder[0]
+        const ackCall = mocks.applyAppendAck.mock.invocationCallOrder[0]
         const establishCall = mocks.ensureTopicAnchorEstablished.mock.invocationCallOrder[0]
-        expect(establishCall).toBeGreaterThan(addMessageCall)
+        expect(establishCall).toBeGreaterThan(ackCall)
 
         expect(mocks.ensureTopicAnchorEstablished).toHaveBeenCalledWith(
           expect.any(Function),
@@ -300,7 +327,6 @@ describe('messageThunk anchor hooks', () => {
     )
 
     it('passes the active branch route to anchor establishment', { timeout: 60_000 }, async () => {
-      mocks.appendMessage.mockResolvedValue(undefined)
       ;(storeState as StoreState & { topicBranch?: unknown }).topicBranch = {
         branchesByTopic: {},
         activeBranchIdByTopic: { 'topic-1': 'branch-7' },
@@ -328,8 +354,6 @@ describe('messageThunk anchor hooks', () => {
       'hands request preparation a writable snapshot carrying the fresh anchor and the caller model override — never the frozen Redux assistant',
       { timeout: 60_000 },
       async () => {
-        mocks.appendMessage.mockResolvedValue(undefined)
-
         // Capture the queued response task (mirrors the production queue) so
         // fetchAndProcessAssistantResponseImpl runs against the frozen state.
         let queuedTask: (() => Promise<void>) | undefined
@@ -420,8 +444,6 @@ describe('messageThunk anchor hooks', () => {
       'preserves the append-model override through appendAssistantResponseThunk while the request resolves the fresh anchor',
       { timeout: 60_000 },
       async () => {
-        mocks.appendMessage.mockResolvedValue(undefined)
-
         // Capture the queued response task (mirrors the production queue) so
         // fetchAndProcessAssistantResponseImpl runs against the frozen state.
         let queuedTask: (() => Promise<void>) | undefined
@@ -509,11 +531,80 @@ describe('messageThunk anchor hooks', () => {
     )
 
     it(
+      'appendAssistantResponseThunk away-and-back publishes nothing (generation guard)',
+      { timeout: 60_000 },
+      async () => {
+        mocks.insertMessagesAfterAnchor.mockImplementation(async () => {
+          const tb = (storeState as unknown as { topicBranch?: Record<string, unknown> }).topicBranch as
+            | { activeBranchIdByTopic?: Record<string, string | null>; routeGenerationByTopic?: Record<string, number> }
+            | undefined
+          if (tb) {
+            tb.activeBranchIdByTopic = { ...tb.activeBranchIdByTopic, 'topic-1': 'b1' }
+            tb.routeGenerationByTopic = { ...tb.routeGenerationByTopic, 'topic-1': 1 }
+            tb.activeBranchIdByTopic = { ...tb.activeBranchIdByTopic, 'topic-1': null }
+            tb.routeGenerationByTopic = { ...tb.routeGenerationByTopic, 'topic-1': 2 }
+          }
+          return {
+            affectedFileIds: [],
+            remainingReferenceCounts: {},
+            topicId: 'topic-1',
+            branchId: null,
+            afterMessageId: 'asst-msg-1',
+            insertedMessages: [{ id: 'asst-new', topicId: 'topic-1', role: 'assistant', blocks: [] }],
+            insertedBlocks: [{ id: 'b-new', messageId: 'asst-new', type: 'main_text', content: 'hi' }],
+            insertedMessageIds: ['asst-new'],
+            patchedMessageIds: [],
+            beforeMessageId: 'asst-msg-1',
+            nextMessageId: null,
+            mutableMessageIds: ['asst-new']
+          }
+        })
+        storeState = {
+          assistants: { assistants: [{ id: 'asst-1', settings: { contextCount: 5 }, topics: [{ id: 'topic-1' }] }] },
+          messages: {
+            entities: {
+              'user-1': createUserMessage(),
+              'asst-msg-1': {
+                id: 'asst-msg-1',
+                role: 'assistant',
+                assistantId: 'asst-1',
+                topicId: 'topic-1',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                askId: 'user-1',
+                status: AssistantMessageStatus.SUCCESS,
+                blocks: []
+              }
+            },
+            messageIdsByTopic: { 'topic-1': ['user-1', 'asst-msg-1'] },
+            mutableMessageIdsByTopic: { 'topic-1': ['user-1', 'asst-msg-1'] },
+            mutableRouteByTopic: { 'topic-1': null },
+            loadingByTopic: {},
+            fulfilledByTopic: {},
+            currentTopicId: null
+          },
+          topicBranch: {
+            branchesByTopic: {},
+            activeBranchIdByTopic: {},
+            routeGenerationByTopic: {}
+          }
+        } as unknown as typeof storeState
+        const { appendAssistantResponseThunk } = await import('../messageThunk')
+        const dispatch = vi.fn()
+        await appendAssistantResponseThunk(
+          'topic-1',
+          'asst-msg-1',
+          { id: 'append-model', provider: 'test-provider', name: 'Append Model', group: 'test-group' },
+          { id: 'asst-1', settings: { contextCount: 5 } } as never
+        )(dispatch, () => storeState as never)
+        expect(mocks.applyInserted).not.toHaveBeenCalled()
+        expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+      }
+    )
+
+    it(
       'preserves each mention model override through the multi-model send path while every request resolves the fresh anchor',
       { timeout: 60_000 },
       async () => {
-        mocks.appendMessage.mockResolvedValue(undefined)
-
         // Capture all queued response tasks (one per mentioned model).
         const queuedTasks: Array<() => Promise<void>> = []
         mocks.queueAdd.mockImplementation(async (task: () => Promise<void>) => {

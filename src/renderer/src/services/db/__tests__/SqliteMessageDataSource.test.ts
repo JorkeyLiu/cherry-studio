@@ -19,6 +19,7 @@
 import { loggerService } from '@logger'
 import type {
   AppendMessageRequest,
+  AppendMessageResponse,
   BulkAddBlocksRequest,
   ChatDbResult,
   CloneMessagesToTopicRequest,
@@ -120,7 +121,7 @@ function makeApiSpy() {
     getRawTopic: vi.fn<(request: GetRawTopicRequest) => Promise<ChatDbResult<GetRawTopicResponse>>>(),
     topicExists: vi.fn<(request: TopicExistsRequest) => Promise<ChatDbResult<boolean>>>(),
     ensureTopic: vi.fn<(request: EnsureTopicRequest) => Promise<ChatDbResult<null>>>(),
-    appendMessage: vi.fn<(request: AppendMessageRequest) => Promise<ChatDbResult<null>>>(),
+    appendMessage: vi.fn<(request: AppendMessageRequest) => Promise<ChatDbResult<AppendMessageResponse>>>(),
     updateMessage: vi.fn<(request: UpdateMessageRequest) => Promise<ChatDbResult<null>>>(),
     updateMessageAndBlocks:
       vi.fn<(request: UpdateMessageAndBlocksRequest) => Promise<ChatDbResult<FileCleanupResult>>>(),
@@ -188,6 +189,17 @@ function failureResult(code = 'TEST_ERROR', message = 'test failure'): ChatDbRes
   return fail(code, message, false)
 }
 
+/** Main-issued creation acknowledgment for one appended message. */
+function ackResult(messageId: string, branchId: string | null = null): ChatDbResult<AppendMessageResponse> {
+  return ok({
+    topicId: 'topic-1',
+    branchId,
+    messageId,
+    createdMessageIds: [messageId],
+    mutableMessageIds: [messageId]
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -235,17 +247,24 @@ describe('SqliteMessageDataSource', () => {
       expect(api.ensureTopic).toHaveBeenCalledWith({ topicId: 'topic-1' })
     })
 
-    it('appendMessage calls api.appendMessage with correct request', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+    it('appendMessage calls api.appendMessage with correct request and returns the Main acknowledgment', async () => {
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const msg = { id: 'm-1', role: 'user', content: 'hi' } as any
       const blk = { id: 'b-1', messageId: 'm-1', type: 'main_text', content: 'hi' } as any
-      await ds.appendMessage('topic-1', msg, [blk])
+      const ack = await ds.appendMessage('topic-1', msg, [blk])
       expect(api.appendMessage).toHaveBeenCalledOnce()
       const req = api.appendMessage.mock.calls[0][0]
       expect(req.topicId).toBe('topic-1')
       expect(req.message.id).toBe('m-1')
       expect(req.blocks).toHaveLength(1)
       expect(req.insertIndex).toBeUndefined()
+      expect(ack).toEqual({
+        topicId: 'topic-1',
+        branchId: null,
+        messageId: 'm-1',
+        createdMessageIds: ['m-1'],
+        mutableMessageIds: ['m-1']
+      })
     })
 
     it('updateMessage calls api.updateMessage', async () => {
@@ -579,7 +598,7 @@ describe('SqliteMessageDataSource', () => {
 
   describe('appendMessage insertIndex handling', () => {
     it('omits insertIndex when undefined', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const msg = { id: 'm-1' } as any
       await ds.appendMessage('t-1', msg, [])
       const req = api.appendMessage.mock.calls[0][0]
@@ -587,7 +606,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('omits insertIndex when -1 sentinel', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const msg = { id: 'm-1' } as any
       await ds.appendMessage('t-1', msg, [], -1)
       const req = api.appendMessage.mock.calls[0][0]
@@ -595,7 +614,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('sends valid non-negative insertIndex', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const msg = { id: 'm-1' } as any
       await ds.appendMessage('t-1', msg, [], 3)
       const req = api.appendMessage.mock.calls[0][0]
@@ -1247,7 +1266,7 @@ describe('SqliteMessageDataSource', () => {
     }
 
     it('dispatches after appendMessage', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       await dispatchesAfter(() => ds.appendMessage('t-1', { id: 'm-1' } as any, []))
     })
 
@@ -1472,7 +1491,7 @@ describe('SqliteMessageDataSource', () => {
     const userBlk = { id: 'b-1', messageId: 'm-1', type: 'main_text', content: 'hi' } as any
 
     it('omits diagnostics and timing logs when no send context is supplied', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       await ds.appendMessage('topic-1', userMsg, [userBlk])
 
       const req = api.appendMessage.mock.calls[0][0]
@@ -1482,7 +1501,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('attaches correlationId + ordinal (1 then 2) for the two appends of one send', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const sendContext = createSendDiagnosticsContext()
 
       await ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)
@@ -1497,15 +1516,15 @@ describe('SqliteMessageDataSource', () => {
     it('keeps correlation ids and ordinals separate across overlapping sends (LOCK-004)', async () => {
       // Two sends (ctxA, ctxB) interleave their append IPC round trips; each
       // append must consume from its OWN context and never cross-attribute.
-      let resolveA: (v: ChatDbResult<null>) => void
-      let resolveB: (v: ChatDbResult<null>) => void
-      const gateA = new Promise<ChatDbResult<null>>((r) => {
+      let resolveA: (v: ChatDbResult<AppendMessageResponse>) => void
+      let resolveB: (v: ChatDbResult<AppendMessageResponse>) => void
+      const gateA = new Promise<ChatDbResult<AppendMessageResponse>>((r) => {
         resolveA = r
       })
-      const gateB = new Promise<ChatDbResult<null>>((r) => {
+      const gateB = new Promise<ChatDbResult<AppendMessageResponse>>((r) => {
         resolveB = r
       })
-      api.appendMessage.mockReturnValueOnce(gateA).mockReturnValueOnce(gateB).mockResolvedValue(successResult(null))
+      api.appendMessage.mockReturnValueOnce(gateA).mockReturnValueOnce(gateB).mockResolvedValue(ackResult('m-1'))
 
       const ctxA = createSendDiagnosticsContext()
       const ctxB = createSendDiagnosticsContext()
@@ -1515,8 +1534,8 @@ describe('SqliteMessageDataSource', () => {
       const pB2 = ds.appendMessage('topic-1', { ...userMsg, id: 'b2' }, [], undefined, ctxB)
       const pA2 = ds.appendMessage('topic-1', { ...userMsg, id: 'a2' }, [], undefined, ctxA)
 
-      resolveA!(successResult(null))
-      resolveB!(successResult(null))
+      resolveA!(ackResult('a1'))
+      resolveB!(ackResult('b1'))
       await Promise.all([pA1, pB1, pB2, pA2])
 
       const diags = api.appendMessage.mock.calls.map((c) => c[0].diagnostics)
@@ -1529,7 +1548,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('emits bounded stage logs whose correlation metadata matches the request diagnostics', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const sendContext = createSendDiagnosticsContext()
 
       await ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)
@@ -1593,7 +1612,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('bounds volume to the first few sends per stage (LOCK-003)', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const sendContext = createSendDiagnosticsContext()
       // 12 appends (6 sends) → only the first 6 per stage are logged.
       for (let i = 0; i < 12; i++) {
@@ -1604,7 +1623,7 @@ describe('SqliteMessageDataSource', () => {
     })
 
     it('a later uninstrumented append is never attributed to a prior send context', async () => {
-      api.appendMessage.mockResolvedValue(successResult(null))
+      api.appendMessage.mockResolvedValue(ackResult('m-1'))
       const sendContext = createSendDiagnosticsContext()
       await ds.appendMessage('topic-1', userMsg, [userBlk], undefined, sendContext)
       // Same caller, no context → no diagnostics, no attribution.

@@ -190,6 +190,31 @@ export interface ApplyInsertedMessagesAfterAnchorPayload {
 }
 
 /**
+ * Payload for applying a Main-issued append creation acknowledgment.
+ *
+ * Single-commit install of one ordinary-send row plus its authoritative
+ * capability — the loaded projection never holds the new row without its
+ * Main capability. The row is appended at the end when absent (ordinary
+ * sends always append; the durable position is authoritative in Main and
+ * converges on the next window read), keyed by stable ID so re-application
+ * is idempotent. Route mismatch against the stored resident route is
+ * fail-closed (no row and no capability change). The capability delta is
+ * trimmed to created ∩ resident IDs; existing capability is retained and
+ * unioned same-route only.
+ */
+export interface ApplyAppendAcknowledgmentPayload {
+  topicId: string
+  /** Captured addressed route key (null = main). Must match the ack route. */
+  route: string | null
+  /** Loaded new row to upsert (local stub or canonical Main wire). */
+  message: Message
+  /** Main-confirmed new owned IDs (`[message.id]` when genuinely inserted). */
+  createdMessageIds: string[]
+  /** Main-authoritative mutability delta (subset of createdMessageIds). */
+  mutableMessageIds: string[]
+}
+
+/**
  * Answer-group authority reorder projection commit (ids-only).
  *
  * Permutes ONLY the existing loaded slots for a topic that belong to the
@@ -494,6 +519,64 @@ export const messagesSlice = createSlice({
       for (const id of incoming) resident.add(id)
       state.mutableRouteByTopic[topicId] = route
       state.mutableMessageIdsByTopic[topicId] = [...resident]
+    },
+    /**
+     * Apply a Main-issued append creation acknowledgment atomically.
+     *
+     * Row + capability commit in ONE reducer action: the loaded new row is
+     * upserted (appended at the end when absent — ordinary sends always
+     * append) and the same-route mutability delta unions in the same commit.
+     * Route mismatch against the stored resident route fails closed with zero
+     * change. The delta is trimmed to created ∩ resident IDs; pre-existing
+     * rows (empty created delta) keep their durable positions and retain
+     * existing capability.
+     */
+    applyAppendAcknowledgment(state, action: PayloadAction<ApplyAppendAcknowledgmentPayload>) {
+      const { topicId, route, message, createdMessageIds, mutableMessageIds } = action.payload
+      if (!message || typeof message.id !== 'string' || message.id.length === 0) return
+      // Fail-closed on stale/route-mismatched resident capability: a stored
+      // route for another route must never authorize this publication.
+      const hasStoredRoute = Object.prototype.hasOwnProperty.call(state.mutableRouteByTopic, topicId)
+      if (hasStoredRoute && (state.mutableRouteByTopic[topicId] ?? null) !== route) return
+      // Upsert the canonical entity first (ID-keyed; re-application idempotent).
+      // @ts-ignore ts-2589 false positive
+      messagesAdapter.upsertOne(state, message)
+      const oldIds = state.messageIdsByTopic[topicId] ?? []
+      if (!oldIds.includes(message.id)) {
+        state.messageIdsByTopic[topicId] = [...oldIds, message.id]
+      }
+      if (!(topicId in state.loadingByTopic)) {
+        state.loadingByTopic[topicId] = false
+      }
+      if (!(topicId in state.fulfilledByTopic)) {
+        state.fulfilledByTopic[topicId] = false
+      }
+      // Same-route capability delta, trimmed to created ∩ resident IDs.
+      const nextSet = new Set(state.messageIdsByTopic[topicId])
+      const createdSet = new Set(
+        (Array.isArray(createdMessageIds) ? createdMessageIds : []).filter(
+          (id) => typeof id === 'string' && id.length > 0
+        )
+      )
+      const incoming = [
+        ...new Set(
+          (Array.isArray(mutableMessageIds) ? mutableMessageIds : []).filter(
+            (id) => typeof id === 'string' && id.length > 0
+          )
+        )
+      ]
+        .filter((id) => createdSet.has(id))
+        .filter((id) => nextSet.has(id))
+      const storedHasCapability = Object.prototype.hasOwnProperty.call(state.mutableMessageIdsByTopic, topicId)
+      if (!hasStoredRoute && !storedHasCapability) {
+        state.mutableRouteByTopic[topicId] = route
+        state.mutableMessageIdsByTopic[topicId] = incoming
+        return
+      }
+      const residentAck = new Set((state.mutableMessageIdsByTopic[topicId] ?? []).filter((id) => nextSet.has(id)))
+      for (const id of incoming) residentAck.add(id)
+      state.mutableRouteByTopic[topicId] = route
+      state.mutableMessageIdsByTopic[topicId] = [...residentAck]
     },
     updateMessage(
       state,

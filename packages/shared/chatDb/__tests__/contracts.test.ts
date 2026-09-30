@@ -1586,8 +1586,23 @@ describe('validateChatDbResult — valid success envelopes', () => {
     expect(() => validateChatDbResult('chatdb:ensure-topic', { ok: true, value: null })).not.toThrow()
   })
 
-  it('append-message: null value', () => {
-    expect(() => validateChatDbResult('chatdb:append-message', { ok: true, value: null })).not.toThrow()
+  it('append-message: accepts a Main-issued creation acknowledgment', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', {
+        ok: true,
+        value: {
+          topicId: 't-1',
+          branchId: null,
+          messageId: 'm-1',
+          createdMessageIds: ['m-1'],
+          mutableMessageIds: ['m-1']
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('append-message: rejects a null success value', () => {
+    expect(() => validateChatDbResult('chatdb:append-message', { ok: true, value: null })).toThrow(ValidationError)
   })
 
   it('update-message: null value', () => {
@@ -2574,8 +2589,14 @@ describe('validateChatDbResult — invalid envelopes', () => {
     )
   })
 
-  it('rejects void result with non-null value for append-message', () => {
+  it('rejects a malformed creation acknowledgment for append-message', () => {
     expect(() => validateChatDbResult('chatdb:append-message', { ok: true, value: 42 })).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:append-message', {
+        ok: true,
+        value: { topicId: 't-1', branchId: null, messageId: 'm-1', createdMessageIds: [], mutableMessageIds: ['m-1'] }
+      })
+    ).toThrow(ValidationError)
   })
 
   it('rejects void result with non-null value for delete-message', () => {

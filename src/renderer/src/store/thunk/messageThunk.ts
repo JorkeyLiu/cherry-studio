@@ -76,6 +76,7 @@ import { NO_MODEL_ERROR_NAME } from '@renderer/utils/noModelError'
 import { getTopicQueue, waitForTopicQueue } from '@renderer/utils/queue'
 import { runTopicWindowRead } from '@renderer/utils/windowReadQueue'
 import type {
+  AppendMessageResponse,
   DeleteMessagesWithDependentsResponse,
   FetchMessagesWindowRequest,
   FetchMessagesWindowResponse,
@@ -170,7 +171,9 @@ const updateExistingMessageAndBlocksInDB = async (
   branchId?: string | null
 ) => {
   try {
-    const route = branchId ?? activeRouteOf(store.getState, updatedMessage.topicId)
+    // An explicitly pinned null addresses the main route and is never
+    // re-resolved; only an absent route falls back to the active route.
+    const route = branchId === undefined ? activeRouteOf(store.getState, updatedMessage.topicId) : branchId
     // Always update blocks if provided
     if (updatedBlocks.length > 0) {
       await updateBlocks(updatedBlocks, undefined, resendAttemptId)
@@ -438,7 +441,9 @@ export const saveFinalMessageAndBlocksAtomically = async (
   branchId?: string | null
 ): Promise<FileCleanupResult> => {
   try {
-    const route = branchId ?? activeRouteOf(store.getState, topicId)
+    // An explicitly pinned null addresses the main route and is never
+    // re-resolved; only an absent route falls back to the active route.
+    const route = branchId === undefined ? activeRouteOf(store.getState, topicId) : branchId
     const cleanup = await dbService.updateMessageAndBlocks(
       topicId,
       { id: messageId, ...messageUpdates } as Partial<Message> & Pick<Message, 'id'>,
@@ -459,6 +464,61 @@ export const saveFinalMessageAndBlocksAtomically = async (
 // These are no longer needed since messages are saved immediately via appendMessage
 // and updated during streaming via updateMessageAndBlocks
 
+/**
+ * Publish one Main-issued append creation acknowledgment as an atomic
+ * loaded-projection + capability commit.
+ *
+ * Fail-closed (returns false, dispatches nothing) when the ack is missing or
+ * mismatched (topic/identity/route echo), when the capability delta is not
+ * limited to actual created IDs, or when the captured operation route no
+ * longer matches the active route or its generation (late publication after
+ * a route switch — including away-and-back — never injects rows or
+ * capability into the unrelated currently displayed route). Owned DB
+ * execution already committed; only the projection publication is gated.
+ */
+const publishAppendAck = (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  message: Message,
+  ack: AppendMessageResponse | null | undefined,
+  capturedRoute: string | null,
+  capturedGeneration: number
+): boolean => {
+  try {
+    if (!ack || typeof ack !== 'object') return false
+    if (ack.topicId !== topicId) return false
+    if (ack.messageId !== message.id) return false
+    if ((ack.branchId ?? null) !== capturedRoute) return false
+    const created = Array.isArray(ack.createdMessageIds) ? ack.createdMessageIds : []
+    const mutable = Array.isArray(ack.mutableMessageIds) ? ack.mutableMessageIds : []
+    const createdSet = new Set(created.filter((id) => typeof id === 'string' && id.length > 0))
+    const delta = [...new Set(mutable.filter((id) => typeof id === 'string' && id.length > 0))].filter((id) =>
+      createdSet.has(id)
+    )
+    let generationNow = 0
+    try {
+      generationNow = selectRouteGeneration(getState(), topicId)
+    } catch {
+      generationNow = 0
+    }
+    if (generationNow !== capturedGeneration) return false
+    if (activeRouteOf(getState, topicId) !== capturedRoute) return false
+    dispatch(
+      newMessagesActions.applyAppendAcknowledgment({
+        topicId,
+        route: capturedRoute,
+        message,
+        createdMessageIds: [...createdSet],
+        mutableMessageIds: delta
+      })
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 // --- Helper Function for Multi-Model Dispatch ---
 // 多模型创建和发送请求的逻辑，用于用户消息多模型发送和重发
 const dispatchMultiModelResponses = async (
@@ -468,7 +528,9 @@ const dispatchMultiModelResponses = async (
   triggeringMessage: Message, // userMessage or messageToResend
   assistant: Assistant,
   mentionedModels: Model[],
-  sendContext?: SendDiagnosticsContext // LOCK-004: per-send correlation context
+  sendContext?: SendDiagnosticsContext, // LOCK-004: per-send correlation context
+  sendRoute?: string | null,
+  sendGeneration?: number
 ) => {
   const assistantMessageStubs: Message[] = []
   const tasksToQueue: { assistantConfig: Assistant; messageStub: Message }[] = []
@@ -488,21 +550,39 @@ const dispatchMultiModelResponses = async (
     })
   }
 
-  // LOCK-005: Persist all stubs via appendMessage BEFORE Redux dispatch
-  // and queueing. Failures must not expose unpersisted stubs.
+  // LOCK-005: Persist all stubs via appendMessage BEFORE Redux publication
+  // and queueing. Each Main acknowledgment is published atomically
+  // (row + capability) under the captured send route; failures and stale
+  // routes publish nothing. The queue never re-resolves the route.
+  const stubRoute = sendRoute === undefined ? activeRouteOf(getState, topicId) : sendRoute
+  const stubGeneration =
+    sendGeneration === undefined
+      ? (() => {
+          try {
+            return selectRouteGeneration(getState(), topicId)
+          } catch {
+            return 0
+          }
+        })()
+      : sendGeneration
   for (const stub of assistantMessageStubs) {
-    await saveMessageAndBlocksToDB(topicId, stub, [], -1, sendContext)
-  }
-
-  // Now safe to dispatch to Redux
-  for (const stub of assistantMessageStubs) {
-    dispatch(newMessagesActions.addMessage({ topicId, message: stub }))
+    const stubAck = await saveMessageAndBlocksToDB(topicId, stub, [], -1, sendContext, stubRoute)
+    publishAppendAck(dispatch, getState, topicId, stub, stubAck, stubRoute, stubGeneration)
   }
 
   const queue = getTopicQueue(topicId)
   for (const task of tasksToQueue) {
     void queue.add(async () => {
-      await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, task.assistantConfig, task.messageStub)
+      await fetchAndProcessAssistantResponseImpl(
+        dispatch,
+        getState,
+        topicId,
+        task.assistantConfig,
+        task.messageStub,
+        undefined,
+        undefined,
+        stubRoute
+      )
     })
   }
 }
@@ -586,7 +666,16 @@ const fetchAndProcessAssistantResponseImpl = async (
    * block overlay (never injected into Redux). Ordinary send/append paths
    * pass undefined with unchanged behavior.
    */
-  authorityUser?: { message: Message; blocks: MessageBlock[] }
+  authorityUser?: { message: Message; blocks: MessageBlock[] },
+  /**
+   * Operation-scoped addressed route pinned by the initiating operation
+   * (send/resend/regenerate/append). Every persistence write and the request
+   * context selection below land in this route even if the user switches
+   * branches mid-stream. An explicitly pinned null addresses the main route;
+   * undefined (legacy callers) falls back to the active route at execution
+   * start. Queue-time re-resolution is never used when pinned.
+   */
+  pinnedRoute?: string | null
 ) => {
   // Re-read the assistant from the store: the caller may have captured a
   // snapshot that predates the first-establishment anchor dispatch in
@@ -602,9 +691,11 @@ const fetchAndProcessAssistantResponseImpl = async (
   // just-persisted anchor, docs/adr/context-window.md CW-6). The result is an
   // independently writable top-level object — never the frozen Redux one.
   const assistant = mergeRequestAssistantSnapshot(origAssistant, freshAssistant, topicId)
-  // Pin the execution route at send start: every persistence write below
-  // lands in this route even if the user switches branches mid-stream.
-  const execRoute = activeRouteOf(getState, topicId)
+  // Pin the execution route for this operation: every persistence write below
+  // lands in this route even if the user switches branches mid-stream. The
+  // initiating operation captures the route once; queue-time re-resolution
+  // only applies to legacy callers that pass no pin.
+  const execRoute = pinnedRoute === undefined ? activeRouteOf(getState, topicId) : pinnedRoute
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
   // Request-local execution state: the execution fact for this generation.
@@ -763,7 +854,7 @@ const fetchAndProcessAssistantResponseImpl = async (
         messages: messagesForContext,
         assistant,
         topicId,
-        branchId: activeRouteOf(getState, topicId),
+        branchId: execRoute,
         blockManager,
         assistantMsgId,
         callbacks,
@@ -812,18 +903,46 @@ export const sendMessage =
     // append and 2+ for assistant stubs/multi-model appends of THIS send only;
     // overlapping sends never share or clobber each other's context.
     const sendContext = createSendDiagnosticsContext()
+    // Operation-scoped route capture: every append, anchor/config route,
+    // multi-model queue task, persistence callback, and request context
+    // selection of THIS send addresses this route. Route switches stay
+    // enabled; late publication into another route fails closed below.
+    const sendRoute = activeRouteOf(getState, topicId)
+    let sendGeneration = 0
+    try {
+      sendGeneration = selectRouteGeneration(getState(), topicId)
+    } catch {
+      sendGeneration = 0
+    }
     try {
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
         return
       }
 
-      await saveMessageAndBlocksToDB(topicId, userMessage, userMessageBlocks, -1, sendContext)
+      const userAck = await saveMessageAndBlocksToDB(
+        topicId,
+        userMessage,
+        userMessageBlocks,
+        -1,
+        sendContext,
+        sendRoute
+      )
       const phase = currentPhaseCorrelation()
       const dispatchStartedAt = performance.now()
-      dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
+      const userPublished = publishAppendAck(
+        dispatch,
+        getState,
+        topicId,
+        userMessage,
+        userAck,
+        sendRoute,
+        sendGeneration
+      )
       if (phase) recordPhaseDuration('echo.userDispatch', dispatchStartedAt, phase.path)
-      if (userMessageBlocks.length > 0) {
+      // Associated block projection rides the successful row/capability
+      // publication only: a rejected/stale ack emits no orphan blocks.
+      if (userPublished && userMessageBlocks.length > 0) {
         dispatch(withClosureTopics(upsertManyBlocks(userMessageBlocks), topicId))
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
@@ -836,7 +955,7 @@ export const sendMessage =
       // the same persisted anchor even though its captured assistant snapshot
       // predates this dispatch. Route-scoped: branch routes anchor under
       // their own route key.
-      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, activeRouteOf(getState, topicId))
+      await ensureTopicAnchorEstablished(dispatch, getState, assistant.id, topicId, sendRoute)
 
       const queue = getTopicQueue(topicId)
 
@@ -850,7 +969,9 @@ export const sendMessage =
           userMessage,
           assistant,
           mentionedModels,
-          sendContext
+          sendContext,
+          sendRoute,
+          sendGeneration
         )
       } else {
         const assistantMessage = createAssistantMessage(assistant.id, topicId, {
@@ -858,16 +979,20 @@ export const sendMessage =
           model: assistant.model,
           traceId: userMessage.traceId
         })
-        await saveMessageAndBlocksToDB(topicId, assistantMessage, [], -1, sendContext)
-        dispatch(
-          newMessagesActions.addMessage({
-            topicId,
-            message: assistantMessage
-          })
-        )
+        const assistantAck = await saveMessageAndBlocksToDB(topicId, assistantMessage, [], -1, sendContext, sendRoute)
+        publishAppendAck(dispatch, getState, topicId, assistantMessage, assistantAck, sendRoute, sendGeneration)
 
         void queue.add(async () => {
-          await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
+          await fetchAndProcessAssistantResponseImpl(
+            dispatch,
+            getState,
+            topicId,
+            assistant,
+            assistantMessage,
+            undefined,
+            undefined,
+            sendRoute
+          )
         })
       }
     } catch (error) {
@@ -1055,6 +1180,16 @@ export const deleteSingleMessageThunk =
 export const resendMessageThunk =
   (topicId: Topic['id'], userMessageToResend: Message, assistant: Assistant) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
+    // Operation-scoped route capture: the resend request, anchor/config
+    // route, Main-created publication, queued executions, persistence
+    // callbacks, and request context selection all address this route.
+    const resendRoute = activeRouteOf(getState, topicId)
+    let resendGeneration = 0
+    try {
+      resendGeneration = selectRouteGeneration(getState(), topicId)
+    } catch {
+      resendGeneration = 0
+    }
     try {
       const state = getState()
       const localUser = state.messages.entities[userMessageToResend.id]
@@ -1098,7 +1233,7 @@ export const resendMessageThunk =
       try {
         response = await dbService.resendUserMessages({
           topicId,
-          branchId: activeRouteOf(getState, topicId),
+          branchId: resendRoute,
           userMessageId: userMessageToResend.id,
           assistantId: assistant.id,
           currentModel
@@ -1116,7 +1251,17 @@ export const resendMessageThunk =
           attemptByMessage.set(entry.messageId, entry.attemptId)
         }
       }
-      const createdIds = new Set(response.createdMessageIds ?? [])
+      // Main-authoritative resend delta: the normalized route echo and the
+      // created/capability delta arrive from Main in the same transaction.
+      // Identity mapping per createdIds is renderer-local; the route echo is
+      // validated and no capability is ever inferred from branchId.
+      const ackBranchId = response.branchId ?? null
+      const ackCreatedIds = new Set(
+        (response.createdMessageIds ?? []).filter((id) => typeof id === 'string' && id.length > 0)
+      )
+      const ackMutableIds = new Set(
+        (response.mutableMessageIds ?? []).filter((id) => typeof id === 'string' && id.length > 0)
+      )
       const loadedIds = new Set(getState().messages.messageIdsByTopic[topicId] ?? [])
       const userLoaded = loadedIds.has(response.askId)
       const executionEntries = (response.executionMessages ?? []).map((e) => ({
@@ -1126,8 +1271,27 @@ export const resendMessageThunk =
       for (const { message } of executionEntries) {
         if (loadedIds.has(message.id)) {
           dispatch(newMessagesActions.updateMessage({ topicId, messageId: message.id, updates: message }))
-        } else if (createdIds.has(message.id) && userLoaded) {
-          dispatch(newMessagesActions.addMessage({ topicId, message }))
+        } else if (ackCreatedIds.has(message.id) && userLoaded) {
+          // Main-created member in this resend: publish row + capability
+          // atomically under the captured resend route. The per-message ack
+          // reuses Main's created/capability delta with the route echo
+          // validated; a mismatched echo publishes nothing (fail-closed).
+          // Existing IDs keep the update path above and retain capability.
+          publishAppendAck(
+            dispatch,
+            getState,
+            topicId,
+            message,
+            {
+              topicId,
+              branchId: ackBranchId,
+              messageId: message.id,
+              createdMessageIds: [message.id],
+              mutableMessageIds: ackMutableIds.has(message.id) ? [message.id] : []
+            },
+            resendRoute,
+            resendGeneration
+          )
         }
       }
       const loadedBlockIds = new Set(Object.keys(getState().messageBlocks.entities ?? {}))
@@ -1156,7 +1320,8 @@ export const resendMessageThunk =
             assistantConfigForThisRegen,
             message,
             attemptId,
-            authorityUser
+            authorityUser,
+            resendRoute
           )
         })
       }
@@ -1192,6 +1357,11 @@ export const resendUserMessageWithEditThunk =
 export const regenerateAssistantResponseThunk =
   (topicId: Topic['id'], assistantMessageToRegenerate: Message, assistant: Assistant) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
+    // Operation-scoped route capture: the regenerate request, queued
+    // execution, persistence callbacks, and request context selection all
+    // address this route. Existing IDs retain existing capability (no new
+    // rows are created on this path).
+    const regenRoute = activeRouteOf(getState, topicId)
     try {
       const state = getState()
       const localSelected = state.messages.entities[assistantMessageToRegenerate.id]
@@ -1236,7 +1406,7 @@ export const regenerateAssistantResponseThunk =
       try {
         response = await dbService.regenerateAssistantMessage({
           topicId,
-          branchId: activeRouteOf(getState, topicId),
+          branchId: regenRoute,
           assistantMessageId: assistantMessageToRegenerate.id,
           assistantId: assistant.id,
           ...(currentModel !== undefined && { currentModel })
@@ -1299,7 +1469,8 @@ export const regenerateAssistantResponseThunk =
           assistantConfigForRegen,
           resetAssistantMsg,
           attemptForExec,
-          authorityUser
+          authorityUser,
+          regenRoute
         )
       })
     } catch (error) {
@@ -1489,6 +1660,12 @@ export const appendAssistantResponseThunk =
       // safe: no loaded-relative DB index). The authoritative response
       // carries canonical wire + stable neighbors + mutability delta.
       const appendRoute = activeRouteOf(getState, topicId)
+      let appendGeneration = 0
+      try {
+        appendGeneration = selectRouteGeneration(getState(), topicId)
+      } catch {
+        appendGeneration = 0
+      }
       const appendResult = await dbService.insertMessagesAfterAnchor(
         topicId,
         existingAssistantMessageId,
@@ -1497,6 +1674,23 @@ export const appendAssistantResponseThunk =
       )
       if ((appendResult.branchId ?? null) !== appendRoute) {
         logger.error(`[appendAssistantResponseThunk] Stale route response; failing closed without publication.`)
+        return
+      }
+      // Late publication after a route switch — including away-and-back
+      // (route matches again but the generation advanced) — never injects
+      // rows or capability into the unrelated currently displayed route.
+      let appendGenerationNow = 0
+      try {
+        appendGenerationNow = selectRouteGeneration(getState(), topicId)
+      } catch {
+        appendGenerationNow = 0
+      }
+      if (appendGenerationNow !== appendGeneration) {
+        logger.error(`[appendAssistantResponseThunk] Stale route generation; failing closed without publication.`)
+        return
+      }
+      if (activeRouteOf(getState, topicId) !== appendRoute) {
+        logger.error(`[appendAssistantResponseThunk] Route switched mid-append; failing closed without publication.`)
         return
       }
 
@@ -1537,7 +1731,10 @@ export const appendAssistantResponseThunk =
           getState,
           topicId,
           assistantConfigForThisCall,
-          newAssistantMessageStub // Pass the newly created stub
+          newAssistantMessageStub, // Pass the newly created stub
+          undefined,
+          undefined,
+          appendRoute
         )
       })
       void requestTask
@@ -2845,10 +3042,18 @@ export const deleteMessagesFromDB = async (
 /**
  * Save a message and its blocks to database
  *
+ * Returns the Main-issued typed creation acknowledgment (normalized
+ * addressed route, authoritative row identity, created/capability delta);
+ * structured failure throws and publishes nothing.
+ *
  * `sendContext` is optional diagnostic-only correlation metadata (LOCK-004):
  * the ordinary send path threads its own per-send context through so each
  * append carries the correct correlation id/ordinal. Callers that omit it
  * (resend, regenerate, insert, channel) stay uninstrumented.
+ *
+ * `branchId` selects the addressed route explicitly: undefined resolves the
+ * topic's active route at call time, while an explicitly pinned null
+ * addresses the main route and is never re-resolved.
  */
 export const saveMessageAndBlocksToDB = async (
   topicId: string,
@@ -2857,7 +3062,7 @@ export const saveMessageAndBlocksToDB = async (
   messageIndex: number = -1,
   sendContext?: SendDiagnosticsContext,
   branchId?: string | null
-): Promise<void> => {
+): Promise<AppendMessageResponse> => {
   try {
     const blockIds = blocks.map((block) => block.id)
     const shouldSyncBlocks =
@@ -2865,15 +3070,25 @@ export const saveMessageAndBlocksToDB = async (
 
     const messageWithBlocks = shouldSyncBlocks ? { ...message, blocks: blockIds } : message
     // Direct call without conditional logic, now with messageIndex.
-    // Route defaults to the topic's active route (send/branch-aware).
-    const route = branchId ?? activeRouteOf(store.getState, topicId)
-    await dbService.appendMessage(topicId, messageWithBlocks, blocks, messageIndex, sendContext, undefined, route)
+    // Route defaults to the topic's active route (send/branch-aware) unless
+    // the caller pinned one (including an explicit null for main).
+    const route = branchId === undefined ? activeRouteOf(store.getState, topicId) : branchId
+    const ack = await dbService.appendMessage(
+      topicId,
+      messageWithBlocks,
+      blocks,
+      messageIndex,
+      sendContext,
+      undefined,
+      route
+    )
     logger.silly('Saved message and blocks via DbService', {
       topicId,
       messageId: message.id,
       blockCount: blocks.length,
       messageIndex
     })
+    return ack
   } catch (error) {
     logger.error('Failed to save message and blocks:', {
       topicId,
@@ -2895,7 +3110,9 @@ export const updateMessage = async (
   branchId?: string | null
 ): Promise<void> => {
   try {
-    const route = branchId ?? activeRouteOf(store.getState, topicId)
+    // An explicitly pinned null addresses the main route and is never
+    // re-resolved; only an absent route falls back to the active route.
+    const route = branchId === undefined ? activeRouteOf(store.getState, topicId) : branchId
     await dbService.updateMessage(topicId, messageId, updates, resendAttemptId, route)
     logger.silly('Updated message via DbService', { topicId, messageId })
   } catch (error) {
@@ -3021,14 +3238,37 @@ export const addChannelUserMessage = (
     blocks: allBlocks.map((b) => b.id)
   }
 
-  for (const block of allBlocks) {
-    dispatch(withClosureTopics(upsertOneBlock(block), topicId))
+  // Channel creation is main-route only: pin null explicitly (never the
+  // active branch) and consume the acknowledged delta only after persistence.
+  let channelGeneration = 0
+  try {
+    channelGeneration = selectRouteGeneration(store.getState(), topicId)
+  } catch {
+    channelGeneration = 0
   }
-  dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
-
-  dbService.appendMessage(topicId, userMessage, allBlocks).catch((err) => {
-    logger.error('Failed to persist channel user message', err as Error)
-  })
+  const capturedChannelGeneration = channelGeneration
+  dbService
+    .appendMessage(topicId, userMessage, allBlocks, undefined, undefined, undefined, null)
+    .then((ack) => {
+      // Associated block projection rides the successful row/capability
+      // publication only: a rejected/stale ack emits no orphan blocks.
+      const published = publishAppendAck(
+        dispatch,
+        store.getState,
+        topicId,
+        userMessage,
+        ack,
+        null,
+        capturedChannelGeneration
+      )
+      if (!published) return
+      for (const block of allBlocks) {
+        dispatch(withClosureTopics(upsertOneBlock(block), topicId))
+      }
+    })
+    .catch((err) => {
+      logger.error('Failed to persist channel user message', err as Error)
+    })
 }
 
 /**
@@ -3049,11 +3289,24 @@ export const setupChannelStream = (
   const assistantMessage = createAssistantMessage(agentId, topicId, {
     ...(model ? { modelId: model.id, model } : {})
   })
-  dispatch(newMessagesActions.addMessage({ topicId, message: assistantMessage }))
   dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
-  dbService.appendMessage(topicId, assistantMessage, []).catch((err) => {
-    logger.error('Failed to persist initial channel assistant message', err as Error)
-  })
+  // Channel creation is main-route only: pin null explicitly (never the
+  // active branch) and consume the acknowledged delta only after persistence.
+  let channelStreamGeneration = 0
+  try {
+    channelStreamGeneration = selectRouteGeneration(store.getState(), topicId)
+  } catch {
+    channelStreamGeneration = 0
+  }
+  const capturedStreamGeneration = channelStreamGeneration
+  dbService
+    .appendMessage(topicId, assistantMessage, [], undefined, undefined, undefined, null)
+    .then((ack) => {
+      publishAppendAck(dispatch, store.getState, topicId, assistantMessage, ack, null, capturedStreamGeneration)
+    })
+    .catch((err) => {
+      logger.error('Failed to persist initial channel assistant message', err as Error)
+    })
 
   let streamController: ReadableStreamDefaultController<TextStreamPart<Record<string, any>>> | null = null
   const stream = new ReadableStream<TextStreamPart<Record<string, any>>>({

@@ -76,6 +76,7 @@ vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: {
     addMessage: (p: unknown) => ({ type: 'add', p }),
     updateMessage: (p: unknown) => ({ type: 'update', p }),
+    applyAppendAcknowledgment: (p: unknown) => ({ type: 'applyAck', p }),
     setTopicLoading: (p: unknown) => ({ type: 'loading', p }),
     setTopicFulfilled: (p: unknown) => ({ type: 'fulfilled', p })
   },
@@ -115,6 +116,7 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: u,
       userBlocks: [{ id: 'bu-1', messageId: 'u-1', type: 'main_text', content: 'hi' }],
@@ -124,6 +126,7 @@ describe('semantic resend/regenerate renderer', () => {
       ],
       removedBlockIds: ['b-old-1', 'b-old-2'],
       createdMessageIds: [],
+      mutableMessageIds: [],
       attempts: [
         { messageId: 'a-1', attemptId: 'att-1' },
         { messageId: 'a-2', attemptId: 'att-2' }
@@ -145,6 +148,7 @@ describe('semantic resend/regenerate renderer', () => {
     const types = dispatch.mock.calls.map((c) => (c[0] as { type: string }).type)
     expect(types).toContain('update')
     expect(types).not.toContain('add')
+    expect(types).not.toContain('applyAck')
     // Only loaded block intersection removed
     const removals = dispatch.mock.calls.filter((c) => (c[0] as { type: string }).type === 'removeBlocks')
     expect(removals).toHaveLength(1)
@@ -165,12 +169,14 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: u,
       userBlocks: [],
       executionMessages: [{ message: created, blocks: [] }],
       removedBlockIds: [],
       createdMessageIds: ['a-new'],
+      mutableMessageIds: ['a-new'],
       attempts: [{ messageId: 'a-new', attemptId: 'att-n' }]
     })
     const dispatch = vi.fn()
@@ -178,7 +184,46 @@ describe('semantic resend/regenerate renderer', () => {
       dispatch,
       () => st as never
     )
-    expect(dispatch.mock.calls.some((c) => (c[0] as { type: string }).type === 'add')).toBe(true)
+    // The Main-created member is published atomically (row + capability),
+    // never via an unguarded add.
+    const ackCalls = dispatch.mock.calls.filter((c) => (c[0] as { type: string }).type === 'applyAck')
+    expect(ackCalls).toHaveLength(1)
+    expect((ackCalls[0][0] as { p: Record<string, unknown> }).p).toMatchObject({
+      topicId: 't-1',
+      route: null,
+      createdMessageIds: ['a-new'],
+      mutableMessageIds: ['a-new']
+    })
+  })
+
+  it('route echo mismatch publishes nothing (no authority guess)', async () => {
+    const { resendMessageThunk } = await import('../messageThunk')
+    const u = user()
+    st.messages.entities = { 'u-1': u }
+    st.messages.messageIdsByTopic = { 't-1': ['u-1'] }
+    syncCap()
+    const created = msg({ id: 'a-new', askId: 'u-1' })
+    mocks.resendUserMessages.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 't-1',
+      branchId: 'b-other',
+      askId: 'u-1',
+      userMessage: u,
+      userBlocks: [],
+      executionMessages: [{ message: created, blocks: [] }],
+      removedBlockIds: [],
+      createdMessageIds: ['a-new'],
+      mutableMessageIds: ['a-new'],
+      attempts: [{ messageId: 'a-new', attemptId: 'att-n' }]
+    })
+    const dispatch = vi.fn()
+    await resendMessageThunk('t-1', u, { id: 'as-1', model: fullModel(), topics: [], settings: {} } as never)(
+      dispatch,
+      () => st as never
+    )
+    const ackCalls = dispatch.mock.calls.filter((c) => (c[0] as { type: string }).type === 'applyAck')
+    expect(ackCalls).toHaveLength(0)
   })
 
   it('regenerate passes authority snapshot to converter and toasts NOT_FOUND', async () => {
@@ -193,12 +238,14 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: au,
       userBlocks: [{ id: 'bu-1', messageId: 'u-1', type: 'main_text', content: 'authority hi' }],
       executionMessages: [{ message: a1, blocks: [] }],
       removedBlockIds: [],
       createdMessageIds: [],
+      mutableMessageIds: [],
       attempts: [{ messageId: 'a-1', attemptId: 'att-1' }]
     })
     const dispatch = vi.fn()
@@ -227,12 +274,14 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: au,
       userBlocks: [],
       executionMessages: [{ message: a1, blocks: [] }],
       removedBlockIds: [],
       createdMessageIds: [],
+      mutableMessageIds: [],
       attempts: [{ messageId: 'a-1', attemptId: 'att-1' }]
     })
     const dispatch = vi.fn()
@@ -320,12 +369,14 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: u,
       userBlocks: [],
       executionMessages: [{ message: created, blocks: [] }],
       removedBlockIds: [],
       createdMessageIds: ['a-new'],
+      mutableMessageIds: ['a-new'],
       attempts: [{ messageId: 'a-new', attemptId: 'att-n' }]
     })
     const dispatch = vi.fn()
@@ -370,12 +421,14 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: au,
       userBlocks: [],
       executionMessages: [{ message: a1, blocks: [] }],
       removedBlockIds: [],
       createdMessageIds: [],
+      mutableMessageIds: [],
       attempts: [{ messageId: 'a-1', attemptId: 'att-1' }]
     })
     const dispatch = vi.fn()
@@ -401,12 +454,14 @@ describe('semantic resend/regenerate renderer', () => {
       affectedFileIds: [],
       remainingReferenceCounts: {},
       topicId: 't-1',
+      branchId: null,
       askId: 'u-1',
       userMessage: au,
       userBlocks: [],
       executionMessages: [{ message: a1, blocks: [] }],
       removedBlockIds: [],
       createdMessageIds: [],
+      mutableMessageIds: [],
       attempts: [{ messageId: 'a-1', attemptId: 'att-1' }]
     })
     const dispatch = vi.fn()
