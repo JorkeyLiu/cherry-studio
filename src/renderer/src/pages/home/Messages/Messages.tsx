@@ -186,6 +186,7 @@ import {
 } from './messageWindow'
 import { isRestoreTargetValid, shouldCancelStabilizerForKeyDown } from './positionStabilizer'
 import Prompt from './Prompt'
+import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
 import {
   buildContainerCapturer,
@@ -762,6 +763,57 @@ const Messages = ({
       } catch {}
     }
   }, [])
+  // Top-only visible incremental rebase pending compensation (fast path).
+  // Set synchronously with the visible union commit; the layout effect below
+  // applies the synchronous first compensation to the target route's own saved
+  // offset (never the divider click offset), then a bounded quiet sequence
+  // (≥1 rAF) revalidates + residual-corrects before the ONE identity-stable
+  // snapshot commit (`commitDisplayedStableWithAnchor`). Ownership + anchoring
+  // token stay held throughout under the same controller session. Cleared
+  // only after a successful commit or a deliberate termination (never cleared
+  // ahead of a failed commit). Supersede/unmount cancels the quiet frame.
+  // Never touches the divider search progress: lost residency falls back
+  // through the existing top hidden terminal (fail-visible, preserve
+  // snapshot), never divider search semantics.
+  const topVisibleRef = useRef<{
+    ownerEpoch: number
+    topicId: string
+    routeId: string | null
+    anchorMessageId: string
+    wantOffset: number
+    windowId: string
+    quietArmed: boolean
+  } | null>(null)
+  // Same-epoch top visible → hidden fallback payload (transient, single-use).
+  // Stored synchronously when the visible union arms: the already-materialized
+  // authoritative hidden target window + first-position plan + saved anchor
+  // identity/offset for THIS epoch. Not a second controller truth (epoch,
+  // intent, displayed, ownership all stay in the controller); consumed exactly
+  // once by the fallback, cleared on success/terminal/supersede/unmount.
+  const topHiddenFallbackRef = useRef<{
+    ownerEpoch: number
+    topicId: string
+    routeId: string | null
+    targetWindow: MessageWindow
+    firstPlan: ViewportFirstPositionPlan
+    anchorMessageId: string
+    wantOffset: number
+    isAtBottom: boolean
+  } | null>(null)
+  const topVisibleRafRef = useRef<number | null>(null)
+  const cancelTopVisibleQuiet = useCallback(() => {
+    const handle = topVisibleRafRef.current
+    topVisibleRafRef.current = null
+    if (handle !== null) {
+      try {
+        cancelAnimationFrame(handle)
+      } catch {}
+    }
+  }, [])
+  const cancelAllVisibleQuiet = useCallback(() => {
+    cancelDividerVisibleQuiet()
+    cancelTopVisibleQuiet()
+  }, [cancelDividerVisibleQuiet, cancelTopVisibleQuiet])
   /** End the viewport's current scroll token (single anchoring owner at a time). */
   const endViewportScrollToken = useCallback(() => {
     const token = viewportStateRef.current.scrollToken
@@ -776,31 +828,35 @@ const Messages = ({
       if (!controller.isSessionCurrent(epoch)) {
         return
       }
-      cancelDividerVisibleQuiet()
+      cancelAllVisibleQuiet()
       controller.terminate(epoch, 'fail-visible')
       dividerProgressRef.current = null
       if (dividerVisibleRef.current?.ownerEpoch === epoch) dividerVisibleRef.current = null
+      if (topVisibleRef.current?.ownerEpoch === epoch) topVisibleRef.current = null
+      if (topHiddenFallbackRef.current?.ownerEpoch === epoch) topHiddenFallbackRef.current = null
       transitionPlanRef.current = null
       endViewportScrollToken()
       notifyViewport()
     },
-    [cancelDividerVisibleQuiet, controller, endViewportScrollToken, notifyViewport]
+    [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport]
   )
   // Superseding teardown: terminate the current session (release exactly
   // once) so the next request starts clean. Never hides: callers own the
   // phase decision (arm re-hides, cancel fails visible).
   const tearDownViewportTransition = useCallback(() => {
     const epoch = controller.currentEpoch
-    cancelDividerVisibleQuiet()
+    cancelAllVisibleQuiet()
     if (controller.programmaticOwned) {
       controller.terminate(epoch, 'superseded')
     }
     dividerProgressRef.current = null
     dividerVisibleRef.current = null
+    topVisibleRef.current = null
+    topHiddenFallbackRef.current = null
     transitionPlanRef.current = null
     endViewportScrollToken()
     notifyViewport()
-  }, [cancelDividerVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
+  }, [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
   // NOTE: the former `armRouteTransition(plan, tid, route)` two-step arm has
   // been removed. Route-switch windows now commit ONLY via the single atomic
   // entry `commitRouteWindowAtomic` defined after `windowIdentityKey` below:
@@ -1132,14 +1188,16 @@ const Messages = ({
       // down (never leaves hidden, never leaks ownership). HMR disposes via
       // the provider effect as well; both paths are idempotent.
       controller.invalidateAll()
-      cancelDividerVisibleQuiet()
+      cancelAllVisibleQuiet()
       dividerProgressRef.current = null
       dividerVisibleRef.current = null
+      topVisibleRef.current = null
+      topHiddenFallbackRef.current = null
       transitionPlanRef.current = null
       endViewportScrollToken()
       notifyViewport()
     }
-  }, [cancelDividerVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
+  }, [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
 
   // Deletion epoch subscription — synchronously invalidate the mounted viewport
   // projection for this topic when authoritative hard deletion advances.
@@ -1167,9 +1225,11 @@ const Messages = ({
       // blocked) and end the scroll token so the emptied viewport is never
       // left hidden by a stale transition.
       controller.invalidateAll()
-      cancelDividerVisibleQuiet()
+      cancelAllVisibleQuiet()
       dividerProgressRef.current = null
       dividerVisibleRef.current = null
+      topVisibleRef.current = null
+      topHiddenFallbackRef.current = null
       transitionPlanRef.current = null
       endViewportScrollToken()
       notifyViewport()
@@ -3163,6 +3223,55 @@ const Messages = ({
     },
     [cancelDividerVisibleQuiet, controller, notifyViewport, viewportDispatch, windowIdentityKey]
   )
+  // Top-only visible incremental rebase entry (fast path, never hidden).
+  // Synchronously rebases the existing rendered list (shared prefix through
+  // the saved anchor stays mounted by stable ID), records session epoch +
+  // target route + window identity as rendered via `applyVisibleRebaseWindow`
+  // (fetch-hold → aligned directly, no positioning/visibility:hidden), and
+  // arms the synchronous first compensation + bounded quiet sequence below.
+  // The target route's own saved offset is used independently (never the
+  // divider click offset). Ownership + anchoring token stay held until the
+  // quiet sequence identity-commits or deliberately terminates. Stale epochs
+  // refuse with no dispatch and never disturb the new session. Any
+  // eligibility/residency doubt must take the existing hidden atomic path
+  // instead — never this entry, never divider search. No stable commit here.
+  const commitTopVisibleAtomic = useCallback(
+    (
+      fetchEpoch: number,
+      topicIdAtStart: string,
+      routeAtStart: string | null,
+      window: MessageWindow,
+      visible: { anchorMessageId: string; wantOffset: number }
+    ): number | null => {
+      if (!controller.isSessionCurrent(fetchEpoch)) return null
+      const intent = controller.currentIntent
+      if (!intent || intent.kind !== 'top') return null
+      if (intent.topicId !== topicIdAtStart || intent.targetRoute !== routeAtStart) return null
+      if (controller.currentPhase !== 'fetch-hold') return null
+      if ((window.displayMessages?.length ?? 0) === 0) return null
+      if (typeof visible.anchorMessageId !== 'string' || visible.anchorMessageId.length === 0) return null
+      if (typeof visible.wantOffset !== 'number' || !Number.isFinite(visible.wantOffset)) return null
+      const wid = windowIdentityKey(window) ?? `epoch-${fetchEpoch}`
+      const ok = controller.applyVisibleRebaseWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
+      if (!ok) return null
+      cancelTopVisibleQuiet()
+      viewportDispatch({ type: 'window/apply', window })
+      topVisibleRef.current = {
+        ownerEpoch: fetchEpoch,
+        topicId: topicIdAtStart,
+        routeId: routeAtStart,
+        anchorMessageId: visible.anchorMessageId,
+        wantOffset: visible.wantOffset,
+        windowId: wid,
+        quietArmed: false
+      }
+      const scrollToken = {}
+      viewportDispatch({ type: 'scroll/begin', mode: 'anchoring', token: scrollToken })
+      notifyViewport()
+      return fetchEpoch
+    },
+    [cancelTopVisibleQuiet, controller, notifyViewport, viewportDispatch, windowIdentityKey]
+  )
   const endDividerSearchTerminal = useCallback(
     (epoch: number, _reason: DividerSearchTerminalReason): void => {
       void _reason
@@ -3660,6 +3769,370 @@ const Messages = ({
     notifyViewport,
     scrollContainerRef,
     stepDividerSearch,
+    windowIdentityKey
+  ])
+
+  // Top-only visible rebase: synchronous first compensation + bounded quiet
+  // sequence (fast path, layout phase, never hidden).
+  // The visible commit above rebased the rendered list synchronously with the
+  // container still visible (phase `aligned`, never `positioning`). This layout
+  // effect applies the FIRST compensation synchronously before paint (saved
+  // anchor → saved offset, via the raw-ID row lookup, never a selector
+  // escape), then schedules a bounded quiet sequence (≥1 rAF after the write,
+  // at most one residual recheck frame). No stable commit happens in this
+  // layout effect: the quiet callback revalidates mounted/topic/route/epoch/
+  // current intent/current rendered window identity + resident anchor, applies
+  // a residual correction when needed, and only then runs the ONE identity-
+  // stable snapshot commit (`commitDisplayedStableWithAnchor`). No timer/
+  // stabilizer loop, no intermediate snapshot write. Post-apply loss of
+  // coverage/residency/alignment fails closed into the EXISTING hidden atomic
+  // restore under the SAME epoch (rewind aligned → fetch-hold, commit the
+  // stashed authoritative target window + plan, hidden retry, ownership held
+  // until it settles) — never divider search semantics, never a second
+  // controller truth, never the union identity adopted as hidden proof. Only
+  // when that hidden path actually cannot restore (missing payload, rewind or
+  // hidden commit refused, retry unresolvable) does the terminal preserve run
+  // (fail-visible, prior snapshot kept). Stale callbacks stay inert and never
+  // touch a newer session. A failed final commit while the epoch is still
+  // current tries the hidden retry first (never clears the pending driver
+  // first); stale callbacks never touch a newer session.
+  useLayoutEffect(() => {
+    const pending = topVisibleRef.current
+    if (!pending) return
+    if (pending.quietArmed) return
+    if (!controller.isSessionCurrent(pending.ownerEpoch)) {
+      if (topVisibleRef.current === pending) topVisibleRef.current = null
+      if (topHiddenFallbackRef.current?.ownerEpoch === pending.ownerEpoch) topHiddenFallbackRef.current = null
+      return
+    }
+    if (controller.currentPhase !== 'aligned') return
+    if (topicIdRef.current !== pending.topicId || routeRef.current !== pending.routeId) {
+      failVisibleTransition(pending.ownerEpoch)
+      return
+    }
+    const live = scrollContainerRef.current
+    if (!live || unmountedRef.current) {
+      failVisibleTransition(pending.ownerEpoch)
+      return
+    }
+    const resolveTarget = (): { el: HTMLElement; target: number } | null => {
+      try {
+        const el = getMessageRowById(pending.anchorMessageId)
+        if (!el) return null
+        if (typeof pending.wantOffset !== 'number' || !Number.isFinite(pending.wantOffset)) return null
+        return { el, target: pending.wantOffset }
+      } catch {
+        return null
+      }
+    }
+    const measureOffset = (el: HTMLElement): number | null => {
+      try {
+        return el.getBoundingClientRect().top - live.getBoundingClientRect().top
+      } catch {
+        return null
+      }
+    }
+    const dropOrFailVisible = (): void => {
+      if (controller.isSessionCurrent(pending.ownerEpoch)) {
+        failVisibleTransition(pending.ownerEpoch)
+      } else {
+        if (topVisibleRef.current === pending) topVisibleRef.current = null
+        if (topHiddenFallbackRef.current?.ownerEpoch === pending.ownerEpoch) topHiddenFallbackRef.current = null
+      }
+    }
+    // Same-epoch top visible → hidden fallback (bounded, no new lifecycle).
+    // Rewinds aligned → fetch-hold and commits the stashed authoritative
+    // target window + first-position plan through the EXISTING hidden entry,
+    // then runs the hidden retry (fold-reveal, bounded projection wait,
+    // direct settle, identity commit gate) under the same epoch with
+    // ownership held throughout. No W1→W2 adoption (the union identity is
+    // never rebound as hidden proof), no programmatic snapshot pollution (the
+    // ONE identity commit is the only writer), no divider semantics. Stale
+    // work stays inert; terminal preserve runs only when the hidden path
+    // actually cannot restore.
+    const runTopHiddenRetry = async (fb: {
+      ownerEpoch: number
+      topicId: string
+      routeId: string | null
+      anchorMessageId: string
+      wantOffset: number
+      isAtBottom: boolean
+    }): Promise<void> => {
+      const epoch = fb.ownerEpoch
+      const stillTarget = (): boolean =>
+        topicIdRef.current === fb.topicId &&
+        routeRef.current === fb.routeId &&
+        !unmountedRef.current &&
+        controller.currentEpoch === epoch
+      try {
+        if (checkElement(fb.anchorMessageId) === 'hidden') {
+          await selectMessageForFold(fb.anchorMessageId)
+        }
+      } catch {
+        // fail-closed: commit gate below still verifies residency
+      }
+      if (!stillTarget()) {
+        failVisibleTransition(epoch)
+        return
+      }
+      try {
+        const projectionReady = await waitForProjectionCommit(fb.anchorMessageId, () => !stillTarget())
+        if (!projectionReady) {
+          failVisibleTransition(epoch)
+          return
+        }
+      } catch {
+        failVisibleTransition(epoch)
+        return
+      }
+      if (!stillTarget()) {
+        failVisibleTransition(epoch)
+        return
+      }
+      const retryLive = scrollContainerRef.current
+      if (retryLive && typeof fb.wantOffset === 'number' && Number.isFinite(fb.wantOffset)) {
+        const settleOnce = (): boolean => {
+          try {
+            const el = getMessageRowById(fb.anchorMessageId)
+            if (!el || !stillTarget()) return false
+            const have = el.getBoundingClientRect().top - retryLive.getBoundingClientRect().top
+            const delta = have - fb.wantOffset
+            if (Math.abs(delta) > 1) retryLive.scrollTop += delta
+            return true
+          } catch {
+            return false
+          }
+        }
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        if (!stillTarget()) {
+          failVisibleTransition(epoch)
+          return
+        }
+        settleOnce()
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        if (!stillTarget()) {
+          failVisibleTransition(epoch)
+          return
+        }
+        settleOnce()
+      }
+      if (!controller.isSessionCurrent(epoch)) return
+      // Hidden commit gate under the original policies: the saved anchor must
+      // be covered (projection) and resident (DOM) before it may become the
+      // route snapshot — an unmet valid anchor fails visible and preserves
+      // the prior snapshot, never a fallback commit.
+      let projectionContains = false
+      try {
+        projectionContains = messagesRef.current.some((m) => m.id === fb.anchorMessageId)
+      } catch {
+        projectionContains = false
+      }
+      let domConnected = false
+      try {
+        domConnected = getMessageRowById(fb.anchorMessageId) !== null
+      } catch {
+        domConnected = false
+      }
+      if (
+        !isTopStableCommittable({
+          isAtBottom: fb.isAtBottom,
+          snapshotInvalidForRoute: false,
+          requestedAnchor: fb.anchorMessageId,
+          projectionContains,
+          domConnected
+        })
+      ) {
+        failVisibleTransition(epoch)
+        return
+      }
+      const ok = commitDisplayedStableWithAnchor(
+        fb.topicId,
+        fb.routeId,
+        epoch,
+        fb.anchorMessageId,
+        Number.isFinite(fb.wantOffset) ? fb.wantOffset : null
+      )
+      if (!ok && controller.isSessionCurrent(epoch)) {
+        failVisibleTransition(epoch)
+      }
+    }
+    const fallBackToHiddenTop = (): void => {
+      const epoch = pending.ownerEpoch
+      // Stale work stays inert: never touch the newer session, only drop the
+      // driver's own attempt data.
+      if (topVisibleRef.current !== pending) return
+      const fb = topHiddenFallbackRef.current
+      if (!controller.isSessionCurrent(epoch)) {
+        if (topVisibleRef.current === pending) topVisibleRef.current = null
+        if (fb?.ownerEpoch === epoch) topHiddenFallbackRef.current = null
+        return
+      }
+      // No materialized hidden plan for this epoch: the hidden path actually
+      // cannot restore → terminal preserve (prior snapshot kept).
+      if (!fb || fb.ownerEpoch !== epoch || fb.topicId !== pending.topicId || fb.routeId !== pending.routeId) {
+        failVisibleTransition(epoch)
+        return
+      }
+      cancelTopVisibleQuiet()
+      if (topVisibleRef.current === pending) topVisibleRef.current = null
+      if (!controller.fallbackTopVisibleToHidden(epoch)) {
+        topHiddenFallbackRef.current = null
+        failVisibleTransition(epoch)
+        return
+      }
+      const hiddenEpoch = commitRouteWindowAtomic(epoch, fb.topicId, fb.routeId, fb.targetWindow, fb.firstPlan)
+      if (hiddenEpoch === null) {
+        topHiddenFallbackRef.current = null
+        failVisibleTransition(epoch)
+        return
+      }
+      // Single-use payload consumed: the hidden path owns the remainder
+      // (first-position layout + retry below). Ownership + token stay held.
+      topHiddenFallbackRef.current = null
+      notifyViewport()
+      void runTopHiddenRetry(fb)
+    }
+    const quietCurrent = (): { ok: boolean; lostResidency: boolean } => {
+      if (unmountedRef.current) return { ok: false, lostResidency: false }
+      if (topicIdRef.current !== pending.topicId || routeRef.current !== pending.routeId) {
+        return { ok: false, lostResidency: false }
+      }
+      if (!controller.isSessionCurrent(pending.ownerEpoch)) return { ok: false, lostResidency: false }
+      if (controller.currentPhase !== 'aligned') return { ok: false, lostResidency: false }
+      const intent = controller.currentIntent
+      if (!intent || intent.kind !== 'top') return { ok: false, lostResidency: false }
+      if (intent.topicId !== pending.topicId || intent.targetRoute !== pending.routeId) {
+        return { ok: false, lostResidency: false }
+      }
+      try {
+        const liveWindowId = windowIdentityKey(viewportStateRef.current.window)
+        if (!liveWindowId || liveWindowId !== pending.windowId) {
+          if (!resolveTarget()) return { ok: false, lostResidency: true }
+          return { ok: false, lostResidency: false }
+        }
+      } catch {
+        return { ok: false, lostResidency: false }
+      }
+      const rendered = controller.renderedProvenance
+      if (!rendered || rendered.epoch !== pending.ownerEpoch || rendered.windowId !== pending.windowId) {
+        if (!resolveTarget()) return { ok: false, lostResidency: true }
+        return { ok: false, lostResidency: false }
+      }
+      if (!resolveTarget()) return { ok: false, lostResidency: true }
+      return { ok: true, lostResidency: false }
+    }
+    const commitQuiet = (): void => {
+      const gate = quietCurrent()
+      if (!gate.ok) {
+        // Coverage/residency/alignment loss retries hidden under the same
+        // epoch; any other current-session divergence terminates. Stale work
+        // only drops its own driver via dropOrFailVisible.
+        if (gate.lostResidency) {
+          fallBackToHiddenTop()
+          return
+        }
+        dropOrFailVisible()
+        return
+      }
+      const ok = commitDisplayedStableWithAnchor(
+        pending.topicId,
+        pending.routeId,
+        pending.ownerEpoch,
+        pending.anchorMessageId,
+        pending.wantOffset
+      )
+      if (ok) {
+        if (topVisibleRef.current === pending) topVisibleRef.current = null
+        if (topHiddenFallbackRef.current?.ownerEpoch === pending.ownerEpoch) topHiddenFallbackRef.current = null
+        notifyViewport()
+        return
+      }
+      // Final visible commit refused while still current: the visible union
+      // cannot complete → hidden retry first, terminal only if hidden cannot
+      // restore. Stale epochs stay inert.
+      if (controller.isSessionCurrent(pending.ownerEpoch)) {
+        fallBackToHiddenTop()
+        return
+      }
+      if (topVisibleRef.current === pending) topVisibleRef.current = null
+      if (topHiddenFallbackRef.current?.ownerEpoch === pending.ownerEpoch) topHiddenFallbackRef.current = null
+    }
+    try {
+      const first = resolveTarget()
+      if (!first) {
+        fallBackToHiddenTop()
+        return
+      }
+      const have = measureOffset(first.el)
+      if (have === null) {
+        fallBackToHiddenTop()
+        return
+      }
+      const delta = have - first.target
+      if (Math.abs(delta) > 1) {
+        try {
+          live.scrollTop += delta
+        } catch {
+          failVisibleTransition(pending.ownerEpoch)
+          return
+        }
+      }
+      pending.quietArmed = true
+      cancelTopVisibleQuiet()
+      topVisibleRafRef.current = requestAnimationFrame(() => {
+        topVisibleRafRef.current = null
+        if (topVisibleRef.current !== pending) return
+        const gate = quietCurrent()
+        if (!gate.ok) {
+          if (gate.lostResidency) {
+            fallBackToHiddenTop()
+            return
+          }
+          dropOrFailVisible()
+          return
+        }
+        const current = resolveTarget()
+        if (!current) {
+          fallBackToHiddenTop()
+          return
+        }
+        const reHave = measureOffset(current.el)
+        if (reHave === null) {
+          fallBackToHiddenTop()
+          return
+        }
+        const residual = reHave - current.target
+        if (Math.abs(residual) > 1) {
+          try {
+            live.scrollTop += residual
+          } catch {
+            failVisibleTransition(pending.ownerEpoch)
+            return
+          }
+          topVisibleRafRef.current = requestAnimationFrame(() => {
+            topVisibleRafRef.current = null
+            if (topVisibleRef.current !== pending) return
+            commitQuiet()
+          })
+          return
+        }
+        commitQuiet()
+      })
+    } catch {
+      failVisibleTransition(pending.ownerEpoch)
+    }
+  }, [
+    viewportState.window,
+    controller,
+    cancelTopVisibleQuiet,
+    checkElement,
+    commitDisplayedStableWithAnchor,
+    commitRouteWindowAtomic,
+    failVisibleTransition,
+    notifyViewport,
+    scrollContainerRef,
+    selectMessageForFold,
+    waitForProjectionCommit,
     windowIdentityKey
   ])
 
@@ -4536,7 +5009,130 @@ const Messages = ({
           NAVIGATION_VISUALLY_NEWER_GROUPS
         )
         let armedTopEpoch: number | null = null
+        // Hidden first-position plan, computed BEFORE the visible attempt so
+        // the same plan object serves as the single-use hidden fallback
+        // payload when the visible union arms (no second plan, no second
+        // truth). `wantOffset` below is the hidden path's own saved offset.
+        const wantOffset =
+          typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+            ? saved.intraRowOffset
+            : null
+        const firstPlan: ViewportFirstPositionPlan = chooseTopFirstPositionPlan({
+          saved,
+          snapshotInvalidForRoute,
+          routeSavedRowAnchor
+        })
         if (targetWindow) {
+          // Top-only visible incremental rebase (fast path, never hidden):
+          // shared route-overlap materializer — the preserved chain is the
+          // current resident prefix through the saved anchor (which may begin
+          // earlier than the target around-window head), verified continuous
+          // against the authoritative target response; only the target
+          // window's ordered exclusive suffix is appended and the outgoing
+          // foreign suffix is removed. The union window covers the preserved
+          // prefix plus the suffix exactly, so shared rows keep their mounted
+          // DOM nodes and the saved anchor stays at its exact saved offset
+          // via the layout compensation below. Any eligibility doubt falls
+          // through to the hidden atomic path unchanged (nonresident/
+          // exclusive anchor, incomplete projection, need-older-pagination,
+          // union-trim/uncovered anchors, unmeasurable offset, folded row, or
+          // empty incoming suffix). Numeric-leading UUID/special IDs are
+          // supported (raw-ID DOM lookup, never a selector escape).
+          if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
+            try {
+              const savedOffset =
+                typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+                  ? saved.intraRowOffset
+                  : null
+              const domRow = getMessageRowById(routeSavedRowAnchor)
+              const rowVisible = (() => {
+                try {
+                  return checkElement(routeSavedRowAnchor) === 'visible'
+                } catch {
+                  return domRow !== null
+                }
+              })()
+              if (savedOffset !== null && domRow !== null && rowVisible) {
+                const currentWindow = viewportStateRef.current.window
+                const currentIdsNewestFirst = currentWindow?.displayMessages?.map((m) => m.id) ?? []
+                const targetIdsNewestFirst = targetWindow.displayMessages?.map((m) => m.id) ?? []
+                const responseIds = ((routeWindow.messages ?? []) as unknown as Message[]).map((m) => m.id)
+                const toOldestFirst = (newestFirst: string[]): string[] => [...newestFirst].reverse()
+                const topPlan = planTopVisibleRebase({
+                  currentIdsOldestFirst: toOldestFirst(currentIdsNewestFirst),
+                  targetResponseIdsOldestFirst: responseIds,
+                  targetWindowIdsOldestFirst: toOldestFirst(targetIdsNewestFirst),
+                  anchorId: routeSavedRowAnchor,
+                  currentHasMoreBefore: currentWindow?.hasMoreOlder ?? false,
+                  targetHasMoreAfter: targetWindow.hasMoreNewer,
+                  loadedIds
+                })
+                if (topPlan) {
+                  const unionNewestFirst = buildRouteVisibleMessages(
+                    currentWindow?.displayMessages ?? [],
+                    loaded,
+                    topPlan
+                  )
+                  const unionOldestFirst = [...unionNewestFirst].reverse()
+                  const unionModel = createMessageViewportGroupModel(unionOldestFirst)
+                  const unionAnchorGroup = unionModel.messageIdToGroup.get(routeSavedRowAnchor)
+                  const unionAnchorGroupIndex = unionAnchorGroup ? unionModel.groups.indexOf(unionAnchorGroup) : -1
+                  if (unionAnchorGroupIndex >= 0) {
+                    const unionWindow = createTargetMessageWindow(
+                      unionOldestFirst,
+                      routeSavedRowAnchor,
+                      unionAnchorGroupIndex + 1,
+                      unionModel.groups.length - unionAnchorGroupIndex - 1,
+                      { hasMoreBefore: topPlan.hasMoreBefore, hasMoreAfter: topPlan.hasMoreAfter }
+                    )
+                    const unionExact = isRouteVisibleUnionExact({
+                      plan: topPlan,
+                      unionOldestFirst,
+                      unionNewestFirst,
+                      unionWindow,
+                      unionModelGroupCount: unionModel.groups.length
+                    })
+                    if (unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
+                      const visibleEpoch = commitTopVisibleAtomic(
+                        fetchEpoch,
+                        topicIdAtEffect,
+                        routeAtEffect,
+                        unionWindow,
+                        { anchorMessageId: routeSavedRowAnchor, wantOffset: savedOffset }
+                      )
+                      if (visibleEpoch !== null) {
+                        // Visible path armed: stash the already-materialized
+                        // authoritative hidden target + plan as the single-use
+                        // same-epoch fallback (transient attempt data, not a
+                        // second controller truth). Post-apply proof loss
+                        // rewinds to fetch-hold and commits THIS window/plan
+                        // through the existing hidden entry; ownership stays
+                        // held until that hidden path settles. The union
+                        // window identity is never adopted as hidden proof.
+                        topHiddenFallbackRef.current = {
+                          ownerEpoch: visibleEpoch,
+                          topicId: topicIdAtEffect,
+                          routeId: routeAtEffect,
+                          targetWindow,
+                          firstPlan,
+                          anchorMessageId: routeSavedRowAnchor,
+                          wantOffset: savedOffset,
+                          isAtBottom: !!saved?.isAtBottom
+                        }
+                        // Visible path armed: the layout effect applies the
+                        // first compensation, then the bounded quiet sequence
+                        // identity-commits. Skip the hidden stabilizer below
+                        // entirely (no positioning, no second commit).
+                        return
+                      }
+                    }
+                  }
+                }
+              }
+            } catch {
+              // fail-closed: fall through to the hidden path below
+            }
+          }
           // Atomic route transition: arm hidden-until-positioned together
           // with the target window commit in the same React batch. The old
           // viewport stays visible during the fetch above (incremental);
@@ -4554,15 +5150,6 @@ const Messages = ({
           // anchor + isAtBottom → bottom; raw-only legacy snapshot
           // (no anchor) → same-route scrollTop; no snapshot → deterministic
           // route-local default (`bottom`). Never outgoing geometry.
-          const wantOffset =
-            typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
-              ? saved.intraRowOffset
-              : null
-          const firstPlan: ViewportFirstPositionPlan = chooseTopFirstPositionPlan({
-            saved,
-            snapshotInvalidForRoute,
-            routeSavedRowAnchor
-          })
           // Provenance-bound atomic commit (single entry): stale epochs
           // refuse with no dispatch, never tearing down the new session.
           const topRestoreEpoch = commitRouteWindowAtomic(
@@ -4785,6 +5372,7 @@ const Messages = ({
     commitDisplayedStable,
     commitDisplayedStableWithAnchor,
     commitRouteWindowAtomic,
+    commitTopVisibleAtomic,
     deletionFallbackIntent,
     dispatch,
     failVisibleTransition,

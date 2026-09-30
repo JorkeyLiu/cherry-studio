@@ -147,16 +147,17 @@ export const useRouteViewport = (): RouteViewportContextValue => {
 export const useOptionalRouteViewport = (): RouteViewportContextValue | null => use(RouteViewportContext)
 
 export const viewportPhaseAttrFor = (phase: string, intentKind?: string | null): ViewportPhaseAttr => {
-  // Divider fetch-hold keeps the current displayed/rendered window on screen
-  // (revealed, never visibility:hidden): the divider fetch resolves around
-  // the already-visible fork anchor and the visible rebase commits
-  // synchronously into the live list. Top intent and every other fetch-hold
-  // keep the existing hidden behavior; only the hidden atomic fallback
-  // (`commitRouteWindowAtomic` → `applyTransitionWindow` → positioning) hides
-  // when visible eligibility/commit fails. Intent comes from the controller
-  // (sole truth); no UI-local route truth is consulted or advanced here.
+  // Divider + top fetch-hold keeps the current displayed/rendered window on
+  // screen (revealed, never visibility:hidden): the fetch resolves around an
+  // already-visible resident anchor (divider fork anchor or top saved anchor)
+  // and the visible rebase commits synchronously into the live list. Every
+  // other fetch-hold keeps the existing hidden behavior; only the hidden
+  // atomic fallback (`commitRouteWindowAtomic` → `applyTransitionWindow` →
+  // positioning) hides when visible eligibility/commit fails. Intent comes
+  // from the controller (sole truth); no UI-local route truth is consulted or
+  // advanced here.
   if (phase === 'positioning') return 'positioning'
-  if (phase === 'fetch-hold') return intentKind === 'divider' ? 'revealed' : 'positioning'
+  if (phase === 'fetch-hold') return intentKind === 'divider' || intentKind === 'top' ? 'revealed' : 'positioning'
   if (phase === 'idle') return 'idle'
   return 'revealed'
 }

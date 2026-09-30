@@ -1,46 +1,23 @@
 import type { Message } from '@renderer/types/newMessage'
 
-import { MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT, type MessageWindow } from './messageWindow'
+import type { MessageWindow } from './messageWindow'
+import {
+  buildRouteVisibleMessages,
+  isRouteVisibleUnionExact,
+  planRouteVisibleRebase,
+  type RouteVisibleRebasePlan
+} from './routeOverlapRebase'
 
 /**
  * Divider-only visible incremental rebase (pure planning, no DOM, no React).
  *
- * Fast path for divider route switches where the fork anchor is resident in
- * the current window AND in the authoritative target route projection: the
- * current resident shared messages through the fork stay mounted (same React
- * keys, same order, same object identities) while only the outgoing foreign
- * suffix leaves and the target exclusive suffix mounts. The container never
- * empties and never hides.
- *
- * Fork-aligned route semantics (no identical window heads required): partial
- * around windows legitimately start at different heads (e.g. current display
- * `[m0..m15, branchSuffix]` vs target around-window `[m5..m29]` with fork
- * `m15` resident in both). The preserved chain is the current resident prefix
- * through the fork — it may begin earlier than the target around-window — and
- * it is verified continuous against the authoritative full target route
- * projection (the windowed `fetchMessagesWindow` response order): every
- * preserved position overlapping the response must match exactly, the fork
- * must sit at the same relative offset in all three lists, the outgoing
- * post-fork suffix must be fully foreign to the response, and the appended
- * post-fork suffix must come from the target window in authoritative order
- * and be fully foreign to the current window. Soundness rests on branch
- * construction: pre-fork trunk is route-shared, so a continuous
- * overlap-verified chain through the fork is the target route's trunk.
- *
- * Fail-closed contract (any violation → null, caller takes the existing
- * hidden searching path unchanged): missing fork, disjoint/malformed lists,
- * unstable (empty/duplicate) IDs, interleaved order, outgoing suffix present
- * in the target projection, incoming suffix present in the current window,
- * target window not a subsequence of the response, or empty incoming suffix.
- *
- * Capability semantics: the built union keeps the preserved current side's
- * older boundary and the target side's newer boundary
- * (`hasMoreBefore` from current, `hasMoreAfter` from target) — truthful
- * because the union's older edge IS the preserved current edge and its newer
- * edge IS the target window edge. Any other existing capability semantics
- * ride unchanged through the standard window constructors. No second
- * route/window truth is created here: the caller still commits via the single
- * `RouteViewportController` entry and the single viewport reducer.
+ * Thin fork-named wrapper over the shared route-overlap materializer
+ * (`routeOverlapRebase`): the preserved chain is the current resident prefix
+ * through the fork, verified continuous against the authoritative target
+ * route projection. See that module for the full fail-closed contract and
+ * capability semantics. No second route/window truth is created here: the
+ * caller still commits via the single `RouteViewportController` entry and the
+ * single viewport reducer.
  */
 
 export interface DividerVisibleRebasePlan {
@@ -79,102 +56,30 @@ export interface DividerVisibleRebaseInput {
   targetHasMoreAfter: boolean
 }
 
-const isStableId = (id: unknown): id is string => typeof id === 'string' && id.length > 0
-
-const hasDuplicates = (ids: readonly string[]): boolean => new Set(ids).size !== ids.length
+const toSharedPlan = (plan: RouteVisibleRebasePlan): DividerVisibleRebasePlan => ({
+  sharedPrefixIds: plan.sharedPrefixIds,
+  outgoingIds: plan.outgoingIds,
+  incomingIds: plan.incomingIds,
+  nextOldestFirst: plan.nextOldestFirst,
+  forkIndex: plan.anchorIndex,
+  hasMoreBefore: plan.hasMoreBefore,
+  hasMoreAfter: plan.hasMoreAfter
+})
 
 /**
  * Pure eligibility + planning. Returns null on ANY violation (fail closed).
  */
 export const planDividerVisibleRebase = (input: DividerVisibleRebaseInput): DividerVisibleRebasePlan | null => {
-  const { currentIdsOldestFirst, targetResponseIdsOldestFirst, targetWindowIdsOldestFirst, forkAnchorId } = input
-  if (!isStableId(forkAnchorId)) return null
-  if (
-    !Array.isArray(currentIdsOldestFirst) ||
-    !Array.isArray(targetResponseIdsOldestFirst) ||
-    !Array.isArray(targetWindowIdsOldestFirst)
-  ) {
-    return null
-  }
-  if (
-    currentIdsOldestFirst.length === 0 ||
-    targetResponseIdsOldestFirst.length === 0 ||
-    targetWindowIdsOldestFirst.length === 0
-  ) {
-    return null
-  }
-  if (typeof input.currentHasMoreBefore !== 'boolean' || typeof input.targetHasMoreAfter !== 'boolean') return null
-  if (
-    !currentIdsOldestFirst.every(isStableId) ||
-    !targetResponseIdsOldestFirst.every(isStableId) ||
-    !targetWindowIdsOldestFirst.every(isStableId)
-  ) {
-    return null
-  }
-  if (
-    hasDuplicates(currentIdsOldestFirst) ||
-    hasDuplicates(targetResponseIdsOldestFirst) ||
-    hasDuplicates(targetWindowIdsOldestFirst)
-  ) {
-    return null
-  }
-
-  const current = [...currentIdsOldestFirst]
-  const response = [...targetResponseIdsOldestFirst]
-  const targetWindow = [...targetWindowIdsOldestFirst]
-  const cFork = current.indexOf(forkAnchorId)
-  const rFork = response.indexOf(forkAnchorId)
-  const wFork = targetWindow.indexOf(forkAnchorId)
-  if (cFork < 0 || rFork < 0 || wFork < 0) return null
-
-  // The target window must be an order-preserving subsequence of the
-  // authoritative response (malformed windows fail closed).
-  const responseIndexById = new Map<string, number>()
-  for (let i = 0; i < response.length; i++) {
-    if (!responseIndexById.has(response[i])) responseIndexById.set(response[i], i)
-  }
-  let prevResponseIndex = -1
-  for (const id of targetWindow) {
-    const ri = responseIndexById.get(id)
-    if (ri === undefined || ri <= prevResponseIndex) return null
-    prevResponseIndex = ri
-  }
-
-  // Overlap agreement: every preserved position overlapping the response must
-  // match exactly (continuous chain, no interleave). Positions older than the
-  // response head are preserved resident (the union may begin earlier).
-  for (let i = 0; i <= cFork; i++) {
-    const j = rFork - (cFork - i)
-    if (j < 0) continue
-    if (current[i] !== response[j]) return null
-  }
-
-  // Outgoing post-fork suffix must be fully foreign to the target projection.
-  const responseSet = new Set(response)
-  const outgoingIds = current.slice(cFork + 1)
-  for (const id of outgoingIds) {
-    if (responseSet.has(id)) return null
-  }
-
-  // Incoming post-fork suffix comes from the target window in authoritative
-  // order and must be fully foreign to the current window.
-  const currentSet = new Set(current)
-  const incomingIds = targetWindow.slice(wFork + 1)
-  if (incomingIds.length === 0) return null
-  for (const id of incomingIds) {
-    if (currentSet.has(id)) return null
-  }
-
-  const sharedPrefixIds = current.slice(0, cFork + 1)
-  return {
-    sharedPrefixIds,
-    outgoingIds,
-    incomingIds,
-    nextOldestFirst: [...sharedPrefixIds, ...incomingIds],
-    forkIndex: cFork,
-    hasMoreBefore: input.currentHasMoreBefore,
-    hasMoreAfter: input.targetHasMoreAfter
-  }
+  const shared = planRouteVisibleRebase({
+    currentIdsOldestFirst: input.currentIdsOldestFirst,
+    targetResponseIdsOldestFirst: input.targetResponseIdsOldestFirst,
+    targetWindowIdsOldestFirst: input.targetWindowIdsOldestFirst,
+    anchorId: input.forkAnchorId,
+    currentHasMoreBefore: input.currentHasMoreBefore,
+    targetHasMoreAfter: input.targetHasMoreAfter
+  })
+  if (!shared) return null
+  return toSharedPlan(shared)
 }
 
 /**
@@ -195,34 +100,21 @@ export const isDividerVisibleUnionExact = (args: {
   unionWindow: MessageWindow
   unionModelGroupCount: number
 }): boolean => {
-  const { plan, unionOldestFirst, unionNewestFirst, unionWindow, unionModelGroupCount } = args
-  if (!plan || !Array.isArray(plan.nextOldestFirst) || plan.nextOldestFirst.length === 0) return false
-  if (!Array.isArray(unionOldestFirst) || !Array.isArray(unionNewestFirst)) return false
-  const unionIdsOldestFirst = unionOldestFirst.map((m) => m?.id)
-  const displayOldestFirst = [...(unionWindow.displayMessages ?? [])].reverse().map((m) => m?.id)
-  if (
-    unionNewestFirst.length !== plan.nextOldestFirst.length ||
-    unionIdsOldestFirst.length !== plan.nextOldestFirst.length ||
-    displayOldestFirst.length !== plan.nextOldestFirst.length
-  ) {
-    return false
-  }
-  for (let i = 0; i < plan.nextOldestFirst.length; i++) {
-    if (unionIdsOldestFirst[i] !== plan.nextOldestFirst[i]) return false
-    if (displayOldestFirst[i] !== plan.nextOldestFirst[i]) return false
-  }
-  if (new Set(displayOldestFirst).size !== displayOldestFirst.length) return false
-  const obs = unionWindow.boundedViewportObservability
-  if (obs?.didTrim === true) return false
-  if (obs && obs.calibrationDefault !== MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT) return false
-  if ((obs?.boundedCapacity ?? 0) > MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT) return false
-  if (unionWindow.groupCount !== unionWindow.displayGroups.length) return false
-  if (unionWindow.displayGroups.length !== unionModelGroupCount) return false
-  if (unionWindow.groupCapacity < unionWindow.groupCount) return false
-  if (unionWindow.groupCapacity > MESSAGE_WINDOW_VIEWPORT_CAPACITY_CALIBRATION_DEFAULT) return false
-  if (unionWindow.hasMoreOlder !== plan.hasMoreBefore) return false
-  if (unionWindow.hasMoreNewer !== plan.hasMoreAfter) return false
-  return true
+  return isRouteVisibleUnionExact({
+    plan: {
+      sharedPrefixIds: args.plan.sharedPrefixIds,
+      outgoingIds: args.plan.outgoingIds,
+      incomingIds: args.plan.incomingIds,
+      nextOldestFirst: args.plan.nextOldestFirst,
+      anchorIndex: args.plan.forkIndex,
+      hasMoreBefore: args.plan.hasMoreBefore,
+      hasMoreAfter: args.plan.hasMoreAfter
+    },
+    unionOldestFirst: args.unionOldestFirst,
+    unionNewestFirst: args.unionNewestFirst,
+    unionWindow: args.unionWindow,
+    unionModelGroupCount: args.unionModelGroupCount
+  })
 }
 
 /**
@@ -310,31 +202,13 @@ export const buildDividerVisibleMessages = (
   targetOldestFirst: readonly Message[],
   plan: DividerVisibleRebasePlan
 ): Message[] => {
-  const residentById = new Map<string, Message>()
-  for (const m of currentNewestFirst) {
-    if (m && typeof m.id === 'string' && !residentById.has(m.id)) residentById.set(m.id, m)
-  }
-  const targetById = new Map<string, Message>()
-  for (const m of targetOldestFirst) {
-    if (m && typeof m.id === 'string' && !targetById.has(m.id)) targetById.set(m.id, m)
-  }
-  const sharedSet = new Set(plan.sharedPrefixIds)
-  const nextOldestFirst: Message[] = []
-  for (const id of plan.nextOldestFirst) {
-    const reused = residentById.get(id)
-    if (reused && sharedSet.has(id)) {
-      nextOldestFirst.push(reused)
-      continue
-    }
-    const authoritative = targetById.get(id)
-    if (authoritative) {
-      nextOldestFirst.push(authoritative)
-      continue
-    }
-    // Fail-closed at the object layer should never happen when the plan was
-    // built from these same ID lists; keep the resident when available.
-    if (reused) nextOldestFirst.push(reused)
-  }
-  // displayMessages order is newest-first.
-  return nextOldestFirst.toReversed()
+  return buildRouteVisibleMessages(currentNewestFirst, targetOldestFirst, {
+    sharedPrefixIds: plan.sharedPrefixIds,
+    outgoingIds: plan.outgoingIds,
+    incomingIds: plan.incomingIds,
+    nextOldestFirst: plan.nextOldestFirst,
+    anchorIndex: plan.forkIndex,
+    hasMoreBefore: plan.hasMoreBefore,
+    hasMoreAfter: plan.hasMoreAfter
+  })
 }

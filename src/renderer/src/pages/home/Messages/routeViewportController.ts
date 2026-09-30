@@ -542,22 +542,24 @@ export class RouteViewportController {
   }
 
   /**
-   * Divider-only visible incremental rebase: record session epoch + target
-   * route + window identity as rendered and enter `aligned` directly, without
-   * any positioning/hidden phase. Accepted ONLY for the current divider intent
-   * in fetch-hold with matching topic/route/window identity. Rendered
+   * Visible incremental rebase: record session epoch + target route + window
+   * identity as rendered and enter `aligned` directly, without any
+   * positioning/hidden phase. Accepted ONLY for the current divider or top
+   * intent in fetch-hold with matching topic/route/window identity. Top uses
+   * the target route's own saved message anchor + exact offset (never the
+   * divider click offset); divider keeps its clicked offset. Rendered
    * provenance and the window generation advance synchronously; ownership
-   * stays held until the existing divider offset alignment + stable commit
-   * releases it. Displayed provenance is NOT advanced here (the stable commit
-   * does that). Stale epochs refuse with no effect and can never disturb a
-   * newer session.
+   * stays held until the existing offset alignment + stable commit releases
+   * it. Displayed provenance is NOT advanced here (the stable commit does
+   * that). Stale epochs refuse with no effect and can never disturb a newer
+   * session.
    */
   applyVisibleRebaseWindow(epoch: number, target: RouteRef, windowId: string): boolean {
     if (!this.checkSession(epoch)) return false
     if (this.phase !== 'fetch-hold') return false
     const intent = this.intent
     if (!intent) return false
-    if (intent.kind !== 'divider') return false
+    if (intent.kind !== 'divider' && intent.kind !== 'top') return false
     if (intent.topicId !== target.topicId || intent.targetRoute !== target.route) return false
     if (typeof windowId !== 'string' || windowId.length === 0) return false
     this.rendered = { topicId: target.topicId, routeId: target.route, epoch, windowId }
@@ -585,6 +587,29 @@ export class RouteViewportController {
     if (!intent) return false
     if (intent.kind !== 'divider') return false
     this.phase = 'searching'
+    return true
+  }
+
+  /**
+   * Same-epoch top visible → hidden fallback: the top visible rebase already
+   * bound this epoch's rendered provenance (aligned), but post-apply proof
+   * disappeared (saved-anchor coverage/residency/alignment lost). Rewind the
+   * SAME session `aligned` → `fetch-hold` so the existing hidden atomic entry
+   * (`applyTransitionWindow` via `commitRouteWindowAtomic`) can commit the
+   * already-materialized authoritative target window + first-position plan.
+   * Same epoch, same top intent, same ownership, same displayed provenance
+   * (still outgoing — displayed never advanced on the visible path), no
+   * snapshot write, no rendered rebind here (the hidden commit rebinds).
+   * Stale epochs, non-top intents, and non-aligned phases refuse with no
+   * effect. Divider sessions keep `fallbackVisibleToSearch` untouched.
+   */
+  fallbackTopVisibleToHidden(epoch: number): boolean {
+    if (!this.checkSession(epoch)) return false
+    if (this.phase !== 'aligned') return false
+    const intent = this.intent
+    if (!intent) return false
+    if (intent.kind !== 'top') return false
+    this.phase = 'fetch-hold'
     return true
   }
 

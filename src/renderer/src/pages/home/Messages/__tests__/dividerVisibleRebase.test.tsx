@@ -208,16 +208,18 @@ describe('fork-aligned visible divider rebase planning (fail closed)', () => {
   })
 })
 
-describe('divider fetch-hold stays visible; top fetch-hold stays hidden', () => {
-  it('maps divider fetch-hold to revealed and every other fetch-hold to positioning', async () => {
+describe('divider + top fetch-hold stay visible; generic stays hidden', () => {
+  it('maps divider/top fetch-hold to revealed and generic fetch-hold to positioning', async () => {
     const { viewportPhaseAttrFor } = await import('../routeViewportContext')
     expect(viewportPhaseAttrFor('fetch-hold', 'divider')).toBe('revealed')
-    expect(viewportPhaseAttrFor('fetch-hold', 'top')).toBe('positioning')
+    expect(viewportPhaseAttrFor('fetch-hold', 'top')).toBe('revealed')
     expect(viewportPhaseAttrFor('fetch-hold', 'generic')).toBe('positioning')
     expect(viewportPhaseAttrFor('fetch-hold')).toBe('positioning')
     expect(viewportPhaseAttrFor('fetch-hold', null)).toBe('positioning')
     expect(viewportPhaseAttrFor('positioning', 'divider')).toBe('positioning')
+    expect(viewportPhaseAttrFor('positioning', 'top')).toBe('positioning')
     expect(viewportPhaseAttrFor('aligned', 'divider')).toBe('revealed')
+    expect(viewportPhaseAttrFor('aligned', 'top')).toBe('revealed')
     expect(viewportPhaseAttrFor('searching', 'divider')).toBe('revealed')
     expect(viewportPhaseAttrFor('stable', 'divider')).toBe('revealed')
     expect(viewportPhaseAttrFor('idle', 'divider')).toBe('idle')
@@ -286,11 +288,21 @@ describe('controller applyVisibleRebaseWindow (sole truth)', () => {
     expect(c.applyVisibleRebaseWindow(first.epoch, { topicId: 't1', route: 'b1' }, 'w1')).toBe(false)
     expect(c.releaseSession(first.epoch)).toBe(false)
     expect(c.isSessionCurrent(second.epoch)).toBe(true)
-    // Non-divider intents and non-fetch-hold phases also refuse.
+    // Generic intents and non-fetch-hold phases still refuse; top is now
+    // visible-eligible (same saved identity + offset path as divider).
     const c2 = new RouteViewportController({ topicId: 't1', route: null })
-    const top = c2.request({ kind: 'top', topicId: 't1', targetRoute: 'b1', saved: null })
-    expect(c2.applyVisibleRebaseWindow(top.epoch, { topicId: 't1', route: 'b1' }, 'w1')).toBe(false)
-    expect(c2.currentPhase).toBe('fetch-hold')
+    const top = c2.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -100, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
+    })
+    expect(c2.applyVisibleRebaseWindow(top.epoch, { topicId: 't1', route: 'b1' }, 'w1')).toBe(true)
+    expect(c2.currentPhase).toBe('aligned')
+    const c3 = new RouteViewportController({ topicId: 't1', route: null })
+    const generic = c3.request({ kind: 'generic', topicId: 't1', targetRoute: 'b1' })
+    expect(c3.applyVisibleRebaseWindow(generic.epoch, { topicId: 't1', route: 'b1' }, 'w1')).toBe(false)
+    expect(c3.currentPhase).toBe('fetch-hold')
   })
 })
 
