@@ -216,8 +216,8 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
 
   it('programmatic scroll with no session never takes over (aexcl06 → window 16→28 stays aexcl06)', () => {
     // Exact regression for the last proven gap: A wheel exclusive aexcl06 is
-    // already stable+persisted and the A→main→A programmatic completion
-    // committed aexcl06; a same-route window refresh (::16→::28) then emits a
+    // already stable+persisted and the A→B→A (main is concrete B) programmatic
+    // completion committed aexcl06; a same-route window refresh (::16→::28) then emits a
     // scroll event with NO declare. The scroll must be rejected and the A
     // snapshot/anchor must stay aexcl06 (keeper compensates the offset).
     const c = new RouteViewportController({ topicId: 't1', route: 'A' })
@@ -238,8 +238,8 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
       isAtBottom: excl.snapshot.isAtBottom
     })
     expect(c.noteInteractionScrollEnd(t0)).toBe(true)
-    // Programmatic A→main→A around the stable A anchor (controller completion
-    // is still a legal stable source and needs no user input).
+    // Programmatic A→B→A (main is concrete B) around the stable A anchor
+    // (controller completion is still a legal stable source and needs no user input).
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
     c.applyTransitionWindow(first.epoch, { topicId: 't1', route: 'main' }, wid('main-25'))
     const second = c.request({
@@ -274,7 +274,11 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     const prog = c.userTakeover({ messageId: 'mMsg11', intraRowOffset: -4, scrollTop: -310, isAtBottom: false })
     expect(prog.taken).toBe(false)
     if (!prog.taken) expect(prog.reason).toBe('no-user-intent')
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mAexcl06', offset: -8 })
+    expect(c.getAnchorFor({ topicId: 't1', route: 'A' })).toEqual({
+      kind: 'message',
+      messageId: 'mAexcl06',
+      offset: -8
+    })
     const kept = store.get('scroll:topic-t1::A') as { messageId: string }
     expect(kept.messageId).toBe('mAexcl06')
     // A real wheel afterwards opens a new session and adopts across scrolls.
@@ -306,6 +310,10 @@ describe('capture → scroll same event writes the exclusive (journey) snapshot'
     }
     expect(c.noteInteractionScrollEnd(wheel)).toBe(true)
     expect((store.get('scroll:topic-t1::A') as { messageId: string }).messageId).toBe('mWheel2')
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mWheel2', offset: -5 })
+    expect(c.getAnchorFor({ topicId: 't1', route: 'A' })).toEqual({
+      kind: 'message',
+      messageId: 'mWheel2',
+      offset: -5
+    })
   })
 })

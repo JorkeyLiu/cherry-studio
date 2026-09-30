@@ -7,8 +7,6 @@
  *   only after stable default); transport stays fail-visible/preserve.
  * - Stable commit requires coverage for valid anchors; defaults/bottom pass.
  */
-import * as fs from 'node:fs'
-
 import {
   canonicalSavedAnchorId,
   chooseRouteWindowRequest,
@@ -387,25 +385,11 @@ describe('continuous top-route sequence: branch anchor survives shared crossing-
 })
 
 describe('top-effect saved substitution is route-qualified (provenance, not displayed==target)', () => {
-  const messagesSrc = (): string => fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
-
-  it('retained live anchor comes only from getAnchorFor(incoming target)', () => {
-    const src = messagesSrc()
-    // The route-qualified read for the incoming target exists.
-    expect(src).toMatch(/controller\.getAnchorFor\(\{\s*topicId:\s*topicIdAtEffect,\s*route:\s*routeAtEffect\s*\}\)/)
-    // The effect must not decide another route's position from the
-    // unqualified global anchor.
-    const topIdx = src.indexOf('Rapid-return retained anchor')
-    expect(topIdx).toBeGreaterThan(-1)
-    const slice = src.slice(topIdx, topIdx + 2600)
-    expect(slice).not.toMatch(/controller\.activeAnchor/)
-    expect(slice).toMatch(/getAnchorFor/)
-    // No route inference from displayed alone in this decision: the retained
-    // gate still requires displayed==target AND the qualified read above
-    // (foreign live anchors read as null, so the persisted snapshot wins).
-    expect(slice).toMatch(/controller\.displayedRoute/)
-  })
-
+  // Behavioral coverage only (no caller-spelling assertion): the controller
+  // provenance unit below covers route-qualified semantics (a foreign live
+  // anchor reads as null for the incoming target); Messages caller wiring
+  // itself is covered by the real-runtime top-cross-route-provenance E2E,
+  // not by this unit.
   it('controller provenance: foreign live anchor is unobservable for the incoming target', async () => {
     const { RouteViewportController } = await import('@renderer/pages/home/Messages/routeViewportController')
     const c = new RouteViewportController({ topicId: 't1', route: 'A' })

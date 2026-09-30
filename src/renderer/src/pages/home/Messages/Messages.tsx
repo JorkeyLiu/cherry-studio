@@ -4326,8 +4326,7 @@ const Messages = ({
     // here solely when its provenance already equals the incoming target
     // (proven same-route). A foreign live anchor (B provenance while
     // requesting A) returns null and the target's own persisted snapshot
-    // wins. Never infer route from displayed alone; never inspect the
-    // unqualified global activeAnchor for another route's position.
+    // wins. Never infer route from displayed alone.
     const retainedLiveAnchor = controller.getAnchorFor({ topicId: topicIdAtEffect, route: routeAtEffect })
     const useRetainedAnchor =
       retainedLiveAnchor !== null &&

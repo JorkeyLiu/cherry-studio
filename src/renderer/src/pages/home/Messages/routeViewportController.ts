@@ -179,9 +179,6 @@ export class RouteViewportController {
    * both fields together via `setAnchorLocked`; every external read of an
    * anchor for a specific target must go through `getAnchorFor()` which
    * returns the anchor only when provenance matches the requested route.
-   * The raw `activeAnchor` getter is legacy/unqualified and must never be
-   * used to decide another route's position (no route inference from
-   * displayed alone).
    */
   private anchorRoute: RouteRef | null = null
   /** Ownership held while a transition session is active. */
@@ -216,7 +213,7 @@ export class RouteViewportController {
    */
   private windowGenerationSeq = 0
   /**
-   * Displayed-route anchor cache across supersession (rapid A→main→A):
+   * Displayed-route anchor cache across supersession (rapid A→B→A):
    * the outgoing route's stable anchor is stashed before a request to a
    * different target overwrites it, so returning to the displayed route with
    * no fresh anchor restores the live/stable anchor instead of bottom.
@@ -274,22 +271,6 @@ export class RouteViewportController {
   }
 
   /**
-   * Legacy unqualified anchor read. Prefer `getAnchorFor(target)` for any
-   * route-targeted decision (top restore, pagination snapshot). Direct use
-   * is allowed only where the caller already proved the route (stable keeper
-   * holding the displayed route while clean, tests asserting the current
-   * session's anchor). Never infer the anchor's route from displayed alone.
-   */
-  get activeAnchor(): RouteVisualAnchor | null {
-    return this.anchor ? { ...this.anchor } : null
-  }
-
-  /** Provenance of the active anchor (copy, null when no anchor). */
-  get anchorProvenance(): RouteRef | null {
-    return this.anchorRoute ? { ...this.anchorRoute } : null
-  }
-
-  /**
    * Route-qualified anchor read (sole anchor source for route-targeted
    * decisions): returns a copy only when the live anchor's provenance
    * exactly matches the requested topic+route; otherwise null. A foreign
@@ -300,20 +281,6 @@ export class RouteViewportController {
     if (!this.anchor || !this.anchorRoute) return null
     if (this.anchorRoute.topicId !== target.topicId || this.anchorRoute.route !== target.route) return null
     return { ...this.anchor }
-  }
-
-  /**
-   * Route-qualified cache peek (tests/diagnostics): the stashed stable
-   * anchor for the requested route, or null. Keyed by canonical route key,
-   * never by displayed inference.
-   */
-  peekCachedAnchorFor(target: RouteRef): RouteVisualAnchor | null {
-    try {
-      const hit = this.anchorCache.get(routeViewportKey(target.topicId, target.route)) ?? null
-      return hit ? { ...hit } : null
-    } catch {
-      return null
-    }
   }
 
   /** Monotonic rendered-window generation (see field doc). */
@@ -355,8 +322,8 @@ export class RouteViewportController {
    * Capture the live DOM as the outgoing snapshot ONLY when clean + stable:
    * not owned, DOM belongs to displayed, phase stable/idle/clean-terminal.
    * Transition-owned or dirty states preserve the existing stable snapshot
-   * and active anchor — never read live DOM (rapid A→main→A must not capture
-   * the intermediate main DOM as A).
+   * and active anchor — never read live DOM (rapid A→B→A must not capture
+   * the intermediate B DOM as A).
    */
   shouldCaptureOutgoing(): boolean {
     if (this.ownershipHeld) return false
@@ -444,7 +411,7 @@ export class RouteViewportController {
     const prevDisplayed = { ...this.displayed }
     const prevIntent: RouteViewportIntent | null = this.intent ? { ...this.intent } : null
     // Stash the outgoing displayed anchor before it is overwritten, so a
-    // rapid return to the same route restores it (A→main→A where main never
+    // rapid return to the same route restores it (A→B→A where B never
     // displayed must restart from the live/stable A anchor). Provenance
     // guard: stash ONLY when the live anchor was actually produced for the
     // still-displayed route. A foreign live anchor (e.g. B's b1 while
@@ -469,7 +436,7 @@ export class RouteViewportController {
     this.terminalReason = null
     // request() starts the TARGET session but never claims rendered: the DOM
     // still shows the outgoing route until the atomic window apply records it.
-    // Rapid-return priority (A→main→A where main never displayed): when the
+    // Rapid-return priority (A→B→A where B never displayed): when the
     // target re-equals the still-displayed route, the RETAINED A anchor
     // (proven same-route live anchor, else the stashed stable anchor) starts
     // the session — it is provably fresher than the persisted snapshot

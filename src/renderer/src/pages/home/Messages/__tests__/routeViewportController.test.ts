@@ -27,6 +27,8 @@ import {
 
 const displayed = (topicId: string, route: string | null) => ({ topicId, route })
 
+const wid = (n: string): string => `oldest::newest::${n}`
+
 describe('routeViewportKey / displayedRouteKey', () => {
   it('keys routes canonically with main fallback', () => {
     expect(routeViewportKey('t1', null)).toBe('topic-t1::main')
@@ -45,7 +47,7 @@ describe('top intent', () => {
       saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
     })
     expect(c.currentPhase).toBe('fetch-hold')
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
     expect(c.programmaticOwned).toBe(true)
     expect(c.canAcceptUserScrollWrite()).toBe(false)
     void epoch
@@ -54,7 +56,7 @@ describe('top intent', () => {
   it('no history resolves to the deterministic bottom default, never outgoing geometry', () => {
     const c = new RouteViewportController(displayed('t1', null))
     c.request({ kind: 'top', topicId: 't1', targetRoute: 'b9', saved: null })
-    expect(c.activeAnchor).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'b9'))).toBeNull()
   })
 
   it('commitStable refuses a valid-but-unresolved top anchor (no fallback commit)', () => {
@@ -83,7 +85,7 @@ describe('divider intent', () => {
       dividerKey: 'm1::main',
       clickOffset: 150
     })
-    expect(c.activeAnchor).toEqual({ kind: 'divider', dividerKey: 'm1::main', offset: 150 })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'divider', dividerKey: 'm1::main', offset: 150 })
     void epoch
   })
 
@@ -168,7 +170,7 @@ describe('lifecycle phases', () => {
     c.revealed(epoch)
     const out = c.commitStable(epoch, { messageId: null, intraRowOffset: null, scrollTop: 0, isAtBottom: true })
     expect(out.committed).toBe(true)
-    expect(c.activeAnchor).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toBeNull()
   })
 })
 
@@ -273,7 +275,7 @@ describe('user intent declare (pending-only, never terminates)', () => {
       // `scrollend` (or request/invalidate) closes it.
       expect(c2.userIntentPending).toBe(true)
       expect(c2.hasActiveUserInteraction()).toBe(true)
-      expect(c2.activeAnchor).toEqual({ kind: 'message', messageId: 'm5', offset: -30 })
+      expect(c2.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm5', offset: -30 })
       expect(c2.noteInteractionScrollEnd(stable)).toBe(true)
       expect(c2.userIntentPending).toBe(false)
     }
@@ -281,7 +283,6 @@ describe('user intent declare (pending-only, never terminates)', () => {
 })
 
 describe('userTakeover atomic (single user-scroll event)', () => {
-  const wid = (n: string): string => `oldest::newest::${n}`
   const measured = { messageId: 'mExcl', intraRowOffset: -8, scrollTop: -120, isAtBottom: false }
 
   it('fetch-hold pre-apply takes over the outgoing route (never the incoming selected key)', () => {
@@ -300,7 +301,7 @@ describe('userTakeover atomic (single user-scroll event)', () => {
       expect(out.snapshot).toMatchObject({ messageId: 'mExcl' })
       expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
       expect(c.currentPhase).toBe('stable')
-      expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mExcl', offset: -8 })
+      expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mExcl', offset: -8 })
     }
     expect(c.programmaticOwned).toBe(false)
     const releases = c.releaseCount
@@ -427,7 +428,7 @@ describe('userTakeover atomic (single user-scroll event)', () => {
     c.declareUserIntent()
     const out = c.userTakeover({ messageId: null, intraRowOffset: null, scrollTop: 0, isAtBottom: true })
     expect(out.taken).toBe(true)
-    expect(c.activeAnchor).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
   })
 })
 
@@ -465,8 +466,6 @@ describe('displayed provenance', () => {
 })
 
 describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', () => {
-  const wid = (n: string): string => `oldest::newest::${n}`
-
   it('request never claims rendered; atomic apply binds epoch+route+window', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     expect(c.isDomProvenanceClean).toBe(true)
@@ -556,7 +555,8 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     expect(c.noteSameRouteWindowUpdate({ topicId: 't1', route: 'A' }, wid('4'))).toBe(false)
   })
 
-  it('rapid A→main→A: second request supersedes, preserves A anchor, never captures main DOM as A', () => {
+  it('rapid A→B→A: second request supersedes, preserves A anchor, never captures B DOM as A', () => {
+    // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
     c.userTakeover({ messageId: 'mA', intraRowOffset: -12, scrollTop: 0, isAtBottom: false })
@@ -564,7 +564,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     // Outgoing A is clean-stable: capture allowed.
     expect(c.shouldCaptureOutgoing()).toBe(true)
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
-    // main window rendered but not displayed (hidden fetch window).
+    // B window rendered but not displayed (hidden fetch window).
     c.applyTransitionWindow(first.epoch, { topicId: 't1', route: 'main' }, wid('main-25'))
     expect(c.isDomProvenanceClean).toBe(false)
     // Second request back to A supersedes main before it ever displayed.
@@ -577,8 +577,8 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     expect(second.epoch).toBeGreaterThan(first.epoch)
     // Displayed never left A; the preserved A anchor restarts the session.
     expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
-    // Dirty during the new fetch: no capture of the intermediate main DOM as A.
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
+    // Dirty during the new fetch: no capture of the intermediate B DOM as A.
     expect(c.shouldCaptureOutgoing()).toBe(false)
     // Stale main completions are inert.
     expect(c.revealed(first.epoch)).toBe(false)
@@ -594,6 +594,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
   })
 
   it('rapid return prefers the retained anchor over a stale persisted snapshot', () => {
+    // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
     c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false })
@@ -611,7 +612,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     })
     expect(second.epoch).toBeGreaterThan(first.epoch)
     expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
     void second
   })
 
@@ -622,7 +623,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     c.noteInteractionScrollEnd()
     // First request stashes the A anchor; the main session itself holds null.
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
-    expect(c.activeAnchor).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'main'))).toBeNull()
     // A forth switch to main with a persisted main snapshot uses it (the
     // retained A anchor must never leak into another route's session).
     c.applyTransitionWindow(first.epoch, { topicId: 't1', route: 'main' }, wid('1'))
@@ -638,11 +639,12 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     // Target == displayed (main) with same-target previous session: the live
     // previous anchor (mMain commit) is retained for the same route — still
     // consistent because it belongs to this route.
-    expect(c.activeAnchor?.kind).toBe('message')
+    expect(c.getAnchorFor(displayed('t1', 'main'))?.kind).toBe('message')
     void third
   })
 
   it('supersede to the displayed route with no fresh anchor keeps the live/stable anchor', () => {
+    // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     c.declareUserIntent()
     c.userTakeover({ messageId: 'mLive', intraRowOffset: -7, scrollTop: 0, isAtBottom: false })
@@ -652,7 +654,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     // Target re-equals displayed (A) with no saved anchor: keep live anchor.
     const second = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: null })
     expect(second.epoch).toBeGreaterThan(first.epoch)
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
     void second
   })
 
@@ -664,11 +666,11 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
       targetRoute: 'b1',
       saved: { scrollTop: -400, messageId: 'm1', intraRowOffset: -12, isAtBottom: false }
     })
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'message', messageId: 'm1', offset: -12 })
     void top
     const c2 = new RouteViewportController(displayed('t1', null))
     c2.request({ kind: 'divider', topicId: 't1', targetRoute: 'b1', dividerKey: 'm1::main', clickOffset: 150 })
-    expect(c2.activeAnchor).toEqual({ kind: 'divider', dividerKey: 'm1::main', offset: 150 })
+    expect(c2.getAnchorFor(displayed('t1', 'b1'))).toEqual({ kind: 'divider', dividerKey: 'm1::main', offset: 150 })
   })
 
   it('focused: foreign window apply after supersede-back never pollutes outgoing A snapshot', () => {
@@ -697,7 +699,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
       targetRoute: 'A',
       saved: { scrollTop: -1, messageId: 'mA', intraRowOffset: -12, isAtBottom: false }
     })
-    // Outgoing freeze for the A session must NOT read the intermediate main
+    // Outgoing freeze for the A session must NOT read the intermediate B
     // DOM as A: gate closed while dirty/owned.
     expect(freeze()).toBe(false)
     expect(store.get('topic-t1::A')).toEqual({ messageId: 'mA' })
@@ -707,7 +709,7 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
     expect(c.applyTransitionWindow(first.epoch, { topicId: 't1', route: 'main' }, wid('main-late'))).toBe(false)
     expect(c.renderedProvenance).toMatchObject({ routeId: 'main', epoch: first.epoch })
     // A target window restores with the preserved anchor.
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
     expect(c.applyTransitionWindow(second.epoch, { topicId: 't1', route: 'A' }, wid('A'))).toBe(true)
     c.firstPositioned(second.epoch, 'placed')
     expect(c.revealed(second.epoch)).toBe(true)
@@ -737,7 +739,6 @@ describe('rendered provenance (selected=A/displayed=A/DOM=main expressible)', ()
 })
 
 describe('interaction token/session (controller-owned, no boolean guess)', () => {
-  const wid = (n: string): string => `oldest::newest::${n}`
   const measured = (id: string, top = -100) => ({
     messageId: id,
     intraRowOffset: -8,
@@ -764,7 +765,7 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
     const rej = c.userTakeover(measured('mX'))
     expect(rej.taken).toBe(false)
     if (!rej.taken) expect(rej.reason).toBe('no-user-intent')
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mA', offset: -12 })
   })
 
   it('stale token rejects after scrollend; later programmatic scroll refused', () => {
@@ -781,7 +782,7 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
     expect(bare.taken).toBe(false)
     if (!bare.taken) expect(bare.reason).toBe('no-user-intent')
     // Anchor stays at the last session scroll (m1), never m2/m3.
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'm1', offset: -8 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'm1', offset: -8 })
   })
 
   it('same session adopts multiple scrolls; final position wins', () => {
@@ -789,13 +790,13 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
     const t = c.declareUserIntent()
     const s1 = c.userTakeover(measured('m1', -100), undefined, t)
     expect(s1.taken).toBe(true)
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'm1', offset: -8 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'm1', offset: -8 })
     // Wheel refresh keeps the same session alive.
     const refreshed = c.declareUserIntent()
     expect(refreshed.interactionId).toBe(t.interactionId)
     const s2 = c.userTakeover(measured('m2', -250), undefined, refreshed)
     expect(s2.taken).toBe(true)
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'm2', offset: -8 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'm2', offset: -8 })
     expect(c.activeInteractionScrollCount).toBe(2)
     expect(c.noteInteractionScrollEnd()).toBe(true)
   })
@@ -846,7 +847,6 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
 })
 
 describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', () => {
-  const wid = (n: string): string => `oldest::newest::${n}`
   const stableA = (c: RouteViewportController, id = 'a1', offset = -12): void => {
     c.declareUserIntent()
     c.userTakeover({ messageId: id, intraRowOffset: offset, scrollTop: -400, isAtBottom: false })
@@ -855,40 +855,51 @@ describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', ()
   const savedOf = (id: string | null, offset: number | null = -12) =>
     id ? { scrollTop: -400, messageId: id, intraRowOffset: offset, isAtBottom: false } : null
 
-  it('exact bug sequence: A stable a1 → request B saved b1 (uncommitted) → request A saved a1 keeps a1, cache A stays a1', () => {
+  it('exact bug sequence: A stable a1 → request B saved b1 (uncommitted) → request A saved a1 keeps a1, never b1', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     stableA(c, 'a1')
     expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
-    // Request B: displayed stays A, live anchor becomes B provenance.
+    // Request B: displayed stays A; the incoming B anchor is observable only for B.
     const toB = c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: savedOf('b1', -30) })
     expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
-    expect(c.anchorProvenance).toEqual(displayed('t1', 'B'))
+    expect(c.currentIntent).toMatchObject({ topicId: 't1', targetRoute: 'B' })
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
     // Foreign anchor is not observable through the route-qualified API.
     expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
-    expect(c.getAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
-    // Contamination guard: cache A still holds a1 (B's b1 never stashed under A).
-    expect(c.peekCachedAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
     // Request A before B commits: the target's own saved a1 must win, never b1.
     const backA = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
     expect(backA.epoch).toBeGreaterThan(toB.epoch)
     expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
-    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+    expect(c.currentIntent).toMatchObject({ topicId: 't1', targetRoute: 'A' })
     expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
-    expect(c.peekCachedAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
-    expect(c.activeAnchor).not.toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
-    void wid
+    expect(c.getAnchorFor(displayed('t1', 'A'))).not.toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    // Behavioral commit proves the restored session commits A, not B.
+    c.applyTransitionWindow(backA.epoch, { topicId: 't1', route: 'A' }, wid('A-1'))
+    c.firstPositioned(backA.epoch, 'placed')
+    expect(c.revealed(backA.epoch)).toBe(true)
+    const out = c.commitStable(backA.epoch, {
+      messageId: 'a1',
+      intraRowOffset: -12,
+      scrollTop: -400,
+      isAtBottom: false
+    })
+    expect(out.committed).toBe(true)
+    expect(out.commit?.routeKey).toBe('topic-t1::A')
+    expect(out.commit?.snapshot).toMatchObject({ messageId: 'a1' })
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
   })
 
   it('B saved null variant: uncommitted null-B never corrupts A', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     stableA(c, 'a1')
     c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: null })
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
     expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
-    expect(c.peekCachedAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
     c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
+    expect(c.currentIntent).toMatchObject({ topicId: 't1', targetRoute: 'A' })
     expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
   })
 
@@ -906,22 +917,28 @@ describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', ()
       isAtBottom: false
     })
     expect(committed.committed).toBe(true)
+    expect(committed.commit?.routeKey).toBe('topic-t1::B')
+    expect(committed.commit?.snapshot).toMatchObject({ messageId: 'b1' })
     expect(c.displayedRoute).toEqual(displayed('t1', 'B'))
     expect(c.getAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
-    // Ordinary committed B switch restores B independently.
-    expect(c.peekCachedAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
+    // Ordinary committed B switch restores B independently; return to A restores a1.
     const backA = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
+    expect(c.displayedRoute).toEqual(displayed('t1', 'B'))
+    expect(c.currentIntent).toMatchObject({ topicId: 't1', targetRoute: 'A' })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
     void backA
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
-    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
   })
 
   it('same-route rapid return retains the legitimate live A anchor over a stale snapshot', () => {
+    // 'main' is the concrete B for this cycle.
     const c = new RouteViewportController(displayed('t1', 'A'))
     stableA(c, 'mLive', -7)
     const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
-    expect(c.activeAnchor).toBeNull()
-    expect(c.anchorProvenance).toBeNull()
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
+    expect(c.getAnchorFor(displayed('t1', 'main'))).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
     const second = c.request({
       kind: 'top',
       topicId: 't1',
@@ -929,24 +946,24 @@ describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', ()
       saved: savedOf('mStale', -1)
     })
     expect(second.epoch).toBeGreaterThan(first.epoch)
-    // Provenance-guarded cache still holds the live A anchor; it beats stale.
-    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
+    // Retained live A anchor beats the stale persisted snapshot.
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
     expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
   })
 
-  it('divider fresh-wins over any retained anchor and carries target provenance', () => {
+  it('divider fresh-wins over any retained anchor and carries target', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     stableA(c, 'a1')
     c.request({ kind: 'divider', topicId: 't1', targetRoute: 'A', dividerKey: 'a1::A', clickOffset: 55 })
-    expect(c.activeAnchor).toEqual({ kind: 'divider', dividerKey: 'a1::A', offset: 55 })
-    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+    expect(c.currentIntent).toMatchObject({ kind: 'divider', topicId: 't1', targetRoute: 'A' })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'divider', dividerKey: 'a1::A', offset: 55 })
     expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
   })
 
-  it('commit/takeover/invalidate maintain provenance; foreign reads stay null', () => {
+  it('commit/takeover/invalidate maintain route-qualified reads; foreign reads stay null', () => {
     const c = new RouteViewportController(displayed('t1', 'A'))
     stableA(c, 'a1')
-    // Commit on A keeps A provenance.
+    // Commit on A keeps the A anchor observable only for A.
     const e1 = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
     c.applyTransitionWindow(e1.epoch, { topicId: 't1', route: 'A' }, wid('A-1'))
     c.firstPositioned(e1.epoch, 'placed')
@@ -958,13 +975,15 @@ describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', ()
       isAtBottom: false
     })
     expect(out.committed).toBe(true)
-    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+    expect(out.commit?.routeKey).toBe('topic-t1::A')
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
     expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
-    // Invalidate clears both anchor and provenance.
+    // Invalidate clears the qualified read for every route.
     c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: savedOf('b1') })
     c.invalidateAll()
-    expect(c.activeAnchor).toBeNull()
-    expect(c.anchorProvenance).toBeNull()
+    expect(c.currentIntent).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
     expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
   })
 })

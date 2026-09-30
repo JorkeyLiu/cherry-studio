@@ -1,16 +1,17 @@
 /**
- * Divider-only visible incremental rebase (bounded unit).
+ * Divider-only visible incremental rebase (bounded unit, behavior-only).
  *
- * Covers every listed claim with direct assertions:
- * - >=5 shared prefix HTMLElements retain object identity;
+ * DOM-behavior matrix lives here via component behavior (not source-regex,
+ * not E2E instrumentation):
+ * - >=5 shared prefix HTMLElements retain object identity (same-object DOM);
  * - shared mounts once / unmounts zero; outgoing unmounts; target mounts;
  * - container never empty; phase never positioning; visibility never hidden;
  * - synchronous divider compensation <=1px;
- * - stale visible apply rejected;
+ * - stale visible apply rejected (controller, same session preserved);
  * - missing anchor falls back to the existing hidden searching path.
+ * The E2E spec keeps one minimal real-runtime smoke; this harness covers the
+ * DOM-behavior matrix above.
  */
-import * as fs from 'node:fs'
-
 import type { Message } from '@renderer/types/newMessage'
 import { act, render } from '@testing-library/react'
 import { useEffect, useState } from 'react'
@@ -603,118 +604,21 @@ describe('post-apply lost residency falls back into hidden searching (same sessi
     expect(buildDividerSearchProgressFromVisible({ ...progress!, dividerKey: '' } as never)).toBeNull()
   })
 
-  it('Messages wires the post-apply fallback under the same epoch (structural)', () => {
-    const src = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
-    // Same-session fallback entry in the visible layout effect.
-    expect(src).toMatch(/fallBackToHiddenSearch|fallbackVisibleToSearch/)
-    expect(src).toMatch(/controller\.fallbackVisibleToSearch\(/)
-    // Fallback arms the EXISTING hidden search progress (no new session) and
-    // steps it explicitly without writing a stable snapshot.
-    expect(src).toMatch(/dividerProgressRef\.current = progress/)
-    expect(src).toMatch(/stepDividerSearch\(\)/)
-    // The visible success path still never enters positioning/hidden.
-    expect(src).toMatch(/commitDividerVisibleAtomic/)
-  })
-})
-
-describe('visible quiet sequence (structural: no same-effect commit, bounded rAF, shared offset)', () => {
-  // Focused structural proof over the current Messages artifact (not a
-  // production integration claim: the synthetic DOM harness above never runs
-  // the real Messages layout effect; E2E owns production positioning proof).
-  const visibleEffectSrc = (): string => {
-    const src = fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
-    const start = src.indexOf('Divider-only visible rebase: synchronous first compensation + bounded')
-    expect(start).toBeGreaterThanOrEqual(0)
-    return src.slice(start, start + 26000)
-  }
-
-  it('no stable commit before the first quiet frame (first compensation only writes scrollTop)', () => {
-    const fx = visibleEffectSrc()
-    // The synchronous section arms the quiet sequence; the ONLY stable commit
-    // lives inside the deferred quiet commit path.
-    expect(fx).toMatch(/pending\.quietArmed = true/)
-    expect(fx).toMatch(/dividerVisibleRafRef\.current = requestAnimationFrame/)
-    const commitCalls = fx.match(/commitDisplayedStable\(pending\.topicId, pending\.routeId, pending\.ownerEpoch\)/g)
-    expect(commitCalls?.length).toBe(1)
-    expect(fx).toMatch(/const commitQuiet = \(\): void => \{[\s\S]*?commitDisplayedStable\(pending\.topicId/)
-    // The synchronous first-pass (first compensation → quiet arm) never
-    // commits: no commit call sits between the first resolve and the arm.
-    const firstResolve = fx.indexOf('const first = resolveTarget()')
-    const arm = fx.indexOf('pending.quietArmed = true')
-    expect(firstResolve).toBeGreaterThanOrEqual(0)
-    expect(arm).toBeGreaterThan(firstResolve)
-    expect(fx.slice(firstResolve, arm)).not.toMatch(/commitDisplayedStable\(/)
-  })
-
-  it('residual correction waits another frame and revalidates before commit', () => {
-    const fx = visibleEffectSrc()
-    expect(fx).toMatch(/const residual = reHave - current\.target/)
-    // Bounded quiet frames: first quiet + residual recheck (no loop, no
-    // timer).
-    expect(fx).toMatch(/live\.scrollTop \+= residual/)
-    const rafCount = fx.match(/requestAnimationFrame\(\(\) => \{/g)?.length ?? 0
-    expect(rafCount).toBeGreaterThanOrEqual(2)
-    expect(rafCount).toBeLessThanOrEqual(3)
-    expect(fx).not.toMatch(/setTimeout|setInterval/)
-    expect(fx).toMatch(/if \(dividerVisibleRef\.current !== pending\) return/)
-  })
-
-  it('shared fallback compensates to sharedOffset (not a residency-only hold)', () => {
-    const fx = visibleEffectSrc()
-    expect(fx).toMatch(/target: pending\.sharedOffset/)
-    expect(fx).toMatch(/typeof pending\.sharedOffset !== 'number'/)
-    // No path commits transient geometry: the quiet gate re-resolves the
-    // target on every frame.
-    expect(fx).toMatch(/const current = resolveTarget\(\)/)
-  })
-
-  it('commit-false while current explicitly fails/terminates (never clears the driver first)', () => {
-    const fx = visibleEffectSrc()
-    expect(fx).toMatch(/const ok = commitDisplayedStable\(pending\.topicId, pending\.routeId, pending\.ownerEpoch\)/)
-    expect(fx).toMatch(
-      /if \(controller\.isSessionCurrent\(pending\.ownerEpoch\)\) \{\s*\n?.*failVisibleTransition\(pending\.ownerEpoch\)/
-    )
-    // Stale commit refusal drops only its own driver, never a newer session.
-    expect(fx).toMatch(/if \(dividerVisibleRef\.current === pending\) dividerVisibleRef\.current = null/)
-  })
-
-  it('stale scheduled callbacks cannot affect a newer epoch', () => {
-    const fx = visibleEffectSrc()
-    // Every rAF body re-checks its own pending identity first (plus the
-    // fallback entry guards its own pending the same way; current-session
-    // failure funnels through dropOrFailVisible which keeps the same
-    // identity guard).
-    const staleGuards = fx.match(/dividerVisibleRef\.current !== pending/g)?.length ?? 0
-    const dropFails = fx.match(/dropOrFailVisible\(\)/g)?.length ?? 0
-    expect(staleGuards + dropFails).toBeGreaterThanOrEqual(3)
-    // Controller-level stale safety: epoch-guarded release/terminate.
+  it('post-apply fallback stays in the same controller session (no transient commit)', () => {
+    // Behavior proof lives in the controller fallbackVisibleToSearch units
+    // above (same-session preserved, no transient commit); the real-runtime
+    // smoke lives in the true-branch E2E spec, not here.
     const c = new RouteViewportController({ topicId: 't1', route: null })
-    const first = c.request({
+    const { epoch } = c.request({
       kind: 'divider',
       topicId: 't1',
       targetRoute: 'b1',
       dividerKey: 'm6::main',
-      clickOffset: 10
+      clickOffset: 150
     })
-    expect(c.applyVisibleRebaseWindow(first.epoch, { topicId: 't1', route: 'b1' }, 'w-visible-1')).toBe(true)
-    const second = c.request({
-      kind: 'divider',
-      topicId: 't1',
-      targetRoute: 'b2',
-      dividerKey: 'm6::main',
-      clickOffset: 12
-    })
-    expect(second.epoch).toBeGreaterThan(first.epoch)
-    // Stale quiet work for the first epoch refuses everywhere and never
-    // releases the newer session's ownership.
-    expect(
-      c.commitStable(first.epoch, { messageId: 'm1', intraRowOffset: 0, scrollTop: 0, isAtBottom: false }).committed
-    ).toBe(false)
-    expect(c.releaseSession(first.epoch)).toBe(false)
-    expect(c.terminate(first.epoch, 'fail-visible').terminated).toBe(false)
-    expect(c.fallbackVisibleToSearch(first.epoch)).toBe(false)
-    expect(c.isSessionCurrent(second.epoch)).toBe(true)
-    expect(c.programmaticOwned).toBe(true)
+    expect(c.applyVisibleRebaseWindow(epoch, { topicId: 't1', route: 'b1' }, 'm1::n2::8')).toBe(true)
+    expect(c.fallbackVisibleToSearch(epoch)).toBe(true)
+    expect(c.currentPhase).toBe('searching')
   })
 })
 
@@ -802,7 +706,6 @@ describe('visible union gate fails closed (pure, exported cap truth)', () => {
     ).toBe(false)
 
     // Missing ID in the committed display list (silent trim above the cap).
-    const dropped = { ...exact }
     const droppedWindow = {
       ...exact.unionWindow,
       displayMessages: exact.unionWindow.displayMessages.slice(1)
@@ -816,7 +719,6 @@ describe('visible union gate fails closed (pure, exported cap truth)', () => {
         unionModelGroupCount: exact.groupCount
       })
     ).toBe(false)
-    void dropped
 
     // Duplicate ID in the committed display list.
     const dupWindow = {

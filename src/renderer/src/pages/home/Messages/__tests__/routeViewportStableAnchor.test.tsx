@@ -276,7 +276,11 @@ describe('stable anchor holds across layout growth (no polling)', () => {
     })
     expect(container.scrollTop).toBe(1033)
     // The anchor identity is unchanged: it is still the continuing anchor.
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'm2', offset: -60 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
     // Scrolling moved the row back under the anchor in real geometry; model
     // that, then verify no further drift on the next observation.
     act(() => {
@@ -304,7 +308,11 @@ describe('stable anchor holds across layout growth (no polling)', () => {
       keeper.rerender(1)
     })
     expect(container.scrollTop).toBe(220)
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'm2', offset: -60 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
     keeper.unmount()
   })
 })
@@ -368,7 +376,11 @@ describe('same-route window 16→28 full event loop (row replacement + 12 rows)'
     expect(live).not.toBeNull()
     expect(live?.isConnected).toBe(true)
     expect((live as HTMLElement).getBoundingClientRect().top - container.getBoundingClientRect().top).toBe(-60)
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'aexcl06', offset: -60 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'aexcl06',
+      offset: -60
+    })
     expect(takeoverSpy).not.toHaveBeenCalled()
     expect(store.get('scroll:topic-t1::main')).toBeUndefined()
     takeoverSpy.mockRestore()
@@ -445,7 +457,11 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
       container.dispatchEvent(new Event('scroll'))
     })
     expect(container.scrollTop).toBe(220)
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'm2', offset: -60 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
     keeper.unmount()
   })
 
@@ -530,7 +546,11 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
       keeper.rerender(1)
     })
     expect(container.scrollTop).toBe(1033)
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'm2', offset: -60 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
     keeper.unmount()
   })
 
@@ -584,7 +604,11 @@ describe('user input takes over the anchor', () => {
       container.dispatchEvent(new Event('scroll'))
     })
     // Keeper alone writes nothing.
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'm2', offset: -60 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
     expect(store.get('scroll:topic-t1::main')).toBeUndefined()
     // Atomic takeover (Messages path) adopts m3; the session stays live for
     // momentum/drag until scrollend, then the keeper predicate restores.
@@ -605,7 +629,11 @@ describe('user input takes over the anchor', () => {
       })
       expect(out.routeKey).toBe('topic-t1::main')
     }
-    expect(controller.activeAnchor).toEqual({ kind: 'message', messageId: 'm3', offset: -10 })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm3',
+      offset: -10
+    })
     const stored = store.get('scroll:topic-t1::main') as { messageId: string; intraRowOffset: number } | undefined
     expect(stored?.messageId).toBe('m3')
     expect(stored?.intraRowOffset).toBe(-10)
@@ -620,7 +648,7 @@ describe('intent defaults', () => {
   it('no-history top restores take the deterministic bottom default', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     const { epoch } = controller.request({ kind: 'top', topicId: 't1', targetRoute: 'fresh', saved: null })
-    expect(controller.activeAnchor).toBeNull()
+    expect(controller.getAnchorFor({ topicId: 't1', route: 'fresh' })).toBeNull()
     controller.appliedWindow(epoch)
     controller.firstPositioned(epoch, 'placed')
     controller.revealed(epoch)

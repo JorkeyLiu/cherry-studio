@@ -3,8 +3,8 @@
  *
  * Proven deterministic bug (controller + Messages top effect):
  * - A displayed/stable with anchor a1/cache A.
- * - request(top B, saved b1) does not advance displayed but sets
- *   activeAnchor=b1 (B provenance).
+ * - request(top B, saved b1) does not advance displayed but sets the
+ *   route-B-qualified active anchor to b1 (B provenance).
  * - request(top A, saved a1) before B commit corrupted cache A with b1 and
  *   let the retained b1 beat the fresh a1.
  * The structural fix tracks the route provenance of the live anchor
@@ -29,186 +29,17 @@
  */
 import { expect, test } from '../../fixtures/electron.fixture'
 import { waitForAppReady } from '../../utils/wait-helpers'
+import {
+  activateTopic,
+  clickToolbarBranch,
+  listBranches,
+  prepareAssistant,
+  seedSourceTopic,
+  uuidLike
+} from '../../utils/branch-route-setup'
 
 const TOTAL = 30
 const ANCHOR_IDX = 15
-
-function pad(n: number, w: number): string {
-  return String(n).padStart(w, '0')
-}
-
-/**
- * Production-realistic UUID-like fixture IDs (digit-leading).
- * Production writers use raw UUIDs commonly starting with digits where
- * `CSS.escape` changes the string; letter-leading synthetic IDs are blind to
- * the raw-`getElementById` contract. Every generated ID here starts with a
- * digit so any planned restore anchor exercises the escape gap.
- */
-function uuidLike(index: number): string {
-  const raw = `${index.toString(16).padStart(8, '0')}9e2a3b4c4d5e8f901234567890ab`.slice(0, 32)
-  return `${raw.slice(0, 8)}-${raw.slice(8, 12)}-4${raw.slice(13, 16)}-8${raw.slice(17, 20)}-${raw.slice(20, 32)}`
-}
-
-async function prepareAssistant(page: any): Promise<string> {
-  await page.evaluate((limit: number) => {
-    const store = (window as any).store
-    store.dispatch({ type: 'newMessages/setDisplayCount', payload: limit })
-  }, TOTAL)
-  const liveAssistantId = await page.evaluate(
-    () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
-  )
-  expect(liveAssistantId, 'live assistant id must exist').toBeTruthy()
-  return liveAssistantId as string
-}
-
-async function seedSourceTopic(page: any, assistantId: string, topicId: string, name: string): Promise<string[]> {
-  const addOk = await page.evaluate(
-    ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
-      try {
-        ;(window as any).store.dispatch({
-          type: 'assistants/addTopic',
-          payload: {
-            assistantId,
-            topic: {
-              id: topicId,
-              assistantId,
-              name,
-              createdAt: '2026-01-01T00:00:00.000Z',
-              updatedAt: '2026-01-01T00:00:00.000Z'
-            }
-          }
-        })
-        return { ok: true }
-      } catch (e) {
-        return { ok: false, err: e instanceof Error ? e.message : String(e) }
-      }
-    },
-    { topicId, assistantId, name }
-  )
-  expect(addOk.ok).toBe(true)
-  const entries: any[] = []
-  const ids: string[] = []
-  for (let i = 0; i < TOTAL; i++) {
-    // Production-realistic digit-leading UUID (not letter-leading synthetic).
-    const msgId = uuidLike(i)
-    const blockId = `${topicId}-block-${pad(i, 5)}`
-    ids.push(msgId)
-    const role = i % 2 === 0 ? 'user' : 'assistant'
-    const msg: any = {
-      id: msgId,
-      topicId,
-      role,
-      assistantId,
-      createdAt: '2026-01-01T00:00:00.000Z',
-      updatedAt: '2026-01-01T00:00:00.000Z',
-      status: 'success',
-      blocks: [blockId],
-      sortOrder: i
-    }
-    if (role === 'assistant') {
-      msg.model = { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' }
-      msg.modelId = 'mock-model'
-      msg.askId = ids[i - 1]
-    }
-    entries.push({
-      message: msg,
-      blocks: [
-        {
-          id: blockId,
-          messageId: msgId,
-          type: 'main_text',
-          content: `top-prov-${pad(i, 5)}`,
-          status: 'success',
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z'
-        }
-      ]
-    })
-  }
-  const persist = await page.evaluate(
-    async ({
-      topicId,
-      assistantId,
-      name,
-      entries
-    }: {
-      topicId: string
-      assistantId: string
-      name: string
-      entries: any
-    }) => {
-      try {
-        const api: any = (window as any).api.chatDb
-        const ensured = await api.ensureTopic({ topicId, assistantId, name })
-        if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
-        const pasted = await api.pasteMessagesToTopic({ topicId, entries })
-        if (!pasted || pasted.ok !== true) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
-        return { ok: true }
-      } catch (e) {
-        return { ok: false, err: e instanceof Error ? e.message : String(e) }
-      }
-    },
-    { topicId, assistantId, name, entries }
-  )
-  expect(persist.ok, `seed failed: ${(persist as any).err}`).toBe(true)
-  return ids
-}
-
-async function activateTopic(page: any, topicId: string, atLeast: number): Promise<void> {
-  const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
-  await topicItem.waitFor({ state: 'attached', timeout: 15000 })
-  await topicItem.scrollIntoViewIfNeeded()
-  await topicItem.waitFor({ state: 'visible', timeout: 15000 })
-  await topicItem.click()
-  await page.waitForFunction(
-    ({ topicId, atLeast }: { topicId: string; atLeast: number }) => {
-      const s = (window as any).store.getState()
-      const ids = s.messages?.messageIdsByTopic?.[topicId]
-      const loading = s.messages?.loadingByTopic?.[topicId]
-      return Array.isArray(ids) && ids.length >= atLeast && loading !== true
-    },
-    { topicId, atLeast },
-    { timeout: 30000 }
-  )
-  await page.waitForFunction(
-    (atLeast: number) => document.querySelectorAll('#messages [data-message-id]').length >= atLeast,
-    atLeast,
-    { timeout: 30000 }
-  )
-}
-
-async function clickToolbarBranch(page: any, messageId: string): Promise<void> {
-  const e = messageId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  const sel = `[id="message-${e}"][data-message-id="${e}"]`
-  let container = page.locator(sel).first()
-  await expect(container, `message container ${messageId} must be visible`).toBeVisible({ timeout: 15000 })
-  await page.evaluate((id: string) => {
-    const escId = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
-    const el = document.querySelector(`[id="message-${escId}"][data-message-id="${escId}"]`) as HTMLElement | null
-    if (el) el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
-  }, messageId)
-  container = page.locator(sel).first()
-  await expect(container, `message container ${messageId} must be visible after scroll`).toBeVisible({ timeout: 15000 })
-  try {
-    await container.hover({ timeout: 8000 })
-  } catch {}
-  const btn = container.locator('[data-testid="msg-true-branch-btn"]')
-  await expect(btn, `true-branch toolbar button for ${messageId} must be attached`).toBeAttached({ timeout: 10000 })
-  try {
-    await btn.click({ timeout: 8000 })
-  } catch {
-    await btn.click({ force: true } as any)
-  }
-}
-
-async function listBranches(page: any, topicId: string): Promise<any[]> {
-  const res: any = await page.evaluate(
-    async (tid: string) => (window as any).api.chatDb.listBranches({ topicId: tid }),
-    topicId
-  )
-  expect(res?.ok, `listBranches failed: ${JSON.stringify(res)}`).toBe(true)
-  return res.value.branches as any[]
-}
 
 test.describe('Top-selector cross-route anchor provenance', () => {
   test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
@@ -224,9 +55,17 @@ test.describe('Top-selector cross-route anchor provenance', () => {
     })
     const page = mainWindow
     await waitForAppReady(page)
-    const assistantId = await prepareAssistant(page)
+    const assistantId = await prepareAssistant(page, TOTAL)
     const topicId = `top-prov-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const ids = await seedSourceTopic(page, assistantId, topicId, `TopProv ${topicId}`)
+    // Production-realistic digit-leading UUIDs (not letter-leading synthetic).
+    const ids = await seedSourceTopic(page, {
+      assistantId,
+      topicId,
+      name: `TopProv ${topicId}`,
+      total: TOTAL,
+      messageIdForIndex: (i: number) => uuidLike(i),
+      contentPrefix: 'top-prov-'
+    })
     const anchorId = ids[ANCHOR_IDX]
     await activateTopic(page, topicId, TOTAL)
     await clickToolbarBranch(page, anchorId)

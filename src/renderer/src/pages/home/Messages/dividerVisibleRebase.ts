@@ -177,10 +177,6 @@ export const planDividerVisibleRebase = (input: DividerVisibleRebaseInput): Divi
   }
 }
 
-/** Boolean eligibility wrapper (same fail-closed contract, no plan details). */
-export const isDividerVisibleRebaseEligible = (input: DividerVisibleRebaseInput): boolean =>
-  planDividerVisibleRebase(input) !== null
-
 /**
  * Fail-closed union gate (pure, no DOM, no React).
  *
