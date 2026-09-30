@@ -99,6 +99,24 @@ export const isElementVisibleInViewport = (el: HTMLElement, containerRect: DOMRe
 const messageIdOf = (elementId: string): string => elementId.replace(/^message-/, '')
 
 /**
+ * Raw message-row lookup by stable message id.
+ *
+ * Contract: `document.getElementById` requires the RAW id string — never
+ * `CSS.escape` it. Writers use raw `id={'message-'+message.id}`, so readers
+ * must use raw `getElementById('message-'+messageId)`. `CSS.escape` is only
+ * for `querySelector`/selector contexts. Returns the connected row or null.
+ */
+export const getMessageRowById = (messageId: string): HTMLElement | null => {
+  try {
+    const el = document.getElementById(`message-${messageId}`)
+    if (!(el instanceof HTMLElement)) return null
+    return el.isConnected ? el : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Finds the stable viewport-top content anchor among registered message
  * elements. See module header for crossing-first semantics.
  */

@@ -14,7 +14,8 @@
  * and must never compete with the controller. The former `ActiveRestoreAnchor`
  * lifecycle helpers were removed as dead second truth (zero production
  * callers); pagination snapshots are built directly from
- * `controller.activeAnchor` at queue time in Messages.
+ * `controller.getAnchorFor({ topicId, route })` at queue time in Messages
+ * (provenance-guarded; a foreign live anchor never snapshots).
  */
 
 /** Detached snapshot attached to a queued older-edge intent (no epoch binding). */

@@ -118,7 +118,9 @@ export const commitSnapshotForRoute = (routeKey: string, snapshot: SavedScrollPo
   } catch {
     return false
   }
-  if (!snapshot) return false
+  if (!snapshot) {
+    return false
+  }
   try {
     window.keyv.set(k, snapshot)
   } catch {

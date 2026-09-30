@@ -285,4 +285,90 @@ describe('applyViewportFirstPosition', () => {
     expect(applyViewportFirstPosition(container, { kind: 'none' })).toBe('unplaced')
     expect(container.scrollTop).toBe(33)
   })
+
+  it('raw getElementById contract: escaped lookup misses while raw stays connected (digit-leading UUID)', () => {
+    // Production UUIDs commonly start with digits where CSS.escape changes the
+    // string. Writers use raw `message-<id>`; getElementById requires raw.
+    const digitId = '1abc9e2a-3b4c-4d5e-8f90-1234567890ab'
+    const row = makeRow(`message-${digitId}`, 210)
+    expect(row.isConnected).toBe(true)
+    const escaped = CSS.escape(digitId)
+    // Sensitivity guard: this fixture must actually exercise the escape gap.
+    expect(escaped).not.toBe(digitId)
+    expect(document.getElementById(`message-${escaped}`)).toBeNull()
+    expect(document.getElementById(`message-${digitId}`)).toBe(row)
+  })
+
+  it('digit-leading UUID anchor restores exact id+offset (message plan)', () => {
+    const container = makeContainer(0)
+    const digitId = '1abc9e2a-3b4c-4d5e-8f90-1234567890ab'
+    expect(CSS.escape(digitId)).not.toBe(digitId)
+    makeRow(`message-${digitId}`, 210)
+    const plan: ViewportFirstPositionPlan = {
+      kind: 'message',
+      messageId: digitId,
+      wantOffset: 30,
+      fallbackScrollTop: -999
+    }
+    expect(applyViewportFirstPosition(container, plan)).toBe('placed')
+    // have 110, want 30 → delta +80.
+    expect(container.scrollTop).toBe(80)
+  })
+
+  it('selector-special legacy id restores via raw lookup (message plan)', () => {
+    const container = makeContainer(0)
+    const legacyId = 'legacy:id.with#chars'
+    expect(CSS.escape(legacyId)).not.toBe(legacyId)
+    makeRow(`message-${legacyId}`, 210)
+    // Raw lookup connects; an escaped getElementById would miss.
+    expect(document.getElementById(`message-${CSS.escape(legacyId)}`)).toBeNull()
+    expect(document.getElementById(`message-${legacyId}`)).not.toBeNull()
+    const plan: ViewportFirstPositionPlan = {
+      kind: 'message',
+      messageId: legacyId,
+      wantOffset: 30,
+      fallbackScrollTop: null
+    }
+    expect(applyViewportFirstPosition(container, plan)).toBe('placed')
+    expect(container.scrollTop).toBe(80)
+  })
+
+  it('digit-leading shared fallback restores via raw lookup (divider plan)', () => {
+    const container = makeContainer(0)
+    const sharedId = '9f31c4aa-0000-4abc-8def-111222333444'
+    expect(CSS.escape(sharedId)).not.toBe(sharedId)
+    makeRow(`message-${sharedId}`, 150)
+    const plan: ViewportFirstPositionPlan = {
+      kind: 'divider',
+      dividerKey: 'missing::parent',
+      anchorMessageId: 'anchor',
+      wantOffset: 999,
+      fallbackMessageId: sharedId,
+      fallbackOffset: 20,
+      rawScrollTop: -50
+    }
+    // have 50, want 20 → delta +30.
+    expect(applyViewportFirstPosition(container, plan)).toBe('placed')
+    expect(container.scrollTop).toBe(30)
+  })
+
+  it('digit-leading anchor scrollIntoView path resolves without edge contract (divider plan)', () => {
+    const container = makeContainer(0)
+    const anchorId = '0dead-beef-4abc-8def-999888777666'
+    expect(CSS.escape(anchorId)).not.toBe(anchorId)
+    const row = makeRow(`message-${anchorId}`, 700)
+    const spy = vi.fn()
+    row.scrollIntoView = spy as never
+    const plan: ViewportFirstPositionPlan = {
+      kind: 'divider',
+      dividerKey: 'missing::parent',
+      anchorMessageId: anchorId,
+      wantOffset: 999,
+      fallbackMessageId: null,
+      fallbackOffset: null,
+      rawScrollTop: null
+    }
+    expect(applyViewportFirstPosition(container, plan)).toBe('placed')
+    expect(spy).toHaveBeenCalledOnce()
+  })
 })

@@ -182,7 +182,7 @@ describe('production wiring (behavior-adjacent guards)', () => {
   it('queues the controller anchor snapshot and replays it into startOlderWindowLoad', () => {
     const code = src()
     expect(code).toMatch(/snapshotPreferredAnchor/)
-    expect(code).toMatch(/controller\.activeAnchor/)
+    expect(code).toMatch(/controller\.getAnchorFor/)
     expect(code).toMatch(/preferredAnchor/)
     expect(code).toMatch(/startOlderWindowLoad\(replayAnchor\)/)
     expect(code).toMatch(/decidePaginationCompensation/)

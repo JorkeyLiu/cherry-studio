@@ -844,3 +844,127 @@ describe('interaction token/session (controller-owned, no boolean guess)', () =>
     if (out.taken) expect(out.routeKey).toBe('topic-t1::main')
   })
 })
+
+describe('top-entry cross-route anchor provenance (A stable a1 → B → A)', () => {
+  const wid = (n: string): string => `oldest::newest::${n}`
+  const stableA = (c: RouteViewportController, id = 'a1', offset = -12): void => {
+    c.declareUserIntent()
+    c.userTakeover({ messageId: id, intraRowOffset: offset, scrollTop: -400, isAtBottom: false })
+    c.noteInteractionScrollEnd()
+  }
+  const savedOf = (id: string | null, offset: number | null = -12) =>
+    id ? { scrollTop: -400, messageId: id, intraRowOffset: offset, isAtBottom: false } : null
+
+  it('exact bug sequence: A stable a1 → request B saved b1 (uncommitted) → request A saved a1 keeps a1, cache A stays a1', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    stableA(c, 'a1')
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    // Request B: displayed stays A, live anchor becomes B provenance.
+    const toB = c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: savedOf('b1', -30) })
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
+    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    expect(c.anchorProvenance).toEqual(displayed('t1', 'B'))
+    // Foreign anchor is not observable through the route-qualified API.
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    // Contamination guard: cache A still holds a1 (B's b1 never stashed under A).
+    expect(c.peekCachedAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    // Request A before B commits: the target's own saved a1 must win, never b1.
+    const backA = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
+    expect(backA.epoch).toBeGreaterThan(toB.epoch)
+    expect(c.displayedRoute).toEqual(displayed('t1', 'A'))
+    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.peekCachedAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.activeAnchor).not.toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    void wid
+  })
+
+  it('B saved null variant: uncommitted null-B never corrupts A', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    stableA(c, 'a1')
+    c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: null })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toBeNull()
+    expect(c.peekCachedAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
+    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+  })
+
+  it('B commits first variant: committed B restores independently, return to A still a1', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    stableA(c, 'a1')
+    const toB = c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: savedOf('b1', -30) })
+    c.applyTransitionWindow(toB.epoch, { topicId: 't1', route: 'B' }, wid('B-1'))
+    c.firstPositioned(toB.epoch, 'placed')
+    expect(c.revealed(toB.epoch)).toBe(true)
+    const committed = c.commitStable(toB.epoch, {
+      messageId: 'b1',
+      intraRowOffset: -30,
+      scrollTop: -500,
+      isAtBottom: false
+    })
+    expect(committed.committed).toBe(true)
+    expect(c.displayedRoute).toEqual(displayed('t1', 'B'))
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    // Ordinary committed B switch restores B independently.
+    expect(c.peekCachedAnchorFor(displayed('t1', 'B'))).toEqual({ kind: 'message', messageId: 'b1', offset: -30 })
+    const backA = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
+    void backA
+    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'a1', offset: -12 })
+    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+  })
+
+  it('same-route rapid return retains the legitimate live A anchor over a stale snapshot', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    stableA(c, 'mLive', -7)
+    const first = c.request({ kind: 'top', topicId: 't1', targetRoute: 'main', saved: null })
+    expect(c.activeAnchor).toBeNull()
+    expect(c.anchorProvenance).toBeNull()
+    const second = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'A',
+      saved: savedOf('mStale', -1)
+    })
+    expect(second.epoch).toBeGreaterThan(first.epoch)
+    // Provenance-guarded cache still holds the live A anchor; it beats stale.
+    expect(c.activeAnchor).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
+    expect(c.getAnchorFor(displayed('t1', 'A'))).toEqual({ kind: 'message', messageId: 'mLive', offset: -7 })
+  })
+
+  it('divider fresh-wins over any retained anchor and carries target provenance', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    stableA(c, 'a1')
+    c.request({ kind: 'divider', topicId: 't1', targetRoute: 'A', dividerKey: 'a1::A', clickOffset: 55 })
+    expect(c.activeAnchor).toEqual({ kind: 'divider', dividerKey: 'a1::A', offset: 55 })
+    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
+  })
+
+  it('commit/takeover/invalidate maintain provenance; foreign reads stay null', () => {
+    const c = new RouteViewportController(displayed('t1', 'A'))
+    stableA(c, 'a1')
+    // Commit on A keeps A provenance.
+    const e1 = c.request({ kind: 'top', topicId: 't1', targetRoute: 'A', saved: savedOf('a1') })
+    c.applyTransitionWindow(e1.epoch, { topicId: 't1', route: 'A' }, wid('A-1'))
+    c.firstPositioned(e1.epoch, 'placed')
+    c.revealed(e1.epoch)
+    const out = c.commitStable(e1.epoch, {
+      messageId: 'a1',
+      intraRowOffset: -12,
+      scrollTop: -400,
+      isAtBottom: false
+    })
+    expect(out.committed).toBe(true)
+    expect(c.anchorProvenance).toEqual(displayed('t1', 'A'))
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
+    // Invalidate clears both anchor and provenance.
+    c.request({ kind: 'top', topicId: 't1', targetRoute: 'B', saved: savedOf('b1') })
+    c.invalidateAll()
+    expect(c.activeAnchor).toBeNull()
+    expect(c.anchorProvenance).toBeNull()
+    expect(c.getAnchorFor(displayed('t1', 'B'))).toBeNull()
+  })
+})

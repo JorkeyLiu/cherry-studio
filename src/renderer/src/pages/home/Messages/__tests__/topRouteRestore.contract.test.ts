@@ -7,6 +7,8 @@
  *   only after stable default); transport stays fail-visible/preserve.
  * - Stable commit requires coverage for valid anchors; defaults/bottom pass.
  */
+import * as fs from 'node:fs'
+
 import {
   canonicalSavedAnchorId,
   chooseRouteWindowRequest,
@@ -381,6 +383,49 @@ describe('continuous top-route sequence: branch anchor survives shared crossing-
         domConnected: true
       })
     ).toBe(false)
+  })
+})
+
+describe('top-effect saved substitution is route-qualified (provenance, not displayed==target)', () => {
+  const messagesSrc = (): string => fs.readFileSync('src/renderer/src/pages/home/Messages/Messages.tsx', 'utf8')
+
+  it('retained live anchor comes only from getAnchorFor(incoming target)', () => {
+    const src = messagesSrc()
+    // The route-qualified read for the incoming target exists.
+    expect(src).toMatch(/controller\.getAnchorFor\(\{\s*topicId:\s*topicIdAtEffect,\s*route:\s*routeAtEffect\s*\}\)/)
+    // The effect must not decide another route's position from the
+    // unqualified global anchor.
+    const topIdx = src.indexOf('Rapid-return retained anchor')
+    expect(topIdx).toBeGreaterThan(-1)
+    const slice = src.slice(topIdx, topIdx + 2600)
+    expect(slice).not.toMatch(/controller\.activeAnchor/)
+    expect(slice).toMatch(/getAnchorFor/)
+    // No route inference from displayed alone in this decision: the retained
+    // gate still requires displayed==target AND the qualified read above
+    // (foreign live anchors read as null, so the persisted snapshot wins).
+    expect(slice).toMatch(/controller\.displayedRoute/)
+  })
+
+  it('controller provenance: foreign live anchor is unobservable for the incoming target', async () => {
+    const { RouteViewportController } = await import('@renderer/pages/home/Messages/routeViewportController')
+    const c = new RouteViewportController({ topicId: 't1', route: 'A' })
+    c.declareUserIntent()
+    c.userTakeover({ messageId: 'a1', intraRowOffset: -12, scrollTop: -400, isAtBottom: false })
+    c.noteInteractionScrollEnd()
+    c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'B',
+      saved: { scrollTop: -500, messageId: 'b1', intraRowOffset: -30, isAtBottom: false }
+    })
+    // Effect-side decision for incoming A: qualified read returns null for
+    // the foreign B anchor, so the caller keeps the persisted A snapshot.
+    expect(c.getAnchorFor({ topicId: 't1', route: 'A' })).toBeNull()
+    expect(c.getAnchorFor({ topicId: 't1', route: 'B' })).toEqual({
+      kind: 'message',
+      messageId: 'b1',
+      offset: -30
+    })
   })
 })
 

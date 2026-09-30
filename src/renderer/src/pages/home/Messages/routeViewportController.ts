@@ -172,6 +172,18 @@ export class RouteViewportController {
   private displayed: RouteRef
   private rendered: RenderedProvenance | null
   private anchor: RouteVisualAnchor | null = null
+  /**
+   * Route provenance of the active visual anchor: which topic+route the
+   * anchor was produced for. Null exactly when `anchor` is null (no anchor)
+   * or when provenance was cleared (invalidate). Every anchor write sets
+   * both fields together via `setAnchorLocked`; every external read of an
+   * anchor for a specific target must go through `getAnchorFor()` which
+   * returns the anchor only when provenance matches the requested route.
+   * The raw `activeAnchor` getter is legacy/unqualified and must never be
+   * used to decide another route's position (no route inference from
+   * displayed alone).
+   */
+  private anchorRoute: RouteRef | null = null
   /** Ownership held while a transition session is active. */
   private ownershipHeld = false
   /** Epoch whose ownership was already released (exactly-once guard). */
@@ -261,8 +273,47 @@ export class RouteViewportController {
     return this.phase === 'terminal' && this.isDomProvenanceClean
   }
 
+  /**
+   * Legacy unqualified anchor read. Prefer `getAnchorFor(target)` for any
+   * route-targeted decision (top restore, pagination snapshot). Direct use
+   * is allowed only where the caller already proved the route (stable keeper
+   * holding the displayed route while clean, tests asserting the current
+   * session's anchor). Never infer the anchor's route from displayed alone.
+   */
   get activeAnchor(): RouteVisualAnchor | null {
     return this.anchor ? { ...this.anchor } : null
+  }
+
+  /** Provenance of the active anchor (copy, null when no anchor). */
+  get anchorProvenance(): RouteRef | null {
+    return this.anchorRoute ? { ...this.anchorRoute } : null
+  }
+
+  /**
+   * Route-qualified anchor read (sole anchor source for route-targeted
+   * decisions): returns a copy only when the live anchor's provenance
+   * exactly matches the requested topic+route; otherwise null. A foreign
+   * live anchor (e.g. B's anchor while requesting A) is never observable
+   * through this API.
+   */
+  getAnchorFor(target: RouteRef): RouteVisualAnchor | null {
+    if (!this.anchor || !this.anchorRoute) return null
+    if (this.anchorRoute.topicId !== target.topicId || this.anchorRoute.route !== target.route) return null
+    return { ...this.anchor }
+  }
+
+  /**
+   * Route-qualified cache peek (tests/diagnostics): the stashed stable
+   * anchor for the requested route, or null. Keyed by canonical route key,
+   * never by displayed inference.
+   */
+  peekCachedAnchorFor(target: RouteRef): RouteVisualAnchor | null {
+    try {
+      const hit = this.anchorCache.get(routeViewportKey(target.topicId, target.route)) ?? null
+      return hit ? { ...hit } : null
+    } catch {
+      return null
+    }
   }
 
   /** Monotonic rendered-window generation (see field doc). */
@@ -352,6 +403,16 @@ export class RouteViewportController {
     this.rendered = { topicId: target.topicId, routeId: target.route, epoch: this.epoch, windowId }
     this.windowGenerationSeq += 1
     this.phase = 'stable'
+    // Provenance invariant: a kept anchor is observable only for its own
+    // route. A rebase to a different route must not retain a foreign anchor
+    // as if it belonged to the new displayed route — clear it fail-closed.
+    if (this.anchor !== null) {
+      const prov = this.anchorRoute
+      if (!prov || prov.topicId !== target.topicId || prov.route !== target.route) {
+        this.anchor = null
+        this.anchorRoute = null
+      }
+    }
     return true
   }
 
@@ -375,20 +436,26 @@ export class RouteViewportController {
     // session: post-request scrolls without a fresh declare are programmatic
     // (window apply / first position / reconcile) and must never take over.
     this.closeInteractionLocked()
-    // Preserve the displayed route's active visual anchor across supersession:
-    // when the new target re-equals the still-displayed route and the request
-    // carries no fresh anchor (rapid A→main→A where main never displayed),
-    // the live/stable A anchor stays — never an unconditional null overwrite.
+    // Capture previous intent/provenance BEFORE overwriting intent: the
+    // comparison below must test the PREVIOUS session's target, never the
+    // just-written current intent (which would be tautologically true).
     const prevAnchor = this.anchor ? { ...this.anchor } : null
+    const prevAnchorRoute = this.anchorRoute ? { ...this.anchorRoute } : null
     const prevDisplayed = { ...this.displayed }
+    const prevIntent: RouteViewportIntent | null = this.intent ? { ...this.intent } : null
     // Stash the outgoing displayed anchor before it is overwritten, so a
     // rapid return to the same route restores it (A→main→A where main never
-    // displayed must restart from the live/stable A anchor).
-    if (prevAnchor !== null) {
-      try {
-        this.anchorCache.set(routeViewportKey(prevDisplayed.topicId, prevDisplayed.route), prevAnchor)
-      } catch {
-        // fail-closed: cache is best-effort, anchor fallback below still holds
+    // displayed must restart from the live/stable A anchor). Provenance
+    // guard: stash ONLY when the live anchor was actually produced for the
+    // still-displayed route. A foreign live anchor (e.g. B's b1 while
+    // displayed is still A) must never corrupt cache A.
+    if (prevAnchor !== null && prevAnchorRoute !== null) {
+      if (prevAnchorRoute.topicId === prevDisplayed.topicId && prevAnchorRoute.route === prevDisplayed.route) {
+        try {
+          this.anchorCache.set(routeViewportKey(prevDisplayed.topicId, prevDisplayed.route), prevAnchor)
+        } catch {
+          // fail-closed: cache is best-effort, anchor fallback below still holds
+        }
       }
     }
     if (this.ownershipHeld) {
@@ -404,28 +471,32 @@ export class RouteViewportController {
     // still shows the outgoing route until the atomic window apply records it.
     // Rapid-return priority (A→main→A where main never displayed): when the
     // target re-equals the still-displayed route, the RETAINED A anchor
-    // (live previous anchor, else the stashed stable anchor) starts the
-    // session — it is provably fresher than the persisted snapshot (storage
-    // freezes while owned/dirty, live tracks the last retained anchor).
-    // Divider intents always carry their own clicked anchor and win.
+    // (proven same-route live anchor, else the stashed stable anchor) starts
+    // the session — it is provably fresher than the persisted snapshot
+    // (storage freezes while owned/dirty, live tracks the last retained
+    // anchor). Divider intents always carry their own clicked anchor and win.
     // Retained anchor resolution (only when the target re-equals the
     // still-displayed route): the previous live anchor is reusable ONLY when
-    // the previous session already targeted this same route (it was retained
-    // for it); otherwise it belongs to a different target's session (e.g. the
-    // intermediate main intent) and must NOT leak across routes — the
-    // per-route stash (written whenever the route was displayed/stable) is
-    // the cross-session source.
+    // the PREVIOUS session already targeted this same route AND the live
+    // anchor's provenance matches it; otherwise it belongs to a different
+    // target's session (e.g. the intermediate B intent) and must NOT leak
+    // across routes — the per-route stash (provenance-guarded above) is the
+    // cross-session source.
     const targetIsDisplayed = prevDisplayed.topicId === req.topicId && prevDisplayed.route === req.targetRoute
-    const prevIntentTarget = this.intent ? { topicId: this.intent.topicId, route: this.intent.targetRoute } : null
     const prevSessionForTarget =
-      prevIntentTarget !== null &&
-      prevIntentTarget.topicId === req.topicId &&
-      prevIntentTarget.route === req.targetRoute
+      prevIntent !== null && prevIntent.topicId === req.topicId && prevIntent.targetRoute === req.targetRoute
+    const prevLiveProvenForTarget =
+      prevAnchorRoute !== null && prevAnchorRoute.topicId === req.topicId && prevAnchorRoute.route === req.targetRoute
     let retained: RouteVisualAnchor | null = null
     if (targetIsDisplayed) {
-      if (prevSessionForTarget && prevAnchor?.kind === 'message') {
+      if (prevSessionForTarget && prevLiveProvenForTarget && prevAnchor?.kind === 'message') {
         retained = prevAnchor
-      } else if (prevSessionForTarget && prevAnchor?.kind === 'divider' && req.kind !== 'divider') {
+      } else if (
+        prevSessionForTarget &&
+        prevLiveProvenForTarget &&
+        prevAnchor?.kind === 'divider' &&
+        req.kind !== 'divider'
+      ) {
         retained = prevAnchor
       } else {
         try {
@@ -437,16 +508,31 @@ export class RouteViewportController {
       }
     }
     const fresh = RouteViewportController.initialAnchorFor(req)
+    let next: RouteVisualAnchor | null = null
     if (req.kind === 'divider') {
-      this.anchor = fresh ?? retained
+      next = fresh ?? retained
     } else if (retained?.kind === 'message') {
-      this.anchor = retained
+      next = retained
     } else if (fresh !== null) {
-      this.anchor = fresh
+      next = fresh
     } else {
-      this.anchor = retained
+      next = retained
     }
+    // Provenance write: a non-null session anchor always belongs to the
+    // incoming target; null clears provenance. No other route truth exists.
+    this.setAnchorLocked(next, next ? { topicId: req.topicId, route: req.targetRoute } : null)
     return { epoch: this.epoch, phase: this.phase }
+  }
+
+  /** Single anchor writer: anchor + provenance always move together. */
+  private setAnchorLocked(anchor: RouteVisualAnchor | null, route: RouteRef | null): void {
+    if (anchor && route) {
+      this.anchor = { ...anchor }
+      this.anchorRoute = { ...route }
+      return
+    }
+    this.anchor = null
+    this.anchorRoute = null
   }
 
   private static initialAnchorFor(req: RouteTransitionRequest): RouteVisualAnchor | null {
@@ -485,6 +571,53 @@ export class RouteViewportController {
     this.rendered = { topicId: target.topicId, routeId: target.route, epoch, windowId }
     this.windowGenerationSeq += 1
     this.phase = 'positioning'
+    return true
+  }
+
+  /**
+   * Divider-only visible incremental rebase: record session epoch + target
+   * route + window identity as rendered and enter `aligned` directly, without
+   * any positioning/hidden phase. Accepted ONLY for the current divider intent
+   * in fetch-hold with matching topic/route/window identity. Rendered
+   * provenance and the window generation advance synchronously; ownership
+   * stays held until the existing divider offset alignment + stable commit
+   * releases it. Displayed provenance is NOT advanced here (the stable commit
+   * does that). Stale epochs refuse with no effect and can never disturb a
+   * newer session.
+   */
+  applyVisibleRebaseWindow(epoch: number, target: RouteRef, windowId: string): boolean {
+    if (!this.checkSession(epoch)) return false
+    if (this.phase !== 'fetch-hold') return false
+    const intent = this.intent
+    if (!intent) return false
+    if (intent.kind !== 'divider') return false
+    if (intent.topicId !== target.topicId || intent.targetRoute !== target.route) return false
+    if (typeof windowId !== 'string' || windowId.length === 0) return false
+    this.rendered = { topicId: target.topicId, routeId: target.route, epoch, windowId }
+    this.windowGenerationSeq += 1
+    this.phase = 'aligned'
+    return true
+  }
+
+  /**
+   * Post-apply lost-residency fallback: the visible rebase already bound this
+   * epoch's rendered provenance (aligned), but the divider row AND the
+   * explicit shared fallback are both absent/unmeasurable at layout alignment.
+   * Move the SAME session `aligned` → `searching` so the existing hidden
+   * restore-owned pagination path owns the remainder — same epoch, same
+   * divider intent, same ownership, same rendered provenance, no displayed
+   * advance, no snapshot write. Stale epochs or non-divider/non-aligned
+   * sessions refuse with no effect. The caller arms the existing
+   * divider-search progress under the same epoch and steps it explicitly;
+   * `paginationSettled` + the existing stable commit still own completion.
+   */
+  fallbackVisibleToSearch(epoch: number): boolean {
+    if (!this.checkSession(epoch)) return false
+    if (this.phase !== 'aligned') return false
+    const intent = this.intent
+    if (!intent) return false
+    if (intent.kind !== 'divider') return false
+    this.phase = 'searching'
     return true
   }
 
@@ -625,13 +758,23 @@ export class RouteViewportController {
       isAtBottom: measured.isAtBottom
     }
     this.displayed = { topicId: intent.topicId, route: intent.targetRoute }
+    const commitRoute: RouteRef = { topicId: intent.topicId, route: intent.targetRoute }
     if (snapshot.messageId) {
-      this.anchor = { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
+      this.setAnchorLocked(
+        { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 },
+        commitRoute
+      )
     } else if (!snapshot.isAtBottom && this.anchor) {
       // keep existing anchor identity (divider restores carry their own
       // clicked identity from request(); terminal paths commit nothing)
+      // Provenance invariant: the kept anchor must already belong to the
+      // commit target; a foreign kept anchor is cleared fail-closed.
+      const prov = this.anchorRoute
+      if (!prov || prov.topicId !== commitRoute.topicId || prov.route !== commitRoute.route) {
+        this.setAnchorLocked(null, null)
+      }
     } else if (snapshot.isAtBottom) {
-      this.anchor = null
+      this.setAnchorLocked(null, null)
     }
     // Refresh the committed route's cache entry so a rapid return restores it.
     try {
@@ -845,7 +988,9 @@ export class RouteViewportController {
         : null
       const oldEpoch = this.epoch
       this.displayed = { ...takeover }
-      this.anchor = nextAnchor ? { ...nextAnchor } : null
+      // Owned takeover provenance: the measured viewport belongs to the
+      // rendered route (never selected/incoming inference).
+      this.setAnchorLocked(nextAnchor, nextAnchor ? { ...takeover } : null)
       try {
         const key = routeViewportKey(takeover.topicId, takeover.route)
         if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
@@ -896,7 +1041,9 @@ export class RouteViewportController {
     const nextAnchor: RouteVisualAnchor | null = snapshot.messageId
       ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
       : null
-    this.anchor = nextAnchor ? { ...nextAnchor } : null
+    // Stable takeover provenance: clean displayed == rendered, so the
+    // measured viewport belongs to the displayed route.
+    this.setAnchorLocked(nextAnchor, nextAnchor ? { ...this.displayed } : null)
     try {
       const key = routeViewportKey(this.displayed.topicId, this.displayed.route)
       if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
@@ -930,7 +1077,7 @@ export class RouteViewportController {
     this.closeInteractionLocked()
     if (!this.ownershipHeld) {
       this.intent = null
-      this.anchor = null
+      this.setAnchorLocked(null, null)
       this.rendered = null
       this.phase = 'idle'
       this.terminalReason = null
@@ -938,6 +1085,7 @@ export class RouteViewportController {
     }
     this.toTerminalLocked(reason)
     this.intent = null
+    this.setAnchorLocked(null, null)
     this.rendered = null
     this.phase = 'idle'
     return true

@@ -20,7 +20,11 @@ import {
   distanceFromBottom,
   isAtBottom as isColumnReverseAtBottom
 } from '@renderer/pages/home/Messages/columnReverseGeometry'
-import { findFirstVisibleMessage, findViewportTopAnchorWithOffset } from '@renderer/pages/home/Messages/domVisibility'
+import {
+  findFirstVisibleMessage,
+  findViewportTopAnchorWithOffset,
+  getMessageRowById
+} from '@renderer/pages/home/Messages/domVisibility'
 import { branchFromAnchorMessage } from '@renderer/pages/home/Messages/messageBranch'
 import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
 import {
@@ -144,6 +148,12 @@ import {
   ForkDivider
 } from './BranchDividers'
 import { decideDividerRestoreSearchStep, type DividerSearchTerminalReason } from './dividerRestoreSearch'
+import {
+  buildDividerSearchProgressFromVisible,
+  buildDividerVisibleMessages,
+  isDividerVisibleUnionExact,
+  planDividerVisibleRebase
+} from './dividerVisibleRebase'
 /**
  * Loaded-route tracking uses the tagged `LoadedRouteState` from
  * `messageWindow` (renderer-local, no persistence): `{ route, loadFailed }`.
@@ -154,6 +164,7 @@ import MessageContextMenu from './MessageContextMenu'
 import { renderEditFlowNodes } from './messageEditSelectionLayout'
 import { buildMessageFlowNodes, resolveContextDividerGroupKey } from './messageFlowNodes'
 import MessageGroup from './MessageGroup'
+import { createMessageViewportGroupModel } from './messageGroups'
 import { NAVIGATION_VISUALLY_NEWER_GROUPS, NAVIGATION_VISUALLY_OLDER_GROUPS } from './messageNavigation'
 import { buildRenderLayers, buildRenderSegments } from './messageRenderLayers'
 import { useCrossMessageSelectionGuard, useEditModeNativeSelectionSuppression } from './messageSelectionGuard'
@@ -163,6 +174,7 @@ import {
   chooseRouteWindowRequest,
   chooseTopFirstPositionPlan,
   claimLoadedRoute,
+  createTargetMessageWindow,
   decideDividerDoubleFailureRecovery,
   decideExternalDoubleFailureRecovery,
   decideTopRestoreAnchor,
@@ -498,7 +510,9 @@ const Messages = ({
   // transitions (e.g. new-branch landing bottom snap): while set, ordinary
   // scroll capture is dropped so the snap is never recorded as a user scroll.
   const suppressUserWriteRef = useRef(false)
-  const viewportPhaseAttr = viewportCtx?.viewportPhaseAttr ?? viewportPhaseAttrFor(controller.currentPhase)
+  const viewportPhaseAttr =
+    viewportCtx?.viewportPhaseAttr ??
+    viewportPhaseAttrFor(controller.currentPhase, controller.currentIntent?.kind ?? null)
   void localViewportVersion
   // Route-keyed scroll snapshots: each branch route keeps its own browsing
   // position under `topic-<id>::<branch|main>`. User scrolls are adopted
@@ -713,6 +727,41 @@ const Messages = ({
     lastLoadFailed: boolean
     drivenWindowKey: string | null
   } | null>(null)
+  // Divider-only visible incremental rebase pending compensation (fast path).
+  // Set synchronously with the visible window commit; the layout effect below
+  // applies the synchronous first compensation (divider → wantOffset, explicit
+  // shared fallback → sharedOffset), then a bounded quiet sequence (≥1 rAF)
+  // revalidates + residual-corrects before the ONE stable commit. Ownership +
+  // anchoring token stay held throughout. Cleared only after a successful
+  // commit or a deliberate same-session fallback/termination (never cleared
+  // ahead of a failed commit). Supersede/unmount cancels the quiet frame.
+  const dividerVisibleRef = useRef<{
+    ownerEpoch: number
+    topicId: string
+    routeId: string | null
+    dividerKey: string
+    anchorMessageId: string
+    parentOfDivider: string | null
+    sharedMessageId: string | null
+    sharedOffset: number | null
+    wantOffset: number
+    windowId: string
+    quietArmed: boolean
+  } | null>(null)
+  // Bounded quiet-frame handle for the visible rebase (at most two frames:
+  // first quiet recheck, plus one residual recheck when a second correction
+  // is written). Never a timer/stabilizer loop. Cancelled on
+  // supersede/unmount/termination so stale callbacks stay inert.
+  const dividerVisibleRafRef = useRef<number | null>(null)
+  const cancelDividerVisibleQuiet = useCallback(() => {
+    const handle = dividerVisibleRafRef.current
+    dividerVisibleRafRef.current = null
+    if (handle !== null) {
+      try {
+        cancelAnimationFrame(handle)
+      } catch {}
+    }
+  }, [])
   /** End the viewport's current scroll token (single anchoring owner at a time). */
   const endViewportScrollToken = useCallback(() => {
     const token = viewportStateRef.current.scrollToken
@@ -724,28 +773,34 @@ const Messages = ({
   const failVisibleTransition = useCallback(
     (epoch: number) => {
       // Stale sessions are inert: never touch the new session's token/phase.
-      if (!controller.isSessionCurrent(epoch)) return
+      if (!controller.isSessionCurrent(epoch)) {
+        return
+      }
+      cancelDividerVisibleQuiet()
       controller.terminate(epoch, 'fail-visible')
       dividerProgressRef.current = null
+      if (dividerVisibleRef.current?.ownerEpoch === epoch) dividerVisibleRef.current = null
       transitionPlanRef.current = null
       endViewportScrollToken()
       notifyViewport()
     },
-    [controller, endViewportScrollToken, notifyViewport]
+    [cancelDividerVisibleQuiet, controller, endViewportScrollToken, notifyViewport]
   )
   // Superseding teardown: terminate the current session (release exactly
   // once) so the next request starts clean. Never hides: callers own the
   // phase decision (arm re-hides, cancel fails visible).
   const tearDownViewportTransition = useCallback(() => {
     const epoch = controller.currentEpoch
+    cancelDividerVisibleQuiet()
     if (controller.programmaticOwned) {
       controller.terminate(epoch, 'superseded')
     }
     dividerProgressRef.current = null
+    dividerVisibleRef.current = null
     transitionPlanRef.current = null
     endViewportScrollToken()
     notifyViewport()
-  }, [controller, endViewportScrollToken, notifyViewport])
+  }, [cancelDividerVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
   // NOTE: the former `armRouteTransition(plan, tid, route)` two-step arm has
   // been removed. Route-switch windows now commit ONLY via the single atomic
   // entry `commitRouteWindowAtomic` defined after `windowIdentityKey` below:
@@ -791,7 +846,9 @@ const Messages = ({
   const saveDisplayedSnapshot = useCallback((): boolean => {
     try {
       const live = viewportCtxRef.current
-      if (live) return live.freezeDisplayed()
+      if (live) {
+        return live.freezeDisplayed()
+      }
       // Isolated-render adapter for focused component tests (bare mount with
       // no provider): same controller-owned clean gate — dirty/owned states
       // preserve, never capture live DOM. Not a second production truth;
@@ -808,8 +865,10 @@ const Messages = ({
     (tid: string, route: string | null) => {
       try {
         const live = viewportCtxRef.current
-        if (live) return live.readSnapshot(displayedKeyFor(tid, route))
-        return getSnapshotForRoute(displayedKeyFor(tid, route))
+        const out = live
+          ? live.readSnapshot(displayedKeyFor(tid, route))
+          : getSnapshotForRoute(displayedKeyFor(tid, route))
+        return out
       } catch {
         return null
       }
@@ -888,20 +947,32 @@ const Messages = ({
   )
   const commitDisplayedStable = useCallback(
     (tid: string, route: string | null, epoch: number): boolean => {
-      if (unmountedRef.current) return false
-      if (topicIdRef.current !== tid || routeRef.current !== route) return false
-      if (!controller.isSessionCurrent(epoch)) return false
+      if (unmountedRef.current) {
+        return false
+      }
+      if (topicIdRef.current !== tid || routeRef.current !== route) {
+        return false
+      }
+      if (!controller.isSessionCurrent(epoch)) {
+        return false
+      }
       const live = scrollContainerRef.current
-      if (!live) return false
+      if (!live) {
+        return false
+      }
       const measured = captureSnapshot()
-      if (!measured) return false
+      if (!measured) {
+        return false
+      }
       const { commit } = controller.commitStable(epoch, {
         messageId: measured.messageId ?? null,
         intraRowOffset: measured.intraRowOffset ?? null,
         scrollTop: measured.scrollTop,
         isAtBottom: measured.isAtBottom
       })
-      if (!commit) return false
+      if (!commit) {
+        return false
+      }
       let stored = false
       try {
         stored = commitSnapshotForRoute(commit.routeKey, {
@@ -934,18 +1005,28 @@ const Messages = ({
   // keeps its own capture commit untouched.
   const commitDisplayedStableWithAnchor = useCallback(
     (tid: string, route: string | null, epoch: number, anchorId: string, wantOffset: number | null): boolean => {
-      if (unmountedRef.current) return false
-      if (topicIdRef.current !== tid || routeRef.current !== route) return false
-      if (!controller.isSessionCurrent(epoch)) return false
+      if (unmountedRef.current) {
+        return false
+      }
+      if (topicIdRef.current !== tid || routeRef.current !== route) {
+        return false
+      }
+      if (!controller.isSessionCurrent(epoch)) {
+        return false
+      }
       const live = scrollContainerRef.current
-      if (!live) return false
+      if (!live) {
+        return false
+      }
       let scrollTop = 0
       try {
         scrollTop = live.scrollTop
       } catch {
         return false
       }
-      if (typeof scrollTop !== 'number' || !Number.isFinite(scrollTop)) return false
+      if (typeof scrollTop !== 'number' || !Number.isFinite(scrollTop)) {
+        return false
+      }
       let atBottom = false
       try {
         atBottom = isColumnReverseAtBottom(scrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
@@ -958,7 +1039,9 @@ const Messages = ({
         scrollTop,
         isAtBottom: atBottom
       })
-      if (!commit) return false
+      if (!commit) {
+        return false
+      }
       let stored = false
       try {
         stored = commitSnapshotForRoute(commit.routeKey, {
@@ -1049,12 +1132,14 @@ const Messages = ({
       // down (never leaves hidden, never leaks ownership). HMR disposes via
       // the provider effect as well; both paths are idempotent.
       controller.invalidateAll()
+      cancelDividerVisibleQuiet()
       dividerProgressRef.current = null
+      dividerVisibleRef.current = null
       transitionPlanRef.current = null
       endViewportScrollToken()
       notifyViewport()
     }
-  }, [controller, endViewportScrollToken, notifyViewport])
+  }, [cancelDividerVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
 
   // Deletion epoch subscription — synchronously invalidate the mounted viewport
   // projection for this topic when authoritative hard deletion advances.
@@ -1082,7 +1167,9 @@ const Messages = ({
       // blocked) and end the scroll token so the emptied viewport is never
       // left hidden by a stale transition.
       controller.invalidateAll()
+      cancelDividerVisibleQuiet()
       dividerProgressRef.current = null
+      dividerVisibleRef.current = null
       transitionPlanRef.current = null
       endViewportScrollToken()
       notifyViewport()
@@ -2370,7 +2457,7 @@ const Messages = ({
                       }
                       return null
                     }
-                    const el = document.getElementById(`message-${esc(preferredSnapshot.messageId)}`)
+                    const el = getMessageRowById(preferredSnapshot.messageId)
                     if (el && el.isConnected) {
                       return el.getBoundingClientRect().top - live.getBoundingClientRect().top
                     }
@@ -2467,7 +2554,17 @@ const Messages = ({
         50
       )
     },
-    [beginScroll, dispatch, isCurrentLoad, setTimeoutTimer, scrollContainerRef, topic.id, viewportDispatch]
+    [
+      beginScroll,
+      controller,
+      dispatch,
+      isCurrentLoad,
+      notifyViewport,
+      setTimeoutTimer,
+      scrollContainerRef,
+      topic.id,
+      viewportDispatch
+    ]
   )
 
   // InfiniteScroll `next` entry (older edge): temporary scroll ownership or
@@ -2482,7 +2579,9 @@ const Messages = ({
     const intent = controller.currentIntent
     if (!intent || intent.topicId !== topic.id || intent.targetRoute !== routeRef.current) return null
     if (!controller.isSessionCurrent(controller.currentEpoch)) return null
-    const anchor = controller.activeAnchor
+    // Provenance-guarded: the anchor is observable only when it was produced
+    // for this exact topic+route. A foreign live anchor never snapshots.
+    const anchor = controller.getAnchorFor({ topicId: topic.id, route: routeRef.current })
     if (!anchor) return null
     if (anchor.kind === 'divider') {
       return { kind: 'divider-row', dividerKey: anchor.dividerKey, targetOffset: anchor.offset }
@@ -2749,7 +2848,9 @@ const Messages = ({
   // terminates/releases the transition; multi-scroll gestures stay in one
   // session (each scroll updates the stable snapshot).
   const cancelActiveStabilizerForUser = useCallback(() => {
-    controller.declareUserIntent()
+    try {
+      controller.declareUserIntent()
+    } catch {}
     notifyViewport()
   }, [controller, notifyViewport])
 
@@ -2849,6 +2950,24 @@ const Messages = ({
             if (out.reason === 'owned-takeover') {
               transitionPlanRef.current = null
               dividerProgressRef.current = null
+              // Owned takeover ends the visible quiet session with it: cancel
+              // its bounded frames and drop only the taken-over pending driver.
+              // The controller already released ownership exactly once above;
+              // the anchoring token ends here exactly once. A newer owned
+              // session (if ever armed) is never touched.
+              try {
+                const h = dividerVisibleRafRef.current
+                dividerVisibleRafRef.current = null
+                if (h !== null) cancelAnimationFrame(h)
+              } catch {}
+              try {
+                const pv = dividerVisibleRef.current
+                if (pv && !(pv.ownerEpoch === controller.currentEpoch && controller.programmaticOwned)) {
+                  dividerVisibleRef.current = null
+                }
+              } catch {
+                // fail-closed
+              }
               endViewportScrollToken()
             }
             notifyViewport()
@@ -2958,13 +3077,21 @@ const Messages = ({
       window: MessageWindow,
       plan: ViewportFirstPositionPlan
     ): number | null => {
-      if (!controller.isSessionCurrent(fetchEpoch)) return null
+      if (!controller.isSessionCurrent(fetchEpoch)) {
+        return null
+      }
       const intent = controller.currentIntent
-      if (!intent || intent.topicId !== topicIdAtStart || intent.targetRoute !== routeAtStart) return null
-      if (controller.currentPhase !== 'fetch-hold') return null
+      if (!intent || intent.topicId !== topicIdAtStart || intent.targetRoute !== routeAtStart) {
+        return null
+      }
+      if (controller.currentPhase !== 'fetch-hold') {
+        return null
+      }
       const wid = windowIdentityKey(window) ?? `epoch-${fetchEpoch}`
       const ok = controller.applyTransitionWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
-      if (!ok) return null
+      if (!ok) {
+        return null
+      }
       viewportDispatch({ type: 'window/apply', window })
       transitionPlanRef.current = {
         topicId: topicIdAtStart,
@@ -2979,6 +3106,62 @@ const Messages = ({
       return fetchEpoch
     },
     [controller, notifyViewport, viewportDispatch, windowIdentityKey]
+  )
+  // Divider-only visible incremental rebase entry (fast path, never hidden).
+  // Synchronously rebases the existing rendered list (shared prefix stays
+  // mounted by stable ID), records session epoch + target route + window
+  // identity as rendered via `applyVisibleRebaseWindow` (fetch-hold → aligned
+  // directly, no positioning/visibility:hidden), and arms the synchronous
+  // first compensation + bounded quiet sequence below. Ownership + anchoring
+  // token stay held until the quiet sequence commits or deliberately falls
+  // back/terminates. Stale epochs refuse with no dispatch and never disturb
+  // the new session. Any eligibility/residency doubt must take the hidden
+  // searching path instead — never this entry. No stable commit happens here.
+  const commitDividerVisibleAtomic = useCallback(
+    (
+      fetchEpoch: number,
+      topicIdAtStart: string,
+      routeAtStart: string | null,
+      window: MessageWindow,
+      visible: {
+        dividerKey: string
+        anchorMessageId: string
+        parentOfDivider: string | null
+        sharedMessageId: string | null
+        sharedOffset: number | null
+        wantOffset: number
+      }
+    ): number | null => {
+      if (!controller.isSessionCurrent(fetchEpoch)) return null
+      const intent = controller.currentIntent
+      if (!intent || intent.kind !== 'divider') return null
+      if (intent.topicId !== topicIdAtStart || intent.targetRoute !== routeAtStart) return null
+      if (controller.currentPhase !== 'fetch-hold') return null
+      if ((window.displayMessages?.length ?? 0) === 0) return null
+      const wid = windowIdentityKey(window) ?? `epoch-${fetchEpoch}`
+      const ok = controller.applyVisibleRebaseWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
+      if (!ok) return null
+      cancelDividerVisibleQuiet()
+      viewportDispatch({ type: 'window/apply', window })
+      dividerVisibleRef.current = {
+        ownerEpoch: fetchEpoch,
+        topicId: topicIdAtStart,
+        routeId: routeAtStart,
+        dividerKey: visible.dividerKey,
+        anchorMessageId: visible.anchorMessageId,
+        parentOfDivider: visible.parentOfDivider,
+        sharedMessageId: visible.sharedMessageId,
+        sharedOffset: visible.sharedOffset,
+        wantOffset: visible.wantOffset,
+        windowId: wid,
+        quietArmed: false
+      }
+      const scrollToken = {}
+      viewportDispatch({ type: 'scroll/begin', mode: 'anchoring', token: scrollToken })
+      notifyViewport()
+      return fetchEpoch
+    },
+    [cancelDividerVisibleQuiet, controller, notifyViewport, viewportDispatch, windowIdentityKey]
   )
   const endDividerSearchTerminal = useCallback(
     (epoch: number, _reason: DividerSearchTerminalReason): void => {
@@ -3043,8 +3226,7 @@ const Messages = ({
         }
         const getSharedEl = (): HTMLElement | null => {
           if (!search.sharedMessageId) return null
-          const el = document.getElementById(`message-${esc(search.sharedMessageId)}`)
-          return el && el.isConnected ? el : null
+          return getMessageRowById(search.sharedMessageId)
         }
         const measureEl = (el: HTMLElement | null): number | null => {
           if (!el) return null
@@ -3138,8 +3320,7 @@ const Messages = ({
         const row = document.querySelector(`[data-divider-key="${esc(search.dividerKey)}"]`) as HTMLElement | null
         dividerResident = !!row && row.isConnected
         if (!dividerResident && search.sharedMessageId) {
-          const el = document.getElementById(`message-${esc(search.sharedMessageId)}`)
-          sharedResident = !!el && el.isConnected
+          sharedResident = getMessageRowById(search.sharedMessageId) !== null
         } else if (dividerResident) {
           sharedResident = false
         }
@@ -3210,6 +3391,277 @@ const Messages = ({
     if (searchAligningRef.current === search.ownerEpoch) return
     stepDividerSearch()
   }, [viewportState.window, viewportState.loading.older, viewportPhaseAttr, stepDividerSearch])
+
+  // Divider-only visible rebase: synchronous first compensation + bounded
+  // quiet sequence (fast path, layout phase, never hidden).
+  // The visible commit above rebased the rendered list synchronously with the
+  // container still visible (phase `aligned`, never `positioning`). This layout
+  // effect applies the FIRST compensation synchronously before paint
+  // (divider → wantOffset, explicit shared fallback → sharedOffset), then
+  // schedules a bounded quiet sequence (≥1 rAF after the write, at most one
+  // residual recheck frame). No stable commit happens in this layout effect:
+  // the quiet callback revalidates mounted/topic/route/epoch/current
+  // intent/current rendered window identity + resident divider-or-shared
+  // fallback, applies a residual correction when needed, and only then runs
+  // the ONE existing stable commit. No timer/stabilizer loop, no intermediate
+  // snapshot write. Post-apply lost residency fails closed INTO the existing
+  // hidden searching path under the SAME epoch/intent/ownership (aligned →
+  // searching via `fallbackVisibleToSearch`, then the restore-owned
+  // coordinator). A failed final commit while the epoch is still current
+  // explicitly fails/terminates the visible transition (never clears the
+  // pending driver first); stale callbacks never touch a newer session.
+  useLayoutEffect(() => {
+    const pending = dividerVisibleRef.current
+    if (!pending) return
+    // The quiet sequence owns the remainder once armed: a re-run for the same
+    // pending must not apply a second first compensation or a second commit.
+    if (pending.quietArmed) return
+    if (!controller.isSessionCurrent(pending.ownerEpoch)) {
+      if (dividerVisibleRef.current === pending) dividerVisibleRef.current = null
+      return
+    }
+    if (controller.currentPhase !== 'aligned') return
+    if (topicIdRef.current !== pending.topicId || routeRef.current !== pending.routeId) {
+      failVisibleTransition(pending.ownerEpoch)
+      return
+    }
+    const live = scrollContainerRef.current
+    if (!live || unmountedRef.current) {
+      failVisibleTransition(pending.ownerEpoch)
+      return
+    }
+    const esc =
+      typeof CSS !== 'undefined' && typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
+        ? (CSS as unknown as { escape: (v: string) => string }).escape
+        : (v: string) => v
+    // Post-apply lost-residency fallback into hidden searching (same session).
+    // Explicit, stale-safe, no stable write: the search coordinator owns the
+    // remainder (restore-owned pagination → resident → aligned → quiet →
+    // the ONE stable commit). The anchoring scroll token stays held across
+    // the transition; ownership releases only at that commit or a terminal.
+    const fallBackToHiddenSearch = (): void => {
+      const epoch = pending.ownerEpoch
+      if (dividerVisibleRef.current !== pending && dividerProgressRef.current?.ownerEpoch !== epoch) {
+        // Not ours anymore: stale work stays inert, never touches the newer
+        // session.
+        return
+      }
+      if (!controller.isSessionCurrent(epoch)) {
+        if (dividerVisibleRef.current === pending) dividerVisibleRef.current = null
+        return
+      }
+      cancelDividerVisibleQuiet()
+      const progress = buildDividerSearchProgressFromVisible({
+        ownerEpoch: pending.ownerEpoch,
+        topicId: pending.topicId,
+        routeId: pending.routeId,
+        dividerKey: pending.dividerKey,
+        anchorMessageId: pending.anchorMessageId,
+        parentOfDivider: pending.parentOfDivider,
+        sharedMessageId: pending.sharedMessageId,
+        sharedOffset: pending.sharedOffset,
+        wantOffset: pending.wantOffset
+      })
+      if (!progress) {
+        failVisibleTransition(epoch)
+        return
+      }
+      if (!controller.fallbackVisibleToSearch(epoch)) {
+        failVisibleTransition(epoch)
+        return
+      }
+      dividerProgressRef.current = progress
+      if (dividerVisibleRef.current === pending) dividerVisibleRef.current = null
+      notifyViewport()
+      try {
+        stepDividerSearch()
+      } catch {
+        // fail-closed: the committed-window watcher re-steps on window change
+      }
+    }
+    const resolveTarget = (): { el: HTMLElement; target: number } | null => {
+      try {
+        const row = document.querySelector(`[data-divider-key="${esc(pending.dividerKey)}"]`) as HTMLElement | null
+        if (row && row.isConnected) {
+          if (typeof pending.wantOffset !== 'number' || !Number.isFinite(pending.wantOffset)) return null
+          return { el: row, target: pending.wantOffset }
+        }
+        if (pending.sharedMessageId) {
+          const el = getMessageRowById(pending.sharedMessageId)
+          if (el) {
+            if (typeof pending.sharedOffset !== 'number' || !Number.isFinite(pending.sharedOffset)) return null
+            return { el, target: pending.sharedOffset }
+          }
+        }
+        return null
+      } catch {
+        return null
+      }
+    }
+    const measureOffset = (el: HTMLElement): number | null => {
+      try {
+        return el.getBoundingClientRect().top - live.getBoundingClientRect().top
+      } catch {
+        return null
+      }
+    }
+    // Explicit terminal for current-session failures: never clears the driver
+    // alone (termination owns the clear + exactly-once token release). Stale
+    // work drops only its own driver and never touches a newer session.
+    const dropOrFailVisible = (): void => {
+      if (controller.isSessionCurrent(pending.ownerEpoch)) {
+        failVisibleTransition(pending.ownerEpoch)
+      } else if (dividerVisibleRef.current === pending) {
+        dividerVisibleRef.current = null
+      }
+    }
+    // Quiet-callback currency gate (strict): mounted/topic/route/epoch/phase/
+    // intent/rendered window identity + live committed window must all still
+    // agree with the pending visible driver. No adoption: a same-current
+    // window mismatch is a current-session failure (explicit fail/terminate
+    // via dropOrFailVisible, or the hidden fallback when anchor residency is
+    // lost). Stale superseded work only clears its own pending ref.
+    const quietCurrent = (): { ok: boolean; lostResidency: boolean } => {
+      if (unmountedRef.current) return { ok: false, lostResidency: false }
+      if (topicIdRef.current !== pending.topicId || routeRef.current !== pending.routeId) {
+        return { ok: false, lostResidency: false }
+      }
+      if (!controller.isSessionCurrent(pending.ownerEpoch)) return { ok: false, lostResidency: false }
+      if (controller.currentPhase !== 'aligned') return { ok: false, lostResidency: false }
+      const intent = controller.currentIntent
+      if (!intent || intent.kind !== 'divider') return { ok: false, lostResidency: false }
+      if (intent.topicId !== pending.topicId || intent.targetRoute !== pending.routeId) {
+        return { ok: false, lostResidency: false }
+      }
+      try {
+        const liveWindowId = windowIdentityKey(viewportStateRef.current.window)
+        if (!liveWindowId || liveWindowId !== pending.windowId) {
+          if (!resolveTarget()) return { ok: false, lostResidency: true }
+          return { ok: false, lostResidency: false }
+        }
+      } catch {
+        return { ok: false, lostResidency: false }
+      }
+      const rendered = controller.renderedProvenance
+      if (!rendered || rendered.epoch !== pending.ownerEpoch || rendered.windowId !== pending.windowId) {
+        if (!resolveTarget()) return { ok: false, lostResidency: true }
+        return { ok: false, lostResidency: false }
+      }
+      if (!resolveTarget()) return { ok: false, lostResidency: true }
+      return { ok: true, lostResidency: false }
+    }
+    const commitQuiet = (): void => {
+      const gate = quietCurrent()
+      if (!gate.ok) {
+        if (gate.lostResidency) {
+          fallBackToHiddenSearch()
+          return
+        }
+        // Same-current window mismatch: explicit fail/terminate (releases
+        // exactly once, preserves the pre-existing snapshot). Stale work
+        // drops only its own driver.
+        dropOrFailVisible()
+        return
+      }
+      const ok = commitDisplayedStable(pending.topicId, pending.routeId, pending.ownerEpoch)
+      if (ok) {
+        if (dividerVisibleRef.current === pending) dividerVisibleRef.current = null
+        notifyViewport()
+        return
+      }
+      // Commit refused: while this epoch is still current the visible
+      // transition must explicitly fail/terminate (releases exactly once,
+      // preserves the pre-existing snapshot). Never clear the pending driver
+      // first — termination owns the clear. Stale epochs stay inert.
+      if (controller.isSessionCurrent(pending.ownerEpoch)) {
+        failVisibleTransition(pending.ownerEpoch)
+        return
+      }
+      if (dividerVisibleRef.current === pending) dividerVisibleRef.current = null
+    }
+    try {
+      const first = resolveTarget()
+      if (!first) {
+        fallBackToHiddenSearch()
+        return
+      }
+      const have = measureOffset(first.el)
+      if (have === null) {
+        fallBackToHiddenSearch()
+        return
+      }
+      const delta = have - first.target
+      if (Math.abs(delta) > 1) {
+        try {
+          live.scrollTop += delta
+        } catch {
+          failVisibleTransition(pending.ownerEpoch)
+          return
+        }
+      }
+      // Hold the same session/ownership + anchoring token across the quiet
+      // sequence: no commit, no snapshot write, no phase change here.
+      pending.quietArmed = true
+      cancelDividerVisibleQuiet()
+      dividerVisibleRafRef.current = requestAnimationFrame(() => {
+        dividerVisibleRafRef.current = null
+        // Stale scheduled work must no-op against a newer session.
+        if (dividerVisibleRef.current !== pending) return
+        const gate = quietCurrent()
+        if (!gate.ok) {
+          if (gate.lostResidency) {
+            fallBackToHiddenSearch()
+            return
+          }
+          // Same-current window mismatch terminates explicitly (releases
+          // exactly once); stale work drops only its own driver.
+          dropOrFailVisible()
+          return
+        }
+        // Residual re-measure: late layout (fonts/images/divider) may have
+        // moved the target after the first write. A second correction waits
+        // one more frame and revalidates before the commit.
+        const current = resolveTarget()
+        if (!current) {
+          fallBackToHiddenSearch()
+          return
+        }
+        const reHave = measureOffset(current.el)
+        if (reHave === null) {
+          fallBackToHiddenSearch()
+          return
+        }
+        const residual = reHave - current.target
+        if (Math.abs(residual) > 1) {
+          try {
+            live.scrollTop += residual
+          } catch {
+            failVisibleTransition(pending.ownerEpoch)
+            return
+          }
+          dividerVisibleRafRef.current = requestAnimationFrame(() => {
+            dividerVisibleRafRef.current = null
+            if (dividerVisibleRef.current !== pending) return
+            commitQuiet()
+          })
+          return
+        }
+        commitQuiet()
+      })
+    } catch {
+      failVisibleTransition(pending.ownerEpoch)
+    }
+  }, [
+    viewportState.window,
+    controller,
+    cancelDividerVisibleQuiet,
+    commitDisplayedStable,
+    failVisibleTransition,
+    notifyViewport,
+    scrollContainerRef,
+    stepDividerSearch,
+    windowIdentityKey
+  ])
 
   // Divider route switch: reliable visual invariant is "the clicked fork
   // divider row keeps the same pixel offset inside the container".
@@ -3338,6 +3790,99 @@ const Messages = ({
           NAVIGATION_VISUALLY_NEWER_GROUPS
         )
         if (targetWindow) {
+          // Divider-only visible incremental rebase (fast path, never hidden):
+          // fork-aligned route semantics — the preserved chain is the current
+          // resident prefix through the fork (which may begin earlier than the
+          // target around-window head), verified continuous against the
+          // authoritative target response; only the target window's ordered
+          // exclusive suffix is appended and the outgoing foreign suffix is
+          // removed. The union window covers the preserved prefix plus the
+          // suffix exactly, so shared rows keep their mounted DOM nodes and
+          // the clicked divider stays at its offset via the layout
+          // compensation below. Any eligibility doubt falls through to the
+          // hidden searching path unchanged (missing fork, disjoint/
+          // malformed/interleaved/duplicate/unstable IDs, foreign suffix,
+          // unmeasurable offset, or empty incoming suffix).
+          if (dividerVisualAnchorOffset !== null) {
+            try {
+              const currentWindow = viewportStateRef.current.window
+              const currentIds = currentWindow?.displayMessages?.map((m) => m.id) ?? []
+              const targetIds = targetWindow.displayMessages?.map((m) => m.id) ?? []
+              const responseIds = ((routeWindow.messages ?? []) as unknown as Message[]).map((m) => m.id)
+              const toOldestFirst = (newestFirst: string[]): string[] => [...newestFirst].reverse()
+              const visiblePlan = planDividerVisibleRebase({
+                currentIdsOldestFirst: toOldestFirst(currentIds),
+                targetResponseIdsOldestFirst: responseIds,
+                targetWindowIdsOldestFirst: toOldestFirst(targetIds),
+                forkAnchorId: anchorMessageId,
+                currentHasMoreBefore: currentWindow?.hasMoreOlder ?? false,
+                targetHasMoreAfter: targetWindow.hasMoreNewer
+              })
+              if (visiblePlan) {
+                // Union objects: preserved prefix reuses the exact resident
+                // instances (same React keys → mounted rows stay); the suffix
+                // comes from the authoritative loaded projection.
+                const unionNewestFirst = buildDividerVisibleMessages(
+                  currentWindow?.displayMessages ?? [],
+                  loaded,
+                  visiblePlan
+                )
+                const unionOldestFirst = [...unionNewestFirst].reverse()
+                // Group quotas sized to cover the whole union (every preserved
+                // group plus every incoming group), so no shared row is
+                // trimmed by quota: the union IS the committed window.
+                // Capabilities ride merged (older from the preserved current
+                // side, newer from the target side).
+                const unionModel = createMessageViewportGroupModel(unionOldestFirst)
+                const unionForkGroup = unionModel.messageIdToGroup.get(anchorMessageId)
+                const unionForkGroupIndex = unionForkGroup ? unionModel.groups.indexOf(unionForkGroup) : -1
+                if (unionForkGroupIndex >= 0) {
+                  const unionWindow = createTargetMessageWindow(
+                    unionOldestFirst,
+                    anchorMessageId,
+                    unionForkGroupIndex + 1,
+                    unionModel.groups.length - unionForkGroupIndex - 1,
+                    { hasMoreBefore: visiblePlan.hasMoreBefore, hasMoreAfter: visiblePlan.hasMoreAfter }
+                  )
+                  // Fail-closed union gate: the built visible window must
+                  // represent every planned ID exactly (no bounded-viewport
+                  // trim, no duplicates/missing IDs, group count/capacity
+                  // consistent, hasMore flags truthful). Any mismatch skips
+                  // the visible path and runs the existing hidden atomic path
+                  // unchanged. Uses the exported cap/observability mechanisms
+                  // (never a hardcoded second truth).
+                  const unionExact = isDividerVisibleUnionExact({
+                    plan: visiblePlan,
+                    unionOldestFirst,
+                    unionNewestFirst,
+                    unionWindow,
+                    unionModelGroupCount: unionModel.groups.length
+                  })
+                  if (unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
+                    const visibleEpoch = commitDividerVisibleAtomic(fetchEpoch, topicIdAtStart, branchId, unionWindow, {
+                      dividerKey,
+                      anchorMessageId,
+                      parentOfDivider,
+                      sharedMessageId: sharedVisualMessageId,
+                      sharedOffset:
+                        fallbackTop && Number.isFinite(fallbackTop.intraRowOffset) ? fallbackTop.intraRowOffset : null,
+                      wantOffset: dividerVisualAnchorOffset
+                    })
+                    if (visibleEpoch !== null) {
+                      // Visible path armed: the layout effect applies the first
+                      // compensation, then the bounded quiet sequence commits.
+                      // Skip the hidden search record and the rAF coordinator
+                      // below entirely (no positioning, no searching on the
+                      // success path).
+                      return
+                    }
+                  }
+                }
+              }
+            } catch {
+              // fail-closed: fall through to the hidden path below
+            }
+          }
           // Atomic route transition: arm hidden-until-positioned together
           // with the target window commit in the same React batch. The old
           // viewport stays visible during the fetch above (incremental);
@@ -3489,6 +4034,7 @@ const Messages = ({
       beginFetchHold,
       cancelActiveLoads,
       commitDisplayedStable,
+      commitDividerVisibleAtomic,
       commitRouteWindowAtomic,
       dispatch,
       failVisibleTransition,
@@ -3775,16 +4321,14 @@ const Messages = ({
     } catch {
       saved = null
     }
-    // Rapid-return retained anchor (A→main→A where the intermediate main
-    // never displayed): when the incoming target still equals the
-    // controller's displayed route and the controller holds a live message
-    // anchor for it, that retained anchor is provably fresher than the
-    // persisted snapshot (storage freezes while owned/dirty; live tracks the
-    // last retained anchor). Fetch around it and plan to it — never let a
-    // stale persisted snapshot drag the still-visible route to an old
-    // position. Ordinary switches (target != displayed) keep the storage
-    // path untouched below.
-    const retainedLiveAnchor = controller.activeAnchor
+    // Rapid-return retained anchor (A→B→A where the intermediate B never
+    // displayed): route-qualified read only — the live anchor is observable
+    // here solely when its provenance already equals the incoming target
+    // (proven same-route). A foreign live anchor (B provenance while
+    // requesting A) returns null and the target's own persisted snapshot
+    // wins. Never infer route from displayed alone; never inspect the
+    // unqualified global activeAnchor for another route's position.
+    const retainedLiveAnchor = controller.getAnchorFor({ topicId: topicIdAtEffect, route: routeAtEffect })
     const useRetainedAnchor =
       retainedLiveAnchor !== null &&
       retainedLiveAnchor.kind === 'message' &&
@@ -4079,13 +4623,7 @@ const Messages = ({
           let domConnected = false
           try {
             if (routeSavedRowAnchor) {
-              const esc =
-                typeof CSS !== 'undefined' &&
-                typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
-                  ? (CSS as unknown as { escape: (v: string) => string }).escape
-                  : (v: string) => v
-              const row = document.getElementById(`message-${esc(routeSavedRowAnchor)}`)
-              domConnected = !!row && row.isConnected
+              domConnected = getMessageRowById(routeSavedRowAnchor) !== null
             }
           } catch {
             domConnected = false
@@ -4154,15 +4692,10 @@ const Messages = ({
               // afterwards; the arm's scroll token stays held until the
               // commit below releases it.
               try {
-                const esc =
-                  typeof CSS !== 'undefined' &&
-                  typeof (CSS as unknown as { escape?: (v: string) => string }).escape === 'function'
-                    ? (CSS as unknown as { escape: (v: string) => string }).escape
-                    : (v: string) => v
                 const settleOnce = (): boolean => {
                   try {
-                    const el = document.getElementById(`message-${esc(routeSavedRowAnchor)}`)
-                    if (!el || !el.isConnected || !stillTopTarget()) return false
+                    const el = getMessageRowById(routeSavedRowAnchor)
+                    if (!el || !stillTopTarget()) return false
                     const have = el.getBoundingClientRect().top - live.getBoundingClientRect().top
                     const delta = have - wantOffset
                     if (Math.abs(delta) > 1) live.scrollTop += delta

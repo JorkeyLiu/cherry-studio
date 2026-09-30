@@ -2001,12 +2001,158 @@ test.describe('Topic-internal branches end-to-end', () => {
         Math.abs((dividerOnParent as number) - (dividerBefore as number)),
         `divider row offset must be stable across the switch at ${block}`
       ).toBeLessThanOrEqual(12)
+      // Visible-rebase probe on the eligible RETURN leg (main -> branch at
+      // `center` only): the fork-aligned union keeps current resident shared
+      // rows mounted while the main suffix leaves and the branch suffix
+      // mounts. Explicit visible baseline first (no latched pre-existing
+      // state); deterministic sampling (MutationObserver + rAF timeline)
+      // installed immediately before the route-changing click; a single
+      // stop-collect-cleanup in page context before any assertion below, so
+      // the probe observes exactly one switch and can never leak into later
+      // loop iterations.
+      const vrbIsReturn = block === 'center'
+      let vrbSharedIds: string[] = []
+      let vrbOutgoingIds: string[] = []
+      let vrbHandles: Array<{ id: string; handle: any }> = []
+      if (vrbIsReturn) {
+        await waitViewportVisible()
+        await waitRouteWindowStable(1)
+        expect(
+          await page.evaluate(() => !(window as any).__vrb_center),
+          'visible-rebase probe must not leak from an earlier iteration'
+        ).toBe(true)
+        const vrbDomBefore: string[] = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+            (r) => r.getAttribute('data-message-id') as string
+          )
+        )
+        const vrbSharedUniverse = ids.slice(0, ANCHOR_IDX + 1)
+        const vrbResidentShared = vrbDomBefore
+          .filter((mid) => vrbSharedUniverse.includes(mid))
+          .sort((a, b) => vrbSharedUniverse.indexOf(a) - vrbSharedUniverse.indexOf(b))
+        expect(
+          vrbResidentShared.length,
+          `visible-rebase needs >=5 resident shared prefix nodes (resident=${vrbResidentShared.length} dom=${vrbDomBefore.length})`
+        ).toBeGreaterThanOrEqual(5)
+        vrbSharedIds = vrbResidentShared.slice(-6)
+        vrbOutgoingIds = vrbDomBefore.filter((mid) => mainPostForkExclusiveIds.includes(mid))
+        expect(
+          vrbOutgoingIds.length,
+          `visible-rebase needs >=1 resident main-exclusive outgoing node (found=${vrbOutgoingIds.length})`
+        ).toBeGreaterThanOrEqual(1)
+        const vrbBeforeBranchExcl = vrbDomBefore.filter((mid) => branchSuffixIds.includes(mid))
+        expect(vrbBeforeBranchExcl, 'branch-exclusives must all be absent before the main->branch return').toEqual([])
+        for (const sid of vrbSharedIds) {
+          const h = await page.locator(`#messages [data-message-id="${sid}"]`).first().elementHandle()
+          expect(h, `shared prefix ${sid} ElementHandle must attach before switch`).not.toBeNull()
+          vrbHandles.push({ id: sid, handle: h })
+        }
+      }
       const parentToggle = page.locator(`[data-testid="branch-fork-toggle-${anchorId}"]`).first()
       await expect(parentToggle, 'parent route shows the untaken count form').toBeVisible({ timeout: 30000 })
       await parentToggle.click()
       await expect(page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()).toBeVisible({
         timeout: 15000
       })
+      if (vrbIsReturn) {
+        // Install immediately before the route-changing click: timestamped
+        // observer + rAF timeline over this switch only.
+        await page.evaluate((sharedIds: string[]) => {
+          const key = '__vrb_center'
+          if ((window as any)[key]) throw new Error('visible-rebase probe already installed')
+          const container = document.querySelector('#messages') as HTMLElement | null
+          if (!container) throw new Error('#messages not found for visible-rebase probe')
+          const before = new Map<string, HTMLElement>()
+          for (const mid of sharedIds) {
+            const el = container.querySelector(`[data-message-id="${mid}"]`) as HTMLElement | null
+            if (!el) throw new Error(`shared node ${mid} missing for visible-rebase probe`)
+            before.set(mid, el)
+          }
+          const t0 = performance.now()
+          const events: Array<{ t: number; kind: string; detail: string }> = []
+          const seen = { positioning: false, hidden: false, empty: false }
+          const removed = new Set<string>()
+          const sample = (why: string): void => {
+            const t = Math.round((performance.now() - t0) * 10) / 10
+            let phase: string | null = null
+            try {
+              phase = container.getAttribute('data-viewport-phase')
+            } catch {
+              phase = null
+            }
+            if (phase === 'positioning' && !seen.positioning) {
+              seen.positioning = true
+              events.push({ t, kind: 'positioning', detail: why })
+            }
+            let vis: string | null = null
+            try {
+              vis = getComputedStyle(container).visibility
+            } catch {
+              vis = null
+            }
+            if (vis === 'hidden' && !seen.hidden) {
+              seen.hidden = true
+              events.push({ t, kind: 'hidden', detail: why })
+            }
+            let count = -1
+            try {
+              count = container.querySelectorAll('[data-message-id]').length
+            } catch {
+              count = -1
+            }
+            if (count === 0 && !seen.empty) {
+              seen.empty = true
+              events.push({ t, kind: 'empty', detail: why })
+            }
+            for (const [mid, el] of before) {
+              let connected = false
+              try {
+                connected = el.isConnected
+              } catch {
+                connected = false
+              }
+              if (!connected && !removed.has(mid)) {
+                removed.add(mid)
+                events.push({ t, kind: 'removal', detail: `${why}:${mid}` })
+              }
+            }
+          }
+          const obs = new MutationObserver(() => sample('mutation'))
+          obs.observe(container, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['data-viewport-phase', 'style', 'class']
+          })
+          let raf = 0
+          let running = true
+          const tick = (): void => {
+            if (!running) return
+            sample('raf')
+            raf = requestAnimationFrame(tick)
+          }
+          sample('install')
+          raf = requestAnimationFrame(tick)
+          ;(window as any)[key] = {
+            before,
+            events,
+            t0,
+            stop: () => {
+              running = false
+              try {
+                cancelAnimationFrame(raf)
+              } catch {
+                // best effort
+              }
+              try {
+                obs.disconnect()
+              } catch {
+                // best effort
+              }
+            }
+          }
+        }, vrbSharedIds)
+      }
       await page.locator(`[data-testid="branch-fork-item-${visualBranchId}"]`).first().click()
       await waitActiveBranch(visualBranchId)
       // True-branch visual divider return: zero synthesized scrolling. The
@@ -2056,6 +2202,132 @@ test.describe('Topic-internal branches end-to-end', () => {
         Math.abs((dividerBack as number) - (dividerBefore as number)),
         `divider row offset must repeat after the round-trip at ${block}`
       ).toBeLessThanOrEqual(12)
+      if (vrbIsReturn) {
+        // Single stop-collect-cleanup in page context BEFORE any assertion:
+        // stops the rAF loop, disconnects the observer, snapshots the
+        // timestamped timeline, deletes every probe key, and returns
+        // serializable data. The fallback cleanup runs even when collection
+        // throws, so the probe can never leak into later loop iterations.
+        let vrbProbe: {
+          installed: boolean
+          events: Array<{ t: number; kind: string; detail: string }>
+          perId: Array<{ id: string; origConnected: boolean; curAttached: boolean; sameObject: boolean }>
+          finalCount: number
+          phaseNow: string | null
+          cleaned: boolean
+        } | null = null
+        try {
+          vrbProbe = await page.evaluate((sharedIds: string[]) => {
+            const key = '__vrb_center'
+            const probe = (window as any)[key] as
+              | { before?: Map<string, HTMLElement>; events?: Array<{ t: number; kind: string; detail: string }> }
+              | undefined
+            const container = document.querySelector('#messages') as HTMLElement | null
+            const result: {
+              installed: boolean
+              events: Array<{ t: number; kind: string; detail: string }>
+              perId: Array<{ id: string; origConnected: boolean; curAttached: boolean; sameObject: boolean }>
+              finalCount: number
+              phaseNow: string | null
+              cleaned: boolean
+            } = { installed: !!probe, events: [], perId: [], finalCount: -1, phaseNow: null, cleaned: false }
+            try {
+              try {
+                ;((window as any)[key] as { stop?: () => void } | undefined)?.stop?.()
+              } catch {
+                // best effort: collection below still reports what exists
+              }
+              result.events = Array.isArray(probe?.events)
+                ? ([...(probe?.events as unknown[])] as typeof result.events)
+                : []
+              const before = probe?.before
+              result.perId = sharedIds.map((mid: string) => {
+                const cur = container?.querySelector(`[data-message-id="${mid}"]`) as HTMLElement | null
+                const orig = before?.get(mid) ?? null
+                return {
+                  id: mid,
+                  origConnected: !!orig?.isConnected,
+                  curAttached: !!cur?.isConnected,
+                  sameObject: !!orig && !!cur && orig === cur
+                }
+              })
+              try {
+                result.finalCount = container?.querySelectorAll('[data-message-id]').length ?? -1
+              } catch {
+                result.finalCount = -1
+              }
+              try {
+                result.phaseNow = container?.getAttribute('data-viewport-phase') ?? null
+              } catch {
+                result.phaseNow = null
+              }
+            } finally {
+              delete (window as any)[key]
+              result.cleaned = !(window as any)[key]
+            }
+            return result
+          }, vrbSharedIds)
+        } finally {
+          await page.evaluate(() => {
+            const key = '__vrb_center'
+            try {
+              ;((window as any)[key] as { stop?: () => void } | undefined)?.stop?.()
+            } catch {
+              // best effort
+            }
+            delete (window as any)[key]
+          })
+        }
+        expect(vrbProbe, 'visible-rebase probe must collect exactly one switch').not.toBeNull()
+        expect(vrbProbe?.installed, 'probe must have observed the return switch').toBe(true)
+        const vrbKinds = (vrbProbe?.events ?? []).map((e) => e.kind)
+        expect(
+          vrbKinds.filter((k) => k === 'positioning'),
+          `no positioning event attributable after click (timeline=${JSON.stringify(vrbProbe?.events)})`
+        ).toEqual([])
+        expect(
+          vrbKinds.filter((k) => k === 'hidden'),
+          `computed visibility must never be hidden (timeline=${JSON.stringify(vrbProbe?.events)})`
+        ).toEqual([])
+        expect(
+          vrbKinds.filter((k) => k === 'empty'),
+          `container must never report an empty frame (timeline=${JSON.stringify(vrbProbe?.events)})`
+        ).toEqual([])
+        expect(
+          vrbKinds.filter((k) => k === 'removal'),
+          `no shared removal attributable after click (timeline=${JSON.stringify(vrbProbe?.events)})`
+        ).toEqual([])
+        expect(
+          vrbProbe?.phaseNow === 'revealed' || vrbProbe?.phaseNow === 'idle',
+          `viewport must settle visible after divider switch (got ${vrbProbe?.phaseNow})`
+        ).toBe(true)
+        for (const row of vrbProbe?.perId ?? []) {
+          expect(row.origConnected, `shared ${row.id} original node must stay connected`).toBe(true)
+          expect(row.curAttached, `shared ${row.id} current node must stay attached`).toBe(true)
+          expect(row.sameObject, `shared ${row.id} must be the exact same DOM object after switch`).toBe(true)
+        }
+        for (const { id, handle } of vrbHandles) {
+          const same = await handle.evaluate((node: Element, mid: string) => {
+            const cur = document.querySelector(`#messages [data-message-id="${mid}"]`)
+            return (node as HTMLElement).isConnected && node === cur
+          }, id)
+          expect(same, `ElementHandle shared ${id} must resolve to the same connected DOM object`).toBe(true)
+        }
+        for (const oid of vrbOutgoingIds) {
+          expect(await domCount(oid), `outgoing main-exclusive ${oid} must disappear after visible rebase`).toBe(0)
+        }
+        const vrbDomAfter: string[] = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('#messages [data-message-id]')).map(
+            (r) => r.getAttribute('data-message-id') as string
+          )
+        )
+        const vrbAfterBranchExcl = vrbDomAfter.filter((mid) => branchSuffixIds.includes(mid))
+        expect(
+          vrbAfterBranchExcl.length,
+          `target branch-exclusive suffix must appear after visible rebase (found=${vrbAfterBranchExcl.length})`
+        ).toBeGreaterThan(0)
+        expect(vrbProbe?.cleaned, 'visible-rebase probe cleanup must be exact and deterministic').toBe(true)
+      }
       // Ordinary pagination anchoring (compatible with the divider contract):
       // the pre-paging head survives the merge and stays attached (resident
       // membership + DOM attached; never a visibility requirement).

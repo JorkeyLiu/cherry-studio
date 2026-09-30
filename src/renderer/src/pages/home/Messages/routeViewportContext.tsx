@@ -81,9 +81,13 @@ export const readRouteSnapshot = (routeKey: string): RouteViewportSnapshot | nul
     return null
   }
   const result = normalizeSnapshot(saved)
-  if (result === null) return null
+  if (result === null) {
+    return null
+  }
   try {
-    if (!handleScrollSnapshotRead(storageKey)) return null
+    if (!handleScrollSnapshotRead(storageKey)) {
+      return null
+    }
   } catch {
     return null
   }
@@ -142,8 +146,17 @@ export const useRouteViewport = (): RouteViewportContextValue => {
 /** Optional access for hooks that must keep working outside the provider (tests). */
 export const useOptionalRouteViewport = (): RouteViewportContextValue | null => use(RouteViewportContext)
 
-export const viewportPhaseAttrFor = (phase: string): ViewportPhaseAttr => {
-  if (phase === 'positioning' || phase === 'fetch-hold') return 'positioning'
+export const viewportPhaseAttrFor = (phase: string, intentKind?: string | null): ViewportPhaseAttr => {
+  // Divider fetch-hold keeps the current displayed/rendered window on screen
+  // (revealed, never visibility:hidden): the divider fetch resolves around
+  // the already-visible fork anchor and the visible rebase commits
+  // synchronously into the live list. Top intent and every other fetch-hold
+  // keep the existing hidden behavior; only the hidden atomic fallback
+  // (`commitRouteWindowAtomic` → `applyTransitionWindow` → positioning) hides
+  // when visible eligibility/commit fails. Intent comes from the controller
+  // (sole truth); no UI-local route truth is consulted or advanced here.
+  if (phase === 'positioning') return 'positioning'
+  if (phase === 'fetch-hold') return intentKind === 'divider' ? 'revealed' : 'positioning'
   if (phase === 'idle') return 'idle'
   return 'revealed'
 }
@@ -181,17 +194,24 @@ export function RouteViewportProvider({
   // outgoing route). No module/global truth: decision is the scoped
   // controller instance's `shouldCaptureOutgoing()`.
   const freezeDisplayed = useCallback((): boolean => {
-    if (!controller.shouldCaptureOutgoing()) return false
+    if (!controller.shouldCaptureOutgoing()) {
+      return false
+    }
     const capturer = capturerRef.current
-    if (!capturer) return false
+    if (!capturer) {
+      return false
+    }
     let snapshot: RouteViewportSnapshot | null = null
     try {
       snapshot = capturer()
     } catch {
       snapshot = null
     }
-    if (!snapshot) return false
-    return writeRouteSnapshot(displayedRouteKey(controller.displayedRoute), snapshot)
+    if (!snapshot) {
+      return false
+    }
+    const outKey = displayedRouteKey(controller.displayedRoute)
+    return writeRouteSnapshot(outKey, snapshot)
   }, [controller])
 
   const readSnapshot = useCallback((_routeKey: string) => readRouteSnapshot(_routeKey), [])
@@ -205,7 +225,8 @@ export function RouteViewportProvider({
   const requestTopRoute = useCallback(
     (forTopicId: string, targetRoute: RouteId): { epoch: number; fresh: boolean } => {
       freezeDisplayed()
-      const saved = readRouteSnapshot(`topic-${forTopicId}::${targetRoute ?? 'main'}`)
+      const targetKey = `topic-${forTopicId}::${targetRoute ?? 'main'}`
+      const saved = readRouteSnapshot(targetKey)
       const { epoch } = controller.request({
         kind: 'top',
         topicId: forTopicId,
@@ -253,7 +274,7 @@ export function RouteViewportProvider({
       readSnapshot,
       requestTopRoute,
       registerCapturer,
-      viewportPhaseAttr: viewportPhaseAttrFor(controller.currentPhase)
+      viewportPhaseAttr: viewportPhaseAttrFor(controller.currentPhase, controller.currentIntent?.kind ?? null)
     }),
     [controller, version, notifyChanged, freezeDisplayed, readSnapshot, requestTopRoute, registerCapturer]
   )
@@ -540,7 +561,11 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       if (phase !== 'stable' && phase !== 'aligned') return
       if (vp.controller.programmaticOwned || vp.controller.hasActiveUserInteraction()) return
       if (!vp.controller.isDomProvenanceClean) return
-      const anchor = vp.controller.activeAnchor
+      // Provenance-guarded hold: the keeper may hold only the displayed
+      // route's own anchor. A foreign live anchor (provenance != displayed)
+      // is inert here — never compensated as if it belonged to this route.
+      const displayed = vp.controller.displayedRoute
+      const anchor = vp.controller.getAnchorFor(displayed)
       if (!anchor) return
       const el = resolveRow(anchor)
       if (!el) return

@@ -19,6 +19,8 @@
  * the visual reveal timing plus the synchronous first-position write.
  */
 
+import { getMessageRowById } from './domVisibility'
+
 /** Visual phase exposed via `data-viewport-phase` (diagnostic, no user strings). */
 export type ViewportTransitionPhase = 'idle' | 'positioning' | 'revealed'
 
@@ -93,6 +95,14 @@ const cssEscape = (value: string): string => {
   return value
 }
 
+const oldestEdgeScrollTop = (container: HTMLElement): number => {
+  try {
+    return Math.min(0, container.clientHeight - container.scrollHeight)
+  } catch {
+    return 0
+  }
+}
+
 /**
  * Synchronously apply the first scroll position. Best-effort but atomic: a
  * single DOM write with no rAF, no async, no stabilizer. Returns the explicit
@@ -104,21 +114,20 @@ const cssEscape = (value: string): string => {
  * The oldest-edge parking is INTERMEDIATE search placement (`searching`), not
  * final success: the requested identity is still outside the resident window
  * and restore-owned pagination must continue under the same ownership.
+ *
+ * Message-row lookups use the raw DOM id (`getMessageRowById`, i.e. raw
+ * `getElementById('message-'+id)` with no `CSS.escape`): writers use the raw
+ * id and `getElementById` requires the raw string. `CSS.escape` stays only
+ * for `querySelector`/selector contexts (divider rows).
  */
-const oldestEdgeScrollTop = (container: HTMLElement): number => {
-  try {
-    return Math.min(0, container.clientHeight - container.scrollHeight)
-  } catch {
-    return 0
-  }
-}
-
 export const applyViewportFirstPosition = (
   container: HTMLElement,
   plan: ViewportFirstPositionPlan
 ): ViewportFirstPositionOutcome => {
   try {
-    if (plan.kind === 'none') return 'unplaced'
+    if (plan.kind === 'none') {
+      return 'unplaced'
+    }
     if (plan.kind === 'bottom') {
       if (Math.abs(container.scrollTop) > 1) container.scrollTop = 0
       return 'placed'
@@ -129,8 +138,8 @@ export const applyViewportFirstPosition = (
     }
     const containerRect = container.getBoundingClientRect()
     if (plan.kind === 'message') {
-      const el = document.getElementById(`message-${cssEscape(plan.messageId)}`)
-      if (!el || !el.isConnected) {
+      const el = getMessageRowById(plan.messageId)
+      if (!el) {
         // Missing requested DOM target: same-route raw scrollTop when the
         // plan carries one (explicit final fallback → placed), else the
         // oldest edge when the caller armed it (INTERMEDIATE search placement
@@ -172,21 +181,21 @@ export const applyViewportFirstPosition = (
       return 'placed'
     }
     if (plan.fallbackMessageId) {
-      const el = document.getElementById(`message-${cssEscape(plan.fallbackMessageId)}`)
-      if (el && el.isConnected && plan.fallbackOffset !== null && Number.isFinite(plan.fallbackOffset)) {
+      const el = getMessageRowById(plan.fallbackMessageId)
+      if (el && plan.fallbackOffset !== null && Number.isFinite(plan.fallbackOffset)) {
         const have = el.getBoundingClientRect().top - containerRect.top
         const delta = have - plan.fallbackOffset
         if (Math.abs(delta) > 1) container.scrollTop += delta
         return 'placed'
       }
-      if (el && el.isConnected && !plan.edgeFallbackOnMissing) {
+      if (el && !plan.edgeFallbackOnMissing) {
         el.scrollIntoView({ behavior: 'auto', block: 'start' })
         return 'placed'
       }
     }
     if (!plan.fallbackMessageId && plan.anchorMessageId && !plan.edgeFallbackOnMissing) {
-      const el = document.getElementById(`message-${cssEscape(plan.anchorMessageId)}`)
-      if (el && el.isConnected) {
+      const el = getMessageRowById(plan.anchorMessageId)
+      if (el) {
         el.scrollIntoView({ behavior: 'auto', block: 'start' })
         return 'placed'
       }

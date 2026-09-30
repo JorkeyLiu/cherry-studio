@@ -59,8 +59,9 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/endDividerSearchTerminal/)
     // Restore identity + captured offset survive every older-window expansion;
     // expansion compensation prefers the controller anchor while current.
+    // Route-qualified only: a foreign live anchor must never snapshot.
     expect(src).toMatch(/snapshotPreferredAnchor/)
-    expect(src).toMatch(/controller\.activeAnchor/)
+    expect(src).toMatch(/controller\.getAnchorFor/)
     expect(src).not.toMatch(/activeRestoreAnchorRef/)
     expect(src).not.toMatch(/snapshotRestoreAnchor\(/)
     // Terminal paths release exactly once with NO divider-position commit:
