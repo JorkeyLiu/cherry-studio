@@ -34,7 +34,12 @@ describe('route-switch scroll + footer contract', () => {
   it('top-selector path restores the saved route position without forcing anchor positioning', () => {
     const effectIdx = messagesSource.indexOf('Top-selector route switch')
     expect(effectIdx).toBeGreaterThanOrEqual(0)
-    const effect = messagesSource.slice(effectIdx, effectIdx + 6000)
+    // Bounded to the single TOP effect (ends at the component return, same
+    // boundary as Messages.visualContract `(1b)`): robust to comment growth
+    // above the target-snapshot read. Never a fixed length (the read sits
+    // ~6.3k past the marker after the reconnect-activation prologue).
+    const effectEnd = messagesSource.indexOf('return (', effectIdx)
+    const effect = messagesSource.slice(effectIdx, effectEnd > effectIdx ? effectEnd : effectIdx + 40000)
     expect(effect).toMatch(/readTargetSnapshot/)
     expect(effect).toMatch(/isAtBottom/)
     expect(effect).toMatch(/anchorId/)

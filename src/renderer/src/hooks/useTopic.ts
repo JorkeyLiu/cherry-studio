@@ -30,21 +30,31 @@ export function useActiveTopic(assistantId: string, topic?: Topic) {
 
   const prevActiveTopicIdRef = useRef<string | undefined>(undefined)
   useEffect(() => {
-    if (activeTopic) {
-      // Actual topic switch (ID change — not a metadata refresh of the same
-      // topic): restore the logical topic's previously active branch instead
-      // of resetting to main. `activeBranchIdByTopic` is persisted; the
-      // stored branch is kept as-is here and `loadTopicMessagesThunk`
-      // resolves the active route at read time. Catalog refresh/deletion
-      // (`branchesReceived`) invalidates stale IDs back to main, and the
-      // same-profile relaunch rehydrates the valid selection the same way.
-      // Sidebar remains logical-topic-only.
-      if (prevActiveTopicIdRef.current !== activeTopic.id) {
-        prevActiveTopicIdRef.current = activeTopic.id
-      }
-      void store.dispatch(loadTopicMessagesThunk(activeTopic.id))
-      void EventEmitter.emit(EVENT_NAMES.CHANGE_TOPIC, activeTopic)
+    if (!activeTopic) {
+      prevActiveTopicIdRef.current = undefined
+      return
     }
+    // Selected-topic identity gate: only a real ID change loads. Effect
+    // reattach (Activity hide/show) or an innocuous same-ID object update
+    // (metadata sync) must not redispatch the cache-hit path, which would
+    // bump the shared same-topic sequence and supersede the viewport's
+    // correct in-flight around request. Initial mount (ref uninitialized)
+    // and genuine A→B→A changes still dispatch. Explicit refresh owns its
+    // own forceReload path elsewhere and never routes through this gate.
+    if (prevActiveTopicIdRef.current === activeTopic.id) {
+      return
+    }
+    // Actual topic switch (ID change — not a metadata refresh of the same
+    // topic): restore the logical topic's previously active branch instead
+    // of resetting to main. `activeBranchIdByTopic` is persisted; the
+    // stored branch is kept as-is here and `loadTopicMessagesThunk`
+    // resolves the active route at read time. Catalog refresh/deletion
+    // (`branchesReceived`) invalidates stale IDs back to main, and the
+    // same-profile relaunch rehydrates the valid selection the same way.
+    // Sidebar remains logical-topic-only.
+    prevActiveTopicIdRef.current = activeTopic.id
+    void store.dispatch(loadTopicMessagesThunk(activeTopic.id))
+    void EventEmitter.emit(EVENT_NAMES.CHANGE_TOPIC, activeTopic)
   }, [activeTopic])
 
   useEffect(() => {

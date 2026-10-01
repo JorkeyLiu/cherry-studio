@@ -188,6 +188,7 @@ import { isRestoreTargetValid, shouldCancelStabilizerForKeyDown } from './positi
 import Prompt from './Prompt'
 import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
+import { shouldTopPipelineRefuseDividerIntent } from './routeViewportActivation'
 import {
   buildContainerCapturer,
   useOptionalRouteViewport,
@@ -486,17 +487,21 @@ const Messages = ({
   // visual anchor. Redux still owns only the SELECTED activeBranch;
   // messageViewportReducer still owns projection/window.
   const viewportCtx = useOptionalRouteViewport()
-  const [localViewportVersion, setLocalViewportVersion] = useState(0)
+  const [, setLocalViewportVersion] = useState(0)
+  const [localConnectionGeneration, setLocalConnectionGeneration] = useState(0)
   const localControllerRef = useRef<RouteViewportController | null>(null)
   if (!localControllerRef.current && !viewportCtx) {
     localControllerRef.current = new RouteViewportController({ topicId: topic.id, route: activeBranchId })
   }
   const controller = viewportCtx?.controller ?? (localControllerRef.current as RouteViewportController)
   // Live context ref: adapter callbacks below read the CURRENT context at
-  // call time under stable useCallback identities, so controller version
-  // bumps never recreate them — otherwise the route effect would re-run
-  // mid-transition, open duplicate sessions, and ping-pong epochs. The
-  // route effect must run only on selected/topic change.
+  // call time under stable useCallback identities, so controller progress
+  // notifies never recreate them — otherwise the route effect would re-run
+  // mid-transition on every notify, open duplicate sessions, and ping-pong
+  // epochs. The route effect runs on selected/topic change plus the explicit
+  // reconnect connection-generation trigger; in-transition notifies only
+  // re-render visuals/keeper (never restore: stable-clean/owned guards plus
+  // no version dep).
   const viewportCtxRef = useRef(viewportCtx)
   viewportCtxRef.current = viewportCtx
   const notifyViewport = useCallback(() => {
@@ -507,6 +512,18 @@ const Messages = ({
     }
     setLocalViewportVersion((v) => v + 1)
   }, [])
+  // Local fallback lifetime (isolated tests without a provider): the provider
+  // owns attach/detach when present; this mirrors the resource lifetime only
+  // for the fallback controller (single increment per mount, detach arms on
+  // unmount). Ordinary local progress notifies above, never this signal.
+  useEffect(() => {
+    setLocalConnectionGeneration((g) => g + 1)
+    return () => {
+      try {
+        localControllerRef.current?.detach()
+      } catch {}
+    }
+  }, [])
   // Local suppression for imperative programmatic scrolls that are NOT route
   // transitions (e.g. new-branch landing bottom snap): while set, ordinary
   // scroll capture is dropped so the snap is never recorded as a user scroll.
@@ -514,7 +531,15 @@ const Messages = ({
   const viewportPhaseAttr =
     viewportCtx?.viewportPhaseAttr ??
     viewportPhaseAttrFor(controller.currentPhase, controller.currentIntent?.kind ?? null)
-  void localViewportVersion
+  // Explicit reconnect-activation trigger: the provider lifetime setup bumps
+  // the connection generation on every Activity attach (local fallback bumps
+  // once per mount above). The single TOP pipeline below depends ONLY on this
+  // connection signal (plus selected topic/route) so a same-selected-route
+  // reconnect retriggers the guarded own-target restore in the SAME effect
+  // that loads it (never a second pipeline, never a loop: owned same-target
+  // beyond-fetch-hold + stable-clean guards return). Ordinary controller
+  // progress notifies (version) only re-render visuals/keeper, never restore.
+  const viewportConnectionGeneration = viewportCtx?.connectionGeneration ?? localConnectionGeneration
   // Route-keyed scroll snapshots: each branch route keeps its own browsing
   // position under `topic-<id>::<branch|main>`. User scrolls are adopted
   // SOLELY via the atomic `controller.userTakeover()` in `handleScroll`
@@ -909,7 +934,27 @@ const Messages = ({
       // no provider): same controller-owned clean gate — dirty/owned states
       // preserve, never capture live DOM. Not a second production truth;
       // production Chat always provides the viewport context above.
+      // Hidden-geometry guard (mirrors the provider capturer): never sample
+      // display:none during detach; preserve the last legal snapshot instead.
       if (!controller.shouldCaptureOutgoing()) return false
+      try {
+        const liveContainer = scrollContainerRef.current as HTMLElement | null
+        if (liveContainer) {
+          // Positive hidden proof only (ancestor display:none / hidden /
+          // disconnected); zero rects alone never prove hidden (jsdom).
+          if (!liveContainer.isConnected) return false
+          let el: HTMLElement | null = liveContainer
+          while (el) {
+            try {
+              if (el.style?.display === 'none') return false
+              if (el.hidden === true) return false
+            } catch {}
+            el = el.parentElement
+          }
+        }
+      } catch {
+        return false
+      }
       const snapshot = captureSnapshot()
       if (!snapshot) return false
       return commitSnapshotForRoute(displayedRouteKey(controller.displayedRoute), snapshot)
@@ -983,17 +1028,22 @@ const Messages = ({
    * Adopt the in-flight fetch-hold session for the same topic/target (opened
    * by the top selector's controller request) instead of opening a second
    * one. Returns null when no adoptable session exists (external change,
-   * deletion fallback, bootstrap) so the caller opens its own.
+   * deletion fallback, bootstrap) so the caller opens its own. TOP-specific:
+   * never adopts a divider-owned session for the same target — divider
+   * continue-here owns its clicked offset and must not be consumed by a
+   * saved-snapshot TOP plan.
    */
   const adoptFetchHold = useCallback(
     (topicIdAtStart: string, incomingRoute: string | null): number | null => {
+      if (shouldTopPipelineRefuseDividerIntent(controller, topicIdAtStart, incomingRoute)) return null
       const intent = controller.currentIntent
       if (
         controller.programmaticOwned &&
         controller.currentPhase === 'fetch-hold' &&
         intent !== null &&
         intent.topicId === topicIdAtStart &&
-        intent.targetRoute === incomingRoute
+        intent.targetRoute === incomingRoute &&
+        intent.kind !== 'divider'
       ) {
         return controller.currentEpoch
       }
@@ -1001,6 +1051,12 @@ const Messages = ({
     },
     [controller]
   )
+  // Single-entry reconnect activation: NO separate hook ever opens a
+  // transaction here. The single TOP pipeline below (connection-generation
+  // dep) owns BOTH the guarded own-target `top` request AND the fetch →
+  // window → measured layout/quiet/alignment → atomic reveal → stable commit
+  // in the SAME bounded effect. Divider-owned sessions refuse there so a
+  // generic activation never overwrites an explicit divider continuation.
   const commitDisplayedStable = useCallback(
     (tid: string, route: string | null, epoch: number): boolean => {
       if (unmountedRef.current) {
@@ -1178,16 +1234,30 @@ const Messages = ({
     notifyViewport()
   }, [viewportPhaseAttr, viewportState.window, failVisibleTransition, scrollContainerRef, controller, notifyViewport])
   useEffect(() => {
+    // Symmetric connection: Activity hidden disconnects this effect (cleanup
+    // below) while preserving state/refs/DOM; Activity visible reconnects by
+    // re-running this setup plus the single TOP pipeline below. Single
+    // controller owner: the provider `detach()` cancels the short-lived
+    // transaction (epoch advance + exactly-once release, reactivation armed);
+    // this instance clears only its UI-local transients here so parent/child
+    // setup can never double-invalidate or ping-pong epochs. Old async
+    // continuations stay inert via the detach epoch advance (fresh transaction
+    // identity, not just this flag). Isolated mounts without a provider own
+    // their fallback controller and detach it directly.
+    unmountedRef.current = false
     return () => {
       unmountedRef.current = true
       pendingOlderIntentRef.current = null
-      // Synchronous unmount teardown: invalidate the controller so late async
-      // continuations stay inert (epoch mismatch), end the viewport scroll
-      // token, and release ownership exactly once. Stale `finally` blocks
-      // skip on epoch mismatch. A pending positioning transition is torn
-      // down (never leaves hidden, never leaks ownership). HMR disposes via
-      // the provider effect as well; both paths are idempotent.
-      controller.invalidateAll()
+      // UI-local teardown only (single controller owner is the provider):
+      // clear the in-flight fetch marker so the reconnected session adopts a
+      // fresh epoch, cancel quiet frames, drop divider/visible progress + the
+      // pre-paint plan, and end the scroll token (never leaves hidden, never
+      // leaks ownership). Stale `finally` blocks skip on epoch mismatch. HMR
+      // disposes via the provider effect as well; both paths are idempotent.
+      try {
+        if (!viewportCtxRef.current) controller.detach()
+      } catch {}
+      routeFetchEpochRef.current = null
       cancelAllVisibleQuiet()
       dividerProgressRef.current = null
       dividerVisibleRef.current = null
@@ -4724,15 +4794,50 @@ const Messages = ({
     // Deletion-fallback intents own their route: the dedicated latest effect
     // above claims and reloads. Never issue a concurrent snapshot-around here.
     if (deletionFallbackIntent && deletionFallbackIntent.route === activeBranchId) return
-    if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) return
+    // Single-entry reconnect activation (Activity Chat→Settings→Chat):
+    // the provider `detach()` armed `isActivationRequired` while preserving
+    // displayed + cache + persisted snapshots. THIS effect alone opens the
+    // guarded own-target `top` fetch-hold below AND drives fetch → window →
+    // measured layout/quiet/alignment → atomic reveal → stable commit — never
+    // a separate hook half-start (prior split consumed the flag in another
+    // effect at routeViewportActivation.ts:112, then this loader could skip
+    // and leave the latest window msg00 instead of the saved anchor msg14).
+    // Same-selected-route reconnect is a real activation even though the
+    // route key is unchanged: it must enter the guarded own-target
+    // restoration below — never trust the loaded claim and never falsely mark
+    // provenance stable (`rebaseClean` refuses while armed). Only a clean
+    // displayed-stable viewport with NO pending activation truly has nothing
+    // to do; every other loaded-current state falls through. An owned fresh
+    // reconnect (flag just consumed by THIS effect's own request) still loads
+    // — consumed-false is never confused with restored-true. Terminal never
+    // auto-retries: a terminal session needs an explicit route/connection
+    // trigger, never a progress reentry.
+    const wasActivation = controller.isActivationRequired
+    if (!wasActivation) {
+      // Terminal no-retry (fail-closed): a released terminal viewport stays
+      // until the next genuine selected/connection trigger.
+      if (controller.currentPhase === 'terminal') return
+      if (isLoadedRouteCurrent(loadedRouteRef.current, activeBranchId)) {
+        if (controller.isDomProvenanceClean) return
+      }
+    }
     const topicIdAtEffect = topic.id
     const routeAtEffect = activeBranchId
     // Single-pipeline guard: a transition for this exact target already owns
     // the controller. Adopt a fetch-hold session to drive the pipeline;
     // when the pipeline is already driving (beyond fetch-hold) or already
     // completed (displayed stable on target), never open a duplicate fetch
-    // pipeline, which would ping-pong epochs with the running one.
+    // pipeline, which would ping-pong epochs with the running one. A dirty
+    // (detached) viewport never counts as completed — it must reconnect.
     const liveIntent = controller.currentIntent
+    // Explicit TOP intent isolation (narrow): a divider-owned session for this
+    // exact target owns its clicked-offset continuation. The TOP pipeline
+    // never consumes that epoch nor overwrites it with a saved-snapshot plan
+    // during a divider fetch-hold + route/version rerun. Foreign-target
+    // divider sessions proceed normally; top/generic/bootstrap unaffected.
+    // Shared `commitRouteWindowAtomic` stays generic (divider hidden fallback
+    // uses it).
+    if (shouldTopPipelineRefuseDividerIntent(controller, topicIdAtEffect, routeAtEffect)) return
     if (
       liveIntent !== null &&
       liveIntent.topicId === topicIdAtEffect &&
@@ -4746,7 +4851,8 @@ const Messages = ({
       !controller.programmaticOwned &&
       controller.displayedRoute.topicId === topicIdAtEffect &&
       controller.displayedRoute.route === routeAtEffect &&
-      (controller.currentPhase === 'stable' || controller.currentPhase === 'idle')
+      (controller.currentPhase === 'stable' || controller.currentPhase === 'idle') &&
+      controller.isDomProvenanceClean
     ) {
       return
     }
@@ -5038,7 +5144,10 @@ const Messages = ({
           // union-trim/uncovered anchors, unmeasurable offset, folded row, or
           // empty incoming suffix). Numeric-leading UUID/special IDs are
           // supported (raw-ID DOM lookup, never a selector escape).
-          if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
+          // Reconnect activation (wasActivation) never takes the visible fast
+          // path: retained display:none geometry on the first frame is not
+          // valid until explicit stable alignment — hidden atomic restore only.
+          if (routeSavedRowAnchor && !snapshotInvalidForRoute && !wasActivation) {
             try {
               const savedOffset =
                 typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
@@ -5382,6 +5491,7 @@ const Messages = ({
     selectMessageForFold,
     t,
     topic.id,
+    viewportConnectionGeneration,
     viewportDispatch,
     waitForProjectionCommit
   ])

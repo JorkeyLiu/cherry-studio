@@ -204,6 +204,19 @@ export class RouteViewportController {
   private activeInteractionId: number | null = null
   private activeInteractionScrolls = 0
   /**
+   * Explicit attach/detach activation requirement (Activity hidden boundary).
+   * `detach()` cancels the short-lived transaction (via `invalidateAll`) and
+   * arms this flag; the next `request()` consumes it. While armed,
+   * `rebaseClean()` refuses — a detached-dirty viewport must reactivate
+   * through a guarded own-target restore request BEFORE any geometry can be
+   * admitted as stable, never via an incidental projection rebase that would
+   * mark fake clean and let the next freeze capture wrong geometry.
+   * Topic-switch dirty (via `syncDisplayed`, no flag) still rebases; only the
+   * detached lifetime blocks. Never a second truth: epoch/intent/phase/
+   * ownership/displayed/anchor all stay in this controller.
+   */
+  private activationRequired = false
+  /**
    * Rendered-window generation (component-scoped event, never DOM work):
    * bumped synchronously on every rendered window identity change
    * (`noteSameRouteWindowUpdate`, `applyTransitionWindow`, `appliedWindow`,
@@ -359,12 +372,16 @@ export class RouteViewportController {
    * Explicit bootstrap rebase to clean with rendered proof (topic first-load).
    * Requires a non-empty window identity proving which window the DOM shows.
    * Refused while a transition owns the viewport (that path commits instead).
+   * Refused while a detached reactivation is required (Activity hidden
+   * boundary): the reconnected lifetime must restore through a guarded
+   * own-target `request()` first — never an incidental projection rebase.
    * Sets displayed + rendered to the target, phase stable, keeps the anchor
    * (the caller adopts it via the atomic user path when measured). No snapshot write
    * here — the caller commits explicitly when the viewport is stable.
    */
   rebaseClean(target: RouteRef, windowId: string): boolean {
     if (this.ownershipHeld) return false
+    if (this.activationRequired) return false
     if (typeof windowId !== 'string' || windowId.length === 0) return false
     this.displayed = { ...target }
     this.rendered = { topicId: target.topicId, routeId: target.route, epoch: this.epoch, windowId }
@@ -399,6 +416,10 @@ export class RouteViewportController {
    * `displayedRoute` (still the old route at that point).
    */
   request(req: RouteTransitionRequest): { epoch: number; phase: RouteViewportPhase } {
+    // A fresh guarded transaction consumes a pending detached reactivation:
+    // the renewed connected lifetime owns its restore BEFORE any geometry is
+    // admitted as stable. Single owner: this request is the activation.
+    this.activationRequired = false
     // Any programmatic transition start forcibly closes a live user gesture
     // session: post-request scrolls without a fresh declare are programmatic
     // (window apply / first position / reconcile) and must never take over.
@@ -1064,7 +1085,41 @@ export class RouteViewportController {
     return this.releaseOwnershipLocked(epoch)
   }
 
-  /** Unmount / HMR / topic disposal: invalidate everything, release once, force-close any live user session. */
+  /**
+   * Explicit Activity detach: cancel the short-lived activation/restore
+   * transaction (released exactly once via `invalidateAll`, epoch advanced so
+   * stale completions stay inert) and arm the reactivation requirement. The
+   * long-lived route session truth (displayed + anchorCache + persisted
+   * snapshots owned outside) survives; hidden never samples. The next
+   * `request()` is the sole activation that consumes this flag.
+   */
+  detach(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
+    const out = this.invalidateAll(reason)
+    this.activationRequired = true
+    return out
+  }
+
+  /** True when a detached lifetime awaits its guarded own-target activation. */
+  get isActivationRequired(): boolean {
+    return this.activationRequired
+  }
+
+  /**
+   * Unmount / HMR / topic disposal / Activity detach: invalidate everything,
+   * release once, force-close any live user session.
+   *
+   * Detach invalidates the short-lived activation/restore transaction while
+   * the long-lived route stable viewport session survives in `anchorCache`
+   * (+ persisted storage, owned outside): displayed + cache are preserved,
+   * live intent/anchor/rendered/phase are cleared. The epoch always advances
+   * so every older epoch-equality-only continuation is inert on reactivation —
+   * reactivation renews lifetime with a fresh transaction identity instead of
+   * reusing the detached epoch.
+   *
+   * Prefer `detach()` for the Activity hidden boundary (arms reactivation);
+   * direct `invalidateAll()` stays for terminal paths (deletion/HMR) that
+   * never reactivate and must not arm the flag.
+   */
   invalidateAll(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
     this.closeInteractionLocked()
     if (!this.ownershipHeld) {
@@ -1073,6 +1128,9 @@ export class RouteViewportController {
       this.rendered = null
       this.phase = 'idle'
       this.terminalReason = null
+      // Fresh identity even for the idle detach: stale epoch-equality checks
+      // (stillTarget / armedEpoch) must not revive after reactivation.
+      this.epoch += 1
       return false
     }
     this.toTerminalLocked(reason)
@@ -1080,6 +1138,9 @@ export class RouteViewportController {
     this.setAnchorLocked(null, null)
     this.rendered = null
     this.phase = 'idle'
+    // Owned detach released exactly once above; advance past it so the old
+    // epoch can never be reused by a reactivated session.
+    this.epoch += 1
     return true
   }
 

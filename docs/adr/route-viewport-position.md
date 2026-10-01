@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范，描述已验证的 durable 语义）。本文档是路由本地稳定视口（route-local stable viewport）的**唯一权威规范**：定义每路由稳定视口的归属、选中/展示/视口三元区分、恢复意图与所有权的生命周期、快照与无快照目标的定位语义、可见性原子性、分隔线恢复的稳定完成条件、终态回退与超前失效、回归契约边界，禁止以中间几何冒充稳定位置或以发出侧滚动冒充目标位置。
 > **决策锁**：VIEWPORT-1 … VIEWPORT-12（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-09-29
+> **最后更新**：2026-10-01
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份、兼容标识、发布/更新、平台范围由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与 L2 导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，稳定 topic 上下文锚点语义由 [Context window governance](./context-window.md) 治理，投影完备性与权威意图由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-1…BRANCH-12）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
@@ -27,7 +27,12 @@
 | 展示路由 | displayed route | 当前已提交渲染的投影所归属的路由（DOM 内容的来源身份） |
 | 路由本地稳定视口 | route-local stable viewport | 某路由上次验证有效的视口位置：稳定消息身份 + 行内偏移/底部语义。它是该路由的本地属性，与用户是否输入/滚动无关 |
 | 视口快照 | viewport snapshot | 路由本地稳定视口的已提交记录（按路由键索引）。快照是可丢弃的渲染投影，不是聊天权威 |
-| 恢复意图 | restore intent | 指向目标路由的待完成恢复（目标稳定身份 + 期望偏移）。意图在稳定完成或终态回退前一直存活 |
+| 恢复意图 | restore intent | 指向目标路由的待完成恢复（目标稳定身份 + 期望偏移）。意图在稳定完成或终态回退前一直存活；分普通恢复意图与分隔线显式延续意图两类（§4–§6），后者优先 |
+| 普通恢复意图 | normal resume intent | 默认隐式意图：目标只按自身快照或自身确定性默认定位（VIEWPORT-5）。普通路由切换与 secondary 页面往返均属此类 |
+| 分隔线显式延续意图 | divider explicit continuation intent | 从分支分隔线发起的独有显式浏览意图：表示从当前视口开始浏览目标分支后缀。定位期间保持当前视口，不被目标历史快照覆盖；只有稳定后的结果才成为该路由后续会话位置；不改变分支权限与上下文锚点 |
+| 路由稳定视口会话 | route stable viewport session | 每路由长期存续的隐式浏览会话：持有该路由上次稳定视口。普通切换与 secondary 页面往返均从各自上次稳定阅读位置继续；页面停用与重连不断开该会话；不新增标签 UI，不承诺重启续读 |
+| 视口资源 | viewport resources | 可分离/重连的展示与测量能力（已提交投影的挂载与度量占位）。停用时断开、重激活时重连；断开不等于会话销毁 |
+| 激活/恢复事务 | activation/restore transaction | 每次进入目标路由时创建的短寿命守卫过程：以目标快照或目标默认（或显式分隔线意图）为输入，走 §5 阶段到稳定或终态回退；上一事务的迟到完成永不复用于新代际 |
 | 恢复所有权 | restore ownership | 当前过渡由哪一次路由切换拥有。所有权决定谁可以分页、谁可以提交、谁可以释放；过期所有者的一切完成均无效 |
 | 定位中 / 已放置 / 搜索中 / 已对齐 / 稳定 / 终态回退 | positioning / placed / searching / aligned / stable / terminal fallback | 恢复生命周期的互斥阶段（§5）。首绘已放置不等于稳定 |
 | 边缘停靠 | edge parking | `searching` 阶段在可滚动边缘的临时停靠（中间几何），用于使恢复拥有的分页得以推进 |
@@ -57,6 +62,8 @@
 | **VIEWPORT-12** | **回归契约冻结**（§9）：无滚动顶部分隔线往返、普通用户滚动后无滚动往返、无快照目标默认、快速超前、分隔线缺席锚点分页/偏移、原子可见性与失败路径。任一契约回归即判定违反本文档 | **Locked** |
 
 > 决策锁 ID 是编排内部协调令牌的产物语义表达：VIEWPORT-* 是本文档的 durable 决策 ID，不进入代码注释、配置或提交信息。
+>
+> **生命周期与目标输入边界澄清（不新增决策锁）**：长存续的路由稳定视口会话（VIEWPORT-1）与可分离/重连的视口资源、与每次进入创建的短寿命激活/恢复事务（VIEWPORT-6/7/11）是三类不同存续期的对象：停用取消旧事务并断开资源，但保留合法稳定快照。目标输入边界不变：普通恢复意图的输入只来自目标自身（VIEWPORT-5）；分隔线显式延续意图是唯一例外输入（§6），它保持当前视口、不改变分支权限与上下文锚点。
 
 ---
 
@@ -66,10 +73,11 @@
 
 | 状态 | 归属 | 语义 |
 |---|---|---|
-| 路由本地稳定视口快照（按路由键） | Renderer 本地 | 每路由上次稳定视口；可丢弃、可重建（VIEWPORT-1） |
+| 路由本地稳定视口快照（按路由键） | Renderer 本地、随路由稳定视口会话长存续 | 每路由上次稳定视口；可丢弃、可重建（VIEWPORT-1）。页面停用与重连不销毁该会话；隐藏（`display:none`）期间不采样新快照 |
+| 视口资源（可分离/重连） | 当前挂载作用域 | 已提交投影的挂载与度量占位；停用时断开、重激活时重连；断开不等于会话销毁，框架 effect 清理不得解释为永久销毁 retained 会话 |
 | 选中路由 / 展示路由 | Renderer 本地 | 意图去向 vs 已提交渲染身份；切换期间两者可短暂不一致（VIEWPORT-2） |
-| 恢复意图 + 恢复所有权（目标路由 + 代际） | 当前过渡作用域 | 从提交存活到稳定完成或终态回退；超前即失效（VIEWPORT-8/9/11） |
-| 生命周期阶段 | 当前过渡作用域 | `positioning` / `placed` / `searching` / `aligned` / `stable` / `terminal fallback`（VIEWPORT-7） |
+| 恢复意图 + 恢复所有权（目标路由 + 代际） | 当前激活/恢复事务作用域 | 从提交存活到稳定完成或终态回退；超前即失效（VIEWPORT-8/9/11）。普通恢复意图与分隔线显式延续意图必须区分，后者优先（§6） |
+| 生命周期阶段 | 当前激活/恢复事务作用域（按代际守卫） | `positioning` / `placed` / `searching` / `aligned` / `stable` / `terminal fallback`（VIEWPORT-7）。旧事务的迟到完成永不复用于新代际 |
 
 ### 不变量（Invariants）
 
@@ -96,6 +104,8 @@
 
 分隔线目标在 `searching` 中可多次分页；意图与偏移在窗口增长中存活，不重置（VIEWPORT-9）。
 
+**停用与重激活（VIEWPORT-10/11 的澄清，不新增语义）**：页面停用取消旧激活/恢复事务（旧事务的晚到完成一律无效）、断开视口资源、保留合法稳定快照；隐藏期间不采样新快照。重激活依据目标快照或目标默认（或显式分隔线意图）创建新守卫的定位过程，旧完成不复用新代际。框架 effect 清理只断开当前挂载资源，不可解释为永久销毁 retained 会话。
+
 ---
 
 ## 6. 稳定完成判定（Stable Completion）
@@ -106,6 +116,7 @@
   3. 目标已对齐（意图身份与实际展示身份一致）；
   4. 布局已安静（无未结算的布局变化）。
 - **非分隔线目标**：目标身份驻留且被覆盖、已对齐、布局安静；有快照时按快照身份 + 行内偏移/底部语义，无快照时按确定性目标路由默认（VIEWPORT-5）。
+- **分隔线显式延续意图（已实现特例，不改变分支权限与上下文锚点）**：从分支分隔线发起的切换携带显式意图，优先于目标历史快照——定位期间保持当前视口，不被目标历史快照覆盖；只有稳定后的结果才成为该路由后续会话位置。普通恢复意图与该显式意图必须区分，不得互相覆盖对方的输入边界。
 - **驱动规则**：分页由状态/驻留驱动，永不由滚动事件驱动；滚动事件不得作为完成信号（VIEWPORT-9）。
 - **禁止**：以 `placed` 首绘几何、以 `searching` 边缘停靠、以发出侧滚动值提交稳定快照（VIEWPORT-3/7/8）。
 
@@ -122,7 +133,7 @@
 ## 8. 持久化与权威边界（Persistence and Authority Boundary）
 
 - 聊天权威持久化是 Main SQLite（Drizzle + better-sqlite3），经版本化迁移治理；本文档不改变其 schema、迁移流程与 L2 兼容导入语义，一律以 [SQLite migration governance](../archived/sqlite-migration.md) 为准。
-- 路由本地稳定视口快照、选中/展示路由、恢复意图与所有权、生命周期阶段均为**一次性、可丢弃、可重建的 renderer 本地投影**；不得经 StoreSync 或任何持久化通道变成第二权威，不得写入 SQLite/Dexie 聊天权威（VIEWPORT-1；PROJ-2 仍然适用）。
+- 路由本地稳定视口快照、选中/展示路由、恢复意图与所有权、生命周期阶段均为**一次性、可丢弃、可重建的 renderer 本地投影**；不得经 StoreSync 或任何持久化通道变成第二权威，不得写入 SQLite/Dexie 聊天权威（VIEWPORT-1；PROJ-2 仍然适用）。页面停用/重激活不产生新的持久化承诺，不承诺重启续读。
 - 上下文锚点与 `contextCount` 属普通 renderer 设置持久化，其有效性/默认/继承/闭包派生由 [Context window governance](./context-window.md) 治理；视口快照与上下文锚点是两种不同的状态——前者是“切回来时看哪里”（本规范），后者是“请求带哪段上下文”（CW-2/CW-6）。视口变化永不移动上下文锚点，锚点变化永不提交视口快照。
 - 路由构成、分支锚点、变更权限由 [Topic Branches](./topic-branches.md) 治理；路由切换永不改变 topic 身份（BRANCH-2/11）。视口快照按路由键隔离，分支路由各持其快照，互不写入。
 - 完备性能力（`window` / `answer-group` / `context-closure` / `whole-topic` / `naming-context` / `topic-activity` / renderer-only `loaded-projection`）由 [Projection Completeness](./projection-completeness-authority.md)（PROJ-3…PROJ-5）治理；视口定位只消费已加载投影与窗口读取结果，永不以视口位置推导权威成员、顺序或闭包范围。
@@ -148,6 +159,12 @@
 5. **分隔线缺席锚点分页与偏移**：所请求分隔线缺席时经恢复拥有的分页使回退身份驻留且被覆盖，意图与偏移在窗口增长中存活，最终稳定位置与偏移正确；无合法回退时走终态回退而非虚假提交。
 6. **原子可见性与失败路径**：过渡期间不展示错位内容；失败时可见失败而非静默隐藏；不提交中间几何为快照。
 
+### 补充回归覆盖（VIEWPORT-12 的子情形，不改变六组冻结计数）
+
+- **A. 页面停用/激活后连续切换**：停用后重激活再连续切换，目标仍按自身快照或自身默认（或显式分隔线意图）定位；停用期间的隐藏几何永不成为快照，会话位置不丢失。
+- **B. 旧事务迟到失效**：停用或超前取消旧事务后，旧事务的晚到稳定提交/揭示/释放一律丢弃，不得复用新代际，不得干扰最新过渡。
+- **C. 分隔线特例不回归**：从分支分隔线发起的切换保持当前视口、不被目标历史快照覆盖；只有稳定后的结果成为该路由后续会话位置；该特例不改变分支权限与上下文锚点。
+
 ### 证据层级
 
 - 按 `AGENTS.md`「Testing and UI/E2E Evidence」路由；UI 变更的渲染/交互验证经 `ui-verify-change`。跨路由切换、分页/驻留、显隐原子性的合同级回归以 Playwright E2E 为准；隔离的定位纯逻辑以 Vitest/组件测试为先。诊断性观察（`pnpm ui:observe`、截图、dev-mode 运行）永不作为回归证据。
@@ -163,7 +180,8 @@
 - 不定义投影完备性能力、稳定 ID 导航/变更、调用者本地读取、请求本地执行覆盖——由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）治理。
 - 不定义同步收敛（基线/操作日志/帧合并/水位）——现状由 [Personal Multi-Device Sync](../work/multi-device-sync.md) 治理，目标由 [Sync Connection & Channel ADR](./sync-connection-channel.md) 与 [Sync Data Convergence ADR](./sync-data-convergence.md) 治理。
 - 不定义模型元数据、provider/model 解析与缓存——由 [Model Metadata Governance](./model-metadata.md) 治理。
-- 不引入节流时长、安静阈值、选择器、内部标识符命名、分页容量数值、测试固件标识等实现细节；不重复实现位置与调用链细节（见 `AGENTS.md` 与 `docs/architecture/architecture.md`）；不引入性能阈值、基线或容量策略。
+- 不引入标签页 UI、重启续读、新的 SQLite/Dexie/StoreSync 持久化承诺；不引入节流时长、安静阈值、选择器、内部标识符命名、分页容量数值、测试固件标识等实现细节；不重复实现位置与调用链细节（见 `AGENTS.md` 与 `docs/architecture/architecture.md`）；不引入性能阈值、基线或容量策略。
+- 分隔线显式延续意图不改变分支构成、分支锚点、变更权限、有效路由算法与上下文锚点语义——分别由 [Topic Branches ADR](./topic-branches.md) 与 [Context window governance](./context-window.md) 治理，本文档只定义切换时的视口归属与定位。
 
 ---
 

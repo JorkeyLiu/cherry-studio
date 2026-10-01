@@ -211,6 +211,7 @@ const renderKeeper = (
   const value = (v: number): RouteViewportContextValue => ({
     controller,
     version: v,
+    connectionGeneration: 0,
     notifyChanged: notify,
     freezeDisplayed: () => false,
     readSnapshot: () => null,

@@ -119,7 +119,10 @@ const writeRouteSnapshot = (routeKey: string, snapshot: RouteViewportSnapshot): 
 
 export interface RouteViewportContextValue {
   controller: RouteViewportController
+  /** Projection/visual notification (every controller progress bump). Never opens restore. */
   version: number
+  /** Viewport resource attach/reconnect only (provider lifetime setup). Sole restore trigger. */
+  connectionGeneration: number
   notifyChanged: () => void
   /** Synchronously freeze the DISPLAYED route snapshot. Returns true when stored. */
   freezeDisplayed: () => boolean
@@ -178,6 +181,12 @@ export function RouteViewportProvider({
   }
   const controller = controllerRef.current
   const [version, setVersion] = useState(0)
+  // Viewport resource connection generation: incremented ONLY in the
+  // attach/reconnect lifetime setup below (Activity visible, provider
+  // re-activation). Ordinary controller progress (request/commit/fail/
+  // teardown/user intent) notifies `version` for projection/keeper visuals
+  // but never touches this signal, so it can never (re)open restoration.
+  const [connectionGeneration, setConnectionGeneration] = useState(0)
   const capturerRef = useRef<SnapshotCapturer | null>(null)
   const lastTopicRef = useRef(topicId)
   if (lastTopicRef.current !== topicId) {
@@ -246,16 +255,39 @@ export function RouteViewportProvider({
     capturerRef.current = capturer
   }, [])
 
-  // Unmount / HMR: invalidate the transition, release ownership exactly once.
+  // Detach / attach (Activity hidden boundary, single controller owner):
+  // detach cancels the short-lived transaction (released exactly once, epoch
+  // advanced so stale completions stay inert, reactivation armed) via the
+  // explicit `detach()`, unregisters the live capturer, and preserves the last
+  // legal stable snapshot/cache (never sample display:none here). The
+  // long-lived route session truth (anchorCache + persisted snapshots)
+  // survives. Attach setup below advances the connection generation AND
+  // notifies the projection: the generation is the explicit reconnect-
+  // activation trigger that retriggers the single Messages top pipeline
+  // (connection-generation dep) for the still-selected route — no transaction
+  // starts here, so parent/child setup can never open parallel pipelines or
+  // double-release. Ordinary `version` bumps (controller progress) only
+  // re-render visuals/keeper and never retrigger restore.
   useEffect(() => {
     const owned = controllerRef.current
+    // Reconnect setup (Activity visible): the short-lived transaction was
+    // cancelled on detach with a fresh epoch + armed reactivation; make the
+    // reconnected phase observable via BOTH signals: the connection generation
+    // (sole restore trigger) plus the projection version (visuals/keeper).
+    // Single increment per activation — no transaction started here.
+    try {
+      setConnectionGeneration((g) => g + 1)
+    } catch {}
+    try {
+      notifyChanged()
+    } catch {}
     return () => {
       try {
-        owned?.invalidateAll()
+        owned?.detach()
       } catch {}
       capturerRef.current = null
     }
-  }, [])
+  }, [notifyChanged])
   useEffect(() => {
     const hot = (import.meta as unknown as { hot?: { dispose: (cb: () => void) => void } }).hot
     if (!hot) return
@@ -270,6 +302,7 @@ export function RouteViewportProvider({
     () => ({
       controller,
       version,
+      connectionGeneration,
       notifyChanged,
       freezeDisplayed,
       readSnapshot,
@@ -277,7 +310,16 @@ export function RouteViewportProvider({
       registerCapturer,
       viewportPhaseAttr: viewportPhaseAttrFor(controller.currentPhase, controller.currentIntent?.kind ?? null)
     }),
-    [controller, version, notifyChanged, freezeDisplayed, readSnapshot, requestTopRoute, registerCapturer]
+    [
+      controller,
+      version,
+      connectionGeneration,
+      notifyChanged,
+      freezeDisplayed,
+      readSnapshot,
+      requestTopRoute,
+      registerCapturer
+    ]
   )
 
   void topicId
@@ -286,11 +328,49 @@ export function RouteViewportProvider({
 
 // --- Live container snapshot ---------------------------------------------------
 
-/** Build a live capturer for a scroll container (registered by the message list). */
+/**
+ * Build a live capturer for a scroll container (registered by the message list).
+ *
+ * Hidden-geometry guard: while the Chat workspace is detached inside
+ * `Activity hidden` (`display:none`) the container has no measurable rects —
+ * sampling then would publish invalid geometry as a stable snapshot. Return
+ * null so the caller preserves the last legal stable snapshot/cache instead.
+ */
+/**
+ * Positive hidden proof for capture gating (Activity `display:none` detach).
+ * True only when the container is disconnected or an inline `display:none` /
+ * `hidden` ancestor proves the subtree is detached-hidden. Never infers
+ * hidden from zero rects alone (jsdom has no layout), so visible jsdom
+ * surfaces keep capturing.
+ */
+export const isCaptureContainerHidden = (container: HTMLElement | null): boolean => {
+  if (!container) return true
+  try {
+    if (!container.isConnected) return true
+  } catch {
+    return true
+  }
+  try {
+    let el: HTMLElement | null = container
+    while (el) {
+      try {
+        const style = el.style as CSSStyleDeclaration | undefined
+        if (style && style.display === 'none') return true
+        if (el.hidden === true) return true
+      } catch {}
+      el = el.parentElement
+    }
+  } catch {}
+  // Real-browser measurable proof only when the API exists AND the ancestor
+  // walk above already proved hidden — never standalone (see doc above).
+  return false
+}
+
 export const buildContainerCapturer = (containerRef: React.RefObject<HTMLElement | null>): SnapshotCapturer => {
   return () => {
     const container = containerRef.current
     if (!container) return null
+    if (isCaptureContainerHidden(container)) return null
     const scrollTop = container.scrollTop
     const anchor = findViewportTopAnchorWithOffset(container)
     return {

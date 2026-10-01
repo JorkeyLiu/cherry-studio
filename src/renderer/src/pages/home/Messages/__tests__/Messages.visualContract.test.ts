@@ -283,12 +283,14 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/onTouchStart/)
     expect(src).toMatch(/onPointerDown/)
     expect(src).toMatch(/onKeyDown/)
-    // Unmount invalidates the controller (release exactly once, never leaves
-    // hidden); stale finally blocks skip on epoch mismatch.
+    // Unmount detaches the controller (explicit `detach()` arming reactivation,
+    // release exactly once, never leaves hidden); stale finally blocks skip on
+    // epoch mismatch. Isolated mounts without a provider detach their fallback
+    // directly; the provider owns the shared instance (single owner).
     const unmountIdx = src.indexOf('return () => {\n      unmountedRef.current = true')
     expect(unmountIdx).toBeGreaterThan(-1)
-    const unmountSlice = src.slice(unmountIdx, unmountIdx + 1200)
-    expect(unmountSlice).toMatch(/controller\.invalidateAll\(\)/)
+    const unmountSlice = src.slice(unmountIdx, unmountIdx + 1400)
+    expect(unmountSlice).toMatch(/controller\.detach\(\)/)
     expect(unmountSlice).not.toMatch(/handle\.cancel\(\)/)
     expect(unmountSlice).not.toMatch(/\.release\(\)/)
     expect(src).toMatch(/isSessionCurrent\(epoch\)/)

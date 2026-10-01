@@ -25,9 +25,37 @@ const defaultSharedContextInfo = {
 const mocks = vi.hoisted(() => {
   const scrollContainerRef: { current: HTMLElement | null } = { current: null }
   const handleScrollSpy = vi.fn()
+  // Stable hook identities (mirror production useScrollPosition/useTranslation
+  // stability): Messages holds these in effect dep arrays, so fresh closures
+  // per render would re-run the route pipeline every render and never settle.
+  const getSavedPositionStable = vi.fn(() => null)
+  const getSnapshotForRouteStable = vi.fn(() => null)
+  const clearSavedPositionStable = vi.fn()
+  const savePositionStable = vi.fn()
+  const captureSnapshotStable = vi.fn(() => null)
+  const tStable = (key: string): string => key
+  // Stable action-controller identities (production callbacks are stable;
+  // fresh closures per render would recreate selectMessageForFold and re-run
+  // `t`-dependent route effects every render).
+  const selectAnswerStable = vi.fn().mockResolvedValue(undefined)
+  const regenerateAssistantStable = vi.fn().mockResolvedValue(undefined)
+  const resendUserStable = vi.fn().mockResolvedValue(undefined)
+  const editSaveStable = vi.fn().mockResolvedValue(true)
+  const resendWithEditStable = vi.fn().mockResolvedValue(true)
   return {
     scrollContainerRef,
     handleScrollSpy,
+    getSavedPositionStable,
+    getSnapshotForRouteStable,
+    clearSavedPositionStable,
+    savePositionStable,
+    captureSnapshotStable,
+    tStable,
+    selectAnswerStable,
+    regenerateAssistantStable,
+    resendUserStable,
+    editSaveStable,
+    resendWithEditStable,
     topicMessages: [] as Message[],
     setTimeoutTimer: vi.fn((_name: string, fn: () => void, _ms: number) => fn()),
     clearTimeoutTimer: vi.fn(),
@@ -75,27 +103,28 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
 }))
 vi.mock('@renderer/hooks/useMessageActionController', () => ({
   useMessageActionController: () => ({
-    selectAnswer: vi.fn().mockResolvedValue(undefined),
-    regenerateAssistant: vi.fn().mockResolvedValue(undefined),
-    resendUser: vi.fn().mockResolvedValue(undefined),
-    editSave: vi.fn().mockResolvedValue(true),
-    resendWithEdit: vi.fn().mockResolvedValue(true)
+    selectAnswer: mocks.selectAnswerStable,
+    regenerateAssistant: mocks.regenerateAssistantStable,
+    resendUser: mocks.resendUserStable,
+    editSave: mocks.editSaveStable,
+    resendWithEdit: mocks.resendWithEditStable
   })
 }))
 vi.mock('@renderer/hooks/useScrollPosition', () => ({
   // Named exports used by the displayed-route coordinator. The single
   // controller owns transition truth; the mock keeps anchoring tests
-  // isolated from hook depth.
+  // isolated from hook depth. Scroll-hook identities are stable (mirroring
+  // production memoization) so route effects run only on genuine triggers.
   commitSnapshotForRoute: vi.fn(() => true),
   routeScrollKey: (topicId: string, branchId: string | null) => `topic-${topicId}::${branchId ?? 'main'}`,
   default: (_key: string) => ({
     containerRef: mocks.scrollContainerRef,
     handleScroll: mocks.handleScrollSpy,
-    getSavedPosition: vi.fn(() => null),
-    getSnapshotForRoute: vi.fn(() => null),
-    clearSavedPosition: vi.fn(),
-    savePosition: vi.fn(),
-    captureSnapshot: vi.fn(() => null)
+    getSavedPosition: mocks.getSavedPositionStable,
+    getSnapshotForRoute: mocks.getSnapshotForRouteStable,
+    clearSavedPosition: mocks.clearSavedPositionStable,
+    savePosition: mocks.savePositionStable,
+    captureSnapshot: mocks.captureSnapshotStable
   })
 }))
 vi.mock('@renderer/hooks/useShortcuts', () => ({ useShortcut: vi.fn() }))
@@ -248,7 +277,9 @@ vi.mock('react-infinite-scroll-component', () => ({
 }))
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = (await importOriginal()) as any
-  return { ...actual, useTranslation: () => ({ t: (key: string) => key }) }
+  // Stable `t` identity (production `t` is stable; a fresh closure per render
+  // would re-run `t`-dependent route effects every render).
+  return { ...actual, useTranslation: () => ({ t: mocks.tStable }) }
 })
 
 vi.mock('@renderer/hooks/useTopicTransition', () => ({

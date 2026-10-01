@@ -114,6 +114,10 @@ const mocks = vi.hoisted(() => {
       rawScrollTop: -100,
       isAtBottom: false
     })),
+    // Route-snapshot read for the restore pipeline: stable identity like the
+    // other scroll-hook spies above (a fresh closure per render would re-run
+    // the route effect every render and never settle).
+    getSnapshotForRoute: vi.fn(() => null),
 
     // S3.2: key-aware infrastructure — exposed for setup/teardown/assertion
     scrollKeyStore,
@@ -165,7 +169,10 @@ const mocks = vi.hoisted(() => {
     // NEW_BRANCH inherit path is not exercised here; the null anchor is a
     // no-op that keeps test semantics unchanged.
     resolveContextClosure: vi.fn(async () => ({ resolvedAnchorGroupKey: null }) as any),
-    fetchMessagesWindow: vi.fn(async () => ({ messages: [], blocks: [] }) as any)
+    fetchMessagesWindow: vi.fn(async () => ({ messages: [], blocks: [] }) as any),
+    // Stable `t` identity (production `t` is stable; a fresh closure per
+    // render would re-run `t`-dependent route effects every render).
+    t: (key: string): string => key
   }
 })
 
@@ -249,7 +256,7 @@ vi.mock('@renderer/hooks/useScrollPosition', () => ({
       containerRef: mocks.scrollContainerRef,
       handleScroll: vi.fn(),
       getSavedPosition: mocks.getSavedPosition,
-      getSnapshotForRoute: vi.fn(() => null),
+      getSnapshotForRoute: mocks.getSnapshotForRoute,
       clearSavedPosition: vi.fn(),
       savePosition: mocks.savePosition,
       captureSnapshot: mocks.captureSnapshot
@@ -347,7 +354,14 @@ vi.mock('@renderer/store/newMessage', async (importOriginal) => {
 })
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
-  updateMessageAndBlocksThunk: vi.fn()
+  updateMessageAndBlocksThunk: vi.fn(),
+  // Restore-pipeline loader stubs: the mocked dispatch never executes thunks,
+  // so these only need to be callable. Without them, merely evaluating the
+  // import throws a mock-missing error and the pipeline takes its exceptional
+  // double-failure path (rebase + toast) instead of the normal empty-window
+  // path — a mock-completeness gap, not production behavior.
+  loadRouteMessagesThunk: vi.fn(() => ({ type: 'test/loadRouteMessages' })),
+  loadRouteWindowWithFallback: vi.fn(async () => undefined)
 }))
 
 vi.mock('@renderer/services/anchorService', () => ({
@@ -524,7 +538,7 @@ vi.mock('react-infinite-scroll-component', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key
+    t: mocks.t
   })
 }))
 
@@ -1725,7 +1739,10 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
     const handlerPromise: Promise<any> = handler('msg-target')
     await act(async () => {})
 
-    // Topic switches while the around read is in flight.
+    // Topic switches while the around read is in flight. The switch itself
+    // legitimately loads the new topic (one pipeline dispatch); clear after
+    // it settles so the assertions below measure only the stale navigation
+    // resolution (which must publish nothing).
     await act(async () => {
       rerender(
         <Messages
@@ -1737,6 +1754,8 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
       )
     })
     mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+    await act(async () => {})
+    mocks.dispatchMock.mockClear()
     await act(async () => {
       ensureResolve?.({ status: 'loaded', messages: [msgFor('msg-target', 'topic-a')], blocks: [] })
     })
@@ -1844,7 +1863,9 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
     await act(async () => {})
 
     // Live ref must observe the switch even though the navigate closure was
-    // created for topic-a: switch to B, then resolve the in-flight ensure.
+    // created for topic-a: switch to B (its legitimate pipeline load settles
+    // first and is cleared), then resolve the in-flight ensure. The stale
+    // resolution must publish nothing.
     await act(async () => {
       rerender(
         <Messages
@@ -1856,6 +1877,8 @@ describe('Unified navigation — ensure/commit/pending semantics (mounted)', () 
       )
     })
     mocks.simulatePassiveKeyUpdate(`topic-${topicB.id}`)
+    await act(async () => {})
+    mocks.dispatchMock.mockClear()
     await act(async () => {
       ensureResolve?.({ status: 'loaded', messages: [msgFor('msg-target', 'topic-a')], blocks: [] })
     })
