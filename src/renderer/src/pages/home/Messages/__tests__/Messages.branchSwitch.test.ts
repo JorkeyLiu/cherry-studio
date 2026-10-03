@@ -67,16 +67,25 @@ describe('true branch incremental switch (windowed)', () => {
   it('divider switch reads around the fork anchor (not history snapshot, not bottom)', () => {
     const idx = messagesSource.indexOf('Divider route switch')
     expect(idx).toBeGreaterThanOrEqual(0)
-    const slice = messagesSource.slice(idx, idx + 14000)
-    // Production path delegates the fork-anchor around read (+latest
-    // fallback) to loadRouteWindowWithFallback with the divider anchor.
-    expect(slice).toMatch(/loadRouteWindowWithFallback/)
+    const slice = messagesSource.slice(idx, idx + 16000)
+    // Production path delegates the fork-anchor around read (+latest fallback) to loadRouteMessagesThunk with deferPublish
+    expect(slice).toMatch(/loadRouteMessagesThunk/)
+    expect(slice).toMatch(/deferPublish/)
+    expect(slice).toMatch(/kind:\s*'around'/)
     expect(slice).toMatch(/anchorMessageId/)
+    expect(slice).toMatch(/before.*after|NAVIGATION_VISUALLY_OLDER_GROUPS/)
+    expect(slice).toMatch(/kind:\s*'latest'/)
+    expect(slice).toMatch(/deferredBlocks|deferredMessages|deferredMutable/)
+    expect(slice).toMatch(/publishDeferredProjection/)
+    expect(slice).toMatch(/rebaseRouteMessages/)
+    expect(slice).toMatch(/commitDividerVisibleAtomic|commitRouteWindowAtomic/)
+    expect(slice).toMatch(/wantOffset/)
     expect(slice).toMatch(/dividerVisualAnchorOffset|dividerKey/)
     expect(slice).toMatch(/findViewportTopAnchorWithOffset/)
     // Double failure rolls back to the previous route (never new-active +
     // old-projection, never mixed pagination).
     expect(slice).toMatch(/prevRoute/)
+    expect(slice).not.toMatch(/kind:\s*'bottom'/)
     const code = slice
       .split('\n')
       .filter((l) => !l.trim().startsWith('//'))

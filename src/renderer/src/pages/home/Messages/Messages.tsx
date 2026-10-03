@@ -98,11 +98,7 @@ import store, { useAppDispatch, useAppSelector } from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
-import {
-  loadRouteMessagesThunk,
-  loadRouteWindowWithFallback,
-  updateMessageAndBlocksThunk
-} from '@renderer/store/thunk/messageThunk'
+import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import {
   activeBranchSet,
   deletionFallbackConsumed,
@@ -3205,7 +3201,8 @@ const Messages = ({
       topicIdAtStart: string,
       routeAtStart: string | null,
       window: MessageWindow,
-      plan: ViewportFirstPositionPlan
+      plan: ViewportFirstPositionPlan,
+      onPublish?: () => void
     ): number | null => {
       if (!controller.isSessionCurrent(fetchEpoch)) {
         return null
@@ -3221,6 +3218,15 @@ const Messages = ({
       const ok = controller.applyTransitionWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
       if (!ok) {
         return null
+      }
+      if (onPublish) {
+        if (topicIdRef.current !== topicIdAtStart || routeRef.current !== routeAtStart) {
+          return null
+        }
+        if (!controller.isSessionCurrent(fetchEpoch)) {
+          return null
+        }
+        onPublish()
       }
       viewportDispatch({ type: 'window/apply', window })
       transitionPlanRef.current = {
@@ -3260,7 +3266,8 @@ const Messages = ({
         sharedMessageId: string | null
         sharedOffset: number | null
         wantOffset: number
-      }
+      },
+      onPublish?: () => void
     ): number | null => {
       if (!controller.isSessionCurrent(fetchEpoch)) return null
       const intent = controller.currentIntent
@@ -3271,6 +3278,15 @@ const Messages = ({
       const wid = windowIdentityKey(window) ?? `epoch-${fetchEpoch}`
       const ok = controller.applyVisibleRebaseWindow(fetchEpoch, { topicId: topicIdAtStart, route: routeAtStart }, wid)
       if (!ok) return null
+      if (onPublish) {
+        if (topicIdRef.current !== topicIdAtStart || routeRef.current !== routeAtStart) {
+          return null
+        }
+        if (!controller.isSessionCurrent(fetchEpoch)) {
+          return null
+        }
+        onPublish()
+      }
       cancelDividerVisibleQuiet()
       viewportDispatch({ type: 'window/apply', window })
       dividerVisibleRef.current = {
@@ -4268,6 +4284,7 @@ const Messages = ({
       // divider intent keeps ONLY the clicked divider's screen offset — the
       // target route's history is never read.
       saveDisplayedSnapshot()
+      const capturedCurrentWindowAtStart = viewportStateRef.current.window
       const fetchEpoch = beginFetchHold(topicIdAtStart, branchId, {
         kind: 'divider',
         dividerKey,
@@ -4281,21 +4298,49 @@ const Messages = ({
       windowCacheRef.current.clear()
       dispatch(activeBranchSet({ topicId, branchId }))
       let routeWindow: FetchMessagesWindowResponse
+      // Deferred publish: fetch without dispatching blocks/rebase so the
+      // Redux projection + viewport window + controller phase commit in ONE
+      // React batch (no intermediate paint with new suffix before compensation).
+      let deferredBlocks: MessageBlock[] = []
+      let deferredMessages: Message[] = []
+      let deferredMutable: string[] = []
       try {
-        // Fork-anchor windowed read with latest fallback for the same target
-        // route (production `loadRouteWindowWithFallback` path).
-        const settled = await loadRouteWindowWithFallback(
-          dispatch,
-          topicId,
-          branchId,
-          {
-            anchorMessageId,
-            before: NAVIGATION_VISUALLY_OLDER_GROUPS,
-            after: NAVIGATION_VISUALLY_NEWER_GROUPS
-          },
-          () => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
-        )
-        routeWindow = settled.response
+        const isStillTarget = (): boolean => topicIdRef.current === topicIdAtStart && routeRef.current === branchId
+        const aroundOpts = {
+          kind: 'around' as const,
+          anchorMessageId,
+          before: NAVIGATION_VISUALLY_OLDER_GROUPS,
+          after: NAVIGATION_VISUALLY_NEWER_GROUPS,
+          deferPublish: true
+        }
+        let aroundRes: FetchMessagesWindowResponse | void = undefined
+        try {
+          aroundRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
+            loadRouteMessagesThunk(topicId, branchId, aroundOpts)
+          )) as FetchMessagesWindowResponse | void
+          // Thunk returns response directly (not via unwrap); handle both.
+          if (aroundRes && (aroundRes as unknown as { window?: unknown }).window) {
+            routeWindow = aroundRes
+          } else {
+            throw new Error('around route read discarded as stale')
+          }
+        } catch (aroundError) {
+          if (!isStillTarget()) throw aroundError
+          const latestRes = (await (dispatch as unknown as (a: unknown) => Promise<unknown>)(
+            loadRouteMessagesThunk(topicId, branchId, { kind: 'latest', deferPublish: true } as unknown as Parameters<
+              typeof loadRouteMessagesThunk
+            >[2])
+          )) as FetchMessagesWindowResponse | void
+          if (!latestRes || !(latestRes as unknown as { window?: unknown }).window) {
+            throw new Error('latest route fallback discarded as stale')
+          }
+          routeWindow = latestRes
+        }
+        deferredBlocks = (routeWindow.blocks as unknown as MessageBlock[]) ?? []
+        deferredMessages = (routeWindow.messages as unknown as Message[]) ?? []
+        deferredMutable = Array.isArray((routeWindow as unknown as { mutableMessageIds?: unknown }).mutableMessageIds)
+          ? ((routeWindow as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
+          : []
       } catch (error) {
         logger.error(`[handleSelectRoute] Failed to load route for topic ${topicId}:`, error as Error)
         window.toast.error(t('message.true_branch.error'))
@@ -4317,8 +4362,28 @@ const Messages = ({
         failVisibleTransition(fetchEpoch)
         return
       }
+      // Batched publish helper: blocks + rebase dispatched synchronously with
+      // the window commit in the same tick (no intermediate paint).
+      let deferredPublished = false
+      const publishDeferredProjection = (): void => {
+        if (deferredPublished) return
+        deferredPublished = true
+        if (deferredBlocks.length > 0) {
+          dispatch(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart))
+        }
+        dispatch(
+          newMessagesActions.rebaseRouteMessages({
+            topicId: topicIdAtStart,
+            messages: deferredMessages,
+            route: branchId,
+            mutableMessageIds: deferredMutable
+          })
+        )
+      }
       try {
-        const loaded = (selectLoadedMessagesForTopic(store.getState(), topicId) ?? []) as Message[]
+        // Use the authoritative deferred messages directly (store not yet updated
+        // due to deferPublish) so target viewport build is deterministic.
+        const loaded = deferredMessages
         const authoritative = routeWindow.window
           ? {
               hasMoreBefore: routeWindow.window.hasMoreBefore,
@@ -4348,7 +4413,7 @@ const Messages = ({
           // unmeasurable offset, or empty incoming suffix).
           if (dividerVisualAnchorOffset !== null) {
             try {
-              const currentWindow = viewportStateRef.current.window
+              const currentWindow = capturedCurrentWindowAtStart
               const currentIds = currentWindow?.displayMessages?.map((m) => m.id) ?? []
               const targetIds = targetWindow.displayMessages?.map((m) => m.id) ?? []
               const responseIds = ((routeWindow.messages ?? []) as unknown as Message[]).map((m) => m.id)
@@ -4402,15 +4467,24 @@ const Messages = ({
                     unionModelGroupCount: unionModel.groups.length
                   })
                   if (unionExact && (unionWindow.displayMessages?.length ?? 0) > 0) {
-                    const visibleEpoch = commitDividerVisibleAtomic(fetchEpoch, topicIdAtStart, branchId, unionWindow, {
-                      dividerKey,
-                      anchorMessageId,
-                      parentOfDivider,
-                      sharedMessageId: sharedVisualMessageId,
-                      sharedOffset:
-                        fallbackTop && Number.isFinite(fallbackTop.intraRowOffset) ? fallbackTop.intraRowOffset : null,
-                      wantOffset: dividerVisualAnchorOffset
-                    })
+                    const visibleEpoch = commitDividerVisibleAtomic(
+                      fetchEpoch,
+                      topicIdAtStart,
+                      branchId,
+                      unionWindow,
+                      {
+                        dividerKey,
+                        anchorMessageId,
+                        parentOfDivider,
+                        sharedMessageId: sharedVisualMessageId,
+                        sharedOffset:
+                          fallbackTop && Number.isFinite(fallbackTop.intraRowOffset)
+                            ? fallbackTop.intraRowOffset
+                            : null,
+                        wantOffset: dividerVisualAnchorOffset
+                      },
+                      publishDeferredProjection
+                    )
                     if (visibleEpoch !== null) {
                       // Visible path armed: the layout effect applies the first
                       // compensation, then the bounded quiet sequence commits.
@@ -4460,8 +4534,17 @@ const Messages = ({
                 : { kind: 'none' }
           // Provenance-bound atomic commit (single entry): stale fetch
           // completions refuse with no dispatch and never disturb the new
-          // session (rapid supersede safe).
-          const restoreEpoch = commitRouteWindowAtomic(fetchEpoch, topicIdAtStart, branchId, targetWindow, firstPlan)
+          // session (rapid supersede safe). Deferred projection publishes
+          // atomically with the window commit in the same synchronous tick
+          // only after epoch/phase success — never before check/apply failed.
+          const restoreEpoch = commitRouteWindowAtomic(
+            fetchEpoch,
+            topicIdAtStart,
+            branchId,
+            targetWindow,
+            firstPlan,
+            publishDeferredProjection
+          )
           if (restoreEpoch === null) {
             failVisibleTransition(fetchEpoch)
             return

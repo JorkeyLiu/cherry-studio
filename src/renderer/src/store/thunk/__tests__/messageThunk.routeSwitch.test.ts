@@ -1,3 +1,4 @@
+import type { AppDispatch, RootState } from '@renderer/store'
 import type * as NewMessageModule from '@renderer/store/newMessage'
 import type { FetchMessagesWindowRequest, FetchMessagesWindowResponse } from '@shared/chatDb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -391,5 +392,250 @@ describe('loadRouteWindowWithFallback (divider reliable degradation, behavior)',
     await expect(
       loadRouteWindowWithFallback(exec, 't1', 'b-new', { anchorMessageId: 'fork' }, () => false)
     ).rejects.toThrow()
+  })
+})
+
+describe('loadRouteMessagesThunk deferPublish contract', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function makeDeferredResponse(
+    request: FetchMessagesWindowRequest,
+    messages: Array<{ id: string } & Record<string, unknown>>,
+    blocks: Array<Record<string, unknown>>,
+    mutableIds: string[],
+    windowOverrides: Partial<FetchMessagesWindowResponse['window']> = {}
+  ): FetchMessagesWindowResponse {
+    const base = makeWindowResponse(request, messages, windowOverrides)
+    ;(base as unknown as { blocks: unknown }).blocks = blocks as unknown as FetchMessagesWindowResponse['blocks']
+    ;(base as unknown as { mutableMessageIds: unknown }).mutableMessageIds = mutableIds
+    return base
+  }
+
+  it('default/absent option publishes immediately with messages+blocks+mutable capability', async () => {
+    const msgs = [{ id: 'u1' }, { id: 'a1' }]
+    const blks = [{ id: 'blk-1', messageId: 'a1' }]
+    const mutable = ['u1']
+    mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) =>
+      makeDeferredResponse(req, msgs, blks, mutable, { hasMoreBefore: true, hasMoreAfter: false })
+    )
+    const { loadRouteMessagesThunk } = await import('../messageThunk')
+    const dispatch = vi.fn()
+    const state = baseState()
+    const getState = () => state
+    // absent opts (default latest)
+    const resDefault = (await (
+      loadRouteMessagesThunk as unknown as (t: string, b: string | null) => (d: unknown, g: unknown) => unknown
+    )('t1', 'b-new')(
+      dispatch as unknown as AppDispatch,
+      getState as unknown as () => RootState
+    )) as FetchMessagesWindowResponse
+    expect(resDefault.messages).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'u1' })]))
+    expect(resDefault.blocks).toEqual(blks as unknown as FetchMessagesWindowResponse['blocks'])
+    expect((resDefault as unknown as { mutableMessageIds: string[] }).mutableMessageIds).toEqual(mutable)
+    expect(mocks.upsertManyBlocks).toHaveBeenCalledTimes(1)
+    expect(mocks.upsertManyBlocks).toHaveBeenCalledWith(blks)
+    expect(mocks.rebaseRouteMessages).toHaveBeenCalledTimes(1)
+    expect(mocks.rebaseRouteMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ topicId: 't1', route: 'b-new', mutableMessageIds: mutable })
+    )
+    vi.clearAllMocks()
+    mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) =>
+      makeDeferredResponse(req, msgs, blks, mutable)
+    )
+    const dispatch2 = vi.fn()
+    const resExplicit = (await loadRouteMessagesThunk('t1', 'b-new', { kind: 'latest' })(
+      dispatch2 as unknown as AppDispatch,
+      getState as unknown as () => RootState
+    )) as unknown as FetchMessagesWindowResponse
+    expect(resExplicit.window.kind).toBe('latest')
+    expect(mocks.rebaseRouteMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('deferPublish true returns authoritative messages/blocks/window/capability without store projection while target selected', async () => {
+    const msgs = [{ id: 'u1' }, { id: 'fork1' }, { id: 'a2' }]
+    const blks = [{ id: 'blk-fork', messageId: 'a2' }]
+    const mutable = ['fork1', 'a2']
+    mocks.fetchMessagesWindow.mockImplementation(async (req: FetchMessagesWindowRequest) =>
+      makeDeferredResponse(req, msgs, blks, mutable, { hasMoreBefore: true, hasMoreAfter: true })
+    )
+    const { loadRouteMessagesThunk } = await import('../messageThunk')
+    const state = baseState()
+    const getState = () => state
+    const dispatch = vi.fn()
+    const res = (await loadRouteMessagesThunk('t1', 'b-new', {
+      kind: 'around',
+      anchorMessageId: 'fork1',
+      before: 10,
+      after: 19,
+      deferPublish: true
+    })(
+      dispatch as unknown as AppDispatch,
+      getState as unknown as () => RootState
+    )) as unknown as FetchMessagesWindowResponse
+    expect(res.messages as unknown as Array<{ id: string }>).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'fork1' })])
+    )
+    expect(res.blocks as unknown as Array<Record<string, unknown>>).toEqual(
+      blks as unknown as FetchMessagesWindowResponse['blocks']
+    )
+    expect((res as unknown as { mutableMessageIds: string[] }).mutableMessageIds).toEqual(mutable)
+    expect(res.window.hasMoreBefore).toBe(true)
+    expect(res.window.hasMoreAfter).toBe(true)
+    expect(res.window.kind).toBe('around')
+    // store projection + blocks/capability remain unchanged (no dispatch)
+    expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+    expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
+    // loading was still toggled, but no projection
+    const loadingCalls = dispatch.mock.calls.filter((c) => c[0]?.type === 'newMessages/setTopicLoading')
+    expect(loadingCalls.length).toBe(2)
+  })
+
+  it('rejected query propagates same error and publishes nothing (both immediate and deferred)', async () => {
+    const err = new Error('window fetch failed')
+    mocks.fetchMessagesWindow.mockRejectedValue(err)
+    const { loadRouteMessagesThunk } = await import('../messageThunk')
+    const state = baseState()
+    const getState = () => state
+    const dispatchImm = vi.fn()
+    await expect(
+      loadRouteMessagesThunk('t1', 'b-new', { kind: 'latest' })(
+        dispatchImm as unknown as AppDispatch,
+        getState as unknown as () => RootState
+      )
+    ).rejects.toThrow('window fetch failed')
+    expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+    expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
+    vi.clearAllMocks()
+    mocks.fetchMessagesWindow.mockRejectedValue(err)
+    const dispatchDef = vi.fn()
+    await expect(
+      loadRouteMessagesThunk('t1', 'b-new', { kind: 'latest', deferPublish: true })(
+        dispatchDef as unknown as AppDispatch,
+        getState as unknown as () => RootState
+      )
+    ).rejects.toThrow('window fetch failed')
+    expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+    expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
+  })
+
+  it('caller final publication after defer sets exact route metadata including Main null and branch capability', async () => {
+    const branchMsgs = [{ id: 'u1' }, { id: 'b-msg' }]
+    const branchBlks = [{ id: 'blk-b', messageId: 'b-msg' }]
+    const branchMutable = ['b-msg']
+    const branchReq = { kind: 'latest', topicId: 't1', branchId: 'b-new', limit: 10 } as FetchMessagesWindowRequest
+    const branchRes = makeDeferredResponse(branchReq, branchMsgs, branchBlks, branchMutable, {
+      hasMoreBefore: true,
+      hasMoreAfter: false
+    })
+    mocks.fetchMessagesWindow.mockResolvedValueOnce(branchRes)
+    const { loadRouteMessagesThunk } = await import('../messageThunk')
+    const stateBranch = baseState()
+    const getStateBranch = () => stateBranch
+    const dispatchBranch = vi.fn()
+    const resBranch = (await loadRouteMessagesThunk('t1', 'b-new', { kind: 'latest', deferPublish: true })(
+      dispatchBranch as unknown as AppDispatch,
+      getStateBranch as unknown as () => RootState
+    )) as unknown as FetchMessagesWindowResponse
+    // caller publishes deferred projection synchronously with window commit
+    const callerDispatch = vi.fn()
+    const deferredBlocks = (resBranch.blocks as unknown as Array<Record<string, unknown>>) ?? []
+    const deferredMessages = (resBranch.messages as unknown as Array<Record<string, unknown>>) ?? []
+    const deferredMutable = (resBranch as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? []
+    if (deferredBlocks.length > 0) callerDispatch(mocks.upsertManyBlocks(deferredBlocks))
+    callerDispatch(
+      mocks.rebaseRouteMessages({
+        topicId: 't1',
+        messages: deferredMessages,
+        route: 'b-new',
+        mutableMessageIds: deferredMutable
+      })
+    )
+    expect(mocks.upsertManyBlocks).toHaveBeenCalledWith(branchBlks)
+    expect(mocks.rebaseRouteMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ topicId: 't1', route: 'b-new', mutableMessageIds: branchMutable, messages: branchMsgs })
+    )
+    vi.clearAllMocks()
+    // Main route (null) exact capability
+    const mainMsgs = [{ id: 'm1' }]
+    const mainBlks: Array<Record<string, unknown>> = []
+    const mainMutable = ['m1']
+    const mainReq = { kind: 'latest', topicId: 't1', branchId: null, limit: 10 } as FetchMessagesWindowRequest
+    const mainRes = makeDeferredResponse(mainReq, mainMsgs, mainBlks, mainMutable)
+    mocks.fetchMessagesWindow.mockResolvedValueOnce(mainRes)
+    const stateMain = {
+      ...baseState(),
+      topicBranch: { branchesByTopic: {}, activeBranchIdByTopic: { t1: null }, routeGenerationByTopic: { t1: 1 } }
+    } as unknown as ReturnType<typeof baseState>
+    const getStateMain = () => stateMain as unknown as ReturnType<typeof baseState>
+    const dispatchMain = vi.fn()
+    const resMain = (await loadRouteMessagesThunk('t1', null, { kind: 'latest', deferPublish: true })(
+      dispatchMain as unknown as AppDispatch,
+      getStateMain as unknown as () => RootState
+    )) as unknown as FetchMessagesWindowResponse
+    expect((resMain as unknown as { mutableMessageIds: string[] }).mutableMessageIds).toEqual(mainMutable)
+    expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
+    expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+    const callerMain = vi.fn()
+    callerMain(
+      mocks.rebaseRouteMessages({
+        topicId: 't1',
+        messages: resMain.messages as unknown as Array<Record<string, unknown>>,
+        route: null,
+        mutableMessageIds: (resMain as unknown as { mutableMessageIds: string[] }).mutableMessageIds
+      })
+    )
+    expect(mocks.rebaseRouteMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ route: null, mutableMessageIds: mainMutable })
+    )
+  })
+
+  it('superseded deferred late response is void and not published (response-only caller guard elsewhere)', async () => {
+    const { loadRouteMessagesThunk } = await import('../messageThunk')
+    let resolveFirst!: (v: FetchMessagesWindowResponse) => void
+    const firstGate = new Promise<FetchMessagesWindowResponse>((r) => (resolveFirst = r))
+    mocks.fetchMessagesWindow.mockImplementationOnce(() => firstGate)
+    mocks.fetchMessagesWindow.mockImplementationOnce(async (req: FetchMessagesWindowRequest) =>
+      makeDeferredResponse(req, [{ id: 'second' }], [{ id: 'blk-second' }], ['second'])
+    )
+    const state = baseState()
+    const getStateFirst = () => state
+    const getStateSecond = () => ({
+      ...state,
+      topicBranch: {
+        ...state.topicBranch,
+        activeBranchIdByTopic: { t1: 'b-second' },
+        routeGenerationByTopic: { t1: 2 }
+      }
+    })
+    const dispatchFirst = vi.fn()
+    const dispatchSecond = vi.fn()
+    const p1 = (
+      loadRouteMessagesThunk('t1', 'b-first', { kind: 'latest', deferPublish: true }) as unknown as (
+        d: unknown,
+        g: unknown
+      ) => Promise<unknown>
+    )(dispatchFirst as unknown as AppDispatch, getStateFirst as unknown as () => RootState)
+    const p2 = (
+      loadRouteMessagesThunk('t1', 'b-second', { kind: 'latest', deferPublish: true }) as unknown as (
+        d: unknown,
+        g: unknown
+      ) => Promise<unknown>
+    )(dispatchSecond as unknown as AppDispatch, getStateSecond as unknown as () => RootState)
+    const resSecond = (await p2) as FetchMessagesWindowResponse
+    expect(resSecond.messages).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'second' })]))
+    // thunk deferred second did not auto-publish
+    expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
+    expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+    vi.clearAllMocks()
+    const staleReq = { kind: 'latest', topicId: 't1', branchId: 'b-first', limit: 10 } as FetchMessagesWindowRequest
+    resolveFirst(makeDeferredResponse(staleReq, [{ id: 'stale' }], [], ['stale']))
+    const resFirst = await p1
+    expect(resFirst).toBeUndefined()
+    // superseded deferred response not published by defer (response only caller guard elsewhere)
+    expect(mocks.rebaseRouteMessages).not.toHaveBeenCalled()
+    expect(mocks.upsertManyBlocks).not.toHaveBeenCalled()
+    expect(dispatchFirst).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'newMessages/rebaseRouteMessages' }))
   })
 })

@@ -2837,8 +2837,8 @@ export const loadTopicMessagesThunk =
  * an older response overwrite the newer route.
  */
 export type LoadRouteWindowOpts =
-  | { kind?: 'latest'; limit?: number }
-  | { kind: 'around'; anchorMessageId: string; before?: number; after?: number }
+  | { kind?: 'latest'; limit?: number; deferPublish?: boolean }
+  | { kind: 'around'; anchorMessageId: string; before?: number; after?: number; deferPublish?: boolean }
 
 export const loadRouteMessagesThunk =
   (topicId: string, branchId: string | null, opts?: LoadRouteWindowOpts) =>
@@ -2918,15 +2918,22 @@ export const loadRouteMessagesThunk =
       }
       const typedMessages = response.messages as unknown as Message[]
       const typedBlocks = response.blocks as unknown as MessageBlock[]
+      const mutableMessageIds = Array.isArray((response as { mutableMessageIds?: unknown }).mutableMessageIds)
+        ? ((response as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
+        : []
+      const deferPublish = !!(opts && (opts as { deferPublish?: boolean }).deferPublish)
+      if (deferPublish) {
+        // Deferred: caller will publish blocks + rebase atomically with the
+        // window commit in the same React batch (visible path must not paint
+        // new suffix before compensation). No dispatch here — just return.
+        return response
+      }
       if (typedBlocks.length > 0) {
         dispatch(withClosureTopics(upsertManyBlocks(typedBlocks), topicId))
       }
       // Atomic conservative rebase with Main-authoritative capability:
       // single commit, no blank, no mixed route. Empty windows publish []
       // (clear). Capability rides atomically; absent clears fail-closed.
-      const mutableMessageIds = Array.isArray((response as { mutableMessageIds?: unknown }).mutableMessageIds)
-        ? ((response as unknown as { mutableMessageIds: string[] }).mutableMessageIds ?? [])
-        : []
       dispatch(newMessagesActions.rebaseRouteMessages({ topicId, messages: typedMessages, route, mutableMessageIds }))
       return response
     } finally {
