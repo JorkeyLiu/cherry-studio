@@ -384,3 +384,73 @@ export const syncResendAttempt = sqliteTable('sync_resend_attempt', {
   resetTimestamp: integer('reset_timestamp').notNull(),
   removedBlockIdsJson: text('removed_block_ids_json').notNull()
 })
+
+// ---------------------------------------------------------------------------
+// sync assistant-config mirror — additive, isolated (019)
+// Main-side mirror rows for renderer-owned non-secret assistant/defaults.
+// Never a config authority: renderer persistence owns local config, Main holds
+// a sync projection only. Rows persist across disable/restart; absence in a
+// snapshot never means deleted (explicit tombstone via sync_state).
+// See migration 019.
+// ---------------------------------------------------------------------------
+export const syncAssistantConfigMirror = sqliteTable('sync_assistant_config_mirror', {
+  key: text('key').primaryKey(),
+  kind: text('kind').notNull(),
+  entityId: text('entity_id').notNull(),
+  payloadJson: text('payload_json').notNull(),
+  version: integer('version').notNull(),
+  localMutationId: text('local_mutation_id'),
+  projectionRevision: integer('projection_revision').notNull().default(0),
+  deleted: integer('deleted').notNull().default(0),
+  updatedAt: integer('updated_at').notNull()
+})
+
+// ---------------------------------------------------------------------------
+// sync file asset + attachment transfer intent — additive, isolated (020)
+//
+// Single source of truth for portable file-asset sync inventory (branch-owned
+// media included). Durable, channel-bound transfer intent lives here — not in
+// memory, not post-commit volatile. Asset rows carry strict FileAsset shape
+// (id/sha256/byteLength/extension + mutable mimeType/originalName/createdAt
+// via sync_field_clock) plus entityClock; file_reference rows (existing
+// file_references table) carry the block↔file association (immutable
+// {blockId,fileId}); pending attachment jobs capture per-asset byte transfer
+// intent (channel-bound, retryable). See migration 020.
+// ---------------------------------------------------------------------------
+export const syncFileAsset = sqliteTable('sync_file_asset', {
+  id: text('id').primaryKey(),
+  sha256: text('sha256').notNull(),
+  byteLength: integer('byte_length').notNull(),
+  extension: text('extension').notNull(),
+  mimeType: text('mime_type').notNull(),
+  originalName: text('original_name').notNull(),
+  createdAt: text('created_at').notNull(),
+  version: integer('version').notNull(),
+  updatedAt: integer('updated_at').notNull()
+})
+
+export const syncAttachmentJob = sqliteTable('sync_attachment_job', {
+  assetId: text('asset_id').primaryKey(),
+  sha256: text('sha256').notNull(),
+  byteLength: integer('byte_length').notNull(),
+  channelId: text('channel_id').notNull(),
+  state: text('state').notNull(),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull()
+})
+
+export const syncAttachmentCaptureIntent = sqliteTable(
+  'sync_attachment_capture_intent',
+  {
+    blockId: text('block_id').notNull(),
+    fileId: text('file_id').notNull(),
+    capturedAt: integer('captured_at').notNull()
+  },
+  (table) => [
+    primaryKey({ columns: [table.blockId, table.fileId] }),
+    index('sync_attachment_capture_intent_file_id_idx').on(table.fileId),
+    index('sync_attachment_capture_intent_captured_at_idx').on(table.capturedAt)
+  ]
+)

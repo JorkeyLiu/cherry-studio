@@ -87,10 +87,11 @@ afterEach(() => {
 
 describe('015_thinking_block_order_repair', () => {
   it('is registered as 15th migration with correct repair DDL and history preserved', () => {
-    expect(MIGRATIONS.length).toBe(17)
+    expect(MIGRATIONS.length).toBe(21)
     expect(MIGRATIONS[14].key).toBe('015_thinking_block_order_repair')
     expect(MIGRATIONS[15].key).toBe('016_topic_branches')
     expect(MIGRATIONS[16].key).toBe('017_cleanup_route_message_overlay')
+    expect(MIGRATIONS[17].key).toBe('018_branch_sync_frames')
     const joined = MIGRATIONS[14].sql.join(' ')
     expect(joined).toContain('UPDATE message_blocks')
     expect(joined).toContain("type = 'thinking'")
@@ -111,7 +112,7 @@ describe('015_thinking_block_order_repair', () => {
   it('fresh database applies 16 migrations and empty DB is no-op', () => {
     const db = drizzle(sqlite, { schema })
     const applied = runMigrations(db as never, sqlite)
-    expect(applied).toBe(17)
+    expect(applied).toBe(21)
     // No blocks, no change, second run is no-op
     const second = runMigrations(db as never, sqlite)
     expect(second).toBe(0)

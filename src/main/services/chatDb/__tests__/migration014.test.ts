@@ -51,7 +51,7 @@ afterEach(() => {
 
 describe('014_sync_resend_attempt', () => {
   it('is registered as 14th migration with correct DDL and no backfill', () => {
-    expect(MIGRATIONS.length).toBe(17)
+    expect(MIGRATIONS.length).toBe(21)
     expect(MIGRATIONS[13].key).toBe('014_sync_resend_attempt')
     const joined = MIGRATIONS[13].sql.join(' ')
     expect(joined).toContain('CREATE TABLE IF NOT EXISTS sync_resend_attempt')
@@ -70,7 +70,7 @@ describe('014_sync_resend_attempt', () => {
   it('fresh database creates an empty intent table (15 migrations)', () => {
     const db = drizzle(sqlite, {})
     const applied = runMigrations(db as never, sqlite)
-    expect(applied).toBe(17)
+    expect(applied).toBe(21)
     const tbl = sqlite
       .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_resend_attempt'`)
       .get() as { sql: string }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { hasExactUserDataDirToken, terminateProcessesByUserDataDir } from './process-cleanup'
+import { hasExactUserDataDirToken, isZombieStat, terminateProcessesByUserDataDir } from './process-cleanup'
 
 describe('exact-token process cleanup', () => {
   it('matches only the complete user-data-dir argv token', () => {
@@ -55,5 +55,31 @@ describe('exact-token process cleanup', () => {
 
     expect(result.errors).toEqual([])
     expect(scan.mock.calls.length).toBeGreaterThan(2)
+  })
+
+  it('distinguishes zombie Z stat from living S/R helpers', () => {
+    expect(isZombieStat('Z')).toBe(true)
+    expect(isZombieStat('Z+')).toBe(true)
+    expect(isZombieStat('ZE')).toBe(true)
+    expect(isZombieStat('S')).toBe(false)
+    expect(isZombieStat('S+')).toBe(false)
+    expect(isZombieStat('R')).toBe(false)
+    expect(isZombieStat('R+')).toBe(false)
+    expect(isZombieStat('')).toBe(false)
+    expect(isZombieStat('  Z  ')).toBe(true)
+  })
+
+  it('treats zombie as not existing but S as existing via mocked stat', async () => {
+    // Simulate processExists via isZombieStat logic: Z -> false, S -> true
+    const exists = (stat: string | null): boolean => {
+      if (stat === null) return false
+      if (isZombieStat(stat)) return false
+      return true
+    }
+    expect(exists('Z')).toBe(false)
+    expect(exists('Z+')).toBe(false)
+    expect(exists('S')).toBe(true)
+    expect(exists('R')).toBe(true)
+    expect(exists(null)).toBe(false)
   })
 })

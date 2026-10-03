@@ -16,6 +16,7 @@
  */
 import { loggerService } from '@logger'
 import type { Middleware } from '@reduxjs/toolkit'
+import { canonicalAssistantConfigKey } from '@shared/sync/assistantConfig'
 
 // S7.13 startup stage anchor for persist rehydration (fail-closed diagnostic only).
 const persistStartPerfMs = performance.now()
@@ -533,6 +534,181 @@ storeSyncService.setOptions({
  * without a new IPC protocol. Generation check before cache publication
  * and before cache use ensures stale data is never claimed.
  */
+/**
+ * Assistant-config bridge middleware (bounded, event-driven only — no polls).
+ * Local `assistants/enqueueAssistantConfigDelta` (non-fromSync) commits via
+ * typed IPC; ack clears the durable pending entry. fromSync actions never
+ * commit (no echo). Multi-window duplicate acks are safe: clearing requires
+ * the stable mutationId match in the slice. Reducer pending is persisted via
+ * `persistor.flush()` BEFORE the commitDelta IPC and after the ack clear, so
+ * crash replay retains intent; rejections retain durable pending (no drop,
+ * no unhandled rejection, no busy-loop retry here — drain is event-driven on
+ * status/profile/startup/pending-new).
+ */
+export const assistantConfigSyncMiddleware: Middleware = (storeApi) => (next) => (action: any) => {
+  const result = next(action)
+  try {
+    if (action?.type === 'assistants/enqueueAssistantConfigDelta' && !action?.meta?.fromSync) {
+      const delta = action?.payload?.delta
+      if (delta && typeof delta.mutationId === 'string') {
+        const api = (window as any)?.api?.syncAssistantConfig
+        void Promise.resolve()
+          .then(() => persistor.flush())
+          .then(() => api?.commitDelta?.(delta))
+          .then((res: any) => {
+            void res
+            storeApi.dispatch({
+              type: 'assistants/ackAssistantConfigDelta',
+              payload: { key: action.payload.key, mutationId: delta.mutationId }
+            } as any)
+            return persistor.flush()
+          })
+          .catch(() => {
+            // Retained durable-pending for restart replay; no drop, no retry storm here.
+          })
+      }
+    }
+    if (action?.type === 'assistants/ackAssistantConfigDelta') {
+      void Promise.resolve()
+        .then(() => persistor.flush())
+        .catch(() => {})
+    }
+    // Local assistant/defaults mutations (non-fromSync) project to portable DTO
+    // deltas and enqueue durable-pending (middleware commits via IPC above).
+    // fromSync projections never re-enqueue (no echo). Failures to project
+    // report concrete (no silent drop): enqueue is skipped only when the
+    // current row cannot safe-project (never claims full).
+    try {
+      if (!action?.meta?.fromSync && typeof action?.type === 'string' && action.type.startsWith('assistants/')) {
+        const t = action.type as string
+        if (
+          t === 'assistants/addAssistant' ||
+          t === 'assistants/insertAssistant' ||
+          t === 'assistants/updateAssistant' ||
+          t === 'assistants/setModel' ||
+          t === 'assistants/updateAssistantSettings' ||
+          t === 'assistants/updateAssistantDefaults' ||
+          t === 'assistants/removeAssistant'
+        ) {
+          void Promise.resolve()
+            .then(() => import('@shared/sync/assistantConfig'))
+            .then((mod) => {
+              const state = storeApi.getState()?.assistants
+              if (!state) return
+              const newUuid = (): string => {
+                try {
+                  const g = globalThis as unknown as { crypto?: { randomUUID?: () => string } }
+                  if (g.crypto?.randomUUID) return g.crypto.randomUUID()
+                } catch {}
+                return `${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffffff).toString(36)}`
+              }
+              const enqueue = (
+                kind: 'assistant' | 'defaults',
+                id: string,
+                fields: Record<string, unknown>,
+                deleted?: boolean
+              ): void => {
+                try {
+                  const key = canonicalAssistantConfigKey(kind, id)
+                  const mutationId = newUuid().replaceAll(':', '')
+                  const revision = Date.now()
+                  const delta: Record<string, unknown> = {
+                    kind,
+                    id,
+                    mutationId,
+                    revision,
+                    timestamp: Date.now(),
+                    fields,
+                    ...(deleted !== undefined ? { deleted } : {})
+                  }
+                  storeApi.dispatch({ type: 'assistants/enqueueAssistantConfigDelta', payload: { key, delta } } as any)
+                } catch {}
+              }
+              if (t === 'assistants/removeAssistant') {
+                const id = (action.payload as { id?: unknown })?.id
+                if (typeof id === 'string' && id.length > 0) enqueue('assistant', id, {}, true)
+                return
+              }
+              if (t === 'assistants/updateAssistantDefaults') {
+                const defaults = state.assistantDefaults
+                if (!defaults || typeof defaults !== 'object') return
+                // Defaults DTO excludes name/emoji/type (kind semantics explicit).
+                const raw: Record<string, unknown> = {
+                  id: 'defaults',
+                  prompt: defaults.prompt,
+                  description: defaults.description,
+                  tags: defaults.tags,
+                  model: defaults.model,
+                  defaultModel: defaults.defaultModel,
+                  settings: defaults.settings,
+                  knowledge_bases: defaults.knowledge_bases,
+                  mcpMode: defaults.mcpMode,
+                  mcpServers: defaults.mcpServers,
+                  enableWebSearch: defaults.enableWebSearch,
+                  webSearchProviderId: defaults.webSearchProviderId,
+                  enableUrlContext: defaults.enableUrlContext,
+                  enableGenerateImage: defaults.enableGenerateImage,
+                  knowledgeRecognition: defaults.knowledgeRecognition,
+                  enableMemory: defaults.enableMemory
+                }
+                // Reuse the assistant projector shape via a synthetic raw with
+                // defaults kind mapping: project manually to avoid name/emoji/type.
+                const dto = (
+                  mod as unknown as {
+                    projectAssistantToConfig: (r: unknown) => { kind: string; id: string; [k: string]: unknown } | null
+                  }
+                ).projectAssistantToConfig({ ...raw, type: undefined, name: undefined, emoji: undefined })
+                if (!dto) return
+                const { schemaVersion: _s, kind: _k, id: _i, ...fields } = dto as unknown as Record<string, unknown>
+                enqueue('defaults', 'defaults', fields)
+                return
+              }
+              // Assistant create/edit: resolve the current row post-reducer and project.
+              let assistantId: string | null = null
+              const p = action.payload as unknown
+              if (
+                t === 'assistants/addAssistant' &&
+                p &&
+                typeof p === 'object' &&
+                typeof (p as { id?: unknown }).id === 'string'
+              ) {
+                assistantId = (p as { id: string }).id
+              } else if (t === 'assistants/insertAssistant' && p && typeof p === 'object') {
+                const a = (p as { assistant?: { id?: unknown } }).assistant
+                if (a && typeof a.id === 'string') assistantId = a.id
+              } else if (
+                (t === 'assistants/updateAssistant' ||
+                  t === 'assistants/setModel' ||
+                  t === 'assistants/updateAssistantSettings') &&
+                p &&
+                typeof p === 'object'
+              ) {
+                const id =
+                  (p as { id?: unknown; assistantId?: unknown }).id ?? (p as { assistantId?: unknown }).assistantId
+                if (typeof id === 'string') assistantId = id
+              }
+              if (!assistantId) return
+              const row = (state.assistants as Array<{ id?: unknown }> | undefined)?.find(
+                (a) => (a as { id?: unknown }).id === assistantId
+              )
+              if (!row) return
+              const dto = mod.projectAssistantToConfig(row as never)
+              if (!dto) return
+              const { schemaVersion: _s, kind: _k, id: _i, ...fields } = dto as unknown as Record<string, unknown>
+              enqueue('assistant', assistantId, fields)
+            })
+            .catch(() => {})
+        }
+      }
+    } catch {
+      // best-effort; never break dispatch
+    }
+  } catch {
+    // best-effort; never break dispatch
+  }
+  return result
+}
+
 export const closureInvalidationMiddleware: Middleware = () => (next) => (action: any) => {
   const result = next(action)
   try {
@@ -604,6 +780,7 @@ const store = configureStore({
     })
       .concat(storeSyncService.createMiddleware())
       .concat(closureInvalidationMiddleware)
+      .concat(assistantConfigSyncMiddleware)
   },
   devTools: true
 })
@@ -619,6 +796,173 @@ export const persistor = persistStore(store, undefined, () => {
     .then(({ markStartupStage }) => {
       try {
         markStartupStage('renderer.persistRehydrate', persistStartPerfMs)
+      } catch {}
+    })
+    .catch(() => {})
+
+  // Assistant-config bridge: drain durable pending only after ready/rehydrate
+  // (never a one-shot snapshot as sync). Restart replays until Main ack, then
+  // flush. Startup getProjection covers lost broadcast events (readiness for
+  // all windows); ack versions stay safe via strict revision match.
+  // Initial seed on opt-in (full assistant/defaults via actual local intent,
+  // never a one-shot noncaptured snapshot) is gated to first opt-in only:
+  // sync enabled + no projection versions + no pending => seed once.
+  void import('../services/syncAssistantConfig')
+    .then(({ drainAssistantConfigPending, applyRemoteProjectionBatch }) => {
+      try {
+        const pendingMap = (store.getState() as any)?.assistants?.assistantConfigSync?.pending ?? {}
+        const pending = Object.values(pendingMap) as any[]
+        if (pending.length > 0) {
+          void drainAssistantConfigPending({
+            pending,
+            onAcked: (delta: any) => {
+              try {
+                const key = `assistant_config:${delta.kind}:${delta.id}`
+                store.dispatch({
+                  type: 'assistants/ackAssistantConfigDelta',
+                  payload: { key, mutationId: delta.mutationId }
+                } as any)
+                void persistor.flush().catch(() => {})
+              } catch {}
+            }
+          })
+            .then(() => persistor.flush().catch(() => {}))
+            .catch(() => {})
+        }
+      } catch {}
+      // Startup projection ensure (covers lost events): fetch current mirror
+      // batch and apply via the fromSync path, then ack after apply+persist.
+      try {
+        const api = (window as any)?.api?.syncAssistantConfig
+        void Promise.resolve()
+          .then(() => api?.getProjection?.())
+          .then((batch: unknown) => {
+            if (!Array.isArray(batch) || batch.length === 0) return
+            return applyRemoteProjectionBatch({
+              batch: batch as never,
+              applyOne: (payload: any, meta: any) => {
+                try {
+                  store.dispatch({
+                    type: 'assistants/applyRemoteAssistantConfig',
+                    meta,
+                    payload: { payload, projectionRevision: meta?.projectionRevision }
+                  } as any)
+                } catch {}
+              },
+              flush: () => persistor.flush(),
+              ackOne: (key: string, projectionRevision: number) => {
+                try {
+                  return api?.ackProjection?.(key, projectionRevision)
+                } catch {
+                  return undefined
+                }
+              }
+            })
+          })
+          .catch(() => {})
+      } catch {}
+      // Initial seed on opt-in (after rehydrate, once only).
+      try {
+        void Promise.resolve()
+          .then(() => (window as any)?.api?.sync?.getStatus?.())
+          .then((status: unknown) => {
+            const enabled = (status as { enabled?: unknown })?.enabled === true
+            if (!enabled) return
+            const s = (store.getState() as any)?.assistants
+            if (!s) return
+            const versions =
+              (s as { assistantConfigSync?: { projectionVersions?: Record<string, unknown> } }).assistantConfigSync
+                ?.projectionVersions ?? {}
+            const pending2 =
+              (s as { assistantConfigSync?: { pending?: Record<string, unknown> } }).assistantConfigSync?.pending ?? {}
+            if (Object.keys(versions).length > 0 || Object.keys(pending2).length > 0) return
+            return import('@shared/sync/assistantConfig').then((mod) => {
+              const newUuid = (): string => {
+                try {
+                  const g = globalThis as unknown as { crypto?: { randomUUID?: () => string } }
+                  if (g.crypto?.randomUUID) return g.crypto.randomUUID().replaceAll(':', '')
+                } catch {}
+                return `${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffffff).toString(36)}`
+              }
+              const list = (s.assistants as Array<unknown> | undefined) ?? []
+              let seeded = false
+              for (const row of list) {
+                try {
+                  const dto = mod.projectAssistantToConfig(row as never)
+                  if (!dto) continue
+                  const { schemaVersion: _s, kind: _k, id: _i, ...fields } = dto as unknown as Record<string, unknown>
+                  const key = mod.canonicalAssistantConfigKey('assistant', dto.id)
+                  store.dispatch({
+                    type: 'assistants/enqueueAssistantConfigDelta',
+                    payload: {
+                      key,
+                      delta: {
+                        kind: 'assistant',
+                        id: dto.id,
+                        mutationId: newUuid(),
+                        revision: Date.now(),
+                        timestamp: Date.now(),
+                        fields
+                      }
+                    }
+                  } as any)
+                  seeded = true
+                } catch {}
+              }
+              try {
+                const defaults = (s as { assistantDefaults?: unknown }).assistantDefaults
+                if (defaults && typeof defaults === 'object') {
+                  const raw = defaults as Record<string, unknown>
+                  const fields: Record<string, unknown> = {}
+                  const map: Record<string, string> = {
+                    knowledgeBaseIds: 'knowledge_bases',
+                    mcpServerIds: 'mcpServers'
+                  }
+                  for (const k of [
+                    'prompt',
+                    'description',
+                    'tags',
+                    'model',
+                    'defaultModel',
+                    'settings',
+                    'knowledgeBaseIds',
+                    'mcpMode',
+                    'mcpServerIds',
+                    'enableWebSearch',
+                    'webSearchProviderId',
+                    'enableUrlContext',
+                    'enableGenerateImage',
+                    'knowledgeRecognition',
+                    'enableMemory'
+                  ] as const) {
+                    const src = map[k] ?? k
+                    const v = raw[src]
+                    if (v !== undefined) fields[k] = v
+                  }
+                  if (Object.keys(fields).length > 0) {
+                    const key = mod.canonicalAssistantConfigKey('defaults', 'defaults')
+                    store.dispatch({
+                      type: 'assistants/enqueueAssistantConfigDelta',
+                      payload: {
+                        key,
+                        delta: {
+                          kind: 'defaults',
+                          id: 'defaults',
+                          mutationId: newUuid(),
+                          revision: Date.now(),
+                          timestamp: Date.now(),
+                          fields
+                        }
+                      }
+                    } as any)
+                    seeded = true
+                  }
+                }
+              } catch {}
+              if (seeded) void persistor.flush().catch(() => {})
+            })
+          })
+          .catch(() => {})
       } catch {}
     })
     .catch(() => {})

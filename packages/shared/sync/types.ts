@@ -3,14 +3,18 @@
  * JSON-only, no Node/Electron imports.
  */
 
-export type SyncEntityType = 'topic' | 'message' | 'message_block'
+export type SyncEntityType = 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'file_asset'
 
 export type SyncOperationKind = 'upsert' | 'delete' | 'order_frame' | 'message_stable_replace'
 
 export const PARENT_ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
 export const ORDER_FRAME_KIND_TOPIC_MESSAGE = 'topicMessage' as const
 export const ORDER_FRAME_KIND_MESSAGE_BLOCK = 'messageBlock' as const
-export type SyncOrderFrameKind = typeof ORDER_FRAME_KIND_TOPIC_MESSAGE | typeof ORDER_FRAME_KIND_MESSAGE_BLOCK
+export const ORDER_FRAME_KIND_BRANCH_SUFFIX = 'branchSuffix' as const
+export type SyncOrderFrameKind =
+  | typeof ORDER_FRAME_KIND_TOPIC_MESSAGE
+  | typeof ORDER_FRAME_KIND_MESSAGE_BLOCK
+  | typeof ORDER_FRAME_KIND_BRANCH_SUFFIX
 
 export interface SyncOrderFrameClock {
   timestamp: number
@@ -146,7 +150,45 @@ export const SYNC_MESSAGE_PATCH_FIELDS = [
 ] as const
 
 /** Mutable allowlisted block fields with per-field clocks (`messageId` is immutable identity). */
-export const SYNC_BLOCK_PATCH_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt'] as const
+export const SYNC_BLOCK_PATCH_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt', 'assetIds'] as const
+
+/** Mutable allowlisted file-asset fields with per-field clocks (`id`/`sha256`/`byteLength`/`extension` are immutable). */
+export const SYNC_FILE_ASSET_PATCH_FIELDS = ['mimeType', 'originalName', 'createdAt'] as const
+
+/**
+ * Mutable allowlisted branch fields with per-field clocks.
+ * Identity (`id`, `topicId`, `parentBranchId`, `anchorMessageId`) is immutable
+ * and excluded. `name` converges by LWW; `createdAt`/`updatedAt` are state
+ * fields (never identity).
+ */
+export const SYNC_BRANCH_PATCH_FIELDS = ['name', 'createdAt', 'updatedAt'] as const
+
+/**
+ * Mutable allowlisted assistant-config fields with per-field clocks.
+ * Identity (`kind`, `id`, `schemaVersion`, `deleted`) is immutable/excluded.
+ * Mirrors `ASSISTANT_CONFIG_TOP_LEVEL_FIELDS` (18 keys). `settings` converges
+ * atomically as one field (never raw unvalidated JSON — full DTO validated).
+ */
+export const SYNC_ASSISTANT_CONFIG_PATCH_FIELDS = [
+  'name',
+  'prompt',
+  'type',
+  'emoji',
+  'description',
+  'tags',
+  'model',
+  'defaultModel',
+  'settings',
+  'knowledgeBaseIds',
+  'mcpMode',
+  'mcpServerIds',
+  'enableWebSearch',
+  'webSearchProviderId',
+  'enableUrlContext',
+  'enableGenerateImage',
+  'knowledgeRecognition',
+  'enableMemory'
+] as const
 
 /** Fixed bound for the durable same-field conflict record log. */
 export const SYNC_CONFLICT_LOG_MAX = 100

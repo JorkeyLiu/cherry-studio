@@ -77,35 +77,89 @@ export function findProcessesByUserDataDir(userDataDir: string): ProcessEntry[] 
 }
 
 /**
- * True when a process with this PID currently exists. A `ps` probe failure is
- * thrown, never reported as "not exists" — an unknown probe result must not
- * be treated as evidence that the process is gone.
+ * macOS process state parsing: first char of `ps -o stat=` indicates the
+ * primary state. `Z` (zombie / <defunct>) means the process has terminated
+ * and its resources are released but the PID has not yet been reaped by the
+ * parent. It must be treated as dead for resource/SIGTERM semantics — the
+ * SQLite file can no longer be accessed — yet the PID still appears in the
+ * process table until reaped. `S`/`R`/`I`/`T` etc. are living helpers and
+ * must NOT be treated as dead.
  */
-export function processExists(pid: number): boolean {
-  const res = spawnSync('ps', ['-p', String(pid), '-o', 'pid='], { encoding: 'utf-8', timeout: PS_TIMEOUT_MS })
+export function isZombieStat(stat: string): boolean {
+  const trimmed = stat.trim()
+  if (trimmed.length === 0) return false
+  // STAT may be like "Z", "Z+", "ZE", etc.; first char is primary state.
+  // Treat any stat containing Z as zombie (covers "Z", "Z+", "<defunct>" via stat Z).
+  // `<defunct>` appears in args, not stat, but stat will be Z.
+  return trimmed.includes('Z')
+}
+
+/**
+ * Raw stat probe for one PID via `ps -p <pid> -o stat=` (header suppressed).
+ * Returns the trimmed stat string, or null when the PID is not in the table.
+ * Throws on genuine ps spawn/signal failures or unexpected nonzero status
+ * (same LOCK-N1 semantics as processExists).
+ */
+export function getProcessStat(pid: number): string | null {
+  const res = spawnSync('ps', ['-p', String(pid), '-o', 'stat='], { encoding: 'utf-8', timeout: PS_TIMEOUT_MS })
   if (res.error) {
-    // Genuine spawn failure (e.g. ps binary missing) — never "not exists".
-    throw new Error(`[E2E] ps probe for pid ${pid} failed: ${res.error.message}`)
+    throw new Error(`[E2E] ps stat probe for pid ${pid} failed: ${res.error.message}`)
   }
   if (res.signal) {
-    // ps terminated by a signal — an unexpected probe failure, never "not exists".
-    throw new Error(`[E2E] ps probe for pid ${pid} was terminated by ${res.signal}`)
+    throw new Error(`[E2E] ps stat probe for pid ${pid} was terminated by ${res.signal}`)
   }
   if (res.status !== 0) {
     const stdout = String(res.stdout ?? '').trim()
     const stderr = String(res.stderr ?? '').trim()
-    // LOCK-N1: on macOS (Node24 reproduced) `ps -p <gone-pid> -o pid=` exits
-    // status 1 with EMPTY stdout AND EMPTY stderr — no "No matching processes"
-    // diagnostic. That empty status-1 probe is the definitive not-found signal,
-    // not a probe failure. The BSD diagnostic form is treated the same way.
-    if (res.status === 1 && stdout === '' && stderr === '') return false
-    if (/no\s*(such\s*process|matching)/i.test(stderr)) return false
-    // Any other nonzero exit is an unexpected probe failure — must throw.
+    if (res.status === 1 && stdout === '' && stderr === '') return null
+    if (/no\s*(such\s*process|matching)/i.test(stderr)) return null
     throw new Error(
-      `[E2E] ps probe for pid ${pid} failed with status ${res.status}: ${stderr.slice(0, 300) || '(no stderr)'}`
+      `[E2E] ps stat probe for pid ${pid} failed with status ${res.status}: ${stderr.slice(0, 300) || '(no stderr)'}`
     )
   }
-  return String(res.stdout ?? '').trim().length > 0
+  const stat = String(res.stdout ?? '').trim()
+  return stat.length > 0 ? stat : null
+}
+
+/**
+ * PPID probe for diagnostics (header suppressed). Returns null when PID is
+ * gone, otherwise the numeric ppid. Throws on spawn/signal/unknown failures.
+ */
+export function getProcessPpid(pid: number): number | null {
+  const res = spawnSync('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf-8', timeout: PS_TIMEOUT_MS })
+  if (res.error) {
+    throw new Error(`[E2E] ps ppid probe for pid ${pid} failed: ${res.error.message}`)
+  }
+  if (res.signal) {
+    throw new Error(`[E2E] ps ppid probe for pid ${pid} was terminated by ${res.signal}`)
+  }
+  if (res.status !== 0) {
+    const stdout = String(res.stdout ?? '').trim()
+    const stderr = String(res.stderr ?? '').trim()
+    if (res.status === 1 && stdout === '' && stderr === '') return null
+    if (/no\s*(such\s*process|matching)/i.test(stderr)) return null
+    throw new Error(
+      `[E2E] ps ppid probe for pid ${pid} failed with status ${res.status}: ${stderr.slice(0, 300) || '(no stderr)'}`
+    )
+  }
+  const raw = String(res.stdout ?? '').trim()
+  if (raw.length === 0) return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+/**
+ * True when a process with this PID currently exists and is NOT a zombie.
+ * A `ps` probe failure is thrown, never reported as "not exists".
+ * Zombie (`Z` in stat) is treated as dead (resource-process death) even though
+ * the PID still appears in the table until reaped — this distinguishes
+ * resource death vs reaped PID and prevents treating `S`/`R` helpers as dead.
+ */
+export function processExists(pid: number): boolean {
+  const stat = getProcessStat(pid)
+  if (stat === null) return false
+  if (isZombieStat(stat)) return false
+  return true
 }
 
 /**

@@ -1269,7 +1269,9 @@ describe('local apply membership persistence and conflict handling', () => {
       const tEnt = topicWithMem.entities.find((e) => e.entityType === 'topic') as unknown as Record<string, unknown>
       tEnt['parentMembershipClock'] = { parentId: 't-rej', timestamp: T, operationId: 'op-trej' }
       topicWithMem.manifest.digest = computeLocalSyncBaselineDigest(topicWithMem)
-      expect(() => applyLocalSyncBaselineCandidate(dstDb, topicWithMem)).toThrow(/unexpected topic membership/)
+      expect(() => applyLocalSyncBaselineCandidate(dstDb, topicWithMem)).toThrow(
+        /unexpected.*membership|baseline apply unexpected parent memb/
+      )
     } finally {
       srcSqlite.close()
       dstSqlite.close()

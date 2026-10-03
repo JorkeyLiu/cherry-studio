@@ -1666,3 +1666,212 @@ describe('F4 persisted fields and authoritative delete coverage', () => {
     }
   })
 })
+
+function insertBranchOn(
+  sqlite: Database.Database,
+  id: string,
+  topicId: string,
+  anchorMessageId: string,
+  parentBranchId: string | null = null
+): void {
+  sqlite
+    .prepare(
+      'INSERT INTO topic_branches (id, topic_id, parent_branch_id, anchor_message_id, name, created_at, updated_at) VALUES (?,?,?,?,?,?,?)'
+    )
+    .run(
+      id,
+      topicId,
+      parentBranchId,
+      anchorMessageId,
+      `Branch ${id}`,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-02T00:00:00.000Z'
+    )
+}
+
+function insertBranchMessageOn(
+  sqlite: Database.Database,
+  id: string,
+  topicId: string,
+  branchId: string,
+  content: string | null = 'branch-body',
+  sortOrder = 7
+): void {
+  sqlite
+    .prepare(
+      'INSERT INTO messages (id, topic_id, branch_id, role, content, status, created_at, updated_at, sort_order) VALUES (?,?,?,?,?,?,?,?,?)'
+    )
+    .run(
+      id,
+      topicId,
+      branchId,
+      'user',
+      content,
+      'success',
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-02T00:00:00.000Z',
+      sortOrder
+    )
+}
+
+function seedVersionedChainOn(
+  sqlite: Database.Database,
+  db: BetterSQLite3Database<typeof schema>,
+  topicId: string,
+  messageId: string,
+  blockId: string,
+  ts: number,
+  opPrefix: string,
+  withMembership: boolean
+): void {
+  insertTopicOn(sqlite, topicId)
+  insertMessageOn(sqlite, messageId, topicId)
+  insertBlockOn(sqlite, blockId, messageId)
+  seedEntityClockOn(db, 'topic', topicId, ts, `${opPrefix}-t`)
+  seedEntityClockOn(db, 'message', messageId, ts, `${opPrefix}-m`)
+  seedEntityClockOn(db, 'message_block', blockId, ts, `${opPrefix}-b`)
+  seedFullFieldsOn(db, 'topic', topicId, ts, `${opPrefix}-t`)
+  seedFullFieldsOn(db, 'message', messageId, ts, `${opPrefix}-m`)
+  seedFullFieldsOn(db, 'message_block', blockId, ts, `${opPrefix}-b`)
+  if (withMembership) {
+    seedMembershipOn(db, 'message', messageId, topicId, ts, `${opPrefix}-m`)
+    seedMembershipOn(db, 'message_block', blockId, messageId, ts, `${opPrefix}-b`)
+  }
+}
+
+describe('branch local-only receiver boundary', () => {
+  function seedDstMainWithFrame(frameTs: number, frameOp: string): void {
+    // Destination main chain fully versioned with exactly the source clocks
+    // (same values, same membership) plus a local frame at the variant clock.
+    seedVersionedChainOn(dstSqlite, dstDb, 't-f', 'm-f', 'b-f', T, 'op-s', true)
+    seedFrameOn(dstDb, 'topicMessage', 't-f', ['m-f'], frameTs, `${frameOp}-t`)
+    seedFrameOn(dstDb, 'messageBlock', 'm-f', ['b-f'], frameTs, `${frameOp}-m`)
+  }
+
+  function seedDstBranch(): void {
+    // Unversioned local-only branch suffix: no entity/field/membership
+    // clocks, no frames, no outbox. Must never enter the merge inventory.
+    insertBranchOn(dstSqlite, 'br-1', 't-f', 'm-f')
+    insertBranchMessageOn(dstSqlite, 'm-br', 't-f', 'br-1', 'branch-body', 7)
+    insertBlockOn(dstSqlite, 'b-br', 'm-br', 'branch-block')
+    dstSqlite.prepare('UPDATE message_blocks SET sort_order=? WHERE id=?').run(3, 'b-br')
+  }
+
+  function expectBranchPreserved(): void {
+    // Branch rows survive with untouched order and no minted sync metadata.
+    const branchMsg = dstSqlite.prepare('SELECT branch_id, sort_order FROM messages WHERE id=?').get('m-br') as {
+      branch_id: string
+      sort_order: number
+    }
+    expect(branchMsg.branch_id).toBe('br-1')
+    expect(branchMsg.sort_order).toBe(7)
+    expect(dstSqlite.prepare('SELECT id FROM topic_branches WHERE id=?').get('br-1')).toBeTruthy()
+    expect(dstSqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-br')).toBeTruthy()
+    expect(dstSqlite.prepare('SELECT sort_order FROM message_blocks WHERE id=?').get('b-br')).toMatchObject({
+      sort_order: 3
+    })
+    for (const bid of ['m-br', 'b-br']) {
+      expect(dstSqlite.prepare('SELECT * FROM sync_entity_clock WHERE entity_id=?').get(bid)).toBeUndefined()
+      expect(dstSqlite.prepare('SELECT * FROM sync_field_clock WHERE entity_id=?').get(bid)).toBeUndefined()
+      expect(dstSqlite.prepare('SELECT * FROM sync_membership_clock WHERE child_entity_id=?').get(bid)).toBeUndefined()
+    }
+    expect(outboxCount()).toBe(0)
+    // Main order still materialized densely; main rows present.
+    expect(dstSqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-f')).toBeTruthy()
+    expect(dstSqlite.prepare('SELECT sort_order FROM messages WHERE id=?').get('m-f')).toMatchObject({
+      sort_order: 0
+    })
+  }
+
+  it('control without branch merges the identical main chain', () => {
+    const candidate = seedCompleteSource('t-f', 'm-f', 'b-f')
+    // Control destination: same main chain, no branch rows.
+    seedDstMainWithFrame(T + 10, 'op-s-frame')
+    const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
+    expect(dstSqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-f')).toBeTruthy()
+    expect(dstSqlite.prepare('SELECT sort_order FROM messages WHERE id=?').get('m-f')).toMatchObject({
+      sort_order: 0
+    })
+    expect(res.inserted + res.updated + res.unchanged).toBeGreaterThan(0)
+  })
+
+  it('equal frame clock with local branch stays idempotent and preserves branch order', () => {
+    const candidate = seedCompleteSource('t-f', 'm-f', 'b-f')
+    seedDstMainWithFrame(T + 10, 'op-s-frame')
+    seedDstBranch()
+    const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
+    expect(res.inserted + res.updated + res.unchanged).toBeGreaterThan(0)
+    expectBranchPreserved()
+  })
+
+  it('higher incoming frame clock wins without touching branch order', () => {
+    const candidate = seedCompleteSource('t-f', 'm-f', 'b-f')
+    seedDstMainWithFrame(T + 5, 'op-dst-old')
+    seedDstBranch()
+    applyLocalSyncBaselineCandidate(dstDb, candidate)
+    const frame = dstSqlite
+      .prepare('SELECT timestamp FROM sync_parent_order_frame WHERE kind=? AND parent_id=?')
+      .get('topicMessage', 't-f') as { timestamp: number }
+    expect(frame.timestamp).toBe(T + 10)
+    expectBranchPreserved()
+  })
+
+  it('lower incoming frame clock loses without touching branch order', () => {
+    const candidate = seedCompleteSource('t-f', 'm-f', 'b-f')
+    seedDstMainWithFrame(T + 20, 'op-dst-win')
+    seedDstBranch()
+    applyLocalSyncBaselineCandidate(dstDb, candidate)
+    const frame = dstSqlite
+      .prepare('SELECT timestamp FROM sync_parent_order_frame WHERE kind=? AND parent_id=?')
+      .get('topicMessage', 't-f') as { timestamp: number }
+    expect(frame.timestamp).toBe(T + 20)
+    expectBranchPreserved()
+  })
+
+  it('main unversioned collision still fails closed when a branch is present', () => {
+    const candidate = seedCompleteSource('t-u2', 'm-u2', 'b-u2')
+    // Destination main rows unversioned with a differing value, plus an
+    // unrelated local branch. The real main collision must still fail.
+    insertTopicOn(dstSqlite, 't-u2', 'Topic t-u2')
+    insertMessageOn(dstSqlite, 'm-u2', 't-u2', 'different-content')
+    insertBlockOn(dstSqlite, 'b-u2', 'm-u2', 'body')
+    insertBranchOn(dstSqlite, 'br-u', 't-u2', 'm-u2')
+    insertBranchMessageOn(dstSqlite, 'm-br-u', 't-u2', 'br-u')
+    insertBlockOn(dstSqlite, 'b-br-u', 'm-br-u', 'branch-block')
+    const before = snapshotTarget()
+    // The genuine main-domain collision (topic fields differ with no local
+    // clocks) must still fail closed with full rollback.
+    expect(() => applyLocalSyncBaselineCandidate(dstDb, candidate)).toThrow(/unversioned_local_collision/)
+    expect(snapshotTarget()).toBe(before)
+  })
+
+  it('winning topic tombstone deletes the whole topic including local branch rows', () => {
+    // Destination: versioned main chain plus an unversioned local branch.
+    seedVersionedChainOn(dstSqlite, dstDb, 't-del2', 'm-del2', 'b-del2', T, 'op-old', false)
+    insertBranchOn(dstSqlite, 'br-del', 't-del2', 'm-del2')
+    insertBranchMessageOn(dstSqlite, 'm-br-del', 't-del2', 'br-del')
+    insertBlockOn(dstSqlite, 'b-br-del', 'm-br-del', 'branch-block')
+
+    // Source: same main IDs fully versioned plus a winning topic tombstone.
+    seedVersionedChainOn(srcSqlite, srcDb, 't-del2', 'm-del2', 'b-del2', T, 'op-src', true)
+    srcSqlite
+      .prepare('INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)')
+      .run('tombstone:topic:t-del2', `${T + 100}:op-del-win`)
+    seedMissingFrames(srcDb, srcSqlite)
+    seedBoundOn(srcSqlite)
+    const candidate = captureLocalSyncBaselineCandidate(srcDb)
+    expect(candidate.completeness.state).toBe('complete')
+    const res = applyLocalSyncBaselineCandidate(dstDb, candidate)
+    expect(res.deleted).toBeGreaterThanOrEqual(1)
+    // Existing FK cascade removes the whole topic including branch rows.
+    expect(dstSqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-del2')).toBeUndefined()
+    expect(dstSqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-del2')).toBeUndefined()
+    expect(dstSqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-br-del')).toBeUndefined()
+    expect(dstSqlite.prepare('SELECT id FROM topic_branches WHERE id=?').get('br-del')).toBeUndefined()
+    expect(dstSqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-br-del')).toBeUndefined()
+    const tomb = dstSqlite.prepare('SELECT value FROM sync_state WHERE key=?').get('tombstone:topic:t-del2') as {
+      value: string
+    }
+    expect(tomb.value).toBe(`${T + 100}:op-del-win`)
+  })
+})

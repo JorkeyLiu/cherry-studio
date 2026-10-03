@@ -689,6 +689,22 @@ const api = {
     rejectPairing: (requestId: string) => ipcRenderer.invoke(IpcChannel.Sync_RejectPairing, { requestId }),
     unpair: () => ipcRenderer.invoke(IpcChannel.Sync_Unpair)
   },
+  syncAssistantConfig: {
+    commitDelta: (delta: unknown) => ipcRenderer.invoke(IpcChannel.SyncAssistantConfig_CommitDelta, delta),
+    getProjection: (keys?: string[]) => ipcRenderer.invoke(IpcChannel.SyncAssistantConfig_GetProjection, keys),
+    ackProjection: (key: string, projectionRevision: number) =>
+      ipcRenderer.invoke(IpcChannel.SyncAssistantConfig_AckProjection, key, projectionRevision),
+    snapshot: () => ipcRenderer.invoke(IpcChannel.SyncAssistantConfig_Snapshot),
+    onProjection: (callback: (batch: unknown) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: unknown) => {
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.SyncAssistantConfig_OnProjection, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.SyncAssistantConfig_OnProjection, listener)
+      }
+    }
+  },
   chatDb: {
     fetchMessages: (request: FetchMessagesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_FetchMessages, request),
     fetchMessagesWindow: (request: FetchMessagesWindowRequest) =>

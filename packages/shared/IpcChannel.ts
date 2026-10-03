@@ -484,5 +484,12 @@ export enum IpcChannel {
   Sync_CancelPairing = 'sync:cancel-pairing',
   Sync_AcceptPairing = 'sync:accept-pairing',
   Sync_RejectPairing = 'sync:reject-pairing',
-  Sync_Unpair = 'sync:unpair'
+  Sync_Unpair = 'sync:unpair',
+
+  // AssistantConfig bridge — renderer-owned non-secret config mirror (typed IPC only).
+  SyncAssistantConfig_CommitDelta = 'sync-assistant-config:commit-delta',
+  SyncAssistantConfig_GetProjection = 'sync-assistant-config:get-projection',
+  SyncAssistantConfig_AckProjection = 'sync-assistant-config:ack-projection',
+  SyncAssistantConfig_Snapshot = 'sync-assistant-config:snapshot',
+  SyncAssistantConfig_OnProjection = 'sync-assistant-config:on-projection'
 }

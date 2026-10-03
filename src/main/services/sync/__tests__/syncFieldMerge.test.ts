@@ -425,8 +425,8 @@ describe('transactional outbox via aggregate', () => {
     const outbox = syncService.listOutbox()
     const msgOps = outbox.filter((o) => o.entityType === 'message' && o.entityId === 'm1')
     expect(msgOps).toHaveLength(1)
-    // Patch-only: identity + changed field, never sortOrder/role/status.
-    expect(Object.keys(msgOps[0].payload ?? {}).sort()).toEqual(['content', 'id', 'topicId'].sort())
+    // Patch-only: identity + changed field, never sortOrder/role/status. BranchId is now required identity for owner preservation.
+    expect(Object.keys(msgOps[0].payload ?? {}).sort()).toEqual(['branchId', 'content', 'id', 'topicId'].sort())
     // Closure captured the untracked topic parent first.
     const kinds = outbox.map((o) => `${o.entityType}/${o.entityId}`)
     expect(kinds).toContain('topic/t1')

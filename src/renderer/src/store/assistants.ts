@@ -38,6 +38,16 @@ export interface AssistantsState {
   presets: AssistantPreset[]
   /** @deprecated should be removed in v2 */
   unifiedListOrder: Array<{ type: 'agent' | 'assistant'; id: string }>
+  /**
+   * Assistant-config sync bridge ledger (renderer-owned, redux-persisted).
+   * Local deltas are recorded durable-pending first (stable mutationId),
+   * then Main-acked via typed IPC; remote projections apply with
+   * meta.fromSync and never re-enqueue. Deletion is explicit tombstone only.
+   */
+  assistantConfigSync: {
+    pending: Record<string, any>
+    projectionVersions: Record<string, number>
+  }
 }
 
 const freshDefaults = createAssistantDefaults()
@@ -48,7 +58,8 @@ const initialState: AssistantsState = {
   tagsOrder: [],
   collapsedTags: {},
   presets: [],
-  unifiedListOrder: []
+  unifiedListOrder: [],
+  assistantConfigSync: { pending: {}, projectionVersions: {} }
 }
 
 const normalizeTopics = (topics: unknown): Topic[] => (Array.isArray(topics) ? topics : [])
@@ -258,6 +269,63 @@ const assistantsSlice = createSlice({
           }
         }
       }
+    },
+    // --- Assistant-config sync bridge (durable pending + fromSync apply) ---
+    enqueueAssistantConfigDelta: (state, action: PayloadAction<{ key: string; delta: any }>) => {
+      if ((action as any)?.meta?.fromSync) return
+      const { key, delta } = action.payload
+      if (typeof key !== 'string' || !delta || typeof delta.mutationId !== 'string') return
+      if (!state.assistantConfigSync) state.assistantConfigSync = { pending: {}, projectionVersions: {} }
+      // Stable mutationId: same key+mutationId repeat never creates an extra op.
+      const prev = state.assistantConfigSync.pending[key]
+      if (prev && prev.mutationId === delta.mutationId) return
+      state.assistantConfigSync.pending[key] = delta
+    },
+    ackAssistantConfigDelta: (state, action: PayloadAction<{ key: string; mutationId: string }>) => {
+      if (!state.assistantConfigSync) return
+      const { key, mutationId } = action.payload
+      const prev = state.assistantConfigSync.pending[key]
+      // Strict ack: only the matching mutationId clears; newer/late acks stay.
+      if (prev && prev.mutationId === mutationId) delete state.assistantConfigSync.pending[key]
+    },
+    applyRemoteAssistantConfig: (state, action: PayloadAction<{ payload: any; projectionRevision: number }>) => {
+      // Remote projection path only: must carry meta.fromSync (validated by
+      // middleware/service); never writes the pending ledger (no echo).
+      if (!(action as any)?.meta?.fromSync) return
+      const { payload, projectionRevision } = action.payload
+      if (!payload || typeof payload.id !== 'string') return
+      const kind = payload.kind === 'defaults' ? 'defaults' : 'assistant'
+      const key = `assistant_config:${kind}:${payload.id}`
+      if (!state.assistantConfigSync) state.assistantConfigSync = { pending: {}, projectionVersions: {} }
+      const prevRev = state.assistantConfigSync.projectionVersions[key] ?? -1
+      if (typeof projectionRevision === 'number' && projectionRevision <= prevRev) return
+      if (payload.deleted === true) {
+        if (kind === 'assistant') {
+          state.assistants = state.assistants.filter((c) => c.id !== payload.id)
+        }
+      } else if (kind === 'assistant') {
+        const idx = state.assistants.findIndex((c) => c.id === payload.id)
+        if (idx !== -1) {
+          const { schemaVersion: _s, kind: _k, id: _i, deleted: _d, settings, ...rest } = payload
+          state.assistants[idx] = { ...state.assistants[idx], ...rest }
+          if (settings && typeof settings === 'object') {
+            state.assistants[idx].settings = { ...state.assistants[idx].settings, ...settings }
+          }
+        }
+      }
+      if (typeof projectionRevision === 'number') {
+        state.assistantConfigSync.projectionVersions[key] = projectionRevision
+      }
+    },
+    setAssistantConfigProjectionVersion: (
+      state,
+      action: PayloadAction<{ key: string; projectionRevision: number }>
+    ) => {
+      if (!state.assistantConfigSync) state.assistantConfigSync = { pending: {}, projectionVersions: {} }
+      const { key, projectionRevision } = action.payload
+      if (typeof key !== 'string' || typeof projectionRevision !== 'number') return
+      const prev = state.assistantConfigSync.projectionVersions[key] ?? -1
+      if (projectionRevision > prev) state.assistantConfigSync.projectionVersions[key] = projectionRevision
     }
   }
 })
@@ -285,7 +353,11 @@ export const {
   addAssistantPreset,
   removeAssistantPreset,
   updateAssistantPreset,
-  updateAssistantPresetSettings
+  updateAssistantPresetSettings,
+  enqueueAssistantConfigDelta,
+  ackAssistantConfigDelta,
+  applyRemoteAssistantConfig,
+  setAssistantConfigProjectionVersion
 } = assistantsSlice.actions
 
 export const selectAllTopics = createSelector([(state: RootState) => state.assistants.assistants], (assistants) =>

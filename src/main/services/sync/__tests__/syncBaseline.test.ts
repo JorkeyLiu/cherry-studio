@@ -437,6 +437,7 @@ describe('allowlist and non-leakage', () => {
       [
         'assistantId',
         'askId',
+        'branchId',
         'content',
         'createdAt',
         'id',
@@ -450,7 +451,7 @@ describe('allowlist and non-leakage', () => {
     )
     const block = candidate.entities.find((e) => e.entityId === 'b-leak')
     expect(Object.keys(block?.payload ?? {}).sort()).toEqual(
-      ['content', 'createdAt', 'id', 'messageId', 'status', 'type', 'updatedAt'].sort()
+      ['assetIds', 'content', 'createdAt', 'id', 'messageId', 'status', 'type', 'updatedAt'].sort()
     )
     expect(candidate.completeness.state).toBe('complete')
   })

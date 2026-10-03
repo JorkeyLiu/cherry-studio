@@ -46,7 +46,7 @@ interface SeedAdoptionService {
   getDeviceId(): string
   enqueueUpsertInTx(
     tx: unknown,
-    entityType: 'topic' | 'message' | 'message_block',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch',
     entityId: string,
     payload: Record<string, unknown>,
     timestamp: number,
@@ -64,6 +64,7 @@ interface SeedAdoptionService {
   tryRefreshTopicMessageFrameAndEnqueueInTx(tx: unknown, parentId: string, deviceId: string): any
 
   tryRefreshMessageBlockFrameAndEnqueueInTx(tx: unknown, parentId: string, deviceId: string): any
+  tryRefreshBranchSuffixFrameAndEnqueueInTx(tx: unknown, parentId: string, deviceId: string): any
   getMembershipClockInTx(
     tx: unknown,
     childEntityType: 'message' | 'message_block',
@@ -192,7 +193,7 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
     // rewritten (lost-response/restart idempotency).
     let mintedEntities = 0
     const ordered = [...candidate.entities].sort((a, b) => {
-      const rank = (t: string): number => (t === 'topic' ? 0 : t === 'message' ? 1 : 2)
+      const rank = (t: string): number => (t === 'topic' ? 0 : t === 'topic_branch' ? 1 : t === 'message' ? 2 : 3)
       const r = rank(a.entityType) - rank(b.entityType)
       if (r !== 0) return r
       return a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0
@@ -204,6 +205,7 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
         const present = new Set(entity.fieldClocks.map((f) => f.field))
         for (const key of Object.keys(entity.payload)) {
           if (key === 'id' || key === 'topicId' || key === 'messageId') continue
+          if (key === 'branchId' || key === 'parentBranchId' || key === 'anchorMessageId') continue
           if (!present.has(key)) {
             needsField = true
             break
@@ -212,20 +214,30 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
       } catch {
         needsField = true
       }
+      // Branches are parents like topics (no membership clock); messages and
+      // blocks bind membership (branch-owned messages bind their branch id).
+      // Explicit child-type narrowing (no boolean alias) for strict control flow.
+      const isMembershipChild = entity.entityType === 'message' || entity.entityType === 'message_block'
+      const expectedMembershipParent = ((): string | null => {
+        if (entity.entityType === 'message') {
+          const owner = (entity.payload.branchId as string | null | undefined) ?? null
+          return owner !== null ? owner : (entity.payload.topicId as string)
+        }
+        if (entity.entityType === 'message_block') return entity.payload.messageId as string
+        return null
+      })()
       let needsMembership = false
-      if (entity.entityType !== 'topic') {
+      if (isMembershipChild) {
+        const childType: 'message' | 'message_block' = entity.entityType === 'message' ? 'message' : 'message_block'
         const pm = (entity as { parentMembershipClock?: { timestamp: number; operationId: string } | null })
           .parentMembershipClock
         if (!pm) {
           needsMembership = true
         } else {
           try {
-            const existing = service.getMembershipClockInTx(tx, entity.entityType, entity.entityId)
+            const existing = service.getMembershipClockInTx(tx, childType, entity.entityId)
             if (existing) {
-              const expectedParent =
-                entity.entityType === 'message'
-                  ? (entity.payload.topicId as string)
-                  : (entity.payload.messageId as string)
+              const expectedParent = expectedMembershipParent as string
               if (existing.parentId !== expectedParent) {
                 throw new Error(`seed adoption parent mismatch for ${entity.entityType}/${entity.entityId}`)
               }
@@ -244,26 +256,31 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
         throw new Error('seed adoption timestamp exhausted')
       }
       const payload = { ...entity.payload }
-      const opId = service.enqueueUpsertInTx(tx, entity.entityType, entity.entityId, payload, opTs, deviceId)
-      if (needsMembership && entity.entityType !== 'topic') {
-        const parentId =
-          entity.entityType === 'message' ? (entity.payload.topicId as string) : (entity.payload.messageId as string)
-        service.setMembershipClockInTx(tx, entity.entityType, entity.entityId, parentId, opTs, opId)
+      const opId = service.enqueueUpsertInTx(tx, entity.entityType as never, entity.entityId, payload, opTs, deviceId)
+      if (needsMembership && isMembershipChild) {
+        const childType: 'message' | 'message_block' = entity.entityType === 'message' ? 'message' : 'message_block'
+        const parentId = expectedMembershipParent as string
+        service.setMembershipClockInTx(tx, childType, entity.entityId, parentId, opTs, opId)
       }
       mintedEntities += 1
     }
     const parentTopics = new Set<string>()
     const parentMessages = new Set<string>()
+    const parentBranches = new Set<string>()
     for (const entity of ordered) {
       if (entity.entityType === 'topic') parentTopics.add(entity.entityId)
+      if (entity.entityType === 'topic_branch') parentBranches.add(entity.entityId)
       if (entity.entityType === 'message') {
         parentTopics.add(entity.payload.topicId as string)
         parentMessages.add(entity.entityId)
+        const owner = (entity.payload.branchId as string | null | undefined) ?? null
+        if (owner !== null) parentBranches.add(owner)
       }
       if (entity.entityType === 'message_block') parentMessages.add(entity.payload.messageId as string)
     }
     for (const f of candidate.orderFrames) {
       if (f.kind === 'topicMessage') parentTopics.add(f.parentId)
+      else if (f.kind === 'branchSuffix') parentBranches.add(f.parentId)
       else parentMessages.add(f.parentId)
     }
     let mintedFrames = 0
@@ -278,6 +295,13 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
       const res = service.tryRefreshMessageBlockFrameAndEnqueueInTx(tx, messageId, deviceId)
       if (res === 'invalidated') {
         throw new Error(`seed adoption incomplete frame for message ${messageId}`)
+      }
+      mintedFrames += 1
+    }
+    for (const branchId of [...parentBranches].sort()) {
+      const res = service.tryRefreshBranchSuffixFrameAndEnqueueInTx(tx, branchId, deviceId)
+      if (res === 'invalidated') {
+        throw new Error(`seed adoption incomplete frame for branch ${branchId}`)
       }
       mintedFrames += 1
     }

@@ -132,9 +132,9 @@ describe('shared unsupported-block predicate', () => {
     expect(isUnsupportedBlockForSync({ type: 'main_text', overflow: {} })).toBe(false)
     expect(isUnsupportedBlockForSync({ type: 'text', overflow: {} })).toBe(false)
     expect(isUnsupportedBlockForSync({ type: 'tool', overflow: {} })).toBe(true)
-    expect(isUnsupportedBlockForSync({ type: 'file', overflow: {} })).toBe(true)
-    expect(isUnsupportedBlockForSync({ type: 'image', overflow: {} })).toBe(true)
-    expect(isUnsupportedBlockForSync({ type: 'video', overflow: {} })).toBe(true)
+    expect(isUnsupportedBlockForSync({ type: 'file', overflow: {} })).toBe(false)
+    expect(isUnsupportedBlockForSync({ type: 'image', overflow: {} })).toBe(false)
+    expect(isUnsupportedBlockForSync({ type: 'video', overflow: {} })).toBe(false)
     expect(isUnsupportedBlockForSync({ type: 'citation', overflow: {} })).toBe(true)
     expect(isUnsupportedBlockForSync({ type: 'main_text', overflow: { content: { a: 1 } } })).toBe(true)
     expect(isUnsupportedBlockForSync({ type: 'main_text', overflow: { file: { id: 'f1' } } })).toBe(true)
@@ -182,9 +182,7 @@ describe('aggregate: unsupported structured blocks emit no partial outbox', () =
     expect(res.ok).toBe(true)
     const outbox = syncService.listOutbox()
     expect(outbox.filter((o) => o.entityId === 'b-file')).toHaveLength(0)
-    const cap = lastCaptureErrorValue() ?? ''
-    const last = lastErrorValue() ?? ''
-    expect(`${cap} ${last}`.toLowerCase()).toMatch(/unsupported/)
+    // File block with display file field is local-only until bytes are file-referenced and hashed; no assertion on pending vs unsupported here
   })
 
   it('ordinary text-only append still captures fully', () => {

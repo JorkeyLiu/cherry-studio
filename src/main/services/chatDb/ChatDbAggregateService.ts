@@ -76,6 +76,7 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { logMainDiagnostic } from '../diagnostics'
 import { isPhaseAttrMainEnabled, recordMainPhaseDuration } from '../phaseTimingDiagnostics'
 import { spanCacheService } from '../SpanCacheService'
+import { captureMediaIntentsInTx, deleteCaptureIntentsForBlocksInTx } from '../sync/syncAttachmentCapture'
 import {
   clearResendAttemptsForTopicInTx,
   clearResendAttemptsInTx,
@@ -408,6 +409,9 @@ export class ChatDbAggregateService {
     return {
       id: data.id,
       topicId: data.topicId,
+      // Immutable owner route (null = main). Never a synthetic composite key;
+      // remote apply validates owner equality and never falls back to null.
+      branchId: data.branchId ?? null,
       role: data.role,
       content: data.content,
       status: data.status,
@@ -422,7 +426,7 @@ export class ChatDbAggregateService {
   }
 
   private syncBlockPayloadFull(data: MessageBlockData): Record<string, unknown> {
-    return {
+    const base: Record<string, unknown> = {
       id: data.id,
       messageId: data.messageId,
       type: data.type,
@@ -432,13 +436,23 @@ export class ChatDbAggregateService {
       updatedAt: data.updatedAt,
       sortOrder: data.sortOrder
     }
+    if (this.isPortableMediaBlockType(data.type)) {
+      const refs = projectFileReferences(data)
+      if (refs.length > 0) {
+        base.assetIds = [...new Set(refs.map((r) => r.fileId))].sort()
+      }
+    } else {
+      base.assetIds = []
+    }
+    return base
   }
 
   /** Intentional message patch → sync field patch (allowlisted only, never identity/sortOrder). */
   private syncMessagePatchPayload(
     topicId: string,
     messageId: string,
-    patch: Record<string, unknown>
+    patch: Record<string, unknown>,
+    branchId: string | null = null
   ): Record<string, unknown> | null {
     const allow = new Set([
       'role',
@@ -451,13 +465,17 @@ export class ChatDbAggregateService {
       'createdAt',
       'updatedAt'
     ])
-    const out: Record<string, unknown> = { id: messageId, topicId }
+    const out: Record<string, unknown> = { id: messageId, topicId, branchId }
+    let hasPatch = false
     for (const [k, v] of Object.entries(patch)) {
       if (k === 'overflow' || k === 'id' || k === 'topicId' || k === 'sortOrder') continue
       if (!allow.has(k)) continue
-      if (v !== undefined) out[k] = v
+      if (v !== undefined) {
+        out[k] = v
+        hasPatch = true
+      }
     }
-    return Object.keys(out).length > 2 ? out : null
+    return hasPatch ? out : null
   }
 
   /** Intentional block patch → sync field patch (allowlisted only, never identity/sortOrder). */
@@ -497,6 +515,29 @@ export class ChatDbAggregateService {
     )
   }
 
+  /**
+   * Branch closure inside the aggregate tx: an untracked branch row is
+   * captured first with a strictly earlier timestamp so relay seq preserves
+   * branch < message even when the branch timestamp is later. Throws
+   * fail-closed when the branch row is missing (rolls back the mutation).
+   */
+  private ensureBranchClosureInTx(tx: SyncTxExecutor, branchId: string, childTs: number, deviceId: string): void {
+    if (syncService.isTrackedEntityInTx(tx, 'topic_branch', branchId)) return
+    const repos = createRepositories(tx as unknown as BetterSQLite3Database<typeof schema>)
+    const brow = repos.branches.getById(branchId)
+    if (!brow.found) throw new Error(`sync closure: branch ${branchId} missing in transaction`)
+    this.ensureTopicClosureInTx(tx, brow.data.topicId, childTs, deviceId)
+    if (syncService.isTrackedEntityInTx(tx, 'topic_branch', branchId)) return
+    syncService.enqueueUpsertInTx(
+      tx,
+      'topic_branch',
+      branchId,
+      this.syncBranchPayloadFull(brow.data),
+      Math.max(0, childTs - 1),
+      deviceId
+    )
+  }
+
   private ensureMessageClosureInTx(tx: SyncTxExecutor, messageId: string, childTs: number, deviceId: string): void {
     const repos = createRepositories(tx as unknown as BetterSQLite3Database<typeof schema>)
     const mrow = repos.messages.getById(messageId)
@@ -504,6 +545,11 @@ export class ChatDbAggregateService {
     const topicId = mrow.data.topicId
     if (!topicId) throw new Error(`sync closure: message ${messageId} has no topic`)
     this.ensureTopicClosureInTx(tx, topicId, childTs, deviceId)
+    const ownerBranch =
+      typeof mrow.data.branchId === 'string' && mrow.data.branchId.length > 0 ? mrow.data.branchId : null
+    if (ownerBranch !== null) {
+      this.ensureBranchClosureInTx(tx, ownerBranch, childTs, deviceId)
+    }
     if (syncService.isTrackedEntityInTx(tx, 'message', messageId)) return
     // Stable-checkpoint gate (LOCK-PERSONAL-004): a transient assistant
     // parent (streaming/pending/processing/searching) must never be emitted
@@ -552,6 +598,97 @@ export class ChatDbAggregateService {
    */
   private isUnsupportedBlock(data: MessageBlockData): boolean {
     return isUnsupportedBlockForSync({ type: data.type, overflow: data.overflow })
+  }
+
+  private isPortableMediaBlockType(type: string | null | undefined): boolean {
+    const t = typeof type === 'string' ? type.toLowerCase() : ''
+    return t === 'file' || t === 'image' || t === 'video'
+  }
+
+  private captureMediaIntentsForBlocksInTx(tx: SyncTxExecutor, blocks: MessageBlockData[], capturedAt: number): void {
+    const intents: Array<{ blockId: string; fileId: string }> = []
+    for (const block of blocks) {
+      if (!this.isPortableMediaBlockType(block.type)) continue
+      if (!isStableBlockStatus(block.status)) continue
+      const refs = projectFileReferences(block)
+      for (const r of refs) {
+        if (typeof r.fileId === 'string' && r.fileId.length > 0) {
+          intents.push({ blockId: block.id, fileId: r.fileId })
+        }
+      }
+    }
+    if (intents.length > 0) {
+      captureMediaIntentsInTx(tx, intents, capturedAt)
+    }
+  }
+
+  /**
+   * Central reusable helper for stable portable media capture + defer logic.
+   * Must be called inside the same chat mutation Tx *after* syncFileReferences.
+   * - Reads authoritative file_references rows for each block (trusted snapshot, not readdir).
+   * - For stable file/image/video blocks with legal refs: captures (blockId,fileId) intents and marks deferred (skip immediate block enqueue, drain will fulfill with full ordered unique assetIds).
+   * - For stable file/image/video with zero/invalid refs or truly unsupported tool/citation/zero-refs: marks unsupported (whole block rejected, no partial shell, durable outcome recorded).
+   * - Transient blocks or non-portable types are not deferred.
+   * - Branch-owned blocks follow v3 owner-allow rule (not suppressed) — deferral applies equally.
+   * Returns deferred set for the caller to skip immediate enqueue; unsupported ids are appended to the provided list.
+   */
+  private capturePortableMediaDeferredInTx(
+    tx: SyncTxExecutor,
+    blocks: MessageBlockData[],
+    capturedAt: number,
+    unsupportedIds: string[]
+  ): Set<string> {
+    const deferred = new Set<string>()
+    const intents: Array<{ blockId: string; fileId: string }> = []
+    for (const block of blocks) {
+      if (!this.isPortableMediaBlockType(block.type)) continue
+      if (!isStableBlockStatus(block.status)) continue
+      if (this.isUnsupportedBlock(block)) {
+        unsupportedIds.push(block.id)
+        continue
+      }
+      // Authoritative file refs after syncFileReferences (trusted snapshot)
+      let refs: Array<{ fileId: string }>
+      try {
+        refs = tx
+          .select({ fileId: schema.fileReferences.fileId })
+          .from(schema.fileReferences)
+          .where(eq(schema.fileReferences.blockId, block.id))
+          .all() as Array<{ fileId: string }>
+      } catch {
+        refs = []
+      }
+      if (refs.length === 0) {
+        unsupportedIds.push(block.id)
+        continue
+      }
+      let hasValid = false
+      for (const r of refs) {
+        const fid = r.fileId
+        if (
+          typeof fid === 'string' &&
+          fid.length > 0 &&
+          !fid.includes('/') &&
+          !fid.includes('\\') &&
+          !fid.includes('..')
+        ) {
+          intents.push({ blockId: block.id, fileId: fid })
+          hasValid = true
+        }
+      }
+      if (!hasValid) {
+        unsupportedIds.push(block.id)
+        continue
+      }
+      deferred.add(block.id)
+    }
+    if (intents.length > 0) captureMediaIntentsInTx(tx, intents, capturedAt)
+    return deferred
+  }
+
+  private cancelMediaIntentsForBlocksInTx(tx: SyncTxExecutor, blockIds: ReadonlySet<string>): void {
+    if (blockIds.size === 0) return
+    deleteCaptureIntentsForBlocksInTx(tx, blockIds)
   }
 
   /**
@@ -743,6 +880,18 @@ export class ChatDbAggregateService {
       const a = pre[k] ?? null
       const b = post[k] ?? null
       if (!Object.is(a, b) && JSON.stringify(a) !== JSON.stringify(b)) out[k] = post[k]
+    }
+    // assetIds diff for portable media (ordered unique)
+    if (this.isPortableMediaBlockType(post.type) || this.isPortableMediaBlockType(pre.type)) {
+      const preRefs = projectFileReferences(pre)
+        .map((r) => r.fileId)
+        .sort()
+      const postRefs = projectFileReferences(post)
+        .map((r) => r.fileId)
+        .sort()
+      if (JSON.stringify(preRefs) !== JSON.stringify(postRefs)) {
+        out['assetIds'] = postRefs
+      }
     }
     return Object.keys(out).length > 2 ? out : null
   }
@@ -2746,6 +2895,22 @@ export class ChatDbAggregateService {
             this.syncFileReferences(repos, plan.blocks)
           }
 
+          // Central portable-media capture + defer (same Tx, after file refs): stable file/image/video with valid refs
+          // captures durable intent and defers immediate block upsert/frame until drain fulfills with full ordered unique assetIds.
+          // Branch-owned blocks follow v3 owner-allow (not suppressed) — deferral applies equally.
+          let insertAfterAnchorDeferred: Set<string> = new Set<string>()
+          if (ctx) {
+            const allPhaseBlocks: MessageBlockData[] = []
+            for (const p of phase4Plans) allPhaseBlocks.push(...p.blocks)
+            insertAfterAnchorDeferred = this.capturePortableMediaDeferredInTx(
+              stx,
+              allPhaseBlocks,
+              ctx.ts,
+              unsupportedBlockIds
+            )
+            if (insertAfterAnchorDeferred.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent (same atomic boundary). True-new
           // stable messages/blocks enqueue full-state upserts with membership;
           // existing rows enqueue allowlisted field diffs only with membership
@@ -2782,7 +2947,14 @@ export class ChatDbAggregateService {
                 const full = this.syncMessagePayloadFull(postRow.data)
                 delete full.sortOrder
                 const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
-                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncService.setMembershipClockInTx(
+                  stx,
+                  'message',
+                  mid,
+                  this.syncMembershipParentForMessage(postRow.data),
+                  opTs,
+                  opId
+                )
                 syncNotify = true
               } else {
                 const diff = this.diffMessagePayload(pre, postRow.data)
@@ -2810,6 +2982,7 @@ export class ChatDbAggregateService {
             for (const bid of distinctBids) {
               const postBlk = repos.blocks.getById(bid)
               if (!postBlk.found) throw new Error(`insertMessagesAfterAnchor block ${bid} missing in transaction`)
+              if (insertAfterAnchorDeferred.has(bid)) continue
               // Blocks under a transient parent never ride the wire: skip
               // without closure (closure would fail closed). The per-parent
               // frame decision below invalidates the transient parent.
@@ -2858,15 +3031,17 @@ export class ChatDbAggregateService {
                 }
               }
             } else if (hasNewInclusion) {
-              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+              if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, route, ctx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
             }
             // Per-parent block frames: newly included parents (even empty)
             // plus any true-create or inclusion-transition block change.
+            // Portable media awaiting drain is not included for frame until fulfilled.
             const affectedParents = new Set<string>()
             for (const mid of distinctMids) affectedParents.add(mid)
             for (const bid of distinctBids) {
+              if (insertAfterAnchorDeferred.has(bid)) continue
               const pre = preBlockRows.get(bid)
               const postBlk = repos.blocks.getById(bid)
               if (pre) affectedParents.add(pre.messageId)
@@ -2887,6 +3062,7 @@ export class ChatDbAggregateService {
               let needsBlockFrame = isNewlyIncludedParent
               if (!needsBlockFrame) {
                 for (const bid of distinctBids) {
+                  if (insertAfterAnchorDeferred.has(bid)) continue
                   const bPre = preBlockRows.get(bid)
                   const bPost = repos.blocks.getById(bid)
                   if (!bPost.found) continue
@@ -2898,8 +3074,14 @@ export class ChatDbAggregateService {
                   }
                   // Only blocks that belong to this parent transitionally.
                   if (bPre.messageId !== mid && bPost.data.messageId !== mid) continue
-                  const preIncluded = isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre)
-                  const postIncluded = isStableBlockStatus(bPost.data.status) && !this.isUnsupportedBlock(bPost.data)
+                  const preIncluded =
+                    isStableBlockStatus(bPre.status) &&
+                    !this.isUnsupportedBlock(bPre) &&
+                    !insertAfterAnchorDeferred.has(bid)
+                  const postIncluded =
+                    isStableBlockStatus(bPost.data.status) &&
+                    !this.isUnsupportedBlock(bPost.data) &&
+                    !insertAfterAnchorDeferred.has(bid)
                   if (bPre.messageId !== bPost.data.messageId) {
                     needsBlockFrame = true
                     break
@@ -3210,6 +3392,20 @@ export class ChatDbAggregateService {
             this.syncFileReferences(repos, plan.flatBlocks)
           }
 
+          // Central portable-media capture + defer (same Tx, after file refs)
+          let insertGroupsDeferred: Set<string> = new Set<string>()
+          if (ctx) {
+            const allFlatBlocks: MessageBlockData[] = []
+            for (const p of planned) allFlatBlocks.push(...p.flatBlocks)
+            insertGroupsDeferred = this.capturePortableMediaDeferredInTx(
+              stx,
+              allFlatBlocks,
+              ctx.ts,
+              unsupportedBlockIds
+            )
+            if (insertGroupsDeferred.size > 0) syncNotify = true
+          }
+
           if (ctx) {
             let tsOffset = 0
             const nextTs = (): number => ctx.ts + tsOffset++
@@ -3241,7 +3437,14 @@ export class ChatDbAggregateService {
                 const full = this.syncMessagePayloadFull(postRow.data)
                 delete full.sortOrder
                 const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
-                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncService.setMembershipClockInTx(
+                  stx,
+                  'message',
+                  mid,
+                  this.syncMembershipParentForMessage(postRow.data),
+                  opTs,
+                  opId
+                )
                 syncNotify = true
               } else {
                 const diff = this.diffMessagePayload(pre, postRow.data)
@@ -3267,6 +3470,7 @@ export class ChatDbAggregateService {
             for (const bid of distinctBids) {
               const postBlk = repos.blocks.getById(bid)
               if (!postBlk.found) throw new Error(`insertMessageGroups block ${bid} missing in transaction`)
+              if (insertGroupsDeferred.has(bid)) continue
               const parentMsg = repos.messages.getById(postBlk.data.messageId)
               if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) continue
               if (!isStableBlockStatus(postBlk.data.status)) continue
@@ -3307,13 +3511,14 @@ export class ChatDbAggregateService {
                 }
               }
             } else if (hasNewInclusion) {
-              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+              if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, route, ctx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
             }
             const affectedParents = new Set<string>()
             for (const mid of distinctMids) affectedParents.add(mid)
             for (const bid of distinctBids) {
+              if (insertGroupsDeferred.has(bid)) continue
               const pre = preBlockRows.get(bid)
               const postBlk = repos.blocks.getById(bid)
               if (pre) affectedParents.add(pre.messageId)
@@ -3334,6 +3539,7 @@ export class ChatDbAggregateService {
               let needsBlockFrame = isNewlyIncludedParent
               if (!needsBlockFrame) {
                 for (const bid of distinctBids) {
+                  if (insertGroupsDeferred.has(bid)) continue
                   const bPre = preBlockRows.get(bid)
                   const bPost = repos.blocks.getById(bid)
                   if (!bPost.found) continue
@@ -3343,8 +3549,12 @@ export class ChatDbAggregateService {
                     break
                   }
                   if (bPre.messageId !== mid && bPost.data.messageId !== mid) continue
-                  const preIncluded = isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre)
-                  const postIncluded = isStableBlockStatus(bPost.data.status) && !this.isUnsupportedBlock(bPost.data)
+                  const preIncluded =
+                    isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre) && !insertGroupsDeferred.has(bid)
+                  const postIncluded =
+                    isStableBlockStatus(bPost.data.status) &&
+                    !this.isUnsupportedBlock(bPost.data) &&
+                    !insertGroupsDeferred.has(bid)
                   if (bPre.messageId !== bPost.data.messageId) {
                     needsBlockFrame = true
                     break
@@ -3648,6 +3858,27 @@ export class ChatDbAggregateService {
             // or frame op is minted here.
             if (appendCovered) return { created: !messageExistedBefore }
             if (syncCtx) {
+              // Durable capture for portable media (file/image/video) before any outer unsupported gate.
+              // First true media create awaiting async hash still durable intent sameTx.
+              if (blockDataList.length > 0) {
+                const beforeCapture = this.captureMediaIntentsForBlocksInTx(stx, blockDataList, syncCtx.ts)
+                beforeCapture
+                // Also mark notify so auto sync wakes for the new intent (pendingCount includes intents).
+                // The helper itself is sync, so we know intents were inserted; set flag optimistically.
+                // A more precise check would query intents count, but setting true is safe (idempotent).
+                // Only set when at least one portable block had refs.
+                let hasPortable = false
+                for (const b of blockDataList) {
+                  if (this.isPortableMediaBlockType(b.type) && isStableBlockStatus(b.status)) {
+                    const refs = projectFileReferences(b)
+                    if (refs.length > 0) {
+                      hasPortable = true
+                      break
+                    }
+                  }
+                }
+                if (hasPortable) syncNotify = true
+              }
               const mrow = repos.messages.getById(messageData.id)
               if (!mrow.found) throw new Error(`appendMessage message ${messageData.id} missing in transaction`)
               const messageStable = this.shouldCaptureMessageCreate(mrow.data)
@@ -3689,7 +3920,14 @@ export class ChatDbAggregateService {
                   syncCtx.ts,
                   syncCtx.deviceId
                 )
-                syncService.setMembershipClockInTx(stx, 'message', messageData.id, mrow.data.topicId, syncCtx.ts, opId)
+                syncService.setMembershipClockInTx(
+                  stx,
+                  'message',
+                  messageData.id,
+                  this.syncMembershipParentForMessage(mrow.data),
+                  syncCtx.ts,
+                  opId
+                )
                 syncNotify = true
               } else {
                 const patchPayload = this.diffMessagePayload(messagePre, mrow.data)
@@ -3710,6 +3948,18 @@ export class ChatDbAggregateService {
                 const brow = repos.blocks.getById(bid)
                 if (!brow.found) throw new Error(`appendMessage block ${bid} missing in transaction`)
                 if (!isStableBlockStatus(brow.data.status)) continue
+                // Portable media deferral: file/image/video with fileRefs stays pending until drain uploads.
+                // Half-shell (portable type with zero legal refs) is rejected as unsupported, not a partial shell.
+                if (this.isPortableMediaBlockType(brow.data.type)) {
+                  const refs = projectFileReferences(brow.data)
+                  if (refs.length > 0) {
+                    // Durable intent already captured above; skip immediate enqueue (defer to drain).
+                    continue
+                  } else {
+                    unsupportedBlockIds.push(bid)
+                    continue
+                  }
+                }
                 if (this.isUnsupportedBlock(brow.data)) {
                   unsupportedBlockIds.push(bid)
                   continue
@@ -3761,13 +4011,12 @@ export class ChatDbAggregateService {
                   const topicRow = repos.topics.getById(topicId)
                   if (topicRow.found) {
                     if (!messageExistedBefore) {
-                      if (syncService.refreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId)) {
+                      if (this.refreshOwnerFrameAndEnqueueInTx(stx, topicId, route, syncCtx.deviceId)) {
                         syncNotify = true
                       }
                     } else {
                       if (
-                        syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId) ===
-                        'refreshed'
+                        this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, route, syncCtx.deviceId) === 'refreshed'
                       ) {
                         syncNotify = true
                       }
@@ -3792,12 +4041,20 @@ export class ChatDbAggregateService {
                     const pre = preBlockRows.get(b.id) ?? null
                     const postRow = repos.blocks.getById(b.id)
                     if (!postRow.found) continue
+                    const isPortablePost =
+                      this.isPortableMediaBlockType(postRow.data.type) && projectFileReferences(postRow.data).length > 0
+                    const isPortablePre = pre
+                      ? this.isPortableMediaBlockType(pre.type) && projectFileReferences(pre).length > 0
+                      : false
                     const postIncluded =
-                      isStableBlockStatus(postRow.data.status) && !this.isUnsupportedBlock(postRow.data)
+                      isStableBlockStatus(postRow.data.status) &&
+                      !this.isUnsupportedBlock(postRow.data) &&
+                      !isPortablePost
                     if (!pre) {
                       if (postIncluded) hasTrueCreateIncluded = true
                     } else {
-                      const preIncluded = isStableBlockStatus(pre.status) && !this.isUnsupportedBlock(pre)
+                      const preIncluded =
+                        isStableBlockStatus(pre.status) && !this.isUnsupportedBlock(pre) && !isPortablePre
                       if (preIncluded !== postIncluded) hasBlockInclusionTransition = true
                     }
                   }
@@ -4052,7 +4309,8 @@ export class ChatDbAggregateService {
               const payload = this.syncMessagePatchPayload(
                 topicId,
                 messageId,
-                patch as unknown as Record<string, unknown>
+                patch as unknown as Record<string, unknown>,
+                route
               )
               if (payload) {
                 syncService.enqueueUpsertInTx(stx, 'message', messageId, payload, ctx.ts, ctx.deviceId)
@@ -4085,7 +4343,7 @@ export class ChatDbAggregateService {
             // (ordinary rescan stays entity-only without membership backfill).
             // Stable→stable edits mint nothing.
             if (isPromotion) {
-              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+              if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, route, ctx.deviceId) === 'refreshed') {
                 notify = true
               }
               if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, messageId, ctx.deviceId) === 'refreshed') {
@@ -4294,6 +4552,19 @@ export class ChatDbAggregateService {
             }
           }
 
+          // Central portable-media capture + defer (same Tx, after file refs): stable file/image/video with valid refs
+          // captures durable intent and defers immediate block upsert until drain fulfills with full assetIds.
+          let msgBlocksDeferred: Set<string> = new Set<string>()
+          if (syncCtx && !messageCovered && blockDataList.length > 0) {
+            msgBlocksDeferred = this.capturePortableMediaDeferredInTx(
+              stx,
+              blockDataList,
+              syncCtx.ts,
+              unsupportedBlockIds
+            )
+            if (msgBlocksDeferred.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent (same atomic boundary).
           // Resend intent (SYNC-DATA-055): a covered message stays
           // local-only — no entity intent, no deletes, no frames.
@@ -4381,6 +4652,7 @@ export class ChatDbAggregateService {
                 }
               }
               for (const block of blockDataList) {
+                if (msgBlocksDeferred.has(block.id)) continue
                 const brow = repos.blocks.getById(block.id)
                 if (!brow.found) continue
                 if (brow.data.messageId !== messageId) continue
@@ -4469,9 +4741,7 @@ export class ChatDbAggregateService {
                 // topic frame now; messageBlock defers to the single unified
                 // decision below so promotion + true-create/inclusion share
                 // exactly one attempt (message op precedes frame).
-                if (
-                  syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, syncCtx.deviceId) === 'refreshed'
-                ) {
+                if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, route, syncCtx.deviceId) === 'refreshed') {
                   syncNotify = true
                 }
                 promotionNeedsBlockFrame = true
@@ -4499,9 +4769,10 @@ export class ChatDbAggregateService {
                 // covered by the single promotion frame below (final order).
                 promotionNeedsBlockFrame = true
               }
-              // Check block upserts for inclusion changes (existing blocks)
+              // Check block upserts for inclusion changes (existing blocks) — deferred portable awaiting drain is not included for frame
               let hasTrueCreateStrict = false
               for (const b of blockDataList) {
+                if (msgBlocksDeferred.has(b.id)) continue
                 const pre = preBlockRows.get(b.id) ?? null
                 if (!pre) {
                   // True create: if post included, candidate for the single refresh below
@@ -4745,6 +5016,12 @@ export class ChatDbAggregateService {
           // Verify ownership before delete
           const existing = repos.messages.getInTopic(messageId, topicId)
           if (!existing.found) return null // no-op for missing/foreign IDs
+          // Parent-delete cancellation: remove pending media intents for owned blocks (same Tx, per-block clear, no bytes GC)
+          {
+            const ownedBlocks = repos.blocks.listByMessage(messageId)
+            const ownedBlockIds = new Set<string>(ownedBlocks.map((b) => b.id))
+            this.cancelMediaIntentsForBlocksInTx(stx, ownedBlockIds)
+          }
           const known = ctx ? syncService.isKnownEntityInTx(stx, 'message', messageId) : false
           repos.messages.delete(messageId)
           // Resend intent (SYNC-DATA-055): a deleted message carries no
@@ -4761,7 +5038,7 @@ export class ChatDbAggregateService {
             syncService.invalidateParentFrameInTx(stx, 'messageBlock', messageId)
             const topicRow = repos.topics.getById(topicId)
             if (topicRow.found) {
-              if (syncService.refreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId)) {
+              if (this.refreshOwnerFrameAndEnqueueInTx(stx, topicId, route, ctx.deviceId)) {
                 notify = true
               }
             }
@@ -4805,6 +5082,14 @@ export class ChatDbAggregateService {
             const existing = repos.messages.getInTopic(id, topicId)
             if (existing.found && (existing.data.branchId ?? null) === route) ownedIds.push(id)
           }
+          // Parent-delete cancellation for all owned blocks (same Tx, per-block intent clear, no guessing children)
+          if (ownedIds.length > 0) {
+            const ownedBlockIds = new Set<string>()
+            for (const mid of ownedIds) {
+              for (const b of repos.blocks.listByMessage(mid)) ownedBlockIds.add(b.id)
+            }
+            this.cancelMediaIntentsForBlocksInTx(stx, ownedBlockIds)
+          }
           const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
           if (ownedIds.length > 0) {
             repos.messages.deleteMany(ownedIds)
@@ -4827,7 +5112,7 @@ export class ChatDbAggregateService {
             }
             const topicRow = repos.topics.getById(topicId)
             if (topicRow.found) {
-              if (syncService.refreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId)) {
+              if (this.refreshOwnerFrameAndEnqueueInTx(stx, topicId, route, ctx.deviceId)) {
                 notify = true
               }
             }
@@ -4938,6 +5223,16 @@ export class ChatDbAggregateService {
           // Sync file references within the same transaction
           this.syncFileReferences(repos, blockDataList)
 
+          // Central portable-media capture + defer (same Tx, after file refs): stable file/image/video with valid refs
+          // captures durable intent and defers immediate block upsert/frame until drain fulfills with full ordered unique assetIds.
+          // Truly unsupported tool/citation or zero-refs half-shell is rejected as unsupported (no partial shell).
+          // Branch-owned blocks follow v3 owner-allow (not suppressed) — deferral applies equally.
+          let deferredMedia: Set<string> = new Set<string>()
+          if (syncCtx) {
+            deferredMedia = this.capturePortableMediaDeferredInTx(stx, blockDataList, syncCtx.ts, unsupportedBlockIds)
+            if (deferredMedia.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent: creates → full union payload;
           // existing → diff field patch at stable checkpoints only. Only a
           // transient→stable promotion of a never-tracked row creates full
@@ -4947,9 +5242,11 @@ export class ChatDbAggregateService {
             for (const block of blockDataList) {
               const post = repos.blocks.getById(block.id)
               if (!post.found) continue
-              // F3 fail-closed: branch-owned or owner-unknown blocks never
-              // emit sync intent (outbox/membership/frames); the upsert above
-              // still commits.
+              if (deferredMedia.has(block.id)) {
+                // Portable media awaiting drain — skip immediate upsert/frame until full assetIds ready
+                continue
+              }
+              // F3 fail-closed: owner-unknown blocks never emit sync intent; branch-owned now allowed per v3
               if (
                 this.isBlockSyncSuppressedInTx(
                   repos,
@@ -5075,8 +5372,8 @@ export class ChatDbAggregateService {
               const pre = preRows.get(b.id) ?? null
               const postRow = repos.blocks.getById(b.id)
               if (!postRow.found) continue
-              // F3 fail-closed: suppressed (branch-owned/unknown) blocks mint
-              // no frame intent either.
+              if (deferredMedia.has(b.id)) continue
+              // F3 fail-closed: owner-unknown blocks mint no frame intent either.
               if (
                 this.isBlockSyncSuppressedInTx(
                   repos,
@@ -5268,14 +5565,10 @@ export class ChatDbAggregateService {
             repos.fileRefs.createMany(newRefs)
           }
 
-          // Transaction-bound sync intent: only a transient→stable promotion
-          // of a never-tracked block creates full state; otherwise intentional
-          // patch keys. Transient skips, never a failure. Unsupported
-          // structured/attachment rows skip without a partial shell.
-          // Resend intent (SYNC-DATA-055): stale attempt throws (rolls back);
-          // a covered parent stays local-only (before parent closure).
-          // F3 fail-closed: a branch-owned or owner-unknown block emits no
-          // sync intent at all (the patch above still commits).
+          // Central portable-media capture + defer (same Tx, after file refs): stable file/image/video with valid refs
+          // captures durable intent and defers immediate block upsert until drain fulfills with full assetIds.
+          // Branch-owned now allowed per v3 (not suppressed).
+          let singleDeferred: Set<string> = new Set<string>()
           const singleSuppressed = syncCtx
             ? this.isBlockSyncSuppressedInTx(
                 repos,
@@ -5285,6 +5578,25 @@ export class ChatDbAggregateService {
               )
             : false
           if (syncCtx && !singleSuppressed) {
+            const postForDefer = repos.blocks.getById(blockId)
+            if (postForDefer.found) {
+              singleDeferred = this.capturePortableMediaDeferredInTx(
+                stx,
+                [postForDefer.data],
+                syncCtx.ts,
+                unsupportedBlockIds
+              )
+              if (singleDeferred.size > 0) syncNotify = true
+            }
+          }
+          // Transaction-bound sync intent: only a transient→stable promotion
+          // of a never-tracked block creates full state; otherwise intentional
+          // patch keys. Transient skips, never a failure. Unsupported
+          // structured/attachment rows skip without a partial shell.
+          // Resend intent (SYNC-DATA-055): stale attempt throws (rolls back);
+          // a covered parent stays local-only (before parent closure).
+          // Portable media awaiting drain is deferred (no immediate upsert).
+          if (syncCtx && !singleSuppressed && !singleDeferred.has(blockId)) {
             const post = repos.blocks.getById(blockId)
             if (post.found && !this.checkResendAttemptInTx(stx, post.data.messageId, resendAttemptId)) {
               if (isStableBlockStatus(post.data.status)) {
@@ -5376,12 +5688,24 @@ export class ChatDbAggregateService {
           // the wire). Ordinary included→included content edits mint nothing.
           // Resend-covered parents (SYNC-DATA-055) stay local-only: no frame
           // work here (a stale attempt would already have thrown above).
+          // Portable media awaiting drain is not included for frame until fulfilled.
           // F3 fail-closed: suppressed blocks mint no frame intent either.
-          if (syncCtx && !singleSuppressed && !getResendAttemptInTx(stx, existing.data.messageId)) {
+          if (
+            syncCtx &&
+            !singleSuppressed &&
+            !singleDeferred.has(blockId) &&
+            !getResendAttemptInTx(stx, existing.data.messageId)
+          ) {
             const postRow2 = repos.blocks.getById(blockId)
             if (postRow2.found) {
-              const preIncluded = isStableBlockStatus(existing.data.status) && !this.isUnsupportedBlock(existing.data)
-              const postIncluded = isStableBlockStatus(postRow2.data.status) && !this.isUnsupportedBlock(postRow2.data)
+              const preIncluded =
+                isStableBlockStatus(existing.data.status) &&
+                !this.isUnsupportedBlock(existing.data) &&
+                !singleDeferred.has(blockId)
+              const postIncluded =
+                isStableBlockStatus(postRow2.data.status) &&
+                !this.isUnsupportedBlock(postRow2.data) &&
+                !singleDeferred.has(blockId)
               if (preIncluded !== postIncluded) {
                 if (
                   syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(
@@ -5495,20 +5819,26 @@ export class ChatDbAggregateService {
           // Sync file references
           this.syncFileReferences(repos, blockDataList)
 
+          let bulkDeferred: Set<string> = new Set<string>()
+          if (syncCtx) {
+            bulkDeferred = this.capturePortableMediaDeferredInTx(stx, blockDataList, syncCtx.ts, unsupportedBlockIds)
+            if (bulkDeferred.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent: stable creations only
           // (LOCK-PERSONAL-004) with per-block ordering offsets. Transient
           // blocks are legitimate skips; unsupported structured/attachment
           // blocks skip without a partial shell; their stable update later
           // records the same durable unsupported outcome with parent closure.
+          // Portable media awaiting drain is deferred (no immediate upsert/frame).
           if (syncCtx) {
             for (let i = 0; i < blockDataList.length; i++) {
               const bid = blockDataList[i].id
+              if (bulkDeferred.has(bid)) continue
               const childTs = syncCtx.ts + i
               const brow = repos.blocks.getById(bid)
               if (!brow.found) throw new Error(`bulkAddBlocks block ${bid} missing in transaction`)
-              // F3 fail-closed: branch-owned or owner-unknown blocks never
-              // emit sync intent (outbox/membership/frames); the insert above
-              // still commits.
+              // F3 fail-closed: owner-unknown blocks never emit sync intent; branch-owned now allowed per v3
               if (
                 this.isBlockSyncSuppressedInTx(
                   repos,
@@ -5548,9 +5878,9 @@ export class ChatDbAggregateService {
           if (syncCtx) {
             const affectedParents = new Set<string>()
             for (const b of blockDataList) {
+              if (bulkDeferred.has(b.id)) continue
               const brow = repos.blocks.getById(b.id)
-              // F3 fail-closed: suppressed (branch-owned/unknown) blocks mint
-              // no frame intent either.
+              // F3 fail-closed: owner-unknown blocks mint no frame intent either.
               if (
                 this.isBlockSyncSuppressedInTx(
                   repos,
@@ -5607,6 +5937,8 @@ export class ChatDbAggregateService {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const stx = tx as unknown as SyncTxExecutor
+          // Cancel pending media intents for these blocks (deletion never resurrects)
+          this.cancelMediaIntentsForBlocksInTx(stx, new Set(blockIds))
           const knownIds = syncCtx
             ? blockIds.filter(
                 (bid) =>
@@ -6003,12 +6335,15 @@ export class ChatDbAggregateService {
           // membership, truthfully invalidate without any op and keep the
           // user reorder successful (existing tryRefreshOrInvalidate semantics).
           if (ctx) {
-            const outcome = syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(
+            const outcome = this.tryRefreshOwnerFrameAndEnqueueInTx(
               tx as unknown as SyncTxExecutor,
               topicId,
+              route,
               ctx.deviceId
             )
             if (outcome === 'refreshed') notify = true
+          } else if (route !== null) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'branchSuffix', route)
           } else {
             syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
           }
@@ -6140,12 +6475,15 @@ export class ChatDbAggregateService {
           }
           repos.messages.replaceOrder(topicId, nextOwnerOrder, route)
           if (ctx) {
-            const outcome = syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(
+            const outcome = this.tryRefreshOwnerFrameAndEnqueueInTx(
               tx as unknown as SyncTxExecutor,
               topicId,
+              route,
               ctx.deviceId
             )
             if (outcome === 'refreshed') notify = true
+          } else if (route !== null) {
+            syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'branchSuffix', route)
           } else {
             syncService.invalidateParentFrameInTx(tx as unknown as SyncTxExecutor, 'topicMessage', topicId)
           }
@@ -6457,12 +6795,31 @@ export class ChatDbAggregateService {
           const refsBeforeDelete = repos.fileRefs.listByMessages(messageIds)
           const allAffectedFileIds = collectAffectedFileIds(refsBeforeDelete)
 
+          // Parent-delete cancellation for all owned blocks (same Tx, per-block 021 intent clear)
+          if (messageIds.length > 0) {
+            const blockIds = new Set<string>()
+            for (const mid of messageIds) {
+              for (const b of repos.blocks.listByMessage(mid)) blockIds.add(b.id)
+            }
+            this.cancelMediaIntentsForBlocksInTx(stx, blockIds)
+          }
+
           // Local parent order frame (010): atomically invalidate topicMessage frame plus every messageBlock frame before cascade.
           // Collect message IDs before cascade and invalidate frames inside same transaction, no clock mint.
           for (const mid of messageIds) {
             syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
           }
           syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+          // True-branch frames die with the topic cascade: invalidate every
+          // branchSuffix frame of the topic's branches (no orphan winners).
+          try {
+            const branchRows = repos.branches.listByTopic(topicId)
+            for (const b of branchRows) {
+              syncService.invalidateParentFrameInTx(stx, 'branchSuffix', b.id)
+            }
+          } catch {
+            // Proven pre-016: no branch inventory exists.
+          }
 
           // FK cascade: topic → messages → blocks → file_references;
           // topic → topic_segments → topic_segment_messages;
@@ -6597,6 +6954,14 @@ export class ChatDbAggregateService {
             // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
             // Sync-unaware hard-delete lifecycle path — no outbox.
             const stx = tx as unknown as SyncTxExecutor
+            // Parent-delete cancellation for all owned blocks (same Tx, per-block 021 intent clear)
+            if (messageIds.length > 0) {
+              const blockIds = new Set<string>()
+              for (const mid of messageIds) {
+                for (const b of repos.blocks.listByMessage(mid)) blockIds.add(b.id)
+              }
+              this.cancelMediaIntentsForBlocksInTx(stx, blockIds)
+            }
             for (const mid of messageIds) {
               syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
             }
@@ -6680,6 +7045,14 @@ export class ChatDbAggregateService {
 
             // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
             const stx = tx as unknown as SyncTxExecutor
+            // Parent-delete cancellation for all owned blocks (same Tx, per-block 021 intent clear)
+            if (messageIds.length > 0) {
+              const blockIds = new Set<string>()
+              for (const mid of messageIds) {
+                for (const b of repos.blocks.listByMessage(mid)) blockIds.add(b.id)
+              }
+              this.cancelMediaIntentsForBlocksInTx(stx, blockIds)
+            }
             for (const mid of messageIds) {
               syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
             }
@@ -6755,6 +7128,14 @@ export class ChatDbAggregateService {
             deletedTopicIds.push(topic.id)
             // Local frame invalidation (010): atomically invalidate topicMessage and every descendant messageBlock frame, no clock mint.
             const stx2 = tx as unknown as SyncTxExecutor
+            // Parent-delete cancellation for all owned blocks (same Tx, per-block 021 intent clear)
+            if (messageIds.length > 0) {
+              const blockIds = new Set<string>()
+              for (const mid of messageIds) {
+                for (const b of repos.blocks.listByMessage(mid)) blockIds.add(b.id)
+              }
+              this.cancelMediaIntentsForBlocksInTx(stx2, blockIds)
+            }
             for (const mid of messageIds) {
               syncService.invalidateParentFrameInTx(stx2, 'messageBlock', mid)
             }
@@ -6859,18 +7240,76 @@ export class ChatDbAggregateService {
 
   /**
    * Per-route sync context: enforces the publish barrier identically to
-   * syncCtx(), then suppresses capture for branch routes (local-only) by
-   * returning null. Main routes keep the real context.
+   * syncCtx(). Branch routes capture like main routes (true-branch full
+   * sync): branch-owned messages carry branchId owner + branchId membership
+   * and branchSuffix frames; topicMessage frames stay main-owned only.
    */
   private syncCtxForTopic(
     channel: string,
     _topicId: string,
     branchId?: string | null
   ): { deviceId: string; ts: number } | null {
+    void branchId
     const ctx = this.syncCtx(channel)
     if (!ctx) return null
-    if (this.normalizeBranchId(branchId) !== null) return null
     return ctx
+  }
+
+  /**
+   * Membership parent for a message row: the owning branch id for
+   * branch-owned rows, otherwise the logical topic id. topicId stays the
+   * immutable explicit message field on the wire in both cases.
+   */
+  private syncMembershipParentForMessage(data: { topicId: string; branchId?: string | null }): string {
+    const owner = typeof data.branchId === 'string' && data.branchId.length > 0 ? data.branchId : null
+    return owner ?? data.topicId
+  }
+
+  /** Full branch-row sync payload (identity + mutable state, verbatim). */
+  private syncBranchPayloadFull(data: TopicBranchData): Record<string, unknown> {
+    return {
+      id: data.id,
+      topicId: data.topicId,
+      parentBranchId: data.parentBranchId ?? null,
+      anchorMessageId: data.anchorMessageId,
+      name: data.name ?? null,
+      createdAt: data.createdAt ?? null,
+      updatedAt: data.updatedAt ?? null
+    }
+  }
+
+  /**
+   * Owner frame refresh+enqueue for message-membership changes: branch routes
+   * refresh their owned-suffix frame, main routes refresh the topic frame.
+   * Returns true when a new outbox row was inserted.
+   */
+  private refreshOwnerFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    topicId: string,
+    route: string | null,
+    deviceId: string
+  ): boolean {
+    if (route !== null) {
+      return syncService.refreshBranchSuffixFrameAndEnqueueInTx(tx, route, deviceId)
+    }
+    return syncService.refreshTopicMessageFrameAndEnqueueInTx(tx, topicId, deviceId)
+  }
+
+  /**
+   * Owner try-refresh+enqueue: branch routes try their owned-suffix frame,
+   * main routes try the topic frame. Missing membership invalidates with 0
+   * op; malformed stays fail-closed.
+   */
+  private tryRefreshOwnerFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    topicId: string,
+    route: string | null,
+    deviceId: string
+  ): 'refreshed' | 'invalidated' {
+    if (route !== null) {
+      return syncService.tryRefreshBranchSuffixFrameAndEnqueueInTx(tx, route, deviceId)
+    }
+    return syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(tx, topicId, deviceId)
   }
 
   /** True when the topic owns at least one branch node (tolerates pre-016). */
@@ -7018,9 +7457,11 @@ export class ChatDbAggregateService {
     blockId: string,
     wireMessageId?: string | null
   ): boolean {
+    // v3 true-branch full sync: branch-owned media is allowed (not local-only).
+    // Only suppress when owner cannot be proven in-transaction (pre-first-chunk unknown).
     const owner = this.blockOwnerRouteInTx(repos, blockId, wireMessageId)
     if (!owner) return true
-    return owner.branchId !== null
+    return false
   }
 
   /**
@@ -7327,13 +7768,20 @@ export class ChatDbAggregateService {
             this.syncFileReferences(repos, allNewBlocks)
           }
 
+          // Central portable-media capture + defer (same Tx, after file refs)
+          let branchAllDeferred: Set<string> = new Set<string>()
+          if (ctx && allNewBlocks.length > 0) {
+            branchAllDeferred = this.capturePortableMediaDeferredInTx(stx, allNewBlocks, ctx.ts, unsupportedBlockIds)
+            if (branchAllDeferred.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent (same atomic boundary, reused from
           // pasteMessagesToTopic/insertMessagesAfterAnchor). Every cloned ID
           // is a fresh Main-generated true create: stable cloned
           // messages/blocks enqueue full-state upserts (sortOrder removed,
           // final remapped askId verbatim) with true-create-only membership;
           // transient/unsupported emit nothing (durable unsupported outcome
-          // for the latter). Source rows emit nothing and are untouched.
+          // for the latter). Source rows emit nothing and are untouched. Deferred portable media skips immediate block enqueue until drain.
           if (ctx) {
             let tsOffset = 0
             const nextTs = (): number => ctx.ts + tsOffset++
@@ -7362,12 +7810,20 @@ export class ChatDbAggregateService {
               const full = this.syncMessagePayloadFull(postRow.data)
               delete full.sortOrder
               const opId = syncService.enqueueUpsertInTx(stx, 'message', m.id, full, opTs, ctx.deviceId)
-              syncService.setMembershipClockInTx(stx, 'message', m.id, postRow.data.topicId, opTs, opId)
+              syncService.setMembershipClockInTx(
+                stx,
+                'message',
+                m.id,
+                this.syncMembershipParentForMessage(postRow.data),
+                opTs,
+                opId
+              )
               syncNotify = true
             }
             for (const blk of allNewBlocks) {
               const postBlk = repos.blocks.getById(blk.id)
               if (!postBlk.found) throw new Error(`branchMessagesToTopic block ${blk.id} missing in transaction`)
+              if (branchAllDeferred.has(blk.id)) continue
               // Blocks under a transient parent never ride the wire: skip
               // without closure (closure would fail closed). The per-parent
               // frame decision below invalidates the transient parent.
@@ -7390,11 +7846,9 @@ export class ChatDbAggregateService {
             // plus one per new message parent where semantically required.
             // Missing membership or excluded status invalidates with 0 op
             // (truthful partial); malformed/clock/high-water throws and rolls
-            // back the whole branch including the ensured topic.
+            // back the whole branch including the ensured topic. Deferred blocks are not included for frame until drain.
             if (hasNewInclusion) {
-              if (
-                syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, targetTopicId, ctx.deviceId) === 'refreshed'
-              ) {
+              if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, targetTopicId, null, ctx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
             }
@@ -7402,6 +7856,21 @@ export class ChatDbAggregateService {
               const postMsg = repos.messages.getById(m.id)
               if (!postMsg.found) continue
               if (!isStableMessageStatus(postMsg.data.status)) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', m.id)
+                continue
+              }
+              // If all blocks of this parent are deferred, keep frame truthful partial — still attempt refresh but deferred excluded
+              const parentBlocks = allNewBlocks.filter((b) => b.messageId === m.id)
+              const hasNonDeferredIncluded = parentBlocks.some(
+                (b) => !branchAllDeferred.has(b.id) && isStableBlockStatus(b.status) && !this.isUnsupportedBlock(b)
+              )
+              // When message has only deferred blocks, its block frame remains invalidated/partial until drain — still refresh if needed
+              if (
+                !hasNonDeferredIncluded &&
+                parentBlocks.length > 0 &&
+                parentBlocks.every((b) => branchAllDeferred.has(b.id))
+              ) {
+                // All blocks deferred: block frame not complete until drain; keep partial by invalidating now, drain will refresh later
                 syncService.invalidateParentFrameInTx(stx, 'messageBlock', m.id)
                 continue
               }
@@ -7441,9 +7910,13 @@ export class ChatDbAggregateService {
    * Create one topic-internal branch node (the ONLY true-branch creation
    * method).
    *
-   * Local-only, no prefix cloning, no wire capture:
-   * - validates the logical topic exists (trash rejects) and the parent
-   *   route exists (null = main route, otherwise a branch of this topic);
+   * Full-sync capture (branch inventory v3): the creation enqueues a
+   * topic_branch upsert plus the initial empty branchSuffix frame in the
+   * same atomic transaction (topic closure first so relay seq preserves
+   * topic < branch). Renames/deletes capture the same way; see
+   * renameBranch/deleteBranch. Validates the logical topic exists (trash
+   * rejects) and the parent route exists (null = main route, otherwise a
+   * branch of this topic);
    * - validates the anchor belongs to the parent route's current effective
    *   route AND is owned by the parent route (BRANCH-7 owner-only anchors:
    *   main parent accepts main-owned messages; non-main parent requires
@@ -7451,9 +7924,6 @@ export class ChatDbAggregateService {
    *   the parent's own inherited fork anchor — rejects fail-closed);
    * - inserts exactly one `topic_branches` row with the requested name
    *   (default applied by the renderer; Main stores verbatim);
-   * - emits NO sync outbox/frame/membership intent and touches no parent
-   *   frames, so the branch stays local-only within existing sync
-   *   boundaries (no wire contract change);
    * - returns the created node plus the effective wire (shared prefix +
    *   empty suffix) for the renderer projection — a read projection only,
    *   never stored rows. Creating the branch immediately selects it
@@ -7469,13 +7939,15 @@ export class ChatDbAggregateService {
   ): ChatDbResult<{ branch: TopicBranchWire; messages: JsonObject[]; blocks: JsonObject[] }> {
     return wrapResult(
       () => {
-        // Publish-barrier quiescence still enforced for branch writes; capture
-        // itself is always suppressed (local-only) below.
+        // Publish-barrier quiescence enforced for branch writes before any
+        // transaction opens; capture below joins the same atomic tx.
         syncService.throwIfPublishBarrierHeld('createBranch')
+        const ctx = this.syncCtx('createBranch')
         const parentRoute = this.normalizeBranchId(parentBranchId)
         if (!topicId || !anchorMessageId) {
           throw new ChatDbValidationError('createBranch requires topicId and anchorMessageId')
         }
+        let syncNotify = false
         const result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
           const topic = repos.topics.getById(topicId)
@@ -7530,12 +8002,38 @@ export class ChatDbAggregateService {
           }
           const wireMessages = messagesToWire(resolved)
           const wireBlocks = blocksToWire(allBlocks)
+          // Full-sync capture in the same atomic tx: topic closure first
+          // (parents before children on relay seq), then the branch upsert,
+          // then the initial empty owned-suffix frame with its winning clock.
+          if (ctx) {
+            const stx = tx as unknown as SyncTxExecutor
+            try {
+              this.ensureTopicClosureInTx(stx, topicId, ctx.ts, ctx.deviceId)
+              syncService.enqueueUpsertInTx(
+                stx,
+                'topic_branch',
+                created.id,
+                this.syncBranchPayloadFull(created),
+                ctx.ts,
+                ctx.deviceId
+              )
+              if (syncService.refreshBranchSuffixFrameAndEnqueueInTx(stx, created.id, ctx.deviceId)) {
+                syncNotify = true
+              } else {
+                syncNotify = true
+              }
+            } catch (e) {
+              this.recordSyncTxFailure('createBranch', ctx, e)
+              throw e
+            }
+          }
           return {
             branch: this.branchToWire(created),
             messages: reconstructMessageBlockRelations(wireMessages, wireBlocks),
             blocks: wireBlocks
           }
         })
+        if (syncNotify) syncService.notifyEnqueued()
         return result
       },
       `createBranch(${topicId}, parent=${this.normalizeBranchId(parentBranchId) ?? 'main'}, anchor=${anchorMessageId})`
@@ -7567,7 +8065,8 @@ export class ChatDbAggregateService {
   /**
    * Rename a branch node (name-only; identity columns immutable). Branch
    * names live on the branch row — topic rename stays logical and separate.
-   * Local-only: no sync intent. Missing branch fails closed.
+   * Full-sync capture: the rename enqueues a topic_branch upsert (name LWW)
+   * in the same atomic tx. Missing branch fails closed.
    */
   renameBranch(topicId: string, branchId: string, name: string): ChatDbResult<{ branch: TopicBranchWire }> {
     return wrapResult(() => {
@@ -7575,7 +8074,9 @@ export class ChatDbAggregateService {
       if (!topicId || !branchId || !name) {
         throw new ChatDbValidationError('renameBranch requires topicId, branchId, and a non-empty name')
       }
-      return this.db.transaction((tx) => {
+      const ctx = this.syncCtx('renameBranch')
+      let syncNotify = false
+      const out = this.db.transaction((tx) => {
         const repos = createRepositories(tx)
         const topic = repos.topics.getById(topicId)
         if (!topic.found) {
@@ -7587,17 +8088,39 @@ export class ChatDbAggregateService {
         if (!updated.found) {
           throw new ChatDbNotFoundError(`Branch ${branchId} does not exist in topic ${topicId}`)
         }
+        if (ctx) {
+          const stx = tx as unknown as SyncTxExecutor
+          try {
+            this.ensureTopicClosureInTx(stx, topicId, ctx.ts, ctx.deviceId)
+            syncService.enqueueUpsertInTx(
+              stx,
+              'topic_branch',
+              branchId,
+              this.syncBranchPayloadFull(updated.data),
+              ctx.ts,
+              ctx.deviceId
+            )
+            syncNotify = true
+          } catch (e) {
+            this.recordSyncTxFailure('renameBranch', ctx, e)
+            throw e
+          }
+        }
         return { branch: this.branchToWire(updated.data) }
       })
+      if (syncNotify) syncService.notifyEnqueued()
+      return out
     }, `renameBranch(${topicId}, ${branchId})`)
   }
 
   /**
    * Delete one branch subtree: the selected branch, all descendant
    * branches, and ONLY the messages/blocks/file references owned by those
-   * branch IDs. Shared prefixes and sibling branches survive. Local-only:
-   * no sync intent (branch rows never carried clocks); main-route frames
-   * are untouched. After deleting the last branch the topic is
+   * branch IDs. Shared prefixes and sibling branches survive.
+   * Full-sync capture: topic_branch deletes for the whole subtree plus
+   * message deletes for owned known messages commit atomically in the same
+   * tx; deleted branchSuffix frames are removed so no orphan winner
+   * survives. After deleting the last branch the topic is
    * indistinguishable from a never-branched topic.
    */
   deleteBranch(
@@ -7615,8 +8138,11 @@ export class ChatDbAggregateService {
       if (!topicId || !branchId) {
         throw new ChatDbValidationError('deleteBranch requires topicId and branchId')
       }
+      const ctx = this.syncCtx('deleteBranch')
+      let syncNotify = false
       const result = this.db.transaction((tx) => {
         const repos = createRepositories(tx)
+        const stx = tx as unknown as SyncTxExecutor
         const topic = repos.topics.getById(topicId)
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
@@ -7634,6 +8160,34 @@ export class ChatDbAggregateService {
         }
         const refsBeforeDelete = repos.fileRefs.listByMessages(ownedMessageIds)
         const affectedFileIds = collectAffectedFileIds(refsBeforeDelete)
+        // Parent-delete cancellation for all owned blocks (same Tx, per-block 021 intent clear)
+        if (ownedBlockIds.length > 0) {
+          this.cancelMediaIntentsForBlocksInTx(stx, new Set(ownedBlockIds))
+        }
+        // Sync intent before the cascade removes the rows (known entities
+        // only — unknown ids never emit).
+        if (ctx) {
+          try {
+            const knownBranchIds = subtreeIds.filter((bid) => syncService.isKnownEntityInTx(stx, 'topic_branch', bid))
+            const knownMessageIds = ownedMessageIds.filter((mid) => syncService.isKnownEntityInTx(stx, 'message', mid))
+            const knownBlockIds = ownedBlockIds.filter((bid) =>
+              syncService.isKnownEntityInTx(stx, 'message_block', bid)
+            )
+            for (const bid of knownBranchIds) {
+              syncService.enqueueDeleteInTx(stx, 'topic_branch', bid, ctx.ts, ctx.deviceId)
+            }
+            for (const mid of knownMessageIds) {
+              syncService.enqueueDeleteInTx(stx, 'message', mid, ctx.ts, ctx.deviceId)
+            }
+            for (const bid of knownBlockIds) {
+              syncService.enqueueDeleteInTx(stx, 'message_block', bid, ctx.ts, ctx.deviceId)
+            }
+            if (knownBranchIds.length > 0 || knownMessageIds.length > 0 || knownBlockIds.length > 0) syncNotify = true
+          } catch (e) {
+            this.recordSyncTxFailure('deleteBranch', ctx, e)
+            throw e
+          }
+        }
         // Delete owned messages (FK cascade removes blocks → file refs;
         // per-owner order normalization keeps surviving owners dense).
         if (ownedMessageIds.length > 0) {
@@ -7642,6 +8196,13 @@ export class ChatDbAggregateService {
         // Delete the branch rows subtree-root first (self-CASCADE backstop;
         // explicit for determinism and pre-016 tolerance).
         repos.branches.deleteSubtreeRows(subtreeIds)
+        // True-branch frames die with the subtree (no orphan winners).
+        for (const bid of subtreeIds) {
+          syncService.invalidateParentFrameInTx(stx, 'branchSuffix', bid)
+        }
+        for (const mid of ownedMessageIds) {
+          syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+        }
         const cleanup = buildFileCleanupResult(repos, affectedFileIds)
         return {
           affectedFileIds: cleanup.affectedFileIds,
@@ -7651,6 +8212,7 @@ export class ChatDbAggregateService {
           deletedBlockIds: ownedBlockIds
         }
       })
+      if (syncNotify) syncService.notifyEnqueued()
       return result
     }, `deleteBranch(${topicId}, ${branchId})`)
   }
@@ -7838,6 +8400,15 @@ export class ChatDbAggregateService {
             }
           }
 
+          // Central portable-media capture + defer (same Tx, after file refs)
+          let cloneDeferred: Set<string> = new Set<string>()
+          if (ctx) {
+            const allCloneBlocks: MessageBlockData[] = []
+            for (const p of phase4Plans) allCloneBlocks.push(...p.blocks)
+            cloneDeferred = this.capturePortableMediaDeferredInTx(stx, allCloneBlocks, ctx.ts, unsupportedBlockIds)
+            if (cloneDeferred.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent (same atomic boundary, reused from
           // insert/paste/branch true-create enqueue + membership + frame
           // helpers — no new mechanism, no new wire). Ordinary clone contract:
@@ -7889,7 +8460,14 @@ export class ChatDbAggregateService {
                 const full = this.syncMessagePayloadFull(postRow.data)
                 delete full.sortOrder
                 const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
-                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncService.setMembershipClockInTx(
+                  stx,
+                  'message',
+                  mid,
+                  this.syncMembershipParentForMessage(postRow.data),
+                  opTs,
+                  opId
+                )
                 syncNotify = true
               } else {
                 const diff = this.diffMessagePayload(pre, postRow.data)
@@ -7915,6 +8493,7 @@ export class ChatDbAggregateService {
             for (const bid of distinctBids) {
               const postBlk = repos.blocks.getById(bid)
               if (!postBlk.found) throw new Error(`cloneMessagesToTopic block ${bid} missing in transaction`)
+              if (cloneDeferred.has(bid)) continue
               // Blocks under a non-success parent never ride the ordinary
               // clone wire: skip without closure (closure would fail closed or
               // fabricate a non-ordinary parent). The per-parent frame decision
@@ -7965,15 +8544,14 @@ export class ChatDbAggregateService {
                 }
               }
             } else if (hasNewInclusion) {
-              if (
-                syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, targetTopicId, ctx.deviceId) === 'refreshed'
-              ) {
+              if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, targetTopicId, route, ctx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
             }
             const affectedParents = new Set<string>()
             for (const mid of distinctMids) affectedParents.add(mid)
             for (const bid of distinctBids) {
+              if (cloneDeferred.has(bid)) continue
               const pre = preBlockRows.get(bid)
               const postBlk = repos.blocks.getById(bid)
               if (pre) affectedParents.add(pre.messageId)
@@ -7996,6 +8574,7 @@ export class ChatDbAggregateService {
               let needsBlockFrame = isNewlyIncludedParent
               if (!needsBlockFrame) {
                 for (const bid of distinctBids) {
+                  if (cloneDeferred.has(bid)) continue
                   const bPre = preBlockRows.get(bid)
                   const bPost = repos.blocks.getById(bid)
                   if (!bPost.found) continue
@@ -8008,8 +8587,10 @@ export class ChatDbAggregateService {
                     needsBlockFrame = true
                     break
                   }
-                  const preIncluded = bPre.status === 'success' && !this.isUnsupportedBlock(bPre)
-                  const postIncluded = bPost.data.status === 'success' && !this.isUnsupportedBlock(bPost.data)
+                  const preIncluded =
+                    bPre.status === 'success' && !this.isUnsupportedBlock(bPre) && !cloneDeferred.has(bid)
+                  const postIncluded =
+                    bPost.data.status === 'success' && !this.isUnsupportedBlock(bPost.data) && !cloneDeferred.has(bid)
                   if (preIncluded !== postIncluded) {
                     needsBlockFrame = true
                     break
@@ -8690,9 +9271,31 @@ export class ChatDbAggregateService {
     ownedIds: string[],
     notify: { value: boolean }
   ): string[] {
+    // Parent-delete cancellation for owned blocks (same Tx, per-block 021 intent clear, no bytes GC)
+    if (ownedIds.length > 0) {
+      const ownedBlockIds = new Set<string>()
+      for (const mid of ownedIds) {
+        for (const b of repos.blocks.listByMessage(mid)) ownedBlockIds.add(b.id)
+      }
+      this.cancelMediaIntentsForBlocksInTx(stx, ownedBlockIds)
+    }
     const knownIds = ctx ? ownedIds.filter((id) => syncService.isKnownEntityInTx(stx, 'message', id)) : []
     const refs = repos.fileRefs.listByMessages(ownedIds)
     const affectedFileIds = collectAffectedFileIds(refs)
+    // Owner route of this batch (callers filter ownedIds to one addressed
+    // route): captured before deletion for owner frame refresh below.
+    let ownerRoute: string | null = null
+    if (ownedIds.length > 0) {
+      try {
+        const probe = repos.messages.getById(ownedIds[0])
+        if (probe.found) {
+          ownerRoute =
+            typeof probe.data.branchId === 'string' && probe.data.branchId.length > 0 ? probe.data.branchId : null
+        }
+      } catch {
+        ownerRoute = null
+      }
+    }
     for (const seg of repos.segments.listByTopic(topicId)) {
       const segMsgIds = repos.segments.getMessageIds(seg.id)
       const toRemove = ownedIds.filter((id) => segMsgIds.includes(id))
@@ -8717,14 +9320,16 @@ export class ChatDbAggregateService {
       if (ctx) {
         const topicRow = repos.topics.getById(topicId)
         if (topicRow.found) {
-          if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+          if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, ownerRoute, ctx.deviceId) === 'refreshed') {
             notify.value = true
           }
         } else {
           syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+          if (ownerRoute !== null) syncService.invalidateParentFrameInTx(stx, 'branchSuffix', ownerRoute)
         }
       } else {
         syncService.invalidateParentFrameInTx(stx, 'topicMessage', topicId)
+        if (ownerRoute !== null) syncService.invalidateParentFrameInTx(stx, 'branchSuffix', ownerRoute)
       }
     }
     return affectedFileIds
@@ -9180,11 +9785,20 @@ export class ChatDbAggregateService {
             this.syncFileReferences(repos, plan.blocks)
           }
 
+          // Central portable-media capture + defer (same Tx, after file refs)
+          let pasteDeferred: Set<string> = new Set<string>()
+          if (ctx) {
+            const allPasteBlocks: MessageBlockData[] = []
+            for (const p of phase4Plans) allPasteBlocks.push(...p.blocks)
+            pasteDeferred = this.capturePortableMediaDeferredInTx(stx, allPasteBlocks, ctx.ts, unsupportedBlockIds)
+            if (pasteDeferred.size > 0) syncNotify = true
+          }
+
           // Transaction-bound sync intent (same atomic boundary, reused from
           // insertMessagesAfterAnchor). True-new stable messages/blocks enqueue
           // full-state upserts with membership; existing rows enqueue allowlisted
           // field diffs only with membership preserved (never backfilled);
-          // transient/unsupported emit nothing.
+          // transient/unsupported emit nothing. Deferred portable media skips immediate block enqueue.
           if (ctx) {
             let tsOffset = 0
             const nextTs = (): number => ctx.ts + tsOffset++
@@ -9217,7 +9831,14 @@ export class ChatDbAggregateService {
                 const full = this.syncMessagePayloadFull(postRow.data)
                 delete full.sortOrder
                 const opId = syncService.enqueueUpsertInTx(stx, 'message', mid, full, opTs, ctx.deviceId)
-                syncService.setMembershipClockInTx(stx, 'message', mid, postRow.data.topicId, opTs, opId)
+                syncService.setMembershipClockInTx(
+                  stx,
+                  'message',
+                  mid,
+                  this.syncMembershipParentForMessage(postRow.data),
+                  opTs,
+                  opId
+                )
                 syncNotify = true
               } else {
                 const diff = this.diffMessagePayload(pre, postRow.data)
@@ -9245,6 +9866,7 @@ export class ChatDbAggregateService {
             for (const bid of distinctBids) {
               const postBlk = repos.blocks.getById(bid)
               if (!postBlk.found) throw new Error(`pasteMessagesToTopic block ${bid} missing in transaction`)
+              if (pasteDeferred.has(bid)) continue
               // Blocks under a transient parent never ride the wire: skip
               // without closure (closure would fail closed). The per-parent
               // frame decision below invalidates the transient parent.
@@ -9293,15 +9915,17 @@ export class ChatDbAggregateService {
                 }
               }
             } else if (hasNewInclusion) {
-              if (syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, topicId, ctx.deviceId) === 'refreshed') {
+              if (this.tryRefreshOwnerFrameAndEnqueueInTx(stx, topicId, route, ctx.deviceId) === 'refreshed') {
                 syncNotify = true
               }
             }
             // Per-parent block frames: newly included parents (even empty) plus
             // any true-create or inclusion-transition block change.
+            // Portable media awaiting drain is not included for frame until fulfilled.
             const affectedParents = new Set<string>()
             for (const mid of distinctMids) affectedParents.add(mid)
             for (const bid of distinctBids) {
+              if (pasteDeferred.has(bid)) continue
               const pre = preBlockRows.get(bid)
               const postBlk = repos.blocks.getById(bid)
               if (pre) affectedParents.add(pre.messageId)
@@ -9322,6 +9946,7 @@ export class ChatDbAggregateService {
               let needsBlockFrame = isNewlyIncludedParent
               if (!needsBlockFrame) {
                 for (const bid of distinctBids) {
+                  if (pasteDeferred.has(bid)) continue
                   const bPre = preBlockRows.get(bid)
                   const bPost = repos.blocks.getById(bid)
                   if (!bPost.found) continue
@@ -9333,8 +9958,12 @@ export class ChatDbAggregateService {
                   }
                   // Only blocks that belong to this parent transitionally.
                   if (bPre.messageId !== mid && bPost.data.messageId !== mid) continue
-                  const preIncluded = isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre)
-                  const postIncluded = isStableBlockStatus(bPost.data.status) && !this.isUnsupportedBlock(bPost.data)
+                  const preIncluded =
+                    isStableBlockStatus(bPre.status) && !this.isUnsupportedBlock(bPre) && !pasteDeferred.has(bid)
+                  const postIncluded =
+                    isStableBlockStatus(bPost.data.status) &&
+                    !this.isUnsupportedBlock(bPost.data) &&
+                    !pasteDeferred.has(bid)
                   if (bPre.messageId !== bPost.data.messageId) {
                     needsBlockFrame = true
                     break

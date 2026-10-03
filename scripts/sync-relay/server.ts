@@ -9,14 +9,17 @@
  */
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
+import type { Socket as NetSocket } from 'node:net'
 import { isIP } from 'node:net'
-import { dirname, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { createSecureContext } from 'node:tls'
 
+import { defaultRelayBlobDirForDbPath, handleAttachmentRequest } from './attachmentResource'
 import { formatRelayHostForUrl, normalizeRelayBindHost } from './relayHost'
 
 export { formatRelayHostForUrl, normalizeRelayBindHost } from './relayHost'
@@ -26,7 +29,8 @@ import Database from 'better-sqlite3'
 import {
   canonicalizePayload as canonicalizeBaselinePayloadShared,
   parseEnvelopeJson as parseBaselineEnvelopeJsonShared,
-  verifyEnvelopeDigest as verifyBaselineEnvelopeDigestShared
+  verifyEnvelopeDigest as verifyBaselineEnvelopeDigestShared,
+  WIRE_VERSION_RANK as WIRE_VERSION_RANK_SHARED
 } from '../../packages/shared/sync/baselineWire'
 import {
   normalizePairingCode as normalizePairingCodeShared,
@@ -57,6 +61,19 @@ export interface RelayOptions {
   token?: string
   /** If set, the relay terminates native TLS with this cert/key pair. */
   tls?: { cert: string | Buffer; key: string | Buffer }
+  /**
+   * Operator-owned relay attachment blob dir override (tests/diagnostics).
+   * Default derives from the file-DB adjacent namespace
+   * (`defaultRelayBlobDirForDbPath`); `:memory:` DBs use an owned disposable
+   * tmp dir with close-cleanup ownership. Normal close retains file-DB blob
+   * data (never deleted); only the owned disposable tmp is removed on close.
+   */
+  blobDir?: string
+  /**
+   * Technical per-attachment stream safety ceiling (positive safe int).
+   * Implementation bound with truthful 413 refusal, NOT a product cap.
+   */
+  maxAttachmentBytes?: number
 }
 
 export const RELAY_LOOPBACK_HOSTS = ['127.0.0.1', 'localhost'] as const
@@ -1204,6 +1221,34 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     ;(heartbeat as unknown as { unref?: () => void }).unref?.()
   } catch {}
 
+  // Operator-owned relay attachment blob dir (this unit only): explicit
+  // override wins; otherwise a file DB derives its adjacent namespace and a
+  // `:memory:` DB gets an owned disposable tmp dir (close-cleanup ownership).
+  // Best-effort ensure at startup; per-request ensure covers the rest. Normal
+  // close retains file-DB blob data; only the owned disposable tmp is removed.
+  let attachmentBlobDir: string
+  let attachmentOwnedDisposable = false
+  if (typeof opts?.blobDir === 'string' && opts.blobDir.length > 0) {
+    attachmentBlobDir = resolve(opts.blobDir)
+  } else {
+    const dbName: unknown = (db as unknown as { name?: unknown })?.name
+    if (typeof dbName === 'string' && dbName.length > 0 && dbName !== ':memory:') {
+      attachmentBlobDir = defaultRelayBlobDirForDbPath(resolve(dbName))
+    } else {
+      attachmentBlobDir = mkdtempSync(join(tmpdir(), 'sync-relay-attachments-'))
+      attachmentOwnedDisposable = true
+    }
+  }
+  try {
+    mkdirSync(attachmentBlobDir, { recursive: true })
+  } catch {}
+  const attachmentMaxBytes =
+    typeof opts?.maxAttachmentBytes === 'number' &&
+    Number.isSafeInteger(opts.maxAttachmentBytes) &&
+    opts.maxAttachmentBytes > 0
+      ? opts.maxAttachmentBytes
+      : undefined
+
   const requestHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `http://${host}`)
@@ -1217,6 +1262,36 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
       res.writeHead(204)
       res.end()
       return
+    }
+
+    // ---- Per-channel attachment bytes (streaming operator-owned file store) ----
+    // Same existing Bearer + device + membership auth (401 first, then 403);
+    // no new capability, no plaintext credential logging, no TLS bypass.
+    if (url.pathname === '/sync/attachments' || url.pathname.startsWith('/sync/attachments/')) {
+      try {
+        const handled = await handleAttachmentRequest(req, res, {
+          blobDir: attachmentBlobDir,
+          isBearerAuthorized: (r) => !tokenRequired || checkAuth(r, expectedToken),
+          resolveCaller: (r) => {
+            const deviceCode = requireDeviceAuthOrThrow(db, r).deviceCode
+            let channel: string | null
+            try {
+              channel = getMembershipChannelOrThrow(db, deviceCode)
+            } catch {
+              throw { status: 500, error: 'store-unavailable' }
+            }
+            return { deviceCode, channelId: channel }
+          },
+          ...(attachmentMaxBytes !== undefined ? { maxAttachmentBytes: attachmentMaxBytes } : {})
+        })
+        if (handled) return
+      } catch {
+        if (!res.writableEnded && !res.destroyed) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'store-unavailable' }))
+        }
+        return
+      }
     }
 
     // ---- Channel-scoped sync data plane (SYNC-CC-016) ----
@@ -1604,15 +1679,17 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
         const txn = db.transaction(() => {
           const head = channelMaxSeqOrThrow(db, channelId)
           const current = getBaselineRowOrThrow(db, channelId)
-          // Baseline v2 transition lock first: once current is v2, any v1
-          // publish is 409 baseline-conflict independent of watermark (never
-          // downgrades, even when N would otherwise be above head).
-          if (
-            current &&
-            current.wire_version === 'sync-baseline-wire-v2' &&
-            envelope.wireVersion === 'sync-baseline-wire-v1'
-          ) {
-            throw { status: 409, error: 'baseline-conflict' }
+          // Regressive-wire rejection: once current is at rank R, any publish
+          // with a lower wire rank is 409 baseline-conflict independent of
+          // watermark (never downgrades, even when N would otherwise be above
+          // head). Covers v1<v2<v3<v4 and any future revision; unknown versions
+          // already fail closed at strict parse (400 invalid-envelope).
+          if (current) {
+            const currentRank = WIRE_VERSION_RANK_SHARED[current.wire_version] ?? 0
+            const incomingRank = WIRE_VERSION_RANK_SHARED[envelope.wireVersion] ?? 0
+            if (incomingRank !== 0 && currentRank !== 0 && incomingRank < currentRank) {
+              throw { status: 409, error: 'baseline-conflict' }
+            }
           }
           if (envelope.watermark > head) {
             throw { status: 400, error: 'watermark-above-head' }
@@ -2543,6 +2620,31 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
   const server = opts?.tls
     ? createHttpsServer({ cert: opts.tls.cert, key: opts.tls.key }, requestHandler)
     : createHttpServer(requestHandler)
+  // Malformed Content-Length never reaches the request handler (Node HTTP
+  // parser rejects it as `clientError` before routing). Reply truthfully with
+  // the attachment length contract so raw-socket probes see 400 JSON instead
+  // of an empty close.
+  server.on('clientError', (err: Error & { code?: string }, socket: NetSocket) => {
+    try {
+      void err
+      // Edge framing failure (invalid Content-Length never reaches routing).
+      // The attachment contract expects 400 `length-mismatch` JSON here.
+      const body = JSON.stringify({ error: 'length-mismatch' })
+      if (socket.writable) {
+        socket.end(
+          `HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`
+        )
+      } else {
+        try {
+          socket.destroy()
+        } catch {}
+      }
+    } catch {
+      try {
+        socket.destroy()
+      } catch {}
+    }
+  })
   server.on('close', () => {
     try {
       clearInterval(heartbeat)
@@ -2553,8 +2655,16 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
       } catch {}
     }
     sseClients.clear()
+    // Owned disposable tmp blob dir (only the `:memory:` path) is removed on
+    // close. File-DB blob data is retained — never deleted on close.
+    if (attachmentOwnedDisposable) {
+      try {
+        rmSync(attachmentBlobDir, { recursive: true, force: true })
+      } catch {}
+    }
   })
   ;(server as unknown as RelaySseIndex).__relaySseClients = sseClients
+  ;(server as unknown as { __relayBlobDir?: string }).__relayBlobDir = attachmentBlobDir
   return server
 }
 

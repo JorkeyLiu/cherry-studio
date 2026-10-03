@@ -22,7 +22,7 @@ import {
   canonicalizePayload as canonicalizeBaselinePayloadShared,
   parseEnvelopeJson as parseBaselineEnvelopeJsonShared,
   verifyEnvelopeDigest as verifyBaselineEnvelopeDigestShared,
-  WIRE_VERSION_V2 as BASELINE_WIRE_VERSION_V2
+  WIRE_VERSION_RANK as WIRE_VERSION_RANK_SHARED
 } from '../../../packages/shared/sync/baselineWire'
 import { normalizePairingCode, validatePairingCode } from '../../../packages/shared/sync/pairing'
 import { validateSyncOperationStrict } from '../../../packages/shared/sync/payloadFilter'
@@ -196,6 +196,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
   // Per-channel operation logs with contiguous per-channel sequences.
   const channelOps = new Map<string, StoredOperation[]>()
   const channelByOpId = new Map<string, Map<string, StoredOperation>>()
+  const channelBlobsMap = new Map<string, Map<string, Buffer>>()
   // Per-channel single current-effective baseline envelope (SYNC-CC-022
   // mirror of `sync_channel_baselines`): one current row per channel holding
   // watermark/digestScheme/digest/wireVersion plus the canonical payload and
@@ -1083,17 +1084,17 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       const ops = channelOps.get(channelId) ?? []
       const head = ops.length > 0 ? ops[ops.length - 1].seq : 0
       const current = channelBaselines.get(channelId) ?? null
-      // Baseline v2 transition lock first: once current is v2, any v1
-      // publish is 409 baseline-conflict independent of watermark (never
-      // downgrades, even when N would otherwise be above head).
-      if (
-        current &&
-        current.wireVersion === BASELINE_WIRE_VERSION_V2 &&
-        envelope.wireVersion !== BASELINE_WIRE_VERSION_V2
-      ) {
-        res.writeHead(409, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'baseline-conflict' }))
-        return
+      // Regressive-wire rejection: once current is at rank R, any publish
+      // with a lower wire rank is 409 independent of watermark (never downgrades).
+      // Covers v1<v2<v3<v4 and unknown versions (already 400 at parse).
+      if (current) {
+        const currentRank = WIRE_VERSION_RANK_SHARED[current.wireVersion] ?? 0
+        const incomingRank = WIRE_VERSION_RANK_SHARED[envelope.wireVersion] ?? 0
+        if (incomingRank !== 0 && currentRank !== 0 && incomingRank < currentRank) {
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'baseline-conflict' }))
+          return
+        }
       }
       if (envelope.watermark > head) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -1197,6 +1198,117 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       baselineGet200Counts.set(caller, (baselineGet200Counts.get(caller) ?? 0) + 1)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(row.envelopeJson)
+      return
+    }
+
+    // ---- Per-channel attachment bytes (in-memory, per-channel isolated) ----
+    if (url.pathname === '/sync/attachments' || url.pathname.startsWith('/sync/attachments/')) {
+      const ATTACHMENT_DIGEST_RE = /^[0-9a-f]{64}$/
+      const method = req.method ?? ''
+      // Auth precedence: Bearer 401 first
+      if (!checkAuth(req, token)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      const channel = memberships.get(caller) ?? null
+      if (!channel) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'pairing-required' }))
+        return
+      }
+      const prefix = '/sync/attachments/'
+      let digest = ''
+      if (url.pathname === '/sync/attachments' || url.pathname === '/sync/attachments/') {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid-digest' }))
+        return
+      }
+      if (!url.pathname.startsWith(prefix)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'not found' }))
+        return
+      }
+      const rest = url.pathname.slice(prefix.length)
+      if (rest.includes('/') || rest.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid-digest' }))
+        return
+      }
+      try {
+        digest = decodeURIComponent(rest)
+      } catch {
+        digest = rest
+      }
+      if (!ATTACHMENT_DIGEST_RE.test(digest)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid-digest' }))
+        return
+      }
+      const channelBlobs = (() => {
+        if (!channelBlobsMap.has(channel)) channelBlobsMap.set(channel, new Map())
+        return channelBlobsMap.get(channel) as Map<string, Buffer>
+      })()
+      if (method === 'PUT') {
+        const chunks: Buffer[] = []
+        let total = 0
+        const maxBytes = Number.MAX_SAFE_INTEGER
+        let tooLarge = false
+        try {
+          for await (const chunk of req) {
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array)
+            total += buf.length
+            if (total > maxBytes) tooLarge = true
+            if (!tooLarge) chunks.push(buf)
+          }
+        } catch {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'store-unavailable' }))
+          return
+        }
+        if (tooLarge) {
+          res.writeHead(413, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'attachment-too-large' }))
+          return
+        }
+        const body = Buffer.concat(chunks)
+        const computed = createHash('sha256').update(body).digest('hex')
+        if (computed !== digest) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'digest-mismatch' }))
+          return
+        }
+        const existing = channelBlobs.get(digest)
+        if (existing) {
+          if (!existing.equals(body)) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'store-unavailable' }))
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ digest, byteLength: body.length, deduplicated: true }))
+          return
+        }
+        channelBlobs.set(digest, Buffer.from(body))
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ digest, byteLength: body.length, deduplicated: false }))
+        return
+      }
+      if (method === 'GET') {
+        const blob = channelBlobs.get(digest)
+        if (!blob) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'attachment-not-found' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(blob.length) })
+        res.end(blob)
+        return
+      }
+      res.writeHead(405, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'method-not-allowed' }))
       return
     }
 

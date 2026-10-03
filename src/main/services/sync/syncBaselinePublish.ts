@@ -23,15 +23,15 @@ import { createHash } from 'node:crypto'
 import {
   DIGEST_SCHEME,
   type SyncEnvelopeAny,
-  type SyncEnvelopeV2,
+  type SyncEnvelopeV3,
   validateEnvelope,
   ValidationError,
   verifyEnvelopeDigest,
-  WIRE_VERSION_V2
+  WIRE_VERSION_V3
 } from '@shared/sync'
 
 import type { LocalSyncBaselineCandidate } from './syncBaseline'
-import { computeWirePayloadDigest, projectLocalBaselineToWirePayload } from './syncBaselineWireProjection'
+import { computeWirePayloadDigestV3, projectLocalBaselineToWirePayloadV3 } from './syncBaselineWireProjection'
 
 export class SyncBaselinePublishError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -76,6 +76,10 @@ export function assertBarrierSnapshotProof(
   if (candidate.pendingOutboxCount !== 0) {
     fail(`publish blocked: snapshot outbox not drained (${String(candidate.pendingOutboxCount)})`)
   }
+  const pendingAttachment = (candidate as unknown as { pendingAttachmentCount?: unknown }).pendingAttachmentCount
+  if (typeof pendingAttachment === 'number' && pendingAttachment !== 0) {
+    fail(`publish blocked: snapshot attachment not drained (${String(pendingAttachment)})`)
+  }
   const observedChannel = candidate.observedLocalChannelKey
   const observedCursor = candidate.observedLocalCursor
   if (observedChannel === null || observedChannel === undefined) {
@@ -108,7 +112,7 @@ export function buildPublishEnvelope(
   candidate: LocalSyncBaselineCandidate,
   channelId: string,
   watermarkN: number
-): { envelope: SyncEnvelopeV2; digest: string } {
+): { envelope: SyncEnvelopeV3; digest: string } {
   if (typeof channelId !== 'string' || channelId.length === 0) {
     fail('publish blocked: channel binding missing')
   }
@@ -118,26 +122,27 @@ export function buildPublishEnvelope(
   if (candidate.observedLocalChannelKey !== channelId || candidate.observedLocalCursor !== watermarkN) {
     fail('publish blocked: envelope must use the barrier snapshot proof (channel/N mismatch)')
   }
-  let payload: ReturnType<typeof projectLocalBaselineToWirePayload>
+  let payload: ReturnType<typeof projectLocalBaselineToWirePayloadV3>
   try {
-    payload = projectLocalBaselineToWirePayload(candidate)
+    payload = projectLocalBaselineToWirePayloadV3(candidate)
   } catch (e) {
     if (e instanceof Error && e.name === 'SyncBaselineWireProjectionError') {
       fail(`publish blocked: candidate not wire-projectable: ${e.message}`, e)
     }
     throw e instanceof Error ? e : new Error(String(e))
   }
-  const digest = computeWirePayloadDigest(payload)
+  const digest = computeWirePayloadDigestV3(payload)
   // Locked outer key order: wireVersion/channelId/watermark/digestScheme/digest/payload.
-  // Baseline v2 (SYNC-DATA-056): publish always emits sync-baseline-wire-v2.
+  // True-branch full sync: publish always emits sync-baseline-wire-v3.
+  // v1/v2-only peers fail closed on the unknown wire version (no downgrade).
   const envelope = {
-    wireVersion: WIRE_VERSION_V2,
+    wireVersion: WIRE_VERSION_V3,
     channelId,
     watermark: watermarkN,
     digestScheme: DIGEST_SCHEME,
     digest,
     payload
-  } as SyncEnvelopeV2
+  } as SyncEnvelopeV3
   // Keep the Any alias usable for transport signatures without reopening v1 publish.
   void (null as unknown as SyncEnvelopeAny)
   try {

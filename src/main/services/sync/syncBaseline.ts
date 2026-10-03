@@ -25,12 +25,14 @@ import { createHash } from 'node:crypto'
 import {
   applyTopicSyncDefaults,
   filterBlockPayload,
+  filterBranchPayload,
   filterMessagePayload,
   filterTopicPayload,
   isStableBlockStatus,
   isStableMessageStatus,
   isUnsupportedBlockForSync,
   SYNC_BLOCK_PATCH_FIELDS,
+  SYNC_BRANCH_PATCH_FIELDS,
   SYNC_MESSAGE_PATCH_FIELDS,
   SYNC_TOPIC_PATCH_FIELDS,
   validateSyncPayloadAllowlist
@@ -103,7 +105,7 @@ export interface LocalSyncBaselineParentMembershipClock {
 }
 
 export interface LocalSyncBaselineEntity {
-  entityType: 'topic' | 'message' | 'message_block'
+  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset'
   entityId: string
   /** Full allowlisted current state for the emitted entity (sortOrder excluded per SYNC-DATA-038). */
   payload: Record<string, unknown>
@@ -116,7 +118,7 @@ export interface LocalSyncBaselineEntity {
 }
 
 export interface LocalSyncBaselineTombstone {
-  entityType: 'topic' | 'message' | 'message_block'
+  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset'
   entityId: string
   timestamp: number
   operationId: string | null
@@ -132,7 +134,7 @@ export interface LocalSyncBaselineCompleteness {
 
 export interface LocalSyncBaselineOrderFrame {
   frameVersion: typeof LOCAL_ORDER_FRAME_VERSION
-  kind: 'topicMessage' | 'messageBlock'
+  kind: 'topicMessage' | 'messageBlock' | 'branchSuffix'
   parentId: string
   orderedChildIds: string[]
   frameClock: LocalSyncBaselineEntityClock
@@ -171,6 +173,13 @@ export interface LocalSyncBaselineReplacementRegister {
   activeBlockIds: string[]
 }
 
+export interface LocalSyncBaselineFileAsset {
+  entityId: string
+  payload: Record<string, unknown>
+  entityClock: LocalSyncBaselineEntityClock | null
+  fieldClocks: LocalSyncBaselineFieldClock[]
+}
+
 export interface LocalSyncBaselineCandidate {
   kind: string
   schemaVersion: string
@@ -190,6 +199,10 @@ export interface LocalSyncBaselineCandidate {
    * re-sorts to UTF-8 byte lex). Empty when no row exists or the table is absent.
    */
   replacementRegisters: LocalSyncBaselineReplacementRegister[]
+  /** File asset inventory in same snapshot (V5). Sorted lexical. */
+  fileAssets: LocalSyncBaselineFileAsset[]
+  /** Pending attachment intent/job counts truthful diagnostics */
+  pendingAttachmentCount: number
   /**
    * Provisional local watermark OBSERVATION (current channel key), not an
    * authoritative reserved watermark. Null when unbound.
@@ -210,13 +223,16 @@ export interface LocalSyncBaselineCandidate {
 const TOMBSTONE_TOPIC_PREFIX = 'tombstone:topic:'
 const TOMBSTONE_MESSAGE_PREFIX = 'tombstone:message:'
 const TOMBSTONE_BLOCK_PREFIX = 'tombstone:message_block:'
+const TOMBSTONE_BRANCH_PREFIX = 'tombstone:topic_branch:'
 const CURSOR_STATE_KEY = 'cursor'
 const CHANNEL_STATE_KEY = 'sync:channelKey'
 
 const ENTITY_TYPE_PRIORITY: Record<LocalSyncBaselineEntity['entityType'], number> = {
   topic: 0,
-  message: 1,
-  message_block: 2
+  topic_branch: 1,
+  file_asset: 2,
+  message: 3,
+  message_block: 4
 }
 
 // Field-clock allowlists: identity/immutable relation fields never clocked; sortOrder
@@ -224,7 +240,9 @@ const ENTITY_TYPE_PRIORITY: Record<LocalSyncBaselineEntity['entityType'], number
 const FIELD_CLOCK_ALLOW: Record<LocalSyncBaselineEntity['entityType'], ReadonlySet<string>> = {
   topic: new Set<string>(SYNC_TOPIC_PATCH_FIELDS as readonly string[]),
   message: new Set<string>(SYNC_MESSAGE_PATCH_FIELDS as readonly string[]),
-  message_block: new Set<string>(SYNC_BLOCK_PATCH_FIELDS as readonly string[])
+  message_block: new Set<string>(SYNC_BLOCK_PATCH_FIELDS as readonly string[]),
+  topic_branch: new Set<string>(SYNC_BRANCH_PATCH_FIELDS as readonly string[]),
+  file_asset: new Set<string>(['mimeType', 'originalName', 'createdAt'] as const as readonly string[])
 }
 
 /**
@@ -295,6 +313,8 @@ export function computeLocalSyncBaselineDigest(candidate: LocalSyncBaselineCandi
     tombstones: candidate.tombstones,
     orderFrames: candidate.orderFrames,
     replacementRegisters: (candidate as { replacementRegisters?: unknown }).replacementRegisters ?? [],
+    fileAssets: (candidate as { fileAssets?: unknown }).fileAssets ?? [],
+    pendingAttachmentCount: (candidate as { pendingAttachmentCount?: unknown }).pendingAttachmentCount ?? 0,
     observedLocalChannelKey: candidate.observedLocalChannelKey,
     observedLocalCursor: candidate.observedLocalCursor,
     observationBinding: candidate.observationBinding,
@@ -373,6 +393,7 @@ function buildTopicPayload(data: {
 function buildMessagePayload(data: {
   id: string
   topicId: string
+  branchId: string | null
   role: string | null
   content: string | null
   status: string | null
@@ -386,6 +407,9 @@ function buildMessagePayload(data: {
   const raw: Record<string, unknown> = {
     id: data.id,
     topicId: data.topicId,
+    // Immutable owner route (null = main). Never a synthetic composite key;
+    // membership parent binds branchId for branch rows, topicId for main.
+    branchId: data.branchId,
     role: data.role,
     content: data.content,
     status: data.status,
@@ -407,6 +431,31 @@ function buildMessagePayload(data: {
   return filtered
 }
 
+function buildBranchPayload(data: {
+  id: string
+  topicId: string
+  parentBranchId: string | null
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}): Record<string, unknown> {
+  const raw: Record<string, unknown> = {
+    id: data.id,
+    topicId: data.topicId,
+    parentBranchId: data.parentBranchId,
+    anchorMessageId: data.anchorMessageId,
+    name: data.name,
+    createdAt: data.createdAt,
+    updatedAt: data.updatedAt
+  }
+  const filtered = filterBranchPayload(raw)
+  if (!filtered) fail(`baseline branch payload filter rejected entity ${data.id}`)
+  const allowErr = validateSyncPayloadAllowlist({ entityType: 'topic_branch', payload: filtered })
+  if (allowErr) fail(`baseline branch payload not allowlisted for ${data.id}: ${allowErr}`)
+  return filtered
+}
+
 function buildBlockPayload(data: {
   id: string
   messageId: string
@@ -415,6 +464,7 @@ function buildBlockPayload(data: {
   status: string | null
   createdAt: string | null
   updatedAt: string | null
+  assetIds: string[]
 }): Record<string, unknown> {
   const raw: Record<string, unknown> = {
     id: data.id,
@@ -423,7 +473,8 @@ function buildBlockPayload(data: {
     content: data.content,
     status: data.status,
     createdAt: data.createdAt,
-    updatedAt: data.updatedAt
+    updatedAt: data.updatedAt,
+    assetIds: [...data.assetIds]
   }
   const filtered = filterBlockPayload(raw)
   if (!filtered) fail(`baseline block payload filter rejected entity ${data.id}`)
@@ -433,6 +484,29 @@ function buildBlockPayload(data: {
     fail(`baseline block payload must not contain sortOrder for ${data.id}`)
   }
   return filtered
+}
+
+function buildFileAssetPayload(data: {
+  id: string
+  sha256: string
+  byteLength: number
+  extension: string
+  mimeType: string
+  originalName: string
+  createdAt: string
+}): Record<string, unknown> {
+  const raw: Record<string, unknown> = {
+    id: data.id,
+    sha256: data.sha256,
+    byteLength: data.byteLength,
+    extension: data.extension,
+    mimeType: data.mimeType,
+    originalName: data.originalName,
+    createdAt: data.createdAt
+  }
+  // FileAsset payload is strictly validated via attachments validator outside;
+  // here we just ensure allowlist shape (no extra keys) via filtered check later.
+  return raw
 }
 
 function decodeOverflow(extra: string | null, table: string, id: string): Record<string, unknown> {
@@ -457,15 +531,27 @@ export function captureLocalSyncBaselineCandidate(db: BaselineTx): LocalSyncBase
   return db.transaction((tx) => buildBaselineCandidate(tx as BaselineTx))
 }
 
+/**
+ * Caller-owned transaction helper: build the candidate from an already-opened
+ * transaction. The caller holds the single consistent SQLite snapshot covering
+ * chat + binding + cursor + outbox + frames + replacement registers. Pure
+ * outside the Tx is done by the caller (wire projection). Exposed for
+ * publishBaseline V4 atomics and for future V5 attachment sections (same style:
+ * V5 will add its own reader in the same Tx). Legacy wrapper above stays.
+ */
+export function buildBaselineCandidateInTx(tx: BaselineTx): LocalSyncBaselineCandidate {
+  return buildBaselineCandidate(tx)
+}
+
 function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   // Materialize every input inside the single read transaction.
   const topicRows = tx.select().from(schema.topics).all()
-  let messageRows = tx.select().from(schema.messages).all()
-  let blockRows = tx.select().from(schema.messageBlocks).all()
-  let syncStateRows = tx.select().from(schema.syncState).all()
-  let entityClockRows = tx.select().from(schema.syncEntityClock).all()
-  let fieldClockRows = tx.select().from(schema.syncFieldClock).all()
-  let membershipRows = tx.select().from(schema.syncMembershipClock).all()
+  const messageRows = tx.select().from(schema.messages).all()
+  const blockRows = tx.select().from(schema.messageBlocks).all()
+  const syncStateRows = tx.select().from(schema.syncState).all()
+  const entityClockRows = tx.select().from(schema.syncEntityClock).all()
+  const fieldClockRows = tx.select().from(schema.syncFieldClock).all()
+  const membershipRows = tx.select().from(schema.syncMembershipClock).all()
   // Frame snapshot in same read transaction
   let frameRows: (typeof schema.syncParentOrderFrame.$inferSelect)[] = []
   try {
@@ -554,112 +640,149 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   }
   const pendingOutboxCount = tx.select({ id: schema.syncOutbox.id }).from(schema.syncOutbox).all().length
 
-  // Topic-internal branches are local-only (never wire, never digest):
-  // exclude branch-owned messages/blocks (messages.branch_id NOT NULL) and
-  // every associated clock, frame, tombstone, and register from this
-  // candidate within existing local boundaries — no wire contract change.
-  // Topics (always logical) and main-route rows, clocks, and frames are
-  // unaffected. Exclusion is deterministic (same DB → same candidate) and
-  // out-of-domain like segments/attachments, so it carries no partial
-  // counter. Unknown ownership (pre-016 rows without the column) stays
-  // syncable — only proven branch ownership excludes.
-  {
-    const branchMessageIds = new Set<string>()
-    for (const row of messageRows) {
-      const branchId = (row as { branchId?: unknown }).branchId
-      if (typeof row.id === 'string' && typeof branchId === 'string' && branchId.length > 0) {
-        branchMessageIds.add(row.id)
-      }
+  // True-branch full sync (baseline wire v3): branch-owned messages/blocks
+  // are inventory members (message carries immutable branchId owner;
+  // membership binds branchId for branch rows, topicId for main rows).
+  // Proven branch ownership is resolved here for child stripping and block
+  // owner inheritance below. Unknown ownership (pre-016 rows without the
+  // column) stays main-route so existing fail-closed validation applies.
+  let branchRows: Array<{
+    id: string
+    topicId: string
+    parentBranchId: string | null
+    anchorMessageId: string
+    name: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }> = []
+  try {
+    branchRows = tx
+      .select({
+        id: schema.topicBranches.id,
+        topicId: schema.topicBranches.topicId,
+        parentBranchId: schema.topicBranches.parentBranchId,
+        anchorMessageId: schema.topicBranches.anchorMessageId,
+        name: schema.topicBranches.name,
+        createdAt: schema.topicBranches.createdAt,
+        updatedAt: schema.topicBranches.updatedAt
+      })
+      .from(schema.topicBranches)
+      .all()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) {
+      branchRows = []
+    } else {
+      throw e
     }
-    if (branchMessageIds.size > 0) {
-      const messageBranchById = new Map<string, boolean>()
-      for (const row of messageRows) {
-        if (typeof row.id === 'string') {
-          const branchId = (row as { branchId?: unknown }).branchId
-          messageBranchById.set(row.id, typeof branchId === 'string' && branchId.length > 0)
-        }
+  }
+  const branchMessageIds = new Set<string>()
+  const messageBranchById = new Map<string, boolean>()
+  for (const row of messageRows) {
+    if (typeof row.id !== 'string') continue
+    const branchId = (row as { branchId?: unknown }).branchId
+    const owned = typeof branchId === 'string' && branchId.length > 0
+    messageBranchById.set(row.id, owned)
+    if (owned) branchMessageIds.add(row.id)
+  }
+  const messageOwnerBranchById = new Map<string, string | null>()
+  for (const row of messageRows) {
+    if (typeof row.id !== 'string') continue
+    const branchId = (row as { branchId?: unknown }).branchId
+    messageOwnerBranchById.set(row.id, typeof branchId === 'string' && branchId.length > 0 ? branchId : null)
+  }
+  const localBranchIdSet = new Set<string>()
+  for (const b of branchRows) {
+    if (typeof b.id === 'string') localBranchIdSet.add(b.id)
+  }
+  // V5: file asset inventory in same snapshot (rows + fileReferences + pending capture/jobs)
+  let fileAssetRows: Array<{
+    id: string
+    sha256: string
+    byteLength: number
+    extension: string
+    mimeType: string
+    originalName: string
+    createdAt: string
+  }> = []
+  try {
+    fileAssetRows = tx
+      .select({
+        id: schema.syncFileAsset.id,
+        sha256: schema.syncFileAsset.sha256,
+        byteLength: schema.syncFileAsset.byteLength,
+        extension: schema.syncFileAsset.extension,
+        mimeType: schema.syncFileAsset.mimeType,
+        originalName: schema.syncFileAsset.originalName,
+        createdAt: schema.syncFileAsset.createdAt
+      })
+      .from(schema.syncFileAsset)
+      .all() as typeof fileAssetRows
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) fileAssetRows = []
+    else throw e
+  }
+  let fileReferenceRows: Array<{ blockId: string; fileId: string }> = []
+  try {
+    fileReferenceRows = tx
+      .select({ blockId: schema.fileReferences.blockId, fileId: schema.fileReferences.fileId })
+      .from(schema.fileReferences)
+      .all() as typeof fileReferenceRows
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) fileReferenceRows = []
+    else throw e
+  }
+  const fileRefsByBlock = new Map<string, string[]>()
+  for (const r of fileReferenceRows) {
+    const list = fileRefsByBlock.get(r.blockId) ?? []
+    list.push(r.fileId)
+    fileRefsByBlock.set(r.blockId, list)
+  }
+  for (const [k, v] of fileRefsByBlock) {
+    const uniq = [...new Set(v)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    fileRefsByBlock.set(k, uniq)
+  }
+  let captureIntentRows: Array<{ blockId: string; fileId: string }> = []
+  try {
+    captureIntentRows = tx.select().from(schema.syncAttachmentCaptureIntent).all() as typeof captureIntentRows
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) captureIntentRows = []
+    else throw e
+  }
+  let attachmentJobRows: Array<{ assetId: string; state: string }> = []
+  try {
+    attachmentJobRows = tx.select().from(schema.syncAttachmentJob).all() as unknown as typeof attachmentJobRows
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(msg)) attachmentJobRows = []
+    else throw e
+  }
+  const pendingAttachmentIntentCount = captureIntentRows.length
+  const pendingAttachmentJobCount = attachmentJobRows.filter((j) => j.state !== 'completed').length
+  const pendingAttachmentCount = pendingAttachmentIntentCount + pendingAttachmentJobCount
+  if (branchMessageIds.size > 0) {
+    const isBranchMessage = (id: string): boolean => messageBranchById.get(id) ?? false
+    // Strip branch-owned children from stored topicMessage frames so a
+    // stale frame can never place branch rows in main order: topicMessage
+    // frames are main-owned only (branchSuffix carries owned suffixes).
+    frameRows = frameRows.map((row) => {
+      if ((row as { kind?: unknown }).kind !== 'topicMessage') return row
+      const raw = (row as unknown as { orderedChildIdsJson?: unknown }).orderedChildIdsJson
+      if (typeof raw !== 'string') return row
+      let ids: unknown
+      try {
+        ids = JSON.parse(raw)
+      } catch {
+        return row
       }
-      const blockBranchById = new Map<string, boolean>()
-      for (const row of blockRows) {
-        if (typeof row.id === 'string' && typeof row.messageId === 'string') {
-          blockBranchById.set(row.id, messageBranchById.get(row.messageId) ?? false)
-        }
-      }
-      const isBranchMessage = (id: string): boolean => messageBranchById.get(id) ?? false
-      const isBranchBlock = (id: string): boolean => blockBranchById.get(id) ?? false
-      messageRows = messageRows.filter((row) => !isBranchMessage(row.id))
-      blockRows = blockRows.filter((row) => {
-        const parentBranch =
-          typeof (row as { messageId?: unknown }).messageId === 'string'
-            ? messageBranchById.get((row as { messageId: string }).messageId)
-            : undefined
-        return parentBranch === undefined || !parentBranch
-      })
-      syncStateRows = syncStateRows.filter((row) => {
-        const key = (row as { key?: unknown }).key
-        if (typeof key !== 'string' || !key.startsWith('tombstone:')) return true
-        if (key.startsWith(TOMBSTONE_TOPIC_PREFIX)) return true
-        if (key.startsWith(TOMBSTONE_MESSAGE_PREFIX)) {
-          return !isBranchMessage(key.slice(TOMBSTONE_MESSAGE_PREFIX.length))
-        }
-        if (key.startsWith(TOMBSTONE_BLOCK_PREFIX)) {
-          return !isBranchBlock(key.slice(TOMBSTONE_BLOCK_PREFIX.length))
-        }
-        return true
-      })
-      entityClockRows = entityClockRows.filter((row) => {
-        const t = (row as { entityType?: unknown; entityId?: unknown }).entityType
-        const id = (row as { entityId?: unknown }).entityId
-        if (typeof id !== 'string') return true
-        if (t === 'message') return !isBranchMessage(id)
-        if (t === 'message_block') return !isBranchBlock(id)
-        return true
-      })
-      fieldClockRows = fieldClockRows.filter((row) => {
-        const t = (row as { entityType?: unknown }).entityType
-        const id = (row as { entityId?: unknown }).entityId
-        if (typeof id !== 'string') return true
-        if (t === 'message') return !isBranchMessage(id)
-        if (t === 'message_block') return !isBranchBlock(id)
-        return true
-      })
-      membershipRows = membershipRows.filter((row) => {
-        const t = (row as { childEntityType?: unknown }).childEntityType
-        const id = (row as { childEntityId?: unknown }).childEntityId
-        if (typeof id !== 'string') return true
-        if (t === 'message') return !isBranchMessage(id)
-        if (t === 'message_block') return !isBranchBlock(id)
-        return true
-      })
-      frameRows = frameRows.filter((row) => {
-        const kind = (row as { kind?: unknown }).kind
-        const parentId = (row as { parentId?: unknown }).parentId
-        if (typeof parentId !== 'string') return true
-        if (kind === 'topicMessage') return true
-        if (kind === 'messageBlock') {
-          return !isBranchMessage(parentId)
-        }
-        return true
-      })
-      // Strip branch-owned children from surviving topicMessage frames so a
-      // stale frame can never reference excluded inventory.
-      frameRows = frameRows.map((row) => {
-        if ((row as { kind?: unknown }).kind !== 'topicMessage') return row
-        const raw = (row as unknown as { orderedChildIdsJson?: unknown }).orderedChildIdsJson
-        if (typeof raw !== 'string') return row
-        let ids: unknown
-        try {
-          ids = JSON.parse(raw)
-        } catch {
-          return row
-        }
-        if (!Array.isArray(ids)) return row
-        const stripped = ids.filter((id) => typeof id !== 'string' || !isBranchMessage(id))
-        if (stripped.length === ids.length) return row
-        return { ...row, orderedChildIdsJson: JSON.stringify(stripped) }
-      })
-      replacementRegisters = replacementRegisters.filter((reg) => !isBranchMessage(reg.messageId))
-    }
+      if (!Array.isArray(ids)) return row
+      const stripped = ids.filter((id) => typeof id !== 'string' || !isBranchMessage(id))
+      if (stripped.length === ids.length) return row
+      return { ...row, orderedChildIdsJson: JSON.stringify(stripped) }
+    })
   }
 
   const entityClockByKey = new Map<string, LocalSyncBaselineEntityClock>()
@@ -785,13 +908,20 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   }
 
   // Messages: stable checkpoints only; never emit a child whose parent topic
-  // was not emitted (no placeholders).
+  // was not emitted (no placeholders). Branch-owned rows are inventory
+  // members with branchId owner (membership binds the branch id).
   let excludedTransientMessages = 0
   let orphanSuppressed = 0
   const emittedMessageIds = new Set<string>()
   const nonEmittedMessageByTopic = new Map<string, number>()
   const registerNonEmittedMessage = (topicId: string): void => {
     nonEmittedMessageByTopic.set(topicId, (nonEmittedMessageByTopic.get(topicId) ?? 0) + 1)
+  }
+  // Non-emitted branch-owned messages count toward their owning branch (not
+  // the topic): topicMessage frames are main-owned only.
+  const nonEmittedSuffixByBranch = new Map<string, number>()
+  const registerNonEmittedSuffixMessage = (branchId: string): void => {
+    nonEmittedSuffixByBranch.set(branchId, (nonEmittedSuffixByBranch.get(branchId) ?? 0) + 1)
   }
   // Track which messageIds are transient/excluded for frame orphan handling
   const transientMessageIds = new Set<string>()
@@ -805,21 +935,31 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     }
     const overflow = decodeOverflow(row.extra, 'messages', row.id)
     void overflow
+    const rowOwnerBranch = messageOwnerBranchById.get(row.id) ?? null
     if (!isStableMessageStatus(row.status)) {
       excludedTransientMessages += 1
       transientMessageIds.add(row.id)
-      registerNonEmittedMessage(row.topicId)
+      if (rowOwnerBranch !== null) registerNonEmittedSuffixMessage(rowOwnerBranch)
+      else registerNonEmittedMessage(row.topicId)
       continue
     }
     if (!emittedTopicIds.has(row.topicId)) {
       orphanSuppressed += 1
       orphanMessageIds.add(row.id)
-      registerNonEmittedMessage(row.topicId)
+      if (rowOwnerBranch !== null) registerNonEmittedSuffixMessage(rowOwnerBranch)
+      else registerNonEmittedMessage(row.topicId)
       continue
+    }
+    // Owner branch must exist locally (FK-equivalent fail-closed): a branch
+    // message without its branch row is corrupt and never emits a dangling
+    // owner.
+    if (rowOwnerBranch !== null && !localBranchIdSet.has(rowOwnerBranch)) {
+      fail(`baseline orphan message ${row.id} branch ${rowOwnerBranch} missing`)
     }
     const payload = buildMessagePayload({
       id: row.id,
       topicId: row.topicId,
+      branchId: messageOwnerBranchById.get(row.id) ?? null,
       role: row.role,
       content: row.content,
       status: row.status,
@@ -832,9 +972,12 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     })
     const key = `message:${row.id}`
     const membership = membershipByKey.get(key)
-    if (membership && membership.parentId !== row.topicId) {
+    // Membership binds the owner: branch id for branch-owned rows, topic id
+    // for main-route rows. topicId stays the immutable logical topic.
+    const expectedMembershipParent = messageOwnerBranchById.get(row.id) ?? row.topicId
+    if (membership && membership.parentId !== expectedMembershipParent) {
       fail(
-        `baseline membership parent mismatch for message/${row.id}: membership parent ${membership.parentId} vs actual ${row.topicId}`
+        `baseline membership parent mismatch for message/${row.id}: membership parent ${membership.parentId} vs actual ${expectedMembershipParent}`
       )
     }
     const parentMembershipClock = membership
@@ -889,6 +1032,16 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       registerNonEmittedBlock(row.messageId)
       continue
     }
+    const typeCanon = typeof row.type === 'string' ? row.type.trim().toLowerCase() : ''
+    const isMedia = typeCanon === 'file' || typeCanon === 'image' || typeCanon === 'video'
+    const assetIds = isMedia ? (fileRefsByBlock.get(row.id) ?? []) : []
+    // V5: media blocks must carry non-empty assetIds
+    if (isMedia && assetIds.length === 0) {
+      excludedUnsupportedBlocks += 1
+      unsupportedBlockIds.add(row.id)
+      registerNonEmittedBlock(row.messageId)
+      continue
+    }
     const payload = buildBlockPayload({
       id: row.id,
       messageId: row.messageId,
@@ -896,7 +1049,8 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       content: row.content,
       status: row.status,
       createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      updatedAt: row.updatedAt,
+      assetIds
     })
     const key = `message_block:${row.id}`
     const membership = membershipByKey.get(key)
@@ -918,6 +1072,96 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     })
   }
 
+  // Branches: every branch row is inventory (identity + mutable state).
+  // Anchor liveness is NOT a capture gate (BRANCH-5 keeps metadata while
+  // the route resolves fail-closed); malformed ids fail closed below.
+  const emittedBranchIds = new Set<string>()
+  const branchById = new Map<string, (typeof branchRows)[number]>()
+  for (const row of branchRows) {
+    try {
+      validateOrdinaryIdStrict(row.id, `branch/${String(row.id)}`)
+      validateOrdinaryIdStrict(row.topicId, `branch/${String(row.id)} topicId`)
+      if (row.parentBranchId !== null) {
+        validateOrdinaryIdStrict(row.parentBranchId, `branch/${String(row.id)} parentBranchId`)
+      }
+      validateOrdinaryIdStrict(row.anchorMessageId, `branch/${String(row.id)} anchorMessageId`)
+    } catch (e) {
+      fail(`baseline malformed branch id for ${String(row.id)}: ${e instanceof Error ? e.message : String(e)}`, e)
+    }
+    if (branchById.has(row.id)) fail(`baseline duplicate branch ${String(row.id)}`)
+    branchById.set(row.id, row)
+    if (!emittedTopicIds.has(row.topicId)) {
+      orphanSuppressed += 1
+      continue
+    }
+    const payload = buildBranchPayload({
+      id: row.id,
+      topicId: row.topicId,
+      parentBranchId: row.parentBranchId,
+      anchorMessageId: row.anchorMessageId,
+      name: row.name,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    })
+    const key = `topic_branch:${row.id}`
+    entities.push({
+      entityType: 'topic_branch',
+      entityId: row.id,
+      payload,
+      entityClock: entityClockByKey.get(key) ?? null,
+      fieldClocks: (fieldClocksByKey.get(key) ?? []).slice().sort((a, b) => compareLexical(a.field, b.field))
+    })
+    emittedBranchIds.add(row.id)
+  }
+
+  // File assets: every sync_file_asset row is inventory (immutable id/sha/size/ext + mutable fields)
+  const fileAssets: LocalSyncBaselineFileAsset[] = []
+  const emittedFileAssetIds = new Set<string>()
+  for (const row of fileAssetRows) {
+    try {
+      validateOrdinaryIdStrict(row.id, `file_asset/${String(row.id)}`)
+    } catch (e) {
+      fail(`baseline malformed file asset id for ${String(row.id)}: ${e instanceof Error ? e.message : String(e)}`, e)
+    }
+    if (typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256)) {
+      fail(`baseline malformed file asset sha256 for ${String(row.id)}`)
+    }
+    if (typeof row.byteLength !== 'number' || !Number.isSafeInteger(row.byteLength) || row.byteLength < 0) {
+      fail(`baseline malformed file asset byteLength for ${String(row.id)}`)
+    }
+    if (typeof row.extension !== 'string' || !/^\.[a-z0-9]+$/.test(row.extension)) {
+      fail(`baseline malformed file asset extension for ${String(row.id)}`)
+    }
+    if (typeof row.mimeType !== 'string' || row.mimeType.length === 0) {
+      fail(`baseline malformed file asset mimeType for ${String(row.id)}`)
+    }
+    if (typeof row.originalName !== 'string' || row.originalName.length === 0) {
+      fail(`baseline malformed file asset originalName for ${String(row.id)}`)
+    }
+    if (typeof row.createdAt !== 'string' || !Number.isFinite(Date.parse(row.createdAt))) {
+      fail(`baseline malformed file asset createdAt for ${String(row.id)}`)
+    }
+    const payload = buildFileAssetPayload({
+      id: row.id,
+      sha256: row.sha256,
+      byteLength: row.byteLength,
+      extension: row.extension,
+      mimeType: row.mimeType,
+      originalName: row.originalName,
+      createdAt: row.createdAt
+    })
+    const key = `file_asset:${row.id}`
+    fileAssets.push({
+      entityId: row.id,
+      payload,
+      entityClock: entityClockByKey.get(key) ?? null,
+      fieldClocks: (fieldClocksByKey.get(key) ?? []).slice().sort((a, b) => compareLexical(a.field, b.field))
+    })
+    emittedFileAssetIds.add(row.id)
+  }
+
+  fileAssets.sort((a, b) => compareLexical(a.entityId, b.entityId))
+
   entities.sort((a, b) => {
     const priority = ENTITY_TYPE_PRIORITY[a.entityType] - ENTITY_TYPE_PRIORITY[b.entityType]
     if (priority !== 0) return priority
@@ -935,12 +1179,18 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     if (key.startsWith(TOMBSTONE_TOPIC_PREFIX)) {
       entityType = 'topic'
       entityId = key.slice(TOMBSTONE_TOPIC_PREFIX.length)
+    } else if (key.startsWith(TOMBSTONE_BRANCH_PREFIX)) {
+      entityType = 'topic_branch'
+      entityId = key.slice(TOMBSTONE_BRANCH_PREFIX.length)
     } else if (key.startsWith(TOMBSTONE_BLOCK_PREFIX)) {
       entityType = 'message_block'
       entityId = key.slice(TOMBSTONE_BLOCK_PREFIX.length)
     } else if (key.startsWith(TOMBSTONE_MESSAGE_PREFIX)) {
       entityType = 'message'
       entityId = key.slice(TOMBSTONE_MESSAGE_PREFIX.length)
+    } else if (key.startsWith('tombstone:file_asset:')) {
+      entityType = 'file_asset'
+      entityId = key.slice('tombstone:file_asset:'.length)
     } else {
       fail(`baseline malformed tombstone key ${JSON.stringify(key).slice(0, 80)}`)
     }
@@ -1006,7 +1256,8 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
       if (childType === 'message') {
         const row = messageById.get(childId)
         if (row) {
-          businessRow = { parentId: row.topicId }
+          const owner = messageOwnerBranchById.get(childId) ?? row.topicId
+          businessRow = { parentId: owner }
           if (!isStableMessageStatus(row.status)) isExcludedTransientOrUnsupported = true
           else if (!emittedTopicIds.has(row.topicId)) isExcludedTransientOrUnsupported = true
         }
@@ -1079,20 +1330,39 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   for (const r of messageRows) messageByIdAll.set(r.id, r)
   const blockByIdAll = new Map<string, (typeof blockRows)[number]>()
   for (const r of blockRows) blockByIdAll.set(r.id, r)
-  // Live children maps for frame evaluation
+  const branchIdSetAll = new Set<string>()
+  for (const r of branchRows) {
+    if (typeof r.id === 'string') branchIdSetAll.add(r.id)
+  }
+  const branchByIdAllHas = (id: string): boolean => branchIdSetAll.has(id)
+  // Live children maps for frame evaluation.
+  // topicMessage frames are main-owned only: only branchId-null messages
+  // join the per-topic map. Branch-owned messages join the per-branch
+  // suffix map keyed by their owning branch id.
   const messagesByTopic = new Map<string, Map<string, { timestamp: number; operationId: string }>>()
+  const suffixByBranch = new Map<string, Map<string, { timestamp: number; operationId: string }>>()
   for (const e of entities) {
     if (e.entityType === 'message') {
       if (suppressedLiveForFrame.has(`message:${e.entityId}`)) continue
-      const topicId = e.payload.topicId as string
       const pm = e.parentMembershipClock as { timestamp: number; operationId: string } | null | undefined
       if (!pm) continue // unversioned, but still need map for evaluation? We'll keep map only for versioned; unversioned will be handled via counts
-      let m = messagesByTopic.get(topicId)
-      if (!m) {
-        m = new Map()
-        messagesByTopic.set(topicId, m)
+      const ownerBranch = (e.payload.branchId as string | null | undefined) ?? null
+      if (ownerBranch !== null) {
+        let m = suffixByBranch.get(ownerBranch)
+        if (!m) {
+          m = new Map()
+          suffixByBranch.set(ownerBranch, m)
+        }
+        m.set(e.entityId, { timestamp: pm.timestamp, operationId: pm.operationId })
+      } else {
+        const topicId = e.payload.topicId as string
+        let m = messagesByTopic.get(topicId)
+        if (!m) {
+          m = new Map()
+          messagesByTopic.set(topicId, m)
+        }
+        m.set(e.entityId, { timestamp: pm.timestamp, operationId: pm.operationId })
       }
-      m.set(e.entityId, { timestamp: pm.timestamp, operationId: pm.operationId })
     }
   }
   const blocksByMessage = new Map<string, Map<string, { timestamp: number; operationId: string }>>()
@@ -1125,7 +1395,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   >()
   for (const row of frameRows) {
     let validated: {
-      kind: 'topicMessage' | 'messageBlock'
+      kind: 'topicMessage' | 'messageBlock' | 'branchSuffix'
       parentId: string
       orderedChildIds: string[]
       timestamp: number
@@ -1165,41 +1435,59 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   // Kind-specific parent validation + retained/excluded/orphan handling
   const retainedOmittedFrames: typeof frameByKey = new Map()
   for (const [key, frame] of frameByKey) {
-    const kind = frame.kind as 'topicMessage' | 'messageBlock'
+    const kind = frame.kind as 'topicMessage' | 'messageBlock' | 'branchSuffix'
     const parentId = frame.parentId
     // Strict kind-specific parent existence check before tombstone logic
     const existsAsTopic = topicRows.some((r) => r.id === parentId)
     const existsAsMessage = messageByIdAll.has(parentId)
     const existsAsBlock = blockByIdAll.has(parentId)
+    const existsAsBranch = branchByIdAllHas(parentId)
     if (kind === 'topicMessage') {
-      if (existsAsMessage || existsAsBlock) {
+      if (existsAsMessage || existsAsBlock || existsAsBranch) {
         fail(
-          `baseline wrong-kind frame parent for topicMessage/${parentId}: known parent is ${existsAsMessage ? 'message' : 'message_block'}`
+          `baseline wrong-kind frame parent for topicMessage/${parentId}: known parent is ${existsAsMessage ? 'message' : existsAsBlock ? 'message_block' : 'branch'}`
+        )
+      }
+    } else if (kind === 'branchSuffix') {
+      if (existsAsTopic || existsAsMessage || existsAsBlock) {
+        fail(
+          `baseline wrong-kind frame parent for branchSuffix/${parentId}: known parent is ${existsAsTopic ? 'topic' : existsAsMessage ? 'message' : 'message_block'}`
         )
       }
     } else {
-      if (existsAsTopic || existsAsBlock) {
-        // messageBlock parent must be a message; block or topic is wrong kind
+      if (existsAsTopic || existsAsBlock || existsAsBranch) {
+        // messageBlock parent must be a message; block, topic, or branch is wrong kind
         if (existsAsTopic) fail(`baseline wrong-kind frame parent for messageBlock/${parentId}: known parent is topic`)
         if (existsAsBlock)
           fail(`baseline wrong-kind frame parent for messageBlock/${parentId}: known parent is message_block`)
+        if (existsAsBranch)
+          fail(`baseline wrong-kind frame parent for messageBlock/${parentId}: known parent is branch`)
       }
     }
     const isTopicParent = kind === 'topicMessage'
-    const isLiveRaw = isTopicParent ? emittedTopicIds.has(parentId) : emittedMessageIds.has(parentId)
+    const isBranchParent = kind === 'branchSuffix'
+    const isLiveRaw = isTopicParent
+      ? emittedTopicIds.has(parentId)
+      : isBranchParent
+        ? emittedBranchIds.has(parentId)
+        : emittedMessageIds.has(parentId)
     const isSuppressed = isTopicParent
       ? suppressedLiveForFrame.has(`topic:${parentId}`)
-      : suppressedLiveForFrame.has(`message:${parentId}`)
+      : isBranchParent
+        ? suppressedLiveForFrame.has(`topic_branch:${parentId}`)
+        : suppressedLiveForFrame.has(`message:${parentId}`)
     const isLiveEmitted = isLiveRaw && !isSuppressed
     if (isLiveEmitted) continue
     const hasTombstone = isTopicParent
       ? tombstoneKeysSet.has(`topic:${parentId}`)
-      : tombstoneKeysSet.has(`message:${parentId}`)
+      : isBranchParent
+        ? tombstoneKeysSet.has(`topic_branch:${parentId}`)
+        : tombstoneKeysSet.has(`message:${parentId}`)
     if (hasTombstone) {
       retainedOmittedFrames.set(key, frame)
       continue
     }
-    if (!isTopicParent) {
+    if (!isTopicParent && !isBranchParent) {
       const msgRow = messageByIdAll.get(parentId)
       if (msgRow) {
         if (transientMessageIds.has(parentId) || orphanMessageIds.has(parentId)) {
@@ -1208,15 +1496,17 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
         }
       }
     }
-    if (!existsAsTopic && !existsAsMessage && !existsAsBlock) {
+    if (!existsAsTopic && !existsAsMessage && !existsAsBlock && !existsAsBranch) {
       fail(`baseline orphan frame for ${kind}/${parentId} with no business row or tombstone`)
     }
     // Current non-emitted transient/excluded parent frames may be omitted under truthful existing diagnostics
-    if (existsAsTopic || existsAsMessage) {
+    if (existsAsTopic || existsAsMessage || existsAsBranch) {
       // If parent exists but is not emitted and not tombstoned, it must be an excluded transient/unsupported/orphan-suppressed parent already counted in diagnostics; omit truthfully
       const isExcluded = isTopicParent
         ? false
-        : transientMessageIds.has(parentId) || orphanMessageIds.has(parentId) || unsupportedBlockIds.has(parentId)
+        : isBranchParent
+          ? orphanMessageIds.has(parentId)
+          : transientMessageIds.has(parentId) || orphanMessageIds.has(parentId) || unsupportedBlockIds.has(parentId)
       if (isExcluded || orphanMessageIds.has(parentId) || orphanBlockIds.has(parentId)) {
         retainedOmittedFrames.set(key, frame)
         continue
@@ -1242,7 +1532,7 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
 
   // Helper to get childParentLookup for a given parent
   const makeLookup = (
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     _parentId: string
   ): ((cid: string) => { parentId: string | null; exists: boolean } | null) => {
     return (cid: string) => {
@@ -1253,16 +1543,27 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
           // Unknown child -> no existence
           const existsAsBlock = blockByIdAll.has(cid)
           if (existsAsBlock) return { parentId: blockByIdAll.get(cid)!.messageId, exists: true }
+          if (branchByIdAllHas(cid)) return { parentId: null, exists: true }
           return { parentId: null, exists: false }
         }
         const mem = membershipByKey.get(`message:${cid}`)
         if (mem) return { parentId: mem.parentId, exists: true }
         return { parentId: row.topicId, exists: true }
+      } else if (kind === 'branchSuffix') {
+        const row = messageByIdAll.get(cid)
+        if (!row) {
+          if (branchByIdAllHas(cid)) return { parentId: null, exists: true }
+          return { parentId: null, exists: false }
+        }
+        const mem = membershipByKey.get(`message:${cid}`)
+        if (mem) return { parentId: mem.parentId, exists: true }
+        return { parentId: messageOwnerBranchById.get(cid) ?? row.topicId, exists: true }
       } else {
         const row = blockByIdAll.get(cid)
         if (!row) {
           const existsAsMsg = messageByIdAll.has(cid)
           if (existsAsMsg) return { parentId: messageByIdAll.get(cid)!.topicId, exists: true }
+          if (branchByIdAllHas(cid)) return { parentId: null, exists: true }
           return { parentId: null, exists: false }
         }
         const mem = membershipByKey.get(`message_block:${cid}`)
@@ -1275,10 +1576,16 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   // Unversioned children make affected frame non-complete/unevaluable (A1)
   const unversionedMessageByTopicCount = new Map<string, number>()
   const unversionedBlockByMessageCount = new Map<string, number>()
+  const unversionedSuffixByBranchCount = new Map<string, number>()
   for (const e of entities) {
     if (e.entityType === 'message' && !e.parentMembershipClock) {
-      const tid = e.payload.topicId as string
-      unversionedMessageByTopicCount.set(tid, (unversionedMessageByTopicCount.get(tid) ?? 0) + 1)
+      const ownerBranch = (e.payload.branchId as string | null | undefined) ?? null
+      if (ownerBranch !== null) {
+        unversionedSuffixByBranchCount.set(ownerBranch, (unversionedSuffixByBranchCount.get(ownerBranch) ?? 0) + 1)
+      } else {
+        const tid = e.payload.topicId as string
+        unversionedMessageByTopicCount.set(tid, (unversionedMessageByTopicCount.get(tid) ?? 0) + 1)
+      }
     }
     if (e.entityType === 'message_block' && !e.parentMembershipClock) {
       const mid = e.payload.messageId as string
@@ -1376,9 +1683,54 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     frameByKey.delete(key)
   }
 
+  // For each emitted live branch (skip suppressed tombstoned): exactly one
+  // branchSuffix frame, empty [] when the branch owns no live children.
+  for (const branchId of emittedBranchIds) {
+    if (suppressedLiveForFrame.has(`topic_branch:${branchId}`)) continue
+    const key = `branchSuffix:${branchId}`
+    const liveMap = suffixByBranch.get(branchId) ?? new Map()
+    const rawFrame = frameByKey.get(key)
+    const hasUnversionedChild = (unversionedSuffixByBranchCount.get(branchId) ?? 0) > 0
+    if (!rawFrame) {
+      missingOrderFrameCount += 1
+      frameDiagnosticReasons.add('missing-order-frame')
+      continue
+    }
+    let result: ReturnType<typeof evaluateEffectiveOrder>
+    try {
+      result = evaluateEffectiveOrder({
+        kind: 'branchSuffix',
+        parentId: branchId,
+        orderedChildIds: rawFrame.orderedChildIds,
+        frameClock: { timestamp: rawFrame.timestamp, operationId: rawFrame.operationId },
+        liveChildren: liveMap,
+        childParentLookup: makeLookup('branchSuffix', branchId)
+      })
+    } catch (e) {
+      fail(
+        `baseline frame parent mismatch for branchSuffix/${branchId}: ${e instanceof Error ? e.message : String(e)}`,
+        e
+      )
+    }
+    let isIncomplete = result.incomplete
+    if (hasUnversionedChild) isIncomplete = true
+    if (isIncomplete) {
+      incompleteOrderFrameCount += 1
+      frameDiagnosticReasons.add('incomplete-order-frame')
+    }
+    outputFrames.push({
+      frameVersion: LOCAL_ORDER_FRAME_VERSION,
+      kind: 'branchSuffix',
+      parentId: branchId,
+      orderedChildIds: result.effective,
+      frameClock: { timestamp: rawFrame.timestamp, operationId: rawFrame.operationId }
+    })
+    frameByKey.delete(key)
+  }
+
   // Sort frames deterministically
   const sortedFrames = sortFramesDeterministically(
-    outputFrames as Array<{ kind: 'topicMessage' | 'messageBlock'; parentId: string }>
+    outputFrames as Array<{ kind: 'topicMessage' | 'messageBlock' | 'branchSuffix'; parentId: string }>
   ) as LocalSyncBaselineOrderFrame[]
 
   // Provisional local watermark observation
@@ -1417,22 +1769,39 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   for (const entity of entities) {
     if (!entity.entityClock) unversionedEntityCount += 1
   }
+  for (const fa of fileAssets) {
+    if (!fa.entityClock) unversionedEntityCount += 1
+  }
   if (unversionedEntityCount > 0) reasons.add('unversioned-entity')
   let unversionedFieldCount = 0
   for (const entity of entities) {
     const allow = FIELD_CLOCK_ALLOW[entity.entityType]
     const present = new Set(entity.fieldClocks.map((entry) => entry.field))
     for (const key of Object.keys(entity.payload)) {
-      if (allow.has(key) && !present.has(key)) unversionedFieldCount += 1
+      if (allow.has(key) && !present.has(key)) {
+        if (key === 'assetIds') continue
+        unversionedFieldCount += 1
+      }
     }
     for (const field of present) {
       if (!Object.prototype.hasOwnProperty.call(entity.payload, field)) unversionedFieldCount += 1
     }
   }
+  for (const fa of fileAssets) {
+    const allow = FIELD_CLOCK_ALLOW['file_asset' as const]
+    const present = new Set(fa.fieldClocks.map((entry) => entry.field))
+    for (const key of Object.keys(fa.payload)) {
+      if (allow.has(key) && !present.has(key)) unversionedFieldCount += 1
+    }
+    for (const field of present) {
+      if (!Object.prototype.hasOwnProperty.call(fa.payload, field)) unversionedFieldCount += 1
+    }
+  }
   if (unversionedFieldCount > 0) reasons.add('unversioned-field')
   let unversionedMembershipCount = 0
   for (const entity of entities) {
-    if (entity.entityType !== 'topic') {
+    // Topics/branches/file_assets carry no membership; only messages/blocks bind membership.
+    if (entity.entityType !== 'topic' && entity.entityType !== 'topic_branch' && entity.entityType !== 'file_asset') {
       const pm = (entity as { parentMembershipClock?: { timestamp: number; operationId: string } | null })
         .parentMembershipClock
       if (!pm) unversionedMembershipCount += 1
@@ -1440,12 +1809,16 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
   }
   if (unversionedMembershipCount > 0) reasons.add('unversioned-membership')
   if (pendingOutboxCount > 0) reasons.add('pending-outbox')
+  if (pendingAttachmentCount > 0) reasons.add('pending-attachment')
   let aggregateIncompleteParents = 0
   for (const entity of entities) {
     if (entity.entityType === 'topic' && (nonEmittedMessageByTopic.get(entity.entityId) ?? 0) > 0) {
       aggregateIncompleteParents += 1
     }
     if (entity.entityType === 'message' && (nonEmittedBlockByMessage.get(entity.entityId) ?? 0) > 0) {
+      aggregateIncompleteParents += 1
+    }
+    if (entity.entityType === 'topic_branch' && (nonEmittedSuffixByBranch.get(entity.entityId) ?? 0) > 0) {
       aggregateIncompleteParents += 1
     }
   }
@@ -1502,6 +1875,8 @@ function buildBaselineCandidate(tx: BaselineTx): LocalSyncBaselineCandidate {
     tombstones,
     orderFrames: sortedFrames,
     replacementRegisters,
+    fileAssets,
+    pendingAttachmentCount,
     observedLocalChannelKey,
     observedLocalCursor,
     observationBinding,

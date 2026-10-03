@@ -1,12 +1,19 @@
 /**
  * Wire baseline direct apply adapter (receiver bootstrap).
  *
- * Validates a `sync-baseline-wire-v1` envelope with the shared strict
+ * Validates a `sync-baseline-wire-v1/v2/v3/v4` envelope with the shared strict
  * `baselineWire` validator (exact keys/channel/digest, no copied rules) and
  * maps it to the normalized merge input consumed by the single merge core in
  * `syncBaselineApply.ts` (`mergeValidatedBaselineInTx`). No LWW/merge rules
  * are duplicated here; dense `sortOrder 0..n-1` materialization stays inside
  * the merge core as local projection only and never goes on the wire.
+ *
+ * v3 maps the branch inventory (branchId owner on messages, branch nodes,
+ * topicBranch tombstones, branchSuffix frames) into the same merge input;
+ * the core's branch-domain gate includes local branch rows in evaluation.
+ * v4 additionally carries the assistant section (assistantConfigs +
+ * assistantTombstones); it is returned as `assistant` for the caller to merge
+ * in the SAME Tx via `mergeAssistantBaselineSectionInTx` (no bypass, no outbox).
  *
  * Transport-free: no relay/network/IPC/UI. The caller owns the SQLite
  * transaction boundary (e.g. bootstrap merge + cursor commit atomically).
@@ -48,6 +55,23 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
   input: ValidatedBaselineMergeInput
   watermark: number
   channelId: string
+  assistant?: {
+    configs: Array<{
+      key: string
+      kind: 'assistant' | 'defaults'
+      id: string
+      config: Record<string, unknown>
+      entityClock: { timestamp: number; operationId: string }
+      fieldClocks: Record<string, { timestamp: number; operationId: string }>
+    }>
+    tombstones: Array<{
+      key: string
+      kind: 'assistant' | 'defaults'
+      id: string
+      deletionClock: { timestamp: number; operationId: string | null }
+      survivingEntityClock: { timestamp: number; operationId: string } | null
+    }>
+  }
 } {
   let envelope: SyncEnvelopeAny
   try {
@@ -88,13 +112,49 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
         .sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0))
     })
   }
+  // v3 branch nodes (absent in v1/v2). Full-state identity + mutable state.
+  // FK order: branches before branch-owned messages (messages.branchId FK).
+  for (const b of ((payload as { branches?: unknown }).branches as Array<{
+    id: string
+    topicId: string
+    parentBranchId: string | null
+    anchorMessageId: string
+    name: string | null
+    createdAt: string | null
+    updatedAt: string | null
+    entityClock: { timestamp: number; operationId: string }
+    fieldClocks: Record<string, { timestamp: number; operationId: string }>
+  }>) ?? []) {
+    entities.push({
+      entityType: 'topic_branch',
+      entityId: b.id,
+      payload: {
+        id: b.id,
+        topicId: b.topicId,
+        parentBranchId: b.parentBranchId,
+        anchorMessageId: b.anchorMessageId,
+        name: b.name,
+        createdAt: b.createdAt,
+        updatedAt: b.updatedAt
+      },
+      entityClock: { timestamp: b.entityClock.timestamp, operationId: b.entityClock.operationId },
+      fieldClocks: Object.entries(b.fieldClocks)
+        .map(([field, clock]) => ({ field, timestamp: clock.timestamp, operationId: clock.operationId }))
+        .sort((a, c) => (a.field < c.field ? -1 : a.field > c.field ? 1 : 0))
+    })
+  }
   for (const m of payload.messages) {
+    // v3 carries the immutable owner branchId (null = main); v1/v2 payloads
+    // have no branchId key (main route). Membership binds the owner.
+    const branchId = (m as { branchId?: unknown }).branchId ?? null
+    const ownerParent = typeof branchId === 'string' && branchId.length > 0 ? branchId : m.topicId
     entities.push({
       entityType: 'message',
       entityId: m.id,
       payload: {
         id: m.id,
         topicId: m.topicId,
+        branchId: typeof branchId === 'string' && branchId.length > 0 ? branchId : null,
         role: m.role,
         content: m.content,
         status: m.status,
@@ -110,28 +170,66 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
         .map(([field, clock]) => ({ field, timestamp: clock.timestamp, operationId: clock.operationId }))
         .sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0)),
       parentMembershipClock: {
-        parentId: m.topicId,
+        parentId: ownerParent,
         timestamp: m.parentMembershipClock.timestamp,
         operationId: m.parentMembershipClock.operationId
       }
     })
   }
+  // V5 fileAssets before media blocks (fileAssets first)
+  for (const fa of ((payload as { fileAssets?: unknown }).fileAssets as Array<{
+    id: string
+    sha256: string
+    byteLength: number
+    extension: string
+    mimeType: string
+    originalName: string
+    createdAt: string
+    entityClock: { timestamp: number; operationId: string }
+    fieldClocks: Record<string, { timestamp: number; operationId: string }>
+  }>) ?? []) {
+    entities.push({
+      entityType: 'file_asset',
+      entityId: fa.id,
+      payload: {
+        id: fa.id,
+        sha256: fa.sha256,
+        byteLength: fa.byteLength,
+        extension: fa.extension,
+        mimeType: fa.mimeType,
+        originalName: fa.originalName,
+        createdAt: fa.createdAt
+      },
+      entityClock: { timestamp: fa.entityClock.timestamp, operationId: fa.entityClock.operationId },
+      fieldClocks: Object.entries(fa.fieldClocks)
+        .map(([field, clock]) => ({ field, timestamp: clock.timestamp, operationId: clock.operationId }))
+        .sort((a, b) => (a.field < b.field ? -1 : a.field > b.field ? 1 : 0))
+    })
+  }
   for (const b of payload.messageBlocks) {
+    const assetIds = (b as { assetIds?: unknown }).assetIds ?? []
+    const payloadWithAsset: Record<string, unknown> = {
+      id: b.id,
+      messageId: b.messageId,
+      type: b.type,
+      content: b.content,
+      status: b.status,
+      createdAt: b.createdAt,
+      updatedAt: b.updatedAt
+    }
+    if (Array.isArray(assetIds)) payloadWithAsset['assetIds'] = [...(assetIds as string[])]
+    else payloadWithAsset['assetIds'] = []
     entities.push({
       entityType: 'message_block',
       entityId: b.id,
-      payload: {
-        id: b.id,
-        messageId: b.messageId,
-        type: b.type,
-        content: b.content,
-        status: b.status,
-        createdAt: b.createdAt,
-        updatedAt: b.updatedAt
-      },
+      payload: payloadWithAsset,
       entityClock: { timestamp: b.entityClock.timestamp, operationId: b.entityClock.operationId },
-      fieldClocks: Object.entries(b.fieldClocks)
-        .map(([field, clock]) => ({ field, timestamp: clock.timestamp, operationId: clock.operationId }))
+      fieldClocks: Object.entries(b.fieldClocks as Record<string, unknown>)
+        .map(([field, clock]) => ({
+          field,
+          timestamp: (clock as { timestamp: number }).timestamp,
+          operationId: (clock as { operationId: string }).operationId
+        }))
         .sort((a, b2) => (a.field < b2.field ? -1 : a.field > b2.field ? 1 : 0)),
       parentMembershipClock: {
         parentId: b.messageId,
@@ -142,7 +240,14 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
   }
 
   const tombstones: LocalSyncBaselineTombstone[] = payload.tombstones.map((t) => ({
-    entityType: t.entityType === 'messageBlock' ? 'message_block' : t.entityType,
+    entityType:
+      t.entityType === 'messageBlock'
+        ? 'message_block'
+        : t.entityType === 'topicBranch'
+          ? 'topic_branch'
+          : t.entityType === 'fileAsset'
+            ? 'file_asset'
+            : t.entityType,
     entityId: t.entityId,
     timestamp: t.deletionClock.timestamp,
     operationId: t.deletionClock.operationId,
@@ -182,7 +287,25 @@ export function mapWireEnvelopeToMergeInput(envelopeUnknown: unknown): {
     replacementRegisters === undefined
       ? { entities, tombstones, orderFrames }
       : { entities, tombstones, orderFrames, replacementRegisters }
-  return { input, watermark: envelope.watermark, channelId: envelope.channelId }
+  // v4 assistant section (branch + assistant only, no attachments): strict-extract
+  // for same-Tx merge via mergeAssistantBaselineSectionInTx. Older wires carry none.
+  const rawAssistantConfigs = (payload as { assistantConfigs?: unknown }).assistantConfigs
+  const rawAssistantTombstones = (payload as { assistantTombstones?: unknown }).assistantTombstones
+  if (rawAssistantConfigs === undefined && rawAssistantTombstones === undefined) {
+    return { input, watermark: envelope.watermark, channelId: envelope.channelId }
+  }
+  if (!Array.isArray(rawAssistantConfigs) || !Array.isArray(rawAssistantTombstones)) {
+    fail('wire baseline assistant section malformed (v4 requires assistantConfigs + assistantTombstones arrays)')
+  }
+  return {
+    input,
+    watermark: envelope.watermark,
+    channelId: envelope.channelId,
+    assistant: {
+      configs: rawAssistantConfigs as never,
+      tombstones: rawAssistantTombstones as never
+    }
+  }
 }
 
 /**

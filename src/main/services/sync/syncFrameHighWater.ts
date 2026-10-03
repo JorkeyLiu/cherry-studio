@@ -24,13 +24,13 @@ import * as schema from '../chatDb/schema'
 export const FRAME_HIGH_WATER_MAX_TIMESTAMP = 9007199254740991
 export const FRAME_HIGH_WATER_MIGRATION_KEY = '012_sync_frame_high_water'
 
-export type FrameHighWaterKind = 'topicMessage' | 'messageBlock'
+export type FrameHighWaterKind = 'topicMessage' | 'messageBlock' | 'branchSuffix'
 
 /** Transaction executor compatible with the root Drizzle database and tx executors. Never opens its own transaction. */
 export type FrameHighWaterExecutor = BetterSQLite3Database<typeof schema>
 
 function isValidKind(kind: string): kind is FrameHighWaterKind {
-  return kind === 'topicMessage' || kind === 'messageBlock'
+  return kind === 'topicMessage' || kind === 'messageBlock' || kind === 'branchSuffix'
 }
 
 function isMissingTableError(e: unknown): boolean {

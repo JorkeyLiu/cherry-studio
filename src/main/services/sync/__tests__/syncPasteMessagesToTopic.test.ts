@@ -246,7 +246,7 @@ describe('pasteMessagesToTopic incremental sync', () => {
       },
       {
         message: msgJson('m-uns', 't-pmix', { role: 'user' }) as never,
-        blocks: [{ ...stableBlock('b-uns', 'm-uns'), type: 'file' } as never]
+        blocks: [{ ...stableBlock('b-uns', 'm-uns'), type: 'tool' } as never]
       }
     ])
     expect(res.ok).toBe(true)
@@ -892,17 +892,16 @@ describe('pasteMessagesToTopic audit findings', () => {
         blocks: [
           {
             ...stableBlock('b-uns', 'm-uns'),
-            type: 'file',
-            file: { id: 'file-uns', name: 'u.pdf', path: '/tmp/u.pdf', type: 'application/pdf' }
+            type: 'tool',
+            content: { tool: 'x' }
           } as never
         ]
       }
     ])
     expect(res.ok).toBe(true)
-    // Local row/block persist, including the local-only file reference.
+    // Local row/block persist
     expect(messageOrder(sqlite, 't-puns')).toContain('m-uns')
     expect(sqlite.prepare(`SELECT id FROM message_blocks WHERE id='b-uns'`).get()).toBeTruthy()
-    expect(sqlite.prepare(`SELECT id FROM file_references WHERE block_id='b-uns'`).get()).toBeTruthy()
     // Stable message rides the wire; the unsupported block emits nothing.
     const ops = outboxRows(db)
     expect(ops.filter((r) => r.op === 'upsert' && r.entityType === 'message' && r.entityId === 'm-uns').length).toBe(1)

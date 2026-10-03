@@ -35,7 +35,7 @@
  */
 
 export const ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
-export type OrderFrameKind = 'topicMessage' | 'messageBlock'
+export type OrderFrameKind = 'topicMessage' | 'messageBlock' | 'branchSuffix'
 
 export interface Clock {
   timestamp: number
@@ -133,7 +133,7 @@ export function validateFrameVersionStrict(version: unknown, context: string): v
 }
 
 export function validateFrameKindStrict(kind: unknown, context: string): OrderFrameKind {
-  if (kind !== 'topicMessage' && kind !== 'messageBlock')
+  if (kind !== 'topicMessage' && kind !== 'messageBlock' && kind !== 'branchSuffix')
     throw new Error(`malformed frame kind for ${context}: ${String(kind)}`)
   return kind as OrderFrameKind
 }
@@ -283,7 +283,7 @@ export function evaluateEffectiveOrder(input: {
 
 /** Sort frames by kind rank then parentId UTF-8 */
 export function sortFramesDeterministically<T extends { kind: OrderFrameKind; parentId: string }>(frames: T[]): T[] {
-  const rank = (k: OrderFrameKind): number => (k === 'topicMessage' ? 0 : 1)
+  const rank = (k: OrderFrameKind): number => (k === 'topicMessage' ? 0 : k === 'messageBlock' ? 1 : 2)
   return frames.slice().sort((a, b) => {
     const ra = rank(a.kind)
     const rb = rank(b.kind)

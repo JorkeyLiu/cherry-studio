@@ -1247,6 +1247,99 @@ export const MIGRATIONS: MigrationEntry[] = [
       `DROP INDEX IF EXISTS message_route_overlays_topic_route_idx`,
       `DELETE FROM migration_state WHERE key='017_route_message_overlay'`
     ]
+  },
+  {
+    key: '018_branch_sync_frames',
+    description:
+      'Additive true-branch full-sync frame support: rebuilds sync_parent_order_frame and sync_frame_high_water to admit the branchSuffix kind (parentId = branch id, children = owned suffix) alongside topicMessage/messageBlock, preserving all rows byte-for-byte. No backfill — existing parents keep their frames; branchSuffix frames are minted by later branch mutations. Existing data preserved; full transaction rollback on violation.',
+    sql: [
+      `ALTER TABLE sync_parent_order_frame RENAME TO sync_parent_order_frame_mig_old`,
+      `CREATE TABLE sync_parent_order_frame (
+        kind TEXT NOT NULL CHECK (kind IN ('topicMessage','messageBlock','branchSuffix')),
+        parent_id TEXT NOT NULL CHECK (length(parent_id) > 0),
+        frame_version TEXT NOT NULL CHECK (frame_version = 'parent-order-frame-v1'),
+        ordered_child_ids_json TEXT NOT NULL CHECK (json_valid(ordered_child_ids_json)),
+        timestamp INTEGER NOT NULL CHECK (timestamp >= 0 AND timestamp <= 9007199254740991),
+        operation_id TEXT NOT NULL CHECK (length(operation_id) > 0 AND length(operation_id) <= 256 AND operation_id NOT LIKE '%:%'),
+        PRIMARY KEY (kind, parent_id)
+      )`,
+      `INSERT INTO sync_parent_order_frame SELECT * FROM sync_parent_order_frame_mig_old`,
+      `DROP TABLE sync_parent_order_frame_mig_old`,
+      `ALTER TABLE sync_frame_high_water RENAME TO sync_frame_high_water_mig_old`,
+      `CREATE TABLE sync_frame_high_water (
+        kind TEXT NOT NULL CHECK (kind IN ('topicMessage','messageBlock','branchSuffix')),
+        parent_id TEXT NOT NULL CHECK (length(parent_id) > 0),
+        max_timestamp INTEGER NOT NULL CHECK (max_timestamp >= 0 AND max_timestamp <= 9007199254740991),
+        PRIMARY KEY (kind, parent_id)
+      )`,
+      `INSERT INTO sync_frame_high_water SELECT * FROM sync_frame_high_water_mig_old`,
+      `DROP TABLE sync_frame_high_water_mig_old`
+    ]
+  },
+  {
+    key: '019_assistant_config_mirror',
+    description:
+      'Additive assistant-config sync mirror: Main-side projection rows for renderer-owned non-secret assistant/defaults (key PK = assistant_config:<kind>:<id>). No backfill — rows are minted by later assistant deltas/baseline merges. Outbox/clocks reuse the existing sync tables (no new transport). Existing data preserved; full transaction rollback on violation.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_assistant_config_mirror (
+        key TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        version INTEGER NOT NULL CHECK (version >= 0),
+        local_mutation_id TEXT,
+        projection_revision INTEGER NOT NULL DEFAULT 0 CHECK (projection_revision >= 0),
+        deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+        updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_assistant_config_mirror_kind_idx ON sync_assistant_config_mirror(kind)`
+    ]
+  },
+  {
+    key: '020_attachment_sync',
+    description:
+      'Additive attachment sync inventory: portable file assets (strict 7-field FileAsset with per-field clocks for mutable mimeType/originalName/createdAt) plus channel-bound byte-transfer intent. Creates sync_file_asset (id PK, sha256, byte_length, extension, mime_type, original_name, created_at, version, updated_at) and sync_attachment_job (asset_id PK, sha256, byte_length, channel_id, state, attempts, last_error, created_at, updated_at). Existing file_references carries block↔file associations; bytes stay in Files dir. No backfill — rows minted by later media mutations/baseline merges. Full transaction rollback on violation.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_file_asset (
+        id TEXT PRIMARY KEY CHECK (length(id) > 0 AND length(id) <= 256 AND id NOT LIKE '%/%' AND id NOT LIKE '%\\%'),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0 AND byte_length <= 9007199254740991),
+        extension TEXT NOT NULL CHECK (extension GLOB '.[a-z0-9]*' AND length(extension) BETWEEN 2 AND 16),
+        mime_type TEXT NOT NULL CHECK (length(mime_type) BETWEEN 3 AND 128),
+        original_name TEXT NOT NULL CHECK (length(original_name) > 0 AND length(original_name) <= 255 AND original_name NOT LIKE '%/%' AND original_name NOT LIKE '%\\%'),
+        created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+        version INTEGER NOT NULL CHECK (version >= 0),
+        updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+      )`,
+      `CREATE TABLE IF NOT EXISTS sync_attachment_job (
+        asset_id TEXT PRIMARY KEY CHECK (length(asset_id) > 0),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0 AND byte_length <= 9007199254740991),
+        channel_id TEXT NOT NULL CHECK (length(channel_id) > 0),
+        state TEXT NOT NULL CHECK (state IN ('pending','uploading','completed','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        last_error TEXT,
+        created_at INTEGER NOT NULL CHECK (created_at >= 0),
+        updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_attachment_job_channel_id_idx ON sync_attachment_job(channel_id)`,
+      `CREATE INDEX IF NOT EXISTS sync_attachment_job_state_idx ON sync_attachment_job(state)`
+    ]
+  },
+  {
+    key: '021_attachment_capture_intent',
+    description:
+      'Additive capture intent for attachment sync: durable per-(blockId,fileId) intent for yet-unhashed/unbound media associations. No hash/channel invented — only immutable stable association plus allowlisted source snapshot. Created inside the same chat mutation Tx as the block (no network/hash inside Tx), drained later by the SyncService byte-transfer intent. Enables crash-no-loss and offline retry. No backfill.',
+    sql: [
+      `CREATE TABLE IF NOT EXISTS sync_attachment_capture_intent (
+        block_id TEXT NOT NULL CHECK (length(block_id) > 0 AND length(block_id) <= 256),
+        file_id TEXT NOT NULL CHECK (length(file_id) > 0 AND length(file_id) <= 256 AND file_id NOT LIKE '%/%' AND file_id NOT LIKE '%\\%'),
+        captured_at INTEGER NOT NULL CHECK (captured_at >= 0),
+        PRIMARY KEY (block_id, file_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS sync_attachment_capture_intent_file_id_idx ON sync_attachment_capture_intent(file_id)`,
+      `CREATE INDEX IF NOT EXISTS sync_attachment_capture_intent_captured_at_idx ON sync_attachment_capture_intent(captured_at)`
+    ]
   }
 ]
 

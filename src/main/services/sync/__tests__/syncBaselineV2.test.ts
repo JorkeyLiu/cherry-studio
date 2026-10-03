@@ -36,7 +36,8 @@ import {
   validatePayload,
   verifyEnvelopeDigest,
   verifySyncDigest,
-  WIRE_VERSION_V2
+  WIRE_VERSION_V2,
+  WIRE_VERSION_V3
 } from '@shared/sync'
 
 import { chatDbService } from '../../chatDb'
@@ -361,7 +362,7 @@ describe('baseline v2 wire apply', () => {
 })
 
 describe('baseline v2 publish/fetch/bootstrap N+1', () => {
-  it('publish builds v2, fetch accepts v1/v2, bootstrap commits N then pulls N+1', async () => {
+  it('publish builds v3, fetch accepts v1/v2/v3, bootstrap commits N then pulls N+1', async () => {
     seedCompleteChain('t-p', 'm-p', 'b-p')
     seedRegister('m-p', T + 20, 'op-rep-p', ['b-p'])
     seedBound('chan-p', '5')
@@ -372,7 +373,7 @@ describe('baseline v2 publish/fetch/bootstrap N+1', () => {
     const candidate = captureLocalSyncBaselineCandidate(db)
     const proof = assertBarrierSnapshotProof(candidate, 'chan-p', 5)
     const { envelope, digest } = buildPublishEnvelope(candidate, 'chan-p', proof.watermarkN)
-    expect(envelope.wireVersion).toBe(WIRE_VERSION_V2)
+    expect(envelope.wireVersion).toBe(WIRE_VERSION_V3)
     expect(envelope.payload.replacementRegisters.map((r) => r.messageId)).toContain('m-p')
     expect(envelope.digest).toBe(digest)
     expect(() => validateEnvelope(envelope)).not.toThrow()
@@ -429,7 +430,7 @@ describe('baseline v2 publish/fetch/bootstrap N+1', () => {
     const { parseEnvelopeJson } = await import('@shared/sync')
     expect(() => parseEnvelopeJson(v1Raw)).not.toThrow()
     expect(() => parseEnvelopeJson(JSON.stringify(envelope))).not.toThrow()
-    // Bootstrap via sync(): cursor 0 device fetches v2, merges register, commits N, pulls N+1.
+    // Bootstrap via sync(): cursor 0 device fetches v3, merges register, commits N, pulls N+1.
     // Reset to a fresh cursor-0 receiver holding the same chain shape minus register.
     sqlite.prepare('DELETE FROM sync_stable_replace_register WHERE message_id=?').run('m-p')
     db.insert(schema.syncState)

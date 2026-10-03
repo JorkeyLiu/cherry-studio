@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import type {
   SyncEnvelopeAny,
   SyncIncomingPairRequest,
@@ -20,6 +22,7 @@ import {
   validateSyncEndpointUrl,
   validateSyncOperationStrict
 } from '@shared/sync'
+import { ATTACHMENT_DIGEST_RE } from '@shared/sync/attachments'
 
 import { relayHttpError } from './relayError'
 
@@ -456,6 +459,219 @@ export class SyncClient {
       if ((e as Error).name === 'AbortError') {
         if (externalSignal?.aborted) throw e
         throw new Error(`baseline publish timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
+      }
+      throw e
+    } finally {
+      clearTimeout(timeout)
+      if (externalSignal) {
+        try {
+          externalSignal.removeEventListener('abort', onExternalAbort)
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Attachment byte upload (narrow transfer primitive for the later
+   * SyncService caller): streaming `PUT /sync/attachments/<sha256>` with raw
+   * bytes. The digest address is strictly validated before any transport
+   * (lowercase hex only, never coerced); the relay verifies content hash and
+   * answers `{digest, byteLength, deduplicated}`. Non-2xx flows through the
+   * existing safe relay mapping (no credential or content echo). Network
+   * timeout aborts via the signal deadline; failures throw so the caller
+   * retains the transfer as pending (no silent success, no retry inside).
+   */
+  async uploadAttachment(
+    endpoint: string,
+    token: string | undefined,
+    args: { digest: string; byteLength?: number; body: unknown },
+    deviceCode: string,
+    deviceSecret: string,
+    externalSignal?: AbortSignal
+  ): Promise<{ digest: string; byteLength: number; deduplicated: boolean }> {
+    const validation = validateEndpointUrl(endpoint)
+    if (validation) throw new Error(validation)
+    if (typeof args?.digest !== 'string' || !ATTACHMENT_DIGEST_RE.test(args.digest)) {
+      throw new Error('attachment upload failed: invalid digest')
+    }
+    if (args.byteLength !== undefined) {
+      if (!Number.isSafeInteger(args.byteLength) || args.byteLength < 0) {
+        throw new Error('attachment upload failed: invalid byteLength')
+      }
+    }
+    if (args.body === undefined || args.body === null) {
+      throw new Error('attachment upload failed: missing body')
+    }
+    if (!deviceCode || !deviceSecret) {
+      throw new Error('attachment upload failed: service not connected (registration required)')
+    }
+    const url = endpoint.replace(/\/$/, '') + `/sync/attachments/${args.digest}`
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS)
+    const onExternalAbort = (): void => {
+      try {
+        controller.abort()
+      } catch {}
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort()
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/octet-stream',
+        ...this.deviceHeaders(deviceCode, deviceSecret)
+      }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      if (args.byteLength !== undefined) headers['Content-Length'] = String(args.byteLength)
+      const init: Record<string, unknown> = {
+        method: 'PUT',
+        headers,
+        body: args.body,
+        signal: controller.signal
+      }
+      // Streaming (non-buffer) bodies require the half-duplex fetch mode.
+      if (typeof args.body === 'object' && !(args.body instanceof Uint8Array) && !Buffer.isBuffer(args.body)) {
+        init['duplex'] = 'half'
+      }
+      const res = await fetch(url, init as unknown as RequestInit)
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw this.relayFailure('attachment upload', res.status, text)
+      }
+      const data = (await res.json().catch(() => null)) as {
+        digest?: unknown
+        byteLength?: unknown
+        deduplicated?: unknown
+      } | null
+      if (!data || data.digest !== args.digest) {
+        throw new Error('attachment upload response malformed: digest mismatch')
+      }
+      if (typeof data.byteLength !== 'number' || !Number.isSafeInteger(data.byteLength) || data.byteLength < 0) {
+        throw new Error('attachment upload response malformed: byteLength must be non-negative safe integer')
+      }
+      if (typeof data.deduplicated !== 'boolean') {
+        throw new Error('attachment upload response malformed: deduplicated must be boolean')
+      }
+      if (args.byteLength !== undefined && data.byteLength !== args.byteLength) {
+        throw new Error(
+          `attachment upload length mismatch: expected ${String(args.byteLength)} but relay stored ${String(data.byteLength)}`
+        )
+      }
+      return { digest: data.digest, byteLength: data.byteLength, deduplicated: data.deduplicated }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) throw e
+        throw new Error(`attachment upload timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
+      }
+      throw e
+    } finally {
+      clearTimeout(timeout)
+      if (externalSignal) {
+        try {
+          externalSignal.removeEventListener('abort', onExternalAbort)
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Attachment byte download (narrow transfer primitive for the later
+   * SyncService caller): streaming `GET /sync/attachments/<sha256>`.
+   * Bytes flow incrementally to `onChunk` (never fully buffered here unless
+   * the caller omits the sink); the incremental SHA-256 must equal the
+   * requested digest or the download throws a safe `digest-mismatch` error
+   * (never echoes content). A declared `expectedByteLength` mismatch throws
+   * a safe `length-mismatch` error. Failures throw so the caller retains the
+   * transfer as pending.
+   */
+  async downloadAttachment(
+    endpoint: string,
+    token: string | undefined,
+    args: { digest: string; expectedByteLength?: number },
+    deviceCode: string,
+    deviceSecret: string,
+    externalSignal?: AbortSignal,
+    onChunk?: (chunk: Uint8Array) => void | Promise<void>
+  ): Promise<{ digest: string; byteLength: number }> {
+    const validation = validateEndpointUrl(endpoint)
+    if (validation) throw new Error(validation)
+    if (typeof args?.digest !== 'string' || !ATTACHMENT_DIGEST_RE.test(args.digest)) {
+      throw new Error('attachment download failed: invalid digest')
+    }
+    if (args.expectedByteLength !== undefined) {
+      if (!Number.isSafeInteger(args.expectedByteLength) || args.expectedByteLength < 0) {
+        throw new Error('attachment download failed: invalid expectedByteLength')
+      }
+    }
+    if (!deviceCode || !deviceSecret) {
+      throw new Error('attachment download failed: service not connected (registration required)')
+    }
+    const url = endpoint.replace(/\/$/, '') + `/sync/attachments/${args.digest}`
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS)
+    const onExternalAbort = (): void => {
+      try {
+        controller.abort()
+      } catch {}
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort()
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
+    try {
+      const headers: Record<string, string> = { ...this.deviceHeaders(deviceCode, deviceSecret) }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(url, { method: 'GET', headers, signal: controller.signal })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw this.relayFailure('attachment download', res.status, text)
+      }
+      const contentType = res.headers.get('content-type') ?? ''
+      if (!contentType.startsWith('application/octet-stream')) {
+        throw new Error('attachment download response malformed: content type must be application/octet-stream')
+      }
+      const declaredLengthRaw = res.headers.get('content-length')
+      if (declaredLengthRaw !== null) {
+        if (!/^(0|[1-9][0-9]*)$/.test(declaredLengthRaw.trim())) {
+          throw new Error('attachment download response malformed: content-length invalid')
+        }
+        const declared = Number(declaredLengthRaw.trim())
+        if (!Number.isSafeInteger(declared) || declared < 0) {
+          throw new Error('attachment download response malformed: content-length invalid')
+        }
+        if (args.expectedByteLength !== undefined && declared !== args.expectedByteLength) {
+          throw new Error(
+            `attachment download length mismatch: expected ${String(args.expectedByteLength)} but relay declared ${String(declared)}`
+          )
+        }
+      }
+      if (!res.body) throw new Error('attachment download response malformed: missing body')
+      const hash = createHash('sha256')
+      let byteLength = 0
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        byteLength += buf.length
+        hash.update(buf)
+        if (onChunk) await onChunk(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength))
+      }
+      if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+        throw new Error('attachment download response malformed: byteLength invalid')
+      }
+      const actual = hash.digest('hex')
+      if (actual !== args.digest) {
+        throw new Error('attachment download failed: digest-mismatch')
+      }
+      if (args.expectedByteLength !== undefined && byteLength !== args.expectedByteLength) {
+        throw new Error(
+          `attachment download length mismatch: expected ${String(args.expectedByteLength)} but received ${String(byteLength)}`
+        )
+      }
+      return { digest: args.digest, byteLength }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) throw e
+        throw new Error(`attachment download timeout after ${SYNC_REQUEST_TIMEOUT_MS}ms`)
       }
       throw e
     } finally {

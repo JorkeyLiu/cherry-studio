@@ -116,6 +116,60 @@ export function registerSyncIpc(): () => void {
     return { ok: true }
   })
 
+  // AssistantConfig bridge (production): canonical SQLite binding before any IPC
+  // startup; barrier gate BEFORE Tx; mirror+outbox same Tx; remote merges bypass
+  // the gate by design. Unavailable mirror retains pending (no memory fallback).
+  try {
+    syncService.initAssistantConfigMirrorBinding()
+  } catch {}
+  register(IpcChannel.SyncAssistantConfig_CommitDelta, async (_e, delta: unknown) => {
+    const { validateAssistantConfigDelta } = await import('@shared/sync/assistantConfig')
+    const err = validateAssistantConfigDelta(delta)
+    if (err) throw new Error(`invalid assistant config delta: ${err}`)
+    const d = delta as {
+      kind: 'assistant' | 'defaults'
+      id: string
+      mutationId: string
+      revision: number
+      timestamp: number
+      fields: Record<string, unknown>
+      deleted?: boolean
+    }
+    const result = syncService.commitAssistantConfigDeltaProduction({
+      kind: d.kind,
+      id: d.id,
+      mutationId: d.mutationId,
+      revision: d.revision,
+      timestamp: d.timestamp,
+      fields: d.fields ?? {},
+      ...(d.deleted !== undefined ? { deleted: d.deleted } : {})
+    })
+    // Post-commit broadcast (never before commit); loss covered by getProjection.
+    try {
+      syncService.broadcastAssistantProjection([result.key])
+    } catch {}
+    return result
+  })
+
+  register(IpcChannel.SyncAssistantConfig_GetProjection, async (_e, keys?: unknown) => {
+    if (keys !== undefined && !Array.isArray(keys)) throw new Error('keys must be array')
+    return syncService.readAssistantProjectionBatch(keys as string[] | undefined)
+  })
+
+  register(IpcChannel.SyncAssistantConfig_AckProjection, async (_e, key: unknown, revision: unknown) => {
+    if (typeof key !== 'string') throw new Error('key must be string')
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision)) throw new Error('revision must be int')
+    const batch = syncService.readAssistantProjectionBatch([key])
+    const current = batch[0]?.projectionRevision ?? null
+    if (current === null) return { cleared: false, current: null }
+    if (revision !== current) return { cleared: false, current }
+    return { cleared: true, current }
+  })
+
+  register(IpcChannel.SyncAssistantConfig_Snapshot, async () => {
+    return syncService.readAssistantProjectionBatch().map((r) => r.payload)
+  })
+
   logger.info(`Registered ${handlers.length} Sync IPC handlers`)
 
   return () => {

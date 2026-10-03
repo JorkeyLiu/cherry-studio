@@ -247,7 +247,7 @@ describe('insertMessagesAfterAnchor incremental sync', () => {
       },
       {
         message: msgJson('m-uns', 't-mix', { role: 'user' }) as never,
-        blocks: [{ ...stableBlock('b-uns', 'm-uns'), type: 'file' } as never]
+        blocks: [{ ...stableBlock('b-uns', 'm-uns'), type: 'tool' } as never]
       }
     ])
     expect(res.ok).toBe(true)

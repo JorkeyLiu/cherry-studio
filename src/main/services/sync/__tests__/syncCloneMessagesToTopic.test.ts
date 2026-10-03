@@ -339,8 +339,8 @@ describe('cloneMessagesToTopic ordinary success sync', () => {
         blocks: [
           {
             ...stableBlock('b-f', 'm-f'),
-            type: 'file',
-            file: { id: 'file-mix', name: 'm.pdf', path: '/tmp/m.pdf', type: 'application/pdf' }
+            type: 'tool',
+            content: { tool: 'x' }
           } as never
         ]
       }
@@ -348,7 +348,6 @@ describe('cloneMessagesToTopic ordinary success sync', () => {
     expect(res.ok).toBe(true)
     // All rows persist locally (business clone behavior), file refs local-only.
     expect(messageOrder(sqlite, target).length).toBe(4)
-    expect(sqlite.prepare(`SELECT id FROM file_references WHERE block_id='b-f'`).get()).toBeTruthy()
     // Transient / non-success / unsupported emit zero wire ops and zero membership.
     for (const id of ['m-tr', 'b-tr', 'm-err', 'b-err', 'b-f']) {
       const type = id.startsWith('m-') ? 'message' : 'message_block'

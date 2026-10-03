@@ -7,8 +7,10 @@
  *
  * - Names live on the branch row (`topic_branches.name`); Topic.name stays
  *   the logical topic name.
- * - Branches are local-only: repositories never mint sync intent; the
- *   aggregate suppresses capture for branch-owned rows.
+ * - Branches are full-sync entities (baseline wire v3 / topic_branch ops):
+ *   repositories never mint sync intent themselves; the aggregate captures
+ *   branch create/rename/delete atomically with clocks and branchSuffix
+ *   frames in the enclosing mutation transaction.
  * - Deletion is subtree-scoped and orchestrated by the aggregate (owned
  *   messages/blocks/file refs + descendant rows); the FK cascades
  *   (self-CASCADE + messages.branch_id CASCADE) are the backstop.

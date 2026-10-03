@@ -64,7 +64,7 @@ export function isStableBlockStatus(status: unknown): boolean {
  * mechanism (no new schema). No-op/foreign rows remain the caller's
  * non-error path and never reach this predicate.
  */
-const UNSUPPORTED_SYNC_BLOCK_TYPES: ReadonlySet<string> = new Set(['tool', 'file', 'image', 'video', 'citation'])
+const UNSUPPORTED_SYNC_BLOCK_TYPES: ReadonlySet<string> = new Set(['tool', 'citation'])
 
 const UNSUPPORTED_SYNC_BLOCK_OVERFLOW_KEYS: ReadonlyArray<string> = [
   'content',
@@ -85,12 +85,17 @@ export function isUnsupportedBlockForSync(block: {
   overflow?: Record<string, unknown> | null | undefined
 }): boolean {
   const overflow = block?.overflow
+  const t = typeof block?.type === 'string' ? block.type.toLowerCase() : ''
+  const isMediaType = t === 'file' || t === 'image' || t === 'video'
   if (overflow && typeof overflow === 'object' && !Array.isArray(overflow)) {
     for (const k of UNSUPPORTED_SYNC_BLOCK_OVERFLOW_KEYS) {
-      if (Object.prototype.hasOwnProperty.call(overflow, k)) return true
+      if (Object.prototype.hasOwnProperty.call(overflow, k)) {
+        // File overflow on media types is expected portable attachment, not unsupported
+        if ((k === 'file' || k === 'fileId' || k === 'file_id') && isMediaType) continue
+        return true
+      }
     }
   }
-  const t = typeof block?.type === 'string' ? block.type.toLowerCase() : ''
   if (UNSUPPORTED_SYNC_BLOCK_TYPES.has(t)) return true
   return false
 }

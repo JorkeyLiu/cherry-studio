@@ -126,22 +126,12 @@ export function getTranslateModel() {
 export function getAssistantProvider(assistant: Assistant): Provider | undefined {
   const providers = getStoreProviders()
   const provider = providers.find((p) => p.id === assistant.model?.provider)
-  return provider || getDefaultProvider()
+  return provider
 }
 
-// FIXME: This function fails in silence.
-// TODO: Refactor it to make it return exactly valid value or null, and update all usage.
 export function getProviderByModel(model?: Model): Provider | undefined {
   const providers = getStoreProviders()
   const provider = providers.find((p) => p.id === model?.provider)
-
-  if (!provider) {
-    // Never silently fall back to the first provider. A missing
-    // model must be detected before provider/API invocation.
-    const defaultProvider = providers.find((p) => p.id === getDefaultModel()?.provider)
-    return defaultProvider
-  }
-
   return provider
 }
 

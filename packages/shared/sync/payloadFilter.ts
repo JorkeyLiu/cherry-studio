@@ -3,6 +3,7 @@
  * Strips credentials, FTS, UI state, contextWindowAnchor, file_path binary etc.
  */
 
+import { parseAssistantConfigKey, validateAssistantConfigPayload } from './assistantConfig'
 import { validateStableReplacePayloadStrict } from './stableReplace'
 
 // Allowlisted topic fields — deletedAt included for soft-delete sync (hard delete uses op=delete)
@@ -21,9 +22,12 @@ const TOPIC_ALLOW = new Set([
   'isNameManuallyEdited'
 ])
 // Message allowlist
+// `branchId` (string|null, absent = main route) is the immutable owner route.
+// `topicId` stays the immutable logical topic. No synthetic composite keys.
 const MESSAGE_ALLOW = new Set([
   'id',
   'topicId',
+  'branchId',
   'role',
   'content',
   'status',
@@ -35,8 +39,24 @@ const MESSAGE_ALLOW = new Set([
   'updatedAt',
   'sortOrder'
 ])
-// Block allowlist — never file_path, never binary, no extra file metadata
-const BLOCK_ALLOW = new Set(['id', 'messageId', 'type', 'content', 'status', 'createdAt', 'updatedAt', 'sortOrder'])
+// Block allowlist — never file_path, never binary, no extra file metadata.
+// assetIds is the portable ordered attachment identity (ordered unique asset IDs, no paths/blobs).
+const BLOCK_ALLOW = new Set([
+  'id',
+  'messageId',
+  'type',
+  'content',
+  'status',
+  'createdAt',
+  'updatedAt',
+  'sortOrder',
+  'assetIds'
+])
+// File asset allowlist — strict 7-key FileAsset identity (no path/count/tokens/purpose/device/secret)
+const FILE_ASSET_ALLOW = new Set(['id', 'sha256', 'byteLength', 'extension', 'mimeType', 'originalName', 'createdAt'])
+// Branch allowlist — identity (id/topicId/parentBranchId/anchorMessageId) plus
+// mutable state (name/createdAt/updatedAt). No synthetic decoded identities.
+const BRANCH_ALLOW = new Set(['id', 'topicId', 'parentBranchId', 'anchorMessageId', 'name', 'createdAt', 'updatedAt'])
 
 // Denied substrings (defense-in-depth)
 const DENIED_KEYS = new Set(['file_path', 'filePath', 'credentials', 'token', 'password', 'secret'])
@@ -103,6 +123,18 @@ export function filterBlockPayload(raw: Record<string, unknown>): Record<string,
   return out
 }
 
+export function filterBranchPayload(raw: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!raw) return undefined
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(raw)) {
+    if (!BRANCH_ALLOW.has(k)) continue
+    if (DENIED_KEYS.has(k)) continue
+    const v = raw[k]
+    if (v !== undefined) out[k] = v
+  }
+  return out
+}
+
 export function isPayloadSafe(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return true
   const obj = payload as Record<string, unknown>
@@ -131,12 +163,31 @@ export function validateSyncPayloadAllowlist(op: {
   payload?: Record<string, unknown>
 }): string | null {
   if (!op.payload) return null
+  if (op.entityType === 'assistant_config') {
+    // Full DTO strict validation (structure keys denied, values never scanned).
+    // Settings/contextWindowAnchor nested refs are validated by the DTO validator.
+    return validateAssistantConfigPayload(op.payload)
+  }
   if (!isPayloadSafe(op.payload)) return 'payload contains denied field'
   // Check FTS derived tables never synced
   if ('fts' in op.payload || 'fts_content' in op.payload) return 'fts field denied'
   if ('contextWindowAnchor' in op.payload) return 'contextWindowAnchor denied'
+  // File asset has its own allowlist
+  if (op.entityType === 'file_asset') {
+    for (const k of Object.keys(op.payload)) {
+      if (!FILE_ASSET_ALLOW.has(k)) return `field ${k} not allowlisted for ${op.entityType}`
+    }
+    return null
+  }
   // Ensure only allowlisted keys
-  const allow = op.entityType === 'topic' ? TOPIC_ALLOW : op.entityType === 'message' ? MESSAGE_ALLOW : BLOCK_ALLOW
+  const allow =
+    op.entityType === 'topic'
+      ? TOPIC_ALLOW
+      : op.entityType === 'message'
+        ? MESSAGE_ALLOW
+        : op.entityType === 'topic_branch'
+          ? BRANCH_ALLOW
+          : BLOCK_ALLOW
   for (const k of Object.keys(op.payload)) {
     if (!allow.has(k)) return `field ${k} not allowlisted for ${op.entityType}`
   }
@@ -197,10 +248,13 @@ function validateOrderFramePayloadStrict(
     return 'order_frame payload must be exactly {frameVersion,kind,parentId,orderedChildIds,frameClock}'
   }
   if (p.frameVersion !== 'parent-order-frame-v1') return 'order_frame unknown frameVersion'
-  if (p.kind !== 'topicMessage' && p.kind !== 'messageBlock') return 'order_frame unknown kind'
-  // Two legal pairs only; any cross combination fails closed with no new spelling.
+  if (p.kind !== 'topicMessage' && p.kind !== 'messageBlock' && p.kind !== 'branchSuffix') {
+    return 'order_frame unknown kind'
+  }
+  // Three legal pairs only; any cross combination fails closed with no new spelling.
   if (p.kind === 'topicMessage' && op.entityType !== 'topic') return 'order_frame entityType/kind mismatch'
   if (p.kind === 'messageBlock' && op.entityType !== 'message') return 'order_frame entityType/kind mismatch'
+  if (p.kind === 'branchSuffix' && op.entityType !== 'topic_branch') return 'order_frame entityType/kind mismatch'
   if (typeof p.parentId !== 'string' || p.parentId.length === 0 || !isValidUnicodeScalarStringLocal(p.parentId)) {
     return 'order_frame invalid parentId'
   }
@@ -254,7 +308,14 @@ export function validateSyncOperationStrict(op: {
   const opId = op.id
   if (opId.includes(':')) return 'invalid id: must not contain colon'
   if (opId.length > SYNC_TOMBSTONE_OPERATION_ID_MAX_LENGTH) return 'invalid id: too long'
-  if (op.entityType !== 'topic' && op.entityType !== 'message' && op.entityType !== 'message_block') {
+  if (
+    op.entityType !== 'topic' &&
+    op.entityType !== 'message' &&
+    op.entityType !== 'message_block' &&
+    op.entityType !== 'topic_branch' &&
+    op.entityType !== 'assistant_config' &&
+    op.entityType !== 'file_asset'
+  ) {
     return `invalid entityType ${String(op.entityType)}`
   }
   if (op.op !== 'upsert' && op.op !== 'delete' && op.op !== 'order_frame' && op.op !== 'message_stable_replace')
@@ -278,11 +339,25 @@ export function validateSyncOperationStrict(op: {
       if (typeof payload !== 'object' || Array.isArray(payload)) return 'invalid payload'
       if (Object.keys(payload).length > 0) return 'delete must not have payload'
     }
+    if (entityType === 'assistant_config') {
+      const parsed = parseAssistantConfigKey((op as { entityId?: unknown }).entityId)
+      if (!parsed) return 'invalid assistant_config entityId: must be assistant_config:<kind>:<id>'
+    }
     return null
   }
   // upsert
   if (payload === undefined || payload === null) return 'upsert missing payload'
   if (typeof payload !== 'object' || Array.isArray(payload)) return 'invalid payload'
+  // assistant_config: kind-qualified stable entityId + full DTO strict.
+  if (entityType === 'assistant_config') {
+    const parsed = parseAssistantConfigKey((op as { entityId?: unknown }).entityId)
+    if (!parsed) return 'invalid assistant_config entityId: must be assistant_config:<kind>:<id>'
+    const dtoErr = validateAssistantConfigPayload(payload)
+    if (dtoErr) return dtoErr
+    const p = payload
+    if (p.kind !== parsed.kind || p.id !== parsed.id) return 'assistant_config payload kind/id must agree with entityId'
+    return null
+  }
   const allowErr = validateSyncPayloadAllowlist({ entityType, payload })
   if (allowErr) return allowErr
   // Payload identity agreement: payload.id when present must equal entityId.
@@ -318,6 +393,17 @@ export function validateSyncOperationStrict(op: {
   }
   if (entityType === 'message') {
     if (!isNonEmptyString(payload.topicId)) return 'message upsert missing topicId'
+    // Immutable owner route: absent/undefined/null/empty = main route, otherwise
+    // a non-empty branch id. Never a synthetic composite key.
+    if ('branchId' in payload && payload.branchId !== undefined && payload.branchId !== null) {
+      if (!isNonEmptyString(payload.branchId)) return 'invalid message branchId'
+      if (typeof payload.branchId === 'string' && !isValidUnicodeScalarStringLocal(payload.branchId)) {
+        return 'invalid message branchId'
+      }
+      if (typeof payload.branchId === 'string' && payload.branchId.includes(':')) {
+        return 'invalid message branchId'
+      }
+    }
     if ('role' in payload && !isOptionalStringOrNull(payload.role)) return 'invalid message role'
     if ('content' in payload && !isOptionalStringOrNull(payload.content)) return 'invalid message content'
     if ('status' in payload && !isOptionalStringOrNull(payload.status)) return 'invalid message status'
@@ -338,6 +424,36 @@ export function validateSyncOperationStrict(op: {
     }
     return null
   }
+  // topic_branch
+  if (entityType === 'topic_branch') {
+    if (!isNonEmptyString(payload.topicId)) return 'branch upsert missing topicId'
+    if (!isNonEmptyString(payload.anchorMessageId)) return 'branch upsert missing anchorMessageId'
+    if ('parentBranchId' in payload && payload.parentBranchId !== undefined && payload.parentBranchId !== null) {
+      if (!isNonEmptyString(payload.parentBranchId)) return 'invalid branch parentBranchId'
+      if (typeof payload.parentBranchId === 'string' && !isValidUnicodeScalarStringLocal(payload.parentBranchId)) {
+        return 'invalid branch parentBranchId'
+      }
+    }
+    if ('name' in payload && !isOptionalStringOrNull(payload.name)) return 'invalid branch name'
+    if ('createdAt' in payload && !isOptionalStringOrNull(payload.createdAt)) return 'invalid branch createdAt'
+    if ('updatedAt' in payload && !isOptionalStringOrNull(payload.updatedAt)) return 'invalid branch updatedAt'
+    return null
+  }
+  // file_asset
+  if (entityType === 'file_asset') {
+    if (!isNonEmptyString(payload.id)) return 'file_asset upsert missing id'
+    if (typeof payload.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(payload.sha256)) return 'invalid file_asset sha256'
+    if (typeof payload.byteLength !== 'number' || !Number.isSafeInteger(payload.byteLength) || payload.byteLength < 0)
+      return 'invalid file_asset byteLength'
+    if (typeof payload.extension !== 'string' || !/^\.[a-z0-9]+$/.test(payload.extension))
+      return 'invalid file_asset extension'
+    if (!isOptionalStringOrNull(payload.mimeType)) return 'invalid file_asset mimeType'
+    if (!isNonEmptyString(payload.originalName)) return 'invalid file_asset originalName'
+    if (payload.originalName.includes('/') || payload.originalName.includes('\\'))
+      return 'invalid file_asset originalName'
+    if (!isOptionalStringOrNull(payload.createdAt)) return 'invalid file_asset createdAt'
+    return null
+  }
   // message_block
   if (!isNonEmptyString(payload.messageId)) return 'block upsert missing messageId'
   if ('type' in payload && !isOptionalStringOrNull(payload.type)) return 'invalid block type'
@@ -353,6 +469,30 @@ export function validateSyncOperationStrict(op: {
     ) {
       return 'invalid block sortOrder'
     }
+  }
+  if ('assetIds' in payload && payload.assetIds !== undefined && payload.assetIds !== null) {
+    if (!Array.isArray(payload.assetIds)) return 'invalid block assetIds'
+    const seen = new Set<string>()
+    for (const v of payload.assetIds as unknown[]) {
+      if (!isNonEmptyString(v)) return 'invalid block assetIds entry'
+      if (v.includes('/') || v.includes('\\') || v.includes('..')) return 'invalid block assetIds entry'
+      if (seen.has(v)) return 'duplicate block assetIds'
+      seen.add(v)
+    }
+  }
+  // Strict portable-media contract (incremental): file/image/video full-state upsert must carry non-empty ordered assetIds;
+  // non-media must not carry assetIds (null/absent/empty allowed, non-empty forbidden).
+  // Patch paths that omit type are validated by the applier against stored type (stored-type wins);
+  // here we validate only when payload explicitly declares a portable type.
+  const rawType = typeof payload.type === 'string' ? payload.type.toLowerCase() : ''
+  const isPortablePayload = rawType === 'file' || rawType === 'image' || rawType === 'video'
+  if (isPortablePayload) {
+    const ids = payload.assetIds as unknown[] | undefined | null
+    if (!Array.isArray(ids) || ids.length === 0) return 'portable media block requires non-empty assetIds'
+  } else if (payload.type !== undefined) {
+    // Non-portable explicit type must not carry non-empty assetIds (empty [] is tolerated as absent)
+    const ids = payload.assetIds as unknown[] | undefined | null
+    if (Array.isArray(ids) && ids.length > 0) return 'non-media block must not have assetIds'
   }
   return null
 }

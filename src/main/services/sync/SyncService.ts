@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { loggerService } from '@logger'
 import { configManager } from '@main/services/ConfigManager'
+import { getFilesDir } from '@main/utils/file'
+import { IpcChannel } from '@shared/IpcChannel'
 import type {
   SyncConfig,
   SyncOperation,
@@ -14,6 +16,7 @@ import type {
 import {
   compareUtf8ByteLex,
   filterBlockPayload,
+  filterBranchPayload,
   filterMessagePayload,
   filterTopicPayload,
   isBaselineRegisterSentinel,
@@ -22,7 +25,9 @@ import {
   isUnsupportedBlockForSync,
   isValidSyncDeviceAuth,
   MESSAGE_STABLE_REPLACE_VERSION,
+  SYNC_ASSISTANT_CONFIG_PATCH_FIELDS,
   SYNC_BLOCK_PATCH_FIELDS,
+  SYNC_BRANCH_PATCH_FIELDS,
   SYNC_CONFLICT_LOG_MAX,
   SYNC_MESSAGE_PATCH_FIELDS,
   SYNC_TOPIC_PATCH_FIELDS,
@@ -32,16 +37,23 @@ import {
   validateSyncPayloadAllowlist
 } from '@shared/sync'
 import { SYNC_MAX_OPERATIONS_PER_PULL, SYNC_MAX_OPERATIONS_PER_PUSH } from '@shared/sync'
+import type { FileAsset } from '@shared/sync/attachments'
 import type Database from 'better-sqlite3'
 import { and, asc, eq, isNull } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
+import { BrowserWindow } from 'electron'
 
 import { chatDbService } from '../chatDb'
 import * as schema from '../chatDb/schema'
-import { captureLocalSyncBaselineCandidate } from './syncBaseline'
+import { mergeAssistantBaselineSectionInTx, readAssistantBaselineSection } from './syncAssistantBaseline'
+import { bindAssistantConfigMirrorToSqlite } from './syncAssistantConfigStore'
+import type { SyncAttachmentClient } from './syncAttachmentService'
+import { SyncAttachmentService } from './syncAttachmentService'
+import { buildBaselineCandidateInTx, captureLocalSyncBaselineCandidate } from './syncBaseline'
 import { mergeValidatedBaselineInTx, SyncBaselineApplyError } from './syncBaselineApply'
-import { assertBarrierSnapshotProof, buildPublishEnvelope, SyncBaselinePublishError } from './syncBaselinePublish'
+import { assertBarrierSnapshotProof, SyncBaselinePublishError } from './syncBaselinePublish'
 import { mapWireEnvelopeToMergeInput } from './syncBaselineWireApply'
+import { computeWirePayloadDigestV5, projectLocalBaselineToWirePayloadV5 } from './syncBaselineWireProjection'
 import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import { compareClock as compareFrameClock, evaluateEffectiveOrder } from './syncFrameEvaluation'
@@ -77,18 +89,32 @@ const CONFIG_DEVICE_ID_MISSING: unique symbol = Symbol('sync-device-id-missing')
 const TOMBSTONE_TOPIC_PREFIX = 'tombstone:topic:'
 const TOMBSTONE_MESSAGE_PREFIX = 'tombstone:message:'
 const TOMBSTONE_BLOCK_PREFIX = 'tombstone:message_block:'
+const TOMBSTONE_BRANCH_PREFIX = 'tombstone:topic_branch:'
+// Assistant-config tombstones reuse the qualified entityId itself:
+// key = `tombstone:${entityId}` where entityId = `assistant_config:<kind>:<id>`.
+// Parsed by the assistant prefix below (entityType implied).
+const TOMBSTONE_ASSISTANT_CONFIG_PREFIX = 'tombstone:assistant_config:'
 // Bounded cross-page orphan buffer: a single sync() cycle never buffers more
 // than this many retryable orphans in memory. Past the budget the cycle fails
 // closed with a durable blocked error (cursor unmoved, no skip).
 const MAX_DEFERRED_ORPHANS = 500
 
 // Outbox push priority: parents before children so relay seq preserves
-// dependency order (topic < message < block < order_frame). Order frames
-// reuse entityType 'topic' but must sort after their member message ops
+// dependency order (assistant_config < topic < branch < message < block <
+// order_frame). Assistant configs carry no chat dependency and must sort
+// before their referencing topics. Order frames reuse entityType
+// 'topic' but must sort after their member message ops
 // (their frameClock is already greater, yet priority would otherwise invert
 // it), so the op kind takes precedence over the entity priority.
 // Within the same priority, timestamp then id order applies.
-const ENTITY_PUSH_PRIORITY: Record<string, number> = { topic: 0, message: 1, message_block: 2 }
+const ENTITY_PUSH_PRIORITY: Record<string, number> = {
+  assistant_config: -1,
+  topic: 0,
+  topic_branch: 1,
+  file_asset: 1,
+  message: 2,
+  message_block: 3
+}
 
 function pushPriorityOf(op: { entityType: string; op: string }): number {
   if (op.op === 'order_frame') return 3
@@ -289,7 +315,7 @@ const MIGRATION_013_KEY = '013_sync_stable_replace_register'
  * local projection only.
  */
 export const PARENT_ORDER_FRAME_VERSION = 'parent-order-frame-v1' as const
-export const VALID_PARENT_FRAME_KINDS: ReadonlySet<string> = new Set(['topicMessage', 'messageBlock'])
+export const VALID_PARENT_FRAME_KINDS: ReadonlySet<string> = new Set(['topicMessage', 'messageBlock', 'branchSuffix'])
 const FRAME_MAX_SAFE_TIMESTAMP = 9007199254740991
 
 /**
@@ -407,9 +433,22 @@ export type SyncTxExecutor = BetterSQLite3Database<typeof schema>
 const TOPIC_CLOCKED = new Set<string>(SYNC_TOPIC_PATCH_FIELDS as readonly string[])
 const MESSAGE_CLOCKED = new Set<string>([...(SYNC_MESSAGE_PATCH_FIELDS as readonly string[]), 'sortOrder'])
 const BLOCK_CLOCKED = new Set<string>([...(SYNC_BLOCK_PATCH_FIELDS as readonly string[]), 'sortOrder'])
+const BRANCH_CLOCKED = new Set<string>(SYNC_BRANCH_PATCH_FIELDS as readonly string[])
+const ASSISTANT_CONFIG_CLOCKED = new Set<string>(SYNC_ASSISTANT_CONFIG_PATCH_FIELDS as readonly string[])
+const FILE_ASSET_CLOCKED = new Set<string>(['mimeType', 'originalName', 'createdAt'])
 
 function clockedFieldsFor(entityType: SyncOperation['entityType']): Set<string> {
-  return entityType === 'topic' ? TOPIC_CLOCKED : entityType === 'message' ? MESSAGE_CLOCKED : BLOCK_CLOCKED
+  if (entityType === 'topic') return TOPIC_CLOCKED
+  if (entityType === 'message') return MESSAGE_CLOCKED
+  if (entityType === 'topic_branch') return BRANCH_CLOCKED
+  if (entityType === 'assistant_config') return ASSISTANT_CONFIG_CLOCKED
+  if (entityType === 'file_asset') return FILE_ASSET_CLOCKED
+  return BLOCK_CLOCKED
+}
+
+function stripAssistantMeta(p: Record<string, unknown>): Record<string, unknown> {
+  const { schemaVersion: _s, kind: _k, id: _i, deleted: _d, ...rest } = p
+  return rest
 }
 
 export class SyncService {
@@ -449,6 +488,13 @@ export class SyncService {
    */
   private configGeneration = 0
   private configFailureListeners = new Set<(error: unknown) => void>()
+  private testAttachmentService: SyncAttachmentService | null = null
+  private attachmentTempDir: string | null = null
+
+  /** Test-only injection for attachment filesDir/tempDir (synthetic per-peer dirs). */
+  setAttachmentServiceForTests(svc: SyncAttachmentService | null): void {
+    this.testAttachmentService = svc
+  }
 
   /** Current config generation (tests + automation coordination). */
   getConfigGeneration(): number {
@@ -602,6 +648,493 @@ export class SyncService {
     return chatDbService.getSqlite()
   }
 
+  private getAttachmentService(): SyncAttachmentService | null {
+    if (this.testAttachmentService) return this.testAttachmentService
+    try {
+      const filesDir = getFilesDir()
+      const tempDir = this.attachmentTempDir ?? `${filesDir}_sync_tmp`
+      return new SyncAttachmentService({
+        filesDir,
+        tempDir,
+        client: syncClient as unknown as SyncAttachmentClient
+      })
+    } catch {
+      return null
+    }
+  }
+
+  private async drainAttachmentIntents(
+    endpoint: string,
+    token: string | undefined,
+    deviceCode: string,
+    deviceSecret: string,
+    syncGen: number
+  ): Promise<void> {
+    let channelKey: string | null
+    try {
+      channelKey = this.getChannelKey()
+    } catch {
+      return
+    }
+    if (channelKey === null) return
+    this.throwIfShutdown()
+    this.throwIfStaleConfig(syncGen)
+    const db = this.getDb()
+    let intents: Array<{ blockId: string; fileId: string; capturedAt: number }>
+    try {
+      intents = db.select().from(schema.syncAttachmentCaptureIntent).all() as any
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return
+      throw e
+    }
+    if (intents.length === 0) return
+    const service = this.getAttachmentService()
+    if (!service) return
+    // Build block->fileIds and fileId->blockIds maps from intents (trusted durable intent)
+    const blockToIntentFileIds = new Map<string, Set<string>>()
+    const fileIdToIntentBlockIds = new Map<string, string[]>()
+    const fileIdToCapturedAt = new Map<string, number>()
+    for (const it of intents) {
+      const s = blockToIntentFileIds.get(it.blockId) ?? new Set<string>()
+      s.add(it.fileId)
+      blockToIntentFileIds.set(it.blockId, s)
+      const l = fileIdToIntentBlockIds.get(it.fileId) ?? []
+      l.push(it.blockId)
+      fileIdToIntentBlockIds.set(it.fileId, l)
+      const prev = fileIdToCapturedAt.get(it.fileId) ?? 0
+      if (it.capturedAt > prev) fileIdToCapturedAt.set(it.fileId, it.capturedAt)
+    }
+    const uniqueFileIds = [...fileIdToIntentBlockIds.keys()]
+    const succeeded = new Map<string, FileAsset>()
+    const reportDrainFailure = (msg: string): void => {
+      const safe = msg.slice(0, 500)
+      try {
+        this.updateLastError(safe)
+      } catch {}
+      logger.warn(`[drainAttachment] ${safe}`)
+    }
+    // Helper: derive extension + hints from trusted file_references snapshot (not readdir guess)
+    const deriveStoredNameAndHints = (
+      fileId: string
+    ): { storedName: string; hints: { originalName?: string; createdAt?: string } } | null => {
+      try {
+        const rows = db
+          .select()
+          .from(schema.fileReferences)
+          .where(eq(schema.fileReferences.fileId, fileId))
+          .all() as Array<{ fileName: string | null; extra: string | null }>
+        if (rows.length === 0) return null
+        // Use first row's snapshot as trusted source; all rows for same fileId share same fileId
+        const r: any = rows[0]
+        const fileName: string | null = (r.fileName as string) ?? null
+        let extra: Record<string, unknown> | null = null
+        if (r.extra) {
+          try {
+            const parsed = JSON.parse(r.extra)
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+              extra = parsed as Record<string, unknown>
+          } catch {}
+        }
+        let extension: string | null = null
+        // Prefer fileName extension
+        if (typeof fileName === 'string' && fileName.length > 0) {
+          const dot = fileName.lastIndexOf('.')
+          if (dot > 0 && dot < fileName.length - 1) {
+            const ext = fileName.slice(dot).toLowerCase()
+            if (/^\.[a-z0-9]+$/.test(ext) && ext.length >= 2 && ext.length <= 16) extension = ext
+          }
+        }
+        if (!extension && extra) {
+          const extCand = (extra as any).ext ?? (extra as any).extension ?? null
+          if (typeof extCand === 'string' && extCand.length > 0) {
+            let e = extCand.toLowerCase()
+            if (!e.startsWith('.')) e = `.${e}`
+            if (/^\.[a-z0-9]+$/.test(e) && e.length >= 2 && e.length <= 16) extension = e
+          }
+        }
+        if (!extension) return null
+        const storedName = `${fileId}${extension}`
+        let originalName: string | undefined
+        if (
+          typeof fileName === 'string' &&
+          fileName.length > 0 &&
+          fileName.length <= 255 &&
+          !fileName.includes('/') &&
+          !fileName.includes('\\')
+        )
+          originalName = fileName
+        else if (extra) {
+          const on = (extra as any).originalName ?? (extra as any).origin_name ?? (extra as any).name ?? null
+          if (typeof on === 'string' && on.length > 0 && on.length <= 255 && !on.includes('/') && !on.includes('\\'))
+            originalName = on
+        }
+        let createdAt: string | undefined
+        if (extra) {
+          const ca = (extra as any).created_at ?? (extra as any).createdAt ?? null
+          if (typeof ca === 'string' && ca.length > 0 && ca.length <= 64 && Number.isFinite(Date.parse(ca)))
+            createdAt = ca
+        }
+        return { storedName, hints: { originalName, createdAt } }
+      } catch {
+        return null
+      }
+    }
+    // Discover + upload outside SQLite Tx (hash + network), but with trusted snapshot and immutable pre-check
+    for (const fileId of uniqueFileIds) {
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      const derived = deriveStoredNameAndHints(fileId)
+      if (!derived) {
+        reportDrainFailure(`attachment drain failed: metadata contradiction for ${fileId} (no trusted snapshot)`)
+        continue
+      }
+      const { storedName, hints } = derived
+      let asset: FileAsset
+      try {
+        asset = await service.discoverAsset(storedName, hints as any)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        reportDrainFailure(`attachment drain failed: discover ${fileId} ${msg.slice(0, 200)}`)
+        continue
+      }
+      if (asset.id !== fileId) {
+        reportDrainFailure(`attachment drain failed: id mismatch discovered ${asset.id} vs intent ${fileId}`)
+        continue
+      }
+      // Fail-closed immutable check BEFORE upload: if local sync_file_asset already exists with differing immutable, retain pending
+      try {
+        const existing = db
+          .select()
+          .from(schema.syncFileAsset)
+          .where(eq(schema.syncFileAsset.id, fileId))
+          .get() as any as typeof schema.syncFileAsset.$inferSelect | undefined
+        if (existing) {
+          if (
+            existing.sha256 !== asset.sha256 ||
+            existing.byteLength !== asset.byteLength ||
+            existing.extension !== asset.extension
+          ) {
+            reportDrainFailure(`attachment drain failed: immutable mismatch for ${fileId} (stored bytes changed)`)
+            continue
+          }
+        }
+      } catch {}
+      try {
+        await service.uploadAsset(asset, endpoint, token, deviceCode, deviceSecret)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        reportDrainFailure(`attachment drain failed: upload ${fileId} ${msg.slice(0, 200)}`)
+        continue
+      }
+      succeeded.set(fileId, asset)
+    }
+    if (succeeded.size === 0) {
+      // No file succeeded — all pending retained, lastError already recorded if any failure
+      return
+    }
+    // Aggregate per block: only when ALL file refs for a block are succeeded do we fulfill that block once with full ordered unique assetIds
+    const sqlite = this.getSqlite()
+    // Use a single stable timestamp for this drain's fulfillment to keep clock/id consistent and avoid resetting all field versions on retry
+    // Reuse the original capturedAt as stable clock floor: max capturedAt for involved files
+    let drainTs = Date.now()
+    for (const at of fileIdToCapturedAt.values()) if (at > drainTs) drainTs = at
+    // Ensure drainTs is safe integer and monotonic
+    if (!Number.isSafeInteger(drainTs) || drainTs < 0) drainTs = Date.now()
+    const deviceId = this.getDeviceId()
+    // Determine which blocks are ready (all refs succeeded)
+    const readyBlocks: Array<{ blockId: string; assetIds: string[]; messageId: string }> = []
+    for (const [blockId, intentFileIds] of blockToIntentFileIds) {
+      this.throwIfShutdown()
+      this.throwIfStaleConfig(syncGen)
+      let blk: any
+      try {
+        blk = db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, blockId)).get() as any
+      } catch {
+        blk = null
+      }
+      if (!blk) {
+        // Block deleted — will be cleaned inside Tx with fresh guard
+        continue
+      }
+      // Fresh guard: block still references exactly the intent fileIds? Load authoritative fileReferences for block
+      let refs: Array<{ fileId: string }>
+      try {
+        refs = db
+          .select({ fileId: schema.fileReferences.fileId })
+          .from(schema.fileReferences)
+          .where(eq(schema.fileReferences.blockId, blockId))
+          .all() as any
+      } catch {
+        refs = []
+      }
+      const refIds = refs.map((r) => r.fileId)
+      // Block's full refs must be subset of succeeded and all succeeded? Actually block's full refs = intentFileIds if capture correct; but if block has extra refs not in intent (e.g., later added), not ready
+      let allRefSucceeded = true
+      for (const fid of refIds) {
+        if (!succeeded.has(fid)) {
+          allRefSucceeded = false
+          break
+        }
+      }
+      if (!allRefSucceeded) continue
+      // Also ensure intent set covers all refs (no extra ref missing intent would mean block not fully captured? but if block has 2 refs but only 1 intent, the missing intent means not all captured, not ready)
+      if (refIds.length !== intentFileIds.size) {
+        // Intent does not cover full refs — not ready
+        let covers = true
+        for (const fid of refIds)
+          if (!intentFileIds.has(fid)) {
+            covers = false
+            break
+          }
+        if (!covers) continue
+      }
+      // Check tombstone for block — if tombstoned, will be cleaned inside Tx
+      const orderedUnique = [...new Set(refIds)].sort()
+      if (orderedUnique.length === 0) continue
+      readyBlocks.push({ blockId, assetIds: orderedUnique, messageId: blk.messageId as string })
+    }
+    if (readyBlocks.length === 0) return
+    // Same-Tx fulfillment for ready blocks + their file_assets (dedup file_asset enqueue)
+    const fileIdsToEnqueue = new Set<string>()
+    for (const rb of readyBlocks) for (const fid of rb.assetIds) fileIdsToEnqueue.add(fid)
+    let didEnqueue = false
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      const tx = db as unknown as SyncTxExecutor
+      // Enqueue file_asset ops first (dedup, immutable already checked outside but recheck inside Tx for race)
+      for (const fileId of fileIdsToEnqueue) {
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        const asset = succeeded.get(fileId)!
+        if (!asset) continue
+        let existingAsset: typeof schema.syncFileAsset.$inferSelect | undefined
+        try {
+          existingAsset = tx.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, fileId)).get() as any
+        } catch {}
+        if (existingAsset) {
+          if (
+            existingAsset.sha256 !== asset.sha256 ||
+            existingAsset.byteLength !== asset.byteLength ||
+            existingAsset.extension !== asset.extension
+          ) {
+            // Race changed inside Tx — retain pending, skip enqueue
+            reportDrainFailure(`attachment drain failed: immutable mismatch for ${fileId} (race)`)
+            continue
+          }
+        }
+        // Upsert job as completed (channel-bound)
+        try {
+          tx.insert(schema.syncAttachmentJob)
+            .values({
+              assetId: fileId,
+              sha256: asset.sha256,
+              byteLength: asset.byteLength,
+              channelId: channelKey,
+              state: 'completed',
+              attempts: 0,
+              lastError: null,
+              createdAt: drainTs,
+              updatedAt: drainTs
+            })
+            .onConflictDoUpdate({
+              target: schema.syncAttachmentJob.assetId,
+              set: {
+                sha256: asset.sha256,
+                byteLength: asset.byteLength,
+                channelId: channelKey,
+                state: 'completed',
+                updatedAt: drainTs
+              }
+            })
+            .run()
+        } catch {}
+        try {
+          if (!existingAsset) {
+            tx.insert(schema.syncFileAsset)
+              .values({
+                id: fileId,
+                sha256: asset.sha256,
+                byteLength: asset.byteLength,
+                extension: asset.extension,
+                mimeType: asset.mimeType,
+                originalName: asset.originalName,
+                createdAt: asset.createdAt,
+                version: 1,
+                updatedAt: drainTs
+              })
+              .run()
+          } else {
+            const updates: Record<string, unknown> = {}
+            if (existingAsset.mimeType !== asset.mimeType) updates.mimeType = asset.mimeType
+            if (existingAsset.originalName !== asset.originalName) updates.originalName = asset.originalName
+            if (existingAsset.createdAt !== asset.createdAt) updates.createdAt = asset.createdAt
+            if (Object.keys(updates).length > 0) {
+              updates.updatedAt = drainTs
+              tx.update(schema.syncFileAsset)
+                .set(updates as any)
+                .where(eq(schema.syncFileAsset.id, fileId))
+                .run()
+            }
+          }
+        } catch {}
+        const filePayload: Record<string, unknown> = {
+          id: asset.id,
+          sha256: asset.sha256,
+          byteLength: asset.byteLength,
+          extension: asset.extension,
+          mimeType: asset.mimeType,
+          originalName: asset.originalName,
+          createdAt: asset.createdAt
+        }
+        const already = tx
+          .select()
+          .from(schema.syncOutbox)
+          .where(eq(schema.syncOutbox.id, `file-${fileId}-${asset.sha256.slice(0, 8)}`))
+          .get()
+        void already
+        // Reuse a deterministic op id per file per drainTs to avoid per-retry churn? Use random but track dedup via outbox idempotence
+        const fileOp: SyncOperation = {
+          id: randomUUID(),
+          entityType: 'file_asset',
+          op: 'upsert',
+          entityId: fileId,
+          timestamp: drainTs,
+          deviceId,
+          payload: filePayload
+        }
+        const inserted = this.enqueueOperationInTx(tx, fileOp as any)
+        if (inserted) didEnqueue = true
+      }
+      // For each ready block, verify fresh guard again inside Tx and enqueue block once with full ordered unique assetIds
+      for (const rb of readyBlocks) {
+        this.throwIfShutdown()
+        this.throwIfStaleConfig(syncGen)
+        const bid = rb.blockId
+        const blkRow = tx.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, bid)).get() as any
+        if (!blkRow) {
+          tx.delete(schema.syncAttachmentCaptureIntent).where(eq(schema.syncAttachmentCaptureIntent.blockId, bid)).run()
+          continue
+        }
+        const refsInside = tx
+          .select({ fileId: schema.fileReferences.fileId })
+          .from(schema.fileReferences)
+          .where(eq(schema.fileReferences.blockId, bid))
+          .all() as Array<{ fileId: string }>
+        const refIdsInside = refsInside.map((r) => r.fileId)
+        const stillAllSucceeded = refIdsInside.every((fid) => succeeded.has(fid))
+        if (!stillAllSucceeded) continue
+        const blockTomb = tx
+          .select()
+          .from(schema.syncState)
+          .where(eq(schema.syncState.key, `tombstone:message_block:${bid}`))
+          .get()
+        if (blockTomb) {
+          tx.delete(schema.syncAttachmentCaptureIntent).where(eq(schema.syncAttachmentCaptureIntent.blockId, bid)).run()
+          continue
+        }
+        // Message tombstone also suppresses
+        const msgTomb = tx
+          .select()
+          .from(schema.syncState)
+          .where(eq(schema.syncState.key, `tombstone:message:${blkRow.messageId}`))
+          .get()
+        if (msgTomb) {
+          tx.delete(schema.syncAttachmentCaptureIntent).where(eq(schema.syncAttachmentCaptureIntent.blockId, bid)).run()
+          continue
+        }
+        // Ensure all succeeded fileIds for this block are indeed the full set (no extra unsucceeded ref)
+        const orderedUnique = [...new Set(refIdsInside)].sort()
+        if (orderedUnique.length === 0) continue
+        // Build full block payload with complete assetIds (not singleton) — retain existing text fields but ensure assetIds complete
+        const blockPayload: Record<string, unknown> = {
+          id: bid,
+          messageId: blkRow.messageId,
+          type: blkRow.type,
+          content: blkRow.content,
+          status: blkRow.status,
+          createdAt: blkRow.createdAt,
+          updatedAt: blkRow.updatedAt,
+          sortOrder: blkRow.sortOrder,
+          assetIds: orderedUnique
+        }
+        // Preserve normal edit existing membership; mint only if absent with stable clock
+        const blockTs = drainTs
+        let emitBlock = false
+        const existingMem = this.getMembershipClockInTx(tx, 'message_block', bid)
+        // Check if block already has outbox pending for same assetIds — avoid per-retry churn: only emit if not already tracked with same assetIds?
+        // For now, always enqueue if not already tracked; deduplicate via LWW will handle
+        // To avoid churn, we check if a pending outbox for this block with same timestamp already exists — simplified: always enqueue first time, retry will be idempotent via operationId uniqueness? We keep as before but track didEnqueue only if new insert
+        void this.isTrackedEntityInTx(tx, 'message_block', bid)
+        const blockOp: SyncOperation = {
+          id: randomUUID(),
+          entityType: 'message_block',
+          op: 'upsert',
+          entityId: bid,
+          timestamp: blockTs,
+          deviceId,
+          payload: blockPayload
+        }
+        const insertedBlock = this.enqueueOperationInTx(tx, blockOp as any)
+        if (insertedBlock) {
+          didEnqueue = true
+          emitBlock = true
+        } else {
+          // Duplicate id ignored — still consider emitted if already tracked? Not new
+          emitBlock = false
+        }
+        if (emitBlock && !existingMem) {
+          this.setMembershipClockInTx(tx, 'message_block', bid, blkRow.messageId, blockTs, blockOp.id)
+        }
+        // Refresh parent frame for this message (try helper handles missing membership case)
+        if (emitBlock) {
+          try {
+            if (this.tryRefreshMessageBlockFrameAndEnqueueInTx(tx, blkRow.messageId, deviceId) === 'refreshed')
+              didEnqueue = true
+          } catch {}
+        }
+        // Delete capture intents for this block (all fileIds for block)
+        tx.delete(schema.syncAttachmentCaptureIntent).where(eq(schema.syncAttachmentCaptureIntent.blockId, bid)).run()
+      }
+      sqlite.exec('COMMIT')
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e
+    }
+    if (didEnqueue) {
+      // Only emit wake-up when truly new outbox intent was inserted (avoid per-retry churn)
+      try {
+        this.notifyEnqueued()
+      } catch {}
+    }
+  }
+
+  private async ensureFileAssetDownloaded(
+    op: SyncOperation,
+    endpoint: string,
+    token: string | undefined,
+    deviceCode: string,
+    deviceSecret: string
+  ): Promise<void> {
+    const payload = op.payload as unknown as Record<string, unknown>
+    const asset = {
+      id: payload.id as string,
+      sha256: payload.sha256 as string,
+      byteLength: payload.byteLength as number,
+      extension: payload.extension as string,
+      mimeType: (payload.mimeType as string) ?? 'application/octet-stream',
+      originalName: payload.originalName as string,
+      createdAt: payload.createdAt as string
+    } as FileAsset
+    const err = (await import('@shared/sync/attachments')).validateFileAsset(asset)
+    if (err) throw new Error(`file_asset payload invalid: ${err}`)
+    const service = this.getAttachmentService()
+    if (!service) throw new Error('attachment service unavailable')
+    // Download and install before DB Tx
+    await service.downloadAndInstall(asset, endpoint, token, deviceCode, deviceSecret)
+  }
+
   getConfig(): SyncConfig {
     const endpoint = configManager.get<string>('sync:endpoint', '') ?? ''
     const token = configManager.get<string>('sync:token', '') ?? ''
@@ -687,7 +1220,24 @@ export class SyncService {
       throw e instanceof Error ? e : new Error(String(e))
     }
     try {
-      const pendingCount = db.select().from(schema.syncOutbox).all().length
+      let pendingCount = db.select().from(schema.syncOutbox).all().length
+      try {
+        pendingCount += db.select().from(schema.syncAttachmentCaptureIntent).all().length
+      } catch {}
+      try {
+        pendingCount += db
+          .select()
+          .from(schema.syncAttachmentJob)
+          .where(eq(schema.syncAttachmentJob.state, 'pending'))
+          .all().length
+      } catch {}
+      try {
+        pendingCount += db
+          .select()
+          .from(schema.syncAttachmentJob)
+          .where(eq(schema.syncAttachmentJob.state, 'failed'))
+          .all().length
+      } catch {}
       const cursorRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CURSOR)).get()
       // Strict persisted cursor (LOCK-PERSONAL-001): a present row must hold a
       // canonical non-negative safe integer; malformed state fails closed via
@@ -1023,9 +1573,14 @@ export class SyncService {
       if (
         inserted &&
         op.op === 'delete' &&
-        (op.entityType === 'topic' || op.entityType === 'message' || op.entityType === 'message_block')
+        (op.entityType === 'topic' ||
+          op.entityType === 'message' ||
+          op.entityType === 'message_block' ||
+          op.entityType === 'topic_branch' ||
+          op.entityType === 'assistant_config')
       ) {
         this.setTombstoneInDb(db, op.entityType, op.entityId, op.timestamp, op.id)
+        this.tombstoneDeleteDescendantsInDb(db, op.entityType, op.entityId, op.timestamp, op.id)
       }
       if (inserted && op.op === 'upsert' && op.payload) {
         this.updateFieldClocksInDb(db, op.entityType, op.entityId, op.payload, op.timestamp, op.id)
@@ -1816,7 +2371,7 @@ export class SyncService {
   /** Tx-bound tombstone read (fail-closed on malformed stored value, like the root read). */
   private getTombstoneInTx(
     tx: SyncTxExecutor,
-    entityType: 'topic' | 'message' | 'message_block',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config',
     entityId: string
   ): { timestamp: number; operationId: string | null } | null {
     const row = tx
@@ -1907,9 +2462,20 @@ export class SyncService {
     }
     if (
       op.op === 'delete' &&
-      (op.entityType === 'topic' || op.entityType === 'message' || op.entityType === 'message_block')
+      (op.entityType === 'topic' ||
+        op.entityType === 'message' ||
+        op.entityType === 'message_block' ||
+        op.entityType === 'topic_branch' ||
+        op.entityType === 'assistant_config')
     ) {
       this.setTombstoneInDb(
+        tx as unknown as BetterSQLite3Database<typeof schema>,
+        op.entityType,
+        op.entityId,
+        op.timestamp,
+        op.id
+      )
+      this.tombstoneDeleteDescendantsInDb(
         tx as unknown as BetterSQLite3Database<typeof schema>,
         op.entityType,
         op.entityId,
@@ -1945,6 +2511,256 @@ export class SyncService {
     const op: SyncOperation = { id: randomUUID(), entityType, op: 'delete', entityId, timestamp, deviceId }
     this.enqueueOperationInTx(tx, op)
     return op.id
+  }
+
+  /**
+   * Production assistant-config local commit (renderer-owned authority).
+   * Barrier gate throws BEFORE any Tx. Mirror + outbox + clocks commit in one
+   * SQLite Tx on the shared chatDB connection (no nested/independent commit).
+   * Same mutationId repeats are idempotent no-ops. Unavailable mirror throws
+   * (retain pending, never memory fallback). Remote internal merges never pass
+   * through this gate (applyAssistantConfig* bypass it by design).
+   */
+  commitAssistantConfigDeltaProduction(delta: {
+    kind: 'assistant' | 'defaults'
+    id: string
+    mutationId: string
+    revision: number
+    timestamp: number
+    fields: Record<string, unknown>
+    deleted?: boolean
+  }): { key: string; version: number; acked: boolean; duplicate: boolean } {
+    this.throwIfPublishBarrierHeld('assistantConfig')
+    const db = this.getDb()
+    const sqlite = this.getSqlite()
+    // Strict delta validation (structure keys only, never prompt scanning).
+    // Dynamic import avoided: SyncService already depends on shared validators
+    // via payloadFilter; delegate shape check through the op validator below.
+    const key = `assistant_config:${delta.kind}:${delta.id}`
+    if (delta.kind !== 'assistant' && delta.kind !== 'defaults') throw new Error('invalid assistant config kind')
+    if (!delta.id || typeof delta.id !== 'string') throw new Error('invalid assistant config id')
+    if (delta.kind === 'defaults' && delta.id !== 'defaults') throw new Error('defaults id must be "defaults"')
+    if (!delta.mutationId || typeof delta.mutationId !== 'string' || delta.mutationId.includes(':')) {
+      throw new Error('invalid assistant mutationId')
+    }
+    if (delta.id.includes(':')) throw new Error('invalid assistant id: must not contain colon')
+    const deviceId = this.getDeviceId()
+    const now = Date.now()
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      let existing: typeof schema.syncAssistantConfigMirror.$inferSelect | undefined
+      try {
+        existing = db
+          .select()
+          .from(schema.syncAssistantConfigMirror)
+          .where(eq(schema.syncAssistantConfigMirror.key, key))
+          .get()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          throw new Error('assistant mirror unavailable: migration 019 not applied')
+        }
+        throw e
+      }
+      if (existing && existing.localMutationId === delta.mutationId) {
+        sqlite.exec('COMMIT')
+        return { key, version: existing.version ?? 0, acked: true, duplicate: true }
+      }
+      const prevPayload: Record<string, unknown> = existing?.payloadJson
+        ? (JSON.parse(existing.payloadJson) as Record<string, unknown>)
+        : {}
+      const nextPayload: Record<string, unknown> =
+        delta.deleted === true
+          ? { schemaVersion: 1, kind: delta.kind, id: delta.id, deleted: true }
+          : { schemaVersion: 1, kind: delta.kind, id: delta.id, ...stripAssistantMeta(prevPayload), ...delta.fields }
+      if (nextPayload.schemaVersion !== 1) nextPayload.schemaVersion = 1
+      nextPayload.kind = delta.kind
+      nextPayload.id = delta.id
+      // Full DTO strict via op validator (fails closed on secrets/paths/raw JSON).
+      // Op payload carries intent-only patch fields (+ identity), never the full
+      // merged mirror DTO: absent keys carry no intent and are preserved on
+      // apply, so disjoint concurrent edits converge without wipe. The mirror
+      // stores the full merged DTO; clocks advance only for intent fields.
+      const op: SyncOperation =
+        delta.deleted === true
+          ? {
+              id: delta.mutationId,
+              entityType: 'assistant_config',
+              op: 'delete',
+              entityId: key,
+              timestamp: delta.timestamp ?? now,
+              deviceId
+            }
+          : {
+              id: delta.mutationId,
+              entityType: 'assistant_config',
+              op: 'upsert',
+              entityId: key,
+              timestamp: delta.timestamp ?? now,
+              deviceId,
+              payload: { schemaVersion: 1, kind: delta.kind, id: delta.id, ...delta.fields }
+            }
+      const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
+      if (strictErr) throw new Error(`invalid assistant config op: ${strictErr}`)
+      if (op.op === 'upsert') {
+        const allowErr = validateSyncPayloadAllowlist(op)
+        if (allowErr) throw new Error(`invalid assistant config payload: ${allowErr}`)
+      }
+      // Outbox + clocks in the same Tx (drizzle tx executor is the same connection;
+      // enqueueOperationInTx performs no BEGIN/COMMIT itself).
+      const tx = db as unknown as SyncTxExecutor
+      const alreadyQueued = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
+      if (!alreadyQueued) {
+        tx.insert(schema.syncOutbox)
+          .values({
+            id: op.id,
+            entityType: op.entityType,
+            op: op.op,
+            entityId: op.entityId,
+            timestamp: op.timestamp,
+            deviceId: op.deviceId,
+            payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+            createdAt: new Date().toISOString()
+          })
+          .onConflictDoNothing()
+          .run()
+        const clockRow = tx
+          .select()
+          .from(schema.syncEntityClock)
+          .where(eq(schema.syncEntityClock.entityType, op.entityType))
+          .all()
+          .find((r) => r.entityId === op.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+        if (!clockRow || this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) > 0) {
+          tx.insert(schema.syncEntityClock)
+            .values({ entityType: op.entityType, entityId: op.entityId, timestamp: op.timestamp, operationId: op.id })
+            .onConflictDoUpdate({
+              target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+              set: { timestamp: op.timestamp, operationId: op.id }
+            })
+            .run()
+        }
+        if (op.op === 'delete') {
+          this.setTombstoneInDb(
+            tx as unknown as BetterSQLite3Database<typeof schema>,
+            'assistant_config',
+            op.entityId,
+            op.timestamp,
+            op.id
+          )
+        } else if (op.payload) {
+          this.updateFieldClocksInDb(
+            tx as unknown as BetterSQLite3Database<typeof schema>,
+            'assistant_config',
+            op.entityId,
+            op.payload,
+            op.timestamp,
+            op.id
+          )
+        }
+      }
+      const version = (existing?.version ?? 0) + 1
+      const mirrorPayloadJson = JSON.stringify(nextPayload)
+      if (!existing) {
+        tx.insert(schema.syncAssistantConfigMirror)
+          .values({
+            key,
+            kind: delta.kind,
+            entityId: delta.id,
+            payloadJson: mirrorPayloadJson,
+            version,
+            localMutationId: delta.mutationId,
+            projectionRevision: 0,
+            deleted: delta.deleted === true ? 1 : 0,
+            updatedAt: now
+          })
+          .run()
+      } else {
+        tx.update(schema.syncAssistantConfigMirror)
+          .set({
+            payloadJson: mirrorPayloadJson,
+            version,
+            localMutationId: delta.mutationId,
+            deleted: delta.deleted === true ? 1 : 0,
+            updatedAt: now
+          })
+          .where(eq(schema.syncAssistantConfigMirror.key, key))
+          .run()
+      }
+      sqlite.exec('COMMIT')
+      if (!alreadyQueued) this.emitEnqueue()
+      return { key, version, acked: true, duplicate: false }
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e
+    }
+  }
+
+  /** Read a projection batch for renderer (post-commit broadcast source). */
+  readAssistantProjectionBatch(
+    keys?: string[]
+  ): Array<{ key: string; payload: unknown; projectionRevision: number; version: number }> {
+    const db = this.getDb()
+    try {
+      const rows = db.select().from(schema.syncAssistantConfigMirror).all()
+      return rows
+        .filter((r) => (keys ? keys.includes(r.key) : true))
+        .map((r) => ({
+          key: r.key,
+          payload: JSON.parse(r.payloadJson) as unknown,
+          projectionRevision: r.projectionRevision ?? 0,
+          version: r.version ?? 0
+        }))
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return []
+      throw e
+    }
+  }
+
+  /**
+   * Post-commit broadcast (never before commit): best-effort send to all
+   * windows. No throw (retained pending + startup getProjection covers loss).
+   */
+  broadcastAssistantProjection(keys?: string[]): void {
+    let batch: Array<{ key: string; payload: unknown; projectionRevision: number; version: number }>
+    try {
+      batch = this.readAssistantProjectionBatch(keys)
+    } catch {
+      return
+    }
+    if (batch.length === 0) return
+    try {
+      const wins = BrowserWindow.getAllWindows?.() ?? []
+      for (const win of wins) {
+        try {
+          if (win.isDestroyed()) continue
+          const wc = win.webContents
+          if (!wc || wc.isDestroyed()) continue
+          wc.send(IpcChannel.SyncAssistantConfig_OnProjection, batch)
+        } catch {}
+      }
+    } catch {}
+  }
+
+  /**
+   * Production mirror bind (canonical SQLite, same chatDB connection).
+   * Called at sync IPC init before any assistant IPC startup. Returns true on
+   * bind, false when the DB is unavailable (retain pending, no memory fallback).
+   */
+  initAssistantConfigMirrorBinding(): boolean {
+    try {
+      const sqlite = this.getSqlite()
+      // Ensure 019 table exists (migration runner owns DDL; this is a guard).
+      try {
+        sqlite.exec(
+          `CREATE TABLE IF NOT EXISTS sync_assistant_config_mirror (key TEXT PRIMARY KEY, kind TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL, version INTEGER NOT NULL, local_mutation_id TEXT, projection_revision INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)`
+        )
+      } catch {}
+      bindAssistantConfigMirrorToSqlite(sqlite as unknown as Parameters<typeof bindAssistantConfigMirrorToSqlite>[0])
+      return true
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -1993,11 +2809,11 @@ export class SyncService {
    */
   refreshParentFrameAndEnqueueInTx(
     tx: SyncTxExecutor,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string,
     deviceId: string
   ): boolean {
-    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    const entityType = kind === 'topicMessage' ? 'topic' : kind === 'messageBlock' ? 'message' : 'topic_branch'
     if (kind === 'messageBlock') {
       const parent = this.getMessageRowInTx(tx, parentId)
       if (!parent) throw new SyncFrameError(`missing messageBlock parent message ${parentId}`)
@@ -2045,6 +2861,16 @@ export class SyncService {
    */
   refreshMessageBlockFrameAndEnqueueInTx(tx: SyncTxExecutor, parentId: string, deviceId: string): boolean {
     return this.refreshParentFrameAndEnqueueInTx(tx, 'messageBlock', parentId, deviceId)
+  }
+
+  /**
+   * Strict branchSuffix refresh+enqueue (branch-owned suffix inclusion).
+   * Same-tx single op reusing the winning frameClock. Throws fail-closed on
+   * missing membership/MAX_SAFE (rolls back). A deleted branch must
+   * invalidate instead (caller-owned).
+   */
+  refreshBranchSuffixFrameAndEnqueueInTx(tx: SyncTxExecutor, parentId: string, deviceId: string): boolean {
+    return this.refreshParentFrameAndEnqueueInTx(tx, 'branchSuffix', parentId, deviceId)
   }
 
   /** Tx-bound message row read for messageBlock parent gating (no throw on miss). */
@@ -2109,7 +2935,7 @@ export class SyncService {
    */
   tryRefreshParentFrameAndEnqueueInTx(
     tx: SyncTxExecutor,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string,
     deviceId: string
   ): 'refreshed' | 'invalidated' {
@@ -2135,7 +2961,7 @@ export class SyncService {
     }
     const frame = this.getParentFrameInTx(tx, kind, parentId)
     if (!frame) throw new SyncFrameError(`missing ${kind} frame for ${parentId} after refresh`)
-    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    const entityType = kind === 'topicMessage' ? 'topic' : kind === 'messageBlock' ? 'message' : 'topic_branch'
     const op: SyncOperation = {
       id: frame.operationId,
       entityType: entityType as SyncOperation['entityType'],
@@ -2185,6 +3011,19 @@ export class SyncService {
     return this.tryRefreshParentFrameAndEnqueueInTx(tx, 'messageBlock', parentId, deviceId)
   }
 
+  /**
+   * Owned-suffix try helper: complete stable membership refreshes + enqueues
+   * exactly one branchSuffix frame; missing membership invalidates with 0 op
+   * while the user mutation succeeds; malformed/MAX_SAFE still rolls back.
+   */
+  tryRefreshBranchSuffixFrameAndEnqueueInTx(
+    tx: SyncTxExecutor,
+    parentId: string,
+    deviceId: string
+  ): 'refreshed' | 'invalidated' {
+    return this.tryRefreshParentFrameAndEnqueueInTx(tx, 'branchSuffix', parentId, deviceId)
+  }
+
   /** Tx-bound tracked check (clock or pending outbox via the same executor). */
   isTrackedEntityInTx(tx: SyncTxExecutor, entityType: SyncOperation['entityType'], entityId: string): boolean {
     try {
@@ -2228,6 +3067,34 @@ export class SyncService {
       if (entityType === 'message') {
         return !!tx.select().from(schema.messages).where(eq(schema.messages.id, entityId)).get()
       }
+      if (entityType === 'topic_branch') {
+        try {
+          return !!tx.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, entityId)).get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return false
+          throw e
+        }
+      }
+      if (entityType === 'assistant_config') {
+        try {
+          return !!tx
+            .select()
+            .from(schema.syncAssistantConfigMirror)
+            .where(eq(schema.syncAssistantConfigMirror.key, entityId))
+            .get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return false
+          throw e
+        }
+      }
+      if (entityType === 'file_asset') {
+        try {
+          return !!tx.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, entityId)).get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return false
+          throw e
+        }
+      }
       return !!tx.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entityId)).get()
     } catch (e) {
       // Fail closed: propagate infrastructure failures to the enclosing tx
@@ -2240,6 +3107,10 @@ export class SyncService {
   private tombstoneKey(entityType: string, entityId: string): string {
     if (entityType === 'topic') return `${TOMBSTONE_TOPIC_PREFIX}${entityId}`
     if (entityType === 'message_block') return `${TOMBSTONE_BLOCK_PREFIX}${entityId}`
+    if (entityType === 'topic_branch') return `${TOMBSTONE_BRANCH_PREFIX}${entityId}`
+    if (entityType === 'assistant_config')
+      return `${TOMBSTONE_ASSISTANT_CONFIG_PREFIX}${entityId.slice('assistant_config:'.length)}`
+    if (entityType === 'file_asset') return `tombstone:file_asset:${entityId}`
     return `${TOMBSTONE_MESSAGE_PREFIX}${entityId}`
   }
 
@@ -2278,7 +3149,7 @@ export class SyncService {
 
   private setTombstoneInDb(
     db: BetterSQLite3Database<typeof schema>,
-    entityType: 'topic' | 'message' | 'message_block',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config' | 'file_asset',
     entityId: string,
     timestamp: number,
     operationId: string | null
@@ -2332,6 +3203,122 @@ export class SyncService {
       .values({ key, value })
       .onConflictDoUpdate({ target: schema.syncState.key, set: { value } })
       .run()
+  }
+
+  /**
+   * Cascade tombstones for hard-delete containment (delete-wins for stale
+   * order_frame replay). Mirrors the remote `applyDelete` contract — a topic
+   * hard-delete records explicit per-child message tombstones — and extends it
+   * by the one level the confirmed stale-frame orphans require: a message
+   * delete records explicit per-child block tombstones. Branch containment:
+   * a topic delete additionally records explicit per-branch tombstones for
+   * every branch node of the topic (subtree rows follow via cascade); a
+   * branch-subtree delete records explicit per-descendant-branch plus
+   * per-owned-message tombstones so replay converges delete-win closed.
+   * Sources are the retained parent-membership clocks (deterministic history,
+   * never backfilled) plus the live branch ancestry, so descendants already
+   * cascade-deleted by the enclosing aggregate transaction are still covered.
+   * Runs inside the caller's outbox/capture transaction: any throw rolls it
+   * back. `setTombstoneInDb` keeps the winning tombstone, so a newer
+   * pre-existing descendant tombstone is never weakened. A proven pre-009
+   * database (no membership table) simply keeps the own tombstone. Genuine
+   * arrival gaps (unknown ids with no tombstone) still throw
+   * `SyncOrphanError` on apply.
+   */
+  private tombstoneDeleteDescendantsInDb(
+    db: BetterSQLite3Database<typeof schema>,
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config',
+    entityId: string,
+    timestamp: number,
+    operationId: string | null
+  ): void {
+    // Assistant configs have no child hierarchy: own tombstone only.
+    if (entityType === 'assistant_config') return
+    try {
+      const rows = db.select().from(schema.syncMembershipClock).all()
+      if (entityType === 'topic') {
+        for (const r of rows) {
+          if (r.childEntityType === 'message' && r.parentId === entityId) {
+            this.setTombstoneInDb(db, 'message', r.childEntityId, timestamp, operationId)
+          }
+        }
+        try {
+          const branches = db
+            .select({ id: schema.topicBranches.id })
+            .from(schema.topicBranches)
+            .where(eq(schema.topicBranches.topicId, entityId))
+            .all()
+          for (const b of branches) {
+            this.setTombstoneInDb(db, 'topic_branch', b.id, timestamp, operationId)
+          }
+        } catch (e) {
+          if (isTolerableMissingSyncTable(db, e, MIGRATION_009_KEY)) {
+            // pre-016 database without the branches table: own tombstone stands.
+          } else if (e instanceof Error && /no such table/i.test(e.message)) {
+            // Proven pre-016: no branch inventory exists.
+          } else {
+            throw e instanceof Error ? e : new Error(String(e))
+          }
+        }
+        return
+      }
+      if (entityType === 'message') {
+        for (const r of rows) {
+          if (r.childEntityType === 'message_block' && r.parentId === entityId) {
+            this.setTombstoneInDb(db, 'message_block', r.childEntityId, timestamp, operationId)
+          }
+        }
+        return
+      }
+      if (entityType === 'topic_branch') {
+        // Subtree cascade: descendant branch rows + owned message rows.
+        // Sources are the live branch ancestry (branch rows may already be
+        // deleted by the enclosing aggregate tx; retained membership still
+        // covers owned messages below).
+        try {
+          const seen = new Set<string>([entityId])
+          const queue: string[] = [entityId]
+          // Descendant rows still present (delete ordering may vary).
+          while (queue.length > 0) {
+            const cur = queue.pop()!
+            let children: Array<{ id: string }> = []
+            try {
+              children = db
+                .select({ id: schema.topicBranches.id })
+                .from(schema.topicBranches)
+                .where(eq(schema.topicBranches.parentBranchId, cur))
+                .all()
+            } catch (e) {
+              if (e instanceof Error && /no such table/i.test(e.message)) break
+              throw e
+            }
+            for (const c of children) {
+              if (seen.has(c.id)) continue
+              seen.add(c.id)
+              this.setTombstoneInDb(db, 'topic_branch', c.id, timestamp, operationId)
+              queue.push(c.id)
+            }
+          }
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) {
+            // Proven pre-016: no branch inventory exists.
+          } else {
+            throw e instanceof Error ? e : new Error(String(e))
+          }
+        }
+        for (const r of rows) {
+          if (r.childEntityType === 'message' && r.parentId === entityId) {
+            this.setTombstoneInDb(db, 'message', r.childEntityId, timestamp, operationId)
+          }
+        }
+      }
+    } catch (e) {
+      // Proven pre-009 compatibility only: no membership inventory exists, so
+      // only the own tombstone stands. Any other failure propagates so the
+      // enclosing capture transaction rolls back (fail closed).
+      if (isTolerableMissingSyncTable(db, e, MIGRATION_009_KEY)) return
+      throw e instanceof Error ? e : new Error(String(e))
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -2529,7 +3516,7 @@ export class SyncService {
   // truthful state only.
   // -------------------------------------------------------------------------
 
-  private isValidFrameKind(kind: string): kind is 'topicMessage' | 'messageBlock' {
+  private isValidFrameKind(kind: string): kind is 'topicMessage' | 'messageBlock' | 'branchSuffix' {
     return VALID_PARENT_FRAME_KINDS.has(kind)
   }
 
@@ -2626,7 +3613,7 @@ export class SyncService {
    */
   getParentFrameInTx(
     tx: SyncTxExecutor,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string
   ): {
     kind: string
@@ -2676,7 +3663,7 @@ export class SyncService {
 
   /** Read-only accessor for verification/testing. */
   getParentFrame(
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string
   ): {
     kind: string
@@ -2731,7 +3718,7 @@ export class SyncService {
   persistParentFrameInTx(
     tx: SyncTxExecutor,
     frame: {
-      kind: 'topicMessage' | 'messageBlock'
+      kind: 'topicMessage' | 'messageBlock' | 'branchSuffix'
       parentId: string
       frameVersion: string
       orderedChildIds: string[]
@@ -2823,7 +3810,11 @@ export class SyncService {
   }
 
   /** Invalidate (delete) a single parent frame inside an existing transaction. Idempotent. */
-  invalidateParentFrameInTx(tx: SyncTxExecutor, kind: 'topicMessage' | 'messageBlock', parentId: string): void {
+  invalidateParentFrameInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
+    parentId: string
+  ): void {
     if (!this.isValidFrameKind(kind)) throw new SyncFrameError(`invalid frame kind ${kind}`)
     if (typeof parentId !== 'string' || parentId.length === 0) throw new SyncFrameError(`invalid parentId ${parentId}`)
     try {
@@ -2840,7 +3831,7 @@ export class SyncService {
   /** Allocate a dedicated winning frameClock for a parent inside same aggregate transaction. */
   allocateWinningFrameClockInTx(
     tx: SyncTxExecutor,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string,
     includedChildIds: string[],
     extraFloorClocks?: Array<{ timestamp: number; operationId: string }>
@@ -2893,7 +3884,7 @@ export class SyncService {
         maxTs = Math.max(maxTs, floor.timestamp)
       }
     }
-    const childType = kind === 'topicMessage' ? 'message' : 'message_block'
+    const childType = kind === 'messageBlock' ? 'message_block' : 'message'
     for (const childId of includedChildIds) {
       if (typeof childId !== 'string' || childId.length === 0) {
         throw new SyncFrameError(`invalid included childId ${String(childId).slice(0, 40)}`)
@@ -3006,15 +3997,44 @@ export class SyncService {
   }
 
   /**
+   * Owned-suffix order for one live branch: final stable messages owned by
+   * the branch (branch_id = parentId) in sortOrder ASC, id ASC. Main-route
+   * rows never join a branchSuffix frame; sibling suffixes never join.
+   */
+  private getOrderedMessageIdsForBranchInTx(tx: SyncTxExecutor, branchId: string): string[] {
+    const rows = tx
+      .select({ id: schema.messages.id, sortOrder: schema.messages.sortOrder, status: schema.messages.status })
+      .from(schema.messages)
+      .where(eq(schema.messages.branchId, branchId))
+      .all()
+      .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder
+        return a.id.localeCompare(b.id)
+      })
+    const filtered: string[] = []
+    for (const r of rows) {
+      if (!isStableMessageStatus(r.status)) continue
+      filtered.push(r.id)
+    }
+    return filtered
+  }
+
+  /**
    * Truthful refresh: read final order, allocate winning clock, persist.
    * If parent has no live included children, persists empty [] with winning clock.
    * Caller must ensure parent is live (deleted parent should invalidate instead).
    */
-  refreshParentFrameInTx(tx: SyncTxExecutor, kind: 'topicMessage' | 'messageBlock', parentId: string): void {
+  refreshParentFrameInTx(
+    tx: SyncTxExecutor,
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
+    parentId: string
+  ): void {
     const orderedIds =
       kind === 'topicMessage'
         ? this.getOrderedMessageIdsForTopicInTx(tx, parentId)
-        : this.getOrderedBlockIdsForMessageInTx(tx, parentId)
+        : kind === 'messageBlock'
+          ? this.getOrderedBlockIdsForMessageInTx(tx, parentId)
+          : this.getOrderedMessageIdsForBranchInTx(tx, parentId)
     const clock = this.allocateWinningFrameClockInTx(tx, kind, parentId, orderedIds)
     this.persistParentFrameInTx(tx, {
       kind,
@@ -3035,7 +4055,7 @@ export class SyncService {
    */
   tryRefreshOrInvalidateParentFrameInTx(
     tx: SyncTxExecutor,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string
   ): void {
     try {
@@ -3171,7 +4191,7 @@ export class SyncService {
   }
 
   private getTombstone(
-    entityType: 'topic' | 'message' | 'message_block',
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'assistant_config',
     entityId: string
   ): { timestamp: number; operationId: string | null } | null {
     // Fail closed: a read failure or a malformed stored value must propagate
@@ -3246,6 +4266,18 @@ export class SyncService {
       if (entityType === 'message') {
         return !!db.select().from(schema.messages).where(eq(schema.messages.id, entityId)).get()
       }
+      if (entityType === 'assistant_config') {
+        try {
+          return !!db
+            .select()
+            .from(schema.syncAssistantConfigMirror)
+            .where(eq(schema.syncAssistantConfigMirror.key, entityId))
+            .get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return false
+          throw e
+        }
+      }
       return !!db.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entityId)).get()
     } catch (e) {
       // Fail closed: propagate infrastructure failures so the hook records a
@@ -3266,6 +4298,7 @@ export class SyncService {
       let payload: Record<string, unknown> | undefined
       if (entityType === 'topic') payload = filterTopicPayload(rawPayload) as Record<string, unknown>
       else if (entityType === 'message') payload = filterMessagePayload(rawPayload) as Record<string, unknown>
+      else if (entityType === 'topic_branch') payload = filterBranchPayload(rawPayload) as Record<string, unknown>
       else payload = filterBlockPayload(rawPayload) as Record<string, unknown>
       const op: SyncOperation = {
         id: randomUUID(),
@@ -3475,6 +4508,13 @@ export class SyncService {
         db.insert(schema.syncApplied).values({ operationId: op.id, appliedAt: new Date().toISOString() }).run()
       }
       sqlite.exec('COMMIT')
+      // Post-commit broadcast for assistant mirror (never before commit).
+      // Loss is covered by startup getProjection + pending retry.
+      if (appliedEntity && op.entityType === 'assistant_config') {
+        try {
+          this.broadcastAssistantProjection([op.entityId])
+        } catch {}
+      }
       return appliedEntity
     } catch (e) {
       try {
@@ -3540,8 +4580,150 @@ export class SyncService {
     // Own echo never repairs (pull loop already skips, defense in depth for
     // direct applyIncomingOperation callers).
     if (op.deviceId === deviceId) return false
-    if (op.entityType === 'message') return this.repairTopicMessageAfterMessageUpsert(tx, db, op, deviceId)
+    if (op.entityType === 'message') {
+      const ownerRow = db.select().from(schema.messages).where(eq(schema.messages.id, op.entityId)).get()
+      const ownerBranch = ownerRow?.branchId ?? null
+      if (ownerBranch !== null) return this.repairBranchSuffixAfterMessageUpsert(tx, db, op, deviceId)
+      return this.repairTopicMessageAfterMessageUpsert(tx, db, op, deviceId)
+    }
     return this.repairMessageBlockAfterBlockUpsert(tx, db, op, deviceId)
+  }
+
+  /**
+   * Owned-suffix union repair after a winning remote branch-message upsert.
+   * Mirrors repairTopicMessageAfterMessageUpsert with the branch row as the
+   * frame parent (kind branchSuffix): the live set is the branch's owned
+   * suffix, membership parent must equal the branch id, and the mint reuses
+   * the branchSuffix frame machinery. Guards (no mint, no throw): unknown
+   * branch parent, winning branch tombstone, transient child, missing/
+   * mismatched membership, stored-frame mismatch.
+   */
+  private repairBranchSuffixAfterMessageUpsert(
+    tx: SyncTxExecutor,
+    db: BetterSQLite3Database<typeof schema>,
+    op: SyncOperation,
+    deviceId: string
+  ): boolean {
+    const childId = op.entityId
+    const childRow = db.select().from(schema.messages).where(eq(schema.messages.id, childId)).get()
+    if (!childRow) return false
+    const parentId = childRow.branchId ?? null
+    if (typeof parentId !== 'string' || parentId.length === 0) return false
+    const ownTomb = this.getTombstone('message', childId)
+    if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) return false
+    if (!isStableMessageStatus(childRow.status)) return false
+    let branchRow: { id: string } | undefined
+    try {
+      branchRow = db
+        .select({ id: schema.topicBranches.id })
+        .from(schema.topicBranches)
+        .where(eq(schema.topicBranches.id, parentId))
+        .get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return false
+      throw e
+    }
+    if (!branchRow) return false
+    if (this.getTombstone('topic_branch', parentId)) return false
+    const childMem = this.getMembershipClockInTx(tx, 'message', childId)
+    if (!childMem || childMem.parentId !== parentId) return false
+    const rows = db.select().from(schema.messages).where(eq(schema.messages.branchId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of rows) {
+      if (!isStableMessageStatus(row.status)) continue
+      const tomb = this.getTombstone('message', row.id)
+      const mem = this.getMembershipClockInTx(tx, 'message', row.id)
+      if (tomb) {
+        if (!mem) return false
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, tomb)) continue
+      }
+      if (!mem) return false
+      if (mem.parentId !== parentId) return false
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    if (!liveChildren.has(childId)) return false
+    const stored = this.getParentFrameInTx(tx, 'branchSuffix', parentId)
+    let storedPrefix: string[] = []
+    let storedClock: { timestamp: number; operationId: string } | null = null
+    let rawSet = new Set<string>()
+    if (stored) {
+      storedClock = { timestamp: stored.timestamp, operationId: stored.operationId }
+      rawSet = new Set(stored.orderedChildIds)
+      if (rawSet.has(childId)) return false
+      const childParentLookup = (
+        cid: string
+      ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+        const r = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+        if (r) {
+          const owner = r.branchId ?? null
+          return { parentId: owner, exists: true, isLiveForThisParent: owner === parentId }
+        }
+        const tomb = this.getTombstone('message', cid)
+        if (tomb) return { parentId: null, exists: true }
+        return null
+      }
+      try {
+        const evaluated = evaluateEffectiveOrder({
+          kind: 'branchSuffix',
+          parentId,
+          orderedChildIds: [...stored.orderedChildIds],
+          frameClock: storedClock,
+          liveChildren,
+          childParentLookup
+        })
+        storedPrefix = [...evaluated.filtered]
+      } catch {
+        return false
+      }
+    } else {
+      storedPrefix = []
+      rawSet = new Set()
+    }
+    const missing = [...liveChildren.keys()].filter((id) => !rawSet.has(id))
+    if (missing.length === 0) return false
+    if (!missing.includes(childId)) return false
+    const suffix = missing
+      .map((id) => ({ id, clock: liveChildren.get(id)! }))
+      .sort((a, b) => {
+        const c = compareFrameClock(a.clock, b.clock)
+        if (c !== 0) return c
+        return compareUtf8ByteLex(a.id, b.id)
+      })
+      .map((e) => e.id)
+    const nextEffective = [...storedPrefix, ...suffix]
+    const mergeClock = this.allocateWinningFrameClockInTx(tx, 'branchSuffix', parentId, [...liveChildren.keys()])
+    if (storedClock && compareFrameClock(mergeClock, storedClock) <= 0) {
+      throw new Error(`upsert repair ${op.id}: merge clock does not win stored for ${parentId}`)
+    }
+    this.persistParentFrameInTx(tx, {
+      kind: 'branchSuffix',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...nextEffective],
+      timestamp: mergeClock.timestamp,
+      operationId: mergeClock.operationId
+    })
+    const frameOp: SyncOperation = {
+      id: mergeClock.operationId,
+      entityType: 'topic_branch',
+      op: 'order_frame',
+      entityId: parentId,
+      timestamp: mergeClock.timestamp,
+      deviceId,
+      payload: {
+        frameVersion: 'parent-order-frame-v1',
+        kind: 'branchSuffix',
+        parentId,
+        orderedChildIds: [...nextEffective],
+        frameClock: { timestamp: mergeClock.timestamp, operationId: mergeClock.operationId }
+      }
+    }
+    this.enqueueOrderFrameInTx(tx, frameOp)
+    this.materializeBranchSuffixOrder(db, [...nextEffective])
+    logger.info(
+      `[applyUpsert] union repair emitted for ${parentId}: new=${missing.length} mergeTs=${mergeClock.timestamp} from=${op.id.slice(0, 8)}`
+    )
+    return true
   }
 
   private repairTopicMessageAfterMessageUpsert(
@@ -3835,8 +5017,9 @@ export class SyncService {
       orderedChildIds: string[]
       frameClock: { timestamp: number; operationId: string }
     }
-    // Closed pair check (defense in depth; strict validator already enforces):
-    // topic/topicMessage vs message/messageBlock; any cross fails closed.
+    // Closed triple check (defense in depth; strict validator already enforces):
+    // topic/topicMessage vs message/messageBlock vs topic_branch/branchSuffix;
+    // any cross fails closed.
     if (payload.kind === 'topicMessage') {
       if (op.entityType !== 'topic' || op.entityId !== payload.parentId) {
         throw new Error(`order_frame ${op.id}: entityType/entityId must pair with topicMessage parent`)
@@ -3851,6 +5034,15 @@ export class SyncService {
         throw new Error(`order_frame ${op.id}: entityType/entityId must pair with messageBlock parent`)
       }
       return this.applyMessageBlockOrderFrame(op, payload.parentId, [...payload.orderedChildIds], {
+        timestamp: payload.frameClock.timestamp,
+        operationId: payload.frameClock.operationId
+      })
+    }
+    if (payload.kind === 'branchSuffix') {
+      if (op.entityType !== 'topic_branch' || op.entityId !== payload.parentId) {
+        throw new Error(`order_frame ${op.id}: entityType/entityId must pair with branchSuffix parent`)
+      }
+      return this.applyBranchSuffixOrderFrame(op, payload.parentId, [...payload.orderedChildIds], {
         timestamp: payload.frameClock.timestamp,
         operationId: payload.frameClock.operationId
       })
@@ -3894,7 +5086,7 @@ export class SyncService {
    */
   private emitSuffixMergeFrameInApply(
     db: BetterSQLite3Database<typeof schema>,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string,
     liveChildren: Map<string, { timestamp: number; operationId: string }>,
     incomingEffective: string[],
@@ -3916,7 +5108,7 @@ export class SyncService {
     // Authoritative parentId proof: re-query membership in the same tx.
     // liveChildren is advisory only and never trusted for parent/clock truth.
     const tx = db as unknown as SyncTxExecutor
-    const childType = kind === 'topicMessage' ? 'message' : 'message_block'
+    const childType = kind === 'messageBlock' ? 'message_block' : 'message'
     for (const sid of suffix) {
       const mem = this.getMembershipClockInTx(tx, childType, sid)
       if (!mem) {
@@ -3945,7 +5137,7 @@ export class SyncService {
       timestamp: mergeClock.timestamp,
       operationId: mergeClock.operationId
     })
-    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    const entityType = kind === 'topicMessage' ? 'topic' : kind === 'messageBlock' ? 'message' : 'topic_branch'
     const op: SyncOperation = {
       id: mergeClock.operationId,
       entityType: entityType as SyncOperation['entityType'],
@@ -3963,7 +5155,8 @@ export class SyncService {
     }
     this.enqueueOrderFrameInTx(tx, op)
     if (kind === 'topicMessage') this.materializeTopicMessageOrder(db, parentId, [...incomingEffective])
-    else this.materializeMessageBlockOrder(db, [...incomingEffective])
+    else if (kind === 'messageBlock') this.materializeMessageBlockOrder(db, [...incomingEffective])
+    else this.materializeBranchSuffixOrder(db, [...incomingEffective])
     logger.info(
       `[applyOrderFrame] suffix merge emitted for ${parentId}: suffix=${suffix.length} mergeTs=${mergeClock.timestamp} from=${opIdForLog.slice(0, 8)}`
     )
@@ -4007,7 +5200,7 @@ export class SyncService {
    */
   private emitIncompleteUnionRepairInApply(
     db: BetterSQLite3Database<typeof schema>,
-    kind: 'topicMessage' | 'messageBlock',
+    kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
     parentId: string,
     liveChildren: Map<string, { timestamp: number; operationId: string }>,
     incomingEffective: string[],
@@ -4022,7 +5215,7 @@ export class SyncService {
       throw new Error(`order_frame ${opIdForLog}: incomplete union deviceId unavailable for ${parentId}`)
     }
     const tx = db as unknown as SyncTxExecutor
-    const childType = kind === 'topicMessage' ? 'message' : 'message_block'
+    const childType = kind === 'messageBlock' ? 'message_block' : 'message'
     // Authoritative revalidation of every missing child in the same tx.
     // liveChildren is advisory only; any ineligible missing throws.
     const missingClocks = new Map<string, { timestamp: number; operationId: string }>()
@@ -4120,7 +5313,7 @@ export class SyncService {
       timestamp: mergeClock.timestamp,
       operationId: mergeClock.operationId
     })
-    const entityType = kind === 'topicMessage' ? 'topic' : 'message'
+    const entityType = kind === 'topicMessage' ? 'topic' : kind === 'messageBlock' ? 'message' : 'topic_branch'
     const frameOp: SyncOperation = {
       id: mergeClock.operationId,
       entityType: entityType as SyncOperation['entityType'],
@@ -4138,7 +5331,8 @@ export class SyncService {
     }
     this.enqueueOrderFrameInTx(tx, frameOp)
     if (kind === 'topicMessage') this.materializeTopicMessageOrder(db, parentId, [...union])
-    else this.materializeMessageBlockOrder(db, [...union])
+    else if (kind === 'messageBlock') this.materializeMessageBlockOrder(db, [...union])
+    else this.materializeBranchSuffixOrder(db, [...union])
     logger.info(
       `[applyOrderFrame] incomplete union emitted for ${parentId}: missing=${missingIds.length} mergeTs=${mergeClock.timestamp} incomingTs=${incomingClock.timestamp} from=${opIdForLog.slice(0, 8)}`
     )
@@ -4434,6 +5628,278 @@ export class SyncService {
     for (let i = 0; i < effective.length; i++) {
       db.update(schema.messages).set({ sortOrder: i }).where(eq(schema.messages.id, effective[i])).run()
     }
+  }
+
+  /** Dense sortOrder projection for a branchSuffix effective order (owned suffix only, local projection). */
+  private materializeBranchSuffixOrder(db: BetterSQLite3Database<typeof schema>, effective: string[]): void {
+    for (let i = 0; i < effective.length; i++) {
+      db.update(schema.messages).set({ sortOrder: i }).where(eq(schema.messages.id, effective[i])).run()
+    }
+  }
+
+  /**
+   * Incremental branchSuffix order_frame apply. Same LWW/equal-divergent/
+   * union-repair/suffix-merge/cursor semantics as topicMessage: parent must
+   * be a live branch row; children are live stable messages owned by the
+   * branch (branch_id = parentId) with membership gating (membership
+   * parentId = branchId); the frame only materializes dense suffix
+   * sortOrder (never creates/deletes/reparents, never overwrites content).
+   * A tombstoned branch suppresses without materializing; an unknown branch
+   * with no tombstone is an arrival gap (orphan, retryable). A
+   * receiver-alive owned child omitted by the frame fails closed incomplete.
+   */
+  private applyBranchSuffixOrderFrame(
+    op: SyncOperation,
+    parentId: string,
+    orderedChildIds: string[],
+    frameClock: { timestamp: number; operationId: string }
+  ): boolean {
+    const db = this.getDb()
+    let branchRow: { id: string } | undefined
+    try {
+      branchRow = db
+        .select({ id: schema.topicBranches.id })
+        .from(schema.topicBranches)
+        .where(eq(schema.topicBranches.id, parentId))
+        .get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) branchRow = undefined
+      else throw e
+    }
+    if (!branchRow) {
+      const branchTomb = this.getTombstone('topic_branch', parentId)
+      if (branchTomb) {
+        logger.warn(
+          `[applyOrderFrame] parent branch ${parentId} tombstoned: frame ${op.id} suppressed without materializing`
+        )
+        return false
+      }
+      throw new SyncOrphanError(`orphan order_frame ${op.id} parent branch ${parentId} missing`)
+    }
+    // Collect live stable owned-suffix messages with tombstone suppression.
+    const messageRows = db.select().from(schema.messages).where(eq(schema.messages.branchId, parentId)).all()
+    const liveChildren = new Map<string, { timestamp: number; operationId: string }>()
+    for (const row of messageRows) {
+      if (!isStableMessageStatus(row.status)) continue
+      const ownTomb = this.getTombstone('message', row.id)
+      const mem = this.getMembershipClock('message', row.id)
+      if (ownTomb) {
+        if (!mem) {
+          throw new Error(`order_frame ${op.id}: live child ${row.id} has tombstone but no membership clock`)
+        }
+        if (this.isSuppressedByTombstone(mem.timestamp, mem.operationId, ownTomb)) continue
+      }
+      if (!mem) {
+        throw new Error(`order_frame ${op.id}: live child ${row.id} missing membership clock`)
+      }
+      if (mem.parentId !== parentId) {
+        throw new Error(`order_frame ${op.id}: membership parent mismatch for ${row.id}`)
+      }
+      liveChildren.set(row.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    const childParentLookup = (
+      childId: string
+    ): { parentId: string | null; exists: boolean; isLiveForThisParent?: boolean } | null => {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, childId)).get()
+      if (row) {
+        const owner = row.branchId ?? null
+        return { parentId: owner, exists: true, isLiveForThisParent: owner === parentId }
+      }
+      const tomb = this.getTombstone('message', childId)
+      if (tomb) return { parentId: null, exists: true }
+      return null
+    }
+    for (const cid of orderedChildIds) {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+      if (row) {
+        const owner = row.branchId ?? null
+        if (owner !== parentId) {
+          throw new Error(`order_frame ${op.id}: child ${cid} belongs to ${owner ?? 'main'}, not branch ${parentId}`)
+        }
+        continue
+      }
+      const tomb = this.getTombstone('message', cid)
+      if (tomb) continue
+      throw new SyncOrphanError(`orphan order_frame ${op.id} member ${cid} missing`)
+    }
+    const evaluated = evaluateEffectiveOrder({
+      kind: 'branchSuffix',
+      parentId,
+      orderedChildIds: [...orderedChildIds],
+      frameClock,
+      liveChildren,
+      childParentLookup
+    })
+    if (evaluated.incomplete) {
+      const covering = this.getParentFrame('branchSuffix', parentId)
+      if (covering) {
+        const coveringClock = { timestamp: covering.timestamp, operationId: covering.operationId }
+        const cmpCover = compareFrameClock(coveringClock, frameClock)
+        if (cmpCover > 0) {
+          try {
+            const coveringEvaluated = evaluateEffectiveOrder({
+              kind: 'branchSuffix',
+              parentId,
+              orderedChildIds: [...covering.orderedChildIds],
+              frameClock: coveringClock,
+              liveChildren,
+              childParentLookup
+            })
+            if (!coveringEvaluated.incomplete) {
+              const coveringSet = new Set(coveringEvaluated.effective)
+              if (evaluated.missingIds.every((id) => coveringSet.has(id))) {
+                logger.info(
+                  `[applyOrderFrame] older incomplete ${op.id} covered by ${covering.operationId} for ${parentId}, consumed`
+                )
+                return false
+              }
+            }
+          } catch {}
+        } else if (cmpCover === 0) {
+          let same = false
+          try {
+            const coveringEvaluated = evaluateEffectiveOrder({
+              kind: 'branchSuffix',
+              parentId,
+              orderedChildIds: [...covering.orderedChildIds],
+              frameClock: coveringClock,
+              liveChildren,
+              childParentLookup
+            })
+            same =
+              coveringEvaluated.effective.length === evaluated.effective.length &&
+              coveringEvaluated.effective.every((id, i) => id === evaluated.effective[i])
+            if (same) {
+              logger.info(`[applyOrderFrame] equal-clock idempotent ${op.id} for ${parentId}, consumed`)
+              return false
+            }
+          } catch {}
+          throw new Error(`order_frame ${op.id}: equal-clock divergence for ${parentId}`)
+        }
+      }
+      const repaired = this.emitIncompleteUnionRepairInApply(
+        db,
+        'branchSuffix',
+        parentId,
+        liveChildren,
+        [...evaluated.effective],
+        [...evaluated.missingIds],
+        frameClock,
+        op.id
+      )
+      if (repaired) return true
+      throw new Error(
+        `order_frame ${op.id} incomplete: missing ${evaluated.missingIds.slice(0, 5).join(',')} for ${parentId}`
+      )
+    }
+    const effective = evaluated.effective
+    const existing = this.getParentFrame('branchSuffix', parentId)
+    if (!existing) {
+      this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+        kind: 'branchSuffix',
+        parentId,
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIds: effective,
+        timestamp: frameClock.timestamp,
+        operationId: frameClock.operationId
+      })
+      this.materializeBranchSuffixOrder(db, effective)
+      this.emitSuffixMergeFrameInApply(
+        db,
+        'branchSuffix',
+        parentId,
+        liveChildren,
+        [...effective],
+        [...evaluated.suffix],
+        frameClock,
+        op.id
+      )
+      return true
+    }
+    const cmp = compareFrameClock(frameClock, { timestamp: existing.timestamp, operationId: existing.operationId })
+    if (cmp < 0) {
+      if (evaluated.suffix.length > 0) {
+        const existingSet = new Set(existing.orderedChildIds)
+        const bringsNew = effective.some((id) => !existingSet.has(id))
+        const missesStored = existing.orderedChildIds.some((id) => !new Set(effective).has(id))
+        if (bringsNew || missesStored) {
+          const merged = this.emitSuffixMergeFrameInApply(
+            db,
+            'branchSuffix',
+            parentId,
+            liveChildren,
+            [...effective],
+            [...evaluated.suffix],
+            frameClock,
+            op.id
+          )
+          if (merged) return true
+        }
+      }
+      logger.info(`[applyOrderFrame] older frame ${op.id} loses to ${existing.operationId} for ${parentId}`)
+      return false
+    }
+    if (cmp === 0) {
+      const existingEvaluated = evaluateEffectiveOrder({
+        kind: 'branchSuffix',
+        parentId,
+        orderedChildIds: [...existing.orderedChildIds],
+        frameClock: { timestamp: existing.timestamp, operationId: existing.operationId },
+        liveChildren,
+        childParentLookup
+      })
+      if (existingEvaluated.incomplete) {
+        throw new Error(`order_frame ${op.id}: existing frame for ${parentId} is incomplete under merged state`)
+      }
+      const same =
+        existingEvaluated.effective.length === effective.length &&
+        existingEvaluated.effective.every((id, i) => id === effective[i])
+      if (same) {
+        if (JSON.stringify(existing.orderedChildIds) !== JSON.stringify(effective)) {
+          this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+            kind: 'branchSuffix',
+            parentId,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIds: effective,
+            timestamp: existing.timestamp,
+            operationId: existing.operationId
+          })
+          this.materializeBranchSuffixOrder(db, effective)
+          this.emitSuffixMergeFrameInApply(
+            db,
+            'branchSuffix',
+            parentId,
+            liveChildren,
+            [...effective],
+            [...evaluated.suffix],
+            frameClock,
+            op.id
+          )
+        }
+        return false
+      }
+      throw new Error(`order_frame ${op.id}: equal-clock divergence for ${parentId}`)
+    }
+    this.persistParentFrameInTx(db as unknown as SyncTxExecutor, {
+      kind: 'branchSuffix',
+      parentId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: effective,
+      timestamp: frameClock.timestamp,
+      operationId: frameClock.operationId
+    })
+    this.materializeBranchSuffixOrder(db, effective)
+    this.emitSuffixMergeFrameInApply(
+      db,
+      'branchSuffix',
+      parentId,
+      liveChildren,
+      [...effective],
+      [...evaluated.suffix],
+      frameClock,
+      op.id
+    )
+    return true
   }
 
   /**
@@ -5501,6 +6967,12 @@ export class SyncService {
     const db = this.getDb()
     const nowIso = new Date().toISOString()
     const p = op.payload ?? {}
+    if (op.entityType === 'file_asset') {
+      return this.applyFileAssetUpsert(op)
+    }
+    if (op.entityType === 'assistant_config') {
+      return this.applyAssistantConfigUpsert(op)
+    }
     if (op.entityType === 'topic') {
       const id = op.entityId
       // Fail closed on wrong metadata types so a malformed op never silently
@@ -5644,6 +7116,18 @@ export class SyncService {
       const id = op.entityId
       const topicId = (p.topicId as string) ?? ''
       if (!topicId) throw new Error('message upsert missing topicId')
+      // Immutable owner route: explicit branchId (string) or main (null).
+      // Absent/undefined/null = main route (v1-compatible); a present
+      // non-empty string addresses the owning branch. Never falls back to
+      // null when the addressed branch is unknown (orphan defer below).
+      let incomingBranchId: string | null = null
+      if (p.branchId !== undefined && p.branchId !== null) {
+        if (typeof p.branchId !== 'string' || p.branchId.length === 0) {
+          throw new Error(`message upsert invalid branchId for ${id}`)
+        }
+        incomingBranchId = p.branchId
+      }
+      const expectedMembershipParent = incomingBranchId ?? topicId
       // Hard-delete delete-wins for late descendants (LOCK-PERSONAL-007): when
       // the exact parent topic tombstone exists and the parent row is still
       // absent, the child must be consumed/suppressed even when its timestamp
@@ -5682,10 +7166,48 @@ export class SyncService {
           return false
         }
       }
+      // Branch-owner gating for branch messages (never fallback to main):
+      // the addressed branch row must exist with the same topic; a winning
+      // branch tombstone suppresses (delete-wins, subtree cascade); an
+      // unknown branch with no tombstone is a retryable arrival gap — the
+      // branch upsert may come later in the same page (orphan, deferred).
+      if (incomingBranchId !== null) {
+        let branchRow: { topicId: string; parentBranchId: string | null } | undefined
+        try {
+          const found = db
+            .select()
+            .from(schema.topicBranches)
+            .where(eq(schema.topicBranches.id, incomingBranchId))
+            .get()
+          branchRow = found ? { topicId: found.topicId, parentBranchId: found.parentBranchId ?? null } : undefined
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) branchRow = undefined
+          else throw e
+        }
+        if (!branchRow) {
+          const branchTomb = this.getTombstone('topic_branch', incomingBranchId)
+          if (branchTomb) {
+            logger.warn(`[applyUpsert] message ${id} suppressed by branch tombstone ${incomingBranchId} (delete-wins)`)
+            this.setTombstoneInDb(db, 'message', id, branchTomb.timestamp, branchTomb.operationId)
+            return false
+          }
+          throw new SyncOrphanError(`orphan message ${id} branch ${incomingBranchId} missing`)
+        }
+        if (branchRow.topicId !== topicId) {
+          throw new Error(`message upsert branch topic mismatch for ${id}: ${branchRow.topicId} vs ${topicId}`)
+        }
+      }
       const existingPre = db.select().from(schema.messages).where(eq(schema.messages.id, id)).get()
       if (existingPre && existingPre.topicId !== topicId) {
         // Immutable parent identity: never reparent an existing message.
         logger.warn(`[applyUpsert] message ${id} reparent ${existingPre.topicId} -> ${topicId} rejected`)
+        return false
+      }
+      if (existingPre && (existingPre.branchId ?? null) !== incomingBranchId) {
+        // Immutable owner identity: never move a message across routes.
+        logger.warn(
+          `[applyUpsert] message ${id} owner ${existingPre.branchId ?? 'main'} -> ${incomingBranchId ?? 'main'} rejected`
+        )
         return false
       }
       const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
@@ -5705,10 +7227,11 @@ export class SyncService {
         // - Same parent: preserve historical membership (do not overwrite).
         // - Different parent: fail closed and rollback (reparent unsupported).
         // - No retained row: establish from this operation.
+        // Branch messages bind their branch id; main messages bind topicId.
         const retained = this.getMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', id)
-        if (retained && retained.parentId !== topicId) {
+        if (retained && retained.parentId !== expectedMembershipParent) {
           throw new SyncTombstoneError(
-            `membership clock conflict for message/${id}: retained parent ${retained.parentId} vs incoming ${topicId}`
+            `membership clock conflict for message/${id}: retained parent ${retained.parentId} vs incoming ${expectedMembershipParent}`
           )
         }
         // Create-union: full insert from provided-or-default values.
@@ -5723,20 +7246,26 @@ export class SyncService {
         const updatedAt = (p.updatedAt as string | null) ?? nowIso
         const rawSort = p.sortOrder as number | null | undefined
         const sortOrder = typeof rawSort === 'number' && Number.isFinite(rawSort) ? rawSort : 0
-        // Main-route rows only: remote applies land on the main route and
-        // must not collide with branch-owned sort orders.
-        const maxRow = db
+        // Sort-order collision scope follows the owner: main-route rows only
+        // collide with main rows, branch rows only with their owned suffix.
+        // Remote applies must not collide across routes.
+        const scopeRows = db
           .select()
           .from(schema.messages)
-          .where(and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId)))
+          .where(
+            incomingBranchId !== null
+              ? eq(schema.messages.branchId, incomingBranchId)
+              : and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId))
+          )
           .all()
-        const maxSort = maxRow.length > 0 ? Math.max(...maxRow.map((r) => r.sortOrder)) + 1 : sortOrder
+        const maxSort = scopeRows.length > 0 ? Math.max(...scopeRows.map((r) => r.sortOrder)) + 1 : sortOrder
         let insertSort = typeof sortOrder === 'number' ? sortOrder : maxSort
-        if (maxRow.some((r) => r.sortOrder === insertSort)) insertSort = maxSort
+        if (scopeRows.some((r) => r.sortOrder === insertSort)) insertSort = maxSort
         db.insert(schema.messages)
           .values({
             id,
             topicId,
+            branchId: incomingBranchId,
             role,
             content,
             status,
@@ -5756,7 +7285,14 @@ export class SyncService {
         // Dedicated parent-membership clock for true creates only (atomic with row + field clocks).
         // Preserve historical membership when same parent already retained; only establish when absent.
         if (!retained) {
-          this.setMembershipClockInTx(db as unknown as SyncTxExecutor, 'message', id, topicId, op.timestamp, op.id)
+          this.setMembershipClockInTx(
+            db as unknown as SyncTxExecutor,
+            'message',
+            id,
+            expectedMembershipParent,
+            op.timestamp,
+            op.id
+          )
         }
         return true
       }
@@ -5888,9 +7424,64 @@ export class SyncService {
         const maxSort = siblings.length > 0 ? Math.max(...siblings.map((r) => r.sortOrder)) + 1 : sortOrder
         let insertSort = typeof sortOrder === 'number' ? sortOrder : maxSort
         if (siblings.some((r) => r.sortOrder === insertSort)) insertSort = maxSort
+        // Strict portable-media contract for full-state create: file/image/video must carry non-empty assetIds,
+        // non-media must not carry non-empty assetIds.
+        {
+          const tRaw = typeof p.type === 'string' ? p.type.toLowerCase() : ''
+          const isPortable = tRaw === 'file' || tRaw === 'image' || tRaw === 'video'
+          const assetIds = (p as any).assetIds as unknown[] | undefined | null
+          if (isPortable) {
+            if (!Array.isArray(assetIds) || assetIds.length === 0) {
+              throw new Error(`portable media block requires non-empty assetIds for ${id}`)
+            }
+          } else {
+            if (Array.isArray(assetIds) && assetIds.length > 0) {
+              throw new Error(`non-media block must not have assetIds for ${id}`)
+            }
+          }
+        }
+        // Asset orphan check: file_asset must exist before block with assetIds can be created.
+        if (Array.isArray((p as any).assetIds) && ((p as any).assetIds as unknown[]).length > 0) {
+          for (const aid of (p as any).assetIds as string[]) {
+            let fa: typeof schema.syncFileAsset.$inferSelect | undefined
+            try {
+              fa = db.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, aid)).get() as any
+            } catch {}
+            if (!fa) throw new SyncOrphanError(`orphan block ${id} asset ${aid} missing`)
+            const tomb = this.getTombstone('file_asset' as any, aid)
+            if (tomb && this.isSuppressedByTombstone(op.timestamp, op.id, tomb)) {
+              throw new SyncOrphanError(`orphan block ${id} asset ${aid} tombstoned`)
+            }
+          }
+        }
         db.insert(schema.messageBlocks)
           .values({ id, messageId, type, content, status, createdAt, updatedAt, sortOrder: insertSort, extra: null })
           .run()
+        // Maintain file_references for assetIds (full-or-none atomic with row/clocks/frames)
+        if (Array.isArray((p as any).assetIds)) {
+          const assetIds = (p as any).assetIds as string[]
+          // Clear existing refs for this block (should be none on create, but safe)
+          try {
+            db.delete(schema.fileReferences).where(eq(schema.fileReferences.blockId, id)).run()
+          } catch {}
+          for (const aid of assetIds) {
+            try {
+              db.insert(schema.fileReferences)
+                .values({
+                  id: `fr-${id}-${aid}`,
+                  blockId: id,
+                  fileId: aid,
+                  fileName: aid,
+                  filePath: null,
+                  fileType: null,
+                  count: 1,
+                  extra: null
+                })
+                .onConflictDoNothing()
+                .run()
+            } catch {}
+          }
+        }
         const provided: Record<string, unknown> = {}
         for (const k of Object.keys(p)) if (BLOCK_CLOCKED.has(k) && p[k] !== undefined) provided[k] = p[k]
         this.updateFieldClocksInDb(db, 'message_block', id, provided, op.timestamp, op.id)
@@ -5905,6 +7496,37 @@ export class SyncService {
           )
         }
         return true
+      }
+      // Strict patch validation using stored type when patch omits type:
+      // file/image/video must not be turned into half-shell by clearing assetIds.
+      // Stored-type wins when patch omits type; patch-provided type wins otherwise.
+      {
+        const incomingHasType = Object.prototype.hasOwnProperty.call(p, 'type')
+        const incomingTypeRaw = typeof p.type === 'string' ? p.type.toLowerCase() : null
+        const storedTypeRaw =
+          typeof (existing as unknown as Record<string, unknown>).type === 'string'
+            ? ((existing as unknown as Record<string, unknown>).type as string).toLowerCase()
+            : ''
+        const effectiveTypeForAssetCheck = incomingHasType ? (incomingTypeRaw ?? '') : storedTypeRaw
+        const isPortableEffective =
+          effectiveTypeForAssetCheck === 'file' ||
+          effectiveTypeForAssetCheck === 'image' ||
+          effectiveTypeForAssetCheck === 'video'
+        if (Object.prototype.hasOwnProperty.call(p, 'assetIds')) {
+          const assetIdsPatch = (p as any).assetIds as unknown
+          if (isPortableEffective) {
+            if (!Array.isArray(assetIdsPatch) || (assetIdsPatch as unknown[]).length === 0) {
+              throw new Error(`portable media block requires non-empty assetIds for ${id}`)
+            }
+          } else {
+            if (Array.isArray(assetIdsPatch) && (assetIdsPatch as unknown[]).length > 0) {
+              throw new Error(`non-media block must not have assetIds for ${id}`)
+            }
+          }
+        } else if (isPortableEffective) {
+          // Patch omits assetIds: allow normal content/status patch without refs change.
+          // No strict check needed; the stored block already has its assetIds preserved.
+        }
       }
       const fieldClocksB = this.getFieldClocksInDb(db, 'message_block', id)
       const currentB = (field: string): unknown => {
@@ -5963,18 +7585,336 @@ export class SyncService {
         wonB[w.field] = p[w.field]
         setB[w.field] = w.value
       }
+      // Orphan check for assetIds on update path (if assetIds is a winning field, its assets must exist)
+      if (Object.prototype.hasOwnProperty.call(p, 'assetIds') && Array.isArray((p as any).assetIds)) {
+        const wanted = (p as any).assetIds as string[]
+        const isWinner = wonB.hasOwnProperty('assetIds')
+        if (isWinner && wanted.length > 0) {
+          for (const aid of wanted) {
+            let fa: typeof schema.syncFileAsset.$inferSelect | undefined
+            try {
+              fa = db.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, aid)).get() as any
+            } catch {}
+            if (!fa) throw new SyncOrphanError(`orphan block ${id} asset ${aid} missing`)
+          }
+        }
+      }
       db.update(schema.messageBlocks).set(setB).where(eq(schema.messageBlocks.id, id)).run()
       this.updateFieldClocksInDb(db, 'message_block', id, wonB, op.timestamp, op.id)
+      // Maintain file_references when assetIds won
+      if (Object.prototype.hasOwnProperty.call(wonB, 'assetIds')) {
+        const assetIds = wonB['assetIds'] as string[] | null | undefined
+        try {
+          db.delete(schema.fileReferences).where(eq(schema.fileReferences.blockId, id)).run()
+        } catch {}
+        if (Array.isArray(assetIds)) {
+          for (const aid of assetIds) {
+            try {
+              db.insert(schema.fileReferences)
+                .values({
+                  id: `fr-${id}-${aid}`,
+                  blockId: id,
+                  fileId: aid,
+                  fileName: aid,
+                  filePath: null,
+                  fileType: null,
+                  count: 1,
+                  extra: null
+                })
+                .onConflictDoNothing()
+                .run()
+            } catch {}
+          }
+        }
+      }
+      return true
+    } else if (op.entityType === 'topic_branch') {
+      const id = op.entityId
+      const topicId = (p.topicId as string) ?? ''
+      const anchorMessageId = (p.anchorMessageId as string) ?? ''
+      if (!topicId) throw new Error(`branch upsert missing topicId for ${id}`)
+      if (!anchorMessageId) throw new Error(`branch upsert missing anchorMessageId for ${id}`)
+      const parentBranchId =
+        p.parentBranchId === undefined || p.parentBranchId === null ? null : String(p.parentBranchId)
+      if (parentBranchId !== null && parentBranchId.length === 0) {
+        throw new Error(`branch upsert invalid parentBranchId for ${id}`)
+      }
+      if (parentBranchId === id) throw new Error(`branch upsert self-parent for ${id}`)
+      // Own-tombstone delete-wins: a subtree delete suppresses stale late
+      // upserts; a newer upsert may still resurrect.
+      const ownBranchTomb = this.getTombstone('topic_branch', id)
+      if (ownBranchTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownBranchTomb)) {
+        logger.warn(`[applyUpsert] branch ${id} suppressed by own tombstone (delete-wins)`)
+        return false
+      }
+      // Topic delete-wins: a hard topic delete suppresses branch upserts while
+      // the topic row is still absent (cascade covers descendants).
+      const branchTopicTomb = this.getTombstone('topic', topicId)
+      if (branchTopicTomb !== null) {
+        const topicRowForBranch = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
+        if (!topicRowForBranch) {
+          logger.warn(`[applyUpsert] branch ${id} suppressed by topic tombstone ${topicId} (delete-wins)`)
+          this.setTombstoneInDb(db, 'topic_branch', id, branchTopicTomb.timestamp, branchTopicTomb.operationId)
+          return false
+        }
+        if (this.isSuppressedByTombstone(op.timestamp, op.id, branchTopicTomb)) {
+          logger.warn(`[applyUpsert] branch ${id} suppressed by topic tombstone ${topicId}`)
+          this.setTombstoneInDb(db, 'topic_branch', id, branchTopicTomb.timestamp, branchTopicTomb.operationId)
+          return false
+        }
+      }
+      // Logical topic must exist; otherwise defer (topic upsert may come later
+      // in the same page). Never synthesize a placeholder topic for branches.
+      const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
+      if (!topicRow) {
+        throw new SyncOrphanError(`orphan branch ${id} topic ${topicId} missing`)
+      }
+      // Parent branch must exist for nested branches (deferrable); a winning
+      // parent tombstone without an own tombstone is inconsistent fail-closed.
+      if (parentBranchId !== null) {
+        let parentRow: { topicId: string } | undefined
+        try {
+          const found = db.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, parentBranchId)).get()
+          parentRow = found ? { topicId: found.topicId } : undefined
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) parentRow = undefined
+          else throw e
+        }
+        if (!parentRow) {
+          const parentTomb = this.getTombstone('topic_branch', parentBranchId)
+          if (parentTomb && !this.isSuppressedByTombstone(op.timestamp, op.id, parentTomb)) {
+            throw new Error(`branch upsert parent ${parentBranchId} tombstoned for ${id}`)
+          }
+          if (parentTomb) {
+            logger.warn(`[applyUpsert] branch ${id} suppressed by parent tombstone ${parentBranchId}`)
+            return false
+          }
+          throw new SyncOrphanError(`orphan branch ${id} parent ${parentBranchId} missing`)
+        }
+        if (parentRow.topicId !== topicId) {
+          throw new Error(`branch upsert parent topic mismatch for ${id}`)
+        }
+      }
+      // Anchor must be a live message of the same topic owned by the parent
+      // route (owner equality). Unknown anchor defers (may come later in the
+      // page); owner/topic mismatch fails closed.
+      const anchorRow = db.select().from(schema.messages).where(eq(schema.messages.id, anchorMessageId)).get()
+      if (!anchorRow) {
+        const anchorTomb = this.getTombstone('message', anchorMessageId)
+        if (anchorTomb) {
+          throw new Error(`branch upsert anchor ${anchorMessageId} tombstoned for ${id}`)
+        }
+        throw new SyncOrphanError(`orphan branch ${id} anchor ${anchorMessageId} missing`)
+      }
+      if (anchorRow.topicId !== topicId) {
+        throw new Error(`branch upsert anchor topic mismatch for ${id}`)
+      }
+      if ((anchorRow.branchId ?? null) !== parentBranchId) {
+        throw new Error(`branch upsert anchor not owned by parent route for ${id}`)
+      }
+      // Ancestry cycle guard (bounded walk over retained rows).
+      try {
+        const seen = new Set<string>([id])
+        let cur: string | null = parentBranchId
+        for (let depth = 0; depth < 32 && cur !== null; depth++) {
+          if (seen.has(cur)) throw new Error(`branch upsert ancestry cycle at ${cur} for ${id}`)
+          seen.add(cur)
+          const node = db.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, cur)).get()
+          if (!node) break
+          cur = (node.parentBranchId ?? null) as string | null
+        }
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          throw new SyncOrphanError(`orphan branch ${id} inventory missing`)
+        }
+        throw e
+      }
+      const existingBranch = (() => {
+        try {
+          return db.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, id)).get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return undefined
+          throw e
+        }
+      })()
+      if (existingBranch) {
+        // Immutable identity: topic/parent/anchor never change via sync.
+        if (
+          existingBranch.topicId !== topicId ||
+          ((existingBranch.parentBranchId ?? null) as string | null) !== parentBranchId ||
+          existingBranch.anchorMessageId !== anchorMessageId
+        ) {
+          throw new SyncTombstoneError(`branch identity mismatch for ${id}: immutable fields differ`)
+        }
+        const fieldClocksBr = this.getFieldClocksInDb(db, 'topic_branch', id)
+        const winnersBr: Array<{ field: string; value: unknown }> = []
+        for (const field of Object.keys(p)) {
+          if (!BRANCH_CLOCKED.has(field)) continue
+          const raw = p[field]
+          if (raw === undefined) continue
+          const incomingVal = (raw ?? null) as unknown
+          const prior = fieldClocksBr.get(field)
+          if (!prior || this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) > 0) {
+            const curVal = ((existingBranch as unknown as Record<string, unknown>)[field] ?? null) as unknown
+            if (prior && !this.fieldValuesEqual(incomingVal, curVal)) {
+              this.recordConflictInDb(db, {
+                entityType: 'topic_branch',
+                entityId: id,
+                field,
+                loserValue: curVal,
+                loserTimestamp: prior.timestamp,
+                loserOperationId: prior.operationId,
+                winnerTimestamp: op.timestamp,
+                winnerOperationId: op.id
+              })
+            }
+            winnersBr.push({ field, value: incomingVal })
+          }
+        }
+        if (winnersBr.length === 0) return false
+        const setBr: Record<string, unknown> = {}
+        const wonBr: Record<string, unknown> = {}
+        for (const w of winnersBr) {
+          wonBr[w.field] = p[w.field]
+          setBr[w.field] = w.value
+        }
+        db.update(schema.topicBranches).set(setBr).where(eq(schema.topicBranches.id, id)).run()
+        this.updateFieldClocksInDb(db, 'topic_branch', id, wonBr, op.timestamp, op.id)
+        return true
+      }
+      // Create: exactly one branch row (name verbatim; no prefix copy).
+      db.insert(schema.topicBranches)
+        .values({
+          id,
+          topicId,
+          parentBranchId,
+          anchorMessageId,
+          name: (p.name as string | null) ?? null,
+          createdAt: (p.createdAt as string | null) ?? nowIso,
+          updatedAt: (p.updatedAt as string | null) ?? nowIso,
+          extra: null
+        })
+        .onConflictDoNothing()
+        .run()
+      const providedBr: Record<string, unknown> = {}
+      for (const k of Object.keys(p)) if (BRANCH_CLOCKED.has(k) && p[k] !== undefined) providedBr[k] = p[k]
+      this.updateFieldClocksInDb(db, 'topic_branch', id, providedBr, op.timestamp, op.id)
       return true
     }
     return false
+  }
+
+  private applyFileAssetUpsert(op: SyncOperation): boolean {
+    const db = this.getDb()
+    const p = op.payload ?? {}
+    const id = op.entityId
+    if (p.id !== undefined && p.id !== id) throw new Error(`file_asset id mismatch for ${id}`)
+    const sha256 = p.sha256 as string
+    const byteLength = p.byteLength as number
+    const extension = p.extension as string
+    // Tombstone delete-wins
+    const ownTomb = this.getTombstone('file_asset' as any, id)
+    if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) {
+      logger.warn(`[applyFileAssetUpsert] file_asset ${id} suppressed by own tombstone`)
+      return false
+    }
+    let existing: typeof schema.syncFileAsset.$inferSelect | undefined
+    try {
+      existing = db.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, id)).get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) existing = undefined
+      else throw e
+    }
+    if (existing) {
+      if (existing.sha256 !== sha256 || existing.byteLength !== byteLength || existing.extension !== extension) {
+        throw new Error(`file_asset immutable mismatch for ${id}`)
+      }
+      const fieldClocks = this.getFieldClocksInDb(db, 'file_asset', id)
+      const winners: Array<{ field: string; value: unknown }> = []
+      for (const field of ['mimeType', 'originalName', 'createdAt'] as const) {
+        if (!Object.prototype.hasOwnProperty.call(p, field)) continue
+        const v = p[field]
+        if (v === undefined) continue
+        const prior = fieldClocks.get(field)
+        if (!prior || this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) > 0) {
+          winners.push({ field, value: v })
+        } else {
+          const loser = v ?? null
+          try {
+            this.recordConflictInDb(db, {
+              entityType: 'file_asset',
+              entityId: id,
+              field,
+              loserValue: loser,
+              loserTimestamp: op.timestamp,
+              loserOperationId: op.id,
+              winnerTimestamp: prior.timestamp,
+              winnerOperationId: prior.operationId
+            })
+          } catch {}
+        }
+      }
+      if (winners.length === 0) return false
+      const setVals: Record<string, unknown> = {}
+      const won: Record<string, unknown> = {}
+      for (const w of winners) {
+        won[w.field] = p[w.field]
+        if (w.field === 'mimeType') setVals.mimeType = w.value
+        else if (w.field === 'originalName') setVals.originalName = w.value
+        else if (w.field === 'createdAt') setVals.createdAt = w.value
+      }
+      if (Object.keys(setVals).length > 0) {
+        try {
+          db.update(schema.syncFileAsset)
+            .set(setVals as any)
+            .where(eq(schema.syncFileAsset.id, id))
+            .run()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return false
+          throw e
+        }
+      }
+      this.updateFieldClocksInDb(db, 'file_asset', id, won, op.timestamp, op.id)
+      return true
+    }
+    // Create
+    const mimeType = (p.mimeType as string) ?? 'application/octet-stream'
+    const originalName = (p.originalName as string) ?? `${id}${extension}`
+    const createdAt = (p.createdAt as string) ?? new Date().toISOString()
+    try {
+      db.insert(schema.syncFileAsset)
+        .values({
+          id,
+          sha256,
+          byteLength,
+          extension,
+          mimeType,
+          originalName,
+          createdAt,
+          version: 1,
+          updatedAt: op.timestamp
+        })
+        .onConflictDoNothing()
+        .run()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) return false
+      throw e
+    }
+    const provided: Record<string, unknown> = {}
+    for (const k of ['mimeType', 'originalName', 'createdAt'] as const) {
+      if (Object.prototype.hasOwnProperty.call(p, k) && p[k] !== undefined) provided[k] = p[k]
+    }
+    this.updateFieldClocksInDb(db, 'file_asset', id, provided, op.timestamp, op.id)
+    return true
   }
 
   private applyDelete(op: SyncOperation): void {
     const db = this.getDb()
     if (op.entityType === 'topic') {
       // Collect child message ids before the FK cascade so their tombstones
-      // survive the cascade and reject stale late blocks. Fail closed: any
+      // survive the cascade and reject stale late blocks. Branch nodes of the
+      // topic are collected too so replay converges delete-win closed even
+      // when the cascade already removed the rows. Fail closed: any
       // collection or tombstone persistence failure propagates so the
       // caller's transaction rolls back (no clock/applied advance).
       const childMessageIds: string[] = db
@@ -5983,10 +7923,35 @@ export class SyncService {
         .where(eq(schema.messages.topicId, op.entityId))
         .all()
         .map((r) => r.id)
+      let childBranchIds: string[] = []
+      try {
+        childBranchIds = db
+          .select({ id: schema.topicBranches.id })
+          .from(schema.topicBranches)
+          .where(eq(schema.topicBranches.topicId, op.entityId))
+          .all()
+          .map((r) => r.id)
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) childBranchIds = []
+        else throw e
+      }
+      // True-branch frames die with the topic cascade (no orphan winners).
+      try {
+        for (const bid of childBranchIds) {
+          this.invalidateParentFrameInTx(db as unknown as SyncTxExecutor, 'branchSuffix', bid)
+        }
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          // Proven pre-018: no branchSuffix frame inventory exists.
+        } else throw e
+      }
       db.delete(schema.topics).where(eq(schema.topics.id, op.entityId)).run()
       this.setTombstoneInDb(db, 'topic', op.entityId, op.timestamp, op.id)
       for (const mid of childMessageIds) {
         this.setTombstoneInDb(db, 'message', mid, op.timestamp, op.id)
+      }
+      for (const bid of childBranchIds) {
+        this.setTombstoneInDb(db, 'topic_branch', bid, op.timestamp, op.id)
       }
     } else if (op.entityType === 'message') {
       db.delete(schema.messages).where(eq(schema.messages.id, op.entityId)).run()
@@ -5994,7 +7959,283 @@ export class SyncService {
     } else if (op.entityType === 'message_block') {
       db.delete(schema.messageBlocks).where(eq(schema.messageBlocks.id, op.entityId)).run()
       this.setTombstoneInDb(db, 'message_block', op.entityId, op.timestamp, op.id)
+    } else if (op.entityType === 'topic_branch') {
+      // Subtree delete replay: the selected branch, all descendant branch
+      // rows, and only the messages/blocks owned by those branch ids.
+      // Ancestor prefix rows and sibling subtrees survive. Tombstones for the
+      // whole subtree converge delete-win closed; the deleted branchSuffix
+      // frames are removed so no orphan winner survives.
+      let subtreeIds: string[] = [op.entityId]
+      try {
+        const seen = new Set<string>([op.entityId])
+        const queue: string[] = [op.entityId]
+        while (queue.length > 0) {
+          const cur = queue.pop()!
+          const children = db
+            .select({ id: schema.topicBranches.id })
+            .from(schema.topicBranches)
+            .where(eq(schema.topicBranches.parentBranchId, cur))
+            .all()
+          for (const c of children) {
+            if (seen.has(c.id)) continue
+            seen.add(c.id)
+            queue.push(c.id)
+          }
+        }
+        subtreeIds = [...seen]
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) subtreeIds = [op.entityId]
+        else throw e
+      }
+      const ownedMessageIds: string[] = []
+      for (const bid of subtreeIds) {
+        try {
+          const rows = db
+            .select({ id: schema.messages.id })
+            .from(schema.messages)
+            .where(eq(schema.messages.branchId, bid))
+            .all()
+          for (const r of rows) ownedMessageIds.push(r.id)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) break
+          throw e
+        }
+      }
+      if (ownedMessageIds.length > 0) {
+        for (const mid of ownedMessageIds) {
+          db.delete(schema.messages).where(eq(schema.messages.id, mid)).run()
+        }
+      }
+      try {
+        for (const bid of subtreeIds) {
+          db.delete(schema.topicBranches).where(eq(schema.topicBranches.id, bid)).run()
+        }
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          // Proven pre-016: nothing to delete.
+        } else throw e
+      }
+      for (const bid of subtreeIds) {
+        try {
+          this.invalidateParentFrameInTx(db as unknown as SyncTxExecutor, 'branchSuffix', bid)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) break
+          throw e
+        }
+        this.setTombstoneInDb(db, 'topic_branch', bid, op.timestamp, op.id)
+      }
+      for (const mid of ownedMessageIds) {
+        this.setTombstoneInDb(db, 'message', mid, op.timestamp, op.id)
+      }
+    } else if (op.entityType === 'file_asset') {
+      try {
+        db.delete(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, op.entityId)).run()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          // proven pre-020
+        } else throw e
+      }
+      this.setTombstoneInDb(db, 'file_asset' as any, op.entityId, op.timestamp, op.id)
+    } else if (op.entityType === 'assistant_config') {
+      this.applyAssistantConfigDelete(op)
     }
+  }
+
+  /**
+   * Assistant-config remote upsert (internal merge, no publish-gate).
+   * Per-field LWW over the 18 allowlisted top fields; absent keys carry no
+   * intent and are preserved. Delete-wins via own tombstone. Mirror row is the
+   * sync projection (never a config authority); renderer applies via broadcast.
+   */
+  private applyAssistantConfigUpsert(op: SyncOperation): boolean {
+    const db = this.getDb()
+    const payload = op.payload ?? {}
+    // Strict DTO already validated at ingress; defense in depth here.
+    // Dynamic import avoided (shared module is sync, no cycle): use inline checks
+    // via the already-validated shape (kind/id agreement enforced by validator).
+    const kind = payload.kind as string
+    const id = payload.id as string
+    if ((kind !== 'assistant' && kind !== 'defaults') || typeof id !== 'string' || id.length === 0) {
+      throw new Error(`assistant_config upsert invalid kind/id for ${op.entityId}`)
+    }
+    const ownTomb = this.getTombstone('assistant_config', op.entityId)
+    if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) {
+      logger.warn(`[applyUpsert] assistant_config ${op.entityId} suppressed by own tombstone (delete-wins)`)
+      return false
+    }
+    let existing: typeof schema.syncAssistantConfigMirror.$inferSelect | undefined
+    try {
+      existing = db
+        .select()
+        .from(schema.syncAssistantConfigMirror)
+        .where(eq(schema.syncAssistantConfigMirror.key, op.entityId))
+        .get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        throw new Error('assistant mirror unavailable: migration 019 not applied')
+      }
+      throw e
+    }
+    const fieldClocks = this.getFieldClocksInDb(db, 'assistant_config', op.entityId)
+    const prevPayload: Record<string, unknown> = existing?.payloadJson
+      ? (JSON.parse(existing.payloadJson) as Record<string, unknown>)
+      : {}
+    const winners: Array<{ field: string; value: unknown }> = []
+    for (const field of Object.keys(payload)) {
+      if (!ASSISTANT_CONFIG_CLOCKED.has(field)) continue
+      const v = payload[field]
+      if (v === undefined) continue
+      const prior = fieldClocks.get(field)
+      if (!prior || this.compareLww(op.timestamp, op.id, prior.timestamp, prior.operationId) > 0) {
+        const currentVal = Object.prototype.hasOwnProperty.call(prevPayload, field) ? prevPayload[field] : undefined
+        if (prior && !this.fieldValuesEqual(v ?? null, currentVal ?? null)) {
+          this.recordConflictInDb(db, {
+            entityType: 'assistant_config',
+            entityId: op.entityId,
+            field,
+            loserValue: currentVal ?? null,
+            loserTimestamp: prior.timestamp,
+            loserOperationId: prior.operationId,
+            winnerTimestamp: op.timestamp,
+            winnerOperationId: op.id
+          })
+        }
+        winners.push({ field, value: v })
+      } else {
+        const currentVal = Object.prototype.hasOwnProperty.call(prevPayload, field) ? prevPayload[field] : undefined
+        if (!this.fieldValuesEqual(v ?? null, currentVal ?? null)) {
+          this.recordConflictInDb(db, {
+            entityType: 'assistant_config',
+            entityId: op.entityId,
+            field,
+            loserValue: v ?? null,
+            loserTimestamp: op.timestamp,
+            loserOperationId: op.id,
+            winnerTimestamp: prior.timestamp,
+            winnerOperationId: prior.operationId
+          })
+        }
+      }
+    }
+    if (!existing) {
+      // Create-union: full DTO insert (identity + winning fields).
+      const merged: Record<string, unknown> = { schemaVersion: 1, kind, id }
+      for (const w of winners) merged[w.field] = w.value
+      const now = Date.now()
+      try {
+        db.insert(schema.syncAssistantConfigMirror)
+          .values({
+            key: op.entityId,
+            kind,
+            entityId: id,
+            payloadJson: JSON.stringify(merged),
+            version: 1,
+            localMutationId: null,
+            projectionRevision: 1,
+            deleted: 0,
+            updatedAt: now
+          })
+          .run()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          throw new Error('assistant mirror unavailable: migration 019 not applied')
+        }
+        throw e
+      }
+      const wonPayload: Record<string, unknown> = {}
+      for (const w of winners) wonPayload[w.field] = w.value
+      this.updateFieldClocksInDb(db, 'assistant_config', op.entityId, wonPayload, op.timestamp, op.id)
+      return true
+    }
+    if (winners.length === 0) return false
+    const merged: Record<string, unknown> = { ...prevPayload }
+    merged.schemaVersion = 1
+    merged.kind = kind
+    merged.id = id
+    delete merged.deleted
+    for (const w of winners) merged[w.field] = w.value
+    const wonPayload: Record<string, unknown> = {}
+    for (const w of winners) wonPayload[w.field] = w.value
+    const now = Date.now()
+    const prevVersion = existing.version ?? 0
+    const prevRevision = existing.projectionRevision ?? 0
+    db.update(schema.syncAssistantConfigMirror)
+      .set({
+        payloadJson: JSON.stringify(merged),
+        version: prevVersion + 1,
+        projectionRevision: prevRevision + 1,
+        deleted: 0,
+        updatedAt: now
+      })
+      .where(eq(schema.syncAssistantConfigMirror.key, op.entityId))
+      .run()
+    this.updateFieldClocksInDb(db, 'assistant_config', op.entityId, wonPayload, op.timestamp, op.id)
+    return true
+  }
+
+  /** Assistant-config remote delete: explicit tombstone + mirror tombstone row. */
+  private applyAssistantConfigDelete(op: SyncOperation): void {
+    const db = this.getDb()
+    let existing: typeof schema.syncAssistantConfigMirror.$inferSelect | undefined
+    try {
+      existing = db
+        .select()
+        .from(schema.syncAssistantConfigMirror)
+        .where(eq(schema.syncAssistantConfigMirror.key, op.entityId))
+        .get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        throw new Error('assistant mirror unavailable: migration 019 not applied')
+      }
+      throw e
+    }
+    // Derive kind/id from the qualified entityId (no fake assistant creation).
+    const parsed = this.parseAssistantConfigEntityId(op.entityId)
+    const tombPayload = { schemaVersion: 1, kind: parsed.kind, id: parsed.id, deleted: true }
+    const now = Date.now()
+    if (!existing) {
+      db.insert(schema.syncAssistantConfigMirror)
+        .values({
+          key: op.entityId,
+          kind: parsed.kind,
+          entityId: parsed.id,
+          payloadJson: JSON.stringify(tombPayload),
+          version: 1,
+          localMutationId: null,
+          projectionRevision: 1,
+          deleted: 1,
+          updatedAt: now
+        })
+        .run()
+    } else {
+      db.update(schema.syncAssistantConfigMirror)
+        .set({
+          payloadJson: JSON.stringify(tombPayload),
+          version: (existing.version ?? 0) + 1,
+          projectionRevision: (existing.projectionRevision ?? 0) + 1,
+          deleted: 1,
+          updatedAt: now
+        })
+        .where(eq(schema.syncAssistantConfigMirror.key, op.entityId))
+        .run()
+    }
+    this.setTombstoneInDb(db, 'assistant_config', op.entityId, op.timestamp, op.id)
+  }
+
+  /** Parse a qualified assistant entityId without fabricating unknown assistants. */
+  private parseAssistantConfigEntityId(entityId: string): { kind: 'assistant' | 'defaults'; id: string } {
+    const prefix = 'assistant_config:'
+    if (!entityId.startsWith(prefix)) throw new Error(`invalid assistant_config entityId ${entityId}`)
+    const rest = entityId.slice(prefix.length)
+    const sep = rest.indexOf(':')
+    if (sep <= 0) throw new Error(`invalid assistant_config entityId ${entityId}`)
+    const kind = rest.slice(0, sep)
+    const id = rest.slice(sep + 1)
+    if ((kind !== 'assistant' && kind !== 'defaults') || id.length === 0) {
+      throw new Error(`invalid assistant_config entityId ${entityId}`)
+    }
+    if (kind === 'defaults' && id !== 'defaults') throw new Error(`invalid assistant_config entityId ${entityId}`)
+    return { kind, id }
   }
 
   private updateCursor(cursor: number): void {
@@ -6173,6 +8414,70 @@ export class SyncService {
             } catch {}
             throw new SyncCursorError(msg)
           }
+          // Strict channel/digest verification BEFORE any file download (no Tx network)
+          try {
+            const preview = mapWireEnvelopeToMergeInput(envelope as unknown)
+            if (preview.channelId !== localChannelKey) {
+              throw new SyncCursorError(
+                `envelope channel mismatch preview ${preview.channelId} vs local ${localChannelKey}`
+              )
+            }
+          } catch (e) {
+            if (e instanceof SyncShutdownError) throw e
+            if (e instanceof SyncStaleConfigError) throw e
+            const msg = e instanceof Error ? e.message : String(e)
+            try {
+              this.updateLastError(`baseline envelope invalid: ${msg}`.slice(0, 1000))
+            } catch {}
+            throw e instanceof Error ? e : new Error(String(e))
+          }
+          this.throwIfShutdown()
+          this.throwIfStaleConfig(syncGen)
+          // Download all baseline file assets BEFORE Tx (verified, installed to trusted filesDir)
+          const fileAssetsForBootstrap =
+            ((envelope as unknown as { payload: { fileAssets?: unknown } }).payload.fileAssets as Array<{
+              id: string
+              sha256: string
+              byteLength: number
+              extension: string
+              mimeType: string
+              originalName: string
+              createdAt: string
+              entityClock: { timestamp: number; operationId: string }
+            }>) ?? []
+          for (const fa of fileAssetsForBootstrap) {
+            this.throwIfShutdown()
+            this.throwIfStaleConfig(syncGen)
+            if (this.getChannelKey() !== localChannelKey) {
+              throw new SyncCursorError('baseline bootstrap channel changed before asset download')
+            }
+            const op = {
+              id: fa.entityClock.operationId,
+              entityType: 'file_asset' as const,
+              op: 'upsert' as const,
+              entityId: fa.id,
+              timestamp: fa.entityClock.timestamp,
+              deviceId: 'bootstrap',
+              payload: {
+                id: fa.id,
+                sha256: fa.sha256,
+                byteLength: fa.byteLength,
+                extension: fa.extension,
+                mimeType: fa.mimeType,
+                originalName: fa.originalName,
+                createdAt: fa.createdAt
+              }
+            } as unknown as SyncOperation
+            try {
+              await this.ensureFileAssetDownloaded(op, cfg.endpoint, cfg.token, deviceCode, deviceSecret)
+            } catch (dlErr) {
+              const msg = dlErr instanceof Error ? dlErr.message : String(dlErr)
+              try {
+                this.updateLastError(`baseline asset download failed for ${fa.id}: ${msg}`.slice(0, 1000))
+              } catch {}
+              throw dlErr instanceof Error ? dlErr : new Error(String(dlErr))
+            }
+          }
           try {
             const watermark = this.runBaselineBootstrapTransaction(envelope, localChannelKey, syncGen)
             cursor = watermark
@@ -6186,6 +8491,19 @@ export class SyncService {
             throw e instanceof Error ? e : new Error(String(e))
           }
         }
+      }
+
+      // Incremental attachment drain: upload blobs before metadata pushes
+      try {
+        await this.drainAttachmentIntents(cfg.endpoint, cfg.token, deviceCode, deviceSecret, syncGen)
+      } catch (e) {
+        if (e instanceof SyncShutdownError) throw e
+        if (e instanceof SyncStaleConfigError) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        logger.warn(`[drainAttachment] failed: ${msg.slice(0, 300)}`)
+        try {
+          this.updateLastError(`attachment drain failed: ${msg}`.slice(0, 1000))
+        } catch {}
       }
 
       // Push all outbox chunks — never advance pull cursor on push
@@ -6397,6 +8715,17 @@ export class SyncService {
             continue
           }
           try {
+            if (op.entityType === 'file_asset' && op.op === 'upsert') {
+              this.throwIfShutdown()
+              this.throwIfStaleConfig(syncGen)
+              await this.ensureFileAssetDownloaded(
+                op as SyncOperation,
+                cfg.endpoint,
+                cfg.token,
+                deviceCode,
+                deviceSecret
+              )
+            }
             this.applyIncomingOperation(op as SyncOperation)
             if (typeof op.seq === 'number') resolved.set(op.seq, true)
           } catch (inner) {
@@ -6709,6 +9038,7 @@ export class SyncService {
     this.throwIfStaleConfig(syncGen)
     const db = this.getDb()
     let watermark = -1
+    let bootstrapAssistantKeys: string[] = []
     db.transaction((tx) => {
       const inner = tx as unknown as BetterSQLite3Database<typeof schema>
       this.throwIfShutdown()
@@ -6754,8 +9084,8 @@ export class SyncService {
       }
       let unionResult: {
         adopted: number
-        sharedParents: { topicIds: string[]; messageIds: string[] }
-        pureParents: { topicIds: string[]; messageIds: string[] }
+        sharedParents: { topicIds: string[]; messageIds: string[]; branchIds: string[] }
+        pureParents: { topicIds: string[]; messageIds: string[]; branchIds: string[] }
       } | null = null
       try {
         const deviceId = this.getDeviceId()
@@ -6768,6 +9098,13 @@ export class SyncService {
       // Apply incoming baseline via shared merge core (no re-validation, single tx)
       const mergeResult = mergeValidatedBaselineInTx(inner, mapped.input)
       void mergeResult
+      // v4 assistant section in the SAME Tx (no bypass: LWW + tombstones, no outbox).
+      let assistantAffected: string[] = []
+      if (mapped.assistant) {
+        const assistantMerge = mergeAssistantBaselineSectionInTx(inner, mapped.assistant)
+        assistantAffected = assistantMerge.affectedKeys
+      }
+      bootstrapAssistantKeys = [...assistantAffected]
       // Post-apply frame generation for adopted exclusive parents: entity ops already precede frames.
       // For pure local-exclusive parents and shared parents, generate a higher winning frame for push convergence.
       if (unionResult && unionResult.adopted > 0) {
@@ -6777,11 +9114,15 @@ export class SyncService {
           ...unionResult.pureParents.messageIds,
           ...unionResult.sharedParents.messageIds
         ].sort()
+        const allBranchParents = [...unionResult.pureParents.branchIds, ...unionResult.sharedParents.branchIds].sort()
         for (const tid of allTopicParents) {
           this.refreshParentFrameAndEnqueueInTx(inner, 'topicMessage', tid, deviceId)
         }
         for (const mid of allMessageParents) {
           this.refreshParentFrameAndEnqueueInTx(inner, 'messageBlock', mid, deviceId)
+        }
+        for (const bid of allBranchParents) {
+          this.refreshParentFrameAndEnqueueInTx(inner, 'branchSuffix', bid, deviceId)
         }
       }
       watermark = mapped.watermark
@@ -6797,6 +9138,12 @@ export class SyncService {
     this.throwIfShutdown()
     this.throwIfStaleConfig(syncGen)
     if (watermark < 0) throw new SyncCursorError('baseline bootstrap transaction produced no watermark')
+    // Post-commit assistant broadcast (never before commit); loss covered by getProjection.
+    if (bootstrapAssistantKeys.length > 0) {
+      try {
+        this.broadcastAssistantProjection(bootstrapAssistantKeys)
+      } catch {}
+    }
     return watermark
   }
 
@@ -7008,13 +9355,44 @@ export class SyncService {
       let envelope: BaselinePublishResult['envelope']
       let digest: string
       try {
-        const candidate = captureLocalSyncBaselineCandidate(db)
+        let candidate: ReturnType<typeof buildBaselineCandidateInTx>
+        let assistantSection: ReturnType<typeof readAssistantBaselineSection>
+        // Single SQLite snapshot for chat + assistant (cursor/channelKey/outbox/frames).
+        // Barrier holds local writes, so this snapshot is same-state; future V5
+        // attachments will reuse this caller-owned Tx pattern (add reader in same Tx).
+        db.transaction((tx) => {
+          const t = tx as unknown as BetterSQLite3Database<typeof schema>
+          candidate = buildBaselineCandidateInTx(t)
+          assistantSection = readAssistantBaselineSection(t)
+        })
         this.throwIfShutdown()
         this.throwIfStaleConfig(syncGen)
-        proof = assertBarrierSnapshotProof(candidate, channelKey, cursor)
-        const built = buildPublishEnvelope(candidate, channelKey, proof.watermarkN)
-        envelope = built.envelope
-        digest = built.digest
+        proof = assertBarrierSnapshotProof(candidate!, channelKey, cursor)
+        // V5: direct projection with file assets + assistant, no V3/V4 downgrade
+        const v5payload = projectLocalBaselineToWirePayloadV5(candidate!, assistantSection!)
+        const v5digest = computeWirePayloadDigestV5(v5payload as never)
+        const v5envelope = {
+          wireVersion: 'sync-baseline-wire-v5' as const,
+          channelId: channelKey,
+          watermark: proof.watermarkN,
+          digestScheme: 'jcs-sha256-v1' as const,
+          digest: v5digest,
+          payload: v5payload
+        }
+        // Self-validate via shared strict validator (exact keys/channel/digest)
+        const { validateEnvelope } = await import('@shared/sync')
+        validateEnvelope(v5envelope as unknown)
+        // Verify digest
+        const { verifyEnvelopeDigest } = await import('@shared/sync')
+        const ok = verifyEnvelopeDigest(v5envelope as unknown as Parameters<typeof verifyEnvelopeDigest>[0], (b) =>
+          createHash('sha256').update(b).digest('hex')
+        )
+        if (!ok)
+          throw new SyncBaselinePublishError(
+            'publish blocked: built v5 envelope digest mismatch (never PUT a mismatched digest)'
+          )
+        envelope = v5envelope as unknown as BaselinePublishResult['envelope']
+        digest = v5digest
       } catch (e) {
         if (e instanceof SyncShutdownError) throw e
         if (e instanceof SyncStaleConfigError) throw e

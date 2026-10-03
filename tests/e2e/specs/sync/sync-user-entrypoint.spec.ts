@@ -214,6 +214,11 @@ test.describe('Sync user-entrypoint persistent relay', () => {
       expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => i + 1))
       const cursorBefore = baseline.body.cursor
 
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      await new Promise((r) => setTimeout(r, 2000))
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
       const statusABase = await getSyncStatusViaApi(pageA)
       const statusBBase = await getSyncStatusViaApi(pageB)
       expect(statusABase.pendingCount).toBe(0)
@@ -250,10 +255,13 @@ test.describe('Sync user-entrypoint persistent relay', () => {
 
       // Retained trust/operations/cursor: the paired observer still verifies
       // (no re-pairing) and the log is contiguous from cursor 0.
+      // Auto-sync may have already pushed pending edit + assistant seeds after restart, so check prefix and >=.
       const retained = await authedPull(endpoint, 0, observer)
       expect(retained.status).toBe(200)
-      expect(retained.body.cursor).toBe(cursorBefore)
-      expect(retained.body.operations.map((o: any) => o.seq)).toEqual(seqs)
+      expect(retained.body.cursor).toBeGreaterThanOrEqual(cursorBefore)
+      const retainedSeqsUE = retained.body.operations.map((o: any) => o.seq) as number[]
+      expect(retainedSeqsUE.slice(0, seqs.length)).toEqual(seqs)
+      expect(retainedSeqsUE).toEqual([...retainedSeqsUE].sort((a, b) => a - b))
 
       const pushed = await runSyncViaApi(pageA)
       expect(pushed.threw).toBeNull()

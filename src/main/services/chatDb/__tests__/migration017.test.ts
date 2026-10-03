@@ -59,7 +59,7 @@ afterEach(() => {
 
 describe('017_cleanup_route_message_overlay', () => {
   it('is registered as 17th migration with cleanup DDL and burns the 017 number', () => {
-    expect(MIGRATIONS.length).toBe(17)
+    expect(MIGRATIONS.length).toBe(21)
     expect(MIGRATIONS[15].key).toBe('016_topic_branches')
     expect(MIGRATIONS[16].key).toBe('017_cleanup_route_message_overlay')
     const joined = MIGRATIONS[16].sql.join(' ')
@@ -74,7 +74,7 @@ describe('017_cleanup_route_message_overlay', () => {
 
   it('fresh database applies 17 migrations; rerun is idempotent; sqlite_master has no overlay', () => {
     const db = drizzle(sqlite, { schema })
-    expect(runMigrations(db as never, sqlite)).toBe(17)
+    expect(runMigrations(db as never, sqlite)).toBe(21)
     const ghost = sqlite
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='message_route_overlays'`)
       .get()

@@ -101,6 +101,18 @@ async function pollForMessageContent(
   throw new Error(`message-content timeout expected=${expected} last=${last}`)
 }
 
+async function pollForPendingDrained(page: Page, timeoutMs = 90000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let last = ''
+  while (Date.now() < deadline) {
+    const s = await getSyncStatusViaApi(page)
+    if (s.pendingCount === 0 && s.lastError === null) return
+    last = `pending=${s.pendingCount} err=${s.lastError}`
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`pending-drain timeout: ${last}`)
+}
+
 test.describe('Sync connection/pairing two-profile real path', () => {
   test.setTimeout(300000)
 
@@ -202,6 +214,8 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       expect((await getDeviceCodeViaApi(pageB)).deviceCode).toBe(codeBefore)
       expect((await getPairStateViaApi(pageB)).state).toBe('paired')
       expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
       // Restart stability: write stable data after relaunch and verify the
       // peer actually converges (ChatDb read), with drained pending, advanced
       // cursor, and no durable error — not just status.
@@ -215,6 +229,8 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       expect((await runSyncViaApi(pageA)).threw).toBeNull()
       expect((await runSyncViaApi(pageB)).threw).toBeNull()
       await pollForMessageContent(pageB, topic, msg, content)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
       const statusA = await getSyncStatusViaApi(pageA)
       const statusB = await getSyncStatusViaApi(pageB)
       expect(statusA.lastError).toBeNull()

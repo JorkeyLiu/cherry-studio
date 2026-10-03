@@ -346,11 +346,10 @@ describe('branchMessagesToTopic incremental sync', () => {
     agg.appendMessage('t-bmix', msgJson('m-mf', 't-bmix', { role: 'user' }) as never, [
       {
         ...stableBlock('b-mf', 'm-mf', { messageId: 'm-mf' }),
-        type: 'file',
-        file: { id: 'file-mix', name: 'm.pdf', path: '/tmp/m.pdf', type: 'application/pdf' }
+        type: 'tool',
+        content: { tool: 'x' }
       } as never
     ])
-    expect(sqlite.prepare(`SELECT id FROM file_references WHERE block_id='b-mf'`).get()).toBeTruthy()
     const outboxBefore = outboxRows(db).length
     vi.spyOn(Date, 'now').mockReturnValue(8_000_000_003_100)
     const res = agg.branchMessagesToTopic('t-bmix', 't-bmix-dst', 'm-mf', 'assistant-1')
@@ -360,11 +359,9 @@ describe('branchMessagesToTopic incremental sync', () => {
     const clonedIds = messageOrder(sqlite, 't-bmix-dst')
     expect(clonedIds.length).toBe(3)
     const clonedFileBlock = sqlite
-      .prepare(`SELECT id FROM message_blocks WHERE type='file' AND message_id IN ('${clonedIds.join("','")}')`)
+      .prepare(`SELECT id FROM message_blocks WHERE type='tool' AND message_id IN ('${clonedIds.join("','")}')`)
       .get() as { id: string }
     expect(clonedFileBlock).toBeTruthy()
-    // Local-only file ref cloned for the file block.
-    expect(sqlite.prepare(`SELECT id FROM file_references WHERE block_id=?`).get(clonedFileBlock.id)).toBeTruthy()
     // Zero wire ops/membership for the transient message pair and the file block.
     const clonedTr = (
       sqlite.prepare(`SELECT id FROM messages WHERE topic_id='t-bmix-dst' AND status='streaming'`).get() as {

@@ -25,6 +25,8 @@ loggerService.initWindowSource('mainWindow')
 
 const bootstrapLogger = loggerService.withContext('Bootstrap')
 
+type AssistantConfigStopHandler = () => void
+
 // LOCK-RETIRE-001: Cherry Chat is the single application identity. Resolve the
 // main-window title from the identity-derived constant at startup — the title
 // seam always produces `Cherry Chat` and overrides the shared static HTML title.
@@ -89,6 +91,52 @@ function initWebTrace() {
   }
 }
 
+// Assistant-config bridge start/stop (event-driven projection only; no polls).
+// Store import stays dynamic behind i18n readiness (module cycle guard).
+// Startup projection ensure + initial seed live in store persistor rehydrate
+// (single source after rehydration). This bootstrap only subscribes to live
+// broadcasts (no one-shot getProjection here, no seed here). Store-dependent:
+// must be called only after bootstrapStoreDependent has the imported store/
+// persistor (no top-level store import, no extra i18n barrier).
+function initAssistantConfigSync(store: any, persistor: any, stopHandlers: AssistantConfigStopHandler[]) {
+  void import('./services/syncAssistantConfig')
+    .then(({ startAssistantConfigSync }) => {
+      try {
+        const stop = startAssistantConfigSync({
+          applyOne: (payload: any, meta: any) => {
+            try {
+              store.dispatch({
+                type: 'assistants/applyRemoteAssistantConfig',
+                meta,
+                payload: { payload, projectionRevision: meta?.projectionRevision }
+              } as any)
+            } catch {}
+          },
+          flush: () => {
+            try {
+              return persistor?.flush?.() ?? Promise.resolve()
+            } catch {
+              return Promise.resolve()
+            }
+          },
+          ackOne: (key: string, projectionRevision: number) => {
+            try {
+              return (window as any)?.api?.syncAssistantConfig?.ackProjection?.(key, projectionRevision)
+            } catch {
+              return undefined
+            }
+          }
+        })
+        stopHandlers.push(stop)
+      } catch (e) {
+        bootstrapLogger.warn('[Bootstrap] AssistantConfigSync init failed', e as Error)
+      }
+    })
+    .catch((e) => {
+      bootstrapLogger.warn('[Bootstrap] AssistantConfigSync init failed', e as Error)
+    })
+}
+
 // Optional models.dev attribution plus vision/websearch provider-dependent
 // predicates need the exact owning provider, but `config/models` modules
 // must stay free of the store/AssistantService chain (collection-time TDZ).
@@ -134,8 +182,13 @@ async function bootstrapStoreDependent(): Promise<void> {
   }
 
   let store: { getState(): RootState }
+  let persistor: { flush?: () => Promise<unknown> } | undefined
   try {
-    ;({ default: store } = await import('./store'))
+    const mod: any = await import('./store')
+    ;({ default: store } = mod)
+    try {
+      persistor = mod.persistor
+    } catch {}
   } catch (e) {
     bootstrapLogger.warn('[Bootstrap] Store import failed — store-dependent init skipped', e as Error)
     return
@@ -176,6 +229,16 @@ async function bootstrapStoreDependent(): Promise<void> {
     bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
   }
 
+  // Assistant-config live subscription — single owner, store-dependent, after
+  // i18n + store hydratable import. No duplicate projection fetch here (startup
+  // GetProjection + drain live in store persistor rehydrate). Bounded
+  // rejection, stop handler tracked for disposal, no extra untracked Promise.
+  try {
+    initAssistantConfigSync(store as any, persistor, assistantConfigSyncStops)
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] AssistantConfigSync init failed', e as Error)
+  }
+
   try {
     initExactProviderResolver(store)
   } catch (e) {
@@ -185,6 +248,7 @@ async function bootstrapStoreDependent(): Promise<void> {
 
 // Store-free inits run immediately (unchanged behavior); store-reaching inits
 // run behind the i18n readiness barrier above.
+const assistantConfigSyncStops: AssistantConfigStopHandler[] = []
 initKeyv()
 initStoreSync()
 initWebTrace()

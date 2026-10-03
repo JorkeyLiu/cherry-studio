@@ -37,6 +37,7 @@ import { chatDbService } from '../../chatDb'
 import { ChatDbAggregateService } from '../../chatDb/ChatDbAggregateService'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
+import type { ValidatedBaselineMergeInput } from '../syncBaselineApply'
 import { syncService } from '../SyncService'
 
 let sqliteA: Database.Database | null = null
@@ -720,13 +721,13 @@ describe('receiver union fail-closed matrix', () => {
             .run(
               'u-b1',
               'u-m1',
-              'image',
+              'tool',
               'x',
               'success',
               '2026-01-01T00:00:00.000Z',
               '2026-01-02T00:00:00.000Z',
               0,
-              null
+              JSON.stringify({ content: { tool: 'x' } })
             )
         }
       },
@@ -2601,4 +2602,405 @@ describe('receiver union stable non-success bootstrap (cursor-0 ordinary live st
       }
     }
   }, 60000)
+})
+
+describe('branch local-only union boundary (direct, no relay)', () => {
+  const UT = 100
+  const UF = 110
+  const UWALL = 9_000_501
+  const TOPIC_FIELDS = [
+    'name',
+    'assistantId',
+    'createdAt',
+    'updatedAt',
+    'deletedAt',
+    'pinned',
+    'prompt',
+    'isNameManuallyEdited'
+  ]
+  const MESSAGE_FIELDS = [
+    'role',
+    'content',
+    'status',
+    'askId',
+    'model',
+    'modelId',
+    'assistantId',
+    'createdAt',
+    'updatedAt'
+  ]
+  const BLOCK_FIELDS = ['type', 'content', 'status', 'createdAt', 'updatedAt']
+
+  const topicPayload = {
+    id: 'ut-t1',
+    name: 'Union One',
+    assistantId: 'a1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    deletedAt: null,
+    pinned: false,
+    prompt: null,
+    isNameManuallyEdited: false
+  }
+  const messagePayload = {
+    id: 'um-m1',
+    topicId: 'ut-t1',
+    role: 'user',
+    content: 'hello',
+    status: 'success',
+    askId: null,
+    model: null,
+    modelId: null,
+    assistantId: null,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-02T00:00:00.000Z'
+  }
+  const blockPayload = {
+    id: 'ub-b1',
+    messageId: 'um-m1',
+    type: 'main_text',
+    content: 'hello',
+    status: 'success',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-02T00:00:00.000Z'
+  }
+
+  function fieldClocks(fields: string[], op: string): Array<{ field: string; timestamp: number; operationId: string }> {
+    return fields.map((field) => ({ field, timestamp: UT, operationId: op }))
+  }
+
+  function topicOnlyInput(): ValidatedBaselineMergeInput {
+    return {
+      entities: [
+        {
+          entityType: 'topic',
+          entityId: 'ut-t1',
+          payload: { ...topicPayload },
+          entityClock: { timestamp: UT, operationId: 'op-ut-t1' },
+          fieldClocks: fieldClocks(TOPIC_FIELDS, 'op-ut-t1')
+        }
+      ],
+      tombstones: [],
+      orderFrames: [
+        {
+          kind: 'topicMessage',
+          parentId: 'ut-t1',
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIds: [],
+          frameClock: { timestamp: UF, operationId: 'op-ut-f1' }
+        }
+      ],
+      replacementRegisters: []
+    } as unknown as ValidatedBaselineMergeInput
+  }
+
+  function fullChainInput(): ValidatedBaselineMergeInput {
+    return {
+      entities: [
+        {
+          entityType: 'topic',
+          entityId: 'ut-t1',
+          payload: { ...topicPayload },
+          entityClock: { timestamp: UT, operationId: 'op-ut-t1' },
+          fieldClocks: fieldClocks(TOPIC_FIELDS, 'op-ut-t1')
+        },
+        {
+          entityType: 'message',
+          entityId: 'um-m1',
+          payload: { ...messagePayload },
+          entityClock: { timestamp: UT, operationId: 'op-um-m1' },
+          fieldClocks: fieldClocks(MESSAGE_FIELDS, 'op-um-m1'),
+          parentMembershipClock: { parentId: 'ut-t1', timestamp: UT, operationId: 'op-um-m1' }
+        },
+        {
+          entityType: 'message_block',
+          entityId: 'ub-b1',
+          payload: { ...blockPayload },
+          entityClock: { timestamp: UT, operationId: 'op-ub-b1' },
+          fieldClocks: fieldClocks(BLOCK_FIELDS, 'op-ub-b1'),
+          parentMembershipClock: { parentId: 'um-m1', timestamp: UT, operationId: 'op-ub-b1' }
+        }
+      ],
+      tombstones: [],
+      orderFrames: [
+        {
+          kind: 'topicMessage',
+          parentId: 'ut-t1',
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIds: ['um-m1'],
+          frameClock: { timestamp: UF, operationId: 'op-uf-t1' }
+        },
+        {
+          kind: 'messageBlock',
+          parentId: 'um-m1',
+          frameVersion: 'parent-order-frame-v1',
+          orderedChildIds: ['ub-b1'],
+          frameClock: { timestamp: UF, operationId: 'op-uf-m1' }
+        }
+      ],
+      replacementRegisters: []
+    } as unknown as ValidatedBaselineMergeInput
+  }
+
+  function insertUnionTopic(sqlite: Database.Database): void {
+    sqlite
+      .prepare(
+        `INSERT INTO topics (id, assistant_id, name, created_at, updated_at, deleted_at, extra) VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        'ut-t1',
+        'a1',
+        'Union One',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        null,
+        JSON.stringify({ pinned: false, prompt: null, isNameManuallyEdited: false })
+      )
+  }
+
+  function insertUnionBranch(sqlite: Database.Database, branchId: string, anchorId: string): void {
+    sqlite
+      .prepare(
+        `INSERT INTO topic_branches (id, topic_id, parent_branch_id, anchor_message_id, name, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(branchId, 'ut-t1', null, anchorId, `B ${branchId}`, '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')
+  }
+
+  function insertUnionBranchMessage(sqlite: Database.Database, id: string, branchId: string, sortOrder: number): void {
+    sqlite
+      .prepare(
+        `INSERT INTO messages (id, topic_id, branch_id, role, content, status, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        id,
+        'ut-t1',
+        branchId,
+        'user',
+        'branch-body',
+        'success',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        sortOrder,
+        null
+      )
+  }
+
+  function insertUnionBranchBlock(sqlite: Database.Database, id: string, messageId: string): void {
+    sqlite
+      .prepare(
+        `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        id,
+        messageId,
+        'main_text',
+        'branch-block',
+        'success',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        0,
+        null
+      )
+  }
+
+  function seedUnionVersionedMain(cDb: BetterSQLite3Database<typeof schema>, cSqlite: Database.Database): void {
+    insertUnionTopic(cSqlite)
+    cSqlite
+      .prepare(
+        `INSERT INTO messages (id, topic_id, role, content, status, created_at, updated_at, sort_order) VALUES (?,?,?,?,?,?,?,?)`
+      )
+      .run('um-m1', 'ut-t1', 'user', 'hello', 'success', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', 0)
+    cSqlite
+      .prepare(
+        `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        'ub-b1',
+        'um-m1',
+        'main_text',
+        'hello',
+        'success',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        0,
+        null
+      )
+    for (const [type, id, op] of [
+      ['topic', 'ut-t1', 'op-ut-t1'],
+      ['message', 'um-m1', 'op-um-m1'],
+      ['message_block', 'ub-b1', 'op-ub-b1']
+    ] as const) {
+      cDb
+        .insert(schema.syncEntityClock)
+        .values({ entityType: type, entityId: id, timestamp: UT, operationId: op })
+        .run()
+      const fields = type === 'topic' ? TOPIC_FIELDS : type === 'message' ? MESSAGE_FIELDS : BLOCK_FIELDS
+      for (const field of fields) {
+        cDb
+          .insert(schema.syncFieldClock)
+          .values({ entityType: type, entityId: id, field, timestamp: UT, operationId: op })
+          .run()
+      }
+    }
+    cDb
+      .insert(schema.syncMembershipClock)
+      .values({
+        childEntityType: 'message',
+        childEntityId: 'um-m1',
+        parentId: 'ut-t1',
+        timestamp: UT,
+        operationId: 'op-um-m1'
+      })
+      .run()
+    cDb
+      .insert(schema.syncMembershipClock)
+      .values({
+        childEntityType: 'message_block',
+        childEntityId: 'ub-b1',
+        parentId: 'um-m1',
+        timestamp: UT,
+        operationId: 'op-ub-b1'
+      })
+      .run()
+    cDb
+      .insert(schema.syncParentOrderFrame)
+      .values({
+        kind: 'topicMessage',
+        parentId: 'ut-t1',
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIdsJson: JSON.stringify(['um-m1']),
+        timestamp: UF,
+        operationId: 'op-uf-t1'
+      })
+      .run()
+    cDb
+      .insert(schema.syncParentOrderFrame)
+      .values({
+        kind: 'messageBlock',
+        parentId: 'um-m1',
+        frameVersion: 'parent-order-frame-v1',
+        orderedChildIdsJson: JSON.stringify(['ub-b1']),
+        timestamp: UF,
+        operationId: 'op-uf-m1'
+      })
+      .run()
+  }
+
+  function expectBranchUntouched(
+    cDb: BetterSQLite3Database<typeof schema>,
+    cSqlite: Database.Database,
+    branchMessageId: string,
+    branchBlockId: string,
+    branchId: string,
+    sortOrder: number
+  ): void {
+    // Local branch rows are never deleted to bypass the merge.
+    expect(cSqlite.prepare(`SELECT id FROM messages WHERE id=?`).get(branchMessageId)).toBeTruthy()
+    expect(cSqlite.prepare(`SELECT id FROM message_blocks WHERE id=?`).get(branchBlockId)).toBeTruthy()
+    expect(cSqlite.prepare(`SELECT id FROM topic_branches WHERE id=?`).get(branchId)).toBeTruthy()
+    const row = cSqlite.prepare(`SELECT branch_id, sort_order FROM messages WHERE id=?`).get(branchMessageId) as {
+      branch_id: string
+      sort_order: number
+    }
+    expect(row.branch_id).toBe(branchId)
+    expect(row.sort_order).toBe(sortOrder)
+    // No outbox/membership/clocks minted for branch entities.
+    const outbox = cDb.select().from(schema.syncOutbox).all() as Array<{ entityId: string }>
+    expect(outbox.some((o) => o.entityId === branchMessageId || o.entityId === branchBlockId)).toBe(false)
+    expect(cSqlite.prepare(`SELECT * FROM sync_entity_clock WHERE entity_id=?`).get(branchMessageId)).toBeUndefined()
+    expect(cSqlite.prepare(`SELECT * FROM sync_entity_clock WHERE entity_id=?`).get(branchBlockId)).toBeUndefined()
+    expect(
+      cSqlite.prepare(`SELECT * FROM sync_membership_clock WHERE child_entity_id=?`).get(branchMessageId)
+    ).toBeUndefined()
+  }
+
+  it('all-unversioned branch is not adopted while main exclusive is adopted and merged', async () => {
+    const { adoptReceiverExclusiveInTx } = await import('../syncReceiverUnion')
+    const { mergeValidatedBaselineInTx } = await import('../syncBaselineApply')
+    const fresh = openChatDb()
+    try {
+      insertUnionTopic(fresh.sqlite)
+      insertExclusiveMessage(fresh.sqlite, 'ux-m1', 'ut-t1', 'exclusive hello', 2)
+      insertExclusiveBlock(fresh.sqlite, 'ux-b1', 'ux-m1', 'exclusive hello')
+      insertUnionBranch(fresh.sqlite, 'ubr-1', 'ux-m1')
+      insertUnionBranchMessage(fresh.sqlite, 'ux-br-m1', 'ubr-1', 9)
+      insertUnionBranchBlock(fresh.sqlite, 'ux-br-b1', 'ux-br-m1')
+      const input = topicOnlyInput()
+      const union = fresh.db.transaction((tx) => {
+        const u = adoptReceiverExclusiveInTx(tx as never, input, 'test-device-union-branch', UWALL)
+        mergeValidatedBaselineInTx(tx as never, input)
+        return u
+      })
+      expect(union.adopted).toBe(2)
+      expect(union.sharedParents.topicIds).toEqual(['ut-t1'])
+      expect(union.pureParents.messageIds).toEqual(['ux-m1'])
+      const outbox = fresh.db.select().from(schema.syncOutbox).all() as Array<{ entityId: string }>
+      expect(outbox.map((o) => o.entityId).sort()).toEqual(['ux-b1', 'ux-m1'])
+      expectBranchUntouched(fresh.db, fresh.sqlite, 'ux-br-m1', 'ux-br-b1', 'ubr-1', 9)
+      // Main exclusive materialized as the suffix; branch order untouched.
+      expect(
+        (fresh.sqlite.prepare(`SELECT sort_order FROM messages WHERE id=?`).get('ux-m1') as { sort_order: number })
+          .sort_order
+      ).toBe(0)
+    } finally {
+      try {
+        fresh.sqlite.close()
+      } catch {}
+    }
+  })
+
+  it('branch-only unversioned local adopts nothing and merges cleanly', async () => {
+    const { adoptReceiverExclusiveInTx } = await import('../syncReceiverUnion')
+    const { mergeValidatedBaselineInTx } = await import('../syncBaselineApply')
+    const fresh = openChatDb()
+    try {
+      insertUnionTopic(fresh.sqlite)
+      insertUnionBranch(fresh.sqlite, 'ubr-2', 'ut-t1')
+      insertUnionBranchMessage(fresh.sqlite, 'ux-br-m2', 'ubr-2', 4)
+      insertUnionBranchBlock(fresh.sqlite, 'ux-br-b2', 'ux-br-m2')
+      const input = topicOnlyInput()
+      const union = fresh.db.transaction((tx) => {
+        const u = adoptReceiverExclusiveInTx(tx as never, input, 'test-device-union-branch', UWALL)
+        mergeValidatedBaselineInTx(tx as never, input)
+        return u
+      })
+      expect(union.adopted).toBe(0)
+      expect(fresh.db.select().from(schema.syncOutbox).all()).toEqual([])
+      expectBranchUntouched(fresh.db, fresh.sqlite, 'ux-br-m2', 'ux-br-b2', 'ubr-2', 4)
+    } finally {
+      try {
+        fresh.sqlite.close()
+      } catch {}
+    }
+  })
+
+  it('fully versioned main plus branch is not rejected by the branch or its parent frame', async () => {
+    const { adoptReceiverExclusiveInTx } = await import('../syncReceiverUnion')
+    const { mergeValidatedBaselineInTx } = await import('../syncBaselineApply')
+    const fresh = openChatDb()
+    try {
+      seedUnionVersionedMain(fresh.db, fresh.sqlite)
+      insertUnionBranch(fresh.sqlite, 'ubr-3', 'um-m1')
+      insertUnionBranchMessage(fresh.sqlite, 'ux-br-m3', 'ubr-3', 6)
+      insertUnionBranchBlock(fresh.sqlite, 'ux-br-b3', 'ux-br-m3')
+      const input = fullChainInput()
+      const union = fresh.db.transaction((tx) => {
+        const u = adoptReceiverExclusiveInTx(tx as never, input, 'test-device-union-branch', UWALL)
+        mergeValidatedBaselineInTx(tx as never, input)
+        return u
+      })
+      expect(union.adopted).toBe(0)
+      expect(fresh.db.select().from(schema.syncOutbox).all()).toEqual([])
+      expectBranchUntouched(fresh.db, fresh.sqlite, 'ux-br-m3', 'ux-br-b3', 'ubr-3', 6)
+      // Main chain converged; main order still dense from the main frame.
+      expect(
+        (fresh.sqlite.prepare(`SELECT sort_order FROM messages WHERE id=?`).get('um-m1') as { sort_order: number })
+          .sort_order
+      ).toBe(0)
+    } finally {
+      try {
+        fresh.sqlite.close()
+      } catch {}
+    }
+  })
 })

@@ -1011,3 +1011,104 @@ describe('audit F1/F2: single per-parent frame decision', () => {
     expect(blockFrameOf(sqlite, 't-ba-m1')!.orderedChildIds).toEqual(blockOrder(sqlite, 't-ba-m1'))
   })
 })
+
+describe('delete-wins cascade tombstones for stale messageBlock frame replay', () => {
+  const T0 = 8_000_000_000_000
+
+  function seedBase(topic: string, msg: string, blk: string): void {
+    vi.spyOn(Date, 'now').mockReturnValue(T0)
+    expect(agg.ensureTopic(topic, 'assistant-1', 'T').ok).toBe(true)
+    const res = agg.appendMessage(
+      topic,
+      { id: msg, topicId: topic, role: 'user', content: 'base', status: 'success' } as never,
+      [stableBlock(blk, msg) as never]
+    )
+    expect(res.ok).toBe(true)
+  }
+
+  function staleBlockFrameOp(parentMsg: string): Record<string, unknown> {
+    const row = db
+      .select()
+      .from(schema.syncOutbox)
+      .all()
+      .find((r) => r.op === 'order_frame' && r.entityType === 'message' && r.entityId === parentMsg)
+    expect(row).toBeDefined()
+    return {
+      id: row!.id,
+      entityType: row!.entityType,
+      op: row!.op,
+      entityId: row!.entityId,
+      timestamp: row!.timestamp,
+      deviceId: row!.deviceId,
+      payload: JSON.parse(row!.payloadJson as string)
+    }
+  }
+
+  function hasTombstone(kind: 'topic' | 'message' | 'message_block', id: string): boolean {
+    const key =
+      kind === 'topic'
+        ? `tombstone:topic:${id}`
+        : kind === 'message'
+          ? `tombstone:message:${id}`
+          : `tombstone:message_block:${id}`
+    return !!sqlite.prepare(`SELECT key FROM sync_state WHERE key=?`).get(key)
+  }
+
+  it('topic hard-delete records the child message tombstone; a stale block frame for the deleted child suppresses without orphan', () => {
+    seedBase('t-del', 'm-del', 'b-del')
+    const staleOp = staleBlockFrameOp('m-del')
+    // Simulate converged push: outbox drained, clocks/memberships/frames retained.
+    sqlite.prepare('DELETE FROM sync_outbox').run()
+    vi.spyOn(Date, 'now').mockReturnValue(T0 + 5000)
+    expect(agg.hardDeleteTopic('t-del').ok).toBe(true)
+    expect(hasTombstone('topic', 't-del')).toBe(true)
+    expect(hasTombstone('message', 'm-del')).toBe(true)
+    // Simulate delete push.
+    sqlite.prepare('DELETE FROM sync_outbox').run()
+    // Stale redelivery (older clock, deleted parent): suppressed-applied, no
+    // throw, no row resurrection, idempotent on replay.
+    expect(syncService.applyIncomingOperation(staleOp as never)).toBe(false)
+    expect(sqlite.prepare(`SELECT id FROM topics WHERE id='t-del'`).get()).toBeUndefined()
+    expect(sqlite.prepare(`SELECT id FROM messages WHERE id='m-del'`).get()).toBeUndefined()
+    expect(sqlite.prepare(`SELECT id FROM message_blocks WHERE id='b-del'`).get()).toBeUndefined()
+    expect(syncService.applyIncomingOperation(staleOp as never)).toBe(false)
+  })
+
+  it('message delete records the child block tombstone; a stale frame after a winning edit suppresses, an unknown member still orphans', () => {
+    seedBase('t-race', 'm-race', 'b-race')
+    const staleOp = staleBlockFrameOp('m-race')
+    sqlite.prepare('DELETE FROM sync_outbox').run()
+    vi.spyOn(Date, 'now').mockReturnValue(T0 + 1000)
+    expect(agg.deleteMessage('t-race', 'm-race').ok).toBe(true)
+    expect(hasTombstone('message', 'm-race')).toBe(true)
+    expect(hasTombstone('message_block', 'b-race')).toBe(true)
+    sqlite.prepare('DELETE FROM sync_outbox').run()
+    // A winning remote edit (newer than the delete) resurrects the message row only.
+    const editOp = {
+      id: 'op-race-edit-1',
+      entityType: 'message',
+      op: 'upsert',
+      entityId: 'm-race',
+      timestamp: T0 + 1001,
+      deviceId: 'd-remote-1',
+      payload: { id: 'm-race', topicId: 't-race', content: 'edited' }
+    }
+    expect(syncService.applyIncomingOperation(editOp as never)).toBe(true)
+    expect(sqlite.prepare(`SELECT id FROM messages WHERE id='m-race'`).get()).toBeTruthy()
+    // Stale frame: parent alive, deleted member tombstoned → consumed without
+    // resurrecting the block and without orphaning.
+    const applied = syncService.applyIncomingOperation(staleOp as never)
+    expect(applied).toBe(true)
+    expect(sqlite.prepare(`SELECT id FROM messages WHERE id='m-race'`).get()).toBeTruthy()
+    expect(sqlite.prepare(`SELECT id FROM message_blocks WHERE id='b-race'`).get()).toBeUndefined()
+    // Genuine arrival gap (never-seen member, no tombstone) still fails strict.
+    const gapOp = makeBlockFrameOp({
+      id: 'op-race-gap-1',
+      parentId: 'm-race',
+      timestamp: T0 + 1002,
+      deviceId: 'd-remote-1',
+      orderedChildIds: ['b-race', 'b-never-seen']
+    })
+    expect(() => syncService.applyIncomingOperation(gapOp as never)).toThrowError(SyncOrphanError)
+  })
+})

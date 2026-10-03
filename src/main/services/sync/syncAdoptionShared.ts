@@ -11,7 +11,7 @@
  * with each caller to avoid refactoring unrelated transaction contexts.
  */
 
-import { filterBlockPayload, filterMessagePayload, filterTopicPayload } from '@shared/sync'
+import { filterBlockPayload, filterBranchPayload, filterMessagePayload, filterTopicPayload } from '@shared/sync'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import * as schema from '../chatDb/schema'
@@ -47,6 +47,8 @@ export const ADOPTION_BLOCK_FIELDS: ReadonlySet<string> = new Set([
   'createdAt',
   'updatedAt'
 ])
+
+export const ADOPTION_BRANCH_FIELDS: ReadonlySet<string> = new Set(['name', 'createdAt', 'updatedAt'])
 
 export function decodeAdoptionOverflow(extra: string | null): Record<string, unknown> {
   if (!extra) return {}
@@ -95,6 +97,7 @@ export function buildAdoptionTopicPayload(row: {
 export function buildAdoptionMessagePayload(row: {
   id: string
   topicId: string
+  branchId?: string | null
   role: string | null
   content: string | null
   status: string | null
@@ -105,9 +108,11 @@ export function buildAdoptionMessagePayload(row: {
   createdAt: string | null
   updatedAt: string | null
 }): Record<string, unknown> {
+  const branchId = typeof row.branchId === 'string' && row.branchId.length > 0 ? row.branchId : null
   const raw: Record<string, unknown> = {
     id: row.id,
     topicId: row.topicId,
+    branchId,
     role: row.role,
     content: row.content,
     status: row.status,
@@ -121,6 +126,29 @@ export function buildAdoptionMessagePayload(row: {
   const filtered = filterMessagePayload(raw)
   if (!filtered) fail(`adoption message payload filter rejected ${row.id}`)
   if (Object.prototype.hasOwnProperty.call(filtered, 'sortOrder')) fail(`sortOrder leak for ${row.id}`)
+  return filtered
+}
+
+export function buildAdoptionBranchPayload(row: {
+  id: string
+  topicId: string
+  parentBranchId: string | null
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}): Record<string, unknown> {
+  const raw: Record<string, unknown> = {
+    id: row.id,
+    topicId: row.topicId,
+    parentBranchId: row.parentBranchId,
+    anchorMessageId: row.anchorMessageId,
+    name: row.name,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  }
+  const filtered = filterBranchPayload(raw)
+  if (!filtered) fail(`adoption branch payload filter rejected ${row.id}`)
   return filtered
 }
 

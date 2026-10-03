@@ -320,7 +320,7 @@ export function reconstructMessageBlockRelations(messages: JsonObject[], blocks:
 // ---------------------------------------------------------------------------
 
 /** Block types that carry file metadata */
-const FILE_BLOCK_TYPES = new Set(['file', 'image'])
+const FILE_BLOCK_TYPES = new Set(['file', 'image', 'video'])
 
 /**
  * Project file references from a block's metadata.

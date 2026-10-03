@@ -16,6 +16,9 @@ import { registerProfileLaunchToken, unregisterProfileLaunchToken } from '../fix
 import { validateProfileLaunchToken } from './run-ownership'
 import {
   findProcessesByUserDataDir,
+  getProcessPpid,
+  getProcessStat,
+  isZombieStat,
   killProcess,
   processExists,
   terminateProcessesByUserDataDir
@@ -213,19 +216,36 @@ export async function relaunchSecondSyncProfileAfterControlledSigterm(
   // Exact-token SIGTERM only: never app.close(), never SIGKILL. A failed scan
   // or kill throws (fail-closed); an empty initial scan throws because there
   // is no live app to prove abnormal-exit recovery against.
+  const syntheticToken = userDataDir.split('/').pop() ?? 'synthetic-token'
+  const startMs = Date.now()
   const initial = findProcessesByUserDataDir(userDataDir)
   if (initial.length === 0) {
     throw new Error('controlled SIGTERM found no exact-token processes; expected a live second profile')
   }
+  // Diagnostic: initial state (synthetic token only, no real path)
+  console.log(
+    `[E2E-diag] SIGTERM start token=${syntheticToken} pids=[${initial.map((p) => p.pid).join(',')}] count=${initial.length} elapsed=0`
+  )
+  const seenKilled = new Set<number>()
   for (const target of initial) {
     const res = killProcess(target.pid, 'SIGTERM')
+    console.log(
+      `[E2E-diag] SIGTERM kill pid=${target.pid} signal=SIGTERM ok=${res.ok} elapsed=${Date.now() - startMs}ms`
+    )
     if (!res.ok) {
       throw new Error(`controlled SIGTERM failed for PID ${target.pid}: ${res.error ?? 'unknown'}`)
     }
+    seenKilled.add(target.pid)
   }
   // SIGTERM-only exit wait: poll exact-token matches + PID liveness without
   // escalation. Stragglers fail closed (no SIGKILL); the caller reports the
-  // blocker without widening scope.
+  // blocker without widening scope. Zombie Z is treated as dead (resource
+  // death) via processExists; diagnostics capture stat/ppid for each alive PID.
+  // Late-spawned helpers (child of helper) that are still S are SIGTERM'd once
+  // on discovery (exact current descendants only, no broad kill). If the main
+  // helper stays S beyond 10s, re-SIGTERM it once (still SIGTERM-only, no
+  // SIGKILL escalation).
+  const reKilled = new Set<number>()
   const deadline = Date.now() + 20000
   for (;;) {
     let current: { pid: number; args: string }[]
@@ -234,19 +254,79 @@ export async function relaunchSecondSyncProfileAfterControlledSigterm(
     } catch (e) {
       throw new Error(`controlled SIGTERM exit scan failed: ${e instanceof Error ? e.message : String(e)}`)
     }
+    // SIGTERM any newly discovered living helper not yet killed (exact token only)
+    for (const entry of current) {
+      if (seenKilled.has(entry.pid)) continue
+      let stat: string | null = null
+      try {
+        stat = getProcessStat(entry.pid)
+      } catch {}
+      if (stat !== null && !isZombieStat(stat)) {
+        const res = killProcess(entry.pid, 'SIGTERM')
+        console.log(
+          `[E2E-diag] SIGTERM late-kill pid=${entry.pid} stat=${stat} ok=${res.ok} elapsed=${Date.now() - startMs}ms`
+        )
+        seenKilled.add(entry.pid)
+        if (!res.ok) {
+          console.log(`[E2E-diag] SIGTERM late-kill failed pid=${entry.pid} err=${res.error ?? 'unknown'}`)
+        }
+      } else if (stat !== null && isZombieStat(stat)) {
+        seenKilled.add(entry.pid)
+        console.log(`[E2E-diag] SIGTERM late-zombie pid=${entry.pid} stat=${stat} elapsed=${Date.now() - startMs}ms`)
+      }
+    }
+    // Re-SIGTERM still-alive S helpers after 10s once (exact current descendants only)
+    if (Date.now() - startMs > 10000) {
+      for (const entry of current) {
+        if (reKilled.has(entry.pid)) continue
+        let stat: string | null = null
+        try {
+          stat = getProcessStat(entry.pid)
+        } catch {}
+        if (stat !== null && !isZombieStat(stat) && seenKilled.has(entry.pid)) {
+          const res = killProcess(entry.pid, 'SIGTERM')
+          console.log(
+            `[E2E-diag] SIGTERM re-kill pid=${entry.pid} stat=${stat} ok=${res.ok} elapsed=${Date.now() - startMs}ms`
+          )
+          reKilled.add(entry.pid)
+        }
+      }
+    }
     const alive: number[] = []
+    const diagAlive: string[] = []
     for (const entry of current) {
       let exists: boolean
+      let stat: string | null = null
+      let ppid: number | null = null
       try {
-        exists = processExists(entry.pid)
+        stat = getProcessStat(entry.pid)
+        ppid = getProcessPpid(entry.pid)
+        exists = stat !== null && !isZombieStat(stat)
       } catch (e) {
         throw new Error(`controlled SIGTERM exit probe failed: ${e instanceof Error ? e.message : String(e)}`)
       }
-      if (exists) alive.push(entry.pid)
+      if (exists) {
+        alive.push(entry.pid)
+        diagAlive.push(`pid=${entry.pid} stat=${stat ?? 'null'} ppid=${ppid ?? 'null'}`)
+      } else if (stat !== null && isZombieStat(stat)) {
+        // Zombie diagnostic (resource dead but pid still in table until reaped)
+        console.log(
+          `[E2E-diag] SIGTERM zombie pid=${entry.pid} stat=${stat} ppid=${ppid ?? 'null'} elapsed=${Date.now() - startMs}ms`
+        )
+      }
     }
-    if (alive.length === 0) break
+    if (alive.length === 0) {
+      console.log(`[E2E-diag] SIGTERM complete token=${syntheticToken} elapsed=${Date.now() - startMs}ms`)
+      break
+    }
     if (Date.now() >= deadline) {
-      throw new Error(`controlled SIGTERM exit timeout; PIDs still alive: ${alive.join(', ')} (no SIGKILL sent)`)
+      const detail = diagAlive.join('; ')
+      console.log(
+        `[E2E-diag] SIGTERM timeout token=${syntheticToken} alive=[${diagAlive.join(', ')}] elapsed=${Date.now() - startMs}ms (no SIGKILL sent)`
+      )
+      throw new Error(
+        `controlled SIGTERM exit timeout; PIDs still alive: ${alive.join(', ')} (no SIGKILL sent) detail=${detail}`
+      )
     }
     await new Promise((resolve) => setTimeout(resolve, 300))
   }

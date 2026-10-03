@@ -22,9 +22,11 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import * as schema from '../chatDb/schema'
 import {
   ADOPTION_BLOCK_FIELDS,
+  ADOPTION_BRANCH_FIELDS,
   ADOPTION_MESSAGE_FIELDS,
   ADOPTION_TOPIC_FIELDS,
   buildAdoptionBlockPayload,
+  buildAdoptionBranchPayload,
   buildAdoptionMessagePayload,
   buildAdoptionTopicPayload,
   decodeAdoptionOverflow,
@@ -33,6 +35,7 @@ import {
 import type { LocalSyncBaselineEntity } from './syncBaseline'
 import type { ValidatedBaselineMergeInput } from './syncBaselineApply'
 import { SyncBaselineApplyError } from './syncBaselineApply'
+import { buildMessageBranchById, isBranchOwnedBlock, isProvenBranchMessageRow } from './syncLocalInventoryBoundary'
 
 type Tx = BetterSQLite3Database<typeof schema>
 
@@ -56,14 +59,27 @@ function isEligibleBlockRow(row: { status: string | null; type: string | null; e
 
 export interface ReceiverUnionResult {
   adopted: number
-  sharedParents: { topicIds: string[]; messageIds: string[] }
-  pureParents: { topicIds: string[]; messageIds: string[] }
+  sharedParents: { topicIds: string[]; messageIds: string[]; branchIds: string[] }
+  pureParents: { topicIds: string[]; messageIds: string[]; branchIds: string[] }
 }
 
-type TombstoneRef = { entityType: 'topic' | 'message' | 'message_block'; entityId: string }
+type TombstoneRef = {
+  entityType: 'topic' | 'message' | 'message_block' | 'topic_branch' | 'file_asset'
+  entityId: string
+}
 type RegisterRef = { messageId: string; activeBlockIds: string[] }
 
 function parseTombstoneKey(key: string): TombstoneRef {
+  if (key.startsWith('tombstone:file_asset:')) {
+    const id = key.slice('tombstone:file_asset:'.length)
+    if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
+    return { entityType: 'file_asset', entityId: id }
+  }
+  if (key.startsWith('tombstone:topic_branch:')) {
+    const id = key.slice('tombstone:topic_branch:'.length)
+    if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
+    return { entityType: 'topic_branch', entityId: id }
+  }
   if (key.startsWith('tombstone:message_block:')) {
     const id = key.slice('tombstone:message_block:'.length)
     if (!id || id.includes(':')) fail(`receiver union malformed tombstone key ${key}`)
@@ -172,13 +188,14 @@ function collectIncomingRegisters(
 
 function assertCandidateClosureDisjoint(
   candidates: Array<{
-    entityType: 'topic' | 'message' | 'message_block'
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch'
     entityId: string
     payload: Record<string, unknown>
   }>,
   topicRowById: Map<string, { id: string }>,
   messageRowById: Map<string, { id: string; topicId: string }>,
   blockRowById: Map<string, { id: string; messageId: string }>,
+  branchRowById: Map<string, { id: string; parentBranchId: string | null }>,
   incomingEntityByKey: Map<string, LocalSyncBaselineEntity>,
   incomingTombstones: TombstoneRef[],
   localTombstones: TombstoneRef[],
@@ -192,6 +209,8 @@ function assertCandidateClosureDisjoint(
 
   const candMsgParent = new Map<string, string>()
   const candBlockParent = new Map<string, string>()
+  const candBranchParent = new Map<string, string | null>()
+  const candBranchTopic = new Map<string, string>()
   for (const c of candidates) {
     if (c.entityType === 'message') {
       const tid: unknown = c.payload.topicId
@@ -201,6 +220,15 @@ function assertCandidateClosureDisjoint(
       const mid: unknown = c.payload.messageId
       if (typeof mid !== 'string' || !mid) fail(`receiver union parent mismatch for block ${c.entityId}`)
       candBlockParent.set(c.entityId, mid)
+    } else if (c.entityType === 'topic_branch') {
+      const tid: unknown = c.payload.topicId
+      if (typeof tid !== 'string' || !tid) fail(`receiver union parent mismatch for branch ${c.entityId}`)
+      candBranchTopic.set(c.entityId, tid)
+      const pid: unknown = c.payload.parentBranchId
+      if (pid !== null && pid !== undefined && (typeof pid !== 'string' || !pid)) {
+        fail(`receiver union parent mismatch for branch ${c.entityId}`)
+      }
+      candBranchParent.set(c.entityId, pid ?? null)
     }
   }
   const localMsgParent = new Map<string, string>()
@@ -245,7 +273,12 @@ function assertCandidateClosureDisjoint(
   const allTombs: TombstoneRef[] = [
     ...localTombstones,
     ...incomingTombstones.map((t) => {
-      if (t.entityType !== 'topic' && t.entityType !== 'message' && t.entityType !== 'message_block') {
+      if (
+        t.entityType !== 'topic' &&
+        t.entityType !== 'message' &&
+        t.entityType !== 'message_block' &&
+        t.entityType !== 'topic_branch'
+      ) {
         fail(`receiver union unknown incoming tombstone type ${String(t.entityType)}`)
       }
       if (typeof t.entityId !== 'string' || !t.entityId || t.entityId.includes(':')) {
@@ -254,12 +287,41 @@ function assertCandidateClosureDisjoint(
       return { entityType: t.entityType, entityId: t.entityId }
     })
   ]
+  const candMessageOwner = new Map<string, string | null>()
+  for (const c of candidates) {
+    if (c.entityType !== 'message') continue
+    const owner: unknown = c.payload.branchId
+    candMessageOwner.set(c.entityId, typeof owner === 'string' && owner ? owner : null)
+  }
+  const candidateBranchIds = new Set<string>(
+    candidates.filter((c) => c.entityType === 'topic_branch').map((c) => c.entityId)
+  )
+  // Local branch ancestry for subtree-disjointness walks (candidate chain
+  // first, then the locally present parent row, bounded).
+  const localBranchParentOf = (bid: string): string | null | undefined => {
+    const cand = candBranchParent.get(bid)
+    if (cand !== undefined) return cand
+    const row = branchRowById.get(bid) as { parentBranchId?: unknown } | undefined
+    if (!row) return undefined
+    const p = row.parentBranchId
+    return typeof p === 'string' && p ? p : null
+  }
+  const branchUnderBranch = (start: string, ancestor: string): boolean => {
+    let cur: string | null | undefined = localBranchParentOf(start)
+    for (let depth = 0; depth < 32 && cur !== undefined && cur !== null; depth++) {
+      if (cur === ancestor) return true
+      cur = localBranchParentOf(cur)
+    }
+    return false
+  }
   for (const t of allTombs) {
     const key = `${t.entityType}:${t.entityId}`
     if (candidateKeys.has(key)) fail(`receiver union tombstone direct overlap ${key}`)
     if (t.entityType === 'topic') {
       for (const [, tid] of candMsgParent)
         if (tid === t.entityId) fail(`receiver union candidate under tombstoned topic ${t.entityId}`)
+      for (const [, tid] of candBranchTopic)
+        if (tid === t.entityId) fail(`receiver union candidate branch under tombstoned topic ${t.entityId}`)
       for (const [bid] of candBlockParent) {
         const topic = resolveBlockTopic(bid)
         if (topic === undefined)
@@ -275,6 +337,22 @@ function assertCandidateClosureDisjoint(
           fail(`receiver union cannot prove tombstoned message ${t.entityId} disjoint from candidates`)
       } else if (candidateTopicIds.has(topic)) {
         fail(`receiver union tombstoned message ${t.entityId} under candidate topic ${topic}`)
+      }
+    } else if (t.entityType === 'topic_branch') {
+      // v3: candidate messages owned by the tombstoned branch, and
+      // candidate branches at or under it, sit inside the deleted subtree.
+      for (const [mid, owner] of candMessageOwner) {
+        if (owner !== null && (owner === t.entityId || branchUnderBranch(owner, t.entityId))) {
+          fail(`receiver union candidate message ${mid} under tombstoned branch ${t.entityId}`)
+        }
+      }
+      if (candidateBranchIds.has(t.entityId)) {
+        fail(`receiver union candidate branch under tombstoned branch ${t.entityId}`)
+      }
+      for (const bid of candidateBranchIds) {
+        if (bid !== t.entityId && branchUnderBranch(bid, t.entityId)) {
+          fail(`receiver union candidate branch ${bid} under tombstoned branch ${t.entityId}`)
+        }
       }
     } else {
       const parentMid = resolveBlockMessage(t.entityId)
@@ -337,6 +415,7 @@ export function adoptReceiverExclusiveInTx(
   const incomingTopicIds = new Set<string>()
   const incomingMessageIds = new Set<string>()
   const incomingBlockIds = new Set<string>()
+  const incomingBranchIds = new Set<string>()
   const incomingTombstoneKeys = new Set<string>()
   const incomingEntityByKey = new Map<string, LocalSyncBaselineEntity>()
   for (const e of incoming.entities) {
@@ -345,7 +424,17 @@ export function adoptReceiverExclusiveInTx(
     if (e.entityType === 'topic') incomingTopicIds.add(e.entityId)
     else if (e.entityType === 'message') incomingMessageIds.add(e.entityId)
     else if (e.entityType === 'message_block') incomingBlockIds.add(e.entityId)
+    else if (e.entityType === 'topic_branch') incomingBranchIds.add(e.entityId)
   }
+  // Branch-domain gate (v3 full sync): the incoming input carries branch
+  // inventory. v1/v2 inputs keep the exact local-only boundary below
+  // (branch rows skipped, never adopted); only the branch domain adopts
+  // fully-unversioned local branch rows/messages/blocks with truthful
+  // clocks or fails on ambiguity — never permanently suppressed.
+  const branchDomain =
+    incomingBranchIds.size > 0 ||
+    incoming.tombstones.some((t) => t.entityType === 'topic_branch') ||
+    incoming.orderFrames.some((f) => (f as { kind?: string }).kind === 'branchSuffix')
   for (const t of incoming.tombstones) {
     incomingTombstoneKeys.add(`${t.entityType}:${t.entityId}`)
   }
@@ -424,6 +513,35 @@ export function adoptReceiverExclusiveInTx(
     sortOrder: number
     extra: string | null
   }>
+  // Branch rows (v3 adoption domain; pre-016 tolerant — absent table means
+  // no local branches).
+  let branchRows: Array<{
+    id: string
+    topicId: string
+    parentBranchId: string | null
+    anchorMessageId: string
+    name: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }> = []
+  try {
+    branchRows = tx
+      .select({
+        id: schema.topicBranches.id,
+        topicId: schema.topicBranches.topicId,
+        parentBranchId: schema.topicBranches.parentBranchId,
+        anchorMessageId: schema.topicBranches.anchorMessageId,
+        name: schema.topicBranches.name,
+        createdAt: schema.topicBranches.createdAt,
+        updatedAt: schema.topicBranches.updatedAt
+      })
+      .from(schema.topicBranches)
+      .all() as typeof branchRows
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e)
+    if (/no such table/i.test(m)) branchRows = []
+    else throw e
+  }
 
   const topicRowById = new Map<string, (typeof topicRows)[number]>()
   for (const r of topicRows) topicRowById.set(r.id, r)
@@ -431,6 +549,15 @@ export function adoptReceiverExclusiveInTx(
   for (const r of messageRows) messageRowById.set(r.id, r)
   const blockRowById = new Map<string, (typeof blockRows)[number]>()
   for (const r of blockRows) blockRowById.set(r.id, r)
+  const branchRowById = new Map<string, (typeof branchRows)[number]>()
+  for (const r of branchRows) branchRowById.set(r.id, r)
+
+  // Branch inventory boundary (version-scoped): v1/v2 inputs keep the exact
+  // local-only boundary (branch-owned messages/blocks never candidates,
+  // never minting). v3 (branchDomain) adopts the branch domain with
+  // truthful clocks. Unknown ownership stays syncable so existing
+  // fail-closed validation still applies.
+  const messageBranchById = buildMessageBranchById(messageRows as Array<{ id: string; branchId?: unknown }>)
 
   // Version helpers: fully-unversioned vs fully-versioned-complete vs partial.
   // Fully-unversioned = no entity/field/membership/outbox/frame/tombstone/register.
@@ -441,8 +568,9 @@ export function adoptReceiverExclusiveInTx(
   const TOPIC_FIELDS = [...ADOPTION_TOPIC_FIELDS]
   const MESSAGE_FIELDS = [...ADOPTION_MESSAGE_FIELDS]
   const BLOCK_FIELDS = [...ADOPTION_BLOCK_FIELDS]
+  const BRANCH_FIELDS = [...ADOPTION_BRANCH_FIELDS]
 
-  const hasEntityClock = (t: 'topic' | 'message' | 'message_block', id: string): boolean => {
+  const hasEntityClock = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): boolean => {
     return !!tx
       .select()
       .from(schema.syncEntityClock)
@@ -450,7 +578,7 @@ export function adoptReceiverExclusiveInTx(
       .all()
       .find((r) => r.entityId === id)
   }
-  const fieldCountFor = (t: 'topic' | 'message' | 'message_block', id: string): number => {
+  const fieldCountFor = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): number => {
     return tx
       .select()
       .from(schema.syncFieldClock)
@@ -467,7 +595,7 @@ export function adoptReceiverExclusiveInTx(
       .all()
       .find((r) => (r as unknown as { childEntityId: string }).childEntityId === id)
   }
-  const hasOutboxFor = (t: 'topic' | 'message' | 'message_block', id: string): boolean => {
+  const hasOutboxFor = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): boolean => {
     return !!tx
       .select()
       .from(schema.syncOutbox)
@@ -475,13 +603,21 @@ export function adoptReceiverExclusiveInTx(
       .all()
       .find((r) => r.entityType === t)
   }
-  const hasFrameAsParent = (t: 'topic' | 'message', id: string): boolean => {
+  const hasFrameAsParent = (t: 'topic' | 'message' | 'topic_branch', id: string): boolean => {
     try {
       if (t === 'topic') {
         return !!tx
           .select()
           .from(schema.syncParentOrderFrame)
           .where(eq(schema.syncParentOrderFrame.kind, 'topicMessage'))
+          .all()
+          .find((r) => r.parentId === id)
+      }
+      if (t === 'topic_branch') {
+        return !!tx
+          .select()
+          .from(schema.syncParentOrderFrame)
+          .where(eq(schema.syncParentOrderFrame.kind, 'branchSuffix'))
           .all()
           .find((r) => r.parentId === id)
       }
@@ -497,13 +633,15 @@ export function adoptReceiverExclusiveInTx(
       throw e
     }
   }
-  const hasTombstoneFor = (t: 'topic' | 'message' | 'message_block', id: string): boolean => {
+  const hasTombstoneFor = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): boolean => {
     const key =
       t === 'topic'
         ? `tombstone:topic:${id}`
         : t === 'message'
           ? `tombstone:message:${id}`
-          : `tombstone:message_block:${id}`
+          : t === 'topic_branch'
+            ? `tombstone:topic_branch:${id}`
+            : `tombstone:message_block:${id}`
     return !!tx.select().from(schema.syncState).where(eq(schema.syncState.key, key)).get()
   }
   const hasRegisterFor = (id: string): boolean => {
@@ -520,23 +658,31 @@ export function adoptReceiverExclusiveInTx(
     }
   }
 
-  const isFullyUnversioned = (t: 'topic' | 'message' | 'message_block', id: string): boolean => {
+  const isFullyUnversioned = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): boolean => {
     if (hasEntityClock(t, id)) return false
     if (fieldCountFor(t, id) > 0) return false
-    if (t !== 'topic' && hasMembership(t, id)) return false
+    if ((t === 'message' || t === 'message_block') && hasMembership(t, id)) return false
     if (hasOutboxFor(t, id)) return false
     if (t === 'topic' && hasFrameAsParent('topic', id)) return false
     if (t === 'message' && hasFrameAsParent('message', id)) return false
+    if (t === 'topic_branch' && hasFrameAsParent('topic_branch', id)) return false
     if (hasTombstoneFor(t, id)) return false
     if (t === 'message' && hasRegisterFor(id)) return false
     return true
   }
 
-  const isFullyVersionedComplete = (t: 'topic' | 'message' | 'message_block', id: string): boolean => {
+  const isFullyVersionedComplete = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): boolean => {
     if (!hasEntityClock(t, id)) return false
-    const need = t === 'topic' ? TOPIC_FIELDS.length : t === 'message' ? MESSAGE_FIELDS.length : BLOCK_FIELDS.length
+    const need =
+      t === 'topic'
+        ? TOPIC_FIELDS.length
+        : t === 'message'
+          ? MESSAGE_FIELDS.length
+          : t === 'topic_branch'
+            ? BRANCH_FIELDS.length
+            : BLOCK_FIELDS.length
     if (fieldCountFor(t, id) < need) return false
-    if (t !== 'topic' && !hasMembership(t, id)) return false
+    if ((t === 'message' || t === 'message_block') && !hasMembership(t, id)) return false
     return true
   }
 
@@ -560,22 +706,42 @@ export function adoptReceiverExclusiveInTx(
     }
   }
   const TOPIC_COMPARE_KEYS = ['id', ...ADOPTION_TOPIC_FIELDS]
-  const MESSAGE_COMPARE_KEYS = ['id', 'topicId', ...ADOPTION_MESSAGE_FIELDS]
+  const MESSAGE_COMPARE_KEYS = ['id', 'topicId', 'branchId', ...ADOPTION_MESSAGE_FIELDS]
   const BLOCK_COMPARE_KEYS = ['id', 'messageId', ...ADOPTION_BLOCK_FIELDS]
+  const BRANCH_COMPARE_KEYS = ['id', 'topicId', 'parentBranchId', 'anchorMessageId', ...ADOPTION_BRANCH_FIELDS]
   for (const row of topicRows) {
     if (!incomingTopicIds.has(row.id)) continue
     if (!isFullyUnversioned('topic', row.id)) continue
     const incomingEntity = incomingEntityByKey.get(`topic:${row.id}`)!
     comparePayload(buildAdoptionTopicPayload(row), incomingEntity.payload, TOPIC_COMPARE_KEYS, `topic/${row.id}`)
   }
+  for (const row of branchRows) {
+    // v3 only: same-ID branch rows compare identity + state; v1 inputs
+    // never carry branches (no local-only suppression needed here since
+    // incomingBranchIds is empty without the branch domain).
+    if (!branchDomain) continue
+    if (!incomingBranchIds.has(row.id)) continue
+    if (!isFullyUnversioned('topic_branch', row.id)) continue
+    const incomingEntity = incomingEntityByKey.get(`topic_branch:${row.id}`)!
+    comparePayload(buildAdoptionBranchPayload(row), incomingEntity.payload, BRANCH_COMPARE_KEYS, `branch/${row.id}`)
+  }
   for (const row of messageRows) {
     if (!incomingMessageIds.has(row.id)) continue
+    // v1/v2 inputs: branch-owned rows are out of the sync inventory —
+    // never compared, never adopted, never version-gated. v3 adopts them.
+    if (!branchDomain && isProvenBranchMessageRow(row as { branchId?: unknown })) continue
     if (!isFullyUnversioned('message', row.id)) continue
     const incomingEntity = incomingEntityByKey.get(`message:${row.id}`)!
-    comparePayload(buildAdoptionMessagePayload(row), incomingEntity.payload, MESSAGE_COMPARE_KEYS, `message/${row.id}`)
+    comparePayload(
+      buildAdoptionMessagePayload(row as Parameters<typeof buildAdoptionMessagePayload>[0]),
+      incomingEntity.payload,
+      MESSAGE_COMPARE_KEYS,
+      `message/${row.id}`
+    )
   }
   for (const row of blockRows) {
     if (!incomingBlockIds.has(row.id)) continue
+    if (!branchDomain && isBranchOwnedBlock(row.messageId, messageBranchById)) continue
     if (!isFullyUnversioned('message_block', row.id)) continue
     const incomingEntity = incomingEntityByKey.get(`message_block:${row.id}`)!
     comparePayload(buildAdoptionBlockPayload(row), incomingEntity.payload, BLOCK_COMPARE_KEYS, `block/${row.id}`)
@@ -587,7 +753,7 @@ export function adoptReceiverExclusiveInTx(
   // - fully-versioned-complete -> ignore (existing suffix/merge handles)
   // - partial (some version but incomplete) or exclusive with outbox/frame/tombstone/register -> fail
   type Candidate = {
-    entityType: 'topic' | 'message' | 'message_block'
+    entityType: 'topic' | 'message' | 'message_block' | 'topic_branch'
     entityId: string
     row: unknown
     payload: Record<string, unknown>
@@ -612,6 +778,9 @@ export function adoptReceiverExclusiveInTx(
   }
   for (const row of messageRows) {
     const id = row.id
+    // v1/v2 inputs: local-only branch suffix excluded from candidacy and
+    // from every eligibility gate. v3 adopts the branch domain below.
+    if (!branchDomain && isProvenBranchMessageRow(row as { branchId?: unknown })) continue
     if (incomingMessageIds.has(id)) continue
     if (incomingTombstoneKeys.has(`message:${id}`)) {
       if (isFullyVersionedComplete('message', id)) continue
@@ -623,7 +792,12 @@ export function adoptReceiverExclusiveInTx(
     if (!topicRowById.has(row.topicId)) {
       fail(`receiver union orphan message ${id} missing topic ${row.topicId}`)
     }
-    const payload = buildAdoptionMessagePayload(row)
+    const ownerBranch = (row as { branchId?: unknown }).branchId
+    const ownerBranchId = typeof ownerBranch === 'string' && ownerBranch.length > 0 ? ownerBranch : null
+    if (branchDomain && ownerBranchId !== null && !branchRowById.has(ownerBranchId)) {
+      fail(`receiver union orphan message ${id} missing branch ${ownerBranchId}`)
+    }
+    const payload = buildAdoptionMessagePayload(row as Parameters<typeof buildAdoptionMessagePayload>[0])
     if (isFullyUnversioned('message', id)) {
       candidates.push({ entityType: 'message', entityId: id, row, payload })
     } else if (isFullyVersionedComplete('message', id)) {
@@ -632,8 +806,36 @@ export function adoptReceiverExclusiveInTx(
       fail(`receiver union partial message ${id}`)
     }
   }
+  // v3 branch nodes: exclusive fully-unversioned local branches adopt with
+  // truthful clocks; tombstone overlap, orphan topic, or partial version
+  // fails closed. Parent/anchor eligibility is proven via local rows or the
+  // same-input candidate set below (parent closure).
+  if (branchDomain) {
+    for (const row of branchRows) {
+      const id = row.id
+      if (incomingBranchIds.has(id)) continue
+      if (incomingTombstoneKeys.has(`topic_branch:${id}`)) {
+        if (isFullyVersionedComplete('topic_branch', id)) continue
+        fail(`receiver union tombstone direct overlap branch/${id}`)
+      }
+      if (!topicRowById.has(row.topicId)) {
+        fail(`receiver union orphan branch ${id} missing topic ${row.topicId}`)
+      }
+      const payload = buildAdoptionBranchPayload(row)
+      if (isFullyUnversioned('topic_branch', id)) {
+        candidates.push({ entityType: 'topic_branch', entityId: id, row, payload })
+      } else if (isFullyVersionedComplete('topic_branch', id)) {
+        continue
+      } else {
+        fail(`receiver union partial branch ${id}`)
+      }
+    }
+  }
   for (const row of blockRows) {
     const id = row.id
+    // v1/v2 inputs: blocks inherit their parent message's local-only owner.
+    // v3 adopts branch-owned blocks with truthful clocks.
+    if (!branchDomain && isBranchOwnedBlock(row.messageId, messageBranchById)) continue
     if (incomingBlockIds.has(id)) continue
     if (incomingTombstoneKeys.has(`message_block:${id}`)) {
       if (isFullyVersionedComplete('message_block', id)) continue
@@ -658,8 +860,8 @@ export function adoptReceiverExclusiveInTx(
   if (candidates.length === 0) {
     return {
       adopted: 0,
-      sharedParents: { topicIds: [], messageIds: [] },
-      pureParents: { topicIds: [], messageIds: [] }
+      sharedParents: { topicIds: [], messageIds: [], branchIds: [] },
+      pureParents: { topicIds: [], messageIds: [], branchIds: [] }
     }
   }
 
@@ -672,6 +874,7 @@ export function adoptReceiverExclusiveInTx(
     topicRowById,
     messageRowById,
     blockRowById,
+    branchRowById as Map<string, { id: string; parentBranchId: string | null }>,
     incomingEntityByKey,
     incoming.tombstones,
     collectLocalTombstones(tx),
@@ -701,6 +904,9 @@ export function adoptReceiverExclusiveInTx(
   const candidateMessageIds = new Set<string>(
     candidates.filter((c) => c.entityType === 'message').map((c) => c.entityId)
   )
+  const candidateBranchIds = new Set<string>(
+    candidates.filter((c) => c.entityType === 'topic_branch').map((c) => c.entityId)
+  )
   // For closure, also consider incoming parent ids already in incoming sets (topics/messages). But for message's topicId, check if topicId in incomingTopicIds or candidateTopicIds
   for (const c of candidates) {
     if (c.entityType === 'message') {
@@ -708,12 +914,49 @@ export function adoptReceiverExclusiveInTx(
       if (!incomingTopicIds.has(topicId) && !candidateTopicIds.has(topicId)) {
         fail(`receiver union parent closure missing topic ${topicId} for message ${c.entityId}`)
       }
+      // Branch owner closure (v3): the owning branch must be incoming,
+      // candidate, or a locally present row (versioned or fully-unversioned
+      // local subtree roots are candidates themselves; anything else fails).
+      const ownerBranchId = c.payload.branchId as string | null | undefined
+      if (typeof ownerBranchId === 'string' && ownerBranchId.length > 0) {
+        if (!incomingBranchIds.has(ownerBranchId) && !candidateBranchIds.has(ownerBranchId)) {
+          if (!branchRowById.has(ownerBranchId)) {
+            fail(`receiver union parent closure missing branch ${ownerBranchId} for message ${c.entityId}`)
+          }
+        }
+      }
       // also ensure local parent row exists (already checked) and if parent is candidate, its payload etc. already validated
       // If parent is incoming, also ensure incoming parent payload exists (it does)
     } else if (c.entityType === 'message_block') {
       const messageId = c.payload.messageId as string
       if (!incomingMessageIds.has(messageId) && !candidateMessageIds.has(messageId)) {
         fail(`receiver union parent closure missing message ${messageId} for block ${c.entityId}`)
+      }
+    } else if (c.entityType === 'topic_branch') {
+      const topicId = c.payload.topicId as string
+      if (!incomingTopicIds.has(topicId) && !candidateTopicIds.has(topicId)) {
+        fail(`receiver union parent closure missing topic ${topicId} for branch ${c.entityId}`)
+      }
+      // Parent branch closure: nested parents must be incoming, candidate,
+      // or locally present (same rule as message owner closure above).
+      const parentBranchId = c.payload.parentBranchId as string | null | undefined
+      if (typeof parentBranchId === 'string' && parentBranchId.length > 0) {
+        if (!incomingBranchIds.has(parentBranchId) && !candidateBranchIds.has(parentBranchId)) {
+          if (!branchRowById.has(parentBranchId)) {
+            fail(`receiver union parent closure missing branch ${parentBranchId} for branch ${c.entityId}`)
+          }
+        }
+      }
+      // Anchor closure: the fork anchor must be incoming, candidate, or
+      // locally present; unknown anchors fail (deferral is the caller's
+      // page buffering, not silent adoption).
+      const anchorMessageId = c.payload.anchorMessageId as string
+      if (
+        !incomingMessageIds.has(anchorMessageId) &&
+        !candidateMessageIds.has(anchorMessageId) &&
+        !messageRowById.has(anchorMessageId)
+      ) {
+        fail(`receiver union parent closure missing anchor ${anchorMessageId} for branch ${c.entityId}`)
       }
     }
   }
@@ -739,7 +982,7 @@ export function adoptReceiverExclusiveInTx(
   // frames, shared payload/clock helpers in syncAdoptionShared) without a
   // service import cycle; payload allowlists and clock-scan stay single-sourced.
   const ordered = [...candidates].sort((a, b) => {
-    const rank = (t: string): number => (t === 'topic' ? 0 : t === 'message' ? 1 : 2)
+    const rank = (t: string): number => (t === 'topic' ? 0 : t === 'topic_branch' ? 1 : t === 'message' ? 2 : 3)
     const r = rank(a.entityType) - rank(b.entityType)
     if (r !== 0) return r
     return a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0
@@ -780,7 +1023,9 @@ export function adoptReceiverExclusiveInTx(
         ? ADOPTION_TOPIC_FIELDS
         : c.entityType === 'message'
           ? ADOPTION_MESSAGE_FIELDS
-          : ADOPTION_BLOCK_FIELDS
+          : c.entityType === 'topic_branch'
+            ? ADOPTION_BRANCH_FIELDS
+            : ADOPTION_BLOCK_FIELDS
     for (const k of Object.keys(c.payload)) {
       if (!fieldAllow.has(k)) continue
       tx.insert(schema.syncFieldClock)
@@ -791,9 +1036,15 @@ export function adoptReceiverExclusiveInTx(
         })
         .run()
     }
-    // Membership for message/block
-    if (c.entityType !== 'topic') {
-      const parentId = c.entityType === 'message' ? (c.payload.topicId as string) : (c.payload.messageId as string)
+    // Membership for message/block. Branch-owned messages bind their
+    // owning branch id; main messages bind topicId (never a fallback).
+    if (c.entityType === 'message' || c.entityType === 'message_block') {
+      const parentId =
+        c.entityType === 'message'
+          ? (c.payload.branchId as string | null | undefined) && (c.payload.branchId as string).length > 0
+            ? (c.payload.branchId as string)
+            : (c.payload.topicId as string)
+          : (c.payload.messageId as string)
       const childType = c.entityType === 'message' ? 'message' : 'message_block'
       tx.insert(schema.syncMembershipClock)
         .values({
@@ -811,9 +1062,15 @@ export function adoptReceiverExclusiveInTx(
   // Determine parent sets for post-merge frame generation
   const exclusiveParentTopicIds = new Set<string>()
   const exclusiveParentMessageIds = new Set<string>()
+  const exclusiveParentBranchIds = new Set<string>()
   for (const c of candidates) {
-    if (c.entityType === 'message') exclusiveParentTopicIds.add(c.payload.topicId as string)
+    if (c.entityType === 'message') {
+      const ownerBranch = c.payload.branchId as string | null | undefined
+      if (typeof ownerBranch === 'string' && ownerBranch.length > 0) exclusiveParentBranchIds.add(ownerBranch)
+      else exclusiveParentTopicIds.add(c.payload.topicId as string)
+    }
     if (c.entityType === 'message_block') exclusiveParentMessageIds.add(c.payload.messageId as string)
+    if (c.entityType === 'topic_branch') exclusiveParentBranchIds.add(c.entityId)
   }
   // Also topics themselves are parents for their messages, but already in exclusiveParentTopicIds via messages.
   // For pure exclusive topics with no messages? They still need frame (empty). Add topic ids themselves.
@@ -837,13 +1094,23 @@ export function adoptReceiverExclusiveInTx(
     if (incomingMessageIds.has(mid) || incomingFrameByParent.has(`messageBlock:${mid}`)) sharedMessageIds.push(mid)
     else pureMessageIds.push(mid)
   }
+  const sharedBranchIds: string[] = []
+  const pureBranchIds: string[] = []
+  for (const bid of exclusiveParentBranchIds) {
+    if (incomingBranchIds.has(bid) || incomingFrameByParent.has(`branchSuffix:${bid}`)) sharedBranchIds.push(bid)
+    else pureBranchIds.push(bid)
+  }
 
   // Note: frames will be created post-merge via caller; we return sets for caller to mint after merge.
   // However we have already minted memberships; the post-merge step needs to know which parents to refresh.
   // Return all exclusive parents; caller will decide.
   return {
     adopted: candidates.length,
-    sharedParents: { topicIds: sharedTopicIds.sort(), messageIds: sharedMessageIds.sort() },
-    pureParents: { topicIds: pureTopicIds.sort(), messageIds: pureMessageIds.sort() }
+    sharedParents: {
+      topicIds: sharedTopicIds.sort(),
+      messageIds: sharedMessageIds.sort(),
+      branchIds: sharedBranchIds.sort()
+    },
+    pureParents: { topicIds: pureTopicIds.sort(), messageIds: pureMessageIds.sort(), branchIds: pureBranchIds.sort() }
   }
 }

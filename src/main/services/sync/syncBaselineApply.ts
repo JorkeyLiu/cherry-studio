@@ -63,6 +63,7 @@ import {
   validateTimestampStrict
 } from './syncFrameEvaluation'
 import { advanceFrameHighWater } from './syncFrameHighWater'
+import { isProvenBranchMessageRow } from './syncLocalInventoryBoundary'
 import { parseStrictCursor } from './SyncService'
 import {
   formatSyncTombstoneValue,
@@ -90,12 +91,20 @@ export interface LocalSyncBaselineApplyResult {
 type BaselineTx = BetterSQLite3Database<typeof schema>
 type EntityType = LocalSyncBaselineEntity['entityType']
 
-const ENTITY_PRIORITY: Record<EntityType, number> = { topic: 0, message: 1, message_block: 2 }
-const UNSUPPORTED_BLOCK_TYPES: ReadonlySet<string> = new Set(['tool', 'file', 'image', 'video', 'citation'])
+const ENTITY_PRIORITY: Record<EntityType, number> = {
+  topic: 0,
+  message: 1,
+  message_block: 2,
+  topic_branch: 3,
+  file_asset: 4
+}
+const UNSUPPORTED_BLOCK_TYPES: ReadonlySet<string> = new Set(['tool', 'citation'])
 const TOMBSTONE_PREFIX: Record<EntityType, string> = {
   topic: 'tombstone:topic:',
   message: 'tombstone:message:',
-  message_block: 'tombstone:message_block:'
+  message_block: 'tombstone:message_block:',
+  topic_branch: 'tombstone:topic_branch:',
+  file_asset: 'tombstone:file_asset:'
 }
 
 /**
@@ -106,6 +115,9 @@ const TOMBSTONE_PREFIX: Record<EntityType, string> = {
  *   optional means canonical null / no overflow entry (never a placeholder).
  * - message: 11 required (sortOrder excluded per SYNC-DATA-038), always materialized.
  * - block: 7 required (sortOrder excluded), always materialized.
+ * - branch: 7 required (id/topicId/parentBranchId/anchorMessageId/name/
+ *   createdAt/updatedAt; parentBranchId/name/createdAt/updatedAt nullable),
+ *   always materialized; topicId/parentBranchId/anchorMessageId immutable.
  * Required fields must not be removable from a recomputed-digest `complete`
  * candidate. Insert mapping never invents defaults for absent required fields.
  */
@@ -124,7 +136,25 @@ const BASELINE_MESSAGE_REQUIRED = [
   'createdAt',
   'updatedAt'
 ] as const
-const BASELINE_BLOCK_REQUIRED = ['id', 'messageId', 'type', 'content', 'status', 'createdAt', 'updatedAt'] as const
+const BASELINE_BLOCK_REQUIRED = [
+  'id',
+  'messageId',
+  'type',
+  'content',
+  'status',
+  'createdAt',
+  'updatedAt',
+  'assetIds'
+] as const
+const BASELINE_BRANCH_REQUIRED = [
+  'id',
+  'topicId',
+  'parentBranchId',
+  'anchorMessageId',
+  'name',
+  'createdAt',
+  'updatedAt'
+] as const
 
 function fail(message: string, cause?: unknown): never {
   throw new SyncBaselineApplyError(message, cause === undefined ? undefined : { cause })
@@ -241,7 +271,7 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
     return
   }
   if (entityType === 'message') {
-    const required = new Set<string>(BASELINE_MESSAGE_REQUIRED)
+    const required = new Set<string>([...BASELINE_MESSAGE_REQUIRED, 'branchId'])
     if (keys.length !== required.size) {
       fail(`baseline apply message field count mismatch for ${entityId}: expected ${required.size}, got ${keys.length}`)
     }
@@ -255,8 +285,19 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
         fail(`baseline apply missing required message field for ${entityId}: ${k}`)
       }
     }
+    if (!Object.prototype.hasOwnProperty.call(payload, 'branchId')) {
+      fail(`baseline apply missing required message field for ${entityId}: branchId`)
+    }
     if (!isNonEmptyString(payload.id)) fail(`baseline apply invalid message id for ${entityId}`)
     if (!isNonEmptyString(payload.topicId)) fail(`baseline apply invalid message topicId for ${entityId}`)
+    if (payload.branchId !== null) {
+      if (!isNonEmptyString(payload.branchId)) fail(`baseline apply invalid message branchId for ${entityId}`)
+      try {
+        requireOrdinaryId(payload.branchId, `message/${entityId} branchId`)
+      } catch (e) {
+        throw e
+      }
+    }
     for (const k of [
       'role',
       'content',
@@ -273,6 +314,68 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
     if (Object.prototype.hasOwnProperty.call(payload, 'sortOrder')) {
       fail(`baseline apply unexpected message sortOrder for ${entityId}`)
     }
+    return
+  }
+  if (entityType === 'topic_branch') {
+    const required = new Set<string>(BASELINE_BRANCH_REQUIRED)
+    if (keys.length !== required.size) {
+      fail(`baseline apply branch field count mismatch for ${entityId}: expected ${required.size}, got ${keys.length}`)
+    }
+    for (const k of keys) {
+      if (!required.has(k)) fail(`baseline apply unexpected branch field for ${entityId}: ${k}`)
+      if (payload[k] === undefined) fail(`baseline apply undefined branch field for ${entityId}: ${k}`)
+    }
+    for (const k of BASELINE_BRANCH_REQUIRED) {
+      if (!Object.prototype.hasOwnProperty.call(payload, k)) {
+        fail(`baseline apply missing required branch field for ${entityId}: ${k}`)
+      }
+    }
+    if (!isNonEmptyString(payload.id)) fail(`baseline apply invalid branch id for ${entityId}`)
+    if (!isNonEmptyString(payload.topicId)) fail(`baseline apply invalid branch topicId for ${entityId}`)
+    if (!isNonEmptyString(payload.anchorMessageId)) fail(`baseline apply invalid branch anchor for ${entityId}`)
+    if (payload.parentBranchId !== null && !isNonEmptyString(payload.parentBranchId)) {
+      fail(`baseline apply invalid branch parentBranchId for ${entityId}`)
+    }
+    for (const k of ['name', 'createdAt', 'updatedAt'] as const) {
+      if (!isStringOrNull(payload[k])) fail(`baseline apply invalid branch ${k} for ${entityId}`)
+    }
+    return
+  }
+  if (entityType === 'file_asset') {
+    const requiredFA = new Set<string>([
+      'id',
+      'sha256',
+      'byteLength',
+      'extension',
+      'mimeType',
+      'originalName',
+      'createdAt'
+    ])
+    if (keys.length !== requiredFA.size) {
+      fail(
+        `baseline apply file_asset field count mismatch for ${entityId}: expected ${requiredFA.size}, got ${keys.length}`
+      )
+    }
+    for (const k of keys) {
+      if (!requiredFA.has(k)) fail(`baseline apply unexpected file_asset field for ${entityId}: ${k}`)
+      if (payload[k] === undefined) fail(`baseline apply undefined file_asset field for ${entityId}: ${k}`)
+    }
+    for (const k of requiredFA) {
+      if (!Object.prototype.hasOwnProperty.call(payload, k))
+        fail(`baseline apply missing required file_asset field for ${entityId}: ${k}`)
+    }
+    if (!isNonEmptyString(payload.id)) fail(`baseline apply invalid file_asset id for ${entityId}`)
+    if (typeof payload.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(payload.sha256))
+      fail(`baseline apply invalid file_asset sha256 for ${entityId}`)
+    if (typeof payload.byteLength !== 'number' || !Number.isSafeInteger(payload.byteLength) || payload.byteLength < 0)
+      fail(`baseline apply invalid file_asset byteLength for ${entityId}`)
+    if (typeof payload.extension !== 'string' || !/^\.[a-z0-9]+$/.test(payload.extension))
+      fail(`baseline apply invalid file_asset extension for ${entityId}`)
+    if (typeof payload.mimeType !== 'string' || payload.mimeType.length < 3)
+      fail(`baseline apply invalid file_asset mimeType for ${entityId}`)
+    if (!isNonEmptyString(payload.originalName)) fail(`baseline apply invalid file_asset originalName for ${entityId}`)
+    if (!isNonEmptyString(payload.createdAt) || !Number.isFinite(Date.parse(payload.createdAt)))
+      fail(`baseline apply invalid file_asset createdAt for ${entityId}`)
     return
   }
   const required = new Set<string>(BASELINE_BLOCK_REQUIRED)
@@ -293,6 +396,19 @@ function validateBaselineFullPayload(entityType: EntityType, entityId: string, p
   if (!isNonEmptyString(payload.messageId)) fail(`baseline apply invalid block messageId for ${entityId}`)
   for (const k of ['type', 'content', 'status', 'createdAt', 'updatedAt'] as const) {
     if (!isStringOrNull(payload[k])) fail(`baseline apply invalid block ${k} for ${entityId}`)
+  }
+  if (!Array.isArray(payload.assetIds)) fail(`baseline apply invalid block assetIds for ${entityId}`)
+  for (const v of payload.assetIds as unknown[]) {
+    if (typeof v !== 'string' || v.length === 0) fail(`baseline apply invalid block assetIds entry for ${entityId}`)
+  }
+  const t = typeof payload.type === 'string' ? payload.type.toLowerCase() : ''
+  const isMedia = t === 'file' || t === 'image' || t === 'video'
+  if (isMedia) {
+    if ((payload.assetIds as unknown[]).length === 0)
+      fail(`baseline apply media block must have assetIds for ${entityId}`)
+  } else {
+    if ((payload.assetIds as unknown[]).length !== 0)
+      fail(`baseline apply non-media block must have empty assetIds for ${entityId}`)
   }
   if (Object.prototype.hasOwnProperty.call(payload, 'sortOrder')) {
     fail(`baseline apply unexpected block sortOrder for ${entityId}`)
@@ -605,7 +721,20 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       const allow = BASELINE_FIELD_CLOCK_ALLOW[e.entityType]
       const present = new Set<string>(Object.keys(e.payload).filter((k) => allow.has(k)))
       const seen = new Set<string>(e.fieldClocks.map((fc) => fc.field))
-      for (const k of present) if (!seen.has(k)) computedUnversionedField++
+      for (const k of present) {
+        if (!seen.has(k)) {
+          if (
+            e.entityType === 'message_block' &&
+            k === 'assetIds' &&
+            Array.isArray(e.payload[k]) &&
+            (e.payload[k] as unknown[]).length === 0
+          ) {
+            const t = typeof e.payload.type === 'string' ? e.payload.type.toLowerCase() : ''
+            if (t !== 'file' && t !== 'image' && t !== 'video') continue
+          }
+          computedUnversionedField++
+        }
+      }
       // extra clocks for absent fields already validated earlier but also count as mismatch? Actually unversionedFieldCount counts missing, not extra; but if extra exists, it would be validated as error earlier. So just missing.
     }
     if ((manifest.unversionedFieldCount as unknown as number) !== computedUnversionedField)
@@ -632,11 +761,17 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   const entityKeys = new Set<string>()
   const topicIds = new Set<string>()
   const messageIds = new Set<string>()
+  const branchIds = new Set<string>()
   let lastId = ''
   let lastType: EntityType | null = null
   for (const entity of candidate.entities) {
     if (!entity || typeof entity !== 'object') fail('baseline apply malformed entity')
-    if (entity.entityType !== 'topic' && entity.entityType !== 'message' && entity.entityType !== 'message_block') {
+    if (
+      entity.entityType !== 'topic' &&
+      entity.entityType !== 'message' &&
+      entity.entityType !== 'message_block' &&
+      entity.entityType !== 'topic_branch'
+    ) {
       fail(`baseline apply unknown entityType ${String((entity as { entityType?: unknown }).entityType)}`)
     }
     if (!isValidOrdinaryId(entity.entityId)) fail('baseline apply malformed entityId')
@@ -660,6 +795,7 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     lastId = entity.entityId
     if (entity.entityType === 'topic') topicIds.add(entity.entityId)
     if (entity.entityType === 'message') messageIds.add(entity.entityId)
+    if (entity.entityType === 'topic_branch') branchIds.add(entity.entityId)
 
     if (!entity.payload || typeof entity.payload !== 'object' || Array.isArray(entity.payload)) {
       fail(`baseline apply malformed payload for ${entity.entityType}/${entity.entityId}`)
@@ -671,7 +807,16 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     validateBaselineFullPayload(entity.entityType, entity.entityId, payload)
     if (entity.entityType === 'message') {
       requireOrdinaryId(payload.topicId, `message/${entity.entityId} topicId`)
+      const ownerBranch = (payload.branchId as string | null | undefined) ?? null
+      if (ownerBranch !== null) requireOrdinaryId(ownerBranch, `message/${entity.entityId} branchId`)
       if (!isStableMessageStatus(payload.status)) fail(`baseline apply transient message for ${entity.entityId}`)
+    }
+    if (entity.entityType === 'topic_branch') {
+      requireOrdinaryId(payload.topicId, `branch/${entity.entityId} topicId`)
+      requireOrdinaryId(payload.anchorMessageId, `branch/${entity.entityId} anchorMessageId`)
+      const parentBranch = (payload.parentBranchId as string | null | undefined) ?? null
+      if (parentBranch !== null) requireOrdinaryId(parentBranch, `branch/${entity.entityId} parentBranchId`)
+      if (parentBranch === entity.entityId) fail(`baseline apply branch self-parent for ${entity.entityId}`)
     }
     if (entity.entityType === 'message_block') {
       requireOrdinaryId(payload.messageId, `block/${entity.entityId} messageId`)
@@ -723,7 +868,10 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     }
     const presentClocked = new Set<string>()
     for (const k of Object.keys(payload)) {
-      if (allow.has(k)) presentClocked.add(k)
+      if (allow.has(k)) {
+        if (k === 'assetIds') continue
+        presentClocked.add(k)
+      }
     }
     for (const k of presentClocked) {
       if (!fieldSeen.has(k)) {
@@ -731,14 +879,15 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       }
     }
     for (const f of fieldSeen) {
+      if (f === 'assetIds') continue
       if (!presentClocked.has(f)) {
         fail(`baseline apply field clock without payload field for ${entity.entityId}/${f}`)
       }
     }
     // Parent-membership clock validation.
-    if (entity.entityType === 'topic') {
+    if (entity.entityType === 'topic' || entity.entityType === 'topic_branch') {
       if (Object.prototype.hasOwnProperty.call(entity as unknown as Record<string, unknown>, 'parentMembershipClock')) {
-        fail(`baseline apply unexpected topic membership for ${entity.entityId}`)
+        fail(`baseline apply unexpected parent membership for ${entity.entityId}`)
       }
     } else {
       if (
@@ -762,9 +911,14 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       if (typeof pmObj.parentId !== 'string' || !isValidOrdinaryId(pmObj.parentId))
         fail(`baseline apply malformed parentId for ${entity.entityId}`)
       requireOrdinaryId(pmObj.parentId, `${entity.entityType}/${entity.entityId} parentId`)
-      // Also ensure payload parent matches membership parent
+      // Also ensure payload parent matches membership parent. Branch-owned
+      // messages bind their branch id; main messages bind topicId.
       const payloadParent =
-        entity.entityType === 'message' ? (payload.topicId as string) : (payload.messageId as string)
+        entity.entityType === 'message'
+          ? ((payload.branchId as string | null | undefined) ?? null) !== null
+            ? (payload.branchId as string)
+            : (payload.topicId as string)
+          : (payload.messageId as string)
       if (pmObj.parentId !== payloadParent)
         fail(
           `baseline apply parentId mismatch for ${entity.entityId}: membership ${pmObj.parentId} vs payload ${payloadParent}`
@@ -777,6 +931,22 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     if (entity.entityType === 'message') {
       const topicId = entity.payload.topicId as string
       if (!topicIds.has(topicId)) fail(`baseline apply orphan message ${entity.entityId} missing topic ${topicId}`)
+      const ownerBranch = (entity.payload.branchId as string | null | undefined) ?? null
+      if (ownerBranch !== null && !branchIds.has(ownerBranch)) {
+        fail(`baseline apply orphan message ${entity.entityId} missing branch ${ownerBranch}`)
+      }
+    }
+    if (entity.entityType === 'topic_branch') {
+      const topicId = entity.payload.topicId as string
+      if (!topicIds.has(topicId)) fail(`baseline apply orphan branch ${entity.entityId} missing topic ${topicId}`)
+      const parentBranch = (entity.payload.parentBranchId as string | null | undefined) ?? null
+      if (parentBranch !== null && !branchIds.has(parentBranch)) {
+        fail(`baseline apply orphan branch ${entity.entityId} missing parent ${parentBranch}`)
+      }
+      const anchorId = entity.payload.anchorMessageId as string
+      if (!messageIds.has(anchorId)) {
+        fail(`baseline apply orphan branch ${entity.entityId} missing anchor ${anchorId}`)
+      }
     }
     if (entity.entityType === 'message_block') {
       const messageId = entity.payload.messageId as string
@@ -792,7 +962,12 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
   let lastTombType: EntityType | null = null
   for (const tomb of candidate.tombstones) {
     if (!tomb || typeof tomb !== 'object') fail('baseline apply malformed tombstone')
-    if (tomb.entityType !== 'topic' && tomb.entityType !== 'message' && tomb.entityType !== 'message_block') {
+    if (
+      tomb.entityType !== 'topic' &&
+      tomb.entityType !== 'message' &&
+      tomb.entityType !== 'message_block' &&
+      tomb.entityType !== 'topic_branch'
+    ) {
       fail('baseline apply unknown tombstone entityType')
     }
     requireOrdinaryId(tomb.entityId, `tombstone/${tomb.entityType}`)
@@ -833,9 +1008,9 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
     const frames = candidate.orderFrames
     if (!Array.isArray(frames)) fail('baseline apply malformed orderFrames')
     const seenKeys = new Set<string>()
-    let lastKind: 'topicMessage' | 'messageBlock' | null = null
+    let lastKind: 'topicMessage' | 'messageBlock' | 'branchSuffix' | null = null
     let lastParentId = ''
-    const kindRank = (k: string): number => (k === 'topicMessage' ? 0 : 1)
+    const kindRank = (k: string): number => (k === 'topicMessage' ? 0 : k === 'messageBlock' ? 1 : 2)
     const frameByKey = new Map<string, (typeof frames)[number]>()
     for (let idx = 0; idx < frames.length; idx++) {
       const f = frames[idx] as unknown as Record<string, unknown>
@@ -843,7 +1018,7 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       if (f.frameVersion !== LOCAL_SYNC_BASELINE_ORDER_FRAME_VERSION) {
         fail(`baseline apply frameVersion mismatch at index ${idx}`)
       }
-      if (f.kind !== 'topicMessage' && f.kind !== 'messageBlock') {
+      if (f.kind !== 'topicMessage' && f.kind !== 'messageBlock' && f.kind !== 'branchSuffix') {
         fail(`baseline apply frame kind mismatch at index ${idx}`)
       }
       requireOrdinaryId(f.parentId, `frame/${String(f.parentId)} parentId`)
@@ -908,12 +1083,21 @@ function validatePureCandidate(candidate: LocalSyncBaselineCandidate): void {
       const k = `messageBlock:${mid}`
       if (!frameByKey.has(k)) fail(`baseline apply missing messageBlock frame for message "${mid}"`)
     }
+    for (const bid of branchIds) {
+      if (suppressedForFrame.has(`topic_branch:${bid}`)) continue
+      const k = `branchSuffix:${bid}`
+      if (!frameByKey.has(k)) fail(`baseline apply missing branchSuffix frame for branch "${bid}"`)
+    }
     for (const [, f] of frameByKey) {
       const kind = (f as unknown as { kind: string }).kind
       const pid = (f as unknown as { parentId: string }).parentId
       if (kind === 'topicMessage') {
         if (!topicIds.has(pid)) fail(`baseline apply frame parent topic unknown/tombstoned "${pid}"`)
         if (suppressedForFrame.has(`topic:${pid}`)) fail(`baseline apply frame parent topic tombstoned "${pid}"`)
+      } else if (kind === 'branchSuffix') {
+        if (!branchIds.has(pid)) fail(`baseline apply frame parent branch unknown/tombstoned "${pid}"`)
+        if (suppressedForFrame.has(`topic_branch:${pid}`))
+          fail(`baseline apply frame parent branch tombstoned "${pid}"`)
       } else {
         if (!messageIds.has(pid)) fail(`baseline apply frame parent message unknown/tombstoned "${pid}"`)
         if (suppressedForFrame.has(`message:${pid}`)) fail(`baseline apply frame parent message tombstoned "${pid}"`)
@@ -1073,6 +1257,9 @@ function loadLocalClocks(tx: BaselineTx): LocalClocks {
     if (row.key.startsWith('tombstone:topic:')) {
       entityType = 'topic'
       entityId = row.key.slice('tombstone:topic:'.length)
+    } else if (row.key.startsWith('tombstone:topic_branch:')) {
+      entityType = 'topic_branch'
+      entityId = row.key.slice('tombstone:topic_branch:'.length)
     } else if (row.key.startsWith('tombstone:message_block:')) {
       entityType = 'message_block'
       entityId = row.key.slice('tombstone:message_block:'.length)
@@ -1318,7 +1505,8 @@ function requireVersionedLiveForTombstone(
   tx: BaselineTx,
   entityType: EntityType,
   entityId: string,
-  entityClockByKey: Map<string, { timestamp: number; operationId: string }>
+  entityClockByKey: Map<string, { timestamp: number; operationId: string }>,
+  opts?: { branchDomain?: boolean }
 ): void {
   // F2: a live local row without a trustworthy entity clock must never be
   // deleted by an incoming tombstone, regardless of tombstone strength.
@@ -1328,6 +1516,13 @@ function requireVersionedLiveForTombstone(
     liveExists = !!tx.select().from(schema.topics).where(eq(schema.topics.id, entityId)).get()
   } else if (entityType === 'message') {
     liveExists = !!tx.select().from(schema.messages).where(eq(schema.messages.id, entityId)).get()
+  } else if (entityType === 'topic_branch') {
+    try {
+      liveExists = !!tx.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, entityId)).get()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) liveExists = false
+      else throw e
+    }
   } else {
     liveExists = !!tx.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entityId)).get()
   }
@@ -1338,11 +1533,17 @@ function requireVersionedLiveForTombstone(
   // unversioned descendants. Fail closed before any write.
   if (entityType === 'topic' && liveExists) {
     const childMessages = tx
-      .select({ id: schema.messages.id })
+      .select({ id: schema.messages.id, branchId: schema.messages.branchId })
       .from(schema.messages)
       .where(eq(schema.messages.topicId, entityId))
       .all()
     for (const m of childMessages) {
+      // v1 inventory: branch-owned suffix rows are local-only and carry no
+      // sync clocks. A winning topic delete still removes them via the
+      // existing FK cascade; they must not fail the version check. v3
+      // (branchDomain): branch rows are versioned inventory and collide
+      // like any other unversioned descendant.
+      if (!opts?.branchDomain && isProvenBranchMessageRow(m)) continue
       if (!entityClockByKey.get(`message:${m.id}`)) {
         fail(`baseline apply unversioned_local_collision for cascade message/${m.id}`)
       }
@@ -1357,6 +1558,26 @@ function requireVersionedLiveForTombstone(
         }
       }
     }
+    if (opts?.branchDomain) {
+      // v3 only: branch nodes of the topic are cascade-deleted with the
+      // topic; unversioned local branch rows collide fail-closed.
+      let childBranches: Array<{ id: string }> = []
+      try {
+        childBranches = tx
+          .select({ id: schema.topicBranches.id })
+          .from(schema.topicBranches)
+          .where(eq(schema.topicBranches.topicId, entityId))
+          .all()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) childBranches = []
+        else throw e
+      }
+      for (const b of childBranches) {
+        if (!entityClockByKey.get(`topic_branch:${b.id}`)) {
+          fail(`baseline apply unversioned_local_collision for cascade topic_branch/${b.id}`)
+        }
+      }
+    }
   }
   if (entityType === 'message' && liveExists) {
     const childBlocks = tx
@@ -1367,6 +1588,58 @@ function requireVersionedLiveForTombstone(
     for (const b of childBlocks) {
       if (!entityClockByKey.get(`message_block:${b.id}`)) {
         fail(`baseline apply unversioned_local_collision for cascade message_block/${b.id}`)
+      }
+    }
+  }
+  if (entityType === 'topic_branch' && liveExists && opts?.branchDomain) {
+    // v3 only: a winning subtree delete removes descendant branch rows plus
+    // owned messages/blocks; unversioned local descendants collide
+    // fail-closed. v1 inputs never carry branch tombstones (validated), so
+    // this gate only runs for the branch domain.
+    const seen = new Set<string>([entityId])
+    const queue: string[] = [entityId]
+    while (queue.length > 0) {
+      const cur = queue.pop()!
+      let children: Array<{ id: string }> = []
+      try {
+        children = tx
+          .select({ id: schema.topicBranches.id })
+          .from(schema.topicBranches)
+          .where(eq(schema.topicBranches.parentBranchId, cur))
+          .all()
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) break
+        throw e
+      }
+      for (const c of children) {
+        if (seen.has(c.id)) continue
+        seen.add(c.id)
+        queue.push(c.id)
+      }
+    }
+    for (const bid of seen) {
+      if (bid !== entityId && !entityClockByKey.get(`topic_branch:${bid}`)) {
+        fail(`baseline apply unversioned_local_collision for cascade topic_branch/${bid}`)
+      }
+      const owned = tx
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(eq(schema.messages.branchId, bid))
+        .all()
+      for (const m of owned) {
+        if (!entityClockByKey.get(`message:${m.id}`)) {
+          fail(`baseline apply unversioned_local_collision for cascade message/${m.id}`)
+        }
+        const childBlocks = tx
+          .select({ id: schema.messageBlocks.id })
+          .from(schema.messageBlocks)
+          .where(eq(schema.messageBlocks.messageId, m.id))
+          .all()
+        for (const b of childBlocks) {
+          if (!entityClockByKey.get(`message_block:${b.id}`)) {
+            fail(`baseline apply unversioned_local_collision for cascade message_block/${b.id}`)
+          }
+        }
       }
     }
   }
@@ -1392,6 +1665,301 @@ function persistTombstone(
     .run()
   local.set(key, { timestamp, operationId, value })
   return true
+}
+
+/**
+ * v3 branch-domain entity merge (single shared merge core, same transaction).
+ * Extracted as a function so the entity loop stays shallow: merges one
+ * topic_branch row with topic containment, parent/anchor presence plus owner
+ * equality, immutable identity, per-field LWW, clocks, and tombstones.
+ * Any `return` below means "done with this entity" (the caller's continue).
+ */
+function mergeBranchEntityInTx(
+  inner: BaselineTx,
+  entity: LocalSyncBaselineEntity,
+  key: string,
+  incomingEntityClock: { timestamp: number; operationId: string } | null,
+  incomingTombByKey: Map<string, LocalSyncBaselineTombstone>,
+  winningTombKeys: Set<string>,
+  tombstoneByKey: Map<string, { timestamp: number; operationId: string | null; value: string }>,
+  entityClockByKey: Map<string, { timestamp: number; operationId: string }>,
+  fieldClockByKey: Map<string, Map<string, { timestamp: number; operationId: string }>>,
+  incomingEntityByKey: Map<string, LocalSyncBaselineEntity>,
+  insertedTopicIds: Set<string>,
+  result: LocalSyncBaselineApplyResult
+): void {
+  if (!incomingEntityClock) fail(`baseline apply missing entity clock for ${entity.entityId}`)
+  const payload = entity.payload
+  for (const required of BASELINE_BRANCH_REQUIRED) {
+    if (!Object.prototype.hasOwnProperty.call(payload, required)) {
+      fail(`baseline apply missing branch field for ${entity.entityId}/${required}`)
+    }
+  }
+  const branchTopicId = payload.topicId as string
+  const branchParentId = (payload.parentBranchId as string | null) ?? null
+  const branchAnchorId = payload.anchorMessageId as string
+  if (!branchTopicId || !branchAnchorId) fail(`baseline apply malformed branch identity for ${entity.entityId}`)
+  if (branchParentId !== null && branchParentId.length === 0) {
+    fail(`baseline apply malformed branch parent for ${entity.entityId}`)
+  }
+  if (branchParentId === entity.entityId) fail(`baseline apply branch self-parent for ${entity.entityId}`)
+  // Topic delete-wins containment (mirror message path).
+  const branchTopicWinning = incomingTombByKey.get(`topic:${branchTopicId}`)
+  const branchTopicWinningActive =
+    branchTopicWinning && winningTombKeys.has(`topic:${branchTopicId}`) ? branchTopicWinning : undefined
+  const localBranchTopicTomb = tombstoneByKey.get(`topic:${branchTopicId}`)
+  const localBranchTopicRow = inner.select().from(schema.topics).where(eq(schema.topics.id, branchTopicId)).get()
+  const candidateBranchTopicInserted = insertedTopicIds.has(branchTopicId)
+  if (branchTopicWinningActive && !localBranchTopicRow && !candidateBranchTopicInserted) {
+    persistTombstone(
+      inner,
+      'topic_branch',
+      entity.entityId,
+      branchTopicWinningActive.timestamp,
+      branchTopicWinningActive.operationId,
+      tombstoneByKey
+    )
+    result.suppressed += 1
+    return
+  }
+  if (localBranchTopicTomb && !localBranchTopicRow && !candidateBranchTopicInserted) {
+    result.suppressed += 1
+    return
+  }
+  if (!localBranchTopicRow && !candidateBranchTopicInserted) {
+    fail(`baseline apply orphan branch ${entity.entityId} topic ${branchTopicId} missing`)
+  }
+  if ((branchTopicWinningActive && localBranchTopicRow) || (localBranchTopicTomb && localBranchTopicRow)) {
+    const tomb = (branchTopicWinningActive ?? localBranchTopicTomb)!
+    if (
+      isSuppressedByTombstone(
+        incomingEntityClock.timestamp,
+        incomingEntityClock.operationId,
+        tomb.timestamp,
+        tomb.operationId
+      )
+    ) {
+      persistTombstone(inner, 'topic_branch', entity.entityId, tomb.timestamp, tomb.operationId, tombstoneByKey)
+      result.suppressed += 1
+      return
+    }
+  }
+  // Parent branch presence (local or same-input; input order is
+  // lexical, so the parent may merge later — presence is proven via the
+  // incoming map, never fabricated).
+  if (branchParentId !== null) {
+    let parentRow: { topicId: string } | undefined
+    try {
+      const found = inner.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, branchParentId)).get()
+      parentRow = found ? { topicId: found.topicId } : undefined
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) parentRow = undefined
+      else throw e
+    }
+    const candidateParent = incomingEntityByKey.get(`topic_branch:${branchParentId}`)
+    if (!parentRow && !candidateParent) {
+      const parentTomb = tombstoneByKey.get(`topic_branch:${branchParentId}`)
+      const parentWinning = incomingTombByKey.get(`topic_branch:${branchParentId}`)
+      if (
+        (parentTomb || (parentWinning && winningTombKeys.has(`topic_branch:${branchParentId}`))) &&
+        !branchTopicWinningActive
+      ) {
+        fail(`baseline apply orphan branch ${entity.entityId} parent ${branchParentId} tombstoned`)
+      }
+      fail(`baseline apply orphan branch ${entity.entityId} parent ${branchParentId} missing`)
+    }
+    const parentTopic = parentRow?.topicId ?? (candidateParent?.payload.topicId as string | undefined) ?? null
+    if (parentTopic !== null && parentTopic !== branchTopicId) {
+      fail(`baseline apply branch parent topic mismatch for ${entity.entityId}`)
+    }
+  }
+  // Anchor presence with owner equality (local or same-input message).
+  // A tombstoned anchor keeps metadata (BRANCH-5) but owner mismatch
+  // fails closed.
+  {
+    const anchorLocal = inner.select().from(schema.messages).where(eq(schema.messages.id, branchAnchorId)).get()
+    const anchorIncoming = incomingEntityByKey.get(`message:${branchAnchorId}`)
+    const anchorTombLocal = tombstoneByKey.get(`message:${branchAnchorId}`)
+    const anchorTombIncoming = incomingTombByKey.get(`message:${branchAnchorId}`)
+    if (!anchorLocal && !anchorIncoming && !anchorTombLocal && !anchorTombIncoming) {
+      fail(`baseline apply orphan branch ${entity.entityId} anchor ${branchAnchorId} missing`)
+    }
+    const anchorTopic = anchorLocal?.topicId ?? (anchorIncoming?.payload.topicId as string | undefined) ?? null
+    if (anchorTopic !== null && anchorTopic !== branchTopicId) {
+      fail(`baseline apply branch anchor topic mismatch for ${entity.entityId}`)
+    }
+    const anchorOwner =
+      anchorLocal !== undefined && anchorLocal !== null
+        ? (anchorLocal.branchId ?? null)
+        : anchorIncoming
+          ? ((anchorIncoming.payload.branchId as string | null) ?? null)
+          : null
+    if (anchorOwner !== null || anchorLocal || anchorIncoming) {
+      if ((anchorOwner ?? null) !== branchParentId) {
+        fail(`baseline apply branch anchor not owned by parent route for ${entity.entityId}`)
+      }
+    }
+  }
+  // Exact local tombstone delete-wins for the same branch.
+  const localBranchExact = tombstoneByKey.get(key)
+  if (
+    localBranchExact &&
+    isSuppressedByTombstone(
+      incomingEntityClock.timestamp,
+      incomingEntityClock.operationId,
+      localBranchExact.timestamp,
+      localBranchExact.operationId
+    )
+  ) {
+    result.suppressed += 1
+    return
+  }
+  let existingBranchRow: typeof schema.topicBranches.$inferSelect | undefined
+  try {
+    existingBranchRow = inner
+      .select()
+      .from(schema.topicBranches)
+      .where(eq(schema.topicBranches.id, entity.entityId))
+      .get() as typeof schema.topicBranches.$inferSelect | undefined
+  } catch (e) {
+    if (e instanceof Error && /no such table/i.test(e.message)) existingBranchRow = undefined
+    else throw e
+  }
+  if (!existingBranchRow) {
+    try {
+      inner
+        .insert(schema.topicBranches)
+        .values({
+          id: entity.entityId,
+          topicId: branchTopicId,
+          parentBranchId: branchParentId,
+          anchorMessageId: branchAnchorId,
+          name: (payload.name as string | null) ?? null,
+          createdAt: (payload.createdAt as string | null) ?? null,
+          updatedAt: (payload.updatedAt as string | null) ?? null,
+          extra: null
+        })
+        .run()
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        fail(`baseline apply branch inventory missing for ${entity.entityId}`)
+      }
+      throw e
+    }
+    upsertEntityClock(
+      inner,
+      'topic_branch',
+      entity.entityId,
+      incomingEntityClock.timestamp,
+      incomingEntityClock.operationId,
+      entityClockByKey
+    )
+    for (const fc of entity.fieldClocks) {
+      upsertFieldClock(inner, 'topic_branch', entity.entityId, fc.field, fc.timestamp, fc.operationId, fieldClockByKey)
+    }
+    result.inserted += 1
+    return
+  }
+  if (
+    existingBranchRow.topicId !== branchTopicId ||
+    ((existingBranchRow.parentBranchId ?? null) as string | null) !== branchParentId ||
+    existingBranchRow.anchorMessageId !== branchAnchorId
+  ) {
+    fail(`baseline apply immutable branch identity mismatch for ${entity.entityId}`)
+  }
+  const incomingBranchFcs = new Map(entity.fieldClocks.map((fc) => [fc.field, fc]))
+  const localBranchFcs = fieldClockByKey.get(key) ?? new Map()
+  const branchWinners: Array<{ field: string; value: unknown }> = []
+  let branchSuppressed = false
+  let branchAllEqual = true
+  for (const field of Object.keys(payload)) {
+    if (field === 'id' || field === 'topicId' || field === 'parentBranchId' || field === 'anchorMessageId') continue
+    if (!BASELINE_FIELD_CLOCK_ALLOW.topic_branch.has(field)) continue
+    const incomingFc = incomingBranchFcs.get(field)
+    if (!incomingFc) fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+    const incomingVal: unknown = (payload[field] ?? null) as unknown
+    const localVal = ((existingBranchRow as unknown as Record<string, unknown>)[field] ?? null) as unknown
+    if (fieldValuesEqual(incomingVal, localVal)) {
+      const prior = localBranchFcs.get(field)
+      if (!prior) {
+        upsertFieldClock(
+          inner,
+          'topic_branch',
+          entity.entityId,
+          field,
+          incomingFc.timestamp,
+          incomingFc.operationId,
+          fieldClockByKey
+        )
+      } else if (compareLww(incomingFc.timestamp, incomingFc.operationId, prior.timestamp, prior.operationId) > 0) {
+        upsertFieldClock(
+          inner,
+          'topic_branch',
+          entity.entityId,
+          field,
+          incomingFc.timestamp,
+          incomingFc.operationId,
+          fieldClockByKey
+        )
+      }
+      return
+    }
+    branchAllEqual = false
+    const prior = localBranchFcs.get(field)
+    if (prior) {
+      if (compareLww(incomingFc.timestamp, incomingFc.operationId, prior.timestamp, prior.operationId) > 0) {
+        branchWinners.push({ field, value: incomingVal })
+      } else {
+        branchSuppressed = true
+      }
+    } else {
+      fail(`baseline apply unversioned_local_collision for topic_branch/${entity.entityId}/${field}`)
+    }
+  }
+  if (branchWinners.length === 0) {
+    if (!branchAllEqual && branchSuppressed) {
+      result.suppressed += 1
+    } else {
+      upsertEntityClock(
+        inner,
+        'topic_branch',
+        entity.entityId,
+        incomingEntityClock.timestamp,
+        incomingEntityClock.operationId,
+        entityClockByKey
+      )
+      result.unchanged += 1
+    }
+    if (branchAllEqual) {
+      upsertEntityClock(
+        inner,
+        'topic_branch',
+        entity.entityId,
+        incomingEntityClock.timestamp,
+        incomingEntityClock.operationId,
+        entityClockByKey
+      )
+    }
+    return
+  }
+  const setBr: Record<string, unknown> = {}
+  for (const w of branchWinners) setBr[w.field] = w.value
+  inner.update(schema.topicBranches).set(setBr).where(eq(schema.topicBranches.id, entity.entityId)).run()
+  for (const w of branchWinners) {
+    const fc = incomingBranchFcs.get(w.field)
+    if (fc)
+      upsertFieldClock(inner, 'topic_branch', entity.entityId, w.field, fc.timestamp, fc.operationId, fieldClockByKey)
+  }
+  upsertEntityClock(
+    inner,
+    'topic_branch',
+    entity.entityId,
+    incomingEntityClock.timestamp,
+    incomingEntityClock.operationId,
+    entityClockByKey
+  )
+  result.updated += 1
+  return
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,6 +2010,16 @@ export function mergeValidatedBaselineInTx(
 
   const result: LocalSyncBaselineApplyResult = { inserted: 0, updated: 0, deleted: 0, suppressed: 0, unchanged: 0 }
   const { entityClockByKey, fieldClockByKey, tombstoneByKey, membershipByKey } = loadLocalClocks(inner)
+  // Branch-domain gate (v3 full sync): the input carries branch inventory
+  // (branch entities, branch tombstones, or branchSuffix frames). v1/v2
+  // inputs keep the exact main-only boundary above and below; only the
+  // branch domain includes local branch rows in evaluation and merges
+  // branch entities/frames/tombstones in this same transaction (no bypass
+  // merge, no snapshot sync).
+  const branchDomain =
+    input.entities.some((e) => e.entityType === 'topic_branch') ||
+    input.tombstones.some((t) => t.entityType === 'topic_branch') ||
+    input.orderFrames.some((f) => (f as { kind?: string }).kind === 'branchSuffix')
   // Track affected parents for fixed-point materialization
   const affectedParents = new Set<string>()
   // Load local frames for LWW with centralized strict validation (A3)
@@ -1461,7 +2039,7 @@ export function mergeValidatedBaselineInTx(
     for (const r of rows) {
       const key = `${r.kind}:${r.parentId}`
       let validated: {
-        kind: 'topicMessage' | 'messageBlock'
+        kind: 'topicMessage' | 'messageBlock' | 'branchSuffix'
         parentId: string
         orderedChildIds: string[]
         timestamp: number
@@ -1619,7 +2197,7 @@ export function mergeValidatedBaselineInTx(
   const insertedTopicIds = new Set<string>()
   const insertedMessageIds = new Set<string>()
 
-  // Process live entities in candidate order (already topic→message→block).
+  // Process live entities in candidate order (already topic→message→block, file assets first via priority).
   for (const entity of input.entities) {
     const key = `${entity.entityType}:${entity.entityId}`
     const payload = entity.payload
@@ -1629,6 +2207,154 @@ export function mergeValidatedBaselineInTx(
     // Live suppressed by its own winning incoming tombstone.
     if (suppressedLiveKeys.has(key)) {
       result.suppressed += 1
+      continue
+    }
+
+    // V5 file_asset (immutable identity: id/sha256/byteLength/extension)
+    if (entity.entityType === 'file_asset') {
+      const localFa = (() => {
+        try {
+          return inner.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, entity.entityId)).get() as
+            | typeof schema.syncFileAsset.$inferSelect
+            | undefined
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) return undefined
+          throw e
+        }
+      })()
+      if (!localFa) {
+        // Insert new file asset
+        inner
+          .insert(schema.syncFileAsset)
+          .values({
+            id: entity.entityId,
+            sha256: payload.sha256 as string,
+            byteLength: payload.byteLength as number,
+            extension: payload.extension as string,
+            mimeType: payload.mimeType as string,
+            originalName: payload.originalName as string,
+            createdAt: payload.createdAt as string,
+            version: 1,
+            updatedAt: Date.now()
+          })
+          .run()
+        upsertEntityClock(
+          inner,
+          'file_asset',
+          entity.entityId,
+          incomingEntityClock.timestamp,
+          incomingEntityClock.operationId,
+          entityClockByKey
+        )
+        for (const fc of entity.fieldClocks) {
+          upsertFieldClock(
+            inner,
+            'file_asset',
+            entity.entityId,
+            fc.field,
+            fc.timestamp,
+            fc.operationId,
+            fieldClockByKey
+          )
+        }
+        result.inserted += 1
+        continue
+      }
+      // Immutable check
+      if (
+        localFa.sha256 !== (payload.sha256 as string) ||
+        localFa.byteLength !== (payload.byteLength as number) ||
+        localFa.extension !== (payload.extension as string)
+      ) {
+        fail(
+          `baseline apply file asset immutable mismatch for ${entity.entityId}: local ${localFa.sha256}/${localFa.byteLength}/${localFa.extension} vs incoming ${payload.sha256}/${payload.byteLength}/${payload.extension}`
+        )
+      }
+      // Field LWW for mutable file asset fields
+      const incomingFcs = new Map(entity.fieldClocks.map((fc) => [fc.field, fc]))
+      const localFcs = fieldClockByKey.get(key) ?? new Map<string, { timestamp: number; operationId: string }>()
+      const winners: Array<{ field: string; value: unknown }> = []
+      let allEqual = true
+      for (const field of Object.keys(payload)) {
+        if (field === 'id' || field === 'sha256' || field === 'byteLength' || field === 'extension') continue
+        if (!BASELINE_FIELD_CLOCK_ALLOW.file_asset.has(field)) continue
+        const incomingFc = incomingFcs.get(field)
+        if (!incomingFc) {
+          if (field === 'assetIds') continue
+          fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        }
+        const incomingVal = (payload[field] ?? null) as unknown
+        const localVal = (localFa as unknown as Record<string, unknown>)[field] ?? null
+        if (fieldValuesEqual(incomingVal, localVal)) {
+          const prior = localFcs.get(field)
+          if (!prior) {
+            upsertFieldClock(
+              inner,
+              'file_asset',
+              entity.entityId,
+              field,
+              incomingFc.timestamp,
+              incomingFc.operationId,
+              fieldClockByKey
+            )
+          } else if (compareLww(incomingFc.timestamp, incomingFc.operationId, prior.timestamp, prior.operationId) > 0) {
+            upsertFieldClock(
+              inner,
+              'file_asset',
+              entity.entityId,
+              field,
+              incomingFc.timestamp,
+              incomingFc.operationId,
+              fieldClockByKey
+            )
+          }
+          continue
+        }
+        allEqual = false
+        const prior = localFcs.get(field)
+        if (prior) {
+          if (compareLww(incomingFc.timestamp, incomingFc.operationId, prior.timestamp, prior.operationId) > 0) {
+            winners.push({ field, value: incomingVal })
+          }
+        } else {
+          fail(`baseline apply unversioned_local_collision for file_asset/${entity.entityId}/${field}`)
+        }
+      }
+      if (winners.length === 0) {
+        if (allEqual) {
+          upsertEntityClock(
+            inner,
+            'file_asset',
+            entity.entityId,
+            incomingEntityClock.timestamp,
+            incomingEntityClock.operationId,
+            entityClockByKey
+          )
+        }
+        result.unchanged += 1
+        continue
+      }
+      const setFA: Record<string, unknown> = {}
+      for (const w of winners) setFA[w.field] = w.value
+      inner
+        .update(schema.syncFileAsset)
+        .set(setFA as never)
+        .where(eq(schema.syncFileAsset.id, entity.entityId))
+        .run()
+      for (const w of winners) {
+        const fc = incomingFcs.get(w.field)
+        if (fc)
+          upsertFieldClock(inner, 'file_asset', entity.entityId, w.field, fc.timestamp, fc.operationId, fieldClockByKey)
+      }
+      upsertEntityClock(
+        inner,
+        'file_asset',
+        entity.entityId,
+        incomingEntityClock.timestamp,
+        incomingEntityClock.operationId,
+        entityClockByKey
+      )
+      result.updated += 1
       continue
     }
 
@@ -1702,6 +2428,98 @@ export function mergeValidatedBaselineInTx(
           )
           result.suppressed += 1
           continue
+        }
+      }
+      // Branch-owner gating (v3): a branch-owned message additionally obeys
+      // its owning branch row. The branch may arrive in the same input
+      // (candidate order is topic→message→block→branch), so presence is
+      // proven via the local row or the incoming entity map — never
+      // fabricated. Unknown branch with no tombstone fails closed (orphan);
+      // a winning branch tombstone suppresses delete-win closed.
+      {
+        const ownerBranchId = (payload.branchId as string | null) ?? null
+        if (ownerBranchId !== null) {
+          const branchWinningKey = `topic_branch:${ownerBranchId}`
+          const branchWinningTomb = incomingTombByKey.get(branchWinningKey)
+          const branchWinning =
+            branchWinningKey && winningTombKeys.has(branchWinningKey) ? branchWinningTomb : undefined
+          const localBranchTomb = tombstoneByKey.get(branchWinningKey)
+          let localBranchRow: { id: string } | undefined
+          try {
+            localBranchRow = inner
+              .select({ id: schema.topicBranches.id })
+              .from(schema.topicBranches)
+              .where(eq(schema.topicBranches.id, ownerBranchId))
+              .get() as { id: string } | undefined
+          } catch (e) {
+            if (e instanceof Error && /no such table/i.test(e.message)) localBranchRow = undefined
+            else throw e
+          }
+          const candidateBranchInserted = incomingEntityByKey.has(branchWinningKey)
+          const branchPresent = !!localBranchRow || candidateBranchInserted
+          if (branchWinning && !branchPresent) {
+            if (branchWinning) {
+              persistTombstone(
+                inner,
+                'message',
+                entity.entityId,
+                branchWinning.timestamp,
+                branchWinning.operationId,
+                tombstoneByKey
+              )
+            }
+            result.suppressed += 1
+            continue
+          }
+          if (localBranchTomb && !localBranchRow) {
+            result.suppressed += 1
+            continue
+          }
+          if (!branchPresent && !localBranchTomb && !branchWinning) {
+            fail(`baseline apply orphan message ${entity.entityId} branch ${ownerBranchId} missing`)
+          }
+          if (localBranchRow && localBranchTomb) {
+            if (
+              isSuppressedByTombstone(
+                incomingEntityClock.timestamp,
+                incomingEntityClock.operationId,
+                localBranchTomb.timestamp,
+                localBranchTomb.operationId
+              )
+            ) {
+              persistTombstone(
+                inner,
+                'message',
+                entity.entityId,
+                localBranchTomb.timestamp,
+                localBranchTomb.operationId,
+                tombstoneByKey
+              )
+              result.suppressed += 1
+              continue
+            }
+          }
+          if (branchWinning && branchPresent) {
+            if (
+              isSuppressedByTombstone(
+                incomingEntityClock.timestamp,
+                incomingEntityClock.operationId,
+                branchWinning.timestamp,
+                branchWinning.operationId
+              )
+            ) {
+              persistTombstone(
+                inner,
+                'message',
+                entity.entityId,
+                branchWinning.timestamp,
+                branchWinning.operationId,
+                tombstoneByKey
+              )
+              result.suppressed += 1
+              continue
+            }
+          }
         }
       }
       // Exact local tombstone delete-wins for the same message.
@@ -1815,7 +2633,9 @@ export function mergeValidatedBaselineInTx(
       }
       requireOrdinaryId(pm.parentId, `${entity.entityType}/${entity.entityId} parentId`)
       const payloadParentId =
-        entity.entityType === 'message' ? (payload.topicId as string) : (payload.messageId as string)
+        entity.entityType === 'message'
+          ? ((payload.branchId as string | null) ?? (payload.topicId as string))
+          : (payload.messageId as string)
       if (pm.parentId !== payloadParentId) {
         fail(
           `baseline apply parentId mismatch for ${entity.entityId}: membership ${pm.parentId} vs payload ${payloadParentId}`
@@ -1884,7 +2704,10 @@ export function mergeValidatedBaselineInTx(
         if (field === 'id') continue
         if (!BASELINE_FIELD_CLOCK_ALLOW.topic.has(field)) continue
         const incomingFc = incomingFcs.get(field)
-        if (!incomingFc) fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        if (!incomingFc) {
+          if (field === 'assetIds') continue
+          fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        }
         const incomingVal = (payload[field] ?? null) as unknown
         const localVal = topicLocalFieldValue(local, overflow, field)
         if (fieldValuesEqual(incomingVal, localVal)) {
@@ -1996,6 +2819,7 @@ export function mergeValidatedBaselineInTx(
 
     if (entity.entityType === 'message') {
       const topicId = payload.topicId as string
+      const branchId = (payload.branchId as string | null) ?? null
       const local = inner.select().from(schema.messages).where(eq(schema.messages.id, entity.entityId)).get()
       if (!local) {
         const parentRow = inner.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
@@ -2009,6 +2833,7 @@ export function mergeValidatedBaselineInTx(
           .values({
             id: entity.entityId,
             topicId,
+            branchId,
             role: (payload.role as string | null) ?? null,
             content: (payload.content as string | null) ?? null,
             status: (payload.status as string | null) ?? null,
@@ -2034,12 +2859,17 @@ export function mergeValidatedBaselineInTx(
           upsertFieldClock(inner, 'message', entity.entityId, fc.field, fc.timestamp, fc.operationId, fieldClockByKey)
         }
         insertedMessageIds.add(entity.entityId)
-        affectedParents.add(`topicMessage:${topicId}`)
+        affectedParents.add(branchId !== null ? `branchSuffix:${branchId}` : `topicMessage:${topicId}`)
         result.inserted += 1
         continue
       }
       if (local.topicId !== topicId) {
         fail(`baseline apply immutable message parent mismatch for ${entity.entityId}: ${local.topicId} vs ${topicId}`)
+      }
+      if ((local.branchId ?? null) !== branchId) {
+        fail(
+          `baseline apply immutable message owner mismatch for ${entity.entityId}: ${String(local.branchId ?? 'main')} vs ${String(branchId ?? 'main')}`
+        )
       }
       const incomingFcs = new Map(entity.fieldClocks.map((fc) => [fc.field, fc]))
       const localFcs = fieldClockByKey.get(key) ?? new Map()
@@ -2048,10 +2878,13 @@ export function mergeValidatedBaselineInTx(
       let hasSuppressedField = false
       let allEqual = true
       for (const field of Object.keys(payload)) {
-        if (field === 'id' || field === 'topicId') continue
+        if (field === 'id' || field === 'topicId' || field === 'branchId') continue
         if (!BASELINE_FIELD_CLOCK_ALLOW.message.has(field)) continue
         const incomingFc = incomingFcs.get(field)
-        if (!incomingFc) fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        if (!incomingFc) {
+          if (field === 'assetIds') continue
+          fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        }
         const incomingVal: unknown = (payload[field] ?? null) as unknown
         const localVal = messageLocalFieldValue(local, field)
         if (fieldValuesEqual(incomingVal, localVal)) {
@@ -2116,7 +2949,7 @@ export function mergeValidatedBaselineInTx(
           )
         }
         insertedMessageIds.add(entity.entityId)
-        affectedParents.add(`topicMessage:${topicId}`)
+        affectedParents.add(branchId !== null ? `branchSuffix:${branchId}` : `topicMessage:${topicId}`)
         continue
       }
       const setM: Record<string, unknown> = {}
@@ -2136,13 +2969,12 @@ export function mergeValidatedBaselineInTx(
         entityClockByKey
       )
       insertedMessageIds.add(entity.entityId)
-      affectedParents.add(`topicMessage:${topicId}`)
+      affectedParents.add(branchId !== null ? `branchSuffix:${branchId}` : `topicMessage:${topicId}`)
       result.updated += 1
       continue
     }
 
-    // message_block
-    {
+    if (entity.entityType === 'message_block') {
       const messageId = payload.messageId as string
       const local = inner.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, entity.entityId)).get()
       if (!local) {
@@ -2184,6 +3016,31 @@ export function mergeValidatedBaselineInTx(
             fieldClockByKey
           )
         }
+        // Rebuild file_references for this block
+        {
+          inner.delete(schema.fileReferences).where(eq(schema.fileReferences.blockId, entity.entityId)).run()
+          const assetIds = (payload.assetIds as string[] | undefined) ?? []
+          for (const aid of assetIds) {
+            const fa = incomingEntityByKey.get(`file_asset:${aid}`)
+            const ext = (fa?.payload.extension as string) ?? ''
+            const orig = (fa?.payload.originalName as string) ?? aid
+            const mime = (fa?.payload.mimeType as string) ?? null
+            inner
+              .insert(schema.fileReferences)
+              .values({
+                id: `${entity.entityId}:${aid}`,
+                blockId: entity.entityId,
+                fileId: aid,
+                fileName: orig,
+                filePath: `${aid}${ext}`,
+                fileType: mime,
+                count: 1,
+                extra: null
+              })
+              .onConflictDoNothing()
+              .run()
+          }
+        }
         result.inserted += 1
         affectedParents.add(`messageBlock:${messageId}`)
         continue
@@ -2203,9 +3060,54 @@ export function mergeValidatedBaselineInTx(
         if (field === 'id' || field === 'messageId') continue
         if (!BASELINE_FIELD_CLOCK_ALLOW.message_block.has(field)) continue
         const incomingFc = incomingFcs.get(field)
-        if (!incomingFc) fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        if (!incomingFc) {
+          if (field === 'assetIds') continue
+          fail(`baseline apply missing field clock for ${entity.entityId}/${field}`)
+        }
         const incomingVal: unknown = (payload[field] ?? null) as unknown
-        const localVal = blockLocalFieldValue(local, field)
+        let localVal: unknown
+        if (field === 'assetIds') {
+          const localRefs = inner
+            .select({ fileId: schema.fileReferences.fileId })
+            .from(schema.fileReferences)
+            .where(eq(schema.fileReferences.blockId, entity.entityId))
+            .all() as Array<{ fileId: string }>
+          const localIds = localRefs.map((r) => r.fileId).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+          localVal = localIds
+          // Normalize incoming as sorted unique for comparison (wire already sorted)
+          const incomingSorted = Array.isArray(incomingVal)
+            ? [...(incomingVal as string[])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+            : incomingVal
+          if (JSON.stringify(incomingSorted) === JSON.stringify(localVal)) {
+            const prior = localFcs.get(field)
+            if (!prior) {
+              upsertFieldClock(
+                inner,
+                'message_block',
+                entity.entityId,
+                field,
+                incomingFc.timestamp,
+                incomingFc.operationId,
+                fieldClockByKey
+              )
+            } else if (
+              compareLww(incomingFc.timestamp, incomingFc.operationId, prior.timestamp, prior.operationId) > 0
+            ) {
+              upsertFieldClock(
+                inner,
+                'message_block',
+                entity.entityId,
+                field,
+                incomingFc.timestamp,
+                incomingFc.operationId,
+                fieldClockByKey
+              )
+            }
+            continue
+          }
+        } else {
+          localVal = blockLocalFieldValue(local, field)
+        }
         if (fieldValuesEqual(incomingVal, localVal)) {
           const prior = localFcs.get(field)
           if (!prior) {
@@ -2272,7 +3174,15 @@ export function mergeValidatedBaselineInTx(
       }
       const setB: Record<string, unknown> = {}
       for (const w of winners) setB[w.field] = w.value
-      inner.update(schema.messageBlocks).set(setB).where(eq(schema.messageBlocks.id, entity.entityId)).run()
+      // assetIds is not a column; only update real columns
+      const setBForDb: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(setB)) {
+        if (k === 'assetIds') continue
+        setBForDb[k] = v
+      }
+      if (Object.keys(setBForDb).length > 0) {
+        inner.update(schema.messageBlocks).set(setBForDb).where(eq(schema.messageBlocks.id, entity.entityId)).run()
+      }
       for (const w of winners) {
         const fc = incomingFcs.get(w.field)
         if (fc)
@@ -2286,6 +3196,31 @@ export function mergeValidatedBaselineInTx(
             fieldClockByKey
           )
       }
+      // Rebuild file_references if assetIds won
+      if (winners.some((w) => w.field === 'assetIds')) {
+        inner.delete(schema.fileReferences).where(eq(schema.fileReferences.blockId, entity.entityId)).run()
+        const assetIds = (setB['assetIds'] as string[] | undefined) ?? []
+        for (const aid of assetIds) {
+          const fa = incomingEntityByKey.get(`file_asset:${aid}`)
+          const ext = (fa?.payload.extension as string) ?? ''
+          const orig = (fa?.payload.originalName as string) ?? aid
+          const mime = (fa?.payload.mimeType as string) ?? null
+          inner
+            .insert(schema.fileReferences)
+            .values({
+              id: `${entity.entityId}:${aid}`,
+              blockId: entity.entityId,
+              fileId: aid,
+              fileName: orig,
+              filePath: `${aid}${ext}`,
+              fileType: mime,
+              count: 1,
+              extra: null
+            })
+            .onConflictDoNothing()
+            .run()
+        }
+      }
       upsertEntityClock(
         inner,
         'message_block',
@@ -2298,6 +3233,25 @@ export function mergeValidatedBaselineInTx(
       result.updated += 1
       continue
     }
+
+    // topic_branch (v3 branch domain only; v1/v2 inputs never carry it).
+    if (entity.entityType === 'topic_branch') {
+      mergeBranchEntityInTx(
+        inner,
+        entity,
+        key,
+        incomingEntityClock,
+        incomingTombByKey,
+        winningTombKeys,
+        tombstoneByKey,
+        entityClockByKey,
+        fieldClockByKey,
+        incomingEntityByKey,
+        insertedTopicIds,
+        result
+      )
+      continue
+    }
   }
 
   // Tombstone application comes before frame merge so that liveness is final.
@@ -2308,7 +3262,7 @@ export function mergeValidatedBaselineInTx(
   const tombstoneAffectedParents = new Set<string>()
   for (const tomb of input.tombstones) {
     const key = `${tomb.entityType}:${tomb.entityId}`
-    requireVersionedLiveForTombstone(inner, tomb.entityType, tomb.entityId, entityClockByKey)
+    requireVersionedLiveForTombstone(inner, tomb.entityType, tomb.entityId, entityClockByKey, { branchDomain })
     if (!winningTombKeys.has(key)) {
       result.suppressed += 1
       continue
@@ -2321,6 +3275,22 @@ export function mergeValidatedBaselineInTx(
         .where(eq(schema.messages.topicId, tomb.entityId))
         .all()
         .map((r) => r.id)
+      // v3 branch domain: capture branch nodes before the FK cascade so
+      // their tombstones survive and their suffix frames are removed.
+      let childBranchIds: string[] = []
+      if (branchDomain) {
+        try {
+          childBranchIds = inner
+            .select({ id: schema.topicBranches.id })
+            .from(schema.topicBranches)
+            .where(eq(schema.topicBranches.topicId, tomb.entityId))
+            .all()
+            .map((r) => r.id)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) childBranchIds = []
+          else throw e
+        }
+      }
       // Capture membership parent for each child to know descendant blocks? Use membership map
       const existing = inner.select().from(schema.topics).where(eq(schema.topics.id, tomb.entityId)).get()
       if (existing) {
@@ -2347,19 +3317,65 @@ export function mergeValidatedBaselineInTx(
         // Mark descendant block frames for removal; they will be cleaned after frame merge
         tombstoneAffectedParents.add(`messageBlock:${mid}`)
       }
+      if (branchDomain) {
+        for (const bid of childBranchIds) {
+          persistTombstone(inner, 'topic_branch', bid, tomb.timestamp, tomb.operationId, tombstoneByKey)
+          tombstoneAffectedParents.add(`branchSuffix:${bid}`)
+        }
+      }
       tombstoneAffectedParents.add(`topicMessage:${tomb.entityId}`)
       // Also mark topic's own frame for removal
       affectedParents.add(`topicMessage:${tomb.entityId}`)
       for (const mid of childIds) affectedParents.add(`messageBlock:${mid}`)
+      if (branchDomain) {
+        for (const bid of childBranchIds) affectedParents.add(`branchSuffix:${bid}`)
+      }
     } else if (tomb.entityType === 'message') {
       // Capture parent topic before delete for fixed-point
       const existing = inner.select().from(schema.messages).where(eq(schema.messages.id, tomb.entityId)).get()
-      const topicIdForCleanup = existing?.topicId ?? membershipByKey.get(`message:${tomb.entityId}`)?.parentId ?? null
+      const topicIdForCleanup = existing?.topicId ?? null
+      const membershipParentForCleanup = membershipByKey.get(`message:${tomb.entityId}`)?.parentId ?? null
+      // Owner frame for fixed-point: branch-owned messages re-evaluate
+      // their suffix frame, main messages the topic frame. The membership
+      // parent binds the owner (branch id vs topic id); without a row the
+      // parent kind is proven via the branch inventory/tombstone/input.
+      const rowOwnerBranch: string | null = existing?.branchId ?? null
+      let cleanupParentIsBranch = rowOwnerBranch !== null
+      let cleanupBranchId: string | null = rowOwnerBranch
+      if (!existing && membershipParentForCleanup !== null) {
+        let isBranch = false
+        try {
+          isBranch =
+            !!inner
+              .select({ id: schema.topicBranches.id })
+              .from(schema.topicBranches)
+              .where(eq(schema.topicBranches.id, membershipParentForCleanup))
+              .get() ||
+            tombstoneByKey.has(`topic_branch:${membershipParentForCleanup}`) ||
+            incomingEntityByKey.has(`topic_branch:${membershipParentForCleanup}`)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) {
+            isBranch =
+              tombstoneByKey.has(`topic_branch:${membershipParentForCleanup}`) ||
+              incomingEntityByKey.has(`topic_branch:${membershipParentForCleanup}`)
+          } else throw e
+        }
+        if (isBranch) {
+          cleanupParentIsBranch = true
+          cleanupBranchId = membershipParentForCleanup
+        }
+      }
+      const orderFrameForCleanup =
+        cleanupParentIsBranch && cleanupBranchId !== null
+          ? `branchSuffix:${cleanupBranchId}`
+          : (topicIdForCleanup ?? membershipParentForCleanup) !== null
+            ? `topicMessage:${(topicIdForCleanup ?? membershipParentForCleanup) as string}`
+            : null
       // Capture before delete for affectedParents
-      if (topicIdForCleanup) affectedParents.add(`topicMessage:${topicIdForCleanup}`)
+      if (orderFrameForCleanup) affectedParents.add(orderFrameForCleanup)
       affectedParents.add(`messageBlock:${tomb.entityId}`)
       tombstoneAffectedParents.add(`messageBlock:${tomb.entityId}`)
-      if (topicIdForCleanup) tombstoneAffectedParents.add(`topicMessage:${topicIdForCleanup}`)
+      if (orderFrameForCleanup) tombstoneAffectedParents.add(orderFrameForCleanup)
       if (existing) {
         inner.delete(schema.messages).where(eq(schema.messages.id, tomb.entityId)).run()
         if (topicIdForCleanup) deleteEmptySegmentsForTopic(inner, topicIdForCleanup)
@@ -2374,6 +3390,89 @@ export function mergeValidatedBaselineInTx(
         upsertEntityClock(
           inner,
           'message',
+          tomb.entityId,
+          tomb.entityClock.timestamp,
+          tomb.entityClock.operationId,
+          entityClockByKey
+        )
+      }
+    } else if (tomb.entityType === 'topic_branch') {
+      // v3 subtree delete replay: the selected branch, all descendant
+      // branch rows, and only owned messages/blocks. Ancestor prefixes and
+      // sibling subtrees survive. Deleted suffix frames are removed so no
+      // orphan winner survives; the whole subtree is tombstoned for
+      // delete-win closed replay.
+      let subtreeIds: string[] = [tomb.entityId]
+      try {
+        const seen = new Set<string>([tomb.entityId])
+        const queue: string[] = [tomb.entityId]
+        while (queue.length > 0) {
+          const cur = queue.pop()!
+          const children = inner
+            .select({ id: schema.topicBranches.id })
+            .from(schema.topicBranches)
+            .where(eq(schema.topicBranches.parentBranchId, cur))
+            .all()
+          for (const c of children) {
+            if (seen.has(c.id)) continue
+            seen.add(c.id)
+            queue.push(c.id)
+          }
+        }
+        subtreeIds = [...seen]
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) subtreeIds = [tomb.entityId]
+        else throw e
+      }
+      const ownedMessageIds: string[] = []
+      for (const bid of subtreeIds) {
+        try {
+          const rows = inner
+            .select({ id: schema.messages.id })
+            .from(schema.messages)
+            .where(eq(schema.messages.branchId, bid))
+            .all()
+          for (const r of rows) ownedMessageIds.push(r.id)
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) break
+          throw e
+        }
+      }
+      for (const bid of subtreeIds) {
+        affectedParents.add(`branchSuffix:${bid}`)
+        tombstoneAffectedParents.add(`branchSuffix:${bid}`)
+      }
+      for (const mid of ownedMessageIds) {
+        affectedParents.add(`messageBlock:${mid}`)
+        tombstoneAffectedParents.add(`messageBlock:${mid}`)
+      }
+      if (ownedMessageIds.length > 0) {
+        for (const mid of ownedMessageIds) {
+          inner.delete(schema.messages).where(eq(schema.messages.id, mid)).run()
+        }
+      }
+      try {
+        for (const bid of subtreeIds) {
+          inner.delete(schema.topicBranches).where(eq(schema.topicBranches.id, bid)).run()
+        }
+        result.deleted += 1
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) {
+          result.unchanged += 1
+        } else throw e
+      }
+      for (const bid of subtreeIds) {
+        persistTombstone(inner, 'topic_branch', bid, tomb.timestamp, tomb.operationId, tombstoneByKey)
+      }
+      for (const mid of ownedMessageIds) {
+        persistTombstone(inner, 'message', mid, tomb.timestamp, tomb.operationId, tombstoneByKey)
+      }
+      if (tomb.operationId !== null) {
+        upsertEntityClock(inner, 'topic_branch', tomb.entityId, tomb.timestamp, tomb.operationId, entityClockByKey)
+      } else if (tomb.entityClock) {
+        upsertEntityClock(
+          inner,
+          'topic_branch',
           tomb.entityId,
           tomb.entityClock.timestamp,
           tomb.entityClock.operationId,
@@ -2420,7 +3519,8 @@ export function mergeValidatedBaselineInTx(
   for (const frame of input.orderFrames) {
     const key = `${frame.kind}:${frame.parentId}`
     // Skip persisting frame for tombstoned (deleted) parents where tombstone actually wins over live
-    const parentEntityType = frame.kind === 'topicMessage' ? 'topic' : 'message'
+    const parentEntityType =
+      frame.kind === 'topicMessage' ? 'topic' : frame.kind === 'messageBlock' ? 'message' : 'topic_branch'
     const parentKey = `${parentEntityType}:${frame.parentId}`
     const parentLiveClock = entityClockByKey.get(parentKey)
     const parentTomb = tombstoneByKey.get(parentKey)
@@ -2437,7 +3537,16 @@ export function mergeValidatedBaselineInTx(
       let exists = false
       if (frame.kind === 'topicMessage')
         exists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, frame.parentId)).get()
-      else exists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, frame.parentId)).get()
+      else if (frame.kind === 'messageBlock')
+        exists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, frame.parentId)).get()
+      else {
+        try {
+          exists = !!inner.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, frame.parentId)).get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) exists = false
+          else throw e
+        }
+      }
       parentIsLive = exists
     }
     if (!parentIsLive) {
@@ -2527,17 +3636,22 @@ export function mergeValidatedBaselineInTx(
       // Equal clock: compare semantic effective sequences under merged live state
       // Build liveChildren for this parent strictly (fail if any live child missing membership)
       const buildLiveStrict = (
-        kind: 'topicMessage' | 'messageBlock',
+        kind: 'topicMessage' | 'messageBlock' | 'branchSuffix',
         parentId: string
       ): Map<string, { timestamp: number; operationId: string }> => {
         if (kind === 'topicMessage') {
           const rows = inner
-            .select({ id: schema.messages.id })
+            .select({ id: schema.messages.id, branchId: schema.messages.branchId })
             .from(schema.messages)
             .where(eq(schema.messages.topicId, parentId))
             .all()
           const map = new Map<string, { timestamp: number; operationId: string }>()
           for (const r of rows) {
+            // v1 inventory: branch-owned suffix rows carry no membership
+            // clock and never join the effective order. v3: owned rows
+            // never join the main frame either (suffix parent owns them),
+            // but membership-gated mismatch fails closed via lookup below.
+            if (isProvenBranchMessageRow(r)) continue
             const mem = membershipByKey.get(`message:${r.id}`)
             if (!mem || mem.parentId !== parentId)
               fail(`baseline apply missing valid membership for live message ${r.id} under ${parentId}`)
@@ -2546,7 +3660,30 @@ export function mergeValidatedBaselineInTx(
             map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
           }
           return map
+        } else if (kind === 'branchSuffix') {
+          const rows = inner
+            .select({ id: schema.messages.id, branchId: schema.messages.branchId })
+            .from(schema.messages)
+            .where(eq(schema.messages.branchId, parentId))
+            .all()
+          const map = new Map<string, { timestamp: number; operationId: string }>()
+          for (const r of rows) {
+            const mem = membershipByKey.get(`message:${r.id}`)
+            if (!mem || mem.parentId !== parentId)
+              fail(`baseline apply missing valid membership for live message ${r.id} under branch ${parentId}`)
+            const msgRow = inner.select().from(schema.messages).where(eq(schema.messages.id, r.id)).get()
+            if (!msgRow || !isStableMessageStatus(msgRow.status)) continue
+            map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+          }
+          return map
         } else {
+          // v1 inventory: blocks inherit their parent message's owner. A
+          // branch-owned parent's blocks are local-only. v3: blocks of
+          // branch-owned messages are inventory members.
+          const parentMsg = inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+          if (parentMsg && isProvenBranchMessageRow(parentMsg) && !branchDomain) {
+            return new Map<string, { timestamp: number; operationId: string }>()
+          }
           const rows = inner
             .select({ id: schema.messageBlocks.id })
             .from(schema.messageBlocks)
@@ -2574,12 +3711,26 @@ export function mergeValidatedBaselineInTx(
         if (frame.kind === 'topicMessage') {
           const row = inner.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
           if (!row) return { parentId: null, exists: false }
+          // v1 inventory: branch-owned rows are not inventory members, so
+          // they can never mismatch a main frame. v3: owned rows report
+          // their branch owner so evaluation fails closed on mismatch.
+          if (!branchDomain && isProvenBranchMessageRow(row)) return { parentId: null, exists: false }
           const mem = membershipByKey.get(`message:${cid}`)
           if (mem) return { parentId: mem.parentId, exists: true }
           return { parentId: row.topicId, exists: true }
+        } else if (frame.kind === 'branchSuffix') {
+          const row = inner.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+          if (!row) return { parentId: null, exists: false }
+          const owner: string | null = row.branchId ?? null
+          const mem = membershipByKey.get(`message:${cid}`)
+          if (mem) return { parentId: mem.parentId, exists: true }
+          return { parentId: owner ?? row.topicId, exists: true }
         } else {
           const row = inner.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
           if (!row) return { parentId: null, exists: false }
+          const parentMsg = inner.select().from(schema.messages).where(eq(schema.messages.id, row.messageId)).get()
+          if (parentMsg && isProvenBranchMessageRow(parentMsg) && !branchDomain)
+            return { parentId: null, exists: false }
           const mem = membershipByKey.get(`message_block:${cid}`)
           if (mem) return { parentId: mem.parentId, exists: true }
           return { parentId: row.messageId, exists: true }
@@ -2666,13 +3817,12 @@ export function mergeValidatedBaselineInTx(
       affectedParents.delete(`topicMessage:${tomb.entityId}`)
       // Descendant messageBlock frames already handled via tombstoneAffectedParents
       for (const kk of [...tombstoneAffectedParents]) {
-        if (kk.startsWith('messageBlock:')) {
-          const mid = kk.slice('messageBlock:'.length)
+        if (kk.startsWith('messageBlock:') || (branchDomain && kk.startsWith('branchSuffix:'))) {
+          const mid = kk.slice(kk.indexOf(':') + 1)
+          const kind = kk.startsWith('branchSuffix:') ? 'branchSuffix' : 'messageBlock'
           inner
             .delete(schema.syncParentOrderFrame)
-            .where(
-              and(eq(schema.syncParentOrderFrame.kind, 'messageBlock'), eq(schema.syncParentOrderFrame.parentId, mid))
-            )
+            .where(and(eq(schema.syncParentOrderFrame.kind, kind), eq(schema.syncParentOrderFrame.parentId, mid)))
             .run()
           localFrames.delete(kk)
           affectedParents.delete(kk)
@@ -2690,6 +3840,33 @@ export function mergeValidatedBaselineInTx(
         .run()
       localFrames.delete(`messageBlock:${tomb.entityId}`)
       affectedParents.delete(`messageBlock:${tomb.entityId}`)
+    } else if (tomb.entityType === 'topic_branch') {
+      // v3 subtree delete: the branch's own suffix frame plus owned
+      // messageBlock frames (already in tombstoneAffectedParents) are
+      // removed so no orphan winner survives.
+      inner
+        .delete(schema.syncParentOrderFrame)
+        .where(
+          and(
+            eq(schema.syncParentOrderFrame.kind, 'branchSuffix'),
+            eq(schema.syncParentOrderFrame.parentId, tomb.entityId)
+          )
+        )
+        .run()
+      localFrames.delete(`branchSuffix:${tomb.entityId}`)
+      affectedParents.delete(`branchSuffix:${tomb.entityId}`)
+      for (const kk of [...tombstoneAffectedParents]) {
+        if (kk.startsWith('branchSuffix:') || kk.startsWith('messageBlock:')) {
+          const pid = kk.slice(kk.indexOf(':') + 1)
+          const kind = kk.startsWith('branchSuffix:') ? 'branchSuffix' : 'messageBlock'
+          inner
+            .delete(schema.syncParentOrderFrame)
+            .where(and(eq(schema.syncParentOrderFrame.kind, kind), eq(schema.syncParentOrderFrame.parentId, pid)))
+            .run()
+          localFrames.delete(kk)
+          affectedParents.delete(kk)
+        }
+      }
     }
   }
 
@@ -2700,12 +3877,17 @@ export function mergeValidatedBaselineInTx(
   // C4/C5: liveness via actual winner between live entity clock and tombstone deletion clock (null barrier, UTF-8 lex); only winning tombstone deletes frame, live parent requires winning frame, empty child set materializes empty
   const loadLiveChildrenForTopicStrict = (topicId: string): Map<string, { timestamp: number; operationId: string }> => {
     const rows = inner
-      .select({ id: schema.messages.id, status: schema.messages.status })
+      .select({ id: schema.messages.id, status: schema.messages.status, branchId: schema.messages.branchId })
       .from(schema.messages)
       .where(eq(schema.messages.topicId, topicId))
       .all()
     const map = new Map<string, { timestamp: number; operationId: string }>()
-    for (const r of rows as Array<{ id: string; status: string | null }>) {
+    for (const r of rows as Array<{ id: string; status: string | null; branchId: string | null }>) {
+      // v1 inventory: branch-owned suffix rows are local-only, carry no
+      // membership clock and never join the materialized order. v3
+      // (branchDomain): branch rows are versioned inventory members of
+      // their own suffix parent, but never of the main topic frame.
+      if (isProvenBranchMessageRow(r)) continue
       if (!isStableMessageStatus(r.status)) continue
       const mem = membershipByKey.get(`message:${r.id}`)
       if (!mem || mem.parentId !== topicId)
@@ -2736,6 +3918,14 @@ export function mergeValidatedBaselineInTx(
   const loadLiveChildrenForMessageStrict = (
     messageId: string
   ): Map<string, { timestamp: number; operationId: string }> => {
+    // v1 inventory: blocks inherit their parent message's owner. A
+    // branch-owned parent's blocks are local-only and never materialized.
+    // v3 (branchDomain): blocks of branch-owned messages are inventory
+    // members of their parent message frame.
+    const parentMsg = inner.select().from(schema.messages).where(eq(schema.messages.id, messageId)).get()
+    if (parentMsg && isProvenBranchMessageRow(parentMsg) && !branchDomain) {
+      return new Map<string, { timestamp: number; operationId: string }>()
+    }
     const rows = inner
       .select({
         id: schema.messageBlocks.id,
@@ -2781,8 +3971,46 @@ export function mergeValidatedBaselineInTx(
     }
     return map
   }
+  // v3 branch domain: live owned-suffix children of one branch (stable
+  // messages with branch_id = parent, membership bound to the branch id).
+  const loadLiveChildrenForBranchStrict = (
+    branchId: string
+  ): Map<string, { timestamp: number; operationId: string }> => {
+    const rows = inner
+      .select({ id: schema.messages.id, status: schema.messages.status, branchId: schema.messages.branchId })
+      .from(schema.messages)
+      .where(eq(schema.messages.branchId, branchId))
+      .all()
+    const map = new Map<string, { timestamp: number; operationId: string }>()
+    for (const r of rows as Array<{ id: string; status: string | null; branchId: string | null }>) {
+      if (!isStableMessageStatus(r.status)) continue
+      const mem = membershipByKey.get(`message:${r.id}`)
+      if (!mem || mem.parentId !== branchId)
+        fail(`baseline apply missing valid membership for live message ${r.id} under branch ${branchId}`)
+      try {
+        validateFrameRowStrict(
+          {
+            kind: 'branchSuffix',
+            parentId: branchId,
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIdsJson: '[]',
+            timestamp: mem.timestamp,
+            operationId: mem.operationId
+          },
+          `membership/${r.id}`
+        )
+      } catch (e) {
+        fail(
+          `baseline apply malformed membership clock for message/${r.id}: ${e instanceof Error ? e.message : String(e)}`,
+          e
+        )
+      }
+      map.set(r.id, { timestamp: mem.timestamp, operationId: mem.operationId })
+    }
+    return map
+  }
   for (const key of [...affectedParents]) {
-    let kind: 'topicMessage' | 'messageBlock'
+    let kind: 'topicMessage' | 'messageBlock' | 'branchSuffix'
     let parentId: string
     if (key.startsWith('topicMessage:')) {
       kind = 'topicMessage'
@@ -2790,10 +4018,18 @@ export function mergeValidatedBaselineInTx(
     } else if (key.startsWith('messageBlock:')) {
       kind = 'messageBlock'
       parentId = key.slice('messageBlock:'.length)
+    } else if (key.startsWith('branchSuffix:')) {
+      kind = 'branchSuffix'
+      parentId = key.slice('branchSuffix:'.length)
     } else {
       fail(`baseline apply malformed affected parent key ${JSON.stringify(key).slice(0, 80)}`)
     }
-    const tKey = kind === 'topicMessage' ? `topic:${parentId}` : `message:${parentId}`
+    const tKey =
+      kind === 'topicMessage'
+        ? `topic:${parentId}`
+        : kind === 'messageBlock'
+          ? `message:${parentId}`
+          : `topic_branch:${parentId}`
     // C4: determine actual liveness via winner between live entity clock and tombstone deletion clock
     const liveClock = entityClockByKey.get(tKey)
     const tomb = tombstoneByKey.get(tKey)
@@ -2812,7 +4048,16 @@ export function mergeValidatedBaselineInTx(
       let rowExists = false
       if (kind === 'topicMessage')
         rowExists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
-      else rowExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+      else if (kind === 'messageBlock')
+        rowExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+      else {
+        try {
+          rowExists = !!inner.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, parentId)).get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) rowExists = false
+          else throw e
+        }
+      }
       if (rowExists) {
         // Unversioned live row with tombstone => fail closed already handled in requireVersionedLiveForTombstone, but here treat as live winning? Actually F2 would have failed, but if we reach here, treat as tombstone not winning if no liveClock?
         // For safety, if row exists but no liveClock, we already failed earlier; but to be strict, consider tombstone not winning if liveClock missing? However C1 says unversioned live with tombstone fails closed, so we would have thrown.
@@ -2826,7 +4071,16 @@ export function mergeValidatedBaselineInTx(
       let rowExists = false
       if (kind === 'topicMessage')
         rowExists = !!inner.select().from(schema.topics).where(eq(schema.topics.id, parentId)).get()
-      else rowExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+      else if (kind === 'messageBlock')
+        rowExists = !!inner.select().from(schema.messages).where(eq(schema.messages.id, parentId)).get()
+      else {
+        try {
+          rowExists = !!inner.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, parentId)).get()
+        } catch (e) {
+          if (e instanceof Error && /no such table/i.test(e.message)) rowExists = false
+          else throw e
+        }
+      }
       isLive = rowExists
     }
     if (isTombstoneWinning) {
@@ -2867,20 +4121,44 @@ export function mergeValidatedBaselineInTx(
       fail(`baseline apply malformed persisted frame for ${key}: ${e instanceof Error ? e.message : String(e)}`, e)
     }
     const liveMap =
-      kind === 'topicMessage' ? loadLiveChildrenForTopicStrict(parentId) : loadLiveChildrenForMessageStrict(parentId)
+      kind === 'topicMessage'
+        ? loadLiveChildrenForTopicStrict(parentId)
+        : kind === 'messageBlock'
+          ? loadLiveChildrenForMessageStrict(parentId)
+          : loadLiveChildrenForBranchStrict(parentId)
     const childParentLookup = (cid: string): { parentId: string | null; exists: boolean } | null => {
       if (kind === 'topicMessage') {
         const row = inner.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
         if (!row) return { parentId: null, exists: false }
+        // v1 inventory: branch-owned rows are not inventory members, so
+        // they can never mismatch a main frame. v3: owned rows mismatch a
+        // main frame via membership (owner = branch id).
+        if (!branchDomain && isProvenBranchMessageRow(row)) return { parentId: null, exists: false }
         const mem = membershipByKey.get(`message:${cid}`)
         if (mem) return { parentId: mem.parentId, exists: true }
         return { parentId: row.topicId, exists: true }
-      } else {
+      } else if (kind === 'messageBlock') {
         const row = inner.select().from(schema.messageBlocks).where(eq(schema.messageBlocks.id, cid)).get()
         if (!row) return { parentId: null, exists: false }
+        const parentMsg = inner.select().from(schema.messages).where(eq(schema.messages.id, row.messageId)).get()
+        if (parentMsg && isProvenBranchMessageRow(parentMsg) && !branchDomain) return { parentId: null, exists: false }
         const mem = membershipByKey.get(`message_block:${cid}`)
         if (mem) return { parentId: mem.parentId, exists: true }
         return { parentId: row.messageId, exists: true }
+      } else {
+        const row = inner.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+        if (!row) return { parentId: null, exists: false }
+        const owner: string | null = row.branchId ?? null
+        if (owner !== parentId) {
+          // Known row owned elsewhere (main or sibling suffix): report the
+          // owner so evaluation fails closed on mismatch.
+          const mem = membershipByKey.get(`message:${cid}`)
+          if (mem) return { parentId: mem.parentId, exists: true }
+          return { parentId: owner ?? row.topicId, exists: true }
+        }
+        const mem = membershipByKey.get(`message:${cid}`)
+        if (mem) return { parentId: mem.parentId, exists: true }
+        return { parentId: owner, exists: true }
       }
     }
     let evaluation: ReturnType<typeof evaluateEffectiveOrder>
@@ -2910,7 +4188,9 @@ export function mergeValidatedBaselineInTx(
       const childId = effective[idx]
       if (kind === 'topicMessage')
         inner.update(schema.messages).set({ sortOrder: idx }).where(eq(schema.messages.id, childId)).run()
-      else inner.update(schema.messageBlocks).set({ sortOrder: idx }).where(eq(schema.messageBlocks.id, childId)).run()
+      else if (kind === 'messageBlock')
+        inner.update(schema.messageBlocks).set({ sortOrder: idx }).where(eq(schema.messageBlocks.id, childId)).run()
+      else inner.update(schema.messages).set({ sortOrder: idx }).where(eq(schema.messages.id, childId)).run()
     }
   }
 
