@@ -1704,6 +1704,7 @@
       "copy": "复制",
       "cut": "剪切",
       "delete": "删除",
+      "moveToNewBranch": "移至新建分支",
       "paste": "粘贴",
       "redo": "重做",
       "selectAll": "全选",

@@ -18,6 +18,7 @@ import type {
   InsertMessagesAfterAnchorResponse,
   ListBranchesResponse,
   MessageBlockEntry,
+  MoveSelectedTurnsToNewBranchResponse,
   RegenerateAssistantMessageRequest,
   RenameBranchResponse,
   ReorderAnswerGroupResponse,
@@ -313,6 +314,21 @@ export interface MessageDataSource {
    * survive.
    */
   deleteBranch?(topicId: string, branchId: string): Promise<DeleteBranchResponse>
+
+  /**
+   * Move selected whole turns to a newly created child branch (purpose-specific
+   * ownership move). The selection is addressed by stable group IDs and the
+   * source route; Main expands authoritatively and validates contiguity,
+   * ownership, preceding anchor, branch-anchor protection, segments, and the
+   * mandatory exact expected-message-ID/order match (no unseen rows).
+   */
+  moveSelectedTurnsToNewBranch?(
+    topicId: string,
+    sourceBranchId: BranchRoute,
+    selectedGroupIds: string[],
+    name?: string,
+    expectedSelectedMessageIds?: string[]
+  ): Promise<MoveSelectedTurnsToNewBranchResponse>
 
   // ============ Insert after stable anchor (S6.2c-2) ============
   /**

@@ -1704,6 +1704,7 @@
       "copy": "Copy",
       "cut": "Cut",
       "delete": "Delete",
+      "moveToNewBranch": "Move to New Branch",
       "paste": "Paste",
       "redo": "Redo",
       "selectAll": "Select All",

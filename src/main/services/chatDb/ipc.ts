@@ -59,6 +59,7 @@ import type {
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
+  MoveSelectedTurnsToNewBranchRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -611,6 +612,16 @@ export function registerChatDbIpc(): () => void {
 
   handleCommand(IpcChannel.ChatDb_DeleteBranch, (agg, req: DeleteBranchRequest) => {
     return agg.deleteBranch(req.topicId, req.branchId)
+  })
+
+  handleCommand(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch, (agg, req: MoveSelectedTurnsToNewBranchRequest) => {
+    return agg.moveSelectedTurnsToNewBranch(
+      req.topicId,
+      req.sourceBranchId,
+      req.selectedGroupIds,
+      req.name,
+      req.expectedSelectedMessageIds
+    )
   })
 
   // 29. clone-messages-to-topic (Phase 5.1B)

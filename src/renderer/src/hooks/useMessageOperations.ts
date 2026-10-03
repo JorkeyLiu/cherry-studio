@@ -18,6 +18,7 @@ import {
   createBranchThunk,
   deleteSingleMessageThunk,
   initiateTranslationThunk,
+  moveSelectedTurnsToNewBranchThunk,
   regenerateAssistantResponseThunk,
   resendMessageThunk,
   resendUserMessageWithEditThunk,
@@ -337,6 +338,21 @@ export function useMessageOperations(topic: Topic) {
   )
 
   /**
+   * Move selected whole turns to a newly created child branch (purpose-specific
+   * ownership move). The selection is addressed by stable group IDs with the
+   * source route; Main expands and validates authoritatively.
+   */
+  const moveSelectionToNewBranch = useCallback(
+    (topicId: string, sourceBranchId: string | null, selectedGroupIds: string[], name: string) => {
+      logger.info(
+        `Moving ${selectedGroupIds.length} turns in topic ${topicId} to a new branch (source route ${sourceBranchId ?? 'main'})`
+      )
+      return dispatch(moveSelectedTurnsToNewBranchThunk(topicId, sourceBranchId, selectedGroupIds, name))
+    },
+    [dispatch]
+  )
+
+  /**
    * Updates message blocks by comparing original and edited blocks.
    * Handles adding, updating, and removing blocks in a SINGLE atomic SQLite
    * transaction via updateMessageAndBlocksThunk with blockIdsToDelete.
@@ -546,6 +562,7 @@ export function useMessageOperations(topic: Topic) {
     getTranslationUpdater,
     createTopicBranchByAnchor,
     createBranch,
+    moveSelectionToNewBranch,
     editMessageBlocks,
     removeMessageBlock
   }

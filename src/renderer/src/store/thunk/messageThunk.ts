@@ -2170,6 +2170,432 @@ export const fetchTopicBranchesThunk =
   }
 
 /**
+ * Move selected whole turns to a newly created child branch.
+ *
+ * Purpose-specific ownership move: the edit-mode whole-turn selection
+ * (stable group IDs addressing the source route) moves atomically to a new
+ * child branch with stable IDs. Renderer prechecks fail closed with zero IPC
+ * on parent/active mismatch, unknown parent metadata, unresolved selection,
+ * non-owned members, orphan/incomplete groups, noncontiguous loaded groups,
+ * missing/non-owned preceding anchor, or a loaded-known branch anchor inside
+ * the selection. The renderer-resolved display-order message IDs ride as the
+ * mandatory `expectedSelectedMessageIds` exact-match guard; Main expands the
+ * groups over the COMPLETE source route and requires exact ID/order equality
+ * inside the same synchronous root transaction (cropped/orphan/incomplete or
+ * changed contents fail closed with zero writes, never silently moving unseen
+ * rows). Main revalidates atomically (contiguity, ownership, preceding
+ * anchor, branch-anchor protection, segments) in the same root transaction.
+ *
+ * Route currency: prechecks run on fresh state immediately before IPC and the
+ * route/generation is rechecked before IPC (zero IPC on change) and before
+ * any post-commit navigation (no forced navigation when the user moved
+ * elsewhere; the source stale window is invalidated only when it is still the
+ * resident, never clobbering the newly active route).
+ *
+ * Post-commit: the committed DB result is tracked; a failed new-route load
+ * never leaves the new-active route with the stale source window and never
+ * returns null (which would wrongly imply the DB did not move). Load throw
+ * clears to an explicit empty fail-closed window on the new route; load
+ * supersession (void) preserves the user's current route with no forced
+ * navigation. Committed success is returned even when navigation failed.
+ *
+ * On success: clears the edit selection, refreshes the branch catalog,
+ * activates the new branch, and loads its bounded route window with
+ * mutability through the existing atomic route navigation lifecycle (never a
+ * full effective array injection). Context anchor inheritance follows the
+ * governed create/route rule.
+ */
+export const moveSelectedTurnsToNewBranchThunk =
+  (topicId: string, sourceBranchId: string | null, selectedGroupIds: string[], name: string) =>
+  async (
+    dispatch: AppDispatch,
+    getState: () => RootState
+  ): Promise<{ branchId: string; anchorMessageId: string; movedMessageIds: string[] } | null> => {
+    if (!topicId || !Array.isArray(selectedGroupIds) || selectedGroupIds.length === 0 || !name) {
+      logger.error(`[moveSelectedTurnsToNewBranchThunk] Invalid topicId/selection/name provided.`)
+      return null
+    }
+    const normalizedSource = typeof sourceBranchId === 'string' && sourceBranchId.length > 0 ? sourceBranchId : null
+    // Route generation at entry (before any await): the dynamic imports below
+    // are await boundaries where the route may change. Prechecks must use
+    // fresh state immediately before IPC and the generation must still match
+    // entry (zero IPC when the user moved away and back).
+    let entryGeneration = 0
+    try {
+      entryGeneration = selectRouteGeneration(getState(), topicId)
+    } catch {
+      entryGeneration = 0
+    }
+    const editSel = await import('../editSelection')
+    const runMovePrechecks = (state: RootState): { expectedDisplayOrdered: string[]; precedingId: string } | null => {
+      const active = selectActiveBranchId(state, topicId)
+      if ((active ?? null) !== normalizedSource) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Source route mismatch; failing closed without IPC.`)
+        return null
+      }
+      if (normalizedSource !== null) {
+        const node = selectBranchNode(state, topicId, normalizedSource)
+        if (node == null || node.topicId !== topicId) {
+          logger.error(`[moveSelectedTurnsToNewBranchThunk] Unknown source branch metadata; failing closed.`)
+          return null
+        }
+      }
+      const resolved = editSel.resolveEditSelectionMessageIds(state, topicId, selectedGroupIds)
+      if (!resolved || resolved.length === 0) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Unresolved selection; failing closed without IPC.`)
+        return null
+      }
+      if (!editSel.selectIsEditSelectionMutable(state, topicId, selectedGroupIds)) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection not owned; failing closed without IPC.`)
+        return null
+      }
+      const loaded = (state as unknown as { messages?: { messageIdsByTopic?: Record<string, string[]> } }).messages
+        ?.messageIdsByTopic?.[topicId]
+      if (!Array.isArray(loaded) || loaded.length === 0) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Unknown loaded projection; failing closed.`)
+        return null
+      }
+      // Known-incomplete/orphan guard (renderer-visible part): every selected
+      // group root must itself be loaded. An assistant-only orphan group (user
+      // root outside the loaded window) disables here; Main's exact expected
+      // match remains the final authority for window-outside members the
+      // renderer cannot see. No new projection completeness subsystem.
+      try {
+        const entities = (
+          state as unknown as { messages?: { entities?: Record<string, { id: string; role: string } | undefined> } }
+        ).messages?.entities
+        const loadedSet = new Set(loaded)
+        for (const gid of selectedGroupIds) {
+          if (!loadedSet.has(gid)) {
+            logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection group root not resident; failing closed.`)
+            return null
+          }
+          const root = entities?.[gid]
+          if (!root) {
+            logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection group root unknown; failing closed.`)
+            return null
+          }
+        }
+      } catch {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Orphan check failed; failing closed.`)
+        return null
+      }
+      const loadedSet = new Set(loaded)
+      for (const id of resolved) {
+        if (!loadedSet.has(id)) {
+          logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection not resident; failing closed.`)
+          return null
+        }
+      }
+      // Display-order normalization: Main compares exact display order, so the
+      // renderer request carries the loaded-order sort (any input order ok).
+      const expectedDisplayOrdered = [...resolved].sort((a, b) => loaded.indexOf(a) - loaded.indexOf(b))
+      const firstIdx = loaded.indexOf(expectedDisplayOrdered[0])
+      if (firstIdx === -1) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection unknown; failing closed.`)
+        return null
+      }
+      for (let i = 1; i < expectedDisplayOrdered.length; i++) {
+        if (loaded.indexOf(expectedDisplayOrdered[i]) - loaded.indexOf(expectedDisplayOrdered[i - 1]) !== 1) {
+          logger.error(`[moveSelectedTurnsToNewBranchThunk] Noncontiguous selection; failing closed.`)
+          return null
+        }
+      }
+      if (firstIdx === 0) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] No preceding anchor; failing closed.`)
+        return null
+      }
+      const precedingId = loaded[firstIdx - 1]
+      if (!isMutableForActiveRoute(state, topicId, precedingId)) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Preceding anchor not owned; failing closed.`)
+        return null
+      }
+      const catalog = (state as unknown as { topicBranch?: { branchesByTopic?: Record<string, unknown> } }).topicBranch
+        ?.branchesByTopic?.[topicId]
+      if (!Array.isArray(catalog)) {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Unknown branch catalog; failing closed.`)
+        return null
+      }
+      const anchorSet = new Set(
+        (catalog as { anchorMessageId: string }[]).map((b) => b.anchorMessageId).filter(Boolean)
+      )
+      for (const id of expectedDisplayOrdered) {
+        if (anchorSet.has(id)) {
+          logger.error(`[moveSelectedTurnsToNewBranchThunk] Selection holds a branch anchor; failing closed.`)
+          return null
+        }
+      }
+      try {
+        const segState = (
+          state as unknown as {
+            topicSegments?: {
+              segmentsByTopic?: Record<string, string[]>
+              segments?: { entities?: Record<string, { messageIds?: string[] }> }
+            }
+          }
+        ).topicSegments
+        const segIds = segState?.segmentsByTopic?.[topicId]
+        if (Array.isArray(segIds) && segIds.length > 0) {
+          const entities = segState?.segments?.entities ?? {}
+          const movedSet = new Set(expectedDisplayOrdered)
+          for (const segId of segIds) {
+            const memberIds = entities[segId]?.messageIds
+            if (!Array.isArray(memberIds) || memberIds.length === 0) continue
+            let inside = 0
+            for (const mid of memberIds) {
+              if (movedSet.has(mid)) inside++
+            }
+            if (inside > 0 && inside < memberIds.length) {
+              logger.error(`[moveSelectedTurnsToNewBranchThunk] Segment cuts selection; failing closed.`)
+              return null
+            }
+          }
+        }
+      } catch {
+        logger.error(`[moveSelectedTurnsToNewBranchThunk] Segment check failed; failing closed.`)
+        return null
+      }
+      return { expectedDisplayOrdered, precedingId }
+    }
+    // Fresh pre-IPC gate: current route/generation must still match the
+    // caller's addressed source; zero IPC on any change before the call
+    // (including away-and-back, detected via generation).
+    const freshBeforeIpc = getState()
+    let generationBeforeIpc = 0
+    try {
+      generationBeforeIpc = selectRouteGeneration(freshBeforeIpc, topicId)
+    } catch {
+      generationBeforeIpc = 0
+    }
+    if (generationBeforeIpc !== entryGeneration) {
+      logger.error(`[moveSelectedTurnsToNewBranchThunk] Route generation changed before IPC; failing closed.`)
+      return null
+    }
+    const precheck = runMovePrechecks(freshBeforeIpc)
+    if (!precheck) {
+      return null
+    }
+    let result: Awaited<ReturnType<typeof dbService.moveSelectedTurnsToNewBranch>>
+    try {
+      result = await dbService.moveSelectedTurnsToNewBranch(
+        topicId,
+        sourceBranchId,
+        selectedGroupIds,
+        name,
+        precheck.expectedDisplayOrdered
+      )
+    } catch (error) {
+      logger.error(`[moveSelectedTurnsToNewBranchThunk] Failed to move turns:`, error as Error)
+      return null
+    }
+    // Commit tracked: the DB move succeeded. Everything below must return the
+    // committed success (never null) so callers never toast a wrong
+    // "move failed" after the commit.
+    const committed = {
+      branchId: result.branch.id,
+      anchorMessageId: result.anchorMessageId,
+      movedMessageIds: result.movedMessageIds
+    }
+    const effectiveMessages = result.messages as unknown as Message[]
+    const effectiveBlocks = result.blocks as unknown as MessageBlock[]
+    if (effectiveBlocks.length > 0) {
+      try {
+        dispatch(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId))
+      } catch {
+        // best-effort block publish; the route load below republishes
+      }
+    }
+    const { branchesReceived, activeBranchSet } = await import('../topicBranch')
+    try {
+      const catalog = await dbService.listBranches(topicId)
+      dispatch(branchesReceived({ topicId, branches: catalog.branches }))
+    } catch (catalogError) {
+      logger.error(`[moveSelectedTurnsToNewBranchThunk] Failed to refresh branch catalog:`, catalogError as Error)
+    }
+    // Post-commit route guard: the user may have moved elsewhere during the
+    // commit/catalog awaits. Preserve their route: no forced navigation, and
+    // invalidate the stale source window only when it is still the resident
+    // (never clobber the newly active route's capability).
+    {
+      const afterCommit = getState()
+      const activeAfterCommit = selectActiveBranchId(afterCommit, topicId)
+      let generationAfterCommit = 0
+      try {
+        generationAfterCommit = selectRouteGeneration(afterCommit, topicId)
+      } catch {
+        generationAfterCommit = 0
+      }
+      if ((activeAfterCommit ?? null) !== normalizedSource || generationAfterCommit !== generationBeforeIpc) {
+        try {
+          const storedRoute = (
+            afterCommit as unknown as { messages?: { mutableRouteByTopic?: Record<string, string | null> } }
+          ).messages?.mutableRouteByTopic?.[topicId]
+          if ((storedRoute ?? null) === normalizedSource) {
+            dispatch(newMessagesActions.invalidateRouteMutability({ topicId }))
+          }
+        } catch {
+          // best-effort invalidation; never break the committed move
+        }
+        try {
+          const { clearSelection } = await import('../editMode')
+          dispatch(clearSelection())
+        } catch {
+          // best-effort selection clear; never break the committed move
+        }
+        logger.warn(
+          `[moveSelectedTurnsToNewBranchThunk] Route changed during commit; preserving current route without forced navigation.`
+        )
+        return committed
+      }
+      try {
+        const storedRoute = (
+          afterCommit as unknown as { messages?: { mutableRouteByTopic?: Record<string, string | null> } }
+        ).messages?.mutableRouteByTopic?.[topicId]
+        if ((storedRoute ?? null) === normalizedSource) {
+          dispatch(newMessagesActions.invalidateRouteMutability({ topicId }))
+        } else if (storedRoute === undefined) {
+          try {
+            dispatch(newMessagesActions.invalidateRouteMutability({ topicId }))
+          } catch {}
+        }
+      } catch {
+        // best-effort invalidation; never break the move
+      }
+    }
+    const newBranchId = result.branch.id
+    try {
+      const { clearSelection } = await import('../editMode')
+      dispatch(clearSelection())
+    } catch {
+      // best-effort selection clear; never break the move
+    }
+    dispatch(activeBranchSet({ topicId, branchId: newBranchId }))
+    // Bounded new-route load: throw and supersession (void) both preserve the
+    // committed success. Throw with the new route still active clears the
+    // stale source window to an explicit empty fail-closed frame (never stale
+    // source messages under the new-active route). Supersession preserves the
+    // user's newer route with no forced navigation.
+    let loadOutcome: unknown
+    let loadThrew = false
+    try {
+      loadOutcome = await dispatch(loadRouteMessagesThunk(topicId, newBranchId, { kind: 'latest' }))
+    } catch (loadError) {
+      loadThrew = true
+      logger.error(`[moveSelectedTurnsToNewBranchThunk] New-route load failed after commit:`, loadError as Error)
+      loadOutcome = undefined
+    }
+    {
+      const afterLoad = getState()
+      const activeAfterLoad = selectActiveBranchId(afterLoad, topicId)
+      if ((activeAfterLoad ?? null) !== newBranchId) {
+        // Superseded (or user moved during load): a newer route owns the
+        // projection now. No forced navigation back; committed success stands.
+        logger.warn(
+          `[moveSelectedTurnsToNewBranchThunk] Route superseded during new-route load; preserving current route.`
+        )
+        return committed
+      }
+      if (loadThrew || loadOutcome === undefined) {
+        if (loadThrew) {
+          // Explicit fail-closed: the new-active route must not keep the stale
+          // source message window. Publish an empty window + empty capability
+          // for the new route (atomic clear, retryable via route effects).
+          try {
+            dispatch(
+              newMessagesActions.rebaseRouteMessages({
+                topicId,
+                messages: [],
+                route: newBranchId,
+                mutableMessageIds: []
+              })
+            )
+          } catch {
+            // best-effort clear; committed success still stands
+          }
+        }
+        // Void without throw while still on the new route: a superseded read
+        // discarded itself but no newer navigation claimed the route. The
+        // committed success stands; the route effect reloads on demand.
+        return committed
+      }
+    }
+    try {
+      const state = getState()
+      const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
+      if (owner) {
+        const { getAssistantSettings } = await import('@renderer/services/AssistantService')
+        const { anchorKeyForRoute } = await import('@renderer/services/anchorService')
+        const parentRoute = typeof sourceBranchId === 'string' && sourceBranchId.length > 0 ? sourceBranchId : null
+        const parentKey = anchorKeyForRoute(topicId, parentRoute)
+        const targetKey = anchorKeyForRoute(topicId, newBranchId)
+        const parentAnchor =
+          (getAssistantSettings(owner).contextWindowAnchor?.[parentKey] as
+            | { kind: string; groupKey: string }
+            | undefined) ?? null
+        const sourceKey =
+          parentAnchor && (parentAnchor as { kind: string }).kind === 'active'
+            ? (parentAnchor as { groupKey: string }).groupKey
+            : null
+        const contextCount = getAssistantSettings(owner).contextCount ?? null
+        try {
+          const inheritRes = await dbService.resolveContextClosure({
+            topicId,
+            branchId: newBranchId,
+            intent: 'inherit',
+            sourceTopicId: topicId,
+            sourceBranchId: parentRoute,
+            sourceAnchorGroupKey: sourceKey,
+            contextCount,
+            currentAnchorGroupKey: null,
+            detail: 'anchor'
+          })
+          const resolved = (inheritRes as { resolvedAnchorGroupKey: string | null }).resolvedAnchorGroupKey
+          const fresh = getState()
+          const freshOwner = fresh.assistants.assistants.find((a) => a.id === owner.id)
+          const freshSettings = freshOwner ? getAssistantSettings(freshOwner) : getAssistantSettings(owner)
+          const existing =
+            (freshSettings.contextWindowAnchor?.[targetKey] as { kind: string; groupKey: string } | undefined) ?? null
+          if (resolved !== null && resolved !== undefined) {
+            if (!existing || (existing as { kind: string }).kind !== 'active') {
+              const { updateAssistantSettings } = await import('../assistants')
+              dispatch(
+                updateAssistantSettings({
+                  assistantId: owner.id,
+                  settings: {
+                    contextWindowAnchor: {
+                      ...freshSettings.contextWindowAnchor,
+                      [targetKey]: { kind: 'active', groupKey: resolved }
+                    }
+                  }
+                }) as any
+              )
+            }
+          } else if (existing) {
+            const { updateAssistantSettings } = await import('../assistants')
+            const next = { ...freshSettings.contextWindowAnchor }
+            delete next[targetKey]
+            dispatch(
+              updateAssistantSettings({
+                assistantId: owner.id,
+                settings: { contextWindowAnchor: next }
+              }) as any
+            )
+          }
+        } catch {
+          if (effectiveMessages.length > 0) {
+            try {
+              await ensureTopicAnchorEstablished(dispatch, getState, owner.id, topicId, newBranchId)
+            } catch {}
+          }
+        }
+      }
+    } catch {
+      // Best-effort inheritance; never break the move.
+    }
+    return committed
+  }
+
+/**
  * Thunk to edit properties of a message and/or its associated blocks.
  * Persists ALL changes in a SINGLE atomic SQLite transaction FIRST,
  * then commits Redux state on success.

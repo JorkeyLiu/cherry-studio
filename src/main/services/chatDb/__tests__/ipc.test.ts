@@ -2,7 +2,7 @@
  * ChatDb IPC Registration Tests — mocked ipcMain, real validation.
  *
  * Covers:
- * - Exactly 37 handlers registered
+ * - Exactly 58 handlers registered
  * - Request validation before dispatch
  * - All result/error mapping categories
  * - Null result for void commands
@@ -107,16 +107,16 @@ describe('ChatDb IPC Registration', () => {
   // Handler count
   // =========================================================================
 
-  it('registers exactly 57 handlers', () => {
+  it('registers exactly 58 handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
   })
 
   // =========================================================================
   // All channels
   // =========================================================================
 
-  it('registers all 57 ChatDb channels', () => {
+  it('registers all 58 ChatDb channels', () => {
     disposer = registerChatDbIpc()
 
     const expectedChannels = [
@@ -181,6 +181,8 @@ describe('ChatDb IPC Registration', () => {
       IpcChannel.ChatDb_ListBranches,
       IpcChannel.ChatDb_RenameBranch,
       IpcChannel.ChatDb_DeleteBranch,
+      // Move selected turns to new branch (exact-match expectedSelectedMessageIds guard)
+      IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch,
       // S6.2c-2: insert after stable anchor
       IpcChannel.ChatDb_InsertMessagesAfterAnchor,
       // S6.2c-3: insert message groups
@@ -208,11 +210,11 @@ describe('ChatDb IPC Registration', () => {
 
   it('disposer removes all handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     disposer()
     expect(handlers.size).toBe(0)
-    expect(mockRemoveHandler).toHaveBeenCalledTimes(57)
+    expect(mockRemoveHandler).toHaveBeenCalledTimes(58)
   })
 
   // =========================================================================
@@ -715,6 +717,90 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
+  // Move selected turns to new branch — typed capability door
+  //
+  // Exact hard guards (continuity, anchor, exact-match expansion) are covered
+  // direct at the aggregate service (moveSelectedTurnsToNewBranch.test.ts).
+  // Here proves the IPC boundary: contract validation, UNAVAILABLE passthrough
+  // for a valid request, exact arg mapping including expectedSelectedMessageIds,
+  // and backend failure surfacing.
+  // =========================================================================
+
+  it('move-selected-turns-to-new-branch rejects invalid requests at the IPC boundary', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch)!
+    // Missing expectedSelectedMessageIds → contract rejects before dispatch.
+    const missing = await handler({}, { topicId: 't-1', selectedGroupIds: ['g1'] } as any)
+    expect(missing.ok).toBe(false)
+    expect(missing.error.code).toBe('VALIDATION_ERROR')
+
+    // Empty arrays → validation error.
+    const empty = await handler({}, { topicId: 't-1', selectedGroupIds: [], expectedSelectedMessageIds: [] } as any)
+    expect(empty.ok).toBe(false)
+    expect(empty.error.code).toBe('VALIDATION_ERROR')
+
+    // Unknown key → validation error.
+    const unknown = await handler({}, {
+      topicId: 't-1',
+      selectedGroupIds: ['g1'],
+      expectedSelectedMessageIds: ['m1'],
+      unknown: 1
+    } as any)
+    expect(unknown.ok).toBe(false)
+    expect(unknown.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('move-selected-turns-to-new-branch accepts a valid request at the IPC boundary', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch)!
+    const result = await handler({}, { topicId: 't-1', selectedGroupIds: ['g1'], expectedSelectedMessageIds: ['m1'] })
+
+    // Validation passes; DB is not initialised → UNAVAILABLE (not VALIDATION_ERROR).
+    expect(result).toHaveProperty('ok')
+    expect(result).not.toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+    expect(result.ok).toBe(false)
+    expect(result.error.code).toBe('UNAVAILABLE')
+  })
+
+  it('move-selected-turns-to-new-branch maps expectedSelectedMessageIds to aggregate and surfaces backend failure', async () => {
+    const { ChatDbAggregateService } = await import('../ChatDbAggregateService')
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue({} as any)
+    mockGetSqlite.mockReturnValue({} as any)
+    const spy = vi.spyOn(ChatDbAggregateService.prototype, 'moveSelectedTurnsToNewBranch')
+    try {
+      spy.mockReturnValueOnce({
+        ok: false as const,
+        error: { code: 'NOT_FOUND', message: 'Topic t-1 does not exist', retryable: false }
+      } as any)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch)!
+      const result = await handler(
+        {},
+        {
+          topicId: 't-1',
+          sourceBranchId: null,
+          selectedGroupIds: ['g1'],
+          expectedSelectedMessageIds: ['m1', 'm2'],
+          name: 'Moved'
+        }
+      )
+
+      expect(spy).toHaveBeenCalledWith('t-1', null, ['g1'], 'Moved', ['m1', 'm2'])
+      expect(result.ok).toBe(false)
+      expect(result.error.code).toBe('NOT_FOUND')
+    } finally {
+      spy.mockRestore()
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+
+  // =========================================================================
   // Segment no-color IPC regression (STORAGE_ERROR root fix)
   //
   // A legal no-color segment must cross the full IPC path
@@ -892,7 +978,7 @@ describe('ChatDb IPC Registration', () => {
   it('uses ipcMain.handle for registration', () => {
     disposer = registerChatDbIpc()
 
-    expect(mockHandle).toHaveBeenCalledTimes(57)
+    expect(mockHandle).toHaveBeenCalledTimes(58)
     for (const call of mockHandle.mock.calls) {
       expect(typeof call[0]).toBe('string')
       expect(typeof call[1]).toBe('function')
@@ -968,19 +1054,19 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
-  // All 40 commands preserve 40-registration invariant
+  // All 58 commands preserve 58-registration invariant
   // =========================================================================
 
-  it('preserves exactly 57 registrations after multiple calls', () => {
+  it('preserves exactly 58 registrations after multiple calls', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // Call disposer, re-register
     disposer()
     expect(handlers.size).toBe(0)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
   })
 
   // =========================================================================
@@ -989,15 +1075,15 @@ describe('ChatDb IPC Registration', () => {
 
   it('re-registration disposes prior handlers before installing new ones', () => {
     const disposer1 = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // Register again without calling disposer1 — should auto-dispose
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // disposer1 is now stale — calling it should be a no-op
     disposer1()
-    expect(handlers.size).toBe(57) // still 57
+    expect(handlers.size).toBe(58) // still 57
 
     // The current disposer works
     disposer()
@@ -1009,32 +1095,32 @@ describe('ChatDb IPC Registration', () => {
 
     // Re-register — disposer1 becomes stale
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // Stale disposer1 is a no-op
     disposer1()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // Active disposer still works
     disposer()
     expect(handlers.size).toBe(0)
   })
 
-  it('three sequential registrations produce exactly 56 handlers each time', () => {
+  it('three sequential registrations produce exactly 58 handlers each time', () => {
     const d1 = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     const d2 = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // Stale discarders are no-ops
     d1()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
     d2()
-    expect(handlers.size).toBe(57)
+    expect(handlers.size).toBe(58)
 
     // Active disposer works
     disposer()

@@ -89,6 +89,8 @@ import type {
   ListTrashTopicsRequest,
   ListTrashTopicsResponse,
   MessageBlockEntry,
+  MoveSelectedTurnsToNewBranchRequest,
+  MoveSelectedTurnsToNewBranchResponse,
   PasteMessagesToTopicRequest,
   PasteMessagesToTopicResponse,
   PurgeExpiredTopicsRequest,
@@ -166,6 +168,9 @@ export interface ChatDbApi {
   listBranches?(request: ListBranchesRequest): Promise<ChatDbResult<ListBranchesResponse>>
   renameBranch?(request: RenameBranchRequest): Promise<ChatDbResult<RenameBranchResponse>>
   deleteBranch?(request: DeleteBranchRequest): Promise<ChatDbResult<DeleteBranchResponse>>
+  moveSelectedTurnsToNewBranch?(
+    request: MoveSelectedTurnsToNewBranchRequest
+  ): Promise<ChatDbResult<MoveSelectedTurnsToNewBranchResponse>>
   insertMessagesAfterAnchor?(
     request: InsertMessagesAfterAnchorRequest
   ): Promise<ChatDbResult<InsertMessagesAfterAnchorResponse>>
@@ -1024,6 +1029,28 @@ export class SqliteMessageDataSource implements MessageDataSource {
     }
     const request: DeleteBranchRequest = cloneForWire({ topicId, branchId })
     const result = unwrap(await this.api.deleteBranch(request))
+    dispatchTopicUpdatedAt(topicId)
+    return result
+  }
+
+  async moveSelectedTurnsToNewBranch(
+    topicId: string,
+    sourceBranchId: string | null | undefined,
+    selectedGroupIds: string[],
+    name?: string,
+    expectedSelectedMessageIds?: string[]
+  ): Promise<MoveSelectedTurnsToNewBranchResponse> {
+    if (!this.api.moveSelectedTurnsToNewBranch) {
+      throw new Error('ChatDb API unavailable: moveSelectedTurnsToNewBranch not exposed')
+    }
+    const request: MoveSelectedTurnsToNewBranchRequest = cloneForWire({
+      topicId,
+      sourceBranchId: sourceBranchId ?? null,
+      selectedGroupIds: [...selectedGroupIds],
+      expectedSelectedMessageIds: [...(expectedSelectedMessageIds ?? [])],
+      name
+    })
+    const result = unwrap(await this.api.moveSelectedTurnsToNewBranch(request))
     dispatchTopicUpdatedAt(topicId)
     return result
   }

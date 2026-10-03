@@ -48,6 +48,7 @@ import type {
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
+  MoveSelectedTurnsToNewBranchRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -1830,6 +1831,82 @@ const deleteBranchContract: ChatDbContract = {
       validateStringArray(v.deletedBranchIds, 'result.value.deletedBranchIds')
       validateStringArray(v.deletedMessageIds, 'result.value.deletedMessageIds')
       validateStringArray(v.deletedBlockIds, 'result.value.deletedBlockIds')
+    }
+  }
+}
+
+const MOVE_SELECTED_TURNS_VALUE_KEYS = new Set([
+  'branch',
+  'movedMessageIds',
+  'anchorMessageId',
+  'parentMessages',
+  'parentBlocks',
+  'messages',
+  'blocks'
+])
+
+const moveSelectedTurnsToNewBranchContract: ChatDbContract = {
+  allowedKeys: keySet('topicId', 'sourceBranchId', 'selectedGroupIds', 'expectedSelectedMessageIds', 'name'),
+  validate(value: unknown): void {
+    validateRequest(value, moveSelectedTurnsToNewBranchContract.allowedKeys)
+    const req = value as MoveSelectedTurnsToNewBranchRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+    validateOptionalBranchId(req.sourceBranchId, 'request.sourceBranchId')
+    validateStringArray(req.selectedGroupIds, 'request.selectedGroupIds')
+    if (req.selectedGroupIds.length === 0) {
+      throw new ValidationError('request.selectedGroupIds', '[chatdb:move-selected-turns] Expected non-empty group IDs')
+    }
+    for (let i = 0; i < req.selectedGroupIds.length; i++) {
+      validateNonEmptyString(req.selectedGroupIds[i], `request.selectedGroupIds[${i}]`)
+    }
+    validateStringArray(req.expectedSelectedMessageIds, 'request.expectedSelectedMessageIds')
+    if (req.expectedSelectedMessageIds.length === 0) {
+      throw new ValidationError(
+        'request.expectedSelectedMessageIds',
+        '[chatdb:move-selected-turns] Expected non-empty expected message IDs'
+      )
+    }
+    for (let i = 0; i < req.expectedSelectedMessageIds.length; i++) {
+      validateNonEmptyString(req.expectedSelectedMessageIds[i], `request.expectedSelectedMessageIds[${i}]`)
+    }
+    if (req.name !== undefined) {
+      validateNonEmptyString(req.name, 'request.name')
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:move-selected-turns-to-new-branch', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:move-selected-turns-to-new-branch] Expected object with branch and moved messages'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:move-selected-turns-to-new-branch] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!MOVE_SELECTED_TURNS_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:move-selected-turns-to-new-branch] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateTopicBranchWire(v.branch, 'result.value.branch', 'chatdb:move-selected-turns-to-new-branch')
+      validateStringArray(v.movedMessageIds, 'result.value.movedMessageIds')
+      validateNonEmptyString(v.anchorMessageId, 'result.value.anchorMessageId')
+      validateJsonObjectArray(v.parentMessages, 'result.value.parentMessages')
+      validateJsonObjectArrayBlock(v.parentBlocks, 'result.value.parentBlocks', BLOCK_JSON_PROFILE)
+      validateJsonObjectArray(v.messages, 'result.value.messages')
+      validateJsonObjectArrayBlock(v.blocks, 'result.value.blocks', BLOCK_JSON_PROFILE)
     }
   }
 }
@@ -4487,6 +4564,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:list-branches': listBranchesContract,
   'chatdb:rename-branch': renameBranchContract,
   'chatdb:delete-branch': deleteBranchContract,
+  'chatdb:move-selected-turns-to-new-branch': moveSelectedTurnsToNewBranchContract,
   // Phase 5.1B: compound mutations
   'chatdb:clone-messages-to-topic': cloneMessagesToTopicContract,
   'chatdb:reset-messages-for-resend': resetMessagesForResendContract,

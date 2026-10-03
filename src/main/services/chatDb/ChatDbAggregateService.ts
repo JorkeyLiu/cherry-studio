@@ -7655,6 +7655,304 @@ export class ChatDbAggregateService {
     }, `deleteBranch(${topicId}, ${branchId})`)
   }
 
+  /**
+   * Group an effective route message list into whole turns, mirroring the
+   * renderer `getMessageGroups` partition: user rows start a new turn,
+   * assistant rows join their askId turn (orphans form their own turn),
+   * system rows form their own turn. Other roles are ignored for grouping
+   * (never selected through the edit UI).
+   */
+  private groupEffectiveTurnsInTx(messages: MessageData[]): { askId: string; messageIds: string[] }[] {
+    const groups: { askId: string; messageIds: string[] }[] = []
+    const byAskId = new Map<string, { askId: string; messageIds: string[] }>()
+    for (const m of messages) {
+      if (m.role === 'user') {
+        const g = { askId: m.id, messageIds: [m.id] }
+        groups.push(g)
+        byAskId.set(m.id, g)
+      } else if (m.role === 'assistant' && m.askId) {
+        const existing = byAskId.get(m.askId)
+        if (existing) {
+          existing.messageIds.push(m.id)
+        } else {
+          const g = { askId: m.askId, messageIds: [m.id] }
+          groups.push(g)
+          byAskId.set(m.askId, g)
+        }
+      } else if (m.role === 'system') {
+        const g = { askId: m.id, messageIds: [m.id] }
+        groups.push(g)
+        byAskId.set(m.id, g)
+      }
+    }
+    return groups
+  }
+
+  /**
+   * Move selected whole turns to a newly created child branch.
+   *
+   * Purpose-specific ownership move (the only owner-transfer path besides
+   * creation stamping): the selected continuous whole turns change owner
+   * from the source route to a newly created child branch. Stable IDs,
+   * topic, blocks, file references, askId relations and contents are
+   * preserved. The new branch anchors at the immutable preceding message.
+   * Ordinary identity patch stays forbidden; no general reparent API.
+   *
+   * Atomic in one root transaction: branch row + message owners + per-owner
+   * dense orders. Any validation failure rejects with zero writes.
+   * Local-only: no sync outbox/membership/frame writes; pre-existing main
+   * sync artifacts for moved IDs are deliberately left untouched (caveat,
+   * outside claim).
+   */
+  moveSelectedTurnsToNewBranch(
+    topicId: string,
+    sourceBranchId: string | null | undefined,
+    selectedGroupIds: string[],
+    name?: string,
+    expectedSelectedMessageIds?: string[]
+  ): ChatDbResult<{
+    branch: TopicBranchWire
+    movedMessageIds: string[]
+    anchorMessageId: string
+    parentMessages: JsonObject[]
+    parentBlocks: JsonObject[]
+    messages: JsonObject[]
+    blocks: JsonObject[]
+  }> {
+    return wrapResult(
+      () => {
+        syncService.throwIfPublishBarrierHeld('moveSelectedTurnsToNewBranch')
+        const sourceRoute = this.normalizeBranchId(sourceBranchId)
+        if (!topicId || !Array.isArray(selectedGroupIds) || selectedGroupIds.length === 0) {
+          throw new ChatDbValidationError('moveSelectedTurnsToNewBranch requires topicId and selectedGroupIds')
+        }
+        const seen = new Set<string>()
+        for (const gid of selectedGroupIds) {
+          if (typeof gid !== 'string' || gid.length === 0) {
+            throw new ChatDbValidationError('moveSelectedTurnsToNewBranch requires non-empty group IDs')
+          }
+          if (seen.has(gid)) {
+            throw new ChatDbValidationError(`Duplicate group ID ${gid} in moveSelectedTurnsToNewBranch selection`)
+          }
+          seen.add(gid)
+        }
+        if (!Array.isArray(expectedSelectedMessageIds) || expectedSelectedMessageIds.length === 0) {
+          throw new ChatDbValidationError(
+            'moveSelectedTurnsToNewBranch requires expectedSelectedMessageIds (exact display-order message IDs)'
+          )
+        }
+        const expectedSeen = new Set<string>()
+        for (const mid of expectedSelectedMessageIds) {
+          if (typeof mid !== 'string' || mid.length === 0) {
+            throw new ChatDbValidationError('moveSelectedTurnsToNewBranch requires non-empty expected message IDs')
+          }
+          if (expectedSeen.has(mid)) {
+            throw new ChatDbValidationError(
+              `Duplicate expected message ID ${mid} in moveSelectedTurnsToNewBranch selection`
+            )
+          }
+          expectedSeen.add(mid)
+        }
+        const result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const topic = repos.topics.getById(topicId)
+          if (!topic.found) {
+            throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+          if (topic.data.deletedAt != null) {
+            throw new ChatDbValidationError(`Topic ${topicId} is in trash and cannot move turns to a branch`)
+          }
+          if (sourceRoute !== null) {
+            this.requireBranchInTx(repos, topicId, sourceRoute)
+          }
+          const effective = this.resolveRouteMessagesInTx(repos, topicId, sourceRoute).messages
+          if (effective.length === 0) {
+            throw new ChatDbValidationError(`Topic ${topicId} has no messages in the source route`)
+          }
+          const turns = this.groupEffectiveTurnsInTx(effective)
+          const turnIndexByAskId = new Map<string, number>()
+          turns.forEach((t, i) => {
+            if (!turnIndexByAskId.has(t.askId)) turnIndexByAskId.set(t.askId, i)
+          })
+          const selectedIndices: number[] = []
+          for (const gid of selectedGroupIds) {
+            const idx = turnIndexByAskId.get(gid)
+            if (idx === undefined) {
+              throw new ChatDbValidationError(`Group ${gid} does not belong to the source route of topic ${topicId}`)
+            }
+            selectedIndices.push(idx)
+          }
+          selectedIndices.sort((a, b) => a - b)
+          for (let i = 1; i < selectedIndices.length; i++) {
+            if (selectedIndices[i] - selectedIndices[i - 1] !== 1) {
+              throw new ChatDbValidationError('moveSelectedTurnsToNewBranch requires continuous whole turns')
+            }
+          }
+          const firstTurnIdx = selectedIndices[0]
+          const lastTurnIdx = selectedIndices[selectedIndices.length - 1]
+          const movedIds: string[] = []
+          for (let i = firstTurnIdx; i <= lastTurnIdx; i++) {
+            movedIds.push(...turns[i].messageIds)
+          }
+          const effectiveIds = effective.map((m) => m.id)
+          const firstMsgIdx = effectiveIds.indexOf(movedIds[0])
+          const lastMsgIdx = effectiveIds.indexOf(movedIds[movedIds.length - 1])
+          if (firstMsgIdx === -1 || lastMsgIdx === -1 || lastMsgIdx - firstMsgIdx + 1 !== movedIds.length) {
+            throw new ChatDbValidationError('moveSelectedTurnsToNewBranch requires continuous whole turns')
+          }
+          for (let i = firstMsgIdx; i <= lastMsgIdx; i++) {
+            if (effectiveIds[i] !== movedIds[i - firstMsgIdx]) {
+              throw new ChatDbValidationError('moveSelectedTurnsToNewBranch requires continuous whole turns')
+            }
+          }
+          if (firstMsgIdx === 0) {
+            throw new ChatDbValidationError(
+              'moveSelectedTurnsToNewBranch requires a preceding anchor message in the source route'
+            )
+          }
+          // Exact expected-selection guard: the authoritative expansion over
+          // the COMPLETE source route must equal the renderer's requested
+          // display-order IDs exactly. A cropped/orphan/incomplete turn or
+          // changed group contents (unseen rows) fails closed with zero
+          // writes — never silently move rows the user did not see.
+          // A root-resident check alone cannot prove this (an off-window
+          // sibling could still be omitted), so the exact ID/order match is
+          // required here, inside the same synchronous root transaction.
+          if (expectedSelectedMessageIds.length !== movedIds.length) {
+            throw new ChatDbValidationError(
+              'moveSelectedTurnsToNewBranch expected selection does not match the source route expansion'
+            )
+          }
+          for (let i = 0; i < movedIds.length; i++) {
+            if (expectedSelectedMessageIds[i] !== movedIds[i]) {
+              throw new ChatDbValidationError(
+                'moveSelectedTurnsToNewBranch expected selection does not match the source route expansion'
+              )
+            }
+          }
+          const byId = new Map(effective.map((m) => [m.id, m] as const))
+          for (const id of movedIds) {
+            const row = byId.get(id)
+            if (!row || row.topicId !== topicId) {
+              throw new ChatDbNotFoundError(`Message ${id} does not belong to topic ${topicId}`)
+            }
+            if ((row.branchId ?? null) !== sourceRoute) {
+              throw new ChatDbValidationError(
+                `Message ${id} is not owned by the source route and cannot move to a new branch`
+              )
+            }
+          }
+          const anchorId = effectiveIds[firstMsgIdx - 1]
+          const anchorRow = byId.get(anchorId)
+          if (!anchorRow || (anchorRow.branchId ?? null) !== sourceRoute) {
+            throw new ChatDbValidationError(
+              `Preceding anchor ${anchorId} is not owned by the source route and cannot fork a child branch`
+            )
+          }
+          let branchRows: TopicBranchData[] = []
+          try {
+            branchRows = repos.branches.listByTopic(topicId)
+          } catch (e) {
+            if (e instanceof Error && /no such table/i.test(e.message)) branchRows = []
+            else throw e
+          }
+          const existingAnchors = new Set(branchRows.map((b) => b.anchorMessageId))
+          for (const id of movedIds) {
+            if (existingAnchors.has(id)) {
+              throw new ChatDbValidationError(
+                `Message ${id} is an existing branch anchor and cannot move to a new branch`
+              )
+            }
+          }
+          const movedSet = new Set(movedIds)
+          const segments = repos.segments.listByTopic(topicId)
+          for (const seg of segments) {
+            const memberIds = repos.segments.getMessageIds(seg.id)
+            if (memberIds.length === 0) continue
+            let inside = 0
+            for (const mid of memberIds) {
+              if (movedSet.has(mid)) inside++
+            }
+            if (inside > 0 && inside < memberIds.length) {
+              throw new ChatDbValidationError(
+                `Segment ${seg.id} cuts through the move selection and cannot move to a new branch`
+              )
+            }
+          }
+          const now = new Date().toISOString()
+          const newBranchId = randomUUID()
+          const created = repos.branches.create({
+            id: newBranchId,
+            topicId,
+            parentBranchId: sourceRoute,
+            anchorMessageId: anchorId,
+            name: typeof name === 'string' && name.length > 0 ? name : null,
+            createdAt: now,
+            updatedAt: now,
+            overflow: {}
+          })
+          const executor = tx as unknown as {
+            update: (table: unknown) => {
+              set: (values: unknown) => { where: (cond: unknown) => { run: () => void } }
+            }
+          }
+          for (let i = 0; i < movedIds.length; i++) {
+            executor
+              .update(schema.messages)
+              // deno-lint-ignore no-explicit-any
+              .set({ branchId: newBranchId, sortOrder: i } as any)
+              // deno-lint-ignore no-explicit-any
+              .where(eq(schema.messages.id, movedIds[i]) as any)
+              .run()
+          }
+          const remainingSourceIds = effective
+            .filter((m) => !movedSet.has(m.id) && (m.branchId ?? null) === sourceRoute)
+            .map((m) => m.id)
+          // Re-read source owner order defensively, then normalize dense.
+          // The in-memory filter above already preserves authority order.
+          for (let i = 0; i < remainingSourceIds.length; i++) {
+            executor
+              .update(schema.messages)
+              // deno-lint-ignore no-explicit-any
+              .set({ sortOrder: i } as any)
+              // deno-lint-ignore no-explicit-any
+              .where(eq(schema.messages.id, remainingSourceIds[i]) as any)
+              .run()
+          }
+          const parentEffective = this.resolveRouteMessagesInTx(repos, topicId, sourceRoute).messages
+          const childEffective = this.resolveRouteMessagesInTx(repos, topicId, newBranchId).messages
+          const parentIds = parentEffective.map((m) => m.id)
+          const childIds = childEffective.map((m) => m.id)
+          const parentBlockMap = repos.blocks.listByMessages(parentIds)
+          const childBlockMap = repos.blocks.listByMessages(childIds)
+          const parentBlocks: MessageBlockData[] = []
+          for (const id of parentIds) {
+            parentBlocks.push(...(parentBlockMap.get(id) ?? []))
+          }
+          const childBlocks: MessageBlockData[] = []
+          for (const id of childIds) {
+            childBlocks.push(...(childBlockMap.get(id) ?? []))
+          }
+          const parentWireMessages = messagesToWire(parentEffective)
+          const parentWireBlocks = blocksToWire(parentBlocks)
+          const childWireMessages = messagesToWire(childEffective)
+          const childWireBlocks = blocksToWire(childBlocks)
+          return {
+            branch: this.branchToWire(created),
+            movedMessageIds: [...movedIds],
+            anchorMessageId: anchorId,
+            parentMessages: reconstructMessageBlockRelations(parentWireMessages, parentWireBlocks),
+            parentBlocks: parentWireBlocks,
+            messages: reconstructMessageBlockRelations(childWireMessages, childWireBlocks),
+            blocks: childWireBlocks
+          }
+        })
+        return result
+      },
+      `moveSelectedTurnsToNewBranch(${topicId}, source=${this.normalizeBranchId(sourceBranchId) ?? 'main'}, groups=${Array.isArray(selectedGroupIds) ? selectedGroupIds.length : 0})`
+    )
+  }
+
   // =========================================================================
   // Phase 5.1B: Compound mutations
   // =========================================================================

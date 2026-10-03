@@ -386,6 +386,7 @@ export enum IpcChannel {
   ChatDb_ListBranches = 'chatdb:list-branches',
   ChatDb_RenameBranch = 'chatdb:rename-branch',
   ChatDb_DeleteBranch = 'chatdb:delete-branch',
+  ChatDb_MoveSelectedTurnsToNewBranch = 'chatdb:move-selected-turns-to-new-branch',
 
   // S6.2c-2 — Main-authoritative insert after stable anchor
   ChatDb_InsertMessagesAfterAnchor = 'chatdb:insert-messages-after-anchor',

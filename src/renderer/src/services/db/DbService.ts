@@ -333,6 +333,22 @@ class DbService implements MessageDataSource {
     if (!this.ordinarySource.deleteBranch) throw new Error('deleteBranch unavailable')
     return this.ordinarySource.deleteBranch(topicId, branchId)
   }
+  moveSelectedTurnsToNewBranch(
+    topicId: string,
+    sourceBranchId: string | null | undefined,
+    selectedGroupIds: string[],
+    name?: string,
+    expectedSelectedMessageIds?: string[]
+  ) {
+    if (!this.ordinarySource.moveSelectedTurnsToNewBranch) throw new Error('moveSelectedTurnsToNewBranch unavailable')
+    return this.ordinarySource.moveSelectedTurnsToNewBranch(
+      topicId,
+      sourceBranchId,
+      selectedGroupIds,
+      name,
+      expectedSelectedMessageIds
+    )
+  }
   insertMessagesAfterAnchor(
     topicId: string,
     afterMessageId: string,
