@@ -2022,6 +2022,11 @@ export function mergeValidatedBaselineInTx(
     input.orderFrames.some((f) => (f as { kind?: string }).kind === 'branchSuffix')
   // Track affected parents for fixed-point materialization
   const affectedParents = new Set<string>()
+  // V5 ownership-transfer bookkeeping (move sync): entity keys whose
+  // membership parent transition won the transition-clock race (row owner
+  // follows below) vs lost it (local owner kept, content still contests).
+  const transferWonKeys = new Set<string>()
+  const transferSuppressedKeys = new Set<string>()
   // Load local frames for LWW with centralized strict validation (A3)
   const localFrames = new Map<
     string,
@@ -2641,15 +2646,141 @@ export function mergeValidatedBaselineInTx(
           `baseline apply parentId mismatch for ${entity.entityId}: membership ${pm.parentId} vs payload ${payloadParentId}`
         )
       }
-      upsertMembershipClock(
-        inner,
-        entity.entityType,
-        entity.entityId,
-        pm.parentId,
-        pm.timestamp,
-        pm.operationId,
-        membershipByKey
-      )
+      // V5 ownership-transfer: a message whose incoming membership parent
+      // differs from the retained parent is an explicit owner move, never an
+      // ordinary edit. It races on the transition clock (incoming membership
+      // clock vs retained) under timestamp-then-operationId LWW: greater wins
+      // (membership replaced, row owner follows at the owner check below),
+      // lesser keeps the local owner (content still contests below), same
+      // timestamp with different operationIds is an ordered race (operationId
+      // decides), and only the identical full clock with divergent parents
+      // fails closed. Blocks never transfer — any block parent divergence
+      // stays strictly fail-closed.
+      if (entity.entityType === 'message') {
+        const retained = membershipByKey.get(key)
+        if (retained && retained.parentId !== pm.parentId) {
+          const localRow = inner.select().from(schema.messages).where(eq(schema.messages.id, entity.entityId)).get()
+          if (!localRow) {
+            fail(`baseline apply orphan transfer ${entity.entityId}: message row missing`)
+          }
+          const incomingTopicId = payload.topicId as string
+          // Cross-topic divergence is never an ownership transfer (no generic
+          // reparent): keep the exact legacy fail-closed contract.
+          if (localRow.topicId !== incomingTopicId) {
+            fail(
+              `baseline apply membership parent conflict for message/${entity.entityId}: retained ${retained.parentId} vs incoming ${pm.parentId}`
+            )
+          }
+          const incomingOwner = (payload.branchId as string | null) ?? null
+          if (incomingOwner === null) {
+            fail(
+              `baseline apply membership parent conflict for message/${entity.entityId}: retained ${retained.parentId} vs incoming ${pm.parentId}`
+            )
+          }
+          // Destination branch must be proven with the same topic, locally or
+          // in this same candidate (candidate order is topic→message→block→branch,
+          // so presence here never fabricates).
+          let destTopic: string | null = null
+          let destAnchor: string | null = null
+          try {
+            const localBranch = inner
+              .select()
+              .from(schema.topicBranches)
+              .where(eq(schema.topicBranches.id, incomingOwner))
+              .get() as { topicId: string; anchorMessageId: string } | undefined
+            if (localBranch) {
+              destTopic = localBranch.topicId
+              destAnchor = localBranch.anchorMessageId
+            }
+          } catch (e) {
+            if (e instanceof Error && /no such table/i.test(e.message)) {
+              fail(`baseline apply branch inventory missing for ${entity.entityId}`)
+            }
+            throw e
+          }
+          if (destTopic === null) {
+            const candidateBranch = incomingEntityByKey.get(`topic_branch:${incomingOwner}`)
+            if (!candidateBranch) {
+              fail(`baseline apply orphan transfer ${entity.entityId} branch ${incomingOwner} missing`)
+            }
+            destTopic = candidateBranch.payload.topicId as string
+            destAnchor = candidateBranch.payload.anchorMessageId as string
+          }
+          if (destTopic !== incomingTopicId) {
+            fail(`baseline apply transfer branch topic mismatch for ${entity.entityId}`)
+          }
+          // Anchor guards mirror the local move contract: the moved ID must
+          // never be an existing branch anchor, and the destination anchor
+          // must differ from the moved ID.
+          try {
+            const anchors = inner
+              .select({ anchorMessageId: schema.topicBranches.anchorMessageId })
+              .from(schema.topicBranches)
+              .where(eq(schema.topicBranches.topicId, incomingTopicId))
+              .all() as Array<{ anchorMessageId: string }>
+            if (anchors.some((b) => b.anchorMessageId === entity.entityId)) {
+              fail(`baseline apply transfer rejected for ${entity.entityId}: message is an existing branch anchor`)
+            }
+          } catch (e) {
+            if (e instanceof Error && /no such table/i.test(e.message)) {
+              fail(`baseline apply branch inventory missing for ${entity.entityId}`)
+            }
+            throw e
+          }
+          if (destAnchor === entity.entityId) {
+            fail(`baseline apply transfer rejected for ${entity.entityId}: message is the destination anchor`)
+          }
+          // Timestamp-then-operationId LWW: same timestamp with a DIFFERENT
+          // operationId is an ordered concurrent race (operationId decides),
+          // never fail-closed. Only the identical full {timestamp,operationId}
+          // with divergent parents is corrupt and fails closed.
+          if (
+            retained.timestamp === pm.timestamp &&
+            retained.operationId === pm.operationId &&
+            retained.parentId !== pm.parentId
+          ) {
+            fail(
+              `baseline apply transfer identical-clock divergent owners for ${entity.entityId}: retained ${retained.parentId} vs incoming ${pm.parentId}`
+            )
+          }
+          if (compareLww(pm.timestamp, pm.operationId, retained.timestamp, retained.operationId) > 0) {
+            inner
+              .update(schema.syncMembershipClock)
+              .set({ parentId: pm.parentId, timestamp: pm.timestamp, operationId: pm.operationId })
+              .where(
+                and(
+                  eq(schema.syncMembershipClock.childEntityType, 'message'),
+                  eq(schema.syncMembershipClock.childEntityId, entity.entityId)
+                )
+              )
+              .run()
+            membershipByKey.set(key, { parentId: pm.parentId, timestamp: pm.timestamp, operationId: pm.operationId })
+            transferWonKeys.add(key)
+          } else {
+            transferSuppressedKeys.add(key)
+          }
+        } else {
+          upsertMembershipClock(
+            inner,
+            entity.entityType,
+            entity.entityId,
+            pm.parentId,
+            pm.timestamp,
+            pm.operationId,
+            membershipByKey
+          )
+        }
+      } else {
+        upsertMembershipClock(
+          inner,
+          entity.entityType,
+          entity.entityId,
+          pm.parentId,
+          pm.timestamp,
+          pm.operationId,
+          membershipByKey
+        )
+      }
     }
 
     // Existing vs missing.
@@ -2866,10 +2997,28 @@ export function mergeValidatedBaselineInTx(
       if (local.topicId !== topicId) {
         fail(`baseline apply immutable message parent mismatch for ${entity.entityId}: ${local.topicId} vs ${topicId}`)
       }
+      // V5 ownership-transfer: only an explicit transfer win above may change
+      // the row owner (same IDs, new branch). A suppressed transfer keeps the
+      // local owner while content fields still contest below. Any other owner
+      // divergence (e.g. legacy unversioned local row) stays fail-closed —
+      // ordinary content never transfers ownership.
       if ((local.branchId ?? null) !== branchId) {
-        fail(
-          `baseline apply immutable message owner mismatch for ${entity.entityId}: ${String(local.branchId ?? 'main')} vs ${String(branchId ?? 'main')}`
-        )
+        if (transferWonKeys.has(key)) {
+          const localOwner = local.branchId ?? null
+          inner.update(schema.messages).set({ branchId }).where(eq(schema.messages.id, entity.entityId)).run()
+          affectedParents.add(localOwner !== null ? `branchSuffix:${localOwner}` : `topicMessage:${local.topicId}`)
+          affectedParents.add(`branchSuffix:${branchId}`)
+        } else if (transferSuppressedKeys.has(key)) {
+          affectedParents.add(
+            (local.branchId ?? null) !== null
+              ? `branchSuffix:${local.branchId as string}`
+              : `topicMessage:${local.topicId}`
+          )
+        } else {
+          fail(
+            `baseline apply immutable message owner mismatch for ${entity.entityId}: ${String(local.branchId ?? 'main')} vs ${String(branchId ?? 'main')}`
+          )
+        }
       }
       const incomingFcs = new Map(entity.fieldClocks.map((fc) => [fc.field, fc]))
       const localFcs = fieldClockByKey.get(key) ?? new Map()

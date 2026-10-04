@@ -100,6 +100,8 @@ export type {
   ListTrashTopicsRequest,
   ListTrashTopicsResponse,
   MessageBlockEntry,
+  MoveSelectedTurnsToNewBranchRequest,
+  MoveSelectedTurnsToNewBranchResponse,
   PasteMessagesToTopicRequest,
   PasteMessagesToTopicResponse,
   PurgeExpiredTopicsRequest,

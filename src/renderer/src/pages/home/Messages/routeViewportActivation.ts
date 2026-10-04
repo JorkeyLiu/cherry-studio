@@ -44,4 +44,58 @@ export const shouldTopPipelineRefuseDividerIntent = (
     return false
   }
 }
+
+/**
+ * Retained-projection-first admission for page reactivation
+ * (Chat→Settings→Chat, same selected route).
+ *
+ * Pure presentation validation against the CURRENT renderer-owned window and
+ * state — never whole-topic completeness/freshness (projection never proves
+ * authority; cooperates with current updates/streams). True only when every
+ * condition holds:
+ * - this is a detached-lifetime reactivation (`wasActivation`) for the same
+ *   selected/displayed route (route changes/deletion fall back safely);
+ * - no deletion-fallback owns this route (deletion path keeps `latest`);
+ * - a non-empty retained window exists;
+ * - anchored restores: the requested stable anchor is covered by the retained
+ *   window AND the current loaded projection AND a connected DOM row
+ *   (measurable geometry; folded-hidden rows still count — the hidden settle
+ *   reveals them before measuring);
+ * - anchorless restores: only the bottom case restores in place (re-assert
+ *   bottom pre-paint); anchorless non-bottom falls back to the existing
+ *   route-local default path.
+ *
+ * Divider sessions never reach here (the narrow refusal above keeps their
+ * clicked-offset continuation); this predicate is TOP-only.
+ */
+export interface RetainedWindowInPlaceInput {
+  wasActivation: boolean
+  selectedTopicId: string
+  selectedRoute: RouteId
+  displayedTopicId: string
+  displayedRoute: RouteId
+  deletionPending: boolean
+  hasRetainedWindow: boolean
+  /** Canonical saved anchor (`messageId`, legacy `anchorId` fallback). Null = anchorless. */
+  canonicalAnchor: string | null
+  isAtBottom: boolean
+  retainedContainsAnchor: boolean
+  loadedContainsAnchor: boolean
+  domAnchorResident: boolean
+}
+
+export const shouldRestoreRetainedWindowInPlace = (input: RetainedWindowInPlaceInput): boolean => {
+  if (!input.wasActivation) return false
+  if (input.deletionPending) return false
+  if (input.selectedTopicId !== input.displayedTopicId) return false
+  if (input.selectedRoute !== input.displayedRoute) return false
+  if (!input.hasRetainedWindow) return false
+  if (input.canonicalAnchor) {
+    return input.retainedContainsAnchor && input.loadedContainsAnchor && input.domAnchorResident
+  }
+  // Anchorless: bottom re-asserts in place; every other anchorless shape
+  // (same-route raw scrollTop, no-snapshot default) uses the existing
+  // route-local default path so no bogus stable snapshot is invented here.
+  return input.isAtBottom
+}
 export type { RouteViewportSnapshot }

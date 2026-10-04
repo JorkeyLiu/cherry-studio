@@ -143,6 +143,7 @@ export async function getOutboxDiagViaApp(
   function prio(o: SanitizedOutboxRow): number {
     if (o.op === 'order_frame') return 3
     if (o.op === 'message_stable_replace') return 4
+    if (o.op === 'move_turns_to_branch') return 1
     return ENTITY_PUSH_PRIORITY[o.entityType] ?? 9
   }
   sanitized.sort((a, b) => {

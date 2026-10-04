@@ -1704,6 +1704,7 @@
       "copy": "[to be translated]:Copy",
       "cut": "[to be translated]:Cut",
       "delete": "[to be translated]:Delete",
+      "moveToNewBranch": "移至新建分支",
       "paste": "[to be translated]:Paste",
       "redo": "[to be translated]:Redo",
       "selectAll": "[to be translated]:Select All",

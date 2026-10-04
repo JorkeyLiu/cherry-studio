@@ -1230,6 +1230,48 @@ export interface DeleteBranchResponse extends FileCleanupResult {
   deletedBlockIds: string[]
 }
 
+/**
+ * Move selected whole turns to a newly created child branch.
+ *
+ * Purpose-specific ownership move: the selected continuous whole turns
+ * (addressed by stable group IDs, expanded authoritatively by Main) change
+ * owner from the source route to the newly created child branch. Stable IDs,
+ * topic, blocks, file references, askId relations and contents are preserved.
+ * The new branch anchors at the immutable preceding message. Ordinary
+ * identity patch remains forbidden; no general reparent API.
+ */
+export interface MoveSelectedTurnsToNewBranchRequest {
+  topicId: string
+  /** Source route: absent/null = main route, non-null = that branch's route. */
+  sourceBranchId?: BranchRouteId
+  /** Selected whole-turn group IDs (askIds) in any order; Main expands authoritatively. */
+  selectedGroupIds: string[]
+  /**
+   * Renderer-resolved stable message IDs for the selection in display order.
+   * Mandatory exact-match guard: Main expands the groups over the complete
+   * source route and requires this list to equal the expanded IDs in exact
+   * order before any write. Cropped/orphan/incomplete turns or changed group
+   * contents fail closed with zero writes (never silently move unseen rows).
+   */
+  expectedSelectedMessageIds: string[]
+  name?: string
+}
+
+/** @see IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch */
+export interface MoveSelectedTurnsToNewBranchResponse {
+  branch: TopicBranchWire
+  /** Stable IDs of the moved messages in display order. */
+  movedMessageIds: string[]
+  /** Preceding anchor message ID (the new branch anchor). */
+  anchorMessageId: string
+  /** Effective wire messages of the parent route after the move. */
+  parentMessages: JsonObject[]
+  parentBlocks: JsonObject[]
+  /** Effective wire messages of the new branch route. */
+  messages: JsonObject[]
+  blocks: JsonObject[]
+}
+
 // ---------------------------------------------------------------------------
 // S6.2c-2: insert after stable anchor (additive, Main-authoritative)
 // ---------------------------------------------------------------------------
@@ -1709,6 +1751,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
   'chatdb:delete-branch': {
     request: DeleteBranchRequest
     response: DeleteBranchResponse
+  }
+  'chatdb:move-selected-turns-to-new-branch': {
+    request: MoveSelectedTurnsToNewBranchRequest
+    response: MoveSelectedTurnsToNewBranchResponse
   }
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': {

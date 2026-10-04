@@ -59,6 +59,7 @@ import type {
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
+  MoveSelectedTurnsToNewBranchRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -97,7 +98,7 @@ import { IpcChannel } from '@shared/IpcChannel'
 import { BrowserWindow, ipcMain } from 'electron'
 
 import { logMainDiagnostic } from '../diagnostics'
-import { handleChatDbSuccessForSync } from '../sync/chatDbHook'
+import { handleChatDbSuccessForSync, isCapturableSyncChannel } from '../sync/chatDbHook'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
 import { internalStorageFailure, mapErrorToResult, validateConstructedResult } from './errors'
 import { chatDbService } from './index'
@@ -328,7 +329,11 @@ export function registerChatDbIpc(): () => void {
         // Tx-owned channels already committed their intent atomically inside
         // the aggregate transaction: invoking the post-commit hook would
         // enqueue a duplicate op, so it is skipped here by channel.
-        if (result.ok === true && !TX_OWNED_SYNC_CHANNELS.has(channel)) {
+        // Noncapturable channels (pure reads + explicitly unsupported
+        // compound mutations, per the hook's shared classifier) never capture
+        // and skip the hook entirely, so a held publish barrier cannot turn a
+        // read into a durable capture failure.
+        if (result.ok === true && !TX_OWNED_SYNC_CHANNELS.has(channel) && isCapturableSyncChannel(channel)) {
           try {
             handleChatDbSuccessForSync(channel, request, result)
           } catch (e) {
@@ -611,6 +616,16 @@ export function registerChatDbIpc(): () => void {
 
   handleCommand(IpcChannel.ChatDb_DeleteBranch, (agg, req: DeleteBranchRequest) => {
     return agg.deleteBranch(req.topicId, req.branchId)
+  })
+
+  handleCommand(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch, (agg, req: MoveSelectedTurnsToNewBranchRequest) => {
+    return agg.moveSelectedTurnsToNewBranch(
+      req.topicId,
+      req.sourceBranchId,
+      req.selectedGroupIds,
+      req.name,
+      req.expectedSelectedMessageIds
+    )
   })
 
   // 29. clone-messages-to-topic (Phase 5.1B)

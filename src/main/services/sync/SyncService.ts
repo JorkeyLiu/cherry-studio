@@ -119,6 +119,11 @@ const ENTITY_PUSH_PRIORITY: Record<string, number> = {
 function pushPriorityOf(op: { entityType: string; op: string }): number {
   if (op.op === 'order_frame') return 3
   if (op.op === 'message_stable_replace') return 4
+  // Whole-turn moves are ONE compound op (branch + all ownership changes +
+  // both winning frames in one Tx): no sibling transfer/frame ops exist, so no
+  // intra-move seq ordering is needed. The compound rides at branch priority
+  // (topic closure at 0 sorts before it).
+  if (op.op === 'move_turns_to_branch') return 1
   return ENTITY_PUSH_PRIORITY[op.entityType] ?? 9
 }
 
@@ -1512,6 +1517,10 @@ export class SyncService {
       this.enqueueStableReplaceRaw(op)
       return
     }
+    if (op.op === 'move_turns_to_branch') {
+      this.enqueueMoveTurnsToBranchRaw(op)
+      return
+    }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) {
       logger.warn(`[enqueueOperation] payload allowlist rejected: ${allowErr}`)
@@ -1708,6 +1717,226 @@ export class SyncService {
       .onConflictDoNothing()
       .run()
     return true
+  }
+
+  /**
+   * Raw outbox-only insert for a move_turns_to_branch compound op (no
+   * entity/field clock, no membership, no tombstone). Mirrors the order_frame
+   * raw path: the standalone path carries no chat mutation, so clocks and
+   * membership stay with the tx-bound and apply paths. Strictly validated.
+   * The compound path is tx-bound capture only; this raw exists for symmetric
+   * strict validation on direct enqueue paths.
+   */
+  private enqueueMoveTurnsToBranchRaw(op: SyncOperation): void {
+    const db = this.getDb()
+    const sqlite = this.getSqlite()
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      db.insert(schema.syncOutbox)
+        .values({
+          id: op.id,
+          entityType: op.entityType,
+          op: op.op,
+          entityId: op.entityId,
+          timestamp: op.timestamp,
+          deviceId: op.deviceId,
+          payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+          createdAt: new Date().toISOString()
+        })
+        .onConflictDoNothing()
+        .run()
+      const ch = sqlite.prepare('SELECT changes() as c').get() as { c: number }
+      const inserted = ch.c > 0
+      sqlite.exec('COMMIT')
+      if (!inserted) {
+        logger.warn(`[enqueueOperation] duplicate id ${op.id} ignored`)
+        return
+      }
+      this.emitEnqueue()
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e
+    }
+  }
+
+  /**
+   * Tx-bound insert for a move_turns_to_branch compound op inside the aggregate
+   * move transaction. Strictly validated; outbox-only here — the caller owns
+   * the branch row, all message owner updates, all membership parent
+   * transitions at the compound transition clock, and both winning owner
+   * frames in the same tx. Duplicate operation IDs are ignored idempotently.
+   * Advances the branch entity clock plus every moved message entity clock on
+   * the transition clock (same LWW rule as upserts; a stale duplicate never
+   * regresses a clock) so the cursor-0 baseline candidate carries the move
+   * causality. Returns true when a new outbox row was inserted.
+   */
+  enqueueMoveTurnsToBranchInTx(tx: SyncTxExecutor, op: SyncOperation): boolean {
+    const strictErr = validateSyncOperationStrict(op as unknown as Record<string, unknown>)
+    if (strictErr) throw new Error(strictErr)
+    if (op.op !== 'move_turns_to_branch')
+      throw new Error('enqueueMoveTurnsToBranchInTx requires op move_turns_to_branch')
+    const existing = tx.select().from(schema.syncOutbox).where(eq(schema.syncOutbox.id, op.id)).get()
+    if (existing) {
+      logger.warn(`[enqueueMoveTurnsToBranchInTx] duplicate id ${op.id} ignored`)
+      return false
+    }
+    tx.insert(schema.syncOutbox)
+      .values({
+        id: op.id,
+        entityType: op.entityType,
+        op: op.op,
+        entityId: op.entityId,
+        timestamp: op.timestamp,
+        deviceId: op.deviceId,
+        payloadJson: op.payload ? JSON.stringify(op.payload) : null,
+        createdAt: new Date().toISOString()
+      })
+      .onConflictDoNothing()
+      .run()
+    const p = op.payload ?? {}
+    const moved = Array.isArray(p.movedMessageIds) ? (p.movedMessageIds as unknown[]) : []
+    const targets: Array<{ entityType: string; entityId: string }> = [
+      { entityType: 'topic_branch', entityId: op.entityId }
+    ]
+    for (const v of moved) {
+      if (typeof v === 'string' && v.length > 0) targets.push({ entityType: 'message', entityId: v })
+    }
+    for (const t of targets) {
+      const clockRow = tx
+        .select()
+        .from(schema.syncEntityClock)
+        .where(eq(schema.syncEntityClock.entityType, t.entityType))
+        .all()
+        .find((r) => r.entityId === t.entityId) as typeof schema.syncEntityClock.$inferSelect | undefined
+      if (!clockRow || this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) > 0) {
+        tx.insert(schema.syncEntityClock)
+          .values({ entityType: t.entityType, entityId: t.entityId, timestamp: op.timestamp, operationId: op.id })
+          .onConflictDoUpdate({
+            target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+            set: { timestamp: op.timestamp, operationId: op.id }
+          })
+          .run()
+      }
+    }
+    // Branch mutable field clocks for baseline completeness (name/createdAt/
+    // updatedAt converge by LWW like ordinary branch upserts).
+    this.updateFieldClocksInDb(
+      tx as unknown as BetterSQLite3Database<typeof schema>,
+      'topic_branch',
+      op.entityId,
+      {
+        name: (p.branchName as string | null) ?? null,
+        createdAt: p.branchCreatedAt as string,
+        updatedAt: p.branchUpdatedAt as string
+      },
+      op.timestamp,
+      op.id
+    )
+    return true
+  }
+
+  /**
+   * Move the membership parent of one message to its new owning route at an
+   * explicit transition clock. Used by the move capture (local rows already
+   * re-owned in the same tx) and by the compound move apply per message.
+   *
+   * Contract is timestamp-then-operationId LWW (same total order as entity
+   * clocks): greater wins (parent+clock replaced), lesser is suppressed
+   * (returns false, row untouched). Equal timestamp with a DIFFERENT
+   * operationId is an ordered concurrent race resolved by operationId
+   * comparison — never a fail-closed divergence. Only the identical full
+   * clock {timestamp,operationId} with divergent parents is corrupt and fails
+   * closed (throws). Exact retry (same parent+clock) is a no-op returning
+   * true. Missing membership is established.
+   */
+  moveMessageMembershipParentInTx(
+    tx: SyncTxExecutor,
+    messageId: string,
+    destParentId: string,
+    timestamp: number,
+    operationId: string
+  ): boolean {
+    if (!messageId || !destParentId) {
+      throw new SyncTombstoneError('move membership requires message and parent ids')
+    }
+    try {
+      parseSyncOperationIdShape(operationId)
+    } catch (e) {
+      throw new SyncTombstoneError(e instanceof Error ? e.message : String(e))
+    }
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+      throw new SyncTombstoneError(`malformed move membership timestamp ${String(timestamp).slice(0, 40)}`)
+    }
+    try {
+      const existing = tx
+        .select()
+        .from(schema.syncMembershipClock)
+        .where(eq(schema.syncMembershipClock.childEntityType, 'message'))
+        .all()
+        .find((r) => r.childEntityId === messageId) as typeof schema.syncMembershipClock.$inferSelect | undefined
+      if (!existing) {
+        tx.insert(schema.syncMembershipClock)
+          .values({
+            childEntityType: 'message',
+            childEntityId: messageId,
+            parentId: destParentId,
+            timestamp,
+            operationId
+          })
+          .run()
+        return true
+      }
+      if (
+        existing.parentId === destParentId &&
+        existing.timestamp === timestamp &&
+        existing.operationId === operationId
+      ) {
+        return true
+      }
+      // Identical full clock {timestamp,operationId} with divergent parents is
+      // corrupt and fails closed. Same timestamp with a DIFFERENT operationId
+      // is an ordered concurrent race resolved by timestamp-then-operationId
+      // LWW below — never a fail-closed divergence.
+      if (
+        existing.timestamp === timestamp &&
+        existing.operationId === operationId &&
+        existing.parentId !== destParentId
+      ) {
+        throw new SyncTombstoneError(
+          `move membership identical-clock divergent owners for message/${messageId}: retained ${existing.parentId} vs incoming ${destParentId}`
+        )
+      }
+      if (this.compareLww(timestamp, operationId, existing.timestamp, existing.operationId) > 0) {
+        tx.update(schema.syncMembershipClock)
+          .set({ parentId: destParentId, timestamp, operationId })
+          .where(
+            and(
+              eq(schema.syncMembershipClock.childEntityType, 'message'),
+              eq(schema.syncMembershipClock.childEntityId, messageId)
+            )
+          )
+          .run()
+        return true
+      }
+      return false
+    } catch (e) {
+      if (e instanceof SyncTombstoneError) throw e
+      if (isTolerableMissingSyncTable(tx, e, MIGRATION_009_KEY)) {
+        tx.insert(schema.syncMembershipClock)
+          .values({
+            childEntityType: 'message',
+            childEntityId: messageId,
+            parentId: destParentId,
+            timestamp,
+            operationId
+          })
+          .run()
+        return true
+      }
+      throw e instanceof Error ? e : new Error(String(e))
+    }
   }
 
   /**
@@ -2409,6 +2638,9 @@ export class SyncService {
     }
     if (op.op === 'message_stable_replace') {
       return this.enqueueStableReplaceInTx(tx, op)
+    }
+    if (op.op === 'move_turns_to_branch') {
+      return this.enqueueMoveTurnsToBranchInTx(tx, op)
     }
     const allowErr = validateSyncPayloadAllowlist(op)
     if (allowErr) throw new Error(allowErr)
@@ -4408,16 +4640,18 @@ export class SyncService {
     const sqlite = this.getSqlite()
 
     const already = db.select().from(schema.syncApplied).where(eq(schema.syncApplied.operationId, op.id)).get()
-    if (already && op.op !== 'order_frame' && op.op !== 'message_stable_replace') {
+    if (already && op.op !== 'order_frame' && op.op !== 'message_stable_replace' && op.op !== 'move_turns_to_branch') {
       logger.info(`[applyIncoming] duplicate ${op.id} skipped`)
       return false
     }
-    // order_frame and message_stable_replace duplicates bypass the blind
-    // skip: the same (timestamp, operationId) clock with different bundled
-    // content is an equal-clock divergence and must fail closed, not silently
-    // pass as idempotent. The frame path below re-evaluates LWW + semantic
-    // effective comparison, and the stable-replace path re-evaluates register
-    // LWW + bundled-winner comparison; both applied inserts are
+    // order_frame, message_stable_replace, and move_turns_to_branch duplicates
+    // bypass the blind skip: the same (timestamp, operationId) clock with
+    // different bundled content is an equal-clock divergence and must fail
+    // closed, not silently pass as idempotent. The frame path below
+    // re-evaluates LWW + semantic effective comparison, the stable-replace
+    // path re-evaluates register LWW + bundled-winner comparison, and the
+    // compound move path re-evaluates branch identity + per-message
+    // membership LWW + frame fixed-point; all applied inserts are
     // conflict-tolerant (see commit below).
 
     // Defense-in-depth: validate before LWW so a malformed old operation
@@ -4432,7 +4666,7 @@ export class SyncService {
       throw new Error(`malformed sync operation ${op.id}: ${strictErr}`)
     }
 
-    if (op.op !== 'order_frame' && op.op !== 'message_stable_replace') {
+    if (op.op !== 'order_frame' && op.op !== 'message_stable_replace' && op.op !== 'move_turns_to_branch') {
       const allowErr = validateSyncPayloadAllowlist(op)
       if (allowErr) {
         logger.warn(`[applyIncoming] payload rejected ${op.id}: ${allowErr}`)
@@ -4458,6 +4692,8 @@ export class SyncService {
         appliedEntity = this.applyOrderFrame(op)
       } else if (op.op === 'message_stable_replace') {
         appliedEntity = this.applyStableReplace(op)
+      } else if (op.op === 'move_turns_to_branch') {
+        appliedEntity = this.applyMoveTurnsToBranch(op)
       } else if (op.op === 'upsert') {
         appliedEntity = this.applyUpsert(op)
         if (appliedEntity) {
@@ -4499,7 +4735,7 @@ export class SyncService {
             .run()
         }
       }
-      if (op.op === 'order_frame' || op.op === 'message_stable_replace') {
+      if (op.op === 'order_frame' || op.op === 'message_stable_replace' || op.op === 'move_turns_to_branch') {
         db.insert(schema.syncApplied)
           .values({ operationId: op.id, appliedAt: new Date().toISOString() })
           .onConflictDoNothing()
@@ -6957,6 +7193,431 @@ export class SyncService {
   }
 
   /**
+   * Whole-turn move apply (V5 move sync): the ONLY path that may change message
+   * `branchId` owners across routes. ONE purpose-specific compound operation
+   * applies the explicit whole-turn move atomically in the caller's single
+   * SQLite Tx: new branch identity + ALL selected same-ID ownership changes +
+   * BOTH winning owner frames. No per-message transfer/frame siblings exist,
+   * so pull paging can never expose a half-moved turn. Any throw rolls back
+   * the whole op with no cursor advance (truthful blocked); `SyncOrphanError`
+   * stays retryable (arrival gap in the same page). No provisional maxSort
+   * projection escapes: dense orders materialize only from validated winning
+   * frames in the same commit.
+   *
+   * Envelope `(timestamp,id)` is the single transition clock for ALL moved
+   * membership parents and races each retained membership clock under
+   * timestamp-then-operationId LWW: greater wins, lesser suppresses the WHOLE
+   * op (atomic, no partial), identical full {timestamp,operationId} with
+   * divergent parents fails closed. Same timestamp with a DIFFERENT
+   * operationId is an ordered race (operationId decides), never fail-closed.
+   * Ordinary upserts never transfer owner (see applyUpsert). Tombstones keep
+   * delete-wins (any winning own/topic/dest-branch tombstone suppresses the
+   * whole op). Unknown branch/topic/message/anchor with no tombstone is a
+   * retryable orphan. Cross-topic, anchor-move, missing-anchor, and frame
+   * fixed-point violations fail closed — never a generic reparent, never a
+   * corrupted anchor/owner claimed as synced. Replay is idempotent.
+   */
+  private applyMoveTurnsToBranch(op: SyncOperation): boolean {
+    const db = this.getDb()
+    const tx = db as unknown as SyncTxExecutor
+    const p = op.payload ?? {}
+    const destBranchId = op.entityId
+    const topicId = p.topicId as string
+    const rawSource = p.sourceBranchId as string | null
+    const sourceBranchId = rawSource ?? null
+    const anchorMessageId = p.anchorMessageId as string
+    const movedIds = Array.isArray(p.movedMessageIds) ? ([...(p.movedMessageIds as unknown[])] as string[]) : []
+    const branchName = (p.branchName as string | null) ?? null
+    const branchCreatedAt = p.branchCreatedAt as string
+    const branchUpdatedAt = p.branchUpdatedAt as string
+    const sourceOrdered = Array.isArray(p.sourceOrderedChildIds)
+      ? ([...(p.sourceOrderedChildIds as unknown[])] as string[])
+      : []
+    const sourceFrameClock = p.sourceFrameClock as { timestamp: number; operationId: string }
+    const destFrameClock = p.destFrameClock as { timestamp: number; operationId: string }
+    if (
+      !topicId ||
+      !destBranchId ||
+      !anchorMessageId ||
+      movedIds.length === 0 ||
+      !branchCreatedAt ||
+      !branchUpdatedAt ||
+      !sourceFrameClock ||
+      !destFrameClock ||
+      op.entityType !== 'topic_branch'
+    ) {
+      throw new Error(`move_turns_to_branch malformed payload for ${String(destBranchId)}`)
+    }
+    // Whole-op delete-wins evaluated before any row mutation: any winning own
+    // tombstone suppresses the entire move even when the deleted row is gone.
+    for (const mid of movedIds) {
+      const ownTomb = this.getTombstone('message', mid)
+      if (ownTomb && this.isSuppressedByTombstone(op.timestamp, op.id, ownTomb)) {
+        logger.warn(`[applyMove] message ${mid} suppressed by own tombstone (delete-wins, whole move suppressed)`)
+        return false
+      }
+    }
+    const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
+    if (!topicRow) {
+      const topicTomb = this.getTombstone('topic', topicId)
+      if (topicTomb) {
+        for (const mid of movedIds) {
+          try {
+            this.setTombstoneInDb(db, 'message', mid, topicTomb.timestamp, topicTomb.operationId)
+          } catch {}
+        }
+        logger.warn(`[applyMove] topic ${topicId} missing with tombstone (delete-wins, whole move suppressed)`)
+        return false
+      }
+      throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: topic ${topicId} missing`)
+    }
+    const topicTomb = this.getTombstone('topic', topicId)
+    if (topicTomb && this.isSuppressedByTombstone(op.timestamp, op.id, topicTomb)) {
+      for (const mid of movedIds) {
+        try {
+          this.setTombstoneInDb(db, 'message', mid, topicTomb.timestamp, topicTomb.operationId)
+        } catch {}
+      }
+      logger.warn(`[applyMove] suppressed by topic tombstone ${topicId} (delete-wins)`)
+      return false
+    }
+    const destTomb = this.getTombstone('topic_branch', destBranchId)
+    if (destTomb && this.isSuppressedByTombstone(op.timestamp, op.id, destTomb)) {
+      logger.warn(`[applyMove] suppressed by branch tombstone ${destBranchId} (delete-wins)`)
+      return false
+    }
+    // Destination branch: create or verify immutable identity. Unknown with no
+    // tombstone is handled below via anchor/parent checks (orphan if deps miss).
+    let destRow: { topicId: string; parentBranchId: string | null; anchorMessageId: string } | undefined
+    try {
+      const found = tx.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, destBranchId)).get() as
+        | { topicId: string; parentBranchId: string | null; anchorMessageId: string }
+        | undefined
+      destRow = found ?? undefined
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) destRow = undefined
+      else throw e
+    }
+    if (destRow) {
+      if (
+        destRow.topicId !== topicId ||
+        (destRow.parentBranchId ?? null) !== sourceBranchId ||
+        destRow.anchorMessageId !== anchorMessageId
+      ) {
+        throw new SyncTombstoneError(`move_turns_to_branch branch identity mismatch for ${destBranchId}`)
+      }
+    }
+    // Parent route must exist for frame persistence (orphan if gap in page).
+    if (sourceBranchId !== null) {
+      let parentRow: { topicId: string } | undefined
+      try {
+        const found = tx.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, sourceBranchId)).get()
+        parentRow = found ? { topicId: (found as { topicId: string }).topicId } : undefined
+      } catch (e) {
+        if (e instanceof Error && /no such table/i.test(e.message)) parentRow = undefined
+        else throw e
+      }
+      if (!parentRow) {
+        const parentTomb = this.getTombstone('topic_branch', sourceBranchId)
+        if (parentTomb) {
+          logger.warn(`[applyMove] suppressed by source parent tombstone ${sourceBranchId}`)
+          return false
+        }
+        throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: source parent ${sourceBranchId} missing`)
+      }
+      if (parentRow.topicId !== topicId) throw new Error(`move_turns_to_branch source parent topic mismatch`)
+    }
+    // Anchor must exist, same topic, owned by the source route. Unknown anchor
+    // defers (may come later in the same page); mismatch fails closed.
+    const anchorRow = db.select().from(schema.messages).where(eq(schema.messages.id, anchorMessageId)).get()
+    if (!anchorRow) {
+      const anchorTomb = this.getTombstone('message', anchorMessageId)
+      if (anchorTomb) throw new Error(`move_turns_to_branch anchor ${anchorMessageId} tombstoned`)
+      throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: anchor ${anchorMessageId} missing`)
+    }
+    if (anchorRow.topicId !== topicId) throw new Error(`move_turns_to_branch anchor topic mismatch`)
+    if ((anchorRow.branchId ?? null) !== sourceBranchId) {
+      throw new Error(`move_turns_to_branch anchor not owned by source route`)
+    }
+    // Moved rows: existence, topic, anchor guards. Unknown message defers.
+    try {
+      const allAnchors = tx
+        .select()
+        .from(schema.topicBranches)
+        .where(eq(schema.topicBranches.topicId, topicId))
+        .all() as Array<{ anchorMessageId: string }>
+      const anchorSet = new Set(allAnchors.map((b) => b.anchorMessageId))
+      for (const mid of movedIds) {
+        if (anchorSet.has(mid)) throw new Error(`move_turns_to_branch rejected: ${mid} is an existing branch anchor`)
+      }
+    } catch (e) {
+      if (e instanceof Error && /no such table/i.test(e.message)) {
+        throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: branch inventory missing`)
+      }
+      throw e
+    }
+    for (const mid of movedIds) {
+      const row = db.select().from(schema.messages).where(eq(schema.messages.id, mid)).get()
+      if (!row) throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: message ${mid} missing`)
+      if (row.topicId !== topicId) throw new Error(`move_turns_to_branch cross-topic rejected for ${mid}`)
+    }
+    // Transition-clock race per message against retained membership clocks.
+    // Atomic whole-op: any loser suppresses the entire move (no partial owner
+    // half-move); identical full-clock divergence fails closed.
+    let allAlready = true
+    for (const mid of movedIds) {
+      const retained = this.getMembershipClockInTx(tx, 'message', mid)
+      if (!retained) {
+        allAlready = false
+        continue
+      }
+      if (retained.parentId === destBranchId && retained.timestamp === op.timestamp && retained.operationId === op.id) {
+        continue
+      }
+      if (retained.timestamp === op.timestamp && retained.operationId === op.id && retained.parentId !== destBranchId) {
+        throw new SyncTombstoneError(
+          `move_turns_to_branch identical-clock divergent owners for message/${mid}: retained ${retained.parentId} vs incoming ${destBranchId}`
+        )
+      }
+      if (this.compareLww(op.timestamp, op.id, retained.timestamp, retained.operationId) <= 0) {
+        logger.info(`[applyMove] message ${mid} loses transition race (whole move suppressed, no partial)`)
+        return false
+      }
+      allAlready = false
+    }
+    // Idempotent replay: all memberships already at this compound clock and
+    // both frames already at payload clocks with same orders.
+    if (allAlready) {
+      const srcKind = sourceBranchId === null ? 'topicMessage' : 'branchSuffix'
+      const srcParent = sourceBranchId === null ? topicId : sourceBranchId
+      const srcFrame = this.getParentFrameInTx(tx, srcKind, srcParent)
+      const dstFrame = this.getParentFrameInTx(tx, 'branchSuffix', destBranchId)
+      const srcSame =
+        srcFrame &&
+        srcFrame.timestamp === sourceFrameClock.timestamp &&
+        srcFrame.operationId === sourceFrameClock.operationId &&
+        JSON.stringify(srcFrame.orderedChildIds) === JSON.stringify(sourceOrdered)
+      const dstSame =
+        dstFrame &&
+        dstFrame.timestamp === destFrameClock.timestamp &&
+        dstFrame.operationId === destFrameClock.operationId &&
+        JSON.stringify(dstFrame.orderedChildIds) === JSON.stringify(movedIds)
+      if (srcSame && dstSame) return false
+      // Same memberships but frames differ (e.g., local repair minted newer
+      // frames): the compound already converged owners; do not roll back.
+      if (srcFrame && dstFrame) return false
+    }
+    // Structural live-set check before any write: source owner live set must
+    // equal moved ∪ sourceOrdered (disjoint), dest must hold no other live
+    // rows (new branch suffix is exactly moved). Otherwise the payload is
+    // stale vs concurrent state → whole-op rollback (truthful blocked, not
+    // silent partial).
+    const liveSourceOwned = (() => {
+      if (sourceBranchId === null) {
+        return db
+          .select({ id: schema.messages.id, status: schema.messages.status })
+          .from(schema.messages)
+          .where(and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId)))
+          .all()
+          .filter((r) => isStableMessageStatus(r.status))
+          .map((r) => r.id)
+      }
+      return db
+        .select({ id: schema.messages.id, status: schema.messages.status })
+        .from(schema.messages)
+        .where(eq(schema.messages.branchId, sourceBranchId))
+        .all()
+        .filter((r) => isStableMessageStatus(r.status))
+        .map((r) => r.id)
+    })()
+    const liveSourceSet = new Set(liveSourceOwned)
+    const expectedSourceSet = new Set([...movedIds, ...sourceOrdered])
+    // Every live source row must be accounted for; every expected remaining
+    // row must be live source-owned (moved rows are still source-owned at this
+    // pre-mutation point).
+    for (const id of liveSourceOwned) {
+      if (!expectedSourceSet.has(id)) {
+        throw new Error(`move_turns_to_branch source live-set mismatch: unexpected live ${id}`)
+      }
+    }
+    for (const id of sourceOrdered) {
+      if (!liveSourceSet.has(id)) {
+        const tomb = this.getTombstone('message', id)
+        if (tomb) throw new Error(`move_turns_to_branch source remaining ${id} tombstoned`)
+        throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: source remaining ${id} missing`)
+      }
+    }
+    for (const mid of movedIds) {
+      if (!liveSourceSet.has(mid)) {
+        // Already at dest (concurrent winner) would have been caught as loser
+        // above; a non-live moved id here means transient/deleted state.
+        const row = db.select().from(schema.messages).where(eq(schema.messages.id, mid)).get()
+        if (!row) throw new SyncOrphanError(`orphan move_turns_to_branch ${op.id}: moved ${mid} missing`)
+        if (!isStableMessageStatus(row.status)) throw new Error(`move_turns_to_branch moved ${mid} not stable`)
+        if ((row.branchId ?? null) !== sourceBranchId && (row.branchId ?? null) !== destBranchId) {
+          throw new Error(`move_turns_to_branch moved ${mid} owned elsewhere`)
+        }
+      }
+    }
+    // Create the branch row when missing (same tx, atomic with owners+frames).
+    if (!destRow) {
+      db.insert(schema.topicBranches)
+        .values({
+          id: destBranchId,
+          topicId,
+          parentBranchId: sourceBranchId,
+          anchorMessageId,
+          name: branchName,
+          createdAt: branchCreatedAt,
+          updatedAt: branchUpdatedAt,
+          extra: null
+        })
+        .onConflictDoNothing()
+        .run()
+      const created = db.select().from(schema.topicBranches).where(eq(schema.topicBranches.id, destBranchId)).get()
+      if (!created) throw new Error(`move_turns_to_branch branch ${destBranchId} creation failed`)
+      if (
+        created.topicId !== topicId ||
+        (created.parentBranchId ?? null) !== sourceBranchId ||
+        created.anchorMessageId !== anchorMessageId
+      ) {
+        throw new SyncTombstoneError(`move_turns_to_branch branch identity mismatch after create for ${destBranchId}`)
+      }
+      this.updateFieldClocksInDb(
+        db,
+        'topic_branch',
+        destBranchId,
+        { name: branchName, createdAt: branchCreatedAt, updatedAt: branchUpdatedAt },
+        op.timestamp,
+        op.id
+      )
+    }
+    // Apply ALL ownership changes + membership transitions (no provisional
+    // order: dense sortOrders come only from validated winning frames below).
+    for (const mid of movedIds) {
+      const moved = this.moveMessageMembershipParentInTx(tx, mid, destBranchId, op.timestamp, op.id)
+      if (!moved) throw new Error(`move_turns_to_branch membership transition failed for ${mid}`)
+    }
+    // Owner rows follow membership atomically in the same Tx. sortOrder here
+    // is temporary; the validated winning frames below materialize the final
+    // dense orders (no provisional projection escapes).
+    for (const mid of movedIds) {
+      db.update(schema.messages).set({ branchId: destBranchId }).where(eq(schema.messages.id, mid)).run()
+    }
+    // Membership-clock fixed-point validation for BOTH frames before any
+    // frame persist: every listed child must have matching membership with
+    // clock <= frameClock; every live child with clock <= frameClock must be
+    // listed; membership > frameClock is a concurrent race → whole-op rollback
+    // (blocked, not silent partial). Tombstoned winners are excluded like the
+    // order_frame path.
+    const validateFrameFixedPoint = (
+      kind: 'topicMessage' | 'branchSuffix',
+      parentId: string,
+      ordered: string[],
+      frameClock: { timestamp: number; operationId: string }
+    ): void => {
+      const seen = new Set<string>()
+      for (const cid of ordered) {
+        if (seen.has(cid)) throw new Error(`move_turns_to_branch duplicate frame child ${cid}`)
+        seen.add(cid)
+        const mem = this.getMembershipClockInTx(tx, 'message', cid)
+        if (!mem) throw new SyncOrphanError(`orphan move_turns_to_branch frame member ${cid} missing membership`)
+        if (mem.parentId !== parentId) throw new Error(`move_turns_to_branch frame parent mismatch for ${cid}`)
+        if (this.compareLww(mem.timestamp, mem.operationId, frameClock.timestamp, frameClock.operationId) > 0) {
+          throw new Error(`move_turns_to_branch frame clock does not cover member ${cid}`)
+        }
+        const row = db.select().from(schema.messages).where(eq(schema.messages.id, cid)).get()
+        if (!row) throw new SyncOrphanError(`orphan move_turns_to_branch frame member ${cid} missing row`)
+        if (!isStableMessageStatus(row.status)) throw new Error(`move_turns_to_branch frame member ${cid} not stable`)
+      }
+      // Completeness: every live child of this parent with membership <=
+      // frameClock must be listed; membership > frameClock means a concurrent
+      // newer owner that this compound cannot cover → blocked.
+      const liveRows =
+        kind === 'topicMessage'
+          ? db
+              .select({ id: schema.messages.id, status: schema.messages.status })
+              .from(schema.messages)
+              .where(and(eq(schema.messages.topicId, topicId), isNull(schema.messages.branchId)))
+              .all()
+          : db
+              .select({ id: schema.messages.id, status: schema.messages.status })
+              .from(schema.messages)
+              .where(eq(schema.messages.branchId, parentId))
+              .all()
+      for (const r of liveRows) {
+        if (!isStableMessageStatus(r.status)) continue
+        const ownTomb = this.getTombstone('message', r.id)
+        const mem = this.getMembershipClockInTx(tx, 'message', r.id)
+        if (!mem) throw new Error(`move_turns_to_branch live child ${r.id} missing membership`)
+        if (mem.parentId !== parentId) continue
+        if (ownTomb && this.isSuppressedByTombstone(mem.timestamp, mem.operationId, ownTomb)) continue
+        if (this.compareLww(mem.timestamp, mem.operationId, frameClock.timestamp, frameClock.operationId) > 0) {
+          throw new Error(`move_turns_to_branch live child ${r.id} newer than frame clock`)
+        }
+        if (!seen.has(r.id)) throw new Error(`move_turns_to_branch frame missing live child ${r.id}`)
+      }
+    }
+    const srcKind: 'topicMessage' | 'branchSuffix' = sourceBranchId === null ? 'topicMessage' : 'branchSuffix'
+    const srcParent = sourceBranchId === null ? topicId : sourceBranchId
+    validateFrameFixedPoint(srcKind, srcParent, sourceOrdered, sourceFrameClock)
+    validateFrameFixedPoint('branchSuffix', destBranchId, movedIds, destFrameClock)
+    // Persist BOTH winning frames verbatim (fail-closed when not winning vs
+    // existing) + dense materialization, atomically with owners+branch.
+    this.persistParentFrameInTx(tx, {
+      kind: srcKind,
+      parentId: srcParent,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...sourceOrdered],
+      timestamp: sourceFrameClock.timestamp,
+      operationId: sourceFrameClock.operationId
+    })
+    this.persistParentFrameInTx(tx, {
+      kind: 'branchSuffix',
+      parentId: destBranchId,
+      frameVersion: 'parent-order-frame-v1',
+      orderedChildIds: [...movedIds],
+      timestamp: destFrameClock.timestamp,
+      operationId: destFrameClock.operationId
+    })
+    if (srcKind === 'topicMessage') this.materializeTopicMessageOrder(db, srcParent, [...sourceOrdered])
+    else this.materializeBranchSuffixOrder(db, [...sourceOrdered])
+    this.materializeBranchSuffixOrder(db, [...movedIds])
+    // Advance entity clocks for branch + every moved message on the transition
+    // clock (same LWW as upserts) so cursor-0 baselines carry move causality.
+    // Field clocks for messages are untouched (content unchanged); branch
+    // mutable field clocks were set at creation above (or converge below).
+    if (destRow) {
+      this.updateFieldClocksInDb(
+        db,
+        'topic_branch',
+        destBranchId,
+        { name: branchName, createdAt: branchCreatedAt, updatedAt: branchUpdatedAt },
+        op.timestamp,
+        op.id
+      )
+    }
+    for (const mid of movedIds) {
+      const clockRow = tx
+        .select()
+        .from(schema.syncEntityClock)
+        .where(eq(schema.syncEntityClock.entityType, 'message'))
+        .all()
+        .find((r) => r.entityId === mid) as typeof schema.syncEntityClock.$inferSelect | undefined
+      if (!clockRow || this.compareLww(op.timestamp, op.id, clockRow.timestamp, clockRow.operationId) > 0) {
+        tx.insert(schema.syncEntityClock)
+          .values({ entityType: 'message', entityId: mid, timestamp: op.timestamp, operationId: op.id })
+          .onConflictDoUpdate({
+            target: [schema.syncEntityClock.entityType, schema.syncEntityClock.entityId],
+            set: { timestamp: op.timestamp, operationId: op.id }
+          })
+          .run()
+      }
+    }
+    return true
+  }
+
+  /**
    * Per-field LWW upsert (LOCK-PERSONAL-010): absent payload keys carry no
    * intent and are preserved; present keys win/lose per field against
    * sync_field_clock using timestamp + operationId tie-break. Same-field
@@ -7203,12 +7864,20 @@ export class SyncService {
         logger.warn(`[applyUpsert] message ${id} reparent ${existingPre.topicId} -> ${topicId} rejected`)
         return false
       }
-      if (existingPre && (existingPre.branchId ?? null) !== incomingBranchId) {
-        // Immutable owner identity: never move a message across routes.
+      // Owner is exclusive to the purpose-specific `move_turns_to_branch`
+      // compound op: an ordinary upsert addressing a different owner NEVER
+      // moves the row and NEVER updates the membership (ownership) clock.
+      // For an existing same-topic known message, supported mutable content
+      // fields still merge by per-field clocks regardless of the payload's
+      // stale different branchId — the current authoritative owner,
+      // membership parent, and dense order are retained. topicId reparent and
+      // block messageId reparent stay rejected below; malformed/unknown branch
+      // stays orphan/fail-closed via the branch gating above.
+      const ownerMismatched = !!existingPre && (existingPre.branchId ?? null) !== incomingBranchId
+      if (ownerMismatched) {
         logger.warn(
-          `[applyUpsert] message ${id} owner ${existingPre.branchId ?? 'main'} -> ${incomingBranchId ?? 'main'} rejected`
+          `[applyUpsert] message ${id} owner ${existingPre.branchId ?? 'main'} -> ${incomingBranchId ?? 'main'} preserved; content still contests by field clocks`
         )
-        return false
       }
       const topicRow = db.select().from(schema.topics).where(eq(schema.topics.id, topicId)).get()
       if (!topicRow) {
@@ -7305,6 +7974,11 @@ export class SyncService {
       const winnersM: Array<{ field: string; value: unknown }> = []
       for (const field of Object.keys(p)) {
         if (!MESSAGE_CLOCKED.has(field)) continue
+        // Owner-mismatched content merge never touches order: dense sortOrder
+        // is owned by the winning order frames (compound move frames for
+        // moved owners), never by an ordinary content op addressing a
+        // different owner.
+        if (ownerMismatched && field === 'sortOrder') continue
         const raw = p[field]
         if (raw === undefined) continue
         let incomingVal: unknown

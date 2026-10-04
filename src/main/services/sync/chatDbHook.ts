@@ -474,6 +474,45 @@ function ensureMessageParentClosure(messageId: string, childTs: number): boolean
 }
 
 /**
+ * Channels that can actually enqueue sync intent through this post-commit
+ * hook. This is the hook-side allowlist backing the switch below: exactly
+ * the transactional mutation set (mirrors the IPC TX-owned set — those rows
+ * are already captured atomically in-tx, the hook stays as fallback for
+ * direct callers that bypassed the aggregate).
+ *
+ * Everything else — pure reads (fetch/get/list/search/count channels) and
+ * explicitly unsupported compound mutations (reorder/resend/clone/paste/
+ * branch/segment/answer-selection/...) — is noncapturable: it must return
+ * before any barrier/config/clock/outbox side effect. In particular a held
+ * publish barrier must never turn a read into a durable capture failure.
+ */
+const CAPTURABLE_SYNC_CHANNELS: ReadonlySet<string> = new Set<string>([
+  IpcChannel.ChatDb_EnsureTopic,
+  IpcChannel.ChatDb_AppendMessage,
+  IpcChannel.ChatDb_UpdateMessage,
+  IpcChannel.ChatDb_UpdateMessageAndBlocks,
+  IpcChannel.ChatDb_UpdateBlocks,
+  IpcChannel.ChatDb_UpdateSingleBlock,
+  IpcChannel.ChatDb_BulkAddBlocks,
+  IpcChannel.ChatDb_DeleteBlocks,
+  IpcChannel.ChatDb_DeleteMessage,
+  IpcChannel.ChatDb_DeleteMessages,
+  IpcChannel.ChatDb_UpdateTopicMetadata,
+  IpcChannel.ChatDb_SoftDeleteTopic,
+  IpcChannel.ChatDb_HardDeleteTopic,
+  IpcChannel.ChatDb_RestoreTopic
+])
+
+/**
+ * True when the channel can capture sync intent via this hook. Shared
+ * classifier so the IPC layer and direct callers agree without duplicated
+ * fragile lists; the switch below remains the authoritative dispatch.
+ */
+export function isCapturableSyncChannel(channel: string): boolean {
+  return CAPTURABLE_SYNC_CHANNELS.has(channel)
+}
+
+/**
  * Capture actual changed entities only. Missing/foreign/no-op targets must not
  * emit destructive or stale remote operations:
  * - Upsert paths re-read the committed row; a missing row means no-op -> skip.
@@ -500,6 +539,13 @@ function ensureMessageParentClosure(messageId: string, childTs: number): boolean
  * limitation, not claimed atomicity.
  */
 export function handleChatDbSuccessForSync(channel: string, request: any, result?: any): void {
+  // Noncapturable channels (pure reads + explicitly unsupported compound
+  // mutations) never capture: return before the publish-barrier refusal and
+  // every other capture side effect (config/clock/outbox/capture-error
+  // writes) so reads succeed during publication without durable errors.
+  if (!isCapturableSyncChannel(channel)) {
+    return
+  }
   // Publisher-barrier quiescence (SYNC-DATA-026): the post-commit fallback
   // cannot roll back already-committed rows, so while the barrier is held it
   // refuses capture fail-closed — no outbox intent is written — and records

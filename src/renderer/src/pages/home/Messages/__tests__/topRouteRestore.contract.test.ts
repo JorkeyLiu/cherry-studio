@@ -244,14 +244,51 @@ describe('chooseTopFirstPositionPlan (anchor outranks isAtBottom)', () => {
     ).toEqual({ kind: 'bottom' })
   })
 
-  it('invalid snapshot selects the terminal default even with an anchor', () => {
+  it('invalid snapshot selects the deterministic bottom default, ignoring stale anchor/raw/bottom values', () => {
     expect(
       chooseTopFirstPositionPlan({
         saved: { scrollTop: -8, anchorId: null, messageId: 'stale', intraRowOffset: -51, isAtBottom: true },
         snapshotInvalidForRoute: true,
         routeSavedRowAnchor: null
       })
-    ).toEqual({ kind: 'none' })
+    ).toEqual({ kind: 'bottom' })
+    // Stale raw scrollTop without bottom flag is still ignored.
+    expect(
+      chooseTopFirstPositionPlan({
+        saved: {
+          scrollTop: -400,
+          anchorId: 'stale-anchor',
+          messageId: 'stale',
+          intraRowOffset: -51,
+          isAtBottom: false
+        },
+        snapshotInvalidForRoute: true,
+        routeSavedRowAnchor: null
+      })
+    ).toEqual({ kind: 'bottom' })
+    // Missing snapshot entirely is still ignored the same way.
+    expect(
+      chooseTopFirstPositionPlan({ saved: null, snapshotInvalidForRoute: true, routeSavedRowAnchor: null })
+    ).toEqual({ kind: 'bottom' })
+  })
+
+  it('invalid-snapshot bottom default is committable without anchor coverage, while a valid absent anchor still fails visible', () => {
+    expect(
+      isTopStableCommittable({
+        isAtBottom: false,
+        snapshotInvalidForRoute: true,
+        requestedAnchor: null,
+        projectionContains: false,
+        domConnected: false
+      })
+    ).toBe(true)
+    const d = decideTopRestoreAnchor({
+      canonicalAnchor: 'valid-but-absent',
+      snapshotInvalidForRoute: false,
+      loadedIds: new Set(['other'])
+    })
+    expect(d.mustFailVisible).toBe(true)
+    expect(d.routeSavedRowAnchor).toBeNull()
   })
 
   it('no snapshot selects the deterministic bottom default', () => {

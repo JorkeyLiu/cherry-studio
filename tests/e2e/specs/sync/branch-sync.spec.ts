@@ -42,7 +42,11 @@ import {
   topicExistsViaApi
 } from '../../pages/sync.page'
 import type { SecondSyncProfile } from '../../utils/sync-second-profile'
-import { closeSecondSyncProfile, launchSecondSyncProfile } from '../../utils/sync-second-profile'
+import {
+  closeSecondSyncProfile,
+  launchSecondSyncProfile,
+  relaunchSecondSyncProfile
+} from '../../utils/sync-second-profile'
 import type { TestRelayHandle } from '../../utils/sync-relay'
 import { startTestRelay } from '../../utils/sync-relay'
 
@@ -68,6 +72,7 @@ type ChatDbMethod =
   | 'appendMessage'
   | 'updateMessage'
   | 'fetchMessages'
+  | 'moveSelectedTurnsToNewBranch'
 
 interface WindowChatDb {
   api?: {
@@ -234,6 +239,47 @@ async function updateBranchMessageViaApi(
 async function fetchRouteViaApi(page: Page, topicId: string, branchId: string | null): Promise<RouteSnapshot> {
   const raw = await invokeChatDb(page, 'fetchMessages', { topicId, branchId })
   return toRouteSnapshot(unwrapOkValue(raw, `fetchMessages(branch=${branchId ?? 'main'})`), 'fetchMessages')
+}
+
+export interface MoveSelectedTurnsResult {
+  branch: BranchWire
+  movedMessageIds: string[]
+  anchorMessageId: string
+}
+
+async function moveSelectedTurnsViaApi(
+  page: Page,
+  args: {
+    topicId: string
+    sourceBranchId?: string | null
+    selectedGroupIds: string[]
+    expectedSelectedMessageIds: string[]
+    name?: string
+  }
+): Promise<MoveSelectedTurnsResult> {
+  const value = unwrapOkValue(
+    await invokeChatDb(page, 'moveSelectedTurnsToNewBranch', {
+      topicId: args.topicId,
+      sourceBranchId: args.sourceBranchId ?? null,
+      selectedGroupIds: args.selectedGroupIds,
+      expectedSelectedMessageIds: args.expectedSelectedMessageIds,
+      name: args.name ?? null
+    }),
+    'moveSelectedTurnsToNewBranch'
+  )
+  if (!value || typeof value !== 'object') throw new Error('moveSelectedTurnsToNewBranch value is non-object')
+  const v = value as Record<string, unknown>
+  if (!v.branch || typeof v.branch !== 'object') throw new Error('moveSelectedTurnsToNewBranch value.branch missing')
+  if (!Array.isArray(v.movedMessageIds)) throw new Error('moveSelectedTurnsToNewBranch movedMessageIds invalid')
+  if (typeof v.anchorMessageId !== 'string') throw new Error('moveSelectedTurnsToNewBranch anchorMessageId invalid')
+  return {
+    branch: toBranchWire(v.branch, 'moveSelectedTurnsToNewBranch'),
+    movedMessageIds: (v.movedMessageIds as unknown[]).map((id) => {
+      if (typeof id !== 'string' || id.length === 0) throw new Error('moveSelectedTurnsToNewBranch moved id invalid')
+      return id
+    }),
+    anchorMessageId: v.anchorMessageId
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -882,6 +928,104 @@ test.describe('Branch sync two-profile real path', () => {
       expect(relay.getBaselineGet200CountForTests(deviceC.deviceCode)).toBeGreaterThanOrEqual(1)
     } finally {
       await closeAll()
+    }
+  })
+
+  test('synced existing IDs move to a new branch and converge peer routes without duplication', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay(RELAY_TOKEN)
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      let pageB = profileB.page
+
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
+
+      // A establishes four synced main-route turns (user + askId assistant each).
+      const topic = 'e2e-branch-topic-5'
+      await ensureTopicViaApi(pageA, topic, 'Branch Topic Five')
+      const turns = ['A', 'B', 'C', 'D'] as const
+      const ids: Record<string, string> = {}
+      for (const t of turns) {
+        const userId = `e2e-branch5-u${t}`
+        const assistantId = `e2e-branch5-a${t}`
+        ids[`u${t}`] = userId
+        ids[`a${t}`] = assistantId
+        await appendMessageViaApi(pageA, topic, messageJson(userId, topic, `move five ${t} user`), [
+          blockJson(`e2e-branch5-k${t}u`, userId, `move five ${t} user`)
+        ])
+        await appendMessageViaApi(
+          pageA,
+          topic,
+          { ...messageJson(assistantId, topic, `move five ${t} assistant`), role: 'assistant', askId: userId },
+          [blockJson(`e2e-branch5-k${t}a`, assistantId, `move five ${t} assistant`)]
+        )
+      }
+      const mainBefore = ['uA', 'aA', 'uB', 'aB', 'uC', 'aC', 'uD', 'aD'].map((k) => ids[k])
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForRouteIds(pageB, topic, null, mainBefore)
+
+      // A moves the already-synced B,C turns to a new child branch via the
+      // production ChatDb IPC (same contract the edit-mode menu invokes).
+      const moved = await moveSelectedTurnsViaApi(pageA, {
+        topicId: topic,
+        sourceBranchId: null,
+        selectedGroupIds: [ids.uB, ids.uC],
+        expectedSelectedMessageIds: [ids.uB, ids.aB, ids.uC, ids.aC],
+        name: 'MovedBC'
+      })
+      expect(moved.movedMessageIds).toEqual([ids.uB, ids.aB, ids.uC, ids.aC])
+      expect(moved.anchorMessageId).toBe(ids.aA)
+      expect(moved.branch.parentBranchId).toBeNull()
+      const branchId = moved.branch.id
+      const parentAfter = [ids.uA, ids.aA, ids.uD, ids.aD]
+      const childAfter = [ids.uA, ids.aA, ids.uB, ids.aB, ids.uC, ids.aC]
+      await pollForRouteIds(pageA, topic, null, parentAfter)
+      await pollForRouteIds(pageA, topic, branchId, childAfter)
+
+      // Incremental rounds converge the peer: same branch node, same effective
+      // routes, moved IDs owned by the branch (mutable there, absent on
+      // main), moved blocks on the child route only, no duplicated rows.
+      expect((await runSyncViaApi(pageA)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForBranchCatalogIds(pageB, topic, [branchId])
+      await pollForRouteIds(pageB, topic, null, parentAfter)
+      await pollForRouteIds(pageB, topic, branchId, childAfter)
+      const catalogB = await listBranchesViaApi(pageB, topic)
+      expect(catalogB.find((b) => b.id === branchId)?.anchorMessageId).toBe(ids.aA)
+      const childB = await fetchRouteViaApi(pageB, topic, branchId)
+      expect(childB.blockContent.get(`e2e-branch5-kBu`)).toBe('move five B user')
+      expect(childB.blockContent.get(`e2e-branch5-kCa`)).toBe('move five C assistant')
+      const mainB = await fetchRouteViaApi(pageB, topic, null)
+      expect(mainB.blockContent.has(`e2e-branch5-kBu`)).toBe(false)
+      expect(mainB.blockContent.has(`e2e-branch5-kCa`)).toBe(false)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusB.lastError).toBeNull()
+      expect(statusB.pendingCount).toBe(0)
+
+      // Same-profile relaunch of the peer: catalog, both effective routes,
+      // and ownership survive with the relay still alive.
+      profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
+        expectedEndpoint: relay.endpoint,
+        expectedToken: RELAY_TOKEN,
+        expectedEnabled: true
+      })
+      pageB = profileB.page
+      await pollForBranchCatalogIds(pageB, topic, [branchId])
+      await pollForRouteIds(pageB, topic, null, parentAfter)
+      await pollForRouteIds(pageB, topic, branchId, childAfter)
+      const statusRelaunched = await getSyncStatusViaApi(pageB)
+      expect(statusRelaunched.lastError).toBeNull()
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
     }
   })
 })

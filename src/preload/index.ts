@@ -35,6 +35,7 @@ import type {
   ListFileRefsByFileRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
+  MoveSelectedTurnsToNewBranchRequest,
   PasteMessagesToTopicRequest,
   PurgeExpiredTopicsRequest,
   RegenerateAssistantMessageRequest,
@@ -791,6 +792,8 @@ const api = {
     listBranches: (request: ListBranchesRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_ListBranches, request),
     renameBranch: (request: RenameBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_RenameBranch, request),
     deleteBranch: (request: DeleteBranchRequest) => ipcRenderer.invoke(IpcChannel.ChatDb_DeleteBranch, request),
+    moveSelectedTurnsToNewBranch: (request: MoveSelectedTurnsToNewBranchRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch, request),
     // S6.2c-2: insert after stable anchor (additive, keeps old append intact)
     insertMessagesAfterAnchor: (request: InsertMessagesAfterAnchorRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_InsertMessagesAfterAnchor, request),

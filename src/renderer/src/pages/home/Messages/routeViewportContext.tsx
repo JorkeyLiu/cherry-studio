@@ -149,7 +149,12 @@ export const useRouteViewport = (): RouteViewportContextValue => {
 /** Optional access for hooks that must keep working outside the provider (tests). */
 export const useOptionalRouteViewport = (): RouteViewportContextValue | null => use(RouteViewportContext)
 
-export const viewportPhaseAttrFor = (phase: string, intentKind?: string | null): ViewportPhaseAttr => {
+export const viewportPhaseAttrFor = (
+  phase: string,
+  intentKind?: string | null,
+  isActivationSession?: boolean,
+  isActivationRequired?: boolean
+): ViewportPhaseAttr => {
   // Divider + top fetch-hold keeps the current displayed/rendered window on
   // screen (revealed, never visibility:hidden): the fetch resolves around an
   // already-visible resident anchor (divider fork anchor or top saved anchor)
@@ -159,8 +164,37 @@ export const viewportPhaseAttrFor = (phase: string, intentKind?: string | null):
   // positioning) hides when visible eligibility/commit fails. Intent comes
   // from the controller (sole truth); no UI-local route truth is consulted or
   // advanced here.
+  //
+  // Page-resume gate (Chat→Settings→Chat): a reactivated session's fetch-hold
+  // stays hidden-but-measurable (`positioning`) even for top/divider intents.
+  // Retained display:none geometry from the hidden interval is not valid until
+  // the retained window is verified + positioned pre-paint; the first visible
+  // frame must already carry the saved message+offset/bottom. Ordinary
+  // transitions keep the incremental visible behavior above.
+  //
+  // Armed-idle gate (F1): after `detach()` the short-lived transaction is
+  // cancelled (phase idle, rendered cleared, epoch advanced) while the
+  // reactivation stays armed (`activationRequired`). The retained DOM must not
+  // paint unverified before the single TOP pipeline opens its guarded
+  // fetch-hold, so armed idle maps hidden (`positioning`, visibility:hidden
+  // but measurable) instead of `idle` (visible).
+  //
+  // Activation settle gate (F2): an activation session stays hidden through
+  // `aligned`/`searching` until the hidden settle verifies effective
+  // alignment + projection coverage + required layout settle and the deferred
+  // reveal/stable commit releases it. Ordinary (non-activation) aligned/
+  // searching stay visible incremental; stable/terminal always reveal
+  // (terminal fail-visible releases once, preserving the prior snapshot).
   if (phase === 'positioning') return 'positioning'
-  if (phase === 'fetch-hold') return intentKind === 'divider' || intentKind === 'top' ? 'revealed' : 'positioning'
+  if (phase === 'fetch-hold') {
+    if (isActivationSession === true) return 'positioning'
+    return intentKind === 'divider' || intentKind === 'top' ? 'revealed' : 'positioning'
+  }
+  if (phase === 'idle') {
+    if (isActivationRequired === true) return 'positioning'
+    return 'idle'
+  }
+  if (isActivationSession === true && (phase === 'aligned' || phase === 'searching')) return 'positioning'
   if (phase === 'idle') return 'idle'
   return 'revealed'
 }
@@ -268,7 +302,18 @@ export function RouteViewportProvider({
   // starts here, so parent/child setup can never open parallel pipelines or
   // double-release. Ordinary `version` bumps (controller progress) only
   // re-render visuals/keeper and never retrigger restore.
-  useEffect(() => {
+  //
+  // Pre-paint timing (F1): this is a layout effect so the detached-armed
+  // hidden state (idle + activationRequired → `positioning`) is published
+  // while still hidden, and the reattached hidden state is committed
+  // synchronously before Activity restores first paint. The single TOP
+  // pipeline itself stays passive (Messages `useEffect`) and still opens the
+  // guarded fetch-hold after first paint — but that first paint is already
+  // hidden via the armed-idle mapping, never an unverified visible frame.
+  // The detach cleanup notifies once so the hidden render caches the armed
+  // hidden attr before the show render; without it the value memo would stay
+  // stale-revealed until the passive attach ran after paint.
+  useLayoutEffect(() => {
     const owned = controllerRef.current
     // Reconnect setup (Activity visible): the short-lived transaction was
     // cancelled on detach with a fresh epoch + armed reactivation; make the
@@ -286,6 +331,12 @@ export function RouteViewportProvider({
         owned?.detach()
       } catch {}
       capturerRef.current = null
+      // Publish the armed idle-hidden state while still hidden so the next
+      // show's first paint (memo below recomputes from the mutated
+      // controller) is already `positioning`, never stale `revealed`/`idle`.
+      try {
+        notifyChanged()
+      } catch {}
     }
   }, [notifyChanged])
   useEffect(() => {
@@ -298,6 +349,17 @@ export function RouteViewportProvider({
     }) as unknown as void
   }, [])
 
+  // Fresh per-render mapping (never stale memo): the attr is derived from the
+  // live controller fields on every render, so the show's first render already
+  // reflects the detached-armed state even before the passive TOP request.
+  // The memo below only carries the computed string, never recomputes stale.
+  const viewportPhaseAttr = viewportPhaseAttrFor(
+    controller.currentPhase,
+    controller.currentIntent?.kind ?? null,
+    controller.isActivationSession,
+    controller.isActivationRequired
+  )
+
   const value = useMemo<RouteViewportContextValue>(
     () => ({
       controller,
@@ -308,7 +370,7 @@ export function RouteViewportProvider({
       readSnapshot,
       requestTopRoute,
       registerCapturer,
-      viewportPhaseAttr: viewportPhaseAttrFor(controller.currentPhase, controller.currentIntent?.kind ?? null)
+      viewportPhaseAttr
     }),
     [
       controller,
@@ -318,7 +380,8 @@ export function RouteViewportProvider({
       freezeDisplayed,
       readSnapshot,
       requestTopRoute,
-      registerCapturer
+      registerCapturer,
+      viewportPhaseAttr
     ]
   )
 

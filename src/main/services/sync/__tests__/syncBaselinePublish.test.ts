@@ -50,7 +50,7 @@ import { chatDbService } from '../../chatDb'
 import { ChatDbAggregateService } from '../../chatDb/ChatDbAggregateService'
 import { runMigrations } from '../../chatDb/migration'
 import * as schema from '../../chatDb/schema'
-import { handleChatDbSuccessForSync } from '../chatDbHook'
+import { handleChatDbSuccessForSync, isCapturableSyncChannel } from '../chatDbHook'
 import { syncClient } from '../SyncClient'
 import { syncService } from '../SyncService'
 import { seedRegisteredAttachedSyncService } from './helpers/syncTestRegistration'
@@ -622,6 +622,117 @@ describe('publish barrier quiescence', () => {
     const recoveredAppend = agg.appendMessage('q-topic-3', makeMessageJson('q-topic-3', 'q-msg-3') as never, [])
     expect(recoveredAppend.ok).toBe(true)
     expect(sqlite.prepare("SELECT id FROM messages WHERE id='q-msg-3'").get()).toBeTruthy()
+  })
+
+  it('pure reads succeed under held barrier with no capture side effects; capturable bypass still fails closed', async () => {
+    seedBoundCursor()
+    // Shared classifier: pure reads and explicitly unsupported compound
+    // mutations are noncapturable; the transactional mutation set is capturable.
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_FetchMessages)).toBe(false)
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_FetchMessagesWindow)).toBe(false)
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_GetRawTopic)).toBe(false)
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_SearchMessages)).toBe(false)
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_ReorderMessages)).toBe(false)
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_AppendMessage)).toBe(true)
+    expect(isCapturableSyncChannel(IpcChannel.ChatDb_UpdateTopicMetadata)).toBe(true)
+
+    let releasePull!: () => void
+    const pullGate = new Promise<void>((resolve) => {
+      releasePull = resolve
+    })
+    let putCalls = 0
+    let releasePut!: () => void
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve
+    })
+    vi.spyOn(syncClient, 'pull').mockImplementation(async () => {
+      await pullGate
+      return { operations: [], cursor: CURSOR_N } as never
+    })
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+      putCalls += 1
+      await putGate
+      const raw = JSON.stringify(envelope)
+      const { parseEnvelopeJson } = await import('@shared/sync')
+      const parsed = parseEnvelopeJson(raw)
+      return { envelope: parsed, rawText: raw }
+    })
+    const pending = syncService.publishBaseline()
+    void pending.catch(() => {})
+    await waitFor(() => syncService.isPublishBarrierHeld(), 'barrier hold')
+    const agg = new ChatDbAggregateService(db, sqlite)
+
+    // Seed the read probe only while the barrier is held (raw bypass SQL, no
+    // outbox intent): an unversioned message must never reach the snapshot.
+    sqlite
+      .prepare(
+        'INSERT INTO messages (id, topic_id, role, content, status, created_at, updated_at, sort_order) VALUES (?,?,?,?,?,?,?,?)'
+      )
+      .run(
+        'pub-msg-1',
+        'pub-topic-1',
+        'user',
+        'hello',
+        'success',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        0
+      )
+
+    // Real aggregate reads succeed while publication is held and return data.
+    const fetched = agg.fetchMessages('pub-topic-1')
+    expect(fetched.ok).toBe(true)
+    expect(JSON.stringify(fetched)).toContain('pub-msg-1')
+    const windowed = agg.fetchMessagesWindow({ kind: 'latest', topicId: 'pub-topic-1', limit: 10 })
+    expect(windowed.ok).toBe(true)
+    expect(JSON.stringify(windowed)).toContain('pub-msg-1')
+
+    // Direct hook for pure reads: no outbox, capture error untouched (null).
+    expect(readLastCaptureError()).toBeNull()
+    handleChatDbSuccessForSync(IpcChannel.ChatDb_FetchMessages, { topicId: 'pub-topic-1' }, fetched)
+    handleChatDbSuccessForSync(
+      IpcChannel.ChatDb_FetchMessagesWindow,
+      { kind: 'latest', topicId: 'pub-topic-1', limit: 10 },
+      windowed
+    )
+    handleChatDbSuccessForSync(IpcChannel.ChatDb_GetRawTopic, { topicId: 'pub-topic-1' })
+    handleChatDbSuccessForSync(IpcChannel.ChatDb_SearchMessages, { topicId: 'pub-topic-1' })
+    expect(db.select().from(schema.syncOutbox).all()).toHaveLength(0)
+    expect(readLastCaptureError()).toBeNull()
+
+    // Remove the unversioned read probe before the snapshot; the bypass topic
+    // below lands after the snapshot (quiescence-test precedent) so the
+    // candidate stays complete.
+    sqlite.prepare("DELETE FROM messages WHERE id='pub-msg-1'").run()
+    releasePull()
+    await waitFor(() => putCalls > 0, 'PUT to start')
+    expect(syncService.isPublishBarrierHeld()).toBe(true)
+
+    // Capturable bypass mutation still fails closed under the barrier.
+    sqlite
+      .prepare('INSERT INTO topics (id, name, created_at, updated_at, deleted_at, extra) VALUES (?,?,?,?,?,?)')
+      .run(
+        'q-bypass-r',
+        'Bypass',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        null,
+        JSON.stringify({ pinned: false, prompt: null, isNameManuallyEdited: false })
+      )
+    handleChatDbSuccessForSync(IpcChannel.ChatDb_UpdateTopicMetadata, { topicId: 'q-bypass-r', name: 'Bypass v2' })
+    expect(db.select().from(schema.syncOutbox).all()).toHaveLength(0)
+    expect(readLastCaptureError()).toMatch(/publish barrier/)
+    const sticky = readLastCaptureError()
+
+    // Reads after a sticky refusal neither clear nor re-record it.
+    handleChatDbSuccessForSync(IpcChannel.ChatDb_FetchMessages, { topicId: 'pub-topic-1' }, fetched)
+    expect(db.select().from(schema.syncOutbox).all()).toHaveLength(0)
+    expect(readLastCaptureError()).toBe(sticky)
+
+    releasePut()
+    const res = await pending
+    expect(res.watermark).toBe(CURSOR_N)
+    expect(syncService.isPublishBarrierHeld()).toBe(false)
   })
 
   it('unsupported aggregate mutation (reorder) also fails under the barrier with no frame loss', async () => {

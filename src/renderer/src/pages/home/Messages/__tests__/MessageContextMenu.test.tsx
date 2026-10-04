@@ -49,7 +49,18 @@ vi.mock('@renderer/hooks/useTopicSegments', () => ({
 
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => vi.fn(),
-  useAppSelector: () => []
+  useAppSelector: (selector: (state: unknown) => unknown) => {
+    const state = (globalThis as unknown as { __menuTestState?: unknown }).__menuTestState ?? {
+      messages: { messageIdsByTopic: {}, mutableMessageIdsByTopic: {}, mutableRouteByTopic: {} },
+      topicBranch: { branchesByTopic: {}, activeBranchIdByTopic: {} },
+      topicSegments: { segmentsByTopic: {}, segments: { entities: {} } }
+    }
+    try {
+      return selector(state)
+    } catch {
+      return []
+    }
+  }
 }))
 
 vi.mock('@renderer/store/editMode', () => ({
@@ -103,9 +114,43 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
     mocks.editMode.canUndo = false
     mocks.editMode.canRedo = false
     mocks.editMode.isSelectionMutable = true
+    ;(globalThis as unknown as { __menuTestState?: unknown }).__menuTestState = {
+      messages: { messageIdsByTopic: {}, mutableMessageIdsByTopic: {}, mutableRouteByTopic: {} },
+      topicBranch: { branchesByTopic: {}, activeBranchIdByTopic: {} },
+      topicSegments: { segmentsByTopic: {}, segments: { entities: {} } }
+    }
     vi.clearAllMocks()
     clearSelection()
   })
+
+  function setMoveState(opts: {
+    loaded: string[]
+    mutable: string[]
+    catalog?: { anchorMessageId: string }[]
+    active?: string | null
+  }): void {
+    const branches = (opts.catalog ?? []).map((b, i) => ({
+      id: `b${i}`,
+      topicId: 't1',
+      parentBranchId: null,
+      anchorMessageId: b.anchorMessageId,
+      name: `b${i}`,
+      createdAt: null,
+      updatedAt: null
+    }))
+    ;(globalThis as unknown as { __menuTestState?: unknown }).__menuTestState = {
+      messages: {
+        messageIdsByTopic: { t1: opts.loaded },
+        mutableMessageIdsByTopic: { t1: opts.mutable },
+        mutableRouteByTopic: { t1: opts.active ?? null }
+      },
+      topicBranch: {
+        branchesByTopic: opts.catalog === undefined ? {} : { t1: branches },
+        activeBranchIdByTopic: opts.active ? { t1: opts.active } : {}
+      },
+      topicSegments: { segmentsByTopic: {}, segments: { entities: {} } }
+    }
+  }
 
   describe('normal-mode selection menu behavior', () => {
     it('offers copy/quote when the context menu opens on a text selection', () => {
@@ -186,12 +231,23 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       mocks.editMode.hasClipboard = true
       mocks.editMode.canUndo = true
       mocks.editMode.canRedo = true
+      setMoveState({ loaded: ['m0', 'm1'], mutable: ['m0', 'm1'], catalog: [] })
 
       renderHost(<p data-testid="target">content</p>)
 
       const items = mocks.dropdownProps.current.menu.items
       const keys = items.filter((item) => item.type !== 'divider').map((item) => item.key)
-      expect(keys).toEqual(['copy', 'cut', 'paste', 'delete', 'createSegment', 'selectAll', 'undo', 'redo'])
+      expect(keys).toEqual([
+        'copy',
+        'cut',
+        'paste',
+        'delete',
+        'createSegment',
+        'moveToNewBranch',
+        'selectAll',
+        'undo',
+        'redo'
+      ])
 
       const byKey = (key: string) => items.find((item) => item.key === key)!
       expect(byKey('paste').disabled).toBe(false)
@@ -225,6 +281,7 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       mocks.editMode.hasClipboard = true
       // Mixed owned+non-owned selection: writes fail closed.
       mocks.editMode.isSelectionMutable = false
+      setMoveState({ loaded: ['m0', 'm1'], mutable: ['m0'], catalog: [] })
 
       renderHost(<p data-testid="target">content</p>)
 
@@ -235,6 +292,61 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
       expect(byKey('paste').disabled).toBe(false)
       expect(byKey('delete').disabled).toBe(true)
       expect(byKey('createSegment').disabled).toBe(true)
+      expect(byKey('moveToNewBranch').disabled).toBe(true)
+    })
+
+    it('moveToNewBranch stays visible but disabled with no preceding anchor', () => {
+      mocks.editMode.isEnabled = true
+      mocks.editMode.selectedGroupIds = ['uA']
+      mocks.editMode.groups = [
+        { askId: 'uA', messages: [{ id: 'uA' }, { id: 'aA' }] },
+        { askId: 'uB', messages: [{ id: 'uB' }, { id: 'aB' }] }
+      ]
+      setMoveState({ loaded: ['uA', 'aA', 'uB', 'aB'], mutable: ['uA', 'aA', 'uB', 'aB'], catalog: [] })
+
+      renderHost(<p data-testid="target">content</p>)
+
+      const items = mocks.dropdownProps.current.menu.items
+      const byKey = (key: string) => items.find((item) => item.key === key)!
+      expect(byKey('moveToNewBranch')).toBeTruthy()
+      expect(byKey('moveToNewBranch').disabled).toBe(true)
+    })
+
+    it('moveToNewBranch stays visible but disabled when the selection holds a branch anchor', () => {
+      mocks.editMode.isEnabled = true
+      mocks.editMode.selectedGroupIds = ['uB']
+      mocks.editMode.groups = [
+        { askId: 'uA', messages: [{ id: 'uA' }, { id: 'aA' }] },
+        { askId: 'uB', messages: [{ id: 'uB' }, { id: 'aB' }] }
+      ]
+      setMoveState({
+        loaded: ['uA', 'aA', 'uB', 'aB'],
+        mutable: ['uA', 'aA', 'uB', 'aB'],
+        catalog: [{ anchorMessageId: 'aB' }]
+      })
+
+      renderHost(<p data-testid="target">content</p>)
+
+      const items = mocks.dropdownProps.current.menu.items
+      const byKey = (key: string) => items.find((item) => item.key === key)!
+      expect(byKey('moveToNewBranch')).toBeTruthy()
+      expect(byKey('moveToNewBranch').disabled).toBe(true)
+    })
+
+    it('moveToNewBranch enables for an owned continuous selection with a preceding anchor', () => {
+      mocks.editMode.isEnabled = true
+      mocks.editMode.selectedGroupIds = ['uB']
+      mocks.editMode.groups = [
+        { askId: 'uA', messages: [{ id: 'uA' }, { id: 'aA' }] },
+        { askId: 'uB', messages: [{ id: 'uB' }, { id: 'aB' }] }
+      ]
+      setMoveState({ loaded: ['uA', 'aA', 'uB', 'aB'], mutable: ['uA', 'aA', 'uB', 'aB'], catalog: [] })
+
+      renderHost(<p data-testid="target">content</p>)
+
+      const items = mocks.dropdownProps.current.menu.items
+      const byKey = (key: string) => items.find((item) => item.key === key)!
+      expect(byKey('moveToNewBranch').disabled).toBe(false)
     })
 
     it('invokes edit-mode handlers from menu clicks', () => {

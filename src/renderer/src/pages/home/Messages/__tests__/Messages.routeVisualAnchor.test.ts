@@ -54,19 +54,28 @@ describe('route-switch scroll + footer contract', () => {
     // Strip line comments so prose mentions (e.g. "never dispatches
     // NAVIGATE_TO_MESSAGE") cannot false-positive the call assertions.
     const handler = messagesSource
-      .slice(switchIdx, switchIdx + 14000)
+      .slice(switchIdx, switchIdx + 16000)
       .split('\n')
       .filter((line) => !line.trim().startsWith('//'))
       .join('\n')
     expect(handler).toMatch(/dividerVisualAnchorOffset|findViewportTopAnchorWithOffset/)
     expect(handler).toMatch(/dividerKey|dividerVisualAnchor/)
-    expect(handler).toMatch(/rawScrollTop/)
-    // Fork-anchor around read (+latest fallback) via the production helper
-    // (which issues loadRouteMessagesThunk around/latest in messageThunk.ts).
-    expect(handler).toMatch(/loadRouteWindowWithFallback/)
-    expect(handler).toMatch(/rebaseRouteMessages|routeWindow/)
+    // Fork-anchor around read with deferred publish (+latest fallback): around/latest via loadRouteMessagesThunk
+    expect(handler).toMatch(/loadRouteMessagesThunk/)
+    expect(handler).toMatch(/deferPublish/)
+    expect(handler).toMatch(/kind:\s*'around'/)
+    expect(handler).toMatch(/anchorMessageId/)
+    expect(handler).toMatch(/kind:\s*'latest'/)
+    expect(handler).toMatch(/before.*after|NAVIGATION_VISUALLY_OLDER_GROUPS/)
+    expect(handler).toMatch(/deferredBlocks|deferredMessages|deferredMutable/)
+    expect(handler).toMatch(/publishDeferredProjection/)
+    expect(handler).toMatch(/rebaseRouteMessages/)
+    expect(handler).toMatch(/commitDividerVisibleAtomic|commitRouteWindowAtomic/)
+    expect(handler).toMatch(/wantOffset/)
     expect(handler).not.toMatch(/setPendingAnchorNavigate/)
     expect(handler).not.toMatch(/NAVIGATE_TO_MESSAGE/)
+    // Divider preserves visual fork anchor, never a bottom/history jump
+    expect(handler).not.toMatch(/kind:\s*'bottom'/)
   })
 
   it('divider popup keeps stable layout height (overlay, no in-flow expansion)', () => {

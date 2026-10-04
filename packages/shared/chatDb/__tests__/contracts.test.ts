@@ -76,6 +76,7 @@ describe('chatDbContracts', () => {
     'chatdb:list-branches',
     'chatdb:rename-branch',
     'chatdb:delete-branch',
+    'chatdb:move-selected-turns-to-new-branch',
     // S6.2c-2: Main-authoritative insert after stable anchor
     'chatdb:insert-messages-after-anchor',
     'chatdb:insert-message-groups',
@@ -3994,6 +3995,7 @@ describe('coverage consistency', () => {
     'chatdb:list-branches',
     'chatdb:rename-branch',
     'chatdb:delete-branch',
+    'chatdb:move-selected-turns-to-new-branch',
     // S6.2c-2: insert after stable anchor
     'chatdb:insert-messages-after-anchor',
     // Stable insert-message-groups (paste/redo/delete-undo authority)

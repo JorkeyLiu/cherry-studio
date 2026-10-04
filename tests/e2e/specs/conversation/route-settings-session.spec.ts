@@ -178,7 +178,7 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
       )
       await page.waitForTimeout(220)
     }
-    const settled = async (): Promise<{ id: string; offset: number } | null> => {
+    const settled = async (): Promise<{ id: string; offset: number }> => {
       let prev: { id: string; offset: number } | null = null
       let stable = 0
       const start = Date.now()
@@ -192,7 +192,9 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
         prev = cur
         await page.waitForTimeout(140)
       }
-      return cur
+      // Robust failure: a settle timeout must fail loudly so an unsettled
+      // viewport can never pass as a stable restore.
+      throw new Error(`viewport failed to settle within 10s (last=${cur ? `${cur.id}@${cur.offset}` : 'null'})`)
     }
     const wheelSeekExclusive = async (allowed: string[]): Promise<{ id: string; offset: number } | null> => {
       for (let i = 0; i < 4; i++) await wheel(-560)
@@ -210,40 +212,175 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
       }
       return await settled()
     }
-    const waitSnapMatchesLive = async (bid: string | null, allowed: string[]): Promise<void> => {
-      await page.waitForFunction(
-        ({ key, ok }: any) => {
-          try {
-            const raw = (window as any).keyv?.get?.(key) as Record<string, unknown> | undefined
-            if (!raw || typeof raw !== 'object') return false
-            const sid =
-              typeof raw.messageId === 'string' && (raw.messageId as string).length > 0
-                ? (raw.messageId as string)
-                : typeof raw.anchorId === 'string'
-                  ? (raw.anchorId as string)
+    const reportSnapTimeout = async (bid: string | null, allowed: string[]): Promise<void> => {
+      const ctx = await page
+        .evaluate(
+          ({ tid, b, ok }: { tid: string; b: string | null; ok: string[] }) => {
+            const out: Record<string, unknown> = { route: b ?? 'main' }
+            try {
+              const key = `scroll:topic-${tid}::${b ?? 'main'}`
+              let rawVal: unknown = null
+              try {
+                rawVal = (window as any).keyv?.get?.(key) ?? null
+              } catch (e) {
+                rawVal = `err:${e instanceof Error ? e.message : String(e)}`
+              }
+              out.snapRaw =
+                rawVal && typeof rawVal === 'object'
+                  ? JSON.stringify(rawVal).slice(0, 400)
+                  : String(rawVal ?? '(missing)')
+              const raw = rawVal as Record<string, unknown> | null
+              const sid =
+                raw && typeof raw === 'object'
+                  ? typeof raw.messageId === 'string' && (raw.messageId as string).length > 0
+                    ? (raw.messageId as string)
+                    : typeof raw.anchorId === 'string'
+                      ? (raw.anchorId as string)
+                      : ''
                   : ''
-            if (!sid || !ok.includes(sid)) return false
-            const container = document.querySelector('#messages') as HTMLElement | null
-            if (!container) return false
-            const c = container.getBoundingClientRect()
-            const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
-            const cands: { id: string; top: number; bottom: number }[] = []
-            for (const row of rows) {
-              const r = row.getBoundingClientRect()
-              const id = row.getAttribute('data-message-id')
-              if (id) cands.push({ id, top: r.top, bottom: r.bottom })
+              out.snapId = sid || '(none-in-allowed)'
+              out.snapInAllowed = sid ? (ok as string[]).includes(sid) : false
+              const container = document.querySelector('#messages') as HTMLElement | null
+              const c = container?.getBoundingClientRect() ?? null
+              const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+              let testAnchor = '(none)'
+              if (c && rows.length > 0) {
+                const cands = rows
+                  .map((row) => {
+                    const r = row.getBoundingClientRect()
+                    return { id: row.getAttribute('data-message-id') as string, top: r.top, bottom: r.bottom }
+                  })
+                  .filter((x) => x.id)
+                const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
+                const picked =
+                  crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+                testAnchor = `${picked.id}@${Math.round((picked.top - c.top) * 10) / 10}`
+              }
+              out.testAnchor = testAnchor
+              out.testInAllowed = testAnchor.split('@')[0] ? (ok as string[]).includes(testAnchor.split('@')[0]) : false
+              let prodAnchor = '(none)'
+              try {
+                if (container && c) {
+                  const els = Array.from(
+                    container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+                  ) as HTMLElement[]
+                  const pc: { id: string; top: number; bottom: number }[] = []
+                  for (const el of els) {
+                    const cs = getComputedStyle(el)
+                    if (cs.display === 'none') continue
+                    const r = el.getBoundingClientRect()
+                    if (r.height === 0) continue
+                    if (!(Math.min(r.bottom, c.bottom) - Math.max(r.top, c.top) > 0)) continue
+                    const id = el.id.replace(/^message-/, '')
+                    if (id) pc.push({ id, top: r.top, bottom: r.bottom })
+                  }
+                  if (pc.length > 0) {
+                    let cross: { id: string; top: number; bottom: number } | null = null
+                    for (const cd of pc) {
+                      if (cd.top <= c.top && cd.bottom > c.top && (!cross || cd.top < cross.top)) cross = cd
+                    }
+                    const picked = cross ?? pc.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? pc[0]
+                    prodAnchor = `${picked.id}@${Math.round((picked.top - c.top) * 10) / 10}`
+                  }
+                }
+              } catch {
+                prodAnchor = '(err)'
+              }
+              out.prodAnchor = prodAnchor
+              out.phase = container?.getAttribute('data-viewport-phase') ?? '(no-container)'
+              const st = (window as any).store?.getState?.() as Record<string, any> | undefined
+              out.currentTopic = st?.messages?.currentTopicId ?? '(unknown)'
+              out.selectedRoute = st?.topicBranch?.activeBranchIdByTopic?.[tid] ?? '(unknown)'
+              const loaded: string[] = Array.isArray(st?.messages?.messageIdsByTopic?.[tid])
+                ? (st.messages.messageIdsByTopic[tid] as string[])
+                : []
+              out.loadedLen = loaded.length
+              out.loadedHead = loaded.slice(0, 3)
+              out.loadedTail = loaded.slice(-3)
+              const domIds = rows.map((r) => r.getAttribute('data-message-id') as string)
+              out.domLen = domIds.length
+              out.domHead = domIds.slice(0, 3)
+              out.domTail = domIds.slice(-3)
+              const focusId = testAnchor.split('@')[0]
+              let idx = domIds.indexOf(focusId)
+              if (idx < 0) idx = 0
+              const picks = new Set<number>()
+              for (let i = 0; i < Math.min(4, domIds.length); i++) picks.add(i)
+              for (let d = -2; d <= 2; d++) {
+                const j = idx + d
+                if (j >= 0 && j < domIds.length) picks.add(j)
+              }
+              if (domIds.length > 0) picks.add(domIds.length - 1)
+              const geom: string[] = []
+              for (const j of Array.from(picks).sort((a, b) => a - b)) {
+                const row = rows[j]
+                if (!row) continue
+                const r = row.getBoundingClientRect()
+                geom.push(`${domIds[j]} t=${Math.round(r.top)} b=${Math.round(r.bottom)}`)
+              }
+              out.geom = geom
+              out.allowedLen = (ok as string[]).length
+            } catch (e) {
+              out.error = e instanceof Error ? e.message : String(e)
             }
-            if (cands.length === 0) return false
-            const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
-            const picked = crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
-            return picked.id === sid
-          } catch {
-            return false
-          }
-        },
-        { key: scrollKeyFor(bid), ok: allowed },
-        { timeout: 30000 }
-      )
+            return out
+          },
+          { tid: topicId, b: bid, ok: allowed }
+        )
+        .catch((e) => ({ error: e instanceof Error ? e.message : String(e) }))
+      const summary =
+        `routeSnapTimeout route=${String((ctx as Record<string, unknown>).route)} snapId=${String((ctx as Record<string, unknown>).snapId)} snapInAllowed=${String((ctx as Record<string, unknown>).snapInAllowed)} allowedLen=${String((ctx as Record<string, unknown>).allowedLen)} ` +
+        `testAnchor=${String((ctx as Record<string, unknown>).testAnchor)} testInAllowed=${String((ctx as Record<string, unknown>).testInAllowed)} ` +
+        `prodAnchor=${String((ctx as Record<string, unknown>).prodAnchor)} phase=${String((ctx as Record<string, unknown>).phase)} ` +
+        `current=${String((ctx as Record<string, unknown>).currentTopic)} selected=${JSON.stringify((ctx as Record<string, unknown>).selectedRoute)} ` +
+        `loadedLen=${String((ctx as Record<string, unknown>).loadedLen)} domLen=${String((ctx as Record<string, unknown>).domLen)} ` +
+        `snapRaw=${String((ctx as Record<string, unknown>).snapRaw).slice(0, 400)} geom=[${(((ctx as Record<string, unknown>).geom as string[] | undefined) ?? []).join(' | ').slice(0, 800)}]`
+      try {
+        // eslint-disable-next-line no-console
+        console.log(`[E2E] ${summary}`)
+      } catch {}
+      test.info().annotations.push({ type: `route-snap-timeout-${bid ?? 'main'}`, description: summary.slice(0, 1900) })
+    }
+    const waitSnapMatchesLive = async (bid: string | null, allowed: string[]): Promise<void> => {
+      try {
+        await page.waitForFunction(
+          ({ key, ok }: any) => {
+            try {
+              const raw = (window as any).keyv?.get?.(key) as Record<string, unknown> | undefined
+              if (!raw || typeof raw !== 'object') return false
+              const sid =
+                typeof raw.messageId === 'string' && (raw.messageId as string).length > 0
+                  ? (raw.messageId as string)
+                  : typeof raw.anchorId === 'string'
+                    ? (raw.anchorId as string)
+                    : ''
+              if (!sid || !ok.includes(sid)) return false
+              const container = document.querySelector('#messages') as HTMLElement | null
+              if (!container) return false
+              const c = container.getBoundingClientRect()
+              const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
+              const cands: { id: string; top: number; bottom: number }[] = []
+              for (const row of rows) {
+                const r = row.getBoundingClientRect()
+                const id = row.getAttribute('data-message-id')
+                if (id) cands.push({ id, top: r.top, bottom: r.bottom })
+              }
+              if (cands.length === 0) return false
+              const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
+              const picked =
+                crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+              return picked.id === sid
+            } catch {
+              return false
+            }
+          },
+          { key: scrollKeyFor(bid), ok: allowed },
+          { timeout: 30000 }
+        )
+      } catch (err) {
+        await reportSnapTimeout(bid, allowed)
+        throw err
+      }
     }
     const topTo = async (bid: string | null): Promise<void> => {
       await page.locator('[data-testid="branch-selector-entry"]').first().click()
@@ -312,7 +449,7 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
     await sidebarPage.goToHome()
     await waitForChatReady(page)
     await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
-    expect(await homeHandle!.evaluate((node) => node.isConnected)).toBe(true)
+    expect(await homeHandle!.evaluate((node: Node) => node.isConnected)).toBe(true)
 
     // CG1: immediate same-route reconnect restores BEFORE any topTo. The
     // detached lifetime renews with a fresh guarded own-target activation on

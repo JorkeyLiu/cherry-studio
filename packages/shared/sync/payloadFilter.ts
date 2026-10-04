@@ -291,6 +291,128 @@ function validateOrderFramePayloadStrict(
   return null
 }
 
+/**
+ * Strictly-closed whole-turn move contract (V5 move sync, current-development
+ * amendment): ONE purpose-specific compound operation for an explicit
+ * `moveSelectedTurnsToNewBranch` whole-turn move, never a generic reparent.
+ * `entityType` is always `topic_branch`, `entityId` is the new branch id, and
+ * the payload is exactly
+ * `{topicId,sourceBranchId,destBranchId,anchorMessageId,movedMessageIds,
+ * branchName,branchCreatedAt,branchUpdatedAt,sourceOrderedChildIds,
+ * sourceFrameClock,destFrameClock}`.
+ * The envelope `(timestamp,id)` is the single transition clock for ALL moved
+ * message membership parents. `dest` order is exactly `movedMessageIds`;
+ * `source` order is `sourceOrderedChildIds` (remaining source owner order,
+ * disjoint from moved). `sourceFrameClock`/`destFrameClock` are the winning
+ * frame clocks persisted verbatim with those orders. Ordinary content upserts
+ * never carry owner intent; only this op may change `branchId` owners.
+ */
+function validateMoveTurnsToBranchPayloadStrict(op: {
+  id?: unknown
+  entityType?: unknown
+  entityId?: unknown
+  payload?: unknown
+}): string | null {
+  if (op.entityType !== 'topic_branch') return 'move_turns_to_branch entityType must be topic_branch'
+  const payload = op.payload as Record<string, unknown> | undefined | null
+  if (payload === undefined || payload === null) return 'move_turns_to_branch missing payload'
+  if (typeof payload !== 'object' || Array.isArray(payload)) return 'invalid payload'
+  const keys = Object.keys(payload).sort()
+  const expected = [
+    'anchorMessageId',
+    'branchCreatedAt',
+    'branchName',
+    'branchUpdatedAt',
+    'destBranchId',
+    'destFrameClock',
+    'movedMessageIds',
+    'sourceBranchId',
+    'sourceFrameClock',
+    'sourceOrderedChildIds',
+    'topicId'
+  ].sort()
+  if (keys.length !== expected.length || !keys.every((k, i) => k === expected[i])) {
+    return 'move_turns_to_branch payload must be exactly {topicId,sourceBranchId,destBranchId,anchorMessageId,movedMessageIds,branchName,branchCreatedAt,branchUpdatedAt,sourceOrderedChildIds,sourceFrameClock,destFrameClock}'
+  }
+  if (!isNonEmptyString(payload.topicId) || !isValidUnicodeScalarStringLocal(payload.topicId)) {
+    return 'move_turns_to_branch invalid topicId'
+  }
+  const dest = payload.destBranchId
+  if (!isNonEmptyString(dest) || !isValidUnicodeScalarStringLocal(dest)) {
+    return 'move_turns_to_branch invalid destBranchId'
+  }
+  if (dest.includes(':')) return 'move_turns_to_branch invalid destBranchId'
+  if (dest !== (op as { entityId?: unknown }).entityId) {
+    return 'move_turns_to_branch destBranchId must agree with entityId'
+  }
+  const src = payload.sourceBranchId
+  if (src !== null) {
+    if (!isNonEmptyString(src) || !isValidUnicodeScalarStringLocal(src)) {
+      return 'move_turns_to_branch invalid sourceBranchId'
+    }
+    if (src.includes(':')) return 'move_turns_to_branch invalid sourceBranchId'
+    if (src === dest) return 'move_turns_to_branch source and dest must differ'
+  }
+  if (!isNonEmptyString(payload.anchorMessageId) || !isValidUnicodeScalarStringLocal(payload.anchorMessageId)) {
+    return 'move_turns_to_branch invalid anchorMessageId'
+  }
+  const moved = payload.movedMessageIds
+  if (!Array.isArray(moved) || moved.length === 0) return 'move_turns_to_branch movedMessageIds must be non-empty array'
+  const movedSeen = new Set<string>()
+  for (const v of moved as unknown[]) {
+    if (typeof v !== 'string' || v.length === 0 || !isValidUnicodeScalarStringLocal(v)) {
+      return 'move_turns_to_branch invalid movedMessageId'
+    }
+    if (movedSeen.has(v)) return 'move_turns_to_branch duplicate movedMessageId'
+    movedSeen.add(v)
+  }
+  if (movedSeen.has(payload.anchorMessageId)) return 'move_turns_to_branch anchor must not be moved'
+  const bn = payload.branchName
+  if (bn !== null && bn !== undefined && typeof bn !== 'string') return 'move_turns_to_branch invalid branchName'
+  if (typeof bn === 'string' && !isValidUnicodeScalarStringLocal(bn)) return 'move_turns_to_branch invalid branchName'
+  if (!isNonEmptyString(payload.branchCreatedAt)) return 'move_turns_to_branch invalid branchCreatedAt'
+  if (!isNonEmptyString(payload.branchUpdatedAt)) return 'move_turns_to_branch invalid branchUpdatedAt'
+  const srcOrder = payload.sourceOrderedChildIds
+  if (!Array.isArray(srcOrder)) return 'move_turns_to_branch sourceOrderedChildIds must be array'
+  const srcSeen = new Set<string>()
+  for (const v of srcOrder as unknown[]) {
+    if (typeof v !== 'string' || v.length === 0 || !isValidUnicodeScalarStringLocal(v)) {
+      return 'move_turns_to_branch invalid sourceOrderedChildId'
+    }
+    if (srcSeen.has(v)) return 'move_turns_to_branch duplicate sourceOrderedChildId'
+    srcSeen.add(v)
+    if (movedSeen.has(v)) return 'move_turns_to_branch sourceOrderedChildIds must exclude moved ids'
+  }
+  if (srcSeen.has(payload.anchorMessageId) === false) {
+    // Anchor must remain in the source owner order (empty-source moves are
+    // forbidden by the local guard: the predecessor anchor stays source-owned).
+    return 'move_turns_to_branch sourceOrderedChildIds must contain anchorMessageId'
+  }
+  for (const clockKey of ['sourceFrameClock', 'destFrameClock'] as const) {
+    const fc = payload[clockKey] as Record<string, unknown> | null | undefined
+    if (typeof fc !== 'object' || fc === null || Array.isArray(fc)) {
+      return `move_turns_to_branch invalid ${clockKey}`
+    }
+    const fcKeys = Object.keys(fc).sort()
+    if (fcKeys.length !== 2 || fcKeys[0] !== 'operationId' || fcKeys[1] !== 'timestamp') {
+      return `move_turns_to_branch ${clockKey} must be exactly {timestamp,operationId}`
+    }
+    if (typeof fc.timestamp !== 'number' || !Number.isSafeInteger(fc.timestamp) || fc.timestamp < 0) {
+      return `move_turns_to_branch invalid ${clockKey} timestamp`
+    }
+    if (
+      typeof fc.operationId !== 'string' ||
+      fc.operationId.length === 0 ||
+      fc.operationId.length > 256 ||
+      fc.operationId.includes(':') ||
+      !isValidUnicodeScalarStringLocal(fc.operationId)
+    ) {
+      return `move_turns_to_branch invalid ${clockKey} operationId`
+    }
+  }
+  return null
+}
+
 export function validateSyncOperationStrict(op: {
   id?: unknown
   entityType?: unknown
@@ -318,7 +440,13 @@ export function validateSyncOperationStrict(op: {
   ) {
     return `invalid entityType ${String(op.entityType)}`
   }
-  if (op.op !== 'upsert' && op.op !== 'delete' && op.op !== 'order_frame' && op.op !== 'message_stable_replace')
+  if (
+    op.op !== 'upsert' &&
+    op.op !== 'delete' &&
+    op.op !== 'order_frame' &&
+    op.op !== 'message_stable_replace' &&
+    op.op !== 'move_turns_to_branch'
+  )
     return `invalid op ${String(op.op)}`
   if (!isNonEmptyString(op.entityId)) return 'invalid entityId'
   if (typeof op.timestamp !== 'number' || !Number.isFinite(op.timestamp)) return 'invalid timestamp'
@@ -333,6 +461,9 @@ export function validateSyncOperationStrict(op: {
     // Dedicated strictly-closed stable-replace contract (SYNC-DATA-050):
     // single shared source of truth in stableReplace.ts — never reimplemented here.
     return validateStableReplacePayloadStrict(op)
+  }
+  if (kind === 'move_turns_to_branch') {
+    return validateMoveTurnsToBranchPayloadStrict(op)
   }
   if (kind === 'delete') {
     if (payload !== undefined && payload !== null) {

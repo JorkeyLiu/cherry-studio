@@ -730,24 +730,93 @@ describe('branch reference governance over sync', () => {
       (created as unknown as { value: { branch: { id: string } } }).value?.branch?.id
     drainAToB()
 
-    // Reparent attempt via forged op: same message id, different owner → rejected, no row.
+    // V5 no-loss: ordinary upsert with stale/different owner merges covered
+    // content by field clocks but NEVER reparents owner/membership/order.
+    // Only the purpose-specific move_turns_to_branch compound may transfer owner.
     bind('B')
+    const memBefore = membershipOf(sqliteB, 'message', 'm1')!
+    expect(memBefore.parentId).toBe('t1')
+    const topicFrameBefore = frameOf(sqliteB, 'topicMessage', 't1')
+    const suffixBefore = frameOf(sqliteB, 'branchSuffix', branchId)
+    const rowBefore = sqliteB
+      .prepare(`SELECT topic_id AS t, branch_id AS b, sort_order AS s FROM messages WHERE id='m1'`)
+      .get() as { t: string; b: string | null; s: number }
+    const fieldTs = (
+      sqliteB
+        .prepare(
+          `SELECT timestamp AS t FROM sync_field_clock WHERE entity_type='message' AND entity_id='m1' AND field='content'`
+        )
+        .get() as { t: number }
+    ).t
+    const forgedTs = Math.max(fieldTs, memBefore.timestamp, Date.now()) + 5000
     const forged = {
       id: '11111111-1111-4111-8111-111111111111',
       entityType: 'message',
       op: 'upsert',
       entityId: 'm1',
-      timestamp: Date.now(),
+      timestamp: forgedTs,
       deviceId: 'device-X',
-      payload: { id: 'm1', topicId: 't1', branchId, role: 'user', content: 'hijack' }
+      payload: {
+        id: 'm1',
+        topicId: 't1',
+        branchId,
+        role: 'user',
+        content: 'hijack',
+        sortOrder: rowBefore.s + 9999
+      }
     } as unknown as SyncOperation
-    expect(syncService.applyIncomingOperation(forged)).toBe(false)
-    const m1 = sqliteB.prepare(`SELECT branch_id AS b, content AS c FROM messages WHERE id='m1'`).get() as {
-      b: null
-      c: string
-    }
+    expect(syncService.applyIncomingOperation(forged)).toBe(true)
+    const m1 = sqliteB
+      .prepare(`SELECT topic_id AS t, branch_id AS b, content AS c, sort_order AS s FROM messages WHERE id='m1'`)
+      .get() as { t: string; b: string | null; c: string; s: number }
+    // Owner/topic preserved; covered content merged; dense order untouched.
+    expect(m1.t).toBe('t1')
     expect(m1.b).toBeNull()
-    expect(m1.c).toBe('c-m1')
+    expect(m1.c).toBe('hijack')
+    expect(m1.s).toBe(rowBefore.s)
+    // Membership (ownership) clock untouched: same parent + full clock.
+    expect(membershipOf(sqliteB, 'message', 'm1')).toEqual(memBefore)
+    // Owner frames untouched.
+    expect(frameOf(sqliteB, 'topicMessage', 't1')).toEqual(topicFrameBefore)
+    expect(frameOf(sqliteB, 'branchSuffix', branchId)).toEqual(suffixBefore)
+
+    // Same-ID upsert addressing an unknown/foreign branch gains no authority:
+    // orphan defers, no row fabricated or moved.
+    const forgedUnknown = {
+      id: '33333333-3333-4333-8333-333333333333',
+      entityType: 'message',
+      op: 'upsert',
+      entityId: 'm1',
+      timestamp: forgedTs + 1,
+      deviceId: 'device-X',
+      payload: { id: 'm1', topicId: 't1', branchId: 'branch-unknown-xyz', role: 'user', content: 'hijack-unknown' }
+    } as unknown as SyncOperation
+    expect(() => syncService.applyIncomingOperation(forgedUnknown)).toThrow(SyncOrphanError)
+    const m1AfterUnknown = sqliteB
+      .prepare(`SELECT topic_id AS t, branch_id AS b, content AS c FROM messages WHERE id='m1'`)
+      .get() as { t: string; b: string | null; c: string }
+    expect(m1AfterUnknown.t).toBe('t1')
+    expect(m1AfterUnknown.b).toBeNull()
+    expect(m1AfterUnknown.c).toBe('hijack')
+    expect(membershipOf(sqliteB, 'message', 'm1')).toEqual(memBefore)
+
+    // Cross-topic reparent stays rejected (immutable topicId).
+    const forgedCross = {
+      id: '44444444-4444-4444-8444-444444444444',
+      entityType: 'message',
+      op: 'upsert',
+      entityId: 'm1',
+      timestamp: forgedTs + 2,
+      deviceId: 'device-X',
+      payload: { id: 'm1', topicId: 't-other', branchId: null, role: 'user', content: 'hijack-cross' }
+    } as unknown as SyncOperation
+    expect(syncService.applyIncomingOperation(forgedCross)).toBe(false)
+    const m1AfterCross = sqliteB
+      .prepare(`SELECT topic_id AS t, branch_id AS b, content AS c FROM messages WHERE id='m1'`)
+      .get() as { t: string; b: string | null; c: string }
+    expect(m1AfterCross.t).toBe('t1')
+    expect(m1AfterCross.b).toBeNull()
+    expect(m1AfterCross.c).toBe('hijack')
 
     // Missing-anchor branch stays governed: forged branch on unknown anchor defers.
     const forgedBranch = {

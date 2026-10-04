@@ -1,11 +1,15 @@
+import { loggerService } from '@logger'
 import { useEditMode } from '@renderer/context/EditModeContext'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { clearSelection, setSelectedGroupIds } from '@renderer/store/editMode'
+import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 import type { MenuProps } from 'antd'
 import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+
+const menuLogger = loggerService.withContext('EditModeMoveToBranch')
 
 /**
  * Edit-mode context menu items for the message list. Extracted from
@@ -35,6 +39,17 @@ export function useEditModeContextMenuItems(topicId: string) {
   const { createSegment, getSegmentsForTopic, updateSegmentMessageIds, deleteSegment } = useTopicSegments(topicId)
 
   const allMessageIds = useAppSelector((state) => state.messages.messageIdsByTopic[topicId] || [])
+  const activeRoute = useAppSelector((state) => selectActiveBranchId(state, topicId))
+  const mutableIds = useAppSelector((state) => state.messages.mutableMessageIdsByTopic?.[topicId])
+  const mutableRoute = useAppSelector((state) => state.messages.mutableRouteByTopic?.[topicId] ?? null)
+  const catalogKnown = useAppSelector((state) =>
+    Object.prototype.hasOwnProperty.call(state.topicBranch?.branchesByTopic ?? {}, topicId)
+  )
+  const branchAnchors = useAppSelector((state) => {
+    const list = state.topicBranch?.branchesByTopic?.[topicId]
+    if (!Array.isArray(list)) return [] as string[]
+    return list.map((b) => b.anchorMessageId).filter((id): id is string => typeof id === 'string')
+  })
 
   const getSelectedMessageIds = useCallback((): string[] => {
     if (selectedGroupIds.length === 0) return []
@@ -226,6 +241,75 @@ export function useEditModeContextMenuItems(topicId: string) {
     return true
   }, [isSelectionMutable, getSelectedMessageIds, checkMessagesContinuous, getSegmentsForTopic, topicId])
 
+  const canMoveToNewBranch = useMemo(() => {
+    if (selectedGroupIds.length === 0 || !isSelectionMutable) return false
+    if (!catalogKnown) return false
+    if (!Array.isArray(mutableIds) || (mutableRoute ?? null) !== (activeRoute ?? null)) return false
+    // Known-incomplete/orphan guard (renderer-visible): every selected group
+    // root must itself be resident. Main's exact expected-match stays final.
+    for (const gid of selectedGroupIds) {
+      if (!allMessageIds.includes(gid)) return false
+    }
+    const msgIds = getSelectedMessageIds()
+    if (msgIds.length === 0) return false
+    if (!checkMessagesContinuous(msgIds)) return false
+    const mutableSet = new Set(mutableIds)
+    for (const id of msgIds) {
+      if (!mutableSet.has(id)) return false
+    }
+    const firstIdx = allMessageIds.indexOf(msgIds[0])
+    if (firstIdx <= 0) return false
+    const precedingId = allMessageIds[firstIdx - 1]
+    if (!mutableSet.has(precedingId)) return false
+    const anchorSet = new Set(branchAnchors)
+    for (const id of msgIds) {
+      if (anchorSet.has(id)) return false
+    }
+    const segments = getSegmentsForTopic(topicId)
+    const movedSet = new Set(msgIds)
+    for (const seg of segments) {
+      if (!Array.isArray(seg.messageIds) || seg.messageIds.length === 0) continue
+      let inside = 0
+      for (const mid of seg.messageIds) {
+        if (movedSet.has(mid)) inside++
+      }
+      if (inside > 0 && inside < seg.messageIds.length) return false
+    }
+    return true
+  }, [
+    selectedGroupIds,
+    isSelectionMutable,
+    catalogKnown,
+    mutableIds,
+    mutableRoute,
+    activeRoute,
+    getSelectedMessageIds,
+    checkMessagesContinuous,
+    allMessageIds,
+    branchAnchors,
+    getSegmentsForTopic,
+    topicId
+  ])
+
+  const handleMoveToNewBranch = useCallback(async () => {
+    if (!canMoveToNewBranch) return
+    try {
+      const { moveSelectedTurnsToNewBranchThunk } = await import('@renderer/store/thunk/messageThunk')
+      const defaultName = t('chat.topics.branch.default_name')
+      const created = (await dispatch(
+        moveSelectedTurnsToNewBranchThunk(topicId, activeRoute ?? null, selectedGroupIds, defaultName) as never
+      )) as unknown as { branchId: string } | null
+      if (!created) {
+        window.toast.error(t('message.true_branch.error'))
+        return
+      }
+      window.toast.success(t('chat.message.true_branch.created'))
+    } catch (error) {
+      menuLogger.error('[handleMoveToNewBranch] Failed to move turns to new branch', error as Error)
+      window.toast.error(t('message.true_branch.error'))
+    }
+  }, [canMoveToNewBranch, dispatch, topicId, activeRoute, selectedGroupIds, t])
+
   const handleRemoveFromSegment = useCallback(async () => {
     // BRANCH-12: 选集不可变时 segment 移除/解散零调用。
     if (!isSelectionMutable) return
@@ -323,6 +407,13 @@ export function useEditModeContextMenuItems(topicId: string) {
         : []),
       { type: 'divider' },
       {
+        key: 'moveToNewBranch',
+        label: t('editMode.contextMenu.moveToNewBranch'),
+        disabled: !canMoveToNewBranch,
+        onClick: () => void handleMoveToNewBranch()
+      },
+      { type: 'divider' },
+      {
         key: 'selectAll',
         label: t('editMode.contextMenu.selectAll'),
         onClick: handleSelectAll
@@ -351,6 +442,7 @@ export function useEditModeContextMenuItems(topicId: string) {
     handleCreateSegment,
     handleMerge,
     handleRemoveFromSegment,
+    handleMoveToNewBranch,
     handleSelectAll,
     handleUndo,
     handleRedo,
@@ -361,8 +453,9 @@ export function useEditModeContextMenuItems(topicId: string) {
     isSelectionMutable,
     mergeInfo,
     removeFromSegmentInfo,
-    canCreateSegment
+    canCreateSegment,
+    canMoveToNewBranch
   ])
 
-  return { items }
+  return { items, canMoveToNewBranch }
 }
