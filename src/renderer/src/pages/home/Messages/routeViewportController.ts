@@ -217,6 +217,15 @@ export class RouteViewportController {
    */
   private activationRequired = false
   /**
+   * True when the current session started as a detached-lifetime reactivation
+   * (the request consumed `activationRequired`). The page-resume gate reads it
+   * to keep the reactivated fetch-hold hidden-but-measurable until the retained
+   * window is verified/positioned — ordinary top fetch-holds stay visible
+   * incremental. Set on every `request()`, cleared by `invalidateAll()`; stale
+   * values are harmless (phase stable/terminal maps revealed regardless).
+   */
+  private activationSession = false
+  /**
    * Rendered-window generation (component-scoped event, never DOM work):
    * bumped synchronously on every rendered window identity change
    * (`noteSameRouteWindowUpdate`, `applyTransitionWindow`, `appliedWindow`,
@@ -419,6 +428,9 @@ export class RouteViewportController {
     // A fresh guarded transaction consumes a pending detached reactivation:
     // the renewed connected lifetime owns its restore BEFORE any geometry is
     // admitted as stable. Single owner: this request is the activation.
+    // The page-resume gate remembers whether THIS session is such an
+    // activation (ordinary transitions reset it to false).
+    this.activationSession = this.activationRequired
     this.activationRequired = false
     // Any programmatic transition start forcibly closes a live user gesture
     // session: post-request scrolls without a fresh declare are programmatic
@@ -825,6 +837,35 @@ export class RouteViewportController {
   }
 
   /**
+   * Fail-visible provenance adoption (deterministic own-target fallback).
+   *
+   * After `terminate()` released the session, advance displayed to the
+   * committed rendered target so a valid visible fallback viewport becomes
+   * clean (displayed == rendered) instead of staying dirty-visible
+   * indefinitely. Guards (stale no-op, never disturbs a newer transaction):
+   * same latest epoch, phase terminal (never adopts an owned in-flight
+   * session), rendered bound to this epoch with a real window identity
+   * (pre-commit failures adopt nothing — the prior snapshot and dirty state
+   * stand). No snapshot write, no anchor change, no release (`terminate()`
+   * already released exactly once): the pre-existing target snapshot is
+   * preserved and the next genuine user scroll forms the new stable snapshot
+   * under the displayed provenance. The caller additionally gates on the
+   * rendered target matching the current selection (same-current target) —
+   * this method never infers selection, and never papers over an arbitrary
+   * old DOM (only the session's own committed render).
+   */
+  adoptRenderedAsDisplayed(epoch: number): boolean {
+    if (epoch !== this.epoch) return false
+    if (this.phase !== 'terminal') return false
+    const cur = this.rendered
+    if (!cur) return false
+    if (cur.epoch !== epoch) return false
+    if (typeof cur.windowId !== 'string' || cur.windowId.length === 0) return false
+    this.displayed = { topicId: cur.topicId, route: cur.routeId }
+    return true
+  }
+
+  /**
    * Capture-phase declaration: genuine user input (wheel/touch/pointer/key,
    * scrollbar drag via pointerdown) arrived before its scroll effect lands.
    * Opens a new interaction session when none is live, otherwise refreshes
@@ -1104,6 +1145,11 @@ export class RouteViewportController {
     return this.activationRequired
   }
 
+  /** True when the current session started as a detached-lifetime reactivation. */
+  get isActivationSession(): boolean {
+    return this.activationSession
+  }
+
   /**
    * Unmount / HMR / topic disposal / Activity detach: invalidate everything,
    * release once, force-close any live user session.
@@ -1122,6 +1168,7 @@ export class RouteViewportController {
    */
   invalidateAll(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
     this.closeInteractionLocked()
+    this.activationSession = false
     if (!this.ownershipHeld) {
       this.intent = null
       this.setAnchorLocked(null, null)

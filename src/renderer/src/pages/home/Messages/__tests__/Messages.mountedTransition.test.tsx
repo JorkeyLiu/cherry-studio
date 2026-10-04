@@ -419,10 +419,14 @@ vi.mock('@renderer/utils/messageUtils/is', () => ({
   isTextLikeBlock: vi.fn(() => false)
 }))
 
-vi.mock('@renderer/pages/home/Messages/domVisibility', () => ({
-  findFirstVisibleMessage: vi.fn(() => null),
-  findFirstVisibleMessageId: vi.fn(() => null)
-}))
+vi.mock('@renderer/pages/home/Messages/domVisibility', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    findFirstVisibleMessage: vi.fn(() => null),
+    findFirstVisibleMessageId: vi.fn(() => null)
+  }
+})
 
 vi.mock('@renderer/pages/home/Messages/messageBranch', () => ({
   branchFromMessage: vi.fn()
@@ -569,6 +573,50 @@ const makeAssistant = (): Assistant =>
 const Messages = (await import('../Messages')).default
 
 // ---------------------------------------------------------------------------
+// Legitimate-target fixture helpers (bootstrap provenance fix):
+// a mocked 'success' only proves placement when the target is actually
+// loaded/rendered. These helpers make the success fixture legitimate via
+// the existing seams (topicMessages + DOM row id/rect), never by forcing
+// the commit spy or weakening assertions.
+// ---------------------------------------------------------------------------
+const makeMsg = (id: string, topicId = 'topic-a'): Message =>
+  ({
+    id,
+    role: 'user',
+    assistantId: 'assistant-1',
+    topicId,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    status: 'success',
+    blocks: []
+  }) as unknown as Message
+
+const installMessageRow = (id: string): HTMLElement => {
+  let el = document.getElementById(`message-${id}`)
+  if (!el) {
+    el = document.createElement('div')
+    el.id = `message-${id}`
+    document.body.appendChild(el)
+  }
+  const htmlEl = el
+  try {
+    ;(htmlEl as unknown as { scrollIntoView: unknown }).scrollIntoView = () => undefined
+  } catch {}
+  try {
+    htmlEl.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 130, left: 0, right: 200, width: 200, height: 30, x: 0, y: 100 }) as DOMRect
+  } catch {}
+  return htmlEl
+}
+
+const cleanupMessageRows = (): void => {
+  for (const el of Array.from(document.querySelectorAll('[id^="message-"]'))) {
+    try {
+      el.remove()
+    } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -587,6 +635,7 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     mocks.ensureMock.mockReset()
     mocks.ensureMock.mockImplementation(async () => ({ status: 'resident' }) as any)
     mocks.topicMessages = [] as any
+    cleanupMessageRows()
     ;(window as any).toast = { error: mocks.toastErrorMock, success: vi.fn(), warning: vi.fn(), loading: vi.fn() }
   })
 
@@ -1337,6 +1386,11 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     const assistant = makeAssistant()
 
     mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    // Legitimate target proof: the mocked 'success' below claims the
+    // load/render committed, so the target must actually be loaded (window
+    // non-empty) and measurable in the DOM (row id seam).
+    mocks.topicMessages = [makeMsg('msg-boot', 'topic-a'), makeMsg('m-tail', 'topic-a')] as any
+    installMessageRow('msg-boot')
 
     render(
       <Messages
@@ -1372,6 +1426,10 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     const assistant = makeAssistant()
 
     mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    // Legitimate current-target proof for the epoch-2 bootstrap: the
+    // revisited topic actually loads the target and it is measurable.
+    mocks.topicMessages = [makeMsg('msg-boot', 'topic-a'), makeMsg('m-tail', 'topic-a')] as any
+    installMessageRow('msg-boot')
 
     const { rerender } = render(
       <Messages
@@ -1410,6 +1468,11 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // bootstrap detects matching pending and starts new navigation
     // (resolver index 1). Unified navigate ensures (async) before the
     // transaction, so drain the ensure microtask chain before asserting.
+    // Refresh the loaded projection reference so the first-load window
+    // effect re-applies for the revisited topic (same content, new
+    // identity — mirrors per-topic resident loads).
+    mocks.topicMessages = [makeMsg('msg-boot', 'topic-a'), makeMsg('m-tail', 'topic-a')] as any
+    installMessageRow('msg-boot')
     await act(async () => {
       rerender(
         <Messages
@@ -1504,6 +1567,9 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
 
     mocks.setPendingNavigate(null)
     mocks.getSavedPosition.mockReturnValue({ scrollTop: 100, anchorId: null, isAtBottom: false })
+    // Legitimate measurable window: a raw saved success needs a
+    // non-perpetually-empty container window, not an empty projection.
+    mocks.topicMessages = [makeMsg('m1', 'topic-a'), makeMsg('m2', 'topic-a')] as any
 
     render(
       <Messages
@@ -1527,6 +1593,150 @@ describe('S3.1 Mounted Messages integration — actual production component', ()
     // Same epoch: the stable completion commits the restored viewport
     // (programmatic restore needs no user input to become stable).
     expect(mocks.commitStableViewport).toHaveBeenCalled()
+  })
+
+  // -----------------------------------------------------------------------
+  // Bootstrap provenance: transient empty vs committed target window.
+  // Only the current transaction's actually committed target window may
+  // take first-placement/final-empty handling; a transient/bootstrap-old
+  // empty stays hidden awaiting the hydrate/nav commit. Success strings
+  // never force placed without positive placement evidence.
+  // -----------------------------------------------------------------------
+
+  it('bootstrap provenance: transient empty stays hidden, loaded target then places exactly once', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    mocks.topicMessages = [] as any
+
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    expect(pendingTransactionResolvers.length).toBe(1)
+
+    // Transient/bootstrap-old empty while the hydrate is still deferred:
+    // no premature terminal commit, no pending consume.
+    await act(async () => {})
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
+
+    // Hydrate: the target is actually loaded and measurable.
+    mocks.topicMessages = [makeMsg('msg-boot', 'topic-a'), makeMsg('m-tail', 'topic-a')] as any
+    installMessageRow('msg-boot')
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicA}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    expect(mocks.clearPendingNavigate).toHaveBeenCalledTimes(1)
+    expect(mocks.commitStableViewport).toHaveBeenCalledTimes(1)
+  })
+
+  it('bootstrap provenance: final committed empty never fabricates a stable snapshot', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    mocks.topicMessages = [] as any
+
+    render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    expect(pendingTransactionResolvers.length).toBe(1)
+
+    // The transaction claims success but the target window is finally empty
+    // (no row, empty projection): fail visible, no stable commit, no fake
+    // snapshot — the prior lawful target snapshot stands.
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+  })
+
+  it('bootstrap provenance: missing target with a non-empty window still refuses stable', async () => {
+    const topicA = makeTopic('topic-a')
+    const assistant = makeAssistant()
+
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-missing' })
+    mocks.topicMessages = [makeMsg('m1', 'topic-a'), makeMsg('m2', 'topic-a')] as any
+
+    render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    expect(pendingTransactionResolvers.length).toBe(1)
+
+    // Window is non-empty but the requested row is absent and the plan
+    // carries no raw fallback: actual outcome is unplaced, so even a
+    // 'success' string must not force placed/stable.
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
+  })
+
+  it('bootstrap provenance: stale epoch success never commits under the new session', async () => {
+    const topicA = makeTopic('topic-a')
+    const topicB = makeTopic('topic-b')
+    const assistant = makeAssistant()
+
+    mocks.setPendingNavigate({ topicId: 'topic-a', messageId: 'msg-boot' })
+    mocks.topicMessages = [] as any
+
+    const { rerender } = render(
+      <Messages
+        assistant={assistant}
+        topic={topicA}
+        setActiveTopic={vi.fn()}
+        sharedContextInfo={defaultSharedContextInfo}
+      />
+    )
+    await act(async () => {})
+    expect(pendingTransactionResolvers.length).toBe(1)
+    mocks.commitStableViewport.mockClear()
+
+    await act(async () => {
+      rerender(
+        <Messages
+          assistant={assistant}
+          topic={topicB}
+          setActiveTopic={vi.fn()}
+          sharedContextInfo={defaultSharedContextInfo}
+        />
+      )
+    })
+    await act(async () => {
+      pendingTransactionResolvers[0]?.('success')
+    })
+    expect(mocks.commitStableViewport).not.toHaveBeenCalled()
+    expect(mocks.clearPendingNavigate).not.toHaveBeenCalled()
   })
 
   // -----------------------------------------------------------------------

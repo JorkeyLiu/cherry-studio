@@ -836,10 +836,13 @@ export function isTopStableCommittable(input: {
  * Pure top first-position plan (route-local stable viewport, VIEWPORT-5):
  * a resolved saved-row anchor always selects `message` with the saved
  * intra-row offset — even when `isAtBottom` is true. `isAtBottom` selects
- * `bottom` only when no anchor is available; invalid snapshots take the
- * terminal `none` default; anchorless raw scrollTop is a same-route local
- * fallback only; anchorless no-snapshot takes the deterministic route-local
- * default `bottom` (never outgoing geometry, never `none`).
+ * `bottom` only when no anchor is available; invalid snapshots
+ * (typed NOT_FOUND: deleted/out-of-route) take the deterministic
+ * route-local default `bottom` on the latest window — stale anchor, raw
+ * scrollTop, and `isAtBottom` values are ignored; anchorless raw scrollTop
+ * is a same-route local fallback only; anchorless no-snapshot takes the
+ * deterministic route-local default `bottom` (never outgoing geometry,
+ * never `none` for the invalid path).
  */
 export function chooseTopFirstPositionPlan(input: {
   saved: RouteWindowSavedPosition
@@ -850,7 +853,7 @@ export function chooseTopFirstPositionPlan(input: {
   | { kind: 'none' }
   | { kind: 'message'; messageId: string; wantOffset: number | null; fallbackScrollTop: null }
   | { kind: 'scrollTop'; scrollTop: number } {
-  if (input.snapshotInvalidForRoute) return { kind: 'none' }
+  if (input.snapshotInvalidForRoute) return { kind: 'bottom' }
   if (input.routeSavedRowAnchor) {
     const wantOffset =
       typeof input.saved?.intraRowOffset === 'number' && Number.isFinite(input.saved.intraRowOffset)

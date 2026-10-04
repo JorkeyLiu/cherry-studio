@@ -182,9 +182,10 @@ import {
 } from './messageWindow'
 import { isRestoreTargetValid, shouldCancelStabilizerForKeyDown } from './positionStabilizer'
 import Prompt from './Prompt'
+import { attemptFirstPosition, isFirstPlacementAwaitingAttempt } from './routeFirstPlacement'
 import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
-import { shouldTopPipelineRefuseDividerIntent } from './routeViewportActivation'
+import { shouldRestoreRetainedWindowInPlace, shouldTopPipelineRefuseDividerIntent } from './routeViewportActivation'
 import {
   buildContainerCapturer,
   useOptionalRouteViewport,
@@ -197,7 +198,6 @@ import TopicSegmentLine from './TopicSegmentLine'
 import { requestTopicBranches, useBranchTree } from './useBranchTree'
 import { createViewportCommitWaiter } from './viewportCommitWaiter'
 import {
-  applyViewportFirstPosition,
   isViewportTransitionCurrent,
   type ViewportFirstPositionOutcome,
   type ViewportFirstPositionPlan,
@@ -526,7 +526,12 @@ const Messages = ({
   const suppressUserWriteRef = useRef(false)
   const viewportPhaseAttr =
     viewportCtx?.viewportPhaseAttr ??
-    viewportPhaseAttrFor(controller.currentPhase, controller.currentIntent?.kind ?? null)
+    viewportPhaseAttrFor(
+      controller.currentPhase,
+      controller.currentIntent?.kind ?? null,
+      controller.isActivationSession,
+      controller.isActivationRequired
+    )
   // Explicit reconnect-activation trigger: the provider lifetime setup bumps
   // the connection generation on every Activity attach (local fallback bumps
   // once per mount above). The single TOP pipeline below depends ONLY on this
@@ -727,6 +732,25 @@ const Messages = ({
     /** Pre-paint first-position outcome (`searching` = intermediate edge parking). */
     outcome: ViewportFirstPositionOutcome | null
   } | null>(null)
+  // First-placement reactive delivery + placement ack (bounded repair for the
+  // branch→main dirty terminal): `transitionPlanRef` is ref-only (never
+  // render state), so a recommitted plan can stay invisible to the pre-paint
+  // layout effect when the window object, visual attr, and controller
+  // primitives are all unchanged (retained same-window reactivation), and a
+  // mutable controller read in an async completion can race React's render
+  // commit (refused-while-`positioning` stable commit terminates the live
+  // plan before it ever places). Every `commitRouteWindowAtomic` therefore
+  // bumps `planSeq` (render state → the layout effect re-runs and attempts
+  // the plan exactly once via `outcome`) and arms a per-epoch placement ack
+  // that the layout effect settles on attempt; async completions await the
+  // ack instead of completing/failing before placement. Supersession,
+  // teardown, and terminal paths settle the previous ack unobserved (stale
+  // no-op, never hangs, never disturbs the newer transaction).
+  const [planSeq, setPlanSeq] = useState(0)
+  const planSeqRef = useRef(0)
+  const planAckRef = useRef<{ epoch: number; resolve: (observed: boolean) => void; promise: Promise<boolean> } | null>(
+    null
+  )
   // Divider restore search progress (binding invariant): while the requested
   // divider/shared anchor is outside the resident window, the restore stays in
   // a restoring/searching state under the owning session. Only the
@@ -843,14 +867,59 @@ const Messages = ({
       viewportDispatch({ type: 'scroll/end', token })
     } catch {}
   }, [viewportDispatch])
+  /**
+   * Settle the live first-placement ack (stale no-op on epoch mismatch, never
+   * disturbs the newer transaction). `epoch === null` settles whatever is
+   * live (commit-time supersession). Resolution wakes the awaiting async
+   * completion, which re-gates currency before completing.
+   */
+  const settlePlanAck = useCallback((epoch: number | null, observed: boolean) => {
+    const ack = planAckRef.current
+    if (!ack) return
+    if (epoch !== null && ack.epoch !== epoch) return
+    planAckRef.current = null
+    try {
+      ack.resolve(observed)
+    } catch {}
+  }, [])
   const failVisibleTransition = useCallback(
     (epoch: number) => {
-      // Stale sessions are inert: never touch the new session's token/phase.
-      if (!controller.isSessionCurrent(epoch)) {
+      // Stale sessions are inert: never touch a newer session's token/phase.
+      // A released-but-latest session (e.g. an `unplaced` first placement
+      // that already terminalized inside the controller) still runs the
+      // adoption below so the visible fallback becomes clean instead of
+      // staying dirty indefinitely.
+      if (epoch !== controller.currentEpoch) {
         return
       }
+      const owned = controller.isSessionCurrent(epoch)
       cancelAllVisibleQuiet()
-      controller.terminate(epoch, 'fail-visible')
+      if (owned) {
+        controller.terminate(epoch, 'fail-visible')
+      }
+      // Deterministic own-target fallback: when the committed rendered window
+      // is this session's own target AND the current selection, adopt it as
+      // displayed so the terminal is clean (displayed == rendered) and a
+      // future user scroll can save under the displayed-provenance target.
+      // Guarded epoch + same-current target: pre-commit failures (rendered
+      // bound to an older epoch or a cleared/empty window) adopt nothing, and
+      // no snapshot is written — the pre-existing target snapshot is
+      // preserved, never replaced by temporary fallback geometry.
+      try {
+        const rendered = controller.renderedProvenance
+        if (
+          rendered &&
+          rendered.epoch === epoch &&
+          rendered.topicId === topicIdRef.current &&
+          rendered.routeId === routeRef.current &&
+          (viewportStateRef.current.window?.displayMessages.length ?? 0) > 0
+        ) {
+          controller.adoptRenderedAsDisplayed(epoch)
+        }
+      } catch {
+        // fail-closed: terminal still releases below
+      }
+      settlePlanAck(epoch, false)
       dividerProgressRef.current = null
       if (dividerVisibleRef.current?.ownerEpoch === epoch) dividerVisibleRef.current = null
       if (topVisibleRef.current?.ownerEpoch === epoch) topVisibleRef.current = null
@@ -859,7 +928,7 @@ const Messages = ({
       endViewportScrollToken()
       notifyViewport()
     },
-    [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport]
+    [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport, settlePlanAck]
   )
   // Superseding teardown: terminate the current session (release exactly
   // once) so the next request starts clean. Never hides: callers own the
@@ -870,6 +939,10 @@ const Messages = ({
     if (controller.programmaticOwned) {
       controller.terminate(epoch, 'superseded')
     }
+    // The torn-down session's plan can never place: settle its ack
+    // unobserved so any awaiting completion wakes and re-gates (stale no-op
+    // for a newer session's ack by epoch mismatch).
+    settlePlanAck(epoch, false)
     dividerProgressRef.current = null
     dividerVisibleRef.current = null
     topVisibleRef.current = null
@@ -877,7 +950,35 @@ const Messages = ({
     transitionPlanRef.current = null
     endViewportScrollToken()
     notifyViewport()
-  }, [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
+  }, [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport, settlePlanAck])
+  /**
+   * Bounded placement ack for async completions: while the current session's
+   * plan is still awaiting its pre-paint placement attempt (`positioning` +
+   * session-current + outcome unrecorded), wait for that explicit attempt
+   * instead of committing or failing before it. The ack resolves via the
+   * pre-paint layout effect of the same commit, or unobserved via
+   * supersession/teardown/terminal — never polling, never an extra rAF,
+   * never a forced render. Stale targets return false immediately; every
+   * resumption re-gates currency before completing.
+   */
+  const awaitPlanPlacement = useCallback(
+    async (epoch: number, isStillTarget: () => boolean): Promise<boolean> => {
+      if (unmountedRef.current) return false
+      if (!isStillTarget()) return false
+      if (!isFirstPlacementAwaitingAttempt(controller, transitionPlanRef.current, epoch)) {
+        return isStillTarget()
+      }
+      const ack = planAckRef.current
+      if (!ack || ack.epoch !== epoch) return isStillTarget()
+      try {
+        await ack.promise
+      } catch {
+        return false
+      }
+      return isStillTarget()
+    },
+    [controller]
+  )
   // NOTE: the former `armRouteTransition(plan, tid, route)` two-step arm has
   // been removed. Route-switch windows now commit ONLY via the single atomic
   // entry `commitRouteWindowAtomic` defined after `windowIdentityKey` below:
@@ -1179,9 +1280,19 @@ const Messages = ({
   // anchor keeper (scoped observers), not a stabilizer loop. Stale/missing
   // targets fail visible.
   useLayoutEffect(() => {
+    // Reactive plan generation (bumped by every `commitRouteWindowAtomic`):
+    // read so this pre-paint placement re-runs for each committed plan even
+    // when the window object, visual attr, and controller primitives are
+    // unchanged (retained same-window reactivation). Exactly-once is owned
+    // by the recorded `outcome`, never by dep equality.
+    void planSeq
     if (controller.currentPhase !== 'positioning') return
     const pending = transitionPlanRef.current
     if (!pending) {
+      return
+    }
+    // Exactly-once per plan: an already-attempted plan never re-applies.
+    if (pending.outcome !== null) {
       return
     }
     if (!controller.isSessionCurrent(pending.epoch)) return
@@ -1194,24 +1305,82 @@ const Messages = ({
       mounted: !unmountedRef.current
     })
     if (!current || !live || !hasWindow) {
+      // Deterministic empty visible fallback (F1): an observed empty window
+      // for the current target is a legitimate empty projection (empty topic /
+      // deletion fallback tail), not a missing commit — fail visible exactly
+      // once (releases, visible, no snapshot, ack settle false via
+      // failVisible). Only a not-yet-observed window (null) stays hidden
+      // awaiting the commit. No fake stable snapshot/anchor is invented.
+      // Provenance-bound: only this transaction's actually committed target
+      // window may take the empty fallback. A transient/bootstrap-old empty
+      // (manual bootstrap arm with no atomic window commit) stays hidden
+      // awaiting the hydrate/nav commit instead of killing it.
+      const observedWindow = viewportStateRef.current.window
+      const observedEmpty = observedWindow != null && (observedWindow.displayMessages?.length ?? 0) === 0
       // Missing window yet (commit not observed): stay hidden until the
       // window lands; only fail visible when this epoch is stale/gone.
-      if (!hasWindow && current && live && !unmountedRef.current) return
-      if (controller.isSessionCurrent(pending.epoch)) {
-        failVisibleTransition(pending.epoch)
+      // Observed empty falls through to fail-visible below (never hidden)
+      // ONLY when provenance-bound (see below).
+      if (!hasWindow && current && live && !unmountedRef.current && !observedEmpty) return
+      if (!hasWindow && current && live && !unmountedRef.current && observedEmpty) {
+        const ack = planAckRef.current
+        const ackArmed = !!ack && ack.epoch === pending.epoch
+        if (!ackArmed) return
+        try {
+          const rendered = controller.renderedProvenance
+          const ow = observedWindow as {
+            oldestMessageId?: unknown
+            newestMessageId?: unknown
+            displayMessages?: unknown[]
+          } | null
+          const observedId =
+            ow && Array.isArray(ow.displayMessages)
+              ? `${String(ow.oldestMessageId ?? '')}::${String(ow.newestMessageId ?? '')}::${ow.displayMessages.length}`
+              : null
+          const renderedMatches =
+            !!rendered &&
+            !!observedId &&
+            rendered.epoch === pending.epoch &&
+            rendered.topicId === pending.topicId &&
+            rendered.routeId === pending.routeId &&
+            rendered.windowId === observedId
+          if (!renderedMatches) return
+        } catch {
+          return
+        }
       }
+      failVisibleTransition(pending.epoch)
       return
     }
+    // Shared attempt (records the explicit outcome on the plan + controller):
+    // `searching` (edge-parked intermediate) keeps the restore in its
+    // searching state — the projection below still reveals at the safe edge
+    // so pagination can run, but no stable commit, intent clear, or ownership
+    // release may follow until the requested identity is resident/aligned/
+    // quiet (divider search coordinator owns that lifecycle). `refused`
+    // (stale/wrong-phase) never touches the newer session: fail-visible is
+    // epoch-gated and stays inert for it.
+    let attempt: ViewportFirstPositionOutcome | 'refused'
     try {
-      // Record the explicit outcome: `searching` (edge-parked intermediate)
-      // keeps the restore in its searching state — the projection below still
-      // reveals at the safe edge so pagination can run, but no stable commit,
-      // intent clear, or ownership release may follow until the requested
-      // identity is resident/aligned/quiet (divider search coordinator owns
-      // that lifecycle).
-      pending.outcome = applyViewportFirstPosition(live, pending.plan)
+      attempt = attemptFirstPosition(controller, pending, live)
     } catch {
-      // fail-visible below still reveals
+      attempt = 'refused'
+    }
+    if (attempt === 'refused') {
+      failVisibleTransition(pending.epoch)
+      return
+    }
+    // Actual placement outcome/phase gates ack success (F2): unplaced or
+    // terminal (including an activation attempt whose helper terminalized via
+    // unplaced/exception) never acks true — fail visible preserving the prior
+    // lawful snapshot (current-terminal own-target adoption iff valid rendered
+    // nonempty via failVisible), settle false; stale stays inert via the epoch
+    // gate. Only an actually placed/aligned or searching usable attempt may
+    // ack success below. Phase is re-read (mutable controller truth may move
+    // between the top guard and here; the cast defeats stale narrowing).
+    if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
+      failVisibleTransition(pending.epoch)
+      return
     }
     if (
       topicIdRef.current !== pending.topicId ||
@@ -1222,13 +1391,60 @@ const Messages = ({
       failVisibleTransition(pending.epoch)
       return
     }
-    controller.firstPositioned(pending.epoch, pending.outcome ?? 'unplaced')
     // Reveal tied to the same route/epoch: advance displayed only when the
     // target is positioned and visible. Ownership + scroll token stay held
     // until stable commit or terminal fallback (release exactly once there).
-    controller.revealed(pending.epoch)
+    //
+    // Activation defers this reveal (F2): the retained window was placed
+    // pre-paint while hidden, but effective alignment + projection coverage +
+    // required layout settle are still unverified (folded anchor may need a
+    // reveal, the projection commit may still be in flight, late layout may
+    // move the anchor). The async activation continuation below verifies while
+    // hidden (`positioning` via the activation aligned/searching mapping) and
+    // calls `revealed()` only after the settle, immediately before the stable
+    // commit. Ordinary transitions keep the immediate pre-paint reveal here.
+    if (!controller.isActivationSession) {
+      const revealedOk = controller.revealed(pending.epoch)
+      if (!revealedOk) {
+        // Epoch-gated: inert for a newer session, and adopts the committed
+        // own-target render as displayed for a released-but-latest session
+        // (e.g. an `unplaced` first placement) instead of leaving it dirty.
+        failVisibleTransition(pending.epoch)
+        return
+      }
+    }
     notifyViewport()
-  }, [viewportPhaseAttr, viewportState.window, failVisibleTransition, scrollContainerRef, controller, notifyViewport])
+    // Placement ack: this plan's pre-paint attempt is now observed — wake any
+    // awaiting async completion (same epoch only; stale no-op). Completions
+    // re-gate currency before committing, so no false stable/reveal can land
+    // before this positive placement. Terminal lost-race safety: a session
+    // that terminalized between attempt and ack never acks true (re-read, see
+    // above).
+    if ((controller.currentPhase as string) === 'terminal') {
+      failVisibleTransition(pending.epoch)
+      return
+    }
+    settlePlanAck(pending.epoch, true)
+    // Real-transaction trigger (retained same-window fix): the visual attr
+    // (`positioning`) and the window object stay identical when a retained
+    // window is recommitted (fetch-hold activation + positioning both map to
+    // `positioning`, SAME window object), so neither can drive this pre-paint
+    // placement. Depend on the primitive current phase/epoch instead: a
+    // fetch-hold → positioning move or a new plan epoch reruns exactly once
+    // via the current-plan gate above (stale epochs return inert, placed
+    // sessions leave `positioning` so repeats are no-ops).
+  }, [
+    controller,
+    controller.currentPhase,
+    controller.currentEpoch,
+    planSeq,
+    viewportPhaseAttr,
+    viewportState.window,
+    failVisibleTransition,
+    scrollContainerRef,
+    notifyViewport,
+    settlePlanAck
+  ])
   useEffect(() => {
     // Symmetric connection: Activity hidden disconnects this effect (cleanup
     // below) while preserving state/refs/DOM; Activity visible reconnects by
@@ -1260,10 +1476,13 @@ const Messages = ({
       topVisibleRef.current = null
       topHiddenFallbackRef.current = null
       transitionPlanRef.current = null
+      // No placement can follow unmount: settle the ack unobserved so any
+      // awaiting completion wakes and re-gates (stale no-op, never hangs).
+      settlePlanAck(controller.currentEpoch, false)
       endViewportScrollToken()
       notifyViewport()
     }
-  }, [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport])
+  }, [cancelAllVisibleQuiet, controller, endViewportScrollToken, notifyViewport, settlePlanAck])
 
   // Deletion epoch subscription — synchronously invalidate the mounted viewport
   // projection for this topic when authoritative hard deletion advances.
@@ -1290,7 +1509,12 @@ const Messages = ({
       // controller (releases ownership exactly once so later saves are not
       // blocked) and end the scroll token so the emptied viewport is never
       // left hidden by a stale transition.
+      const epochBeforeInvalidate = controller.currentEpoch
       controller.invalidateAll()
+      // The invalidated plan can never place: settle its ack unobserved so
+      // any awaiting completion wakes and re-gates (epoch-exact, never
+      // disturbs a newer session).
+      settlePlanAck(epochBeforeInvalidate, false)
       cancelAllVisibleQuiet()
       dividerProgressRef.current = null
       dividerVisibleRef.current = null
@@ -1318,7 +1542,7 @@ const Messages = ({
       invalidate()
     }
     return unsub
-  }, [tearDownViewportTransition, topic.id, clearTimeoutTimer, viewportDispatch])
+  }, [tearDownViewportTransition, topic.id, clearTimeoutTimer, viewportDispatch, settlePlanAck])
 
   // S3.1: Explicit topic transition coordinator. Detects topic prop changes
   // and orchestrates deterministic cleanup: save old-topic scroll position,
@@ -2245,42 +2469,83 @@ const Messages = ({
           failVisibleTransition(bootstrapRestoreEpoch)
           return
         }
+        // Placement evidence (never trust the 'success' string alone): only
+        // the current transaction's actually placed target may commit. The
+        // shared helper records outcome + phase together (exactly-once with
+        // the pre-paint layout attempt); unplaced/refused/terminal fails
+        // visible preserving the prior lawful snapshot.
         const pendingTransition = transitionPlanRef.current
         if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-          // Synchronously enforce the first position before reveal: when the
-          // pre-paint layout effect already applied it, this re-application
-          // is idempotent (same target/offset); when the transaction never
-          // positioned (cancelled/failed/missing target), the plan's explicit
-          // fallback applies now instead of revealing at an unplaced scroll.
-          // Only while still on the same topic/route/epoch — otherwise the
-          // new owner positions.
           try {
             const live = scrollContainerRef.current
             if (
-              live &&
-              !unmountedRef.current &&
-              topicIdRef.current === topic.id &&
-              routeRef.current === pendingTransition.routeId &&
-              controller.currentEpoch === bootstrapRestoreEpoch
+              !live ||
+              unmountedRef.current ||
+              topicIdRef.current !== topic.id ||
+              routeRef.current !== pendingTransition.routeId ||
+              !controller.isSessionCurrent(bootstrapRestoreEpoch)
             ) {
-              applyViewportFirstPosition(live, pendingTransition.plan)
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+            let attempt: ViewportFirstPositionOutcome | 'refused'
+            try {
+              attempt = attemptFirstPosition(controller, pendingTransition, live)
+            } catch {
+              attempt = 'refused'
+            }
+            if (attempt === 'refused') {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
+            }
+            if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
+              failVisibleTransition(bootstrapRestoreEpoch)
+              bootstrapPhaseRef.current = 'done'
+              return
             }
           } catch {
-            // fail-visible below still reveals
+            failVisibleTransition(bootstrapRestoreEpoch)
+            bootstrapPhaseRef.current = 'done'
+            return
           }
-          transitionPlanRef.current = null
-          controller.revealed(bootstrapRestoreEpoch)
-          notifyViewport()
+        } else if ((controller.currentPhase as string) !== 'aligned') {
+          const phaseNow = controller.currentPhase as string
+          if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+            if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
+            failVisibleTransition(bootstrapRestoreEpoch)
+            bootstrapPhaseRef.current = 'done'
+            return
+          }
         }
         if (result !== 'cancelled') {
+          // Positive placement required: the attempt above (or the pre-paint
+          // layout attempt it deduplicates) left aligned/searching. A success
+          // string with an unplaced target never forces placed. Final empty
+          // windows never commit (fail-visible preserves the lawful snapshot).
+          const phaseNow = controller.currentPhase as string
+          if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            bootstrapPhaseRef.current = 'done'
+            return
+          }
+          if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            bootstrapPhaseRef.current = 'done'
+            return
+          }
+          if (
+            topicIdRef.current !== topic.id ||
+            !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
+            unmountedRef.current
+          ) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            bootstrapPhaseRef.current = 'done'
+            return
+          }
           clearPendingNavigate(pending)
           bootstrapPhaseRef.current = 'done'
-          // The navigation transaction performed the positioning scroll
-          // itself (it owns its token); record it so the stable commit below
-          // is gated on positioned+visible, not on the layout effect having
-          // observed a window. Idempotent when the layout effect already
-          // placed (same session/plan).
-          controller.firstPositioned(bootstrapRestoreEpoch, 'placed')
           controller.revealed(bootstrapRestoreEpoch)
           notifyViewport()
           // Stable completion commit: the final visible viewport is the
@@ -2339,36 +2604,73 @@ const Messages = ({
         failVisibleTransition(bootstrapRestoreEpoch)
         return
       }
+      // Same placement-evidence contract as the pending path above: never
+      // trust the result string alone; unplaced/refused/terminal fails
+      // visible preserving the prior lawful snapshot.
       const pendingTransition = transitionPlanRef.current
       if (pendingTransition?.epoch === bootstrapRestoreEpoch) {
-        // Same synchronous enforce-before-reveal contract as the pending
-        // path above: idempotent when the layout effect already placed the
-        // target, corrective (explicit fallback) when it did not.
         try {
           const live = scrollContainerRef.current
           if (
-            live &&
-            !unmountedRef.current &&
-            topicIdRef.current === topic.id &&
-            routeRef.current === pendingTransition.routeId &&
-            controller.currentEpoch === bootstrapRestoreEpoch
+            !live ||
+            unmountedRef.current ||
+            topicIdRef.current !== topic.id ||
+            routeRef.current !== pendingTransition.routeId ||
+            !controller.isSessionCurrent(bootstrapRestoreEpoch)
           ) {
-            applyViewportFirstPosition(live, pendingTransition.plan)
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          let attempt: ViewportFirstPositionOutcome | 'refused'
+          try {
+            attempt = attemptFirstPosition(controller, pendingTransition, live)
+          } catch {
+            attempt = 'refused'
+          }
+          if (attempt === 'refused') {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          if (attempt === 'unplaced' || (controller.currentPhase as string) === 'terminal') {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
           }
         } catch {
-          // fail-visible below still reveals
+          failVisibleTransition(bootstrapRestoreEpoch)
+          return
         }
-        transitionPlanRef.current = null
-        controller.revealed(bootstrapRestoreEpoch)
-        notifyViewport()
+      } else if ((controller.currentPhase as string) !== 'aligned') {
+        const phaseNow = controller.currentPhase as string
+        if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+          if (!controller.isSessionCurrent(bootstrapRestoreEpoch)) return
+          failVisibleTransition(bootstrapRestoreEpoch)
+          return
+        }
       }
       // Stable completion commit (same epoch gate already checked above):
       // the final visible viewport is the route's stable snapshot even with
-      // no user input. The transaction positioned itself, so record
-      // placed+revealed before committing; a non-persisted result terminates
-      // visibly without committing. Advances displayed provenance.
+      // no user input. Positive placement (aligned/searching) plus a
+      // non-empty committed window is required; a non-persisted result or an
+      // unplaced/empty target terminates visibly without committing.
+      // Advances displayed provenance.
       if (shouldPersistNavigationResult(result)) {
-        controller.firstPositioned(bootstrapRestoreEpoch, 'placed')
+        const phaseNow = controller.currentPhase as string
+        if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
+          failVisibleTransition(bootstrapRestoreEpoch)
+          return
+        }
+        if ((viewportStateRef.current.window?.displayMessages.length ?? 0) === 0) {
+          failVisibleTransition(bootstrapRestoreEpoch)
+          return
+        }
+        if (
+          topicIdRef.current !== topic.id ||
+          !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
+          unmountedRef.current
+        ) {
+          failVisibleTransition(bootstrapRestoreEpoch)
+          return
+        }
         controller.revealed(bootstrapRestoreEpoch)
         notifyViewport()
         commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
@@ -3236,12 +3538,25 @@ const Messages = ({
         plan,
         outcome: null
       }
+      // Observable plan delivery: supersede any previous ack, arm this
+      // epoch's placement ack, and bump the reactive plan generation so the
+      // pre-paint layout effect attempts this plan exactly once even when the
+      // window object, visual attr, and controller primitives are unchanged
+      // (retained same-window reactivation).
+      settlePlanAck(null, false)
+      let ackResolve: (observed: boolean) => void = () => undefined
+      const ackPromise = new Promise<boolean>((resolve) => {
+        ackResolve = resolve
+      })
+      planAckRef.current = { epoch: fetchEpoch, resolve: ackResolve, promise: ackPromise }
+      planSeqRef.current += 1
+      setPlanSeq(planSeqRef.current)
       const scrollToken = {}
       viewportDispatch({ type: 'scroll/begin', mode: 'anchoring', token: scrollToken })
       notifyViewport()
       return fetchEpoch
     },
-    [controller, notifyViewport, viewportDispatch, windowIdentityKey]
+    [controller, notifyViewport, settlePlanAck, viewportDispatch, windowIdentityKey]
   )
   // Divider-only visible incremental rebase entry (fast path, never hidden).
   // Synchronously rebases the existing rendered list (shared prefix stays
@@ -3950,6 +4265,14 @@ const Messages = ({
         routeRef.current === fb.routeId &&
         !unmountedRef.current &&
         controller.currentEpoch === epoch
+      // Placement ack: the hidden fallback's fresh plan places in the
+      // pre-paint layout effect of the same-epoch hidden commit — settle
+      // work must not run before that attempt is observed.
+      const retryPlacementObserved = await awaitPlanPlacement(epoch, stillTarget)
+      if (!retryPlacementObserved) {
+        failVisibleTransition(epoch)
+        return
+      }
       try {
         if (checkElement(fb.anchorMessageId) === 'hidden') {
           await selectMessageForFold(fb.anchorMessageId)
@@ -4209,6 +4532,7 @@ const Messages = ({
     }
   }, [
     viewportState.window,
+    awaitPlanPlacement,
     controller,
     cancelTopVisibleQuiet,
     checkElement,
@@ -4817,12 +5141,27 @@ const Messages = ({
         } finally {
           // Epoch-guarded stable completion: stale `finally` blocks never
           // touch the new session (session currency, not bare epoch equality).
-          if (deletionEpoch !== null && controller.isSessionCurrent(deletionEpoch)) {
+          // Placement ack first: the fallback plan places in the pre-paint
+          // layout effect of the same commit — completing before that attempt
+          // would refuse while `positioning` and strand the session.
+          const doneEpoch = deletionEpoch
+          if (doneEpoch !== null && controller.isSessionCurrent(doneEpoch)) {
+            await awaitPlanPlacement(doneEpoch, () =>
+              isRestoreTargetValid({
+                topicMatch: topicIdRef.current === topicIdAtEffect,
+                routeMatch: routeRef.current === routeAtEffect,
+                mounted: !unmountedRef.current,
+                epochCurrent: controller.currentEpoch === doneEpoch
+              })
+            )
+            if (!controller.isSessionCurrent(doneEpoch)) {
+              return
+            }
             // Stable completion: the fallback bottom viewport is the route's
             // stable snapshot (no user input required). commitDisplayedStable
             // advances displayed provenance, ends the token, clears the plan,
             // and releases ownership exactly once.
-            commitDisplayedStable(topicIdAtEffect, routeAtEffect, deletionEpoch)
+            commitDisplayedStable(topicIdAtEffect, routeAtEffect, doneEpoch)
             notifyViewport()
           }
         }
@@ -4843,6 +5182,7 @@ const Messages = ({
     deletionFallbackIntent,
     dispatch,
     displayCount,
+    awaitPlanPlacement,
     failVisibleTransition,
     t,
     topic.id
@@ -5003,6 +5343,275 @@ const Messages = ({
         intraRowOffset: retainedLiveAnchor.offset,
         rawScrollTop: typeof saved?.rawScrollTop === 'number' ? saved.rawScrollTop : 0,
         isAtBottom: false
+      }
+    }
+    // Retained-projection-first reactivation (page resume, same route):
+    // when the retained window demonstrably covers the requested stable
+    // anchor against the current renderer-owned window + loaded projection +
+    // connected DOM, restore it in place with a fresh guarded epoch and no
+    // windowed fetch — row DOM identities survive, no reload. Every other
+    // shape (missing anchor, changed route, deletion, anchorless non-bottom)
+    // falls through to the existing full fetch/rebuild below. Divider-owned
+    // sessions already refused above and never reach here.
+    if (wasActivation) {
+      try {
+        const retainedWindow = viewportStateRef.current.window
+        const retainedIds = new Set((retainedWindow?.displayMessages ?? []).map((m) => m.id))
+        const loadedList = messagesRef.current
+        const loadedIds = new Set(loadedList.map((m) => m.id))
+        const anchorForInPlace = canonicalSavedAnchorId(saved)
+        const displayedAtEffect = controller.displayedRoute
+        const domResidentForInPlace = anchorForInPlace ? getMessageRowById(anchorForInPlace) !== null : true
+        const inPlaceEligible = shouldRestoreRetainedWindowInPlace({
+          wasActivation,
+          selectedTopicId: topicIdAtEffect,
+          selectedRoute: routeAtEffect,
+          displayedTopicId: displayedAtEffect.topicId,
+          displayedRoute: displayedAtEffect.route,
+          deletionPending: !!(deletionFallbackIntent && deletionFallbackIntent.route === routeAtEffect),
+          hasRetainedWindow: (retainedWindow?.displayMessages.length ?? 0) > 0,
+          canonicalAnchor: anchorForInPlace,
+          isAtBottom: !!saved?.isAtBottom,
+          retainedContainsAnchor: anchorForInPlace ? retainedIds.has(anchorForInPlace) : false,
+          loadedContainsAnchor: anchorForInPlace ? loadedIds.has(anchorForInPlace) : false,
+          domAnchorResident: domResidentForInPlace
+        })
+        if (inPlaceEligible && retainedWindow && (retainedWindow.displayMessages.length ?? 0) > 0) {
+          saveDisplayedSnapshot()
+          const inPlaceEpoch =
+            adoptFetchHold(topicIdAtEffect, routeAtEffect) ??
+            beginFetchHold(topicIdAtEffect, routeAtEffect, {
+              kind: 'top',
+              saved: useRetainedAnchor
+                ? {
+                    scrollTop: saved?.scrollTop ?? 0,
+                    messageId: saved?.messageId ?? null,
+                    intraRowOffset: saved?.intraRowOffset ?? null,
+                    isAtBottom: false
+                  }
+                : undefined
+            })
+          if (routeFetchEpochRef.current !== null && controller.isSessionCurrent(routeFetchEpochRef.current)) {
+            return
+          }
+          routeFetchEpochRef.current = inPlaceEpoch
+          // The retained projection is already the loaded route: never reclaim
+          // `loadedRouteRef` here (already current) and never drop the
+          // per-route window cache for a path that issues no fetch.
+          const inPlacePlan = chooseTopFirstPositionPlan({
+            saved,
+            snapshotInvalidForRoute: false,
+            routeSavedRowAnchor: anchorForInPlace
+          })
+          const inPlaceRestoreEpoch = commitRouteWindowAtomic(
+            inPlaceEpoch,
+            topicIdAtEffect,
+            routeAtEffect,
+            retainedWindow,
+            inPlacePlan
+          )
+          if (inPlaceRestoreEpoch === null) {
+            failVisibleTransition(inPlaceEpoch)
+            return
+          }
+          // Hidden settle only (never first placement — the layout effect
+          // places pre-paint while hidden): fold-reveal when hidden, bounded
+          // projection wait, direct compensation to the saved offset/bottom,
+          // then the ONE identity-stable commit. Stale paths fail visible and
+          // preserve the prior snapshot; no snapshot is invented here.
+          void (async () => {
+            const stillInPlaceTarget = (): boolean =>
+              isRestoreTargetValid({
+                topicMatch: topicIdRef.current === topicIdAtEffect,
+                routeMatch: routeRef.current === routeAtEffect,
+                mounted: !unmountedRef.current,
+                epochCurrent: controller.currentEpoch === inPlaceRestoreEpoch
+              })
+            // Placement ack: the retained plan places pre-paint while hidden
+            // (driven by the reactive plan generation even though the window
+            // object is unchanged) — the hidden settle below must not run
+            // before that attempt is observed.
+            const inPlacePlacementObserved = await awaitPlanPlacement(inPlaceRestoreEpoch, stillInPlaceTarget)
+            if (!inPlacePlacementObserved) {
+              failVisibleTransition(inPlaceRestoreEpoch)
+              return
+            }
+            try {
+              if (anchorForInPlace) {
+                try {
+                  if (checkElement(anchorForInPlace) === 'hidden') {
+                    await selectMessageForFold(anchorForInPlace)
+                  }
+                } catch {
+                  // fail-closed: commit gate below still verifies residency
+                }
+                if (!stillInPlaceTarget()) {
+                  failVisibleTransition(inPlaceRestoreEpoch)
+                  return
+                }
+                try {
+                  const projectionReady = await waitForProjectionCommit(anchorForInPlace, () => !stillInPlaceTarget())
+                  if (!projectionReady) {
+                    failVisibleTransition(inPlaceRestoreEpoch)
+                    return
+                  }
+                } catch {
+                  failVisibleTransition(inPlaceRestoreEpoch)
+                  return
+                }
+                if (!stillInPlaceTarget()) {
+                  failVisibleTransition(inPlaceRestoreEpoch)
+                  return
+                }
+                const wantInPlaceOffset =
+                  typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+                    ? saved.intraRowOffset
+                    : null
+                const inPlaceLive = scrollContainerRef.current
+                if (inPlaceLive && wantInPlaceOffset !== null) {
+                  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+                  if (!stillInPlaceTarget()) {
+                    failVisibleTransition(inPlaceRestoreEpoch)
+                    return
+                  }
+                  const settleInPlaceOnce = (): boolean => {
+                    try {
+                      const el = getMessageRowById(anchorForInPlace)
+                      if (!el || !stillInPlaceTarget()) return false
+                      const have = el.getBoundingClientRect().top - inPlaceLive.getBoundingClientRect().top
+                      const delta = have - wantInPlaceOffset
+                      if (Math.abs(delta) > 1) inPlaceLive.scrollTop += delta
+                      return true
+                    } catch {
+                      return false
+                    }
+                  }
+                  settleInPlaceOnce()
+                  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+                  if (!stillInPlaceTarget()) {
+                    failVisibleTransition(inPlaceRestoreEpoch)
+                    return
+                  }
+                  settleInPlaceOnce()
+                }
+              } else {
+                // Anchorless bottom: already at bottom pre-paint; settle one
+                // frame so late layout lands before the stable commit.
+                await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+              }
+            } catch {
+              // fail-closed: commit gate below still verifies currency
+            } finally {
+              // Deferred activation reveal (F2): the layout effect placed
+              // pre-paint while hidden and deliberately skipped `revealed()`.
+              // Reveal here only after the hidden settle verified effective
+              // alignment + projection coverage + required layout settle
+              // (fold-reveal + projection wait + direct compensation above,
+              // residency re-proven below). Stale epochs never reveal: the
+              // session-current gate plus `revealed()`'s own epoch guard keep
+              // old completions inert so they can never reveal/release the new
+              // transaction. Terminal fail-visible preserves the prior
+              // snapshot (no snapshot invented here).
+              if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                if (anchorForInPlace) {
+                  let projectionContains = false
+                  try {
+                    projectionContains = messagesRef.current.some((m) => m.id === anchorForInPlace)
+                  } catch {
+                    projectionContains = false
+                  }
+                  let domConnected = false
+                  try {
+                    domConnected = getMessageRowById(anchorForInPlace) !== null
+                  } catch {
+                    domConnected = false
+                  }
+                  if (
+                    !isTopStableCommittable({
+                      isAtBottom: !!saved?.isAtBottom,
+                      snapshotInvalidForRoute: false,
+                      requestedAnchor: anchorForInPlace,
+                      projectionContains,
+                      domConnected
+                    })
+                  ) {
+                    failVisibleTransition(inPlaceRestoreEpoch)
+                    return
+                  }
+                  let inPlaceRevealed = false
+                  try {
+                    inPlaceRevealed = controller.revealed(inPlaceRestoreEpoch)
+                  } catch {
+                    inPlaceRevealed = false
+                  }
+                  // Bounded rejection: a CURRENT owner's rejected reveal must
+                  // not stay hidden (fail-visible preserving snapshot/release
+                  // once); a stale owner's failure is inert and never
+                  // terminates the new session.
+                  if (!inPlaceRevealed) {
+                    if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                      failVisibleTransition(inPlaceRestoreEpoch)
+                    }
+                    return
+                  }
+                  if (!controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                    return
+                  }
+                  const identityOffset =
+                    typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+                      ? saved.intraRowOffset
+                      : null
+                  const inPlaceCommitted = commitDisplayedStableWithAnchor(
+                    topicIdAtEffect,
+                    routeAtEffect,
+                    inPlaceRestoreEpoch,
+                    anchorForInPlace,
+                    identityOffset
+                  )
+                  if (!inPlaceCommitted) {
+                    if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                      failVisibleTransition(inPlaceRestoreEpoch)
+                    }
+                    return
+                  }
+                } else {
+                  // Anchorless bottom: the deferred reveal lands here too —
+                  // pre-paint stayed hidden, one settle frame ran above, and
+                  // displayed advances only now, immediately before stable.
+                  let inPlaceBottomRevealed = false
+                  try {
+                    inPlaceBottomRevealed = controller.revealed(inPlaceRestoreEpoch)
+                  } catch {
+                    inPlaceBottomRevealed = false
+                  }
+                  if (!inPlaceBottomRevealed) {
+                    if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                      failVisibleTransition(inPlaceRestoreEpoch)
+                    }
+                    return
+                  }
+                  if (!controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                    return
+                  }
+                  const inPlaceBottomCommitted = commitDisplayedStable(
+                    topicIdAtEffect,
+                    routeAtEffect,
+                    inPlaceRestoreEpoch
+                  )
+                  if (!inPlaceBottomCommitted) {
+                    if (controller.isSessionCurrent(inPlaceRestoreEpoch)) {
+                      failVisibleTransition(inPlaceRestoreEpoch)
+                    }
+                    return
+                  }
+                }
+              }
+            }
+          })()
+          return
+        }
+      } catch {
+        // fail-closed: fall through to the full fetch/rebuild below
       }
     }
     // Outgoing freeze (idempotent when the selector already saved) + fetch
@@ -5337,8 +5946,9 @@ const Messages = ({
           // offset (even when isAtBottom) with NO missing-row fallback (a
           // missing row with a valid anchor fails visible and preserves the
           // snapshot — intermediate raw geometry never poses as stable);
-          // invalid snapshot → terminal default (`none`, the latest window's
-          // natural tail position, committable after placed/stable); no usable
+          // invalid snapshot → deterministic route-local default (`bottom` on
+          // the latest window, placed pre-paint then committable after
+          // stable); no usable
           // anchor + isAtBottom → bottom; raw-only legacy snapshot
           // (no anchor) → same-route scrollTop; no snapshot → deterministic
           // route-local default (`bottom`). Never outgoing geometry.
@@ -5367,7 +5977,8 @@ const Messages = ({
         // layout drift (even when isAtBottom: exact anchor + offset outranks
         // bottom vicinity); anchorless isAtBottom → already at bottom
         // pre-paint, nothing more; same-route raw scrollTop → already set
-        // none → deterministic vicinity default, already committed.
+        // deterministic bottom default (including the invalid-snapshot
+        // path) → already at bottom pre-paint.
         // Target validity is the restore epoch (topic/route/mounted/epoch),
         // never `canHandleUserViewportScroll` (the programmatic token below
         // closes that gate by design and would self-cancel).
@@ -5415,6 +6026,17 @@ const Messages = ({
           })
         }
         try {
+          // Placement ack (bounded root repair): the pre-paint layout effect
+          // owns first placement; this async completion must not commit or
+          // fail before that attempt is observed — a refused-while-
+          // `positioning` stable commit would terminate the live plan before
+          // it ever placed (branch→main dirty terminal). Stale targets fail
+          // visible below exactly as before.
+          const placementObserved = await awaitPlanPlacement(topRestoreEpoch, stillTopTarget)
+          if (!placementObserved) {
+            failVisibleTransition(topRestoreEpoch)
+            return
+          }
           if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
             const wantOffset =
               typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
@@ -5507,8 +6129,8 @@ const Messages = ({
             // Deterministic route-local default (`bottom` plan): the committed
             // latest window is already at bottom pre-paint; settle one frame
             // so late layout lands before the stable commit. Invalid
-            // snapshots land here too via the terminal `none` plan — only
-            // this stable default may replace the stale snapshot.
+            // snapshots land here too via the deterministic `bottom` plan —
+            // only this stable default may replace the stale snapshot.
             await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
           }
         } catch {
@@ -5523,31 +6145,70 @@ const Messages = ({
           // above, so the next no-scroll round-trip restores that default.
           // Valid anchors commit by identity (applied anchor + wantOffset,
           // live scrollTop/bottom; never a crossing-first capture); bottom /
-          // raw / terminal defaults commit the final visible viewport. A
+          // raw / invalid-snapshot defaults commit the final visible viewport. A
           // valid unresolved anchor never commits a fallback: the gate below
           // fails visible and preserves the prior snapshot. Stale `finally`
           // blocks never touch the new session (session currency gate).
+          //
+          // Activation deferred reveal (F2, full fallback): ordinary sessions
+          // already revealed pre-paint in the layout effect, so this is a
+          // harmless idempotent re-assert. Activation sessions skipped that
+          // pre-paint reveal and stayed hidden (`positioning` through
+          // aligned/searching); reveal here only after the hidden settle
+          // above verified residency/coverage, immediately before stable.
+          // Old completions never reveal the new session: both `revealed()`
+          // and the stable helpers are epoch-guarded.
           if (controller.isSessionCurrent(topRestoreEpoch)) {
             if (!isTopAnchorCommittable()) {
               failVisibleTransition(topRestoreEpoch)
-            } else if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
-              const identityOffset =
-                typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
-                  ? saved.intraRowOffset
-                  : null
-              // Identity commit (applied anchor + wantOffset, live
-              // scrollTop/bottom). commitDisplayedStableWithAnchor advances
-              // displayed, ends the token, clears the plan, and releases
-              // exactly once.
-              commitDisplayedStableWithAnchor(
-                topicIdAtEffect,
-                routeAtEffect,
-                topRestoreEpoch,
-                routeSavedRowAnchor,
-                identityOffset
-              )
             } else {
-              commitDisplayedStable(topicIdAtEffect, routeAtEffect, topRestoreEpoch)
+              if (controller.isActivationSession) {
+                let topRevealed = false
+                try {
+                  topRevealed = controller.revealed(topRestoreEpoch)
+                } catch {
+                  topRevealed = false
+                }
+                // Bounded rejection: CURRENT owner only; stale stays inert.
+                if (!topRevealed) {
+                  if (controller.isSessionCurrent(topRestoreEpoch)) {
+                    failVisibleTransition(topRestoreEpoch)
+                  }
+                  return
+                }
+                if (!controller.isSessionCurrent(topRestoreEpoch)) {
+                  return
+                }
+              }
+              let topCommitted = false
+              if (routeSavedRowAnchor && !snapshotInvalidForRoute) {
+                const identityOffset =
+                  typeof saved?.intraRowOffset === 'number' && Number.isFinite(saved.intraRowOffset)
+                    ? saved.intraRowOffset
+                    : null
+                // Identity commit (applied anchor + wantOffset, live
+                // scrollTop/bottom). commitDisplayedStableWithAnchor advances
+                // displayed, ends the token, clears the plan, and releases
+                // exactly once.
+                topCommitted = commitDisplayedStableWithAnchor(
+                  topicIdAtEffect,
+                  routeAtEffect,
+                  topRestoreEpoch,
+                  routeSavedRowAnchor,
+                  identityOffset
+                )
+              } else {
+                topCommitted = commitDisplayedStable(topicIdAtEffect, routeAtEffect, topRestoreEpoch)
+              }
+              // Bounded rejection: a CURRENT owner's rejected stable commit
+              // must not stay hidden (fail-visible preserving snapshot/release
+              // once); stale stays inert and never terminates the new session.
+              if (!topCommitted) {
+                if (controller.isSessionCurrent(topRestoreEpoch)) {
+                  failVisibleTransition(topRestoreEpoch)
+                }
+                return
+              }
             }
           }
         }
@@ -5557,6 +6218,7 @@ const Messages = ({
     })()
   }, [
     activeBranchId,
+    awaitPlanPlacement,
     beginFetchHold,
     beginScroll,
     cancelActiveLoads,

@@ -60,64 +60,180 @@ async function stableRects(page: any, ids: string[]) {
 function dividerSelector(aid: string): string {
   return `[data-divider-key="${aid}::main"],[data-testid="branch-fork-divider-${aid}-main"],[data-testid="branch-fork-toggle-${aid}"],[data-testid="branch-fork-selected-${aid}"]`
 }
-async function measureForkRange(page: any, anchorId: string) {
-  const exists: any = await page.evaluate((aid: string) => {
-    const c = document.querySelector('#messages') as HTMLElement | null
+async function readDividerState(page: any, anchorId: string) {
+  return await page.evaluate((aid: string) => {
+    const c = document.querySelector('#messages') as HTMLElement
     const d =
       (document.querySelector(`[data-divider-key="${aid}::main"]`) as HTMLElement | null) ||
       (document.querySelector(`[data-testid="branch-fork-divider-${aid}-main"]`) as HTMLElement | null) ||
       ((document.querySelector(`[data-testid="branch-fork-divider-${aid}"]`) as HTMLElement | null)?.closest(
         '[data-divider-key]'
       ) as HTMLElement | null) ||
+      (document.querySelector(`[data-testid="branch-fork-toggle-${aid}"]`) as HTMLElement | null) ||
+      (document.querySelector(`[data-testid="branch-fork-selected-${aid}"]`) as HTMLElement | null)
+    const cr = c.getBoundingClientRect()
+    const dr = d ? d.getBoundingClientRect() : { top: 0 }
+    return { off: d ? dr.top - cr.top : -1, st: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight }
+  }, anchorId)
+}
+interface ForkWheelTarget {
+  x: number
+  y: number
+  hit: string
+  chain: string
+}
+
+let lastForkWheel: ForkWheelTarget | null = null
+
+async function resolveForkWheelTarget(page: any): Promise<ForkWheelTarget | null> {
+  // Deterministic outer-#messages wheel point. Source nesting fact:
+  // CodeBlockView renders CodeViewer collapsed by default (codeCollapsible=true,
+  // expandOverride starts false, MAX_COLLAPSED_CODE_HEIGHT=350px) and the
+  // collapsed `.shiki-scroller` ScrollContainer carries inline
+  // overflowY:auto + maxHeight:350px — so every tall fixture block (Py40/JS40/
+  // Rust65 lines) is a nested vertical scroller (scrollHeight>clientHeight).
+  // A wheel dispatched at the #messages center hits that nested scroller and
+  // is intercepted there, which is why the outer scroll stalled at st=-1858
+  // (dy=108 no-change, divider off 476 vs target 340). Candidates therefore
+  // use the container padding gutters (left/right, several heights) — never
+  // the horizontal center — and elementFromPoint + ancestor-chain proof picks
+  // the first point whose path to #messages contains NO scrollable nested
+  // element (computed overflowY auto/scroll AND scrollHeight>clientHeight).
+  // Labels carry tag/id/class only (bounded, no message content).
+  return await page.evaluate(() => {
+    const c = document.querySelector('#messages') as HTMLElement | null
+    if (!c) return null
+    const cr = c.getBoundingClientRect()
+    const isNestedScroller = (el: Element): boolean => {
+      if (el === c) return false
+      const cs = getComputedStyle(el as HTMLElement)
+      const oy = cs.overflowY
+      if (oy !== 'auto' && oy !== 'scroll') return false
+      const h = el as HTMLElement
+      return h.scrollHeight > h.clientHeight + 1
+    }
+    const label = (el: Element): string => {
+      const t = (el.tagName || '?').toLowerCase()
+      const id = (el as HTMLElement).id ? `#${(el as HTMLElement).id}` : ''
+      const rawCls = (el as HTMLElement).className
+      const cls = typeof rawCls === 'string' ? rawCls.trim().split(/\s+/).slice(0, 3).join('.') : ''
+      return `${t}${id}${cls ? `.${cls}` : ''}`
+    }
+    const xs = [cr.left + 5, cr.left + 9, cr.right - 9, cr.right - 5]
+    const ys = [
+      cr.top + cr.height * 0.3,
+      cr.top + cr.height * 0.4,
+      cr.top + cr.height * 0.5,
+      cr.top + cr.height * 0.6,
+      cr.top + cr.height * 0.7
+    ]
+    for (const y of ys) {
+      for (const x of xs) {
+        if (x < cr.left || x >= cr.right || y < cr.top || y >= cr.bottom) continue
+        const hit = document.elementFromPoint(x, y) as Element | null
+        if (!hit) continue
+        // Hit must be the container itself (padding gutter / scrollbar track)
+        // or contained within it — otherwise a pointer overlay owns the point.
+        if (hit !== c && !c.contains(hit)) continue
+        const chain: Element[] = []
+        let n: Element | null = hit
+        while (n && n !== c) {
+          chain.push(n)
+          n = n.parentElement
+        }
+        if (!n) continue
+        if (chain.filter(isNestedScroller).length === 0) {
+          return { x, y, hit: label(hit), chain: chain.map(label).join('>') }
+        }
+      }
+    }
+    return null
+  })
+}
+async function focusForkMessages(page: any): Promise<ForkWheelTarget> {
+  const pt: ForkWheelTarget | null = await resolveForkWheelTarget(page)
+  expect(
+    pt,
+    'fork wheel needs a gutter point whose ancestor path has no scrollable nested element before #messages; all candidates blocked (wheel would hit a collapsed code .shiki-scroller instead of the outer pane)'
+  ).not.toBeNull()
+  await page.mouse.move(pt!.x, pt!.y)
+  lastForkWheel = pt
+  return pt!
+}
+async function forkWheel(page: any, dy: number) {
+  await focusForkMessages(page)
+  await page.mouse.wheel(0, dy)
+  await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
+  await page.waitForTimeout(220)
+}
+async function measureForkRange(page: any, anchorId: string) {
+  // Wheel-established reachable range (ordinary user input only). Causal
+  // root of the prior empty intersection (main[-1381,-1381]): direct
+  // c.scrollTop writes are no-intent scrolls — Messages handleScroll takes
+  // the keeper requestHold branch and the stable-anchor keeper compensates
+  // scrollTop back to hold the active anchor offset, so the programmatic
+  // probe never moved and low==high. Wheel opens declareUserIntent capture
+  // + userTakeover, so the scroll genuinely lands and the keeper stands down.
+  const exists: any = await page.evaluate((aid: string) => {
+    const c = document.querySelector('#messages') as HTMLElement | null
+    const d =
+      (document.querySelector(`[data-divider-key="${aid}::main"]`) as HTMLElement | null) ||
+      (document.querySelector(`[data-testid="branch-fork-divider-${aid}-main"]`) as HTMLElement | null) ||
       (document.querySelector(`[data-testid="branch-fork-toggle-${aid}"]`) as HTMLElement | null) ||
       (document.querySelector(`[data-testid="branch-fork-selected-${aid}"]`) as HTMLElement | null)
     if (!c || !d) return null
     return { ch: c.clientHeight, sh: c.scrollHeight, st: c.scrollTop }
   }, anchorId)
   expect(exists, 'divider must exist for range measure').not.toBeNull()
-  // one-off programmatic scroll to bottom extreme (scrollTop=0) — column-reverse bottom is 0
-  await page.evaluate(() => {
-    const c = document.querySelector('#messages') as HTMLElement | null
-    if (c) c.scrollTop = 0
-  })
-  await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
-  const atZero: any = await page.evaluate((aid: string) => {
-    const c = document.querySelector('#messages') as HTMLElement
-    const d =
-      (document.querySelector(`[data-divider-key="${aid}::main"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-divider-${aid}-main"]`) as HTMLElement | null) ||
-      ((document.querySelector(`[data-testid="branch-fork-divider-${aid}"]`) as HTMLElement | null)?.closest(
-        '[data-divider-key]'
-      ) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-toggle-${aid}"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-selected-${aid}"]`) as HTMLElement | null)
-    const cr = c.getBoundingClientRect()
-    const dr = d ? d.getBoundingClientRect() : { top: 0 }
-    return { off: d ? dr.top - cr.top : -1, st: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight }
-  }, anchorId)
-  // one-off to top extreme (scrollTop = -(scrollHeight - clientHeight)) — column-reverse top is most negative
-  await page.evaluate(() => {
-    const c = document.querySelector('#messages') as HTMLElement | null
-    if (c) {
-      const top = -(c.scrollHeight - c.clientHeight)
-      c.scrollTop = top
+  expect(
+    exists.sh - exists.ch,
+    `fork fixture too short for real scroll (sh=${exists.sh} ch=${exists.ch}); seeded tall content must make sh>ch+margin`
+  ).toBeGreaterThan(200)
+  const isBottom = async (): Promise<boolean> => {
+    const s: any = await readDividerState(page, anchorId)
+    return Math.abs(s.st) <= 100
+  }
+  const isTop = async (): Promise<boolean> => {
+    const s: any = await readDividerState(page, anchorId)
+    const extreme = -(s.sh - s.ch)
+    return Math.abs(s.st - extreme) <= 120
+  }
+  const wheelToBottom = async (): Promise<void> => {
+    for (let i = 0; i < 30; i++) {
+      if (await isBottom()) break
+      await forkWheel(page, 560)
     }
-  })
-  await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
-  const atMax: any = await page.evaluate((aid: string) => {
-    const c = document.querySelector('#messages') as HTMLElement
-    const d =
-      (document.querySelector(`[data-divider-key="${aid}::main"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-divider-${aid}-main"]`) as HTMLElement | null) ||
-      ((document.querySelector(`[data-testid="branch-fork-divider-${aid}"]`) as HTMLElement | null)?.closest(
-        '[data-divider-key]'
-      ) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-toggle-${aid}"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-selected-${aid}"]`) as HTMLElement | null)
-    const cr = c.getBoundingClientRect()
-    const dr = d ? d.getBoundingClientRect() : { top: 0 }
-    return { off: d ? dr.top - cr.top : -1, st: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight }
-  }, anchorId)
+    if (!(await isBottom())) {
+      for (let i = 0; i < 30; i++) {
+        if (await isBottom()) break
+        await forkWheel(page, -560)
+      }
+    }
+    expect(await isBottom(), 'fork range prep must reach true bottom via ordinary wheel').toBe(true)
+  }
+  const wheelToTop = async (): Promise<void> => {
+    for (let i = 0; i < 30; i++) {
+      if (await isTop()) break
+      await forkWheel(page, -560)
+    }
+    if (!(await isTop())) {
+      for (let i = 0; i < 30; i++) {
+        if (await isTop()) break
+        await forkWheel(page, 560)
+      }
+    }
+    expect(await isTop(), 'fork range prep must reach true top via ordinary wheel').toBe(true)
+  }
+  await wheelToBottom()
+  await waitVisible(page)
+  const atZero: any = await readDividerState(page, anchorId)
+  await wheelToTop()
+  await waitVisible(page)
+  const atMax: any = await readDividerState(page, anchorId)
+  expect(
+    Math.abs(atMax.st - atZero.st) > 50,
+    `fork range prep must show real scroll movement (bottom st=${atZero.st} top st=${atMax.st}); keeper-corrected probe is not a range`
+  ).toBe(true)
   const low = Math.min(atZero.off, atMax.off)
   const high = Math.max(atZero.off, atMax.off)
   const stLow = Math.min(atZero.st, atMax.st)
@@ -133,52 +249,155 @@ async function positionToTarget(
   target: number,
   range: { low: number; high: number; slope: number; stLow: number; stHigh: number }
 ) {
-  const cur: any = await page.evaluate((aid: string) => {
-    const c = document.querySelector('#messages') as HTMLElement
-    const d =
-      (document.querySelector(`[data-divider-key="${aid}::main"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-divider-${aid}-main"]`) as HTMLElement | null) ||
-      ((document.querySelector(`[data-testid="branch-fork-divider-${aid}"]`) as HTMLElement | null)?.closest(
-        '[data-divider-key]'
-      ) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-toggle-${aid}"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-selected-${aid}"]`) as HTMLElement | null)
-    const cr = c.getBoundingClientRect()
-    const dr = d ? d.getBoundingClientRect() : { top: 0 }
-    return { off: d ? dr.top - cr.top : -1, st: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight }
-  }, anchorId)
-  // compute required scrollTop delta using slope if available, else direct delta
-  let deltaSt: number
-  if (Math.abs(range.slope) > 1e-6) {
-    deltaSt = (target - cur.off) / range.slope
-  } else {
-    // fallback: assume offset moves opposite scrollTop 1:1
-    deltaSt = cur.off - target
+  // Ordinary-wheel positioning to the feasible common offset (no direct
+  // scrollTop write: the keeper would compensate a programmatic jump as a
+  // no-intent scroll). Measured proportional control with exact trial limit
+  // (40): one small real-wheel calibration learns the local off/dy + st/dy
+  // response, then each step is dy=err/offPerDy (damped, clamped to the safe
+  // viewport range) so the step shrinks as the error shrinks. Direction sign
+  // comes ONLY from the observed calibration (reverse-column slope is -1, but
+  // never assumed); each wheel is ordinary user input followed by bounded
+  // stable-geometry settle. Per-trial history is emitted ONLY on failure with
+  // exit reason + before/delta/off/st; success returns the actual final
+  // geometry (never a tracked best without reposition). Impossible fixtures
+  // fail (no skip); convergence within 12px is asserted by the caller.
+  const readNow = async (): Promise<{ off: number; st: number; sh: number; ch: number }> =>
+    await readDividerState(page, anchorId)
+  const settleGeom = async (): Promise<{ off: number; st: number; sh: number; ch: number }> => {
+    let cur: any = await readNow()
+    for (let i = 0; i < 3; i++) {
+      await page.waitForTimeout(120)
+      const next: any = await readNow()
+      if (Math.abs(next.off - cur.off) <= 2 && Math.abs(next.st - cur.st) <= 2) return next
+      cur = next
+    }
+    return cur
   }
-  // clamp to reachable st range
-  let desiredSt = cur.st + deltaSt
-  if (desiredSt < range.stLow) desiredSt = range.stLow
-  if (desiredSt > range.stHigh) desiredSt = range.stHigh
-  await page.evaluate((s: number) => {
-    const c = document.querySelector('#messages') as HTMLElement | null
-    if (c) c.scrollTop = s
-  }, desiredSt)
-  await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))
-  const after: any = await page.evaluate((aid: string) => {
-    const c = document.querySelector('#messages') as HTMLElement
-    const d =
-      (document.querySelector(`[data-divider-key="${aid}::main"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-divider-${aid}-main"]`) as HTMLElement | null) ||
-      ((document.querySelector(`[data-testid="branch-fork-divider-${aid}"]`) as HTMLElement | null)?.closest(
-        '[data-divider-key]'
-      ) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-toggle-${aid}"]`) as HTMLElement | null) ||
-      (document.querySelector(`[data-testid="branch-fork-selected-${aid}"]`) as HTMLElement | null)
-    const cr = c.getBoundingClientRect()
-    const dr = d ? d.getBoundingClientRect() : { top: 0 as any }
-    return { off: d ? dr.top - cr.top : -1, st: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight }
-  }, anchorId)
-  return { before: cur, after, desiredSt, deltaSt, slope: range.slope }
+  const before: any = await settleGeom()
+  if (Math.abs(before.off - target) <= 12) {
+    return { before, after: before, desiredSt: before.st, deltaSt: 0, slope: range.slope }
+  }
+  // Calibration: one small real wheel in each sign until movement is seen.
+  // Keeps ordinary input (declareUserIntent) and never writes scrollTop.
+  const trials: { dy: number; off: number; st: number; err: number }[] = []
+  let calDy = 160
+  let calBefore: any = before
+  let calAfter: any = null
+  let offPerDy = 0
+  let stPerDy = 0
+  let calibratedDy = 0
+  for (const sign of [1, -1]) {
+    const dy = sign * calDy
+    await forkWheel(page, dy)
+    const cur: any = await settleGeom()
+    const dOff = cur.off - calBefore.off
+    const dSt = cur.st - calBefore.st
+    trials.push({ dy, off: cur.off, st: cur.st, err: Math.abs(cur.off - target) })
+    if (Math.abs(dOff) >= 1 || Math.abs(dSt) >= 1) {
+      offPerDy = dOff / dy
+      stPerDy = dSt / dy
+      calibratedDy = dy
+      calAfter = cur
+      break
+    }
+  }
+  if (!calAfter || Math.abs(offPerDy) < 1e-6) {
+    const detail =
+      `positionToTarget calibration saw no real wheel movement ` +
+      `before off=${before.off} st=${before.st} target=${target} ` +
+      trials.map((t) => `dy=${t.dy} off=${t.off} st=${t.st}`).join(' | ')
+    expect(Math.abs(offPerDy), detail).toBeGreaterThan(0)
+  }
+  let cur: any = calAfter
+  let gain = 0.8
+  let flips = 0
+  let prevSign = 0
+  let exitReason = 'trial-limit'
+  for (let i = 0; i < 40; i++) {
+    const err = target - cur.off
+    if (Math.abs(err) <= 12) {
+      exitReason = 'converged'
+      break
+    }
+    // Proportional bounded delta: raw step from measured response, damped to
+    // avoid overshoot, clamped to the safe ordinary-wheel range; magnitude
+    // shrinks naturally as err shrinks. Clamp the predicted scrollTop to the
+    // measured reachable range so no step asks for an impossible position.
+    // No hard minimum step: fixed minStep=40 oscillates around the goal
+    // (target362 off348.078<->388.078 with offPerDy=-1/stPerDy=1) because
+    // each +-40 moves ~40px and never settles within 12px. Small
+    // proportional dy down to +-1 (still an ordinary real wheel at the safe
+    // outer gutter) is allowed near the goal so the error settles 1px at a
+    // time. Zero-rounding fallback keeps the err/offPerDy sign so reverse
+    // slope is respected.
+    let dy = Math.round((err / offPerDy) * gain)
+    if (!Number.isFinite(dy) || dy === 0) dy = (err / offPerDy > 0 ? 1 : -1) * 1
+    const maxStep = 560
+    if (Math.abs(dy) > maxStep) dy = (dy > 0 ? 1 : -1) * maxStep
+    if (Math.abs(stPerDy) > 1e-6) {
+      const predictedSt = cur.st + dy * stPerDy
+      const lo = Math.min(range.stLow, range.stHigh) - 20
+      const hi = Math.max(range.stLow, range.stHigh) + 20
+      if (predictedSt < lo || predictedSt > hi) {
+        const clampedSt = Math.max(lo, Math.min(hi, predictedSt))
+        const fitDy = Math.round((clampedSt - cur.st) / stPerDy)
+        if (Number.isFinite(fitDy) && fitDy !== 0) dy = Math.max(-maxStep, Math.min(maxStep, fitDy))
+      }
+    }
+    const sign = dy > 0 ? 1 : -1
+    if (prevSign !== 0 && sign !== prevSign) {
+      flips += 1
+      if (flips >= 3) gain = Math.max(0.3, gain / 2)
+    }
+    prevSign = sign
+    const prevOff = cur.off
+    const prevSt = cur.st
+    await forkWheel(page, dy)
+    const next: any = await settleGeom()
+    trials.push({ dy, off: next.off, st: next.st, err: Math.abs(next.off - target) })
+    if (Math.abs(next.st - prevSt) < 1 && Math.abs(next.off - prevOff) < 1) {
+      // Fully clamped at an extreme with no movement: cannot converge.
+      cur = next
+      exitReason = `clamped-no-movement dy=${dy} st=${next.st} off=${next.off}`
+      break
+    }
+    cur = next
+  }
+  const after: any = await settleGeom()
+  trials.push({ dy: 0, off: after.off, st: after.st, err: Math.abs(after.off - target) })
+  if (Math.abs(after.off - before.off) < 1 && Math.abs(after.st - before.st) < 1) {
+    // No actual scroll occurred; surface as fixture/movement failure, never
+    // silently accept the stale position.
+    expect(
+      Math.abs(after.off - before.off) + Math.abs(after.st - before.st),
+      `positionToTarget must move via real wheel (before off=${before.off} st=${before.st} after off=${after.off} st=${after.st} target=${target})`
+    ).toBeGreaterThan(0)
+  }
+  if (Math.abs(after.off - target) > 12) {
+    const head = trials
+      .slice(0, 6)
+      .map((t) => `dy=${t.dy} off=${t.off} st=${t.st} err=${t.err}`)
+      .join(' | ')
+    const tail = trials
+      .slice(-6)
+      .map((t) => `dy=${t.dy} off=${t.off} st=${t.st} err=${t.err}`)
+      .join(' | ')
+    const wheelPt = lastForkWheel
+      ? `x=${Math.round(lastForkWheel.x)} y=${Math.round(lastForkWheel.y)} hit=${lastForkWheel.hit} chain=${lastForkWheel.chain.slice(0, 300)}`
+      : 'none'
+    const detail =
+      `positionToTarget failed exit=${exitReason} target=${target} ` +
+      `before off=${before.off} st=${before.st} after off=${after.off} st=${after.st} ` +
+      `offPerDy=${offPerDy} stPerDy=${stPerDy} calibDy=${calibratedDy} gain=${gain} ` +
+      `wheelPt=[${wheelPt}] ` +
+      `head=[${head}] tail=[${tail}]`
+    // eslint-disable-next-line no-console
+    console.log(`[FORK-POS] ${detail}`)
+    test.info().annotations.push({ type: 'fork-pos-failure', description: detail.slice(0, 1900) })
+  }
+  const desiredSt = after.st
+  const deltaSt = after.st - before.st
+  return { before, after, desiredSt, deltaSt, slope: range.slope }
 }
 
 test.describe('Fork viewport asymmetric — minimal divider visible atomic', () => {
@@ -212,6 +431,7 @@ test.describe('Fork viewport asymmetric — minimal divider visible atomic', () 
       messageIdForIndex: (i: number) => uuidLike(i),
       contentPrefix: 'fork-',
       contentForIndex: (i: number) => {
+        if (i === COMMON - 2) return tallPy
         if (i === COMMON - 1) return tallJS
         if (i === COMMON) return tallRust
         if (i === COMMON + 1) return 'user follow rust'
