@@ -16,7 +16,15 @@ import { act, render, screen } from '@testing-library/react'
 import { Activity, useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { shouldRestoreRetainedWindowInPlace, shouldTopPipelineRefuseDividerIntent } from '../routeViewportActivation'
+import {
+  alignRetainedViewportOnce,
+  isRetainedAnchorOffsetAligned,
+  isRetainedBottomAligned,
+  RETAINED_CONTINUATION_ALIGN_EPS_PX,
+  shouldContinueRetainedViewport,
+  shouldRestoreRetainedWindowInPlace,
+  shouldTopPipelineRefuseDividerIntent
+} from '../routeViewportActivation'
 import {
   buildContainerCapturer,
   isCaptureContainerHidden,
@@ -617,6 +625,498 @@ describe('retained same-window pre-paint trigger (regression)', () => {
     ).toBe(false)
     expect(c.releaseSession(stable.epoch)).toBe(false)
     expect(c.isSessionCurrent(reactivated.epoch)).toBe(true)
+  })
+
+  it('validated continuation keeps the return revealed: no hidden repositioning, no extra generation, release exactly once', () => {
+    const c = new RouteViewportController({ topicId: 't1', route: null })
+    c.detach()
+    expect(c.isRetainedContinuation).toBe(false)
+    const reactivated = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: null,
+      saved: { scrollTop: -400, messageId: 'm14', intraRowOffset: -12, isAtBottom: false }
+    })
+    // Unvalidated activation still hides: the guard is not simply removed.
+    expect(c.isRetainedContinuation).toBe(false)
+    expect(viewportPhaseAttrFor(c.currentPhase, 'top', true, false, c.isRetainedContinuation)).toBe('positioning')
+    const generationBefore = c.windowGeneration
+    const anchorBefore = c.getAnchorFor({ topicId: 't1', route: null })
+
+    // Synchronous validation of the already-correct retained window: no window
+    // redispatch, no placement plan, no scroll write, no generation bump —
+    // observable as unchanged generation + unchanged anchor + aligned phase.
+    expect(c.validateRetainedContinuation(reactivated.epoch, { topicId: 't1', route: null }, 'm00::m29::30')).toBe(true)
+    expect(c.isRetainedContinuation).toBe(true)
+    expect(c.currentPhase).toBe('aligned')
+    expect(c.windowGeneration).toBe(generationBefore)
+    expect(c.getAnchorFor({ topicId: 't1', route: null })).toEqual(anchorBefore)
+    // The validated return stays revealed (first visible frame already correct).
+    expect(viewportPhaseAttrFor(c.currentPhase, 'top', true, false, c.isRetainedContinuation)).toBe('revealed')
+    expect(viewportPhaseAttrFor('fetch-hold', 'top', true, false, true)).toBe('revealed')
+    expect(viewportPhaseAttrFor('searching', 'top', true, false, true)).toBe('revealed')
+
+    // Synchronous reveal + identity commit releases exactly once; the snapshot
+    // keeps the same stable identity (continuation, not a new position).
+    expect(c.revealed(reactivated.epoch)).toBe(true)
+    const releasesBefore = c.releaseCount
+    expect(
+      c.commitStable(reactivated.epoch, {
+        messageId: 'm14',
+        intraRowOffset: -12,
+        scrollTop: -400,
+        isAtBottom: false
+      }).committed
+    ).toBe(true)
+    expect(c.currentPhase).toBe('stable')
+    expect(c.releaseCount).toBe(releasesBefore + 1)
+    expect(c.isDomProvenanceClean).toBe(true)
+    expect(viewportPhaseAttrFor(c.currentPhase, 'top', true, false, c.isRetainedContinuation)).toBe('revealed')
+    // Second completion on the released epoch is inert (release exactly once).
+    expect(
+      c.commitStable(reactivated.epoch, {
+        messageId: 'm14',
+        intraRowOffset: -12,
+        scrollTop: -400,
+        isAtBottom: false
+      }).committed
+    ).toBe(false)
+    expect(c.releaseSession(reactivated.epoch)).toBe(false)
+  })
+
+  it('continuation refuses everything the hidden restore must still own; stale epochs stay inert', () => {
+    // Ordinary (non-detached) session is never a continuation.
+    const ordinary = new RouteViewportController({ topicId: 't1', route: null })
+    const ordReq = ordinary.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: null,
+      saved: { scrollTop: -400, messageId: 'm14', intraRowOffset: -12, isAtBottom: false }
+    })
+    expect(ordinary.validateRetainedContinuation(ordReq.epoch, { topicId: 't1', route: null }, 'm00::m29::30')).toBe(
+      false
+    )
+    expect(ordinary.isRetainedContinuation).toBe(false)
+
+    // Divider explicit continuation keeps priority: TOP continuation refuses it.
+    const divider = new RouteViewportController({ topicId: 't1', route: null })
+    divider.detach()
+    const divReq = divider.request({
+      kind: 'divider',
+      topicId: 't1',
+      targetRoute: 'b9',
+      dividerKey: 'mFork::main',
+      clickOffset: 55
+    })
+    expect(divider.validateRetainedContinuation(divReq.epoch, { topicId: 't1', route: 'b9' }, 'a::b::5')).toBe(false)
+
+    // Activation validation matrix: wrong phase, wrong target, empty window,
+    // stale epoch all refuse with no effect on the live session.
+    const c = new RouteViewportController({ topicId: 't1', route: null })
+    c.detach()
+    const reactivated = c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: null,
+      saved: { scrollTop: -400, messageId: 'm14', intraRowOffset: -12, isAtBottom: false }
+    })
+    expect(c.validateRetainedContinuation(reactivated.epoch, { topicId: 't1', route: 'bX' }, 'm00::m29::30')).toBe(
+      false
+    )
+    expect(c.validateRetainedContinuation(reactivated.epoch, { topicId: 't1', route: null }, '')).toBe(false)
+    expect(c.validateRetainedContinuation(reactivated.epoch + 99, { topicId: 't1', route: null }, 'm00::m29::30')).toBe(
+      false
+    )
+    expect(c.currentPhase).toBe('fetch-hold')
+    expect(c.isSessionCurrent(reactivated.epoch)).toBe(true)
+    // A new request clears a previously validated continuation.
+    expect(c.validateRetainedContinuation(reactivated.epoch, { topicId: 't1', route: null }, 'm00::m29::30')).toBe(true)
+    expect(c.isRetainedContinuation).toBe(true)
+    c.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: 'b1',
+      saved: { scrollTop: -100, messageId: 'm2', intraRowOffset: -5, isAtBottom: false }
+    })
+    expect(c.isRetainedContinuation).toBe(false)
+    c.invalidateAll()
+    expect(c.isRetainedContinuation).toBe(false)
+  })
+
+  it('continuation admission needs a provable geometry target; 1px production epsilon (not E2E budget)', () => {
+    const base = {
+      wasActivation: true,
+      selectedTopicId: 't1',
+      selectedRoute: null as string | null,
+      displayedTopicId: 't1',
+      displayedRoute: null as string | null,
+      deletionPending: false,
+      hasRetainedWindow: true,
+      canonicalAnchor: 'm14',
+      isAtBottom: false,
+      retainedContainsAnchor: true,
+      loadedContainsAnchor: true,
+      domAnchorResident: true
+    }
+    // Anchored continuation requires a finite saved offset target.
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: true })).toBe(true)
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: false })).toBe(false)
+    // Anchorless bottom continues; anchorless non-bottom never invents a target.
+    expect(
+      shouldContinueRetainedViewport({
+        ...base,
+        canonicalAnchor: null,
+        isAtBottom: true,
+        retainedContainsAnchor: false,
+        loadedContainsAnchor: false,
+        domAnchorResident: true,
+        wantOffsetFinite: false
+      })
+    ).toBe(true)
+    expect(
+      shouldContinueRetainedViewport({
+        ...base,
+        canonicalAnchor: null,
+        isAtBottom: false,
+        retainedContainsAnchor: false,
+        loadedContainsAnchor: false,
+        domAnchorResident: true,
+        wantOffsetFinite: false
+      })
+    ).toBe(false)
+    // Route/topic/deletion/empty/coverage failures decline to the hidden path.
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: true, selectedRoute: 'b1' })).toBe(false)
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: true, deletionPending: true })).toBe(false)
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: true, hasRetainedWindow: false })).toBe(false)
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: true, retainedContainsAnchor: false })).toBe(
+      false
+    )
+    expect(shouldContinueRetainedViewport({ ...base, wantOffsetFinite: true, wasActivation: false })).toBe(false)
+
+    // Production geometric acceptance is 1px (viewportTransition + pagination
+    // epsilon), NOT the E2E measurement budget (12px anchor / 100px bottom).
+    expect(RETAINED_CONTINUATION_ALIGN_EPS_PX).toBe(1)
+    expect(isRetainedAnchorOffsetAligned(-12, -12)).toBe(true)
+    expect(isRetainedAnchorOffsetAligned(-12, -11)).toBe(true)
+    expect(isRetainedAnchorOffsetAligned(-12, -10.9)).toBe(false)
+    // Within-E2E-but-inaccurate cases must REJECT: 9px offset is inside the
+    // 12px E2E budget but outside the 1px production epsilon.
+    expect(isRetainedAnchorOffsetAligned(0, 9)).toBe(false)
+    expect(isRetainedAnchorOffsetAligned(0, 12)).toBe(false)
+    expect(isRetainedAnchorOffsetAligned(0, 12.1)).toBe(false)
+    expect(isRetainedAnchorOffsetAligned(NaN, -12)).toBe(false)
+    expect(isRetainedAnchorOffsetAligned(0, Number.POSITIVE_INFINITY)).toBe(false)
+    expect(isRetainedBottomAligned(0)).toBe(true)
+    expect(isRetainedBottomAligned(1)).toBe(true)
+    expect(isRetainedBottomAligned(1.1)).toBe(false)
+    // 80px bottom is inside the 100px E2E budget but far outside true-bottom
+    // geometry (column-reverse scrollTop 0 within 1px).
+    expect(isRetainedBottomAligned(80)).toBe(false)
+    expect(isRetainedBottomAligned(100)).toBe(false)
+    expect(isRetainedBottomAligned(100.1)).toBe(false)
+    expect(isRetainedBottomAligned(NaN)).toBe(false)
+    expect(isRetainedBottomAligned(Number.NaN)).toBe(false)
+  })
+
+  it('shared pre-paint helper: exact means zero writes; coverable mismatch means one write + 1px remeasure; failure never invents aligned', () => {
+    const makeContainer = (overrides: {
+      top?: number
+      width?: number
+      height?: number
+      clientHeight?: number
+      scrollTop?: number
+      clampScroll?: boolean
+    }) => {
+      let scrollTop = overrides.scrollTop ?? 0
+      let writes = 0
+      const rect = () => ({ top: overrides.top ?? 100, width: overrides.width ?? 400, height: overrides.height ?? 600 })
+      const container = {
+        clientHeight: overrides.clientHeight ?? 600,
+        getBoundingClientRect: () => ({ ...rect() }),
+        isConnected: true
+      } as unknown as HTMLElement
+      Object.defineProperty(container, 'scrollTop', {
+        get: () => scrollTop,
+        set: (v: number) => {
+          writes += 1
+          scrollTop = overrides.clampScroll === true ? scrollTop : v
+        },
+        configurable: true
+      })
+      return { container, getWrites: () => writes, getScrollTop: () => scrollTop }
+    }
+    const makeRow = (top: number, height = 40, connected = true, finite = true) => {
+      const row = { isConnected: connected } as unknown as HTMLElement
+
+      ;(row as any).getBoundingClientRect = () => ({
+        top: finite ? top : Number.NaN,
+        height: finite ? height : Number.NaN
+      })
+      return row
+    }
+
+    // Exact anchored geometry: no scroll write.
+    {
+      const c = makeContainer({ top: 100, scrollTop: -400 })
+      const row = makeRow(88)
+      const before = c.getScrollTop()
+      const res = alignRetainedViewportOnce({
+        container: c.container,
+        rowEl: row,
+        anchorId: 'm14',
+        wantOffset: -12,
+        isAtBottom: false,
+        isRowVisible: true
+      })
+      expect(res).toEqual({ aligned: true, writes: 0 })
+      expect(c.getWrites()).toBe(0)
+      expect(c.getScrollTop()).toBe(before)
+    }
+
+    // Coverable 9px mismatch (inside E2E 12px, outside 1px): exactly one
+    // synchronous correction, then the remeasure verifies within 1px. The
+    // fake row tracks the container scroll so the second measure lands exact.
+    {
+      let scrollTop = -400
+      const containerTop = 100
+      const want = -12
+      const haveBefore = -3 // 9px off
+      let writes = 0
+      const container = { clientHeight: 600, isConnected: true } as unknown as HTMLElement
+      Object.defineProperty(container, 'scrollTop', {
+        get: () => scrollTop,
+        set: (v: number) => {
+          writes += 1
+          scrollTop = v
+        },
+        configurable: true
+      })
+
+      ;(container as any).getBoundingClientRect = () => ({ top: containerTop, width: 400, height: 600 })
+      const row = { isConnected: true } as unknown as HTMLElement
+
+      ;(row as any).getBoundingClientRect = () => ({
+        // After the single correction the row sits exactly at want.
+        top: writes === 0 ? containerTop + haveBefore : containerTop + want,
+        height: 40
+      })
+      const res = alignRetainedViewportOnce({
+        container,
+        rowEl: row,
+        anchorId: 'm14',
+        wantOffset: want,
+        isAtBottom: false,
+        isRowVisible: true
+      })
+      expect(res).toEqual({ aligned: true, writes: 1 })
+      expect(writes).toBe(1)
+    }
+
+    // Clamped/failed correction must NOT mark aligned: the write happens once
+    // but the remeasure still misses, so the caller falls back to hidden.
+    {
+      const c = makeContainer({ top: 100, scrollTop: -400, clampScroll: true })
+      const row = makeRow(97) // 9px off (100+9-100=9 vs want -12 => 21px off)
+      const res = alignRetainedViewportOnce({
+        container: c.container,
+        rowEl: row,
+        anchorId: 'm14',
+        wantOffset: -12,
+        isAtBottom: false,
+        isRowVisible: true
+      })
+      expect(res.aligned).toBe(false)
+      expect(res.writes).toBe(1)
+      expect(c.getWrites()).toBe(1)
+    }
+
+    // Unmeasurable geometry never writes and never aligns.
+    {
+      const c = makeContainer({ top: 100 })
+      expect(
+        alignRetainedViewportOnce({
+          container: c.container,
+          rowEl: null,
+          anchorId: 'm14',
+          wantOffset: -12,
+          isAtBottom: false,
+          isRowVisible: true
+        })
+      ).toEqual({ aligned: false, writes: 0 })
+      expect(c.getWrites()).toBe(0)
+
+      const hidden = makeContainer({ top: 100 })
+      const hiddenRow = makeRow(88)
+      expect(
+        alignRetainedViewportOnce({
+          container: hidden.container,
+          rowEl: hiddenRow,
+          anchorId: 'm14',
+          wantOffset: -12,
+          isAtBottom: false,
+          isRowVisible: false
+        })
+      ).toEqual({ aligned: false, writes: 0 })
+
+      const zeroBox = makeContainer({ top: 100, width: 0, height: 600 })
+      expect(
+        alignRetainedViewportOnce({
+          container: zeroBox.container,
+          rowEl: makeRow(88),
+          anchorId: 'm14',
+          wantOffset: -12,
+          isAtBottom: false,
+          isRowVisible: true
+        })
+      ).toEqual({ aligned: false, writes: 0 })
+
+      // Anchorless non-bottom invents no target.
+      const bottomless = makeContainer({ top: 100 })
+      expect(
+        alignRetainedViewportOnce({
+          container: bottomless.container,
+          rowEl: null,
+          anchorId: null,
+          wantOffset: null,
+          isAtBottom: false,
+          isRowVisible: true
+        })
+      ).toEqual({ aligned: false, writes: 0 })
+    }
+
+    // Bottom: exact means zero writes; 80px mismatch (inside E2E 100px,
+    // outside 1px) aligns with exactly one write to true bottom.
+    {
+      const exact = makeContainer({ scrollTop: 0 })
+      expect(
+        alignRetainedViewportOnce({
+          container: exact.container,
+          rowEl: null,
+          anchorId: null,
+          wantOffset: null,
+          isAtBottom: true,
+          isRowVisible: true
+        })
+      ).toEqual({ aligned: true, writes: 0 })
+      expect(exact.getWrites()).toBe(0)
+
+      const off = makeContainer({ scrollTop: -80 })
+      const res = alignRetainedViewportOnce({
+        container: off.container,
+        rowEl: null,
+        anchorId: null,
+        wantOffset: null,
+        isAtBottom: true,
+        isRowVisible: true
+      })
+      expect(res).toEqual({ aligned: true, writes: 1 })
+      expect(off.getScrollTop()).toBe(0)
+    }
+  })
+
+  it('reconnect ordering: hidden/disconnected stays inert without consuming activation; layout setup precedes pre-paint measurement', () => {
+    // Production contract (Messages layout lifetime + pre-paint + passive):
+    // - the lifetime marker is layout-ordered before pre-paint measurement, so
+    //   a show's pre-paint validation observes the reconnected (not stale
+    //   disconnected) state;
+    // - the passive lane never starts/consumes while the container is
+    //   detached or under an actual display:none ancestor (existing
+    //   isCaptureContainerHidden predicate); visibility:hidden stays
+    //   measurable on purpose and is covered by the alignment helper.
+    // Asserted against the actual production helpers, not a copied sketch.
+    const hiddenHost = document.createElement('div')
+    hiddenHost.style.display = 'none'
+    const hiddenContainer = document.createElement('div')
+    hiddenHost.appendChild(hiddenContainer)
+    document.body.appendChild(hiddenHost)
+    const visibleContainer = document.createElement('div')
+    document.body.appendChild(visibleContainer)
+    try {
+      expect(isCaptureContainerHidden(hiddenContainer)).toBe(true)
+      expect(isCaptureContainerHidden(visibleContainer)).toBe(false)
+      // Detached container is hidden-proof without rect inference.
+      const detached = document.createElement('div')
+      expect(isCaptureContainerHidden(detached)).toBe(true)
+      visibleContainer.appendChild(detached)
+      // Still connected under a visible parent: not hidden.
+      expect(isCaptureContainerHidden(detached)).toBe(false)
+
+      // Armed activation survives hidden: the passive-style hidden gate must
+      // decline BEFORE any request/epoch/snapshot/scroll side effect.
+      const c = new RouteViewportController({ topicId: 't1', route: null })
+      c.detach()
+      expect(c.isActivationRequired).toBe(true)
+      expect(c.currentPhase).toBe('idle')
+      const epochBefore = c.currentEpoch
+      // Simulated passive gate order (actual predicate): hidden → inert.
+      const passiveGateAllows = !isCaptureContainerHidden(hiddenContainer)
+      expect(passiveGateAllows).toBe(false)
+      // No consumption happened: activation still armed, epoch unchanged.
+      expect(c.isActivationRequired).toBe(true)
+      expect(c.currentEpoch).toBe(epochBefore)
+      expect(c.currentPhase).toBe('idle')
+
+      // Visible container passes the gate and the shared 1px helper proves
+      // exact geometry with zero writes (sole fast-path owner stays pre-paint).
+      expect(isCaptureContainerHidden(visibleContainer)).toBe(false)
+      const row = document.createElement('div')
+      visibleContainer.appendChild(row)
+      const want = -12
+      const containerTop = 100
+      vi.spyOn(visibleContainer, 'getBoundingClientRect').mockReturnValue({
+        top: containerTop,
+        width: 400,
+        height: 600,
+        bottom: 700,
+        left: 0,
+        right: 400,
+        x: 0,
+        y: containerTop,
+        toJSON: () => ({})
+      } as unknown as DOMRect)
+      vi.spyOn(row, 'getBoundingClientRect').mockReturnValue({
+        top: containerTop + want,
+        height: 40,
+        width: 100,
+        bottom: containerTop + want + 40,
+        left: 0,
+        right: 100,
+        x: 0,
+        y: containerTop + want,
+        toJSON: () => ({})
+      } as unknown as DOMRect)
+      Object.defineProperty(visibleContainer, 'clientHeight', { value: 600, configurable: true })
+      const aligned = alignRetainedViewportOnce({
+        container: visibleContainer,
+        rowEl: row,
+        anchorId: 'm14',
+        wantOffset: want,
+        isAtBottom: false,
+        isRowVisible: true
+      })
+      expect(aligned).toEqual({ aligned: true, writes: 0 })
+
+      // Stale same-lifetime completions stay inert after detach advances the
+      // epoch: the old epoch can never validate/commit/release the new one.
+      const reactivated = c.request({
+        kind: 'top',
+        topicId: 't1',
+        targetRoute: null,
+        saved: { scrollTop: -400, messageId: 'm14', intraRowOffset: -12, isAtBottom: false }
+      })
+      const staleEpoch = reactivated.epoch
+      c.detach()
+      expect(c.isSessionCurrent(staleEpoch)).toBe(false)
+      expect(c.validateRetainedContinuation(staleEpoch, { topicId: 't1', route: null }, 'm00::m29::30')).toBe(false)
+      expect(
+        c.commitStable(staleEpoch, { messageId: 'm14', intraRowOffset: -12, scrollTop: -400, isAtBottom: false })
+          .committed
+      ).toBe(false)
+      expect(c.releaseSession(staleEpoch)).toBe(false)
+    } finally {
+      hiddenHost.remove()
+      visibleContainer.remove()
+    }
   })
 
   it('current-owner rejected completion fails visible; stale-owner failure never terminates the new session', () => {

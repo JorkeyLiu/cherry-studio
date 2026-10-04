@@ -865,7 +865,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       label: string,
       expected: Anchor,
       expectedBottom: boolean,
-      snapBefore: Snap
+      snapBefore: Snap,
+      tightFirstFramePx: number | null = null
     ): Promise<void> => {
       // Corrected lifetime: the sampler started BEFORE the return keeps running
       // while the return reaches eventual viewport visible + stable termination.
@@ -886,22 +887,71 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       const { frames } = await stopResumeProbe()
       const visible = frames.filter((f) => f.homeVisible && f.messagesVisible && f.containerVis !== 'hidden')
       const hidden = frames.length - visible.length
+      // Continuation contract: every home-visible frame is examined — never
+      // filtered away. A valid retained return keeps showing its viewport, so
+      // once Home paints, messages must already be there: no home-visible
+      // frames with messages hidden/empty/positioning. The pre-paint
+      // validated continuation commits before first paint; anything else is
+      // an artificial blank transition (the old restore hid through rAF
+      // settles here). Invalid-anchor/divider legs keep their own restore
+      // assertions elsewhere and never pass through this contract.
+      const homeVisibleFrames = frames.filter((f) => f.homeVisible)
+      const blankWhileHome = homeVisibleFrames.filter(
+        (f) => !f.messagesVisible || f.containerVis === 'hidden' || f.phase === 'positioning' || !f.anchorId
+      )
       // Bounded frame diagnostics BEFORE any visible assert so logs always
       // contain the underlying phase/visibility/anchor shape on failure.
       const headDiag = frames.slice(0, 5).map(describeResumeFrame).join(' | ')
       const tailDiag = frames.slice(-8).map(describeResumeFrame).join(' | ')
+      const blankDiag = blankWhileHome.slice(0, 8).map(describeResumeFrame).join(' | ')
       test.info().annotations.push({
         type: `resume-${label}`,
-        description: `frames=${frames.length} visible=${visible.length} hidden=${hidden} expected=${expected.id}@${expected.offset} bottom=${expectedBottom} firstVisible=${visible.length > 0 ? `${visible[0].anchorId}@${visible[0].anchorOffset} st=${visible[0].scrollTop} phase=${visible[0].phase}` : 'none'}`
+        description: `frames=${frames.length} visible=${visible.length} hidden=${hidden} homeVisible=${homeVisibleFrames.length} blankWhileHome=${blankWhileHome.length} expected=${expected.id}@${expected.offset} bottom=${expectedBottom} firstVisible=${visible.length > 0 ? `${visible[0].anchorId}@${visible[0].anchorOffset} st=${visible[0].scrollTop} phase=${visible[0].phase}` : 'none'}`
       })
       test.info().annotations.push({
         type: `resume-${label}-frames`,
-        description: `head=[${headDiag}] tail=[${tailDiag}]`
+        description: `head=[${headDiag}] tail=[${tailDiag}] blankWhileHome=[${blankDiag}]`
       })
       // No fake hiding: the return must actually paint visible frames.
       expect(frames.length, `${label}: sampler must capture frames across the return`).toBeGreaterThan(0)
       expect(visible.length, `${label}: must produce nonzero visible frames (no hide-to-pass)`).toBeGreaterThan(0)
       expect(hidden, `${label}: must not hide every sample`).toBeLessThan(frames.length)
+      // No blank transition: the first home-visible frame already carries the
+      // retained viewport — Home must never paint with messages hidden/empty.
+      expect(
+        blankWhileHome.length,
+        `${label}: no home-visible blank/hidden frames on a valid retained return (blank=[${blankDiag}])`
+      ).toBe(0)
+      // First home-visible frame already matches the stable anchor (not just
+      // the first post-settle visible frame): content AND position are
+      // continuous across the detour.
+      if (homeVisibleFrames.length > 0) {
+        const firstHome = homeVisibleFrames[0]
+        if (expectedBottom) {
+          expect(
+            Math.abs(firstHome.scrollTop),
+            `${label}: first home-visible frame must already be true bottom`
+          ).toBeLessThanOrEqual(BOTTOM_TOL)
+        } else {
+          expect(firstHome.anchorId, `${label}: first home-visible frame anchor identity`).toBe(expected.id)
+          expect(
+            Math.abs(firstHome.anchorOffset - expected.offset),
+            `${label}: first home-visible frame anchor offset`
+          ).toBeLessThanOrEqual(OFFSET_TOL)
+          // Mismatch-leg deterministic proof: the 9px perturbation sits inside
+          // the 12px measurement budget but outside the 1px production epsilon,
+          // so the 12px check alone would pass WITHOUT any correction. The
+          // tight 1px first-frame check below fails unless the pre-paint lane
+          // performed its single synchronous correction before first paint.
+          // Other legs keep the 12px budget (tightFirstFramePx null).
+          if (tightFirstFramePx !== null) {
+            expect(
+              Math.abs(firstHome.anchorOffset - expected.offset),
+              `${label}: first home-visible frame must already be production-exact (<=${tightFirstFramePx}px proves the minimal pre-paint correction ran)`
+            ).toBeLessThanOrEqual(tightFirstFramePx)
+          }
+        }
+      }
       // First eligible visible frame already matches — the pre-fix middle bug
       // showed a wrong older message here for ~2 frames before correcting.
       let firstBad = -1
@@ -1028,6 +1078,125 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
     const middleSnap = await readSnap()
     expect(middleSnap.id, 'middle snapshot must confirm the wheel-established anchor').toBe(middle.id)
     await roundtripWithProbe('middle', middle, false, middleSnap, [middle.id])
+
+    // --- PRE-PAINT minimal-alignment leg (deterministic 9px retained mismatch) ---
+    // Same middle viewport, but while Home is hidden the persisted target
+    // offset is nudged by +9px via the established window.keyv scroll-key seam
+    // (test-controlled geometry, no test-only app API): inside the 12px E2E
+    // measurement budget but outside the 1px production alignment epsilon, so
+    // the pre-paint retained activation must perform its single synchronous
+    // correction before first paint. A direct hidden scrollTop write is
+    // ineffective while display:none (clamped, delta 0 — observed), so the
+    // mismatch is expressed through the target snapshot the pre-paint lane
+    // measures against; retained DOM stays at the original offset. Target
+    // identity still covers (anchor stays in the retained window/loaded
+    // projection/DOM); the sampler starts BEFORE the return while Chat is
+    // hidden, and the existing no-blank + tight 1px first-frame contract below
+    // proves the return needed no visible correction.
+    {
+      const mismatchBase = await settledOrThrow()
+      const mismatchSnap = await readSnap()
+      expect(mismatchSnap.id, 'mismatch snapshot must confirm the settled anchor').toBe(mismatchBase.id)
+      await captureRowIdentity()
+      await sidebarPage.goToSettings()
+      await waitForSettingsLoad(page)
+      await expect(page.locator('#home-page')).toBeHidden({ timeout: 10000 })
+      const perturbed = await page.evaluate(
+        ({ tid, wantId }: { tid: string; wantId: string }) => {
+          try {
+            const w = window as unknown as {
+              keyv?: { get?: (k: string) => unknown; set?: (k: string, v: unknown) => unknown }
+            }
+            const keys = [`scroll:topic-${tid}::main`, `scroll:topic-${tid}`]
+            const seen: { key: string; id: string; before: number }[] = []
+            for (const key of keys) {
+              const raw = w.keyv?.get?.(key) as Record<string, unknown> | null | undefined
+              if (!raw || typeof raw !== 'object') continue
+              const mid =
+                typeof raw.messageId === 'string' && (raw.messageId as string).length > 0
+                  ? (raw.messageId as string)
+                  : typeof raw.anchorId === 'string'
+                    ? (raw.anchorId as string)
+                    : ''
+              const off = raw.intraRowOffset
+              if (typeof off !== 'number' || !Number.isFinite(off)) continue
+              if (mid) seen.push({ key, id: mid, before: off })
+              if (mid && mid === wantId) {
+                const before: number = off
+                const after = before + 9
+                try {
+                  raw.intraRowOffset = after
+                  const r = w.keyv?.set?.(key, raw)
+                  if (r && typeof (r as Promise<unknown>).then === 'function') {
+                    // keyv.set may be async; value is already mutated in place.
+                  }
+                } catch {
+                  return { applied: false, before, after: before, id: mid, key, seen }
+                }
+                return { applied: true, before, after, id: mid, key, seen }
+              }
+            }
+            // No snapshot matches the live baseline identity: do not mutate an
+            // unrelated legacy key. Report the observed keys for diagnosis.
+            return { applied: false, before: NaN, after: NaN, id: '', key: '', seen }
+          } catch {
+            return { applied: false, before: NaN, after: NaN, id: '', key: '', seen: [] }
+          }
+        },
+        { tid: topicId, wantId: mismatchBase.id }
+      )
+      test.info().annotations.push({
+        type: 'resume-mismatch-perturb',
+        description: `nudge snapshot intraRowOffset base=${mismatchBase.id}@${mismatchBase.offset} before=${(perturbed as { before?: unknown }).before} after=${(perturbed as { after?: unknown }).after} applied=${(perturbed as { applied?: unknown }).applied} key=${(perturbed as { key?: unknown }).key} snapId=${(perturbed as { id?: unknown }).id}`
+      })
+      expect(perturbed.applied, 'mismatch: test-controlled snapshot nudge must apply while hidden').toBe(true)
+      expect(
+        (perturbed as { id?: unknown }).id,
+        'mismatch: nudged snapshot must pertain to the live baseline stable message ID'
+      ).toBe(mismatchBase.id)
+      expect(
+        Math.abs(((perturbed as { before?: number }).before as number) - mismatchBase.offset),
+        'mismatch: stored snapshot baseline must tie to the live geometry (perturbed.before ~= mismatchBase.offset)'
+      ).toBeLessThanOrEqual(1)
+      expect(
+        Math.abs((perturbed.after as number) - (perturbed.before as number) - 9),
+        'mismatch: retained perturbation must be a deterministic ~9px coverable shift'
+      ).toBeLessThanOrEqual(1.5)
+      // The perturbed snapshot is the new legal target: retained DOM sits 9px
+      // off it until the pre-paint correction lands it production-exact.
+      const mismatchExpected: Anchor = { id: mismatchBase.id, offset: perturbed.after as number }
+      expect(
+        Math.abs(mismatchExpected.offset - mismatchBase.offset - 9),
+        'mismatch: nudged target must sit ~9px off the live baseline before navigating'
+      ).toBeLessThanOrEqual(1.5)
+      expect(
+        Math.abs(mismatchExpected.offset - mismatchBase.offset),
+        'mismatch: nudged target must differ from the baseline by more than the 1px production epsilon'
+      ).toBeGreaterThan(1)
+      await startResumeProbe()
+      const mismatchSeed = await installRouteLoadProbe(page, RESUME_PROBE_KEY, topicId)
+      expect(mismatchSeed.startingLoading, 'mismatch: seed loading must be false before return').toBe(false)
+      try {
+        await sidebarPage.goToHome()
+        await waitForChatReady(page)
+        await expect(page.locator('#home-page')).toBeVisible({ timeout: 15000 })
+        await assertResumeContract('mismatch', mismatchExpected, false, mismatchSnap, 1)
+        const mismatchWc = await readRouteLoadProbe(page, RESUME_PROBE_KEY)
+        test.info().annotations.push({
+          type: 'resume-mismatch-request',
+          description: `route-thunk request loadingTransitions=${mismatchWc.loadingTransitions} trueSightings=${mismatchWc.trueSightings} idsCommits(diag)=${mismatchWc.idsCommits} startLoading=${mismatchSeed.startingLoading} details=[${mismatchWc.details.join('; ')}] (0 transitions = in-place, pre-paint corrected)`
+        })
+        expect(
+          mismatchWc.loadingTransitions,
+          'mismatch: perturbed same-route resume must start no route-thunk request'
+        ).toBe(0)
+      } finally {
+        await stopResumeProbe().catch(() => ({ frames: [] }))
+        const mismatchRemoved = await removeRouteLoadProbe(page, RESUME_PROBE_KEY)
+        expect(mismatchRemoved.cleaned, 'mismatch: route load probe must unsubscribe exactly').toBe(true)
+      }
+      await expectRowIdentityKept([mismatchExpected.id])
+    }
 
     // --- TOP leg (verifies TRUE top, never an incidental position) ---
     const top = await wheelToTop()

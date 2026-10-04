@@ -153,7 +153,8 @@ export const viewportPhaseAttrFor = (
   phase: string,
   intentKind?: string | null,
   isActivationSession?: boolean,
-  isActivationRequired?: boolean
+  isActivationRequired?: boolean,
+  isRetainedContinuation?: boolean
 ): ViewportPhaseAttr => {
   // Divider + top fetch-hold keeps the current displayed/rendered window on
   // screen (revealed, never visibility:hidden): the fetch resolves around an
@@ -187,6 +188,11 @@ export const viewportPhaseAttrFor = (
   // (terminal fail-visible releases once, preserving the prior snapshot).
   if (phase === 'positioning') return 'positioning'
   if (phase === 'fetch-hold') {
+    // A validated retained continuation never hides: the retained geometry
+    // was already proven at its legal target before first paint, so the
+    // fetch-hold opens revealed instead of hidden-but-measurable. Every
+    // unvalidated activation keeps the existing hidden behavior below.
+    if (isRetainedContinuation === true) return 'revealed'
     if (isActivationSession === true) return 'positioning'
     return intentKind === 'divider' || intentKind === 'top' ? 'revealed' : 'positioning'
   }
@@ -194,7 +200,12 @@ export const viewportPhaseAttrFor = (
     if (isActivationRequired === true) return 'positioning'
     return 'idle'
   }
-  if (isActivationSession === true && (phase === 'aligned' || phase === 'searching')) return 'positioning'
+  // Validated continuation stays revealed through aligned/searching until the
+  // synchronous stable commit; unvalidated activation sessions stay hidden.
+  if (isActivationSession === true && (phase === 'aligned' || phase === 'searching')) {
+    if (isRetainedContinuation === true) return 'revealed'
+    return 'positioning'
+  }
   if (phase === 'idle') return 'idle'
   return 'revealed'
 }
@@ -357,7 +368,8 @@ export function RouteViewportProvider({
     controller.currentPhase,
     controller.currentIntent?.kind ?? null,
     controller.isActivationSession,
-    controller.isActivationRequired
+    controller.isActivationRequired,
+    controller.isRetainedContinuation
   )
 
   const value = useMemo<RouteViewportContextValue>(
