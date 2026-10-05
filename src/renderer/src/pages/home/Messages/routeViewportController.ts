@@ -226,6 +226,18 @@ export class RouteViewportController {
    */
   private activationSession = false
   /**
+   * Validated retained continuation for a detached-lifetime reactivation
+   * (same-route page return whose retained viewport already shows the legal
+   * target). Set ONLY by `validateRetainedContinuation()` for the current
+   * fetch-hold activation epoch; cleared by every `request()` and by
+   * `invalidateAll()`. While set, the visibility mapping keeps the session
+   * revealed (no hidden repositioning) until the synchronous stable commit
+   * releases it. Never a second truth: epoch/intent/phase/ownership stay in
+   * this controller; this flag only records that the retained geometry was
+   * measurably validated before first paint.
+   */
+  private continuationEpoch: number | null = null
+  /**
    * Rendered-window generation (component-scoped event, never DOM work):
    * bumped synchronously on every rendered window identity change
    * (`noteSameRouteWindowUpdate`, `applyTransitionWindow`, `appliedWindow`,
@@ -432,6 +444,9 @@ export class RouteViewportController {
     // activation (ordinary transitions reset it to false).
     this.activationSession = this.activationRequired
     this.activationRequired = false
+    // A new session is never a validated continuation until the caller proves
+    // retained geometry synchronously via `validateRetainedContinuation()`.
+    this.continuationEpoch = null
     // Any programmatic transition start forcibly closes a live user gesture
     // session: post-request scrolls without a fresh declare are programmatic
     // (window apply / first position / reconcile) and must never take over.
@@ -575,6 +590,36 @@ export class RouteViewportController {
   }
 
   /**
+   * Validated retained continuation (same-route page return, TOP-only): the
+   * caller proved synchronously — before first paint — that the retained
+   * window covers the requested stable anchor, the anchor row is connected
+   * AND measurably at its saved offset (or true bottom), using the target's
+   * own snapshot (never hidden geometry, never outgoing position).
+   * Records session epoch + target route + retained window identity as
+   * rendered and enters `aligned` directly with NO window redispatch, NO
+   * placement plan, NO scroll write, and NO generation bump (the retained
+   * DOM is already correct; the keeper re-resolves via the version notify).
+   * Ownership stays held until the caller's synchronous `revealed()` +
+   * stable commit releases it exactly once. Divider intents, non-activation
+   * sessions, non-fetch-hold phases, mismatched targets, empty window
+   * identities, and stale epochs refuse with no effect.
+   */
+  validateRetainedContinuation(epoch: number, target: RouteRef, windowId: string): boolean {
+    if (!this.checkSession(epoch)) return false
+    if (this.phase !== 'fetch-hold') return false
+    if (!this.activationSession) return false
+    const intent = this.intent
+    if (!intent) return false
+    if (intent.kind === 'divider') return false
+    if (intent.topicId !== target.topicId || intent.targetRoute !== target.route) return false
+    if (typeof windowId !== 'string' || windowId.length === 0) return false
+    this.rendered = { topicId: target.topicId, routeId: target.route, epoch, windowId }
+    this.phase = 'aligned'
+    this.continuationEpoch = epoch
+    return true
+  }
+
+  /**
    * Visible incremental rebase: record session epoch + target route + window
    * identity as rendered and enter `aligned` directly, without any
    * positioning/hidden phase. Accepted ONLY for the current divider or top
@@ -584,7 +629,7 @@ export class RouteViewportController {
    * provenance and the window generation advance synchronously; ownership
    * stays held until the existing offset alignment + stable commit releases
    * it. Displayed provenance is NOT advanced here (the stable commit does
-   * that). Stale epochs refuse with no effect and can never disturb a newer
+   * that). Stale epochs refuse with no dispatch and never disturb a newer
    * session.
    */
   applyVisibleRebaseWindow(epoch: number, target: RouteRef, windowId: string): boolean {
@@ -1151,6 +1196,17 @@ export class RouteViewportController {
   }
 
   /**
+   * True when the current activation session was validated as an already-
+   * correct retained continuation (same epoch, still the activation session).
+   * The visibility mapping reads this to keep the validated return revealed
+   * instead of hidden-but-measurable. False for every ordinary transition,
+   * every unvalidated activation, and every stale epoch.
+   */
+  get isRetainedContinuation(): boolean {
+    return this.continuationEpoch !== null && this.continuationEpoch === this.epoch && this.activationSession
+  }
+
+  /**
    * Unmount / HMR / topic disposal / Activity detach: invalidate everything,
    * release once, force-close any live user session.
    *
@@ -1169,6 +1225,7 @@ export class RouteViewportController {
   invalidateAll(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
     this.closeInteractionLocked()
     this.activationSession = false
+    this.continuationEpoch = null
     if (!this.ownershipHeld) {
       this.intent = null
       this.setAnchorLocked(null, null)

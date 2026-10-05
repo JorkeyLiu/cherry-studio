@@ -99,9 +99,10 @@ describe('true branch incremental switch (windowed)', () => {
     expect(idx).toBeGreaterThanOrEqual(0)
     // Window covers the rapid-return retained-anchor block, the
     // retained-projection-first reactivation branch (same-route page resume,
-    // no fetch), plus the windowed fetch choice below it (never overwrites
+    // no fetch), the validated-continuation pre-paint + passive second-chance
+    // blocks, plus the windowed fetch choice below them (never overwrites
     // the target snapshot).
-    const slice = messagesSource.slice(idx, idx + 26000)
+    const slice = messagesSource.slice(idx, idx + 48000)
     expect(slice).toMatch(/readTargetSnapshot/)
     // Single session: adopt the selector's in-flight top transition instead
     // of opening a second one.

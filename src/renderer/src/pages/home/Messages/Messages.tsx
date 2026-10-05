@@ -185,9 +185,15 @@ import Prompt from './Prompt'
 import { attemptFirstPosition, isFirstPlacementAwaitingAttempt } from './routeFirstPlacement'
 import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleRebase } from './routeOverlapRebase'
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
-import { shouldRestoreRetainedWindowInPlace, shouldTopPipelineRefuseDividerIntent } from './routeViewportActivation'
+import {
+  alignRetainedViewportOnce,
+  shouldContinueRetainedViewport,
+  shouldRestoreRetainedWindowInPlace,
+  shouldTopPipelineRefuseDividerIntent
+} from './routeViewportActivation'
 import {
   buildContainerCapturer,
+  isCaptureContainerHidden,
   useOptionalRouteViewport,
   useStableVisualAnchor,
   viewportPhaseAttrFor
@@ -530,7 +536,8 @@ const Messages = ({
       controller.currentPhase,
       controller.currentIntent?.kind ?? null,
       controller.isActivationSession,
-      controller.isActivationRequired
+      controller.isActivationRequired,
+      controller.isRetainedContinuation
     )
   // Explicit reconnect-activation trigger: the provider lifetime setup bumps
   // the connection generation on every Activity attach (local fallback bumps
@@ -1445,7 +1452,13 @@ const Messages = ({
     notifyViewport,
     settlePlanAck
   ])
-  useEffect(() => {
+  // Layout lifetime (MUST stay layout + declared before the pre-paint
+  // continuation below): the layout continuation consumes this marker, so the
+  // reconnect setup must commit in the same layout phase before resumed
+  // measurement. A passive marker stays stale-true through the show's layout
+  // phase and the pre-paint fast path declines. Same cleanup meaning and same
+  // resources as before; single controller owner stays the provider.
+  useLayoutEffect(() => {
     // Symmetric connection: Activity hidden disconnects this effect (cleanup
     // below) while preserving state/refs/DOM; Activity visible reconnects by
     // re-running this setup plus the single TOP pipeline below. Single
@@ -1454,8 +1467,10 @@ const Messages = ({
     // this instance clears only its UI-local transients here so parent/child
     // setup can never double-invalidate or ping-pong epochs. Old async
     // continuations stay inert via the detach epoch advance (fresh transaction
-    // identity, not just this flag). Isolated mounts without a provider own
-    // their fallback controller and detach it directly.
+    // identity, not just this flag) plus the prompt same-lifetime flag below.
+    // Isolated mounts without a provider own their fallback controller and
+    // detach it directly. Stable deps only (no connection-generation dep) so
+    // provider gen bumps re-render without re-running this teardown.
     unmountedRef.current = false
     return () => {
       unmountedRef.current = true
@@ -5212,15 +5227,228 @@ const Messages = ({
   // marker keeps loadedRouteRef diverged so the route effect (or a subsequent
   // route/topic switch) retries with a fresh load instead of believing the
   // new route is loaded.
+  // Validated-continuation pre-paint (same-route page return, PRE-PAINT ONLY):
+  // when the retained viewport provably shows its legal target — same
+  // selected/displayed route, target-owned snapshot, retained + loaded +
+  // connected coverage, live measurable geometry at the 1px production
+  // epsilon — commit the fresh guarded epoch synchronously in the layout
+  // phase so the FIRST paint already shows the correct viewport: no hidden
+  // frames, no window redispatch, no placement plan. Exact geometry means
+  // ZERO writes; a covered measurable mismatch gets ONE synchronous
+  // anchor/bottom correction here (still pre-paint) with an immediate
+  // remeasure that must verify within 1px before validate/reveal/commit.
+  // A fresh guarded epoch still opens (new transaction identity, resources
+  // reconnect) and identity/coverage/epoch/owner guards still apply; the
+  // snapshot stays target-owned (never hidden geometry, never outgoing
+  // position). Any doubt (unmeasurable, unverified after one correction,
+  // empty, route change, deletion, divider, anchorless non-bottom) declines
+  // with NO side effects — no epoch opened, no snapshot touched — and the
+  // passive TOP pipeline below takes the existing hidden measurable restore.
+  // Success consumes `activationRequired` and stabilizes, so the passive
+  // pipeline early-returns as nothing-to-do. The passive lane never performs
+  // a visible correction.
+  useLayoutEffect(() => {
+    if (!controller.isActivationRequired) return
+    if (controller.currentPhase !== 'idle') return
+    if (controller.programmaticOwned) return
+    if (unmountedRef.current) return
+    const tidForPre = topic.id
+    const routeForPre = activeBranchId
+    if (topicIdRef.current !== tidForPre || routeRef.current !== routeForPre) return
+    const displayedForPre = controller.displayedRoute
+    if (displayedForPre.topicId !== tidForPre || displayedForPre.route !== routeForPre) return
+    if (deletionFallbackIntent && deletionFallbackIntent.route === routeForPre) return
+    if (shouldTopPipelineRefuseDividerIntent(controller, tidForPre, routeForPre)) return
+    // Target-owned snapshot read (mirrors the TOP pipeline below: storage by
+    // target key, retained live-anchor preference when proven same-route).
+    // After a detach the live anchor is cleared, so this is the persisted
+    // snapshot — never hidden geometry, never outgoing position.
+    let savedForPre: {
+      scrollTop: number
+      anchorId: string | null
+      messageId?: string | null
+      intraRowOffset?: number | null
+      rawScrollTop?: number
+      isAtBottom: boolean
+    } | null = null
+    try {
+      const rawForPre =
+        readTargetSnapshot(tidForPre, routeForPre) ?? (routeForPre === null ? getLegacyMainSavedPosition() : null)
+      const recForPre = (rawForPre ?? null) as {
+        scrollTop: number
+        anchorId?: string | null
+        messageId?: string | null
+        intraRowOffset?: number | null
+        rawScrollTop?: number
+        isAtBottom: boolean
+      } | null
+      savedForPre = recForPre
+        ? {
+            scrollTop: recForPre.scrollTop,
+            anchorId: recForPre.messageId ?? recForPre.anchorId ?? null,
+            messageId: recForPre.messageId ?? null,
+            intraRowOffset: recForPre.intraRowOffset ?? null,
+            rawScrollTop: recForPre.rawScrollTop ?? recForPre.scrollTop,
+            isAtBottom: recForPre.isAtBottom
+          }
+        : null
+    } catch {
+      return
+    }
+    const retainedLiveForPre = controller.getAnchorFor({ topicId: tidForPre, route: routeForPre })
+    const useRetainedForPre =
+      retainedLiveForPre !== null &&
+      retainedLiveForPre.kind === 'message' &&
+      controller.displayedRoute.topicId === tidForPre &&
+      controller.displayedRoute.route === routeForPre
+    if (useRetainedForPre && retainedLiveForPre.kind === 'message') {
+      savedForPre = {
+        scrollTop: typeof savedForPre?.scrollTop === 'number' ? savedForPre.scrollTop : 0,
+        anchorId: retainedLiveForPre.messageId,
+        messageId: retainedLiveForPre.messageId,
+        intraRowOffset: retainedLiveForPre.offset,
+        rawScrollTop: typeof savedForPre?.rawScrollTop === 'number' ? savedForPre.rawScrollTop : 0,
+        isAtBottom: false
+      }
+    }
+    const anchorForPre = canonicalSavedAnchorId(savedForPre)
+    const wantOffsetForPre =
+      typeof savedForPre?.intraRowOffset === 'number' && Number.isFinite(savedForPre.intraRowOffset)
+        ? savedForPre.intraRowOffset
+        : null
+    const retainedWindowForPre = viewportStateRef.current.window
+    const retainedIdsForPre = new Set((retainedWindowForPre?.displayMessages ?? []).map((m) => m.id))
+    const loadedIdsForPre = new Set(messagesRef.current.map((m) => m.id))
+    const admittedForPre = shouldContinueRetainedViewport({
+      wasActivation: true,
+      selectedTopicId: tidForPre,
+      selectedRoute: routeForPre,
+      displayedTopicId: displayedForPre.topicId,
+      displayedRoute: displayedForPre.route,
+      deletionPending: false,
+      hasRetainedWindow: (retainedWindowForPre?.displayMessages.length ?? 0) > 0,
+      canonicalAnchor: anchorForPre,
+      isAtBottom: !!savedForPre?.isAtBottom,
+      retainedContainsAnchor: anchorForPre ? retainedIdsForPre.has(anchorForPre) : false,
+      loadedContainsAnchor: anchorForPre ? loadedIdsForPre.has(anchorForPre) : false,
+      domAnchorResident: anchorForPre ? getMessageRowById(anchorForPre) !== null : true,
+      wantOffsetFinite: wantOffsetForPre !== null
+    })
+    if (!admittedForPre || !retainedWindowForPre || (retainedWindowForPre.displayMessages.length ?? 0) === 0) {
+      return
+    }
+    const liveForPre = scrollContainerRef.current
+    const widForPre = windowIdentityKey(retainedWindowForPre)
+    if (!liveForPre || !widForPre) return
+    // Disconnected/hidden guard (same existing predicate as capture + passive):
+    // never consume the activation while the container is detached or under an
+    // actual display:none ancestor. visibility:hidden stays measurable (the
+    // helper ignores it) so the hidden-but-measurable restore remains allowed.
+    // Declines with no side effects — no epoch opened, no snapshot touched.
+    try {
+      if (isCaptureContainerHidden(liveForPre)) return
+    } catch {
+      return
+    }
+    // Single shared pre-paint geometry gate (1px production epsilon): exact
+    // means zero writes; covered mismatch gets one synchronous correction +
+    // immediate remeasure here, still before paint and still revealed. Any
+    // unmeasurable/unverified geometry declines with no side effects (the
+    // helper's failed write is the only scroll touch, and it falls through
+    // to the hidden restore below — never a fictional aligned commit).
+    let alignedForPre = false
+    try {
+      const rowElForPre = anchorForPre ? getMessageRowById(anchorForPre) : null
+      const isRowVisibleForPre = anchorForPre ? checkElement(anchorForPre) === 'visible' : true
+      const alignForPre = alignRetainedViewportOnce({
+        container: liveForPre,
+        rowEl: rowElForPre,
+        anchorId: anchorForPre,
+        wantOffset: wantOffsetForPre,
+        isAtBottom: !!savedForPre?.isAtBottom,
+        isRowVisible: isRowVisibleForPre
+      })
+      alignedForPre = alignForPre.aligned
+    } catch {
+      alignedForPre = false
+    }
+    if (!alignedForPre) return
+    // Commit synchronously pre-paint: fresh epoch, validate, reveal, stabilize.
+    // No window dispatch, no plan, no scroll token, no rAF — the keeper
+    // re-resolves via the version notify inside the commit helpers.
+    saveDisplayedSnapshot()
+    const preEpoch =
+      adoptFetchHold(tidForPre, routeForPre) ??
+      beginFetchHold(tidForPre, routeForPre, {
+        kind: 'top',
+        saved: useRetainedForPre
+          ? {
+              scrollTop: savedForPre?.scrollTop ?? 0,
+              messageId: savedForPre?.messageId ?? null,
+              intraRowOffset: savedForPre?.intraRowOffset ?? null,
+              isAtBottom: false
+            }
+          : undefined
+      })
+    if (routeFetchEpochRef.current !== null && controller.isSessionCurrent(routeFetchEpochRef.current)) return
+    routeFetchEpochRef.current = preEpoch
+    if (!controller.validateRetainedContinuation(preEpoch, { topicId: tidForPre, route: routeForPre }, widForPre)) {
+      failVisibleTransition(preEpoch)
+      return
+    }
+    let preRevealed = false
+    try {
+      preRevealed = controller.revealed(preEpoch)
+    } catch {
+      preRevealed = false
+    }
+    if (!preRevealed || !controller.isSessionCurrent(preEpoch)) {
+      if (controller.isSessionCurrent(preEpoch)) {
+        failVisibleTransition(preEpoch)
+      }
+      return
+    }
+    const preCommitted = anchorForPre
+      ? commitDisplayedStableWithAnchor(tidForPre, routeForPre, preEpoch, anchorForPre, wantOffsetForPre)
+      : commitDisplayedStable(tidForPre, routeForPre, preEpoch)
+    if (!preCommitted && controller.isSessionCurrent(preEpoch)) {
+      failVisibleTransition(preEpoch)
+    }
+  }, [
+    viewportConnectionGeneration,
+    topic.id,
+    activeBranchId,
+    controller,
+    deletionFallbackIntent,
+    readTargetSnapshot,
+    getLegacyMainSavedPosition,
+    saveDisplayedSnapshot,
+    adoptFetchHold,
+    beginFetchHold,
+    failVisibleTransition,
+    commitDisplayedStable,
+    commitDisplayedStableWithAnchor,
+    checkElement,
+    windowIdentityKey
+  ])
   useEffect(() => {
+    // Disconnected lifetime (Activity hidden cleanup ran, show setup not yet
+    // re-run): stay inert without consuming the armed activation. The show's
+    // pre-paint layout effect above owns the single validated continuation
+    // before first paint; consuming here while disconnected would force a
+    // hidden first paint. Mirrors the pre-paint `unmountedRef` guard.
+    if (unmountedRef.current) return
     if (topic.id !== topicIdRef.current) return
     // Deletion-fallback intents own their route: the dedicated latest effect
     // above claims and reloads. Never issue a concurrent snapshot-around here.
     if (deletionFallbackIntent && deletionFallbackIntent.route === activeBranchId) return
     // Single-entry reconnect activation (Activity Chat→Settings→Chat):
     // the provider `detach()` armed `isActivationRequired` while preserving
-    // displayed + cache + persisted snapshots. THIS effect alone opens the
-    // guarded own-target `top` fetch-hold below AND drives fetch → window →
+    // displayed + cache + persisted snapshots. The strict pre-paint layout
+    // effect above may already have consumed the activation (validated exact
+    // continuation → stable); when it did, the nothing-to-do guard below
+    // returns immediately. Otherwise THIS effect opens the guarded own-target
+    // `top` fetch-hold below AND drives fetch → window →
     // measured layout/quiet/alignment → atomic reveal → stable commit — never
     // a separate hook half-start (prior split consumed the flag in another
     // effect at routeViewportActivation.ts:112, then this loader could skip
@@ -5354,6 +5582,43 @@ const Messages = ({
     // falls through to the existing full fetch/rebuild below. Divider-owned
     // sessions already refused above and never reach here.
     if (wasActivation) {
+      // Validated continuation lives ONLY in the pre-paint layout effect above
+      // (single shared 1px geometry helper + immediate remeasure, still
+      // revealed, still synchronous). This ordinary passive effect never
+      // performs a visible correction: an unguarded passive scroll write could
+      // paint a corrected frame after Home is already visible. When pre-paint
+      // declines, this lane falls through to the existing hidden measurable
+      // restore below (never a wrong visible frame, never a fictional commit).
+      // Hidden-lifetime guard: while Home is hidden the container has no
+      // measurable layout (display:none rects). Stay inert here without
+      // consuming the activation (no epoch, no snapshot, no scroll) so the
+      // show's pre-paint layout effect owns the single validated continuation
+      // before first paint; consuming now would force a hidden first paint.
+      // Uses the existing capture predicate (detached / actual display:none /
+      // hidden ancestor) plus the measurable-rect gate; visibility:hidden
+      // stays measurable on purpose (hidden-but-measurable restore allowed).
+      try {
+        const liveForGate = scrollContainerRef.current
+        if (!liveForGate) return
+        try {
+          if (isCaptureContainerHidden(liveForGate)) return
+        } catch {
+          return
+        }
+        const gateRect = liveForGate.getBoundingClientRect()
+        if (
+          !Number.isFinite(gateRect.width) ||
+          !Number.isFinite(gateRect.height) ||
+          gateRect.width <= 0 ||
+          gateRect.height <= 0 ||
+          !Number.isFinite(liveForGate.clientHeight) ||
+          liveForGate.clientHeight <= 0
+        ) {
+          return
+        }
+      } catch {
+        return
+      }
       try {
         const retainedWindow = viewportStateRef.current.window
         const retainedIds = new Set((retainedWindow?.displayMessages ?? []).map((m) => m.id))

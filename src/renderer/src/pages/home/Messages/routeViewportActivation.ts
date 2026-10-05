@@ -98,4 +98,143 @@ export const shouldRestoreRetainedWindowInPlace = (input: RetainedWindowInPlaceI
   // route-local default path so no bogus stable snapshot is invented here.
   return input.isAtBottom
 }
+
+/**
+ * Validated-continuation geometric acceptance (production epsilon, NOT E2E
+ * measurement tolerance): anchor intra-row offset within 1px and true bottom
+ * (column-reverse scrollTop 0) within 1px. This matches the existing
+ * production alignment-write epsilon used by the viewport transition
+ * (`applyViewportFirstPosition`: `abs(delta) > 1` writes) and the pagination
+ * compensation epsilon (`routeRestoreAnchor`: `epsilonPx = 1`). The E2E
+ * contract tolerances (12px anchor / 100px bottom) are measurement/test
+ * budgets and must never gate production geometry: the snapshot commit stores
+ * the target `wantOffset`, so accepted geometry must already be accurate
+ * within the same 1px production epsilon. `COLUMN_REVERSE_BOTTOM_THRESHOLD`
+ * (50px) only classifies bottom proximity, never geometric alignment.
+ */
+export const RETAINED_CONTINUATION_ALIGN_EPS_PX = 1
+
+/** Pure offset check: measured anchor offset already at its saved target (1px). */
+export const isRetainedAnchorOffsetAligned = (haveOffset: number, wantOffset: number): boolean => {
+  if (!Number.isFinite(haveOffset) || !Number.isFinite(wantOffset)) return false
+  return Math.abs(haveOffset - wantOffset) <= RETAINED_CONTINUATION_ALIGN_EPS_PX
+}
+
+/** Pure bottom check: column-reverse scrollTop already at true bottom (1px). */
+export const isRetainedBottomAligned = (scrollTop: number): boolean => {
+  if (!Number.isFinite(scrollTop)) return false
+  return Math.abs(scrollTop) <= RETAINED_CONTINUATION_ALIGN_EPS_PX
+}
+
+/**
+ * Single shared retained-continuation geometry helper (production use by the
+ * pre-paint retained activation block; unit tests cover it directly).
+ *
+ * Contract: exact/no-op verified geometry -> zero writes; covered measurable
+ * mismatch -> ONE synchronous anchor/bottom correction here, then an
+ * immediate remeasure that must verify within the same 1px epsilon.
+ * Unmeasurable geometry (missing/disconnected row, hidden row, zero-size
+ * container, non-finite rects) or a correction that does not verify
+ * (clamped/failed write) returns `aligned: false` with NO fictional success:
+ * the caller keeps its guards and falls back to the existing hidden
+ * full/in-place restore. Never invents a snapshot; never samples identity,
+ * epoch, or ownership (those stay with the controller caller).
+ */
+export const alignRetainedViewportOnce = (input: {
+  container: HTMLElement
+  rowEl: HTMLElement | null
+  anchorId: string | null
+  wantOffset: number | null
+  isAtBottom: boolean
+  isRowVisible: boolean
+}): { aligned: boolean; writes: 0 | 1 } => {
+  try {
+    const container = input.container
+    if (!container || typeof container.getBoundingClientRect !== 'function') return { aligned: false, writes: 0 }
+    if (input.anchorId && input.wantOffset !== null && Number.isFinite(input.wantOffset)) {
+      const want = input.wantOffset
+      const rowEl = input.rowEl
+      if (!rowEl || !rowEl.isConnected) return { aligned: false, writes: 0 }
+      if (input.isRowVisible !== true) return { aligned: false, writes: 0 }
+      const containerRect = container.getBoundingClientRect()
+      if (
+        !Number.isFinite(containerRect.width) ||
+        !Number.isFinite(containerRect.height) ||
+        !Number.isFinite(containerRect.top) ||
+        containerRect.width <= 0 ||
+        containerRect.height <= 0
+      ) {
+        return { aligned: false, writes: 0 }
+      }
+      if (!Number.isFinite(container.clientHeight) || container.clientHeight <= 0) {
+        return { aligned: false, writes: 0 }
+      }
+      const rowRect = rowEl.getBoundingClientRect()
+      if (!Number.isFinite(rowRect.top) || !Number.isFinite(rowRect.height) || rowRect.height <= 0) {
+        return { aligned: false, writes: 0 }
+      }
+      const have = rowRect.top - containerRect.top
+      if (!Number.isFinite(have)) return { aligned: false, writes: 0 }
+      if (isRetainedAnchorOffsetAligned(have, want)) return { aligned: true, writes: 0 }
+      try {
+        container.scrollTop += have - want
+      } catch {
+        return { aligned: false, writes: 0 }
+      }
+      try {
+        const containerAfter = container.getBoundingClientRect()
+        const rowAfter = rowEl.getBoundingClientRect()
+        if (!Number.isFinite(containerAfter.top) || !Number.isFinite(rowAfter.top)) {
+          return { aligned: false, writes: 1 }
+        }
+        const haveAfter = rowAfter.top - containerAfter.top
+        if (isRetainedAnchorOffsetAligned(haveAfter, want)) return { aligned: true, writes: 1 }
+        return { aligned: false, writes: 1 }
+      } catch {
+        return { aligned: false, writes: 1 }
+      }
+    }
+    if (!input.anchorId && input.isAtBottom === true) {
+      if (!Number.isFinite(container.scrollTop)) return { aligned: false, writes: 0 }
+      if (!Number.isFinite(container.clientHeight) || container.clientHeight <= 0) {
+        return { aligned: false, writes: 0 }
+      }
+      if (isRetainedBottomAligned(container.scrollTop)) return { aligned: true, writes: 0 }
+      try {
+        container.scrollTop = 0
+      } catch {
+        return { aligned: false, writes: 0 }
+      }
+      try {
+        if (isRetainedBottomAligned(container.scrollTop)) return { aligned: true, writes: 1 }
+        return { aligned: false, writes: 1 }
+      } catch {
+        return { aligned: false, writes: 1 }
+      }
+    }
+    return { aligned: false, writes: 0 }
+  } catch {
+    return { aligned: false, writes: 0 }
+  }
+}
+
+export interface RetainedContinuationInput extends RetainedWindowInPlaceInput {
+  /** Anchored restores require a finite saved intra-row offset target. */
+  wantOffsetFinite: boolean
+}
+
+/**
+ * Validated-continuation admission (pure): the in-place presentation checks
+ * PLUS a provable geometry target. Anchored restores need a finite saved
+ * offset (otherwise there is nothing measurable to continue); anchorless
+ * bottom reuses the in-place bottom rule. Divider sessions never reach here
+ * (the narrow refusal keeps their clicked-offset continuation). Identity,
+ * coverage, epoch, and ownership guards stay with the controller caller;
+ * this predicate never samples geometry itself.
+ */
+export const shouldContinueRetainedViewport = (input: RetainedContinuationInput): boolean => {
+  if (!shouldRestoreRetainedWindowInPlace(input)) return false
+  if (input.canonicalAnchor) return input.wantOffsetFinite
+  return input.isAtBottom
+}
 export type { RouteViewportSnapshot }
