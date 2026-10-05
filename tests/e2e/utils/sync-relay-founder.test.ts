@@ -9,13 +9,13 @@ import { provisionedHeaders, startTestRelay } from './sync-relay'
 
 describe('in-memory relay registration and accept concurrency', () => {
   it('concurrent registrations issue distinct stable codes', async () => {
-    const relay = await startTestRelay(`reg-${Date.now()}`)
+    const relay = await startTestRelay()
     try {
       const results = await Promise.all(
         ['r-a', 'r-b', 'r-c'].map((deviceId) =>
           fetch(`${relay.endpoint}/sync/register`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${relay.token}` },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ deviceId })
           }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }))
         )
@@ -30,19 +30,27 @@ describe('in-memory relay registration and accept concurrency', () => {
   })
 
   it('concurrent accepts of one request admit exactly one outcome', async () => {
-    const relay = await startTestRelay(`accept-${Date.now()}`)
+    const relay = await startTestRelay()
     try {
-      const authed = { 'Content-Type': 'application/json', Authorization: `Bearer ${relay.token}` }
+      const jsonHeaders = { 'Content-Type': 'application/json' }
       const regA = (await (
-        await fetch(`${relay.endpoint}/sync/register`, { method: 'POST', headers: authed, body: JSON.stringify({}) })
+        await fetch(`${relay.endpoint}/sync/register`, {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({})
+        })
       ).json()) as { deviceCode: string; deviceSecret: string }
       const regB = (await (
-        await fetch(`${relay.endpoint}/sync/register`, { method: 'POST', headers: authed, body: JSON.stringify({}) })
+        await fetch(`${relay.endpoint}/sync/register`, {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({})
+        })
       ).json()) as { deviceCode: string; deviceSecret: string }
       const req = (await (
         await fetch(`${relay.endpoint}/sync/pair/request`, {
           method: 'POST',
-          headers: { ...authed, ...provisionedHeaders({ code: regB.deviceCode, secret: regB.deviceSecret }) },
+          headers: { ...jsonHeaders, ...provisionedHeaders({ code: regB.deviceCode, secret: regB.deviceSecret }) },
           body: JSON.stringify({ targetCode: regA.deviceCode })
         })
       ).json()) as { requestId: string }
@@ -50,7 +58,7 @@ describe('in-memory relay registration and accept concurrency', () => {
         [0, 1].map(() =>
           fetch(`${relay.endpoint}/sync/pair/accept`, {
             method: 'POST',
-            headers: { ...authed, ...provisionedHeaders({ code: regA.deviceCode, secret: regA.deviceSecret }) },
+            headers: { ...jsonHeaders, ...provisionedHeaders({ code: regA.deviceCode, secret: regA.deviceSecret }) },
             body: JSON.stringify({ requestId: req.requestId })
           }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }))
         )

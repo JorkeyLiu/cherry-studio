@@ -8,9 +8,9 @@
  * - Asserts no visible Save or Refresh configuration controls remain
  *   (Sync Now stays the sole manual sync action).
  * - Endpoint edit + blur persists the normalized endpoint without an
- *   explicit save click; token edit + blur persists without overwriting the
- *   endpoint; Enabled toggle persists immediately without overwriting
- *   endpoint/token.
+ *   explicit save click; Enabled toggle persists immediately without
+ *   overwriting the endpoint. There is no shared service token anywhere:
+ *   the persisted config carries endpoint/enabled only.
  * - Navigate-away/back re-renders the persisted values (no app relaunch).
  *
  * Determinism: loopback endpoints on closed ports, never Connect, never
@@ -22,20 +22,12 @@
 import type { Page } from '@playwright/test'
 
 import { expect, test } from '../../fixtures/electron.fixture'
-import {
-  assertSyncTokenExactRedacted,
-  getSyncConfigViaApi,
-  setSyncConfigViaApi,
-  SyncSettingsPage,
-  type SyncConfigShape
-} from '../../pages/sync.page'
+import { getSyncConfigViaApi, setSyncConfigViaApi, SyncSettingsPage, type SyncConfigShape } from '../../pages/sync.page'
 import { SettingsPage } from '../../pages/settings.page'
 import { waitForAppReady } from '../../utils/wait-helpers'
 
 const SEED_ENDPOINT = 'http://127.0.0.1:13873'
-const SEED_TOKEN = 'e2e-autosave-seed-token-1'
 const EDITED_ENDPOINT = 'http://127.0.0.1:13874'
-const EDITED_TOKEN = 'e2e-autosave-token-2'
 
 async function pollSyncConfig(
   page: Page,
@@ -69,19 +61,19 @@ test.describe('Sync settings autosave', () => {
     // Safe initial config via production IPC before rendered interaction:
     // enabled true so the UI toggle below runs true -> false (disable path,
     // never dials). Closed loopback ports; never Connect, never sync().
-    await setSyncConfigViaApi(mainWindow, { endpoint: SEED_ENDPOINT, token: SEED_TOKEN, enabled: true })
+    await setSyncConfigViaApi(mainWindow, { endpoint: SEED_ENDPOINT, enabled: true })
     const seeded = await getSyncConfigViaApi(mainWindow)
     expect(seeded.endpoint).toBe(SEED_ENDPOINT)
-    assertSyncTokenExactRedacted(seeded.token, SEED_TOKEN, 'seed sync token')
     expect(seeded.enabled).toBe(true)
+    expect('token' in seeded).toBe(false)
 
     // Navigate to Data Settings > Synchronization using page patterns.
     await syncPage.openSync()
     await syncPage.waitForHydrated()
 
-    // Hydrated form renders the seeded config.
+    // Hydrated form renders the seeded config; no token field exists.
     await expect(syncPage.endpointInput).toHaveValue(SEED_ENDPOINT)
-    await expect(syncPage.tokenInput).toHaveValue(SEED_TOKEN)
+    await expect(mainWindow.getByTestId('sync-token-input')).toHaveCount(0)
 
     // No explicit Save or Refresh configuration controls remain; Sync Now
     // stays the sole manual sync action.
@@ -96,40 +88,30 @@ test.describe('Sync settings autosave', () => {
     await syncPage.fillEndpointAndBlur(`  ${EDITED_ENDPOINT}  `)
     const afterEndpoint = await pollSyncConfig(mainWindow, (cfg) => cfg.endpoint === EDITED_ENDPOINT)
     expect(afterEndpoint.endpoint).toBe(EDITED_ENDPOINT)
-    assertSyncTokenExactRedacted(afterEndpoint.token, SEED_TOKEN, 'token after endpoint edit')
     expect(afterEndpoint.enabled).toBe(true)
+    expect('token' in afterEndpoint).toBe(false)
 
-    // Edit access token and blur; token persists while endpoint stays intact.
-    await syncPage.fillTokenAndBlur(`  ${EDITED_TOKEN}  `)
-    const afterToken = await pollSyncConfig(
-      mainWindow,
-      (cfg) => cfg.endpoint === EDITED_ENDPOINT && cfg.token === EDITED_TOKEN && cfg.enabled === true
-    )
-    expect(afterToken.endpoint).toBe(EDITED_ENDPOINT)
-    assertSyncTokenExactRedacted(afterToken.token, EDITED_TOKEN, 'token after token edit')
-    expect(afterToken.enabled).toBe(true)
-
-    // Toggle Enabled true -> false; it persists immediately while
-    // endpoint/token remain intact.
+    // Toggle Enabled true -> false; it persists immediately while the
+    // endpoint remains intact.
     await syncPage.enabledSwitch.click()
     const afterToggle = await pollSyncConfig(
       mainWindow,
-      (cfg) => cfg.endpoint === EDITED_ENDPOINT && cfg.token === EDITED_TOKEN && cfg.enabled === false
+      (cfg) => cfg.endpoint === EDITED_ENDPOINT && cfg.enabled === false
     )
     expect(afterToggle.endpoint).toBe(EDITED_ENDPOINT)
-    assertSyncTokenExactRedacted(afterToggle.token, EDITED_TOKEN, 'token after toggle')
     expect(afterToggle.enabled).toBe(false)
+    expect('token' in afterToggle).toBe(false)
 
     // Navigate away/back and verify the persisted values are rendered.
     await settingsPage.goToGeneral()
     await syncPage.openSync()
     await syncPage.waitForHydrated()
     await expect(syncPage.endpointInput).toHaveValue(EDITED_ENDPOINT)
-    await expect(syncPage.tokenInput).toHaveValue(EDITED_TOKEN)
+    await expect(mainWindow.getByTestId('sync-token-input')).toHaveCount(0)
     await expect(syncPage.enabledSwitch).toHaveAttribute('aria-checked', 'false')
     const reread = await getSyncConfigViaApi(mainWindow)
     expect(reread.endpoint).toBe(EDITED_ENDPOINT)
-    assertSyncTokenExactRedacted(reread.token, EDITED_TOKEN, 'token after renavigate')
     expect(reread.enabled).toBe(false)
+    expect('token' in reread).toBe(false)
   })
 })

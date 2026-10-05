@@ -101,7 +101,7 @@ describe('attachment incremental chain', () => {
     mkdirSync(tmpDirB, { recursive: true })
 
     // Mock syncClient push/pull to use relayOps
-    vi.spyOn(syncClient, 'push').mockImplementation(async (_endpoint, _token, req: any) => {
+    vi.spyOn(syncClient, 'push').mockImplementation(async (_endpoint, req: any) => {
       const accepted: string[] = []
       for (const op of req.operations) {
         if (relayOps.some((r) => (r.op.id as string) === op.id)) continue
@@ -111,13 +111,13 @@ describe('attachment incremental chain', () => {
       }
       return { cursor: relaySeq, acceptedIds: accepted } as any
     })
-    vi.spyOn(syncClient, 'pull').mockImplementation(async (_endpoint, _token, cursor: number) => {
+    vi.spyOn(syncClient, 'pull').mockImplementation(async (_endpoint, cursor: number) => {
       const ops = relayOps.filter((r) => r.seq > cursor).map((r) => ({ ...r.op, seq: r.seq }))
       return { operations: ops, cursor: relaySeq } as any
     })
     // Stub attachment client via injected services, not via syncClient directly
     // But ensure syncClient upload/download also mocked for fallback
-    vi.spyOn(syncClient, 'uploadAttachment').mockImplementation(async (_endpoint, _token, args: any) => {
+    vi.spyOn(syncClient, 'uploadAttachment').mockImplementation(async (_endpoint, args: any) => {
       // collect body if it's a stream
       const body = args.body
       let buf: Buffer
@@ -140,7 +140,7 @@ describe('attachment incremental chain', () => {
       return { digest, byteLength: buf.length, deduplicated: false }
     })
     vi.spyOn(syncClient, 'downloadAttachment').mockImplementation(
-      async (_endpoint, _token, args: any, _c, _s, _sig, onChunk?: any) => {
+      async (_endpoint, args: any, _c, _s, _sig, onChunk?: any) => {
         const buf = attachmentStore.get(args.digest)
         if (!buf) {
           const err: any = new Error('attachment download failed 404: not found')
@@ -167,10 +167,8 @@ describe('attachment incremental chain', () => {
     const deviceIdB = randomUUID()
     // endpoint/token
     const endpoint = 'http://127.0.0.1:3030'
-    const token = 'test-token'
     for (const store of [storeA, storeB]) {
       store.set('sync:endpoint', endpoint)
-      store.set('sync:token', token)
       store.set('sync:enabled', true)
     }
     storeA.set('sync:deviceCode', 'ABCD2345')

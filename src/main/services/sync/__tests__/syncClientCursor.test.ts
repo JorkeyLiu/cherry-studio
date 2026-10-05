@@ -40,9 +40,9 @@ describe('SyncClient request cursor validation', () => {
     async (cursor) => {
       const fetchSpy = vi.fn(async () => ({ ok: true, json: async () => ({ operations: [], cursor: 0 }) }) as never)
       vi.stubGlobal('fetch', fetchSpy)
-      await expect(
-        syncClient.pull(ENDPOINT, undefined, cursor, 'd1', undefined, TEST_CODE, TEST_SECRET)
-      ).rejects.toThrow(/cursor must be non-negative safe integer/)
+      await expect(syncClient.pull(ENDPOINT, cursor, 'd1', TEST_CODE, TEST_SECRET)).rejects.toThrow(
+        /cursor must be non-negative safe integer/
+      )
       expect(fetchSpy).not.toHaveBeenCalled()
     }
   )
@@ -55,7 +55,7 @@ describe('SyncClient request cursor validation', () => {
         return { ok: true, json: async () => ({ operations: [], cursor: 0 }) } as never
       })
     )
-    const res = await syncClient.pull(ENDPOINT, undefined, 0, 'd1', undefined, TEST_CODE, TEST_SECRET)
+    const res = await syncClient.pull(ENDPOINT, 0, 'd1', TEST_CODE, TEST_SECRET)
     expect(res.cursor).toBe(0)
   })
 })
@@ -63,28 +63,28 @@ describe('SyncClient request cursor validation', () => {
 describe('SyncClient response seq/cursor validation', () => {
   it.each([[1.5], [-1], [Number.MAX_SAFE_INTEGER + 1]])('pull rejects unsafe response cursor %s', async (cursor) => {
     stubFetch({ operations: [], cursor })
-    await expect(syncClient.pull(ENDPOINT, undefined, cursor, 'd1', undefined, TEST_CODE, TEST_SECRET)).rejects.toThrow(
+    await expect(syncClient.pull(ENDPOINT, cursor, 'd1', TEST_CODE, TEST_SECRET)).rejects.toThrow(
       /cursor must be non-negative safe integer/
     )
   })
 
   it('pull rejects string response cursor without reinterpretation', async () => {
     stubFetch({ operations: [], cursor: '1' })
-    await expect(syncClient.pull(ENDPOINT, undefined, 1, 'd1', undefined, TEST_CODE, TEST_SECRET)).rejects.toThrow(
+    await expect(syncClient.pull(ENDPOINT, 1, 'd1', TEST_CODE, TEST_SECRET)).rejects.toThrow(
       /cursor must be non-negative safe integer/
     )
   })
 
   it.each([[0], [-2], [1.5], [Number.MAX_SAFE_INTEGER + 1]])('pull rejects unsafe response seq %s', async (seq) => {
     stubFetch({ operations: [validOp(seq, `unsafe-${String(seq)}`)], cursor: 1 })
-    await expect(syncClient.pull(ENDPOINT, undefined, 0, 'd1', undefined, TEST_CODE, TEST_SECRET)).rejects.toThrow(
+    await expect(syncClient.pull(ENDPOINT, 0, 'd1', TEST_CODE, TEST_SECRET)).rejects.toThrow(
       /invalid seq|non-contiguous/
     )
   })
 
   it('pull rejects string seq without reinterpretation', async () => {
     stubFetch({ operations: [{ ...validOp(1, 'str'), seq: '1' }], cursor: 1 })
-    await expect(syncClient.pull(ENDPOINT, undefined, 0, 'd1', undefined, TEST_CODE, TEST_SECRET)).rejects.toThrow(
+    await expect(syncClient.pull(ENDPOINT, 0, 'd1', TEST_CODE, TEST_SECRET)).rejects.toThrow(
       /invalid seq|non-contiguous/
     )
   })
@@ -96,14 +96,14 @@ describe('SyncClient response seq/cursor validation', () => {
         vi.fn(async () => ({ ok: true, json: async () => ({ cursor, acceptedIds: ['a'] }) }) as never)
       )
       await expect(
-        syncClient.push(ENDPOINT, undefined, { deviceId: 'd1', operations: [] }, undefined, TEST_CODE, TEST_SECRET)
+        syncClient.push(ENDPOINT, { deviceId: 'd1', operations: [] }, TEST_CODE, TEST_SECRET)
       ).rejects.toThrow(/cursor must be non-negative safe integer/)
     }
   })
 
   it('contiguous safe-integer frame still passes', async () => {
     stubFetch({ operations: [validOp(1, 'ok1'), validOp(2, 'ok2')], cursor: 2 })
-    const res = await syncClient.pull(ENDPOINT, undefined, 0, 'd1', undefined, TEST_CODE, TEST_SECRET)
+    const res = await syncClient.pull(ENDPOINT, 0, 'd1', TEST_CODE, TEST_SECRET)
     expect(res.cursor).toBe(2)
     expect(res.operations).toHaveLength(2)
   })

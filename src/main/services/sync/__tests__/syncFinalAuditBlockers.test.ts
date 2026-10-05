@@ -108,7 +108,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -254,7 +253,7 @@ describe('syncAuto.refresh config-read failure invalidates active SyncService cy
     const stopCalls: string[] = []
     const fakeSubscriber = { start: vi.fn(), stop: (): void => void stopCalls.push('stop') }
     const svc = new Cls({
-      getConfig: (): { endpoint: string; token?: string; enabled: boolean } => {
+      getConfig: (): { endpoint: string; enabled: boolean } => {
         throw new Error('config-boom')
       },
       isAttached: () => true,

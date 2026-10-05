@@ -1,7 +1,7 @@
 /**
  * Test-owned in-memory reference relay for sync E2E (SYNC-CC-* protocol).
  *
- * Per-spec, in-process, loopback-bound to an ephemeral port, token-protected,
+ * Per-spec, in-process, loopback-bound to an ephemeral port,
  * fully closed/cleaned in teardown. Mirrors the transport contract of
  * scripts/sync-relay/server.ts (auth, limits, registration, channel pairing,
  * per-channel push/pull framing, per-channel current-effective
@@ -47,7 +47,6 @@ interface StoredOperation {
 export interface TestRelayHandle {
   endpoint: string
   port: number
-  token: string
   close: () => Promise<void>
   /**
    * Reversible controlled network interruption for E2E. While paused, push
@@ -61,7 +60,7 @@ export interface TestRelayHandle {
    * Independent direction barriers (test-only, in-memory). Push and pull
    * fail closed (503) independently when their barrier is set, without
    * touching the in-memory operation log or cursor. Auth precedence is
-   * unchanged (401 wins over 503). SSE remains hint-only and is never
+   * unchanged (device-credential 403 wins over 503). SSE remains hint-only and is never
    * gated by these barriers. Combined with the legacy full pause: a push
    * is blocked while paused OR push-blocked; a pull is blocked while
    * paused OR pull-blocked. Clearing requires resetting each flag set.
@@ -101,14 +100,6 @@ export interface TestRelayHandle {
   getInFlightCount: () => number
   /** Resolve once no admitted push/pull request is still executing. */
   waitForQuiescent: (timeoutMs?: number) => Promise<void>
-}
-
-function checkAuth(req: IncomingMessage, expectedToken: string): boolean {
-  const hdr = req.headers.authorization
-  if (!hdr || typeof hdr !== 'string') return false
-  const prefix = 'Bearer '
-  if (!hdr.startsWith(prefix)) return false
-  return hdr.slice(prefix.length) === expectedToken
 }
 
 /**
@@ -182,8 +173,7 @@ function storedEquals(stored: StoredOperation, op: any): boolean {
  * Start the test-owned relay bound to 127.0.0.1 on an ephemeral port.
  * The caller owns the handle and MUST await close() (fail-closed).
  */
-export function startTestRelay(token: string): Promise<TestRelayHandle> {
-  if (!token || typeof token !== 'string') throw new Error('startTestRelay requires a non-empty token')
+export function startTestRelay(): Promise<TestRelayHandle> {
   // Registration / channel / pairing state (in-memory mirror of the
   // reference relay). Secrets are stored hashed; plaintext is never retained.
   const devices = new Map<string, { secretHash: string; clientDeviceId?: string }>()
@@ -394,7 +384,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     const url = new URL(req.url ?? '/', `http://${host}`)
     res.setHeader('Access-Control-Allow-Origin', '*')
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Sync-Device-Code,X-Sync-Device-Secret')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-Sync-Device-Code,X-Sync-Device-Secret')
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
       res.end()
@@ -402,11 +392,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/register') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       try {
         const body = await jsonBodyWithLimit(req, 64 * 1024)
         const rawCode: unknown = body.deviceCode
@@ -463,11 +448,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/state') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       const channel = memberships.get(caller) ?? null
@@ -491,11 +471,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/request') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       try {
@@ -556,11 +531,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/cancel') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       try {
@@ -603,11 +573,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/accept') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       try {
@@ -701,11 +666,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/reject') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       try {
@@ -744,11 +704,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/unpair') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       const channel = memberships.get(caller) ?? null
@@ -791,21 +746,14 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/push') {
-      // Auth precedence: invalid/missing auth stays 401 even while paused;
-      // only authenticated requests observe the 503 pause signal.
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
-      if (paused || pushPaused) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'relay paused' }))
-        return
-      }
-      // Admitted from here: finish/close listeners in trackInFlight
-      // decrement once this response completes.
-      trackInFlight(res)
+      // Natural-boundary parity with scripts/sync-relay/server.ts: applicable
+      // request-size validation (Content-Length early check + bounded body
+      // read) FIRST, then durable device auth, then the test-only
+      // pause/direction barrier, then mutation/read channel checks. Size 413
+      // wins over auth 403; auth 403 wins over pause 503; pause 503 wins over
+      // channel 403. Bodies are parsed only through the bounded reader; no
+      // state (devices/memberships/ops/cursor) is touched before device auth,
+      // and paused valid requests change no data/cursor.
       const clHeader = req.headers['content-length']
       const clStr = Array.isArray(clHeader) ? (clHeader[0] ?? '0') : (clHeader ?? '0')
       const contentLength = Number(clStr)
@@ -814,10 +762,32 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
         res.end(JSON.stringify({ error: 'payload too large' }))
         return
       }
+      let rawBody: any
       try {
-        const body = await jsonBodyWithLimit(req, SYNC_MAX_PAYLOAD_BYTES)
-        const caller = requireAuth(req, res)
-        if (!caller) return
+        rawBody = await jsonBodyWithLimit(req, SYNC_MAX_PAYLOAD_BYTES)
+      } catch (e) {
+        const msg = (e as Error).message
+        if (msg === 'payload too large') {
+          res.writeHead(413, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'payload too large' }))
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: msg.slice(0, 500) }))
+        }
+        return
+      }
+      const caller = requireAuth(req, res)
+      if (!caller) return
+      if (paused || pushPaused) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'relay paused' }))
+        return
+      }
+      // Admitted from here: finish/close listeners in trackInFlight
+      // decrement once this response completes.
+      trackInFlight(res)
+      try {
+        const body = rawBody
         const pushDeviceId: unknown = (body as { deviceId?: unknown })?.deviceId
         if (!isValidDevice(pushDeviceId)) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -942,19 +912,14 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/pull') {
-      // Auth precedence mirrors push: 401 wins over the 503 pause signal.
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
+      // Auth precedence mirrors push: device-credential 403 wins over the 503 pause signal.
+      const caller = requireAuth(req, res)
+      if (!caller) return
       if (paused || pullPaused) {
         res.writeHead(503, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'relay paused' }))
         return
       }
-      const caller = requireAuth(req, res)
-      if (!caller) return
       const pullDeviceId = url.searchParams.get('deviceId') ?? ''
       if (!isValidDevice(pullDeviceId)) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -1015,7 +980,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     // `PUT /sync/baseline` publishes (idempotent replace) and
     // `GET /sync/baseline` fetches the single current-effective envelope for
     // the caller's channel. Contract mirror of scripts/sync-relay/server.ts:
-    // Bearer 401, device credential 403, unpaired 403 pairing-required,
+    // Device credential 403, unpaired 403 pairing-required,
     // cross-channel 403 channel-mismatch, strict envelope 400
     // invalid-envelope (exact keys/versions/duplicate-key rejection via the
     // shared baselineWire parser), digest 400 digest-mismatch, watermark
@@ -1026,11 +991,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     // verbatim. Pause/pushPaused/pullPaused never gate this resource (the
     // reference has no such 503 semantics).
     if (req.method === 'PUT' && url.pathname === '/sync/baseline') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       let rawText: string
@@ -1174,11 +1134,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/baseline') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const caller = requireAuth(req, res)
       if (!caller) return
       const channel = memberships.get(caller) ?? null
@@ -1205,12 +1160,7 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     if (url.pathname === '/sync/attachments' || url.pathname.startsWith('/sync/attachments/')) {
       const ATTACHMENT_DIGEST_RE = /^[0-9a-f]{64}$/
       const method = req.method ?? ''
-      // Auth precedence: Bearer 401 first
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
+      // Auth precedence: device-credential 403 first
       const caller = requireAuth(req, res)
       if (!caller) return
       const channel = memberships.get(caller) ?? null
@@ -1319,11 +1269,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/subscribe') {
-      if (!checkAuth(req, token)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const cursorParam = url.searchParams.get('cursor') ?? '0'
       try {
         parseStrictRelayCursor(cursorParam)
@@ -1376,7 +1321,6 @@ export function startTestRelay(token: string): Promise<TestRelayHandle> {
       const handle: TestRelayHandle = {
         endpoint,
         port: addr.port,
-        token,
         setPaused: (p: boolean) => {
           paused = p === true
         },
@@ -1456,10 +1400,10 @@ export function provisionedHeaders(dev: ProvisionedDevice): Record<string, strin
   return { 'x-sync-device-code': dev.code, 'x-sync-device-secret': dev.secret }
 }
 
-export async function provisionPairedDevices(endpoint: string, token: string, count = 2): Promise<ProvisionedDevice[]> {
+export async function provisionPairedDevices(endpoint: string, count = 2): Promise<ProvisionedDevice[]> {
   if (!Number.isSafeInteger(count) || count < 1) throw new Error('provisionPairedDevices requires count >= 1')
   const base = endpoint.replace(/\/$/, '')
-  const authedJson = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+  const jsonHeaders = { 'Content-Type': 'application/json' }
   const devices: ProvisionedDevice[] = []
   for (let i = 0; i < count; i++) {
     // Intentionally registers without a client device id (null binding) so
@@ -1468,7 +1412,7 @@ export async function provisionPairedDevices(endpoint: string, token: string, co
     // explicitly by the shared conformance with bound registrations.
     const res = await fetch(`${base}/sync/register`, {
       method: 'POST',
-      headers: authedJson,
+      headers: jsonHeaders,
       body: JSON.stringify({})
     })
     if (res.status !== 200) throw new Error(`provision register ${i} failed: ${res.status}`)
@@ -1481,14 +1425,14 @@ export async function provisionPairedDevices(endpoint: string, token: string, co
   for (let i = 1; i < devices.length; i++) {
     const req = await fetch(`${base}/sync/pair/request`, {
       method: 'POST',
-      headers: { ...authedJson, ...provisionedHeaders(devices[i]) },
+      headers: { ...jsonHeaders, ...provisionedHeaders(devices[i]) },
       body: JSON.stringify({ targetCode: devices[0].code })
     })
     if (req.status !== 200) throw new Error(`provision request ${i} failed: ${req.status}`)
     const reqBody = (await req.json()) as { requestId: string }
     const accept = await fetch(`${base}/sync/pair/accept`, {
       method: 'POST',
-      headers: { ...authedJson, ...provisionedHeaders(devices[0]) },
+      headers: { ...jsonHeaders, ...provisionedHeaders(devices[0]) },
       body: JSON.stringify({ requestId: reqBody.requestId })
     })
     if (accept.status !== 200) throw new Error(`provision accept ${i} failed: ${accept.status}`)

@@ -66,7 +66,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:3999')
-  configStore.set('sync:token', 'test-token')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -244,25 +243,11 @@ describe('SyncClient device-identity headers', () => {
     }) as never
     try {
       const auth = freshDeviceAuth()
-      await syncClient.push(
-        'http://127.0.0.1:9',
-        undefined,
-        { deviceId: 'd1', operations: [] },
-        undefined,
-        'ABCD2345',
-        auth
-      )
+      await syncClient.push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, 'ABCD2345', auth)
       expect(seen[0].headers['x-sync-device-code']).toBe('ABCD2345')
       expect(seen[0].headers['x-sync-device-secret']).toBe(auth)
       await expect(
-        syncClient.push(
-          'http://127.0.0.1:9',
-          undefined,
-          { deviceId: 'd1', operations: [] },
-          undefined,
-          'ABCD2345',
-          'bad'
-        )
+        syncClient.push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, 'ABCD2345', 'bad')
       ).rejects.toThrow(/device auth/i)
       expect(seen.length).toBe(1)
     } finally {
@@ -272,11 +257,11 @@ describe('SyncClient device-identity headers', () => {
 
   it('push/pull require registration before transport', async () => {
     const { syncClient } = await import('../SyncClient')
-    await expect(syncClient.push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] })).rejects.toThrow(
+    await expect(syncClient.push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, '', '')).rejects.toThrow(
       /registration required/i
     )
-    await expect(syncClient.pull('http://127.0.0.1:9', undefined, 0, 'd1')).rejects.toThrow(/registration required/i)
-    await expect(syncClient.pull('http://127.0.0.1:9', undefined, 0, '')).rejects.toThrow(/device id/i)
+    await expect(syncClient.pull('http://127.0.0.1:9', 0, 'd1', '', '')).rejects.toThrow(/registration required/i)
+    await expect(syncClient.pull('http://127.0.0.1:9', 0, '', '', '')).rejects.toThrow(/device id/i)
   })
 
   it('relay error text never carries the secret', async () => {
@@ -291,7 +276,7 @@ describe('SyncClient device-identity headers', () => {
       }) as never) as never
     try {
       const err = await syncClient
-        .push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] }, undefined, 'ABCD2345', issued)
+        .push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, 'ABCD2345', issued)
         .then(
           () => null,
           (e: unknown) => e as Error
@@ -483,7 +468,7 @@ describe('centralized relay error sanitizer', () => {
       ({ ok: false, status: 403, text: async () => nestedBody }) as never) as never
     try {
       const err = await syncClient
-        .push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] }, undefined, 'ABCD2345', issued)
+        .push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, 'ABCD2345', issued)
         .then(
           () => null,
           (e: unknown) => e as Error & { cause?: unknown }
@@ -515,7 +500,7 @@ describe('centralized relay error sanitizer', () => {
     ;(globalThis as unknown as { fetch: unknown }).fetch = (async () =>
       ({ ok: false, status: 409, text: async () => body }) as never) as never
     try {
-      const err = await syncClient.pull('http://127.0.0.1:9', undefined, 0, 'd1', undefined, 'ABCD2345', issued).then(
+      const err = await syncClient.pull('http://127.0.0.1:9', 0, 'd1', 'ABCD2345', issued).then(
         () => null,
         (e: unknown) => e as Error & { cause?: unknown }
       )
@@ -536,7 +521,7 @@ describe('centralized relay error sanitizer', () => {
       ({ ok: false, status: 500, text: async () => `relay boom ${DECOY} failed badly` }) as never) as never
     try {
       const err = await syncClient
-        .push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] }, undefined, 'ABCD2345', issued)
+        .push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, 'ABCD2345', issued)
         .then(
           () => null,
           (e: unknown) => e as Error & { cause?: unknown }
@@ -606,7 +591,7 @@ describe('centralized relay error sanitizer', () => {
     try {
       const sub = new SyncSubscriber()
       const disconnected = new Promise<Error | undefined>((resolve) => {
-        sub.start('http://127.0.0.1:9', undefined, {
+        sub.start('http://127.0.0.1:9', {
           onNotify: () => {},
           onDisconnect: (e) => resolve(e)
         })

@@ -45,7 +45,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:3999')
-  configStore.set('sync:token', 'test-token')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -70,7 +69,7 @@ async function openRelay(): Promise<{ base: string; relayDb: Database.Database; 
   const { createRelayServer, ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
   const relayDb = new Database(':memory:')
   ensureRelaySchema(relayDb)
-  const server = createRelayServer(relayDb, {})
+  const server = createRelayServer(relayDb)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const addr = server.address() as { port: number }
   return {
@@ -181,7 +180,7 @@ describe('SyncClient redacts relay error bodies', () => {
       }) as never) as never
     try {
       const err = await syncClient
-        .push('http://127.0.0.1:9', undefined, { deviceId: 'd1', operations: [] }, undefined, 'ABCD2345', issued)
+        .push('http://127.0.0.1:9', { deviceId: 'd1', operations: [] }, 'ABCD2345', issued)
         .then(
           () => null,
           (e: unknown) => e as Error
@@ -205,7 +204,7 @@ describe('SyncClient redacts relay error bodies', () => {
         text: async () => JSON.stringify({ error: 'invalid cursor', deviceSecret: issued })
       }) as never) as never
     try {
-      const err = await syncClient.pull('http://127.0.0.1:9', undefined, 0, 'd1', undefined, 'ABCD2345', issued).then(
+      const err = await syncClient.pull('http://127.0.0.1:9', 0, 'd1', 'ABCD2345', issued).then(
         () => null,
         (e: unknown) => e as Error
       )

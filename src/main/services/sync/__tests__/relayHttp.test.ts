@@ -28,7 +28,6 @@ describe('relay http hardening (channel protocol)', () => {
   let db: Database.Database
   let server: ReturnType<typeof createRelayServer>
   let baseUrl: string
-  const token = 'test-token-123'
   // Registered + paired device codes for the data-plane tests.
   let codeA = ''
   let secretA = ''
@@ -37,7 +36,7 @@ describe('relay http hardening (channel protocol)', () => {
   beforeAll(async () => {
     db = new Database(':memory:')
     ensureRelaySchema(db)
-    server = createRelayServer(db, { token })
+    server = createRelayServer(db)
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => resolve())
     })
@@ -45,7 +44,7 @@ describe('relay http hardening (channel protocol)', () => {
     baseUrl = `http://127.0.0.1:${addr.port}`
     const authed = (init?: RequestInit): RequestInit => ({
       ...init,
-      headers: { ...init?.headers, Authorization: `Bearer ${token}` }
+      headers: { ...init?.headers }
     })
     // Register two devices and pair them: A <- B request, A accepts.
     // Registrations carry their real client device ids so the operation
@@ -106,9 +105,8 @@ describe('relay http hardening (channel protocol)', () => {
     db.close()
   })
 
-  async function push(ops: any[], withToken = true): Promise<Response> {
+  async function push(ops: any[]): Promise<Response> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (withToken) headers['Authorization'] = `Bearer ${token}`
     headers['x-sync-device-code'] = codeA
     headers['x-sync-device-secret'] = secretA
     const res = await fetch(`${baseUrl}/sync/push`, {
@@ -119,36 +117,36 @@ describe('relay http hardening (channel protocol)', () => {
     return res
   }
 
-  async function pull(cursor: number, withToken = true): Promise<Response> {
+  async function pull(cursor: number): Promise<Response> {
     const headers: Record<string, string> = {}
-    if (withToken) headers['Authorization'] = `Bearer ${token}`
     headers['x-sync-device-code'] = codeA
     headers['x-sync-device-secret'] = secretA
     const res = await fetch(`${baseUrl}/sync/pull?cursor=${cursor}&deviceId=${uuidA}`, { headers })
     return res
   }
 
-  it('rejects push without token when required', async () => {
-    const res = await push(
-      [
-        {
-          id: 'op-1',
-          entityType: 'topic',
-          op: 'upsert',
-          entityId: 't1',
-          timestamp: Date.now(),
-          deviceId: uuidA,
-          payload: { id: 't1', name: 'A' }
-        }
-      ],
-      false
-    )
-    expect(res.status).toBe(401)
+  it('accepts push/pull with device auth and no service token', async () => {
+    const res = await push([
+      {
+        id: 'op-1',
+        entityType: 'topic',
+        op: 'upsert',
+        entityId: 't1',
+        timestamp: Date.now(),
+        deviceId: uuidA,
+        payload: { id: 't1', name: 'A' }
+      }
+    ])
+    expect(res.status).toBe(200)
   })
 
-  it('rejects pull without token', async () => {
-    const res = await pull(0, false)
-    expect(res.status).toBe(401)
+  it('rejects pull with invalid device credential', async () => {
+    const headers: Record<string, string> = {
+      'x-sync-device-code': codeA,
+      'x-sync-device-secret': '0'.repeat(64)
+    }
+    const res = await fetch(`${baseUrl}/sync/pull?cursor=0&deviceId=${uuidA}`, { headers })
+    expect(res.status).toBe(403)
   })
 
   it('rejects invalid entityType', async () => {

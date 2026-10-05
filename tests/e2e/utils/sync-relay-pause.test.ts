@@ -8,8 +8,6 @@ import {
   type TestRelayHandle
 } from './sync-relay'
 
-const TOKEN = 'pause-precedence-token'
-
 function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Record<string, unknown> {
   return {
     id,
@@ -27,8 +25,8 @@ let relay: TestRelayHandle | null = null
 let dev: ProvisionedDevice | null = null
 
 beforeEach(async () => {
-  relay = await startTestRelay(TOKEN)
-  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
+  relay = await startTestRelay()
+  dev = (await provisionPairedDevices(relay.endpoint, 2))[0]
 })
 
 afterEach(async () => {
@@ -47,9 +45,20 @@ afterEach(async () => {
   }
 })
 
-async function pushRaw(ops: Record<string, unknown>[], token: string | null): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...provisionedHeaders(dev!) }
-  if (token !== null) headers.Authorization = `Bearer ${token}`
+/** Per-device credential selector: valid member, absent, or wrong secret. */
+type RawCred = 'valid' | 'none' | 'wrong'
+
+function rawCredHeaders(cred: RawCred): Record<string, string> {
+  if (cred === 'none') return {}
+  if (cred === 'wrong') return { 'x-sync-device-code': dev!.code, 'x-sync-device-secret': '0'.repeat(64) }
+  return provisionedHeaders(dev!)
+}
+
+async function pushRaw(
+  ops: Record<string, unknown>[],
+  cred: RawCred = 'valid'
+): Promise<{ status: number; body: any }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...rawCredHeaders(cred) }
   const res = await fetch(`${relay!.endpoint}/sync/push`, {
     method: 'POST',
     headers,
@@ -59,30 +68,29 @@ async function pushRaw(ops: Record<string, unknown>[], token: string | null): Pr
   return { status: res.status, body }
 }
 
-async function pullRaw(cursor = 0, token: string | null = TOKEN): Promise<{ status: number; body: any }> {
-  const headers: Record<string, string> = { ...provisionedHeaders(dev!) }
-  if (token !== null) headers.Authorization = `Bearer ${token}`
+async function pullRaw(cursor = 0, cred: RawCred = 'valid'): Promise<{ status: number; body: any }> {
+  const headers: Record<string, string> = { ...rawCredHeaders(cred) }
   const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
   const body = await res.json().catch(() => ({}))
   return { status: res.status, body }
 }
 
 describe('test relay pause precedence and determinism (LOCK-007)', () => {
-  it('invalid/missing auth stays 401 while paused for both push and pull', async () => {
+  it('invalid/missing device credential stays 403 while paused for both push and pull', async () => {
     relay!.setPaused(true)
     expect(relay!.isPaused()).toBe(true)
 
-    const pushNoAuth = await pushRaw([topicOp('op-pause-auth-1', 't-pause-auth-1')], null)
-    expect(pushNoAuth.status).toBe(401)
+    const pushNoAuth = await pushRaw([topicOp('op-pause-auth-1', 't-pause-auth-1')], 'none')
+    expect(pushNoAuth.status).toBe(403)
 
-    const pushBadAuth = await pushRaw([topicOp('op-pause-auth-2', 't-pause-auth-2')], 'wrong-token')
-    expect(pushBadAuth.status).toBe(401)
+    const pushBadAuth = await pushRaw([topicOp('op-pause-auth-2', 't-pause-auth-2')], 'wrong')
+    expect(pushBadAuth.status).toBe(403)
 
-    const pullNoAuth = await pullRaw(0, null)
-    expect(pullNoAuth.status).toBe(401)
+    const pullNoAuth = await pullRaw(0, 'none')
+    expect(pullNoAuth.status).toBe(403)
 
-    const pullBadAuth = await pullRaw(0, 'wrong-token')
-    expect(pullBadAuth.status).toBe(401)
+    const pullBadAuth = await pullRaw(0, 'wrong')
+    expect(pullBadAuth.status).toBe(403)
 
     // Rejected auth attempts never touch the log or cursor.
     await relay!.waitForQuiescent()
@@ -92,7 +100,7 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
 
   it('authenticated push and pull are 503 while paused with unchanged counters', async () => {
     const ts = Date.now()
-    const seed = await pushRaw([topicOp('op-pause-seed', 't-pause-seed', 'Seed', ts)], TOKEN)
+    const seed = await pushRaw([topicOp('op-pause-seed', 't-pause-seed', 'Seed', ts)])
     expect(seed.status).toBe(200)
     await relay!.waitForQuiescent()
     const cursorBefore = relay!.getCursor()
@@ -101,9 +109,9 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
     expect(opsBefore).toBe(1)
 
     relay!.setPaused(true)
-    const pushPaused = await pushRaw([topicOp('op-pause-held', 't-pause-held', 'Held', ts + 1)], TOKEN)
+    const pushPaused = await pushRaw([topicOp('op-pause-held', 't-pause-held', 'Held', ts + 1)])
     expect(pushPaused.status).toBe(503)
-    const pullPaused = await pullRaw(0, TOKEN)
+    const pullPaused = await pullRaw(0)
     expect(pullPaused.status).toBe(503)
 
     // Pause fails closed: no new ops, no cursor motion.
@@ -112,9 +120,9 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
     expect(relay!.getOperationCount()).toBe(opsBefore)
   })
 
-  it('pull barrier blocks pulls while pushes still commit (auth still 401-first)', async () => {
+  it('pull barrier blocks pulls while pushes still commit (auth still 403-first)', async () => {
     const ts = Date.now()
-    const seed = await pushRaw([topicOp('op-dir-seed', 't-dir-seed', 'Seed', ts)], TOKEN)
+    const seed = await pushRaw([topicOp('op-dir-seed', 't-dir-seed', 'Seed', ts)])
     expect(seed.status).toBe(200)
     await relay!.waitForQuiescent()
     const cursorBefore = relay!.getCursor()
@@ -125,42 +133,42 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
     expect(relay!.isPaused()).toBe(false)
 
     // Push stays open: commits and advances ops/cursor.
-    const pushed = await pushRaw([topicOp('op-dir-push-open', 't-dir-push-open', 'Open', ts + 1)], TOKEN)
+    const pushed = await pushRaw([topicOp('op-dir-push-open', 't-dir-push-open', 'Open', ts + 1)])
     expect(pushed.status).toBe(200)
     await relay!.waitForQuiescent()
     expect(relay!.getCursor()).toBeGreaterThan(cursorBefore)
     expect(relay!.getOperationCount()).toBe(2)
 
     // Pull stays gated: authenticated pull is 503, log/cursor untouched.
-    const pulled = await pullRaw(0, TOKEN)
+    const pulled = await pullRaw(0)
     expect(pulled.status).toBe(503)
     await relay!.waitForQuiescent()
     expect(relay!.getCursor()).toBe(cursorBefore + 1)
 
     // Auth precedence holds under the independent barrier.
-    const badPush = await pushRaw([topicOp('op-dir-bad', 't-dir-bad')], 'wrong-token')
-    expect(badPush.status).toBe(401)
-    const badPull = await pullRaw(0, 'wrong-token')
-    expect(badPull.status).toBe(401)
+    const badPush = await pushRaw([topicOp('op-dir-bad', 't-dir-bad')], 'wrong')
+    expect(badPush.status).toBe(403)
+    const badPull = await pullRaw(0, 'wrong')
+    expect(badPull.status).toBe(403)
 
     // SSE hint subscription is never gated by the pull barrier (hint-only);
     // it still authenticates as the paired channel member.
     const sseRes = await fetch(`${relay!.endpoint}/sync/subscribe?cursor=0`, {
-      headers: { Authorization: `Bearer ${TOKEN}`, ...provisionedHeaders(dev!) }
+      headers: { ...provisionedHeaders(dev!) }
     })
     expect(sseRes.status).toBe(200)
     await sseRes.body?.cancel?.().catch(() => {})
 
     relay!.setPullPaused(false)
     expect(relay!.isPullPaused()).toBe(false)
-    const after = await pullRaw(cursorBefore, TOKEN)
+    const after = await pullRaw(cursorBefore)
     expect(after.status).toBe(200)
     expect(after.body.operations.map((o: any) => o.id)).toContain('op-dir-push-open')
   })
 
-  it('push barrier blocks pushes while pulls still serve (auth still 401-first)', async () => {
+  it('push barrier blocks pushes while pulls still serve (auth still 403-first)', async () => {
     const ts = Date.now()
-    const seed = await pushRaw([topicOp('op-dir2-seed', 't-dir2-seed', 'Seed', ts)], TOKEN)
+    const seed = await pushRaw([topicOp('op-dir2-seed', 't-dir2-seed', 'Seed', ts)])
     expect(seed.status).toBe(200)
     await relay!.waitForQuiescent()
     const cursorBefore = relay!.getCursor()
@@ -170,24 +178,24 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
     expect(relay!.isPullPaused()).toBe(false)
 
     // Push gated: authenticated push is 503 with no log/cursor motion.
-    const held = await pushRaw([topicOp('op-dir2-held', 't-dir2-held', 'Held', ts + 1)], TOKEN)
+    const held = await pushRaw([topicOp('op-dir2-held', 't-dir2-held', 'Held', ts + 1)])
     expect(held.status).toBe(503)
     await relay!.waitForQuiescent()
     expect(relay!.getCursor()).toBe(cursorBefore)
     expect(relay!.getOperationCount()).toBe(1)
 
     // Pull stays open.
-    const pulled = await pullRaw(0, TOKEN)
+    const pulled = await pullRaw(0)
     expect(pulled.status).toBe(200)
     expect(pulled.body.operations.map((o: any) => o.id)).toContain('op-dir2-seed')
 
     // Auth precedence holds under the independent barrier.
-    const badPush = await pushRaw([topicOp('op-dir2-bad', 't-dir2-bad')], 'wrong-token')
-    expect(badPush.status).toBe(401)
+    const badPush = await pushRaw([topicOp('op-dir2-bad', 't-dir2-bad')], 'wrong')
+    expect(badPush.status).toBe(403)
 
     relay!.setPushPaused(false)
     expect(relay!.isPushPaused()).toBe(false)
-    const admitted = await pushRaw([topicOp('op-dir2-ok', 't-dir2-ok', 'Ok', ts + 2)], TOKEN)
+    const admitted = await pushRaw([topicOp('op-dir2-ok', 't-dir2-ok', 'Ok', ts + 2)])
     expect(admitted.status).toBe(200)
   })
 
@@ -196,15 +204,15 @@ describe('test relay pause precedence and determinism (LOCK-007)', () => {
     for (let round = 0; round < 2; round += 1) {
       relay!.setPaused(true)
       expect(relay!.isPaused()).toBe(true)
-      const held = await pushRaw([topicOp(`op-pause-cycle-${round}`, `t-pause-cycle-${round}`)], TOKEN)
+      const held = await pushRaw([topicOp(`op-pause-cycle-${round}`, `t-pause-cycle-${round}`)])
       expect(held.status).toBe(503)
 
       relay!.setPaused(false)
       expect(relay!.isPaused()).toBe(false)
       const op = topicOp(`op-pause-cycle-ok-${round}`, `t-pause-cycle-ok-${round}`, `Ok${round}`, ts + round)
-      const admitted = await pushRaw([op], TOKEN)
+      const admitted = await pushRaw([op])
       expect(admitted.status).toBe(200)
-      const pulled = await pullRaw(admitted.body.cursor - 1, TOKEN)
+      const pulled = await pullRaw(admitted.body.cursor - 1)
       expect(pulled.status).toBe(200)
       expect(pulled.body.operations.map((o: any) => o.id)).toContain(`op-pause-cycle-ok-${round}`)
     }

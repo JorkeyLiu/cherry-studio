@@ -2,7 +2,6 @@
  * One-shot seed baseline first close (SYNC-CC-026): adoption tx, orchestration,
  * and seed receiver gates. Main-native integration, no E2E fixture.
  */
-import { randomBytes } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -48,7 +47,6 @@ let aggA: ChatDbAggregateService | null = null
 let relayDb: Database.Database | null = null
 let relayServer: { close: (cb?: () => void) => void } | null = null
 let relayEndpoint = ''
-let relayToken = ''
 let relayDbPath = ''
 let ownedTmp = ''
 
@@ -68,7 +66,6 @@ function bindProfile(which: 'A' | 'B', creds: { deviceId: string; code: string; 
   ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:endpoint', relayEndpoint)
-  configStore.set('sync:token', relayToken)
   configStore.set('sync:enabled', true)
   if (creds.deviceId) configStore.set('deviceId', creds.deviceId)
   else configStore.delete('deviceId')
@@ -194,7 +191,6 @@ beforeEach(() => {
   credB = { deviceId: '', code: '', secret: '' }
   ownedTmp = mkdtempSync(join(tmpdir(), 'sync-seed-'))
   relayDbPath = join(ownedTmp, 'relay.db')
-  relayToken = `seed-${randomBytes(8).toString('hex')}`
   relayDb = new Database(relayDbPath)
   relayDb.pragma('journal_mode = WAL')
   ensureRelaySchema(relayDb)
@@ -246,7 +242,7 @@ afterEach(async () => {
 
 async function startRelay(): Promise<void> {
   if (!relayDb) throw new Error('relay db not initialized')
-  const server = createRelayServer(relayDb, { token: relayToken })
+  const server = createRelayServer(relayDb)
   relayServer = server as unknown as { close: (cb?: () => void) => void }
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const addr = server.address() as { port: number }

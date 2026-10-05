@@ -80,7 +80,6 @@ function bind(which: 'A' | 'B'): void {
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   configStore.set('deviceId', which === 'A' ? 'device-A' : 'device-B')
   configStore.set('sync:explicitDisconnect', false)
 }
@@ -721,7 +720,7 @@ describe('real reference relay push/pull (fresh-authenticated transport)', () =>
     const { createRelayServer, ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
     const rdb = new Database(':memory:')
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'move-dual' })
+    const server = createRelayServer(rdb)
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
         resolve()

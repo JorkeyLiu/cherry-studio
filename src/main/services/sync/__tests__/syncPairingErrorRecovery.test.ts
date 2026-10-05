@@ -46,7 +46,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:3999')
-  configStore.set('sync:token', 'test-token')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)

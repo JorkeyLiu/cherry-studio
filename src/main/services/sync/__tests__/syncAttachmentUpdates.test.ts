@@ -102,7 +102,7 @@ describe('attachment incremental updates and strict cases', () => {
     mkdirSync(tmpDirA, { recursive: true })
     mkdirSync(tmpDirB, { recursive: true })
 
-    vi.spyOn(syncClient, 'push').mockImplementation(async (_endpoint, _token, req: any) => {
+    vi.spyOn(syncClient, 'push').mockImplementation(async (_endpoint, req: any) => {
       const accepted: string[] = []
       for (const op of req.operations) {
         if (relayOps.some((r) => (r.op.id as string) === op.id)) continue
@@ -112,11 +112,11 @@ describe('attachment incremental updates and strict cases', () => {
       }
       return { cursor: relaySeq, acceptedIds: accepted } as any
     })
-    vi.spyOn(syncClient, 'pull').mockImplementation(async (_endpoint, _token, cursor: number) => {
+    vi.spyOn(syncClient, 'pull').mockImplementation(async (_endpoint, cursor: number) => {
       const ops = relayOps.filter((r) => r.seq > cursor).map((r) => ({ ...r.op, seq: r.seq }))
       return { operations: ops, cursor: relaySeq } as any
     })
-    vi.spyOn(syncClient, 'uploadAttachment').mockImplementation(async (_endpoint, _token, args: any) => {
+    vi.spyOn(syncClient, 'uploadAttachment').mockImplementation(async (_endpoint, args: any) => {
       const body = args.body
       let buf: Buffer
       if (Buffer.isBuffer(body)) buf = body
@@ -133,7 +133,7 @@ describe('attachment incremental updates and strict cases', () => {
       return { digest, byteLength: buf.length, deduplicated: false }
     })
     vi.spyOn(syncClient, 'downloadAttachment').mockImplementation(
-      async (_endpoint, _token, args: any, _c, _s, _sig, onChunk?: any) => {
+      async (_endpoint, args: any, _c, _s, _sig, onChunk?: any) => {
         const buf = attachmentStore.get(args.digest)
         if (!buf) {
           const err: any = new Error('attachment download failed 404: not found')
@@ -155,10 +155,8 @@ describe('attachment incremental updates and strict cases', () => {
     vi.spyOn(syncClient, 'fetchBaseline').mockImplementation(async () => ({ found: false }) as any)
 
     const endpoint = 'http://127.0.0.1:3030'
-    const token = 'test-token'
     for (const store of [storeA, storeB]) {
       store.set('sync:endpoint', endpoint)
-      store.set('sync:token', token)
       store.set('sync:enabled', true)
     }
     storeA.set('sync:deviceCode', 'ABCD2345')

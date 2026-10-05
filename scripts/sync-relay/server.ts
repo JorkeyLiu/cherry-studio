@@ -2,8 +2,8 @@
  * Reference HTTP relay for sync MVP — isolated non-production path.
  * Minimal persistent operation log with endpoint handlers.
  * Must NOT be imported by production app code.
- * Runnable via:  npx tsx scripts/sync-relay/server.ts [--port 3000] [--db /tmp/sync-relay.db] [--token secret]
- * LAN via: npx tsx scripts/sync-relay/server.ts --host <LAN-IP> [--cert <cert.pem> --key <key.pem>] [--port ...] [--db ...] [--token ...]
+ * Runnable via:  npx tsx scripts/sync-relay/server.ts [--port 3000] [--db /tmp/sync-relay.db]
+ * LAN via: npx tsx scripts/sync-relay/server.ts --host <LAN-IP> [--cert <cert.pem> --key <key.pem>] [--port ...] [--db ...]
  *   (plain HTTP by default; native HTTPS when user-supplied --cert/--key are given; the relay never generates certificates)
  * Container bridge via: --host 0.0.0.0 --allow-unspecified-bind (Docker bridge internal bind only)
  */
@@ -57,8 +57,6 @@ interface SyncOperation {
 }
 
 export interface RelayOptions {
-  /** If set, Bearer token is required for push/pull */
-  token?: string
   /** If set, the relay terminates native TLS with this cert/key pair. */
   tls?: { cert: string | Buffer; key: string | Buffer }
   /**
@@ -318,14 +316,13 @@ export const RELAY_HELP_TEXT = [
   'Cherry Chat personal sync relay (reference implementation).',
   '',
   'Usage:',
-  '  pnpm sync:relay -- --port <port> --db <path> --token <token>',
-  '  pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> --token <token> [--cert <cert.pem> --key <key.pem>]',
+  '  pnpm sync:relay -- --port <port> --db <path>',
+  '  pnpm sync:relay -- --host <LAN-IP> --port <port> --db <path> [--cert <cert.pem> --key <key.pem>]',
   '  pnpm sync:relay -- --help',
   '',
   'Options:',
   '  --port <port>    TCP port to bind (0 = ephemeral, otherwise 1-65535; default 3030)',
   '  --db <path>      SQLite file for relay state (persistent; never deleted on stop)',
-  '  --token <token>  Bearer token (fallback: SYNC_RELAY_TOKEN env; required for the supported path)',
   '  --host <host>    Bind host: 127.0.0.1 or localhost for loopback HTTP (default 127.0.0.1);',
   '                     an explicit non-loopback LAN IP serves plain HTTP by default,',
   '                     or native HTTPS when both --cert and --key are given.',
@@ -352,14 +349,13 @@ export const RELAY_HELP_TEXT = [
   '  - Cert/key files are read before the DB is opened; missing, empty, or',
   '    mismatched cert/key aborts startup without creating the DB.',
   '  - SIGTERM/SIGINT shut down gracefully exactly once without deleting the DB.',
-  '  - Same --db/--token (--cert/--key for HTTPS) on restart retains relay state.'
+  '  - Same --db (--cert/--key for HTTPS) on restart retains relay state.'
 ].join('\n')
 
 export interface RelayCliArgs {
   port: number
   dbPath: string
   host: string
-  token?: string
   certPath?: string
   keyPath?: string
   allowUnspecifiedBind: boolean
@@ -374,9 +370,10 @@ export function parseRelayArgs(
   let port = 3030
   let dbPath = resolve(process.cwd(), 'tmp-sync-relay.db')
   let host = '127.0.0.1'
-  let token: string | undefined
-  const envToken = env.SYNC_RELAY_TOKEN
-  if (typeof envToken === 'string' && envToken.length > 0) token = envToken
+  // Legacy service-wide shared Bearer token is removed: SYNC_RELAY_TOKEN env
+  // is ignored (never read, never logged) and --token fails as unsupported
+  // without echoing any value.
+  void env
   let certPath: string | undefined
   let keyPath: string | undefined
   // Deployment-scoped container-internal bind opt-in (Docker bridge only).
@@ -393,14 +390,10 @@ export function parseRelayArgs(
       allowUnspecifiedBind = true
       continue
     }
-    if (
-      arg === '--port' ||
-      arg === '--db' ||
-      arg === '--token' ||
-      arg === '--host' ||
-      arg === '--cert' ||
-      arg === '--key'
-    ) {
+    if (arg === '--token' || arg.startsWith('--token=')) {
+      throw new Error('unsupported flag --token (service-wide shared token removed; per-device code+secret only)')
+    }
+    if (arg === '--port' || arg === '--db' || arg === '--host' || arg === '--cert' || arg === '--key') {
       const raw = argv[i + 1]
       if (raw === undefined) {
         throw new Error(`missing value for ${arg} (expected a value)`)
@@ -417,11 +410,6 @@ export function parseRelayArgs(
       if (arg === '--db') {
         if (typeof raw !== 'string' || raw.length === 0) throw new Error('invalid --db (expected a file path)')
         dbPath = resolve(raw)
-        i++
-        continue
-      }
-      if (arg === '--token') {
-        token = raw
         i++
         continue
       }
@@ -509,7 +497,7 @@ export function parseRelayArgs(
   if (allowUnspecifiedBind) {
     requireBridgeBindAttested(env, bridgeExists)
   }
-  return { port, dbPath, host, token, certPath, keyPath, allowUnspecifiedBind, help }
+  return { port, dbPath, host, certPath, keyPath, allowUnspecifiedBind, help }
 }
 
 export interface RelayTlsConfig {
@@ -1129,16 +1117,6 @@ function jsonBodyWithLimit(req: IncomingMessage, limitBytes: number): Promise<an
   })
 }
 
-function checkAuth(req: IncomingMessage, expectedToken: string | undefined): boolean {
-  if (!expectedToken) return true
-  const hdr = req.headers.authorization
-  if (!hdr || typeof hdr !== 'string') return false
-  const prefix = 'Bearer '
-  if (!hdr.startsWith(prefix)) return false
-  const token = hdr.slice(prefix.length)
-  return token === expectedToken
-}
-
 /**
  * Strict canonical relay cursor parser: only canonical non-negative
  * safe-integer decimal forms are accepted (`0` or `[1-9][0-9]*`, no leading
@@ -1165,8 +1143,7 @@ type RelaySseIndex = {
 }
 
 export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
-  const expectedToken = opts?.token ?? process.env.SYNC_RELAY_TOKEN ?? undefined
-  const tokenRequired = typeof expectedToken === 'string' && expectedToken.length > 0
+  void opts
   // Notification-only SSE subscribers, scoped per channel (SYNC-CC-016).
   // Each entry is an open event-stream response bound to the subscriber's
   // device and channel at subscribe time; hints carry only a
@@ -1265,13 +1242,12 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     // ---- Per-channel attachment bytes (streaming operator-owned file store) ----
-    // Same existing Bearer + device + membership auth (401 first, then 403);
-    // no new capability, no plaintext credential logging, no TLS bypass.
+    // Device + membership auth (403); no new capability, no plaintext
+    // credential logging, no TLS bypass.
     if (url.pathname === '/sync/attachments' || url.pathname.startsWith('/sync/attachments/')) {
       try {
         const handled = await handleAttachmentRequest(req, res, {
           blobDir: attachmentBlobDir,
-          isBearerAuthorized: (r) => !tokenRequired || checkAuth(r, expectedToken),
           resolveCaller: (r) => {
             const deviceCode = requireDeviceAuthOrThrow(db, r).deviceCode
             let channel: string | null
@@ -1298,11 +1274,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     // push requires paired channel membership; operations are sequenced
     // contiguously per channel and never visible to other channels.
     if (req.method === 'POST' && url.pathname === '/sync/push') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       const clHeader = req.headers['content-length']
       const clStr = Array.isArray(clHeader) ? (clHeader[0] ?? '0') : (clHeader ?? '0')
       const contentLength = Number(clStr)
@@ -1483,11 +1454,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/pull') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -1595,14 +1561,9 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     // `GET /sync/baseline` fetches the single current-effective
     // `sync-baseline-wire-v1` envelope for the caller's channel. Request and
     // success response bodies are directly the locked `SyncEnvelope` JSON.
-    // Auth follows the existing channel data-plane semantics: Bearer token
-    // `401`, device credential `403`, unpaired `403 pairing-required`.
+    // Auth follows the channel data-plane semantics: device credential
+    // `403`, unpaired `403 pairing-required`.
     if (req.method === 'PUT' && url.pathname === '/sync/baseline') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -1804,11 +1765,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/baseline') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -1856,11 +1812,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     // code + durable secret). Later attachment presents the secret; unknown
     // credentials fail closed and are never silently re-registered.
     if (req.method === 'POST' && url.pathname === '/sync/register') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       try {
         const body = await jsonBodyWithLimit(req, 64 * 1024)
         const rawCode: unknown = (body as { deviceCode?: unknown })?.deviceCode
@@ -1931,11 +1882,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/state') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -1981,11 +1927,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/request') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -2102,11 +2043,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/cancel') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -2177,11 +2113,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/accept') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -2377,11 +2308,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/reject') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -2455,11 +2381,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'POST' && url.pathname === '/sync/pair/unpair') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       let caller: string
       try {
         caller = requireDeviceAuthOrThrow(db, req).deviceCode
@@ -2552,11 +2473,6 @@ export function createRelayServer(db: Database.Database, opts?: RelayOptions) {
     }
 
     if (req.method === 'GET' && url.pathname === '/sync/subscribe') {
-      if (tokenRequired && !checkAuth(req, expectedToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unauthorized' }))
-        return
-      }
       // Non-authoritative cursor query hint only; strict framing is validated
       // before subscribing, never used to filter or promise delivery. Actual
       // data moves via pull.
@@ -2683,12 +2599,9 @@ if (isMain) {
     console.log(RELAY_HELP_TEXT)
     process.exit(0)
   }
-  const { port, dbPath, host, token, certPath, keyPath, allowUnspecifiedBind } = parsed
-  if (typeof token !== 'string' || token.length === 0) {
-    console.error('[sync-relay] missing --token (or SYNC_RELAY_TOKEN env); refusing unauthenticated startup')
-    console.error(RELAY_HELP_TEXT)
-    process.exit(2)
-  }
+  const { port, dbPath, host, certPath, keyPath, allowUnspecifiedBind } = parsed
+  // Unauthenticated startup is supported: protection is per-device
+  // (registration code+secret, explicit request→accept, channel binding).
   // TLS/cert material loads before the DB is opened: any missing, empty, or
   // mismatched configuration aborts startup without creating the DB.
   // Non-loopback hosts serve plain HTTP unless both --cert/--key are given
@@ -2713,8 +2626,8 @@ if (isMain) {
   const server = createRelayServer(
     relayDb,
     relayTls.scheme === 'https' && relayTls.cert && relayTls.key
-      ? { token, tls: { cert: relayTls.cert, key: relayTls.key } }
-      : { token }
+      ? { tls: { cert: relayTls.cert, key: relayTls.key } }
+      : {}
   )
   let shuttingDown = false
   let dbClosed = false
@@ -2800,7 +2713,7 @@ if (isMain) {
     // emits a URL-shaped wildcard; Docker controls host exposure via ports.
     const addr = server.address()
     const boundPort = typeof addr === 'object' && addr ? addr.port : port
-    // Bounded readiness output — no sensitive path, token, or key material.
+    // Bounded readiness output — no sensitive path or key material.
     // IPv6 literals serialize bracketed so explicit-host lines stay valid
     // URLs; the raw unbracketed host is used only for server.listen above.
     console.log(formatRelayReadiness(host, relayTls.scheme, boundPort))

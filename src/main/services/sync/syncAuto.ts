@@ -27,7 +27,7 @@ export function computeAutoRetryDelay(attempt: number): number {
 }
 
 export interface SyncAutoDeps {
-  getConfig: () => { endpoint: string; token?: string; enabled: boolean }
+  getConfig: () => { endpoint: string; enabled: boolean }
   runSync: () => Promise<unknown>
   /**
    * Conservative auto-publish attempt (local-triggered success only).
@@ -255,12 +255,10 @@ export class SyncAutoService {
     if (!this.started) return
     this.clearReconnectTimer()
     let endpoint = ''
-    let token: string | undefined
     let enabled = false
     try {
       const cfg = this.deps.getConfig()
       endpoint = cfg.endpoint ?? ''
-      token = cfg.token
       enabled = !!cfg.enabled
     } catch (e) {
       this.handleAutoConfigFailure('refresh', e)
@@ -276,15 +274,15 @@ export class SyncAutoService {
       this.handleAutoConfigFailure('refresh', e)
       return
     }
-    // Config-lifecycle invalidation: any disabled/endpoint/token transition
+    // Config-lifecycle invalidation: any disabled/endpoint transition
     // cancels pending automatic work so stale debounced cycles never run
     // against the new config. The generation bump invalidates in-flight
     // drain continuations; timers/pending are cleared before new work. An
-    // in-flight SyncService.sync() carries its own config-generation token
+    // in-flight SyncService.sync() carries its own config-generation marker
     // (snapshotted at start): a detected transition also invalidates it so
     // the stale cycle aborts before further stale transport or
     // post-transition database/status effects (LOCK-PERSONAL-001).
-    const configKey = `${enabled ? '1' : '0'}|${endpoint}|${token ?? ''}|${attached ? '1' : '0'}`
+    const configKey = `${enabled ? '1' : '0'}|${endpoint}|${attached ? '1' : '0'}`
     const configChanged = this.lastConfigKey !== null && this.lastConfigKey !== configKey
     const becameInvalid = !enabled || !endpoint || !!validateEndpointUrl(endpoint) || !attached
     if (configChanged) {
@@ -312,14 +310,13 @@ export class SyncAutoService {
       this.stopSubscriber()
       return
     }
-    // Restart the single connection so endpoint/token changes reconnect cleanly.
+    // Restart the single connection so endpoint changes reconnect cleanly.
     this.stopSubscriber()
     const subscriber = this.deps.createSubscriber()
     this.subscriber = subscriber
     try {
       subscriber.start(
         endpoint,
-        token,
         {
           onNotify: () => this.notifyRemote(),
           // SSE/relay disconnect promptly marks the observed service state
@@ -503,7 +500,7 @@ export class SyncAutoService {
           if (isStale()) return
           const msg = e instanceof Error ? e.message : String(e)
           // Stale-config abort (LOCK-PERSONAL-001): the active cycle was
-          // invalidated by a disable/endpoint/token transition. Exit without
+          // invalidated by a disable/endpoint transition. Exit without
           // retry — a fresh cycle on the new config follows via refresh.
           if ((e as Error)?.name === 'SyncStaleConfigError') {
             logger.info(`[autoSync] cycle invalidated by config change, stop`)
@@ -600,7 +597,7 @@ export class SyncAutoService {
   }
 
   /**
-   * Invalidate pending/in-flight automatic work on disabled/endpoint/token
+   * Invalidate pending/in-flight automatic work on disabled/endpoint
    * transitions. Bumps the generation so drain continuations exit without
    * further DB work, and clears debounced/pending triggers. Does not touch
    * the subscriber itself (callers restart/stop it separately).

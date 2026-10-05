@@ -155,7 +155,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   const opened = openChatDb()
   sqlite = opened.sqlite
   db = opened.db
@@ -361,7 +360,7 @@ describe('insertMessagesAfterAnchor incremental sync', () => {
   it('dual-profile real relay push/pull converges rows, askId, dense order and winning frames with file refs local-only and no baseline', async () => {
     const rdb = new Database(':memory:')
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'ins-dual' })
+    const server = createRelayServer(rdb)
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
         resolve()

@@ -2,7 +2,7 @@
   "$id": "https://cherry-chat.local/schemas/relay-config-2.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Public, transferable relay config artifact. Carries only operator-supplied endpoint metadata (public URL, relay name, schema/init versions) so a client can be pointed at the relay. NEVER carries a bearer token, certificate, private key, or fingerprint (the token lives separately in the mode-0600 relay-token file; the relay generates no certificates). Written only when RELAY_PUBLIC_URL is set; without it, users enter the server endpoint manually. The init implementation (deploy/sync-relay/relay-init.mjs) remains the authoritative validator: it enforces exact keys, exact primitive types, http/https publicUrl, and RFC3339 date-time issuedAt with calendar validity.",
+  "description": "Public, transferable relay config artifact. Carries only operator-supplied endpoint metadata (public URL, relay name, schema/init versions) so a client can be pointed at the relay. NEVER carries a bearer token, shared secret, certificate, private key, or fingerprint (no shared token exists since 2026-10-05; auth is per-device code+secret with pairing; the relay generates no certificates). Written only when RELAY_PUBLIC_URL is set; without it, users enter the server endpoint manually. The init implementation (deploy/sync-relay/relay-init.mjs) remains the authoritative validator: it enforces exact keys, exact primitive types, http/https publicUrl, and RFC3339 date-time issuedAt with calendar validity.",
   "properties": {
     "issuedAt": {
       "format": "date-time",

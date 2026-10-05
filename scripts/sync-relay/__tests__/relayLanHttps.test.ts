@@ -46,7 +46,6 @@ import {
 
 const SERVER_ENTRY = resolve(process.cwd(), 'scripts/sync-relay/server.ts')
 const TSX_ENTRY = resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs')
-const TOKEN = 'lan-https-token-1'
 const START_TIMEOUT_MS = 20000
 const STOP_TIMEOUT_MS = 8000
 const REQUEST_TIMEOUT_MS = 5000
@@ -377,11 +376,11 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
     try {
       const cases: { args: string[]; match: RegExp }[] = [
         {
-          args: ['--host', '0.0.0.0', '--db', join(root, 'c-wild.db'), '--token', TOKEN],
+          args: ['--host', '0.0.0.0', '--db', join(root, 'c-wild.db')],
           match: /wildcard/
         },
         {
-          args: ['--host', '::', '--db', join(root, 'c-wild6.db'), '--token', TOKEN],
+          args: ['--host', '::', '--db', join(root, 'c-wild6.db')],
           match: /wildcard/
         },
         {
@@ -390,8 +389,6 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
             '192.168.1.10',
             '--db',
             join(root, 'c2.db'),
-            '--token',
-            TOKEN,
             '--cert',
             join(root, 'absent.pem'),
             '--key',
@@ -404,39 +401,17 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
       const a = generateServerCert(root, '127.0.0.1', 'cli-a')
       const b = generateServerCert(root, '127.0.0.1', 'cli-b')
       cases.push({
-        args: [
-          '--host',
-          '192.168.1.10',
-          '--db',
-          join(root, 'c3.db'),
-          '--token',
-          TOKEN,
-          '--cert',
-          a.certPath,
-          '--key',
-          b.keyPath
-        ],
+        args: ['--host', '192.168.1.10', '--db', join(root, 'c3.db'), '--cert', a.certPath, '--key', b.keyPath],
         match: /mismatched/
       })
       // Partial (cert without key) case.
       cases.push({
-        args: ['--host', '192.168.1.10', '--db', join(root, 'c4.db'), '--token', TOKEN, '--cert', a.certPath],
+        args: ['--host', '192.168.1.10', '--db', join(root, 'c4.db'), '--cert', a.certPath],
         match: /both --cert and --key/
       })
       // Wildcard with valid cert/key must still fail before DB creation.
       cases.push({
-        args: [
-          '--host',
-          '0.0.0.0',
-          '--db',
-          join(root, 'c-wild-tls.db'),
-          '--token',
-          TOKEN,
-          '--cert',
-          a.certPath,
-          '--key',
-          a.keyPath
-        ],
+        args: ['--host', '0.0.0.0', '--db', join(root, 'c-wild-tls.db'), '--cert', a.certPath, '--key', a.keyPath],
         match: /wildcard/
       })
       // IPv4-mapped unspecified with valid cert/key must still fail before DB.
@@ -446,8 +421,6 @@ describe('relay LAN HTTPS TLS config (fail-closed, before DB)', () => {
           '::ffff:0.0.0.0',
           '--db',
           join(root, 'c-wild-mapped-tls.db'),
-          '--token',
-          TOKEN,
           '--cert',
           a.certPath,
           '--key',
@@ -482,7 +455,6 @@ describe('relay native HTTPS serving (disposable cert/key)', () => {
       const tls = resolveRelayTls('127.0.0.1', certPath, keyPath)
       expect(tls.scheme).toBe('https')
       server = createRelayServer(db, {
-        token: TOKEN,
         tls: { cert: tls.cert as Buffer, key: tls.key as Buffer }
       })
       const port = await new Promise<number>((resolvePort, rejectPort) => {
@@ -531,7 +503,7 @@ describe('relay native HTTPS serving (disposable cert/key)', () => {
           bridgeExists: containerExists
         }).scheme
       ).toBe('http')
-      server = createRelayServer(db, { token: TOKEN })
+      server = createRelayServer(db)
       const port = await new Promise<number>((resolvePort, rejectPort) => {
         server!.listen(0, '0.0.0.0', () => {
           const addr = server!.address()
@@ -565,7 +537,7 @@ describe('relay native HTTPS serving (disposable cert/key)', () => {
     const db = new Database(':memory:')
     let server: ReturnType<typeof createRelayServer> | undefined
     try {
-      server = createRelayServer(db, { token: TOKEN })
+      server = createRelayServer(db)
       const port = await new Promise<number>((resolvePort, rejectPort) => {
         server!.listen(0, '127.0.0.1', () => {
           const addr = server!.address()
@@ -601,22 +573,7 @@ describe('relay native HTTPS serving (disposable cert/key)', () => {
         const { certPath, keyPath } = generateServerCert(root, lan, 'lan')
         child = spawn(
           process.execPath,
-          [
-            TSX_ENTRY,
-            SERVER_ENTRY,
-            '--host',
-            lan,
-            '--port',
-            '0',
-            '--db',
-            dbPath,
-            '--token',
-            TOKEN,
-            '--cert',
-            certPath,
-            '--key',
-            keyPath
-          ],
+          [TSX_ENTRY, SERVER_ENTRY, '--host', lan, '--port', '0', '--db', dbPath, '--cert', certPath, '--key', keyPath],
           {
             stdio: ['ignore', 'pipe', 'pipe']
           }

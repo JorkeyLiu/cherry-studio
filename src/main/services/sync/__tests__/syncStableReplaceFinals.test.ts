@@ -67,7 +67,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -614,7 +613,7 @@ describe('reset/resend finals — real-relay dual-profile convergence', () => {
     const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
     const relayDb = new Database(':memory:')
     ensureRelaySchema(relayDb)
-    const server = createRelayServer(relayDb, {})
+    const server = createRelayServer(relayDb)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     const base = `http://127.0.0.1:${addr.port}`

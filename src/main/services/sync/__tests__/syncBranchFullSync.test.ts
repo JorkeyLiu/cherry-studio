@@ -71,7 +71,6 @@ function bind(which: 'A' | 'B'): void {
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   configStore.set('deviceId', which === 'A' ? 'device-A' : 'device-B')
   configStore.set('sync:explicitDisconnect', false)
 }

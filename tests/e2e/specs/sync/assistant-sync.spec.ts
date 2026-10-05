@@ -28,8 +28,6 @@ import {
   topicExistsViaApi
 } from '../../pages/sync.page'
 
-const RELAY_TOKEN = 'e2e-assistant-sync-token-1'
-
 interface WindowAssistantSync {
   api?: {
     syncAssistantConfig?: {
@@ -103,7 +101,7 @@ test.describe('assistant-config sync (two profiles, production paths)', () => {
   let second: SecondSyncProfile | null = null
 
   test.beforeEach(async () => {
-    relay = await startTestRelay(RELAY_TOKEN)
+    relay = await startTestRelay()
   })
 
   test.afterEach(async () => {
@@ -123,12 +121,12 @@ test.describe('assistant-config sync (two profiles, production paths)', () => {
     mockPort
   }) => {
     const pageA = mainWindow
-    relay = relay ?? (await startTestRelay(RELAY_TOKEN))
+    relay = relay ?? (await startTestRelay())
     second = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
     const pageB = second.page
 
-    await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-    await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+    await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+    await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
     await pairProfilesViaApi(pageA, pageB)
 
     const assistantId = `e2e-ast-${Date.now().toString(36)}`

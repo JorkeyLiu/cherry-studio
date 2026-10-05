@@ -6,7 +6,7 @@
  * pair devices over HTTP, then PUT/GET raw bytes. Covers round-trip,
  * idempotent dedup replay, channel isolation (404, no oracle), strict digest
  * (uppercase/short/empty/traversal → 400), wrong-body 400 with no final file,
- * malformed Content-Length 400, missing asset 404, Bearer 401 precedence,
+ * malformed Content-Length 400, missing asset 404, device 403 precedence,
  * unpaired 403, over-ceiling 413 with no final file, aborted partial with no
  * final file, chunked PUT, dedup restart retention (file-DB blob data kept),
  * `:memory:` owned disposable tmp cleanup on close, and a >32MiB chunked
@@ -28,7 +28,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { handleAttachmentRequest } from '../attachmentResource'
 import { createRelayServer, ensureRelaySchema } from '../server'
 
-const TOKEN = 'attachment-stream-token'
 const DEVICE_CODE_HEADER = 'x-sync-device-code'
 const DEVICE_SECRET_HEADER = 'x-sync-device-secret'
 
@@ -83,7 +82,6 @@ async function startFileServer(opts?: { maxAttachmentBytes?: number }): Promise<
   dbs.push(db)
   ensureRelaySchema(db)
   const server = createRelayServer(db, {
-    token: TOKEN,
     ...(opts?.maxAttachmentBytes !== undefined ? { maxAttachmentBytes: opts.maxAttachmentBytes } : {})
   })
   servers.push(server as unknown as { close: (cb?: () => void) => void })
@@ -165,12 +163,11 @@ function shaHex(bytes: Buffer | Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-function deviceHeaders(code: string, secret: string, withBearer = true): Record<string, string> {
+function deviceHeaders(code: string, secret: string): Record<string, string> {
   const h: Record<string, string> = {
     [DEVICE_CODE_HEADER]: code,
     [DEVICE_SECRET_HEADER]: secret
   }
-  if (withBearer) h['authorization'] = `Bearer ${TOKEN}`
   return h
 }
 
@@ -199,7 +196,7 @@ async function jsonCall(
 }
 
 async function registerDevice(base: string): Promise<{ deviceCode: string; deviceSecret: string }> {
-  const res = await jsonCall(base, 'POST', '/sync/register', { authorization: `Bearer ${TOKEN}` }, {})
+  const res = await jsonCall(base, 'POST', '/sync/register', {}, {})
   expect(res.status).toBe(200)
   const j = res.json as { deviceCode: string; deviceSecret: string }
   expect(typeof j.deviceCode).toBe('string')
@@ -216,7 +213,7 @@ async function pairDevices(
     base,
     'POST',
     '/sync/pair/request',
-    { authorization: `Bearer ${TOKEN}`, [DEVICE_CODE_HEADER]: a.deviceCode, [DEVICE_SECRET_HEADER]: a.deviceSecret },
+    { [DEVICE_CODE_HEADER]: a.deviceCode, [DEVICE_SECRET_HEADER]: a.deviceSecret },
     { targetCode: b.deviceCode }
   )
   expect(req.status).toBe(200)
@@ -225,7 +222,7 @@ async function pairDevices(
     base,
     'POST',
     '/sync/pair/accept',
-    { authorization: `Bearer ${TOKEN}`, [DEVICE_CODE_HEADER]: b.deviceCode, [DEVICE_SECRET_HEADER]: b.deviceSecret },
+    { [DEVICE_CODE_HEADER]: b.deviceCode, [DEVICE_SECRET_HEADER]: b.deviceSecret },
     { requestId }
   )
   expect(accept.status).toBe(200)
@@ -433,15 +430,15 @@ describe('attachment streaming relay resource', () => {
     expect(JSON.parse(res.body.toString('utf8'))).toEqual({ error: 'attachment-not-found' })
   })
 
-  it('Bearer 401 takes precedence even with a malformed address', async () => {
+  it('device membership 403 takes precedence even with a malformed address', async () => {
     const { base } = await startFileServer()
     const a = await registerDevice(base)
     const res = await httpCall(base, 'GET', '/sync/attachments/nothex', {
       [DEVICE_CODE_HEADER]: a.deviceCode,
       [DEVICE_SECRET_HEADER]: a.deviceSecret
     })
-    expect(res.status).toBe(401)
-    expect(JSON.parse(res.body.toString('utf8'))).toEqual({ error: 'unauthorized' })
+    expect(res.status).toBe(403)
+    expect(JSON.parse(res.body.toString('utf8'))).toEqual({ error: 'pairing-required' })
   })
 
   it('unpaired caller is 403 pairing-required', async () => {
@@ -489,7 +486,6 @@ describe('attachment streaming relay resource', () => {
       const req = httpRequest(url, {
         method: 'PUT',
         headers: {
-          authorization: `Bearer ${TOKEN}`,
           [DEVICE_CODE_HEADER]: a.deviceCode,
           [DEVICE_SECRET_HEADER]: a.deviceSecret
         }
@@ -513,7 +509,7 @@ describe('attachment streaming relay resource', () => {
       const db = new Database(dbPath)
       dbs.push(db)
       ensureRelaySchema(db)
-      const server = createRelayServer(db, { token: TOKEN })
+      const server = createRelayServer(db)
       servers.push(server as unknown as { close: (cb?: () => void) => void })
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
       const addr = server.address() as AddressInfo
@@ -574,7 +570,7 @@ describe('attachment streaming relay resource', () => {
     const db = new Database(':memory:')
     dbs.push(db)
     ensureRelaySchema(db)
-    const server = createRelayServer(db, { token: TOKEN })
+    const server = createRelayServer(db)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const blobDir = (server as unknown as { __relayBlobDir: string }).__relayBlobDir
     expect(blobDir.startsWith(tmpdir())).toBe(true)
@@ -613,7 +609,6 @@ describe('attachment streaming relay resource', () => {
         {
           method: 'PUT',
           headers: {
-            authorization: `Bearer ${TOKEN}`,
             [DEVICE_CODE_HEADER]: a.deviceCode,
             [DEVICE_SECRET_HEADER]: a.deviceSecret,
             'content-type': 'application/octet-stream'
@@ -691,7 +686,6 @@ describe('attachment streaming relay resource', () => {
       { writableEnded: true, destroyed: true } as never,
       {
         blobDir: dir,
-        isBearerAuthorized: () => true,
         resolveCaller: () => {
           throw new Error('must not be called for non-attachment routes')
         }

@@ -1,13 +1,13 @@
 /**
  * User-entrypoint persistent relay E2E: two real profiles through
  * `pnpm sync:relay` (`scripts/sync-relay/server.ts`) with the stable
- * `--port/--db/--token` CLI contract.
+ * `--port/--db` CLI contract (no shared service token).
  *
  * The relay starts through the user-facing entrypoint file (same file the
  * package script runs; Electron-as-Node launcher only for the ABI 145 lane),
  * not through the in-memory test-only relay. Pairing/trust uses the
  * production flow, convergence uses production IPC ChatDb state, restart
- * reuses the same DB/token/port, and cleanup deletes only the disposable
+ * reuses the same DB/port, and cleanup deletes only the disposable
  * owned root. Loopback only; no remote/LAN/TLS, backup, capacity, or
  * power-loss claim.
  */
@@ -40,8 +40,6 @@ import {
   startUserEntrypointRelay,
   type UserEntrypointRelayHandle
 } from '../../utils/sync-relay-user-entrypoint'
-
-const RELAY_TOKEN = 'e2e-user-entrypoint-token-1'
 
 function messageJson(id: string, topicId: string, content: string): Record<string, unknown> {
   const now = isoNow()
@@ -113,16 +111,12 @@ async function pollForPendingDrained(page: Page, ms = 90000): Promise<void> {
 }
 
 async function ensureObserverPaired(endpoint: string, approverPage: Page): Promise<{ code: string; secret: string }> {
-  return await provisionObserverViaRaw(endpoint, RELAY_TOKEN, approverPage)
+  return await provisionObserverViaRaw(endpoint, approverPage)
 }
 
 async function authedPull(endpoint: string, cursor: number, observer: { code: string; secret: string }) {
   const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`, {
-    headers: {
-      Authorization: `Bearer ${RELAY_TOKEN}`,
-      'x-sync-device-code': observer.code,
-      'x-sync-device-secret': observer.secret
-    }
+    headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
   })
   const body = (await res.json().catch(() => ({ operations: [], cursor }))) as { operations: any[]; cursor: number }
   return { status: res.status, body }
@@ -176,24 +170,23 @@ test.describe('Sync user-entrypoint persistent relay', () => {
     try {
       validateOwnedRoot(ownedTmpRoot)
       try {
-        relay = await startUserEntrypointRelay({ ownedTmpRoot, token: RELAY_TOKEN })
+        relay = await startUserEntrypointRelay({ ownedTmpRoot })
       } catch (e) {
         relay = getUserRelayHandle(e) ?? relay
         throw e
       }
-      // User-entrypoint proof: stable readiness endpoint, disposable DB under
-      // the owned root, explicit token (not env-only).
+      // User-entrypoint proof: stable readiness endpoint and disposable DB
+      // under the owned root.
       expect(relay.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
       expect(relay.dbPath.startsWith(ownedTmpRoot)).toBe(true)
-      expect(relay.token).toBe(RELAY_TOKEN)
       expect(fs.existsSync(relay.dbPath)).toBe(true)
 
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
       const endpoint = relay.endpoint
 
-      await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const observer = await ensureObserverPaired(endpoint, pageA)
 
@@ -245,7 +238,7 @@ test.describe('Sync user-entrypoint persistent relay', () => {
       expect(failedStatus.cursor).toBe(cursorA0)
       expect((await getSyncStatusViaApi(pageB)).cursor).toBe(cursorB0)
 
-      // Restart the same user entrypoint against the same DB/token/port.
+      // Restart the same user entrypoint against the same DB/port.
       await relay.restart()
       expect(relay.isRunning()).toBe(true)
       expect(relay.endpoint).toBe(endpoint)

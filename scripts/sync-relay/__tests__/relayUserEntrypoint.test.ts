@@ -2,7 +2,7 @@
  * User-entrypoint contract for the personal sync relay.
  *
  * Covers the one supported launch contract (`pnpm sync:relay` ->
- * `scripts/sync-relay/server.ts`): stable CLI args, SYNC_RELAY_TOKEN fallback,
+ * `scripts/sync-relay/server.ts`): stable CLI args, legacy SYNC_RELAY_TOKEN ignored,
  * loopback HTTP plus non-loopback HTTP/HTTPS host/TLS behavior (loopback
  * `127.0.0.1`/`localhost` serves plain HTTP; explicit numeric non-loopback
  * LAN IPs serve plain HTTP unless --cert/--key select native HTTPS; the
@@ -33,7 +33,6 @@ import {
 
 const SERVER_ENTRY = resolve(process.cwd(), 'scripts/sync-relay/server.ts')
 const TSX_ENTRY = resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs')
-const TOKEN = 'user-entrypoint-token-1'
 const READINESS_RE = /\[sync-relay\] listening on http:\/\/127\.0\.0\.1:(\d+)/
 const START_TIMEOUT_MS = 15000
 const HEALTH_TIMEOUT_MS = 10000
@@ -49,25 +48,28 @@ describe('relay user-entrypoint CLI contract', () => {
     expect(existsSync(SERVER_ENTRY)).toBe(true)
   })
 
-  it('parses stable args with env token fallback and CLI precedence', () => {
+  it('parses stable args; legacy --token fails as unsupported without echoing any value', () => {
     const cwdDb = resolve(process.cwd(), 'tmp-sync-relay.db')
     expect(parseRelayArgs([], {})).toMatchObject({ port: 3030, dbPath: cwdDb, host: '127.0.0.1', help: false })
-    expect(parseRelayArgs([], {}).token).toBeUndefined()
-    expect(parseRelayArgs([], { SYNC_RELAY_TOKEN: 'env-token' }).token).toBe('env-token')
-    const over = parseRelayArgs(['--port', '4123', '--db', '/tmp/x.db', '--token', 'cli-token'], {
+    expect('token' in parseRelayArgs([], {})).toBe(false)
+    // Legacy env token is ignored (never read, never logged).
+    expect('token' in parseRelayArgs([], { SYNC_RELAY_TOKEN: 'env-token' })).toBe(false)
+    const over = parseRelayArgs(['--port', '4123', '--db', '/tmp/x.db'], {
       SYNC_RELAY_TOKEN: 'env-token'
     })
     expect(over.port).toBe(4123)
     expect(over.dbPath).toBe(resolve('/tmp/x.db'))
-    expect(over.token).toBe('cli-token')
+    expect('token' in over).toBe(false)
     expect(over.host).toBe('127.0.0.1')
     expect(parseRelayArgs(['--host', 'localhost'], {}).host).toBe('127.0.0.1')
     expect(parseRelayArgs(['--help'], {}).help).toBe(true)
     expect(parseRelayArgs(['-h'], {}).help).toBe(true)
     expect(RELAY_HELP_TEXT).toContain('--port')
     expect(RELAY_HELP_TEXT).toContain('--db')
-    expect(RELAY_HELP_TEXT).toContain('--token')
+    expect(RELAY_HELP_TEXT).not.toContain('--token')
     expect(RELAY_HELP_TEXT).toContain('pnpm sync:relay')
+    expect(() => parseRelayArgs(['--token', 'cli-token'], {})).toThrow(/unsupported flag --token/)
+    expect(() => parseRelayArgs(['--token=cli-token'], {})).toThrow(/unsupported flag --token/)
   })
 
   it('rejects invalid port and guards hosts without touching the DB', () => {
@@ -138,7 +140,7 @@ describe('relay user-entrypoint CLI contract', () => {
     expect(resolveRelayTls('127.0.0.1').scheme).toBe('http')
     expect(() => parseRelayArgs(['--port'], {})).toThrow(/missing value for --port/)
     expect(() => parseRelayArgs(['--db'], {})).toThrow(/missing value for --db/)
-    expect(() => parseRelayArgs(['--token'], {})).toThrow(/missing value for --token/)
+    expect(() => parseRelayArgs(['--token'], {})).toThrow(/unsupported flag --token/)
     expect(() => parseRelayArgs(['--host'], {})).toThrow(/missing value for --host/)
     expect(() => parseRelayArgs(['--unknown'], {})).toThrow(/unknown option/)
     expect(() => parseRelayArgs(['--port=3030'], {})).toThrow(/unknown option/)
@@ -167,19 +169,7 @@ describe('relay user-entrypoint CLI contract', () => {
       // provided here, so startup rejects before the DB is opened.
       const res = spawnSync(
         process.execPath,
-        [
-          TSX_ENTRY,
-          SERVER_ENTRY,
-          '--host',
-          '0.0.0.0',
-          '--allow-unspecified-bind',
-          '--port',
-          '0',
-          '--db',
-          dbPath,
-          '--token',
-          TOKEN
-        ],
+        [TSX_ENTRY, SERVER_ENTRY, '--host', '0.0.0.0', '--allow-unspecified-bind', '--port', '0', '--db', dbPath],
         { timeout: 30000, encoding: 'utf8', env: { ...process.env, [RELAY_BRIDGE_ATTEST_ENV]: '' } }
       )
       expect(res.status).toBe(2)
@@ -205,17 +195,23 @@ describe('relay user-entrypoint CLI contract', () => {
     }
   }, 30000)
 
-  it('missing token exits 2 without creating the DB', () => {
+  it('legacy --token fails as unsupported without echoing any value', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-cli-'))
     const dbPath = join(root, 'should-not-exist.db')
     try {
-      const res = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--port', '0', '--db', dbPath], {
-        timeout: 30000,
-        encoding: 'utf8',
-        env: { ...process.env, SYNC_RELAY_TOKEN: '' }
-      })
+      const res = spawnSync(
+        process.execPath,
+        [TSX_ENTRY, SERVER_ENTRY, '--port', '0', '--db', dbPath, '--token', 'super-secret-value'],
+        {
+          timeout: 30000,
+          encoding: 'utf8',
+          env: { ...process.env, SYNC_RELAY_TOKEN: '' }
+        }
+      )
       expect(res.status).toBe(2)
-      expect(`${String(res.stderr)}${String(res.stdout)}`).toMatch(/missing --token/)
+      const out = `${String(res.stderr)}${String(res.stdout)}`
+      expect(out).toMatch(/unsupported flag --token/)
+      expect(out).not.toContain('super-secret-value')
       expect(existsSync(dbPath)).toBe(false)
       expect(existsSync(`${dbPath}-wal`)).toBe(false)
     } finally {
@@ -227,11 +223,10 @@ describe('relay user-entrypoint CLI contract', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-cli-'))
     const dbPath = join(root, 'should-not-exist.db')
     try {
-      const unknown = spawnSync(
-        process.execPath,
-        [TSX_ENTRY, SERVER_ENTRY, '--nope', '--db', dbPath, '--token', TOKEN],
-        { timeout: 30000, encoding: 'utf8' }
-      )
+      const unknown = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--nope', '--db', dbPath], {
+        timeout: 30000,
+        encoding: 'utf8'
+      })
       expect(unknown.status).toBe(2)
       expect(`${String(unknown.stderr)}${String(unknown.stdout)}`).toMatch(/unknown option/)
       const missing = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--port'], {
@@ -255,7 +250,7 @@ describe('relay user-entrypoint graceful shutdown', () => {
     let paired: { code: string; secret: string } | null = null
     const provisionPair = async (baseUrl: string): Promise<{ code: string; secret: string }> => {
       if (paired) return paired
-      const authed = { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }
+      const authed = { 'Content-Type': 'application/json' }
       const reg = async (deviceId: string): Promise<{ code: string; secret: string }> => {
         const res = await fetch(`${baseUrl}/sync/register`, {
           method: 'POST',
@@ -291,7 +286,6 @@ describe('relay user-entrypoint graceful shutdown', () => {
       const dev = await provisionPair(baseUrl)
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${TOKEN}`,
         'x-sync-device-code': dev.code,
         'x-sync-device-secret': dev.secret
       }
@@ -323,7 +317,6 @@ describe('relay user-entrypoint graceful shutdown', () => {
     ): Promise<{ status: number; cursor: number; ids: string[] }> => {
       const dev = await provisionPair(baseUrl)
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${TOKEN}`,
         'x-sync-device-code': dev.code,
         'x-sync-device-secret': dev.secret
       }
@@ -347,13 +340,9 @@ describe('relay user-entrypoint graceful shutdown', () => {
     const failedStarts: ChildProcess[] = []
     const start = (port: string): Promise<{ child: ChildProcess; baseUrl: string; logs: () => string }> =>
       new Promise((resolveStart, rejectStart) => {
-        const child = spawn(
-          process.execPath,
-          [TSX_ENTRY, SERVER_ENTRY, '--port', port, '--db', dbPath, '--token', TOKEN],
-          {
-            stdio: ['ignore', 'pipe', 'pipe']
-          }
-        )
+        const child = spawn(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--port', port, '--db', dbPath], {
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
         let out = ''
         let settled = false
         const fail = (err: Error): void => {
@@ -445,8 +434,9 @@ describe('relay user-entrypoint graceful shutdown', () => {
       // Hold one active SSE stream so shutdown must close active
       // connections before server.close can complete.
       const sseAbort = new AbortController()
+      const sseDev = paired ?? (await provisionPair(first.baseUrl))
       const sseOpen = fetch(`${first.baseUrl}/sync/subscribe?cursor=0`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
+        headers: { 'x-sync-device-code': sseDev.code, 'x-sync-device-secret': sseDev.secret },
         signal: sseAbort.signal
       })
         .then(async (r) => {
@@ -470,7 +460,7 @@ describe('relay user-entrypoint graceful shutdown', () => {
       // Normal stop never deletes user data.
       expect(existsSync(dbPath)).toBe(true)
       await expect(fetch(first.baseUrl, { signal: AbortSignal.timeout(2000) })).rejects.toThrow()
-      // Restart on the same DB/token retains relay state with sequence continuity.
+      // Restart on the same DB retains relay state with sequence continuity.
       second = await start(port)
       await waitHealth(second.baseUrl)
       expect(second.baseUrl).toBe(first.baseUrl)

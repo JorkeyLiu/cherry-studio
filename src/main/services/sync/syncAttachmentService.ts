@@ -16,7 +16,7 @@
  *   block→assetRef projection (shared `projectPortableMediaRefs`) and pending
  *   bookkeeping. Failures throw so the caller retains the transfer as pending.
  * - Logging goes through `loggerService` only and never carries credential
- *   material (device secrets/tokens) or secret paths — only asset ids,
+ *   material (device secrets) or secret paths — only asset ids,
  *   digests, and sizes.
  */
 
@@ -36,7 +36,6 @@ const logger = loggerService.withContext('SyncAttachmentService')
 export interface SyncAttachmentClient {
   uploadAttachment(
     endpoint: string,
-    token: string | undefined,
     args: { digest: string; byteLength?: number; body: unknown },
     deviceCode: string,
     deviceSecret: string,
@@ -44,7 +43,6 @@ export interface SyncAttachmentClient {
   ): Promise<{ digest: string; byteLength: number; deduplicated: boolean }>
   downloadAttachment(
     endpoint: string,
-    token: string | undefined,
     args: { digest: string; expectedByteLength?: number },
     deviceCode: string,
     deviceSecret: string,
@@ -183,7 +181,6 @@ export class SyncAttachmentService {
   async uploadAsset(
     asset: FileAsset,
     endpoint: string,
-    token: string | undefined,
     deviceCode: string,
     deviceSecret: string,
     externalSignal?: AbortSignal
@@ -207,7 +204,6 @@ export class SyncAttachmentService {
       const receipt = await Promise.race([
         this.client.uploadAttachment(
           endpoint,
-          token,
           { digest: asset.sha256, byteLength: asset.byteLength, body },
           deviceCode,
           deviceSecret,
@@ -236,7 +232,6 @@ export class SyncAttachmentService {
   async downloadAndInstall(
     asset: FileAsset,
     endpoint: string,
-    token: string | undefined,
     deviceCode: string,
     deviceSecret: string,
     externalSignal?: AbortSignal
@@ -272,7 +267,6 @@ export class SyncAttachmentService {
       const fileStream = createWriteStreamSafe(writeHandle)
       await this.client.downloadAttachment(
         endpoint,
-        token,
         { digest: asset.sha256, expectedByteLength: asset.byteLength },
         deviceCode,
         deviceSecret,

@@ -674,7 +674,7 @@ const api = {
   },
   sync: {
     getConfig: () => ipcRenderer.invoke(IpcChannel.Sync_GetConfig),
-    setConfig: (config: { endpoint?: string; token?: string; enabled?: boolean }) =>
+    setConfig: (config: { endpoint?: string; enabled?: boolean }) =>
       ipcRenderer.invoke(IpcChannel.Sync_SetConfig, config),
     getStatus: () => ipcRenderer.invoke(IpcChannel.Sync_GetStatus),
     sync: () => ipcRenderer.invoke(IpcChannel.Sync_Sync),

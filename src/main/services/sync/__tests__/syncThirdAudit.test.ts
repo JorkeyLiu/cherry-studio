@@ -70,7 +70,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as any, sqlite)
@@ -135,28 +134,26 @@ describe('F2: manual sync failure is truthful', () => {
     const pushMock = vi
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-f2-orphan',
-                entityType: 'message_block',
-                op: 'upsert',
-                entityId: 'b-f2',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 'b-f2', messageId: 'm-f2-missing', type: 'text', content: 'x' }
-              }
-            ],
-            cursor: 1
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-f2-orphan',
+              entityType: 'message_block',
+              op: 'upsert',
+              entityId: 'b-f2',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 'b-f2', messageId: 'm-f2-missing', type: 'text', content: 'x' }
+            }
+          ],
+          cursor: 1
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await expect(syncService.sync()).rejects.toThrow(/orphan|blocked/i)
     const status = syncService.getStatus()
     expect(status.lastError).toBeTruthy()
@@ -295,18 +292,14 @@ describe('F4: push acks constrained to current chunk', () => {
     }
     const laterId = ids[ids.length - 1]
     const { syncClient } = await import('../SyncClient')
-    const pushMock = vi
-      .spyOn(syncClient, 'push')
-      .mockImplementation(async (_ep: string, _t: string | undefined, req: any) => {
-        // Faulty relay: ack the exact chunk plus a later-chunk operation ID
-        const chunkIds = (req.operations as Array<{ id: string }>).map((o) => o.id)
-        return { acceptedIds: [...chunkIds, laterId], cursor: 0 } as any
-      })
+    const pushMock = vi.spyOn(syncClient, 'push').mockImplementation(async (_ep: string, req: any) => {
+      // Faulty relay: ack the exact chunk plus a later-chunk operation ID
+      const chunkIds = (req.operations as Array<{ id: string }>).map((o) => o.id)
+      return { acceptedIds: [...chunkIds, laterId], cursor: 0 } as any
+    })
     const pullMock = vi
       .spyOn(syncClient, 'pull')
-      .mockImplementation(
-        async (_e: string, _t: string | undefined, c: number) => ({ operations: [], cursor: c }) as any
-      )
+      .mockImplementation(async (_e: string, c: number) => ({ operations: [], cursor: c }) as any)
     await expect(syncService.sync()).rejects.toThrow(/unexpected/)
     // First chunk cleared, but the later outbox op must remain queued
     const remaining = syncService.listOutbox().map((o) => o.id)
@@ -325,9 +318,7 @@ describe('F4: push acks constrained to current chunk', () => {
       try {
         return await syncClient.push(
           'http://127.0.0.1:9',
-          undefined,
           { deviceId: 'd1', operations: [] } as any,
-          undefined,
           'ABCD2345',
           'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
         )

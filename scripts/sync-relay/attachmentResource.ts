@@ -9,7 +9,7 @@
  * Design (locked for this unit):
  * - No `packages/shared/sync/*` imports (another writer owns shared validators,
  *   types, baseline, and core) and no `server.ts` imports. Auth is injected via
- *   callbacks so the relay's existing Bearer + device/channel semantics stay
+ *   callbacks so the relay's existing device/channel semantics stay
  *   owned by the server.
  * - Durability is the operator-owned relay blob dir on the filesystem, NOT
  *   SQLite BLOBs and NOT whole-buffer memory: the request stream is written
@@ -33,9 +33,9 @@
  *   the relay never silently truncates, and disk-space failure (`ENOSPC`)
  *   surfaces as 500 `store-unavailable` so the client keeps the transfer
  *   pending for a later retry.
- * - Auth precedence mirrors the relay data plane: Bearer `401` first, then
- *   device credential `403`, then unpaired `403 pairing-required`. Digest
- *   format/body errors are `400` only after auth passes.
+ * - Auth precedence mirrors the relay data plane: device credential `403`,
+ *   then unpaired `403 pairing-required`. Digest format/body errors are
+ *   `400` only after auth passes.
  * - No transaction is held across the network: the only commit is the atomic
  *   rename after the stream completes and verifies. Dedup replays verify the
  *   existing final (regular file, size coherence) and store nothing new.
@@ -76,8 +76,6 @@ export interface AttachmentContext {
    * disposable tmp dir with close-cleanup ownership.
    */
   blobDir: string
-  /** Return true when the Bearer check passes (or when the relay runs without a token). */
-  isBearerAuthorized: (req: IncomingMessage) => boolean
   /**
    * Resolve the device-authenticated caller. Throw `{ status, error }` for HTTP
    * mapping (server's `requireDeviceAuthOrThrow` shape): `status: 500` maps to
@@ -287,18 +285,8 @@ export async function handleAttachmentRequest(
 
   const maxBytes = resolveMaxBytes(ctx)
 
-  // Auth precedence (relay data-plane order): Bearer 401 first.
-  let bearerOk = false
-  try {
-    bearerOk = ctx.isBearerAuthorized(req) === true
-  } catch {
-    bearerOk = false
-  }
-  if (!bearerOk) {
-    jsonError(res, 401, 'unauthorized')
-    return true
-  }
-
+  // Device-first auth (relay data-plane order): device credential 403,
+  // then channel membership 403.
   let caller: AttachmentCaller
   try {
     caller = await ctx.resolveCaller(req)

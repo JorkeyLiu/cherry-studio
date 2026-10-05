@@ -54,8 +54,6 @@ import {
 export interface FileBackedRelayOptions {
   /** Ownership-safe temp root; bundle + DB live beneath it. */
   ownedTmpRoot: string
-  /** Bearer token required for push/pull (non-empty). */
-  token: string
   /** DB file name under the owned root (default unique). */
   dbFileName?: string
   /** Bundle file name under the owned root (default unique). */
@@ -71,14 +69,13 @@ export interface FileBackedRelayHandle {
   readonly endpoint: string
   /** Bound port (ephemeral first start, then pinned for restart). */
   readonly port: number
-  readonly token: string
   readonly dbPath: string
   /** Owned child PID, or null when stopped. */
   pid(): number | null
   isRunning(): boolean
   /** Bounded SIGTERM then SIGKILL stop; retains the DB files. */
   stop(): Promise<void>
-  /** Stop (if running) then start the same bundle against the same DB/token/port. */
+  /** Stop (if running) then start the same bundle against the same DB/port. */
   restart(): Promise<void>
   /** Stop then remove bundle + DB files (fail-closed). */
   close(): Promise<void>
@@ -441,8 +438,6 @@ export function assertRestartPortContinuity(expectedPort: number, actualPort: nu
 export async function startFileBackedRelay(options: FileBackedRelayOptions): Promise<FileBackedRelayHandle> {
   if (!options || typeof options !== 'object') throw new Error('startFileBackedRelay requires options')
   const ownedTmpRoot = validateOwnedRoot(options.ownedTmpRoot)
-  const token = options.token
-  if (!token || typeof token !== 'string') throw new Error('startFileBackedRelay requires a non-empty token')
   const readyTimeoutMs = validateRelayTimeoutMs('readyTimeoutMs', options.readyTimeoutMs ?? READY_DEFAULT_MS)
   const stopTimeoutMs = validateRelayTimeoutMs('stopTimeoutMs', options.stopTimeoutMs ?? STOP_DEFAULT_MS)
   const suffix = uniqueSuffix()
@@ -504,11 +499,10 @@ export async function startFileBackedRelay(options: FileBackedRelayOptions): Pro
   }
 
   async function startChild(requestedPort: number): Promise<{ endpoint: string; port: number }> {
-    const proc = spawn(
-      electronBinary,
-      [bundlePath, '--port', String(requestedPort), '--db', dbPath, '--token', token],
-      { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }
-    )
+    const proc = spawn(electronBinary, [bundlePath, '--port', String(requestedPort), '--db', dbPath], {
+      env: childEnv,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
     // Retain ownership immediately so every startup/readiness failure can
     // stop/escalate the exact owned child before rejecting (fail-closed, no orphan).
     child = proc
@@ -619,7 +613,6 @@ export async function startFileBackedRelay(options: FileBackedRelayOptions): Pro
       get port() {
         return boundPort ?? 0
       },
-      token,
       dbPath,
       pid: () => child?.pid ?? null,
       isRunning: () => child !== null && child.exitCode === null && child.signalCode === null,

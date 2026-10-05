@@ -11,6 +11,11 @@
  *   became paired fails terminal 410 request-replaced with no merge.
  * - Two independent channels stay invisible to each other with independent
  *   contiguous cursors.
+ * - zh-CN address-only connect shows the own device code plus the
+ *   partner-code input with the expected waiting state before pairing; the
+ *   header holds the enable switch, the server label reads 同步服务器地址,
+ *   no token field exists, no HTTP banner appears for LAN HTTP, and one
+ *   unknown-code request proves the controls fail closed.
  */
 import type { Page } from '@playwright/test'
 
@@ -29,6 +34,7 @@ import {
   provisionObserverViaRaw,
   runSyncViaApi,
   setSyncConfigViaApi,
+  SyncSettingsPage,
   unpairViaApi,
   updateMessageViaApi
 } from '../../pages/sync.page'
@@ -39,8 +45,7 @@ import {
   type SecondSyncProfile
 } from '../../utils/sync-second-profile'
 import { startTestRelay, type TestRelayHandle } from '../../utils/sync-relay'
-
-const RELAY_TOKEN = 'e2e-pairing-token-1'
+import { waitForAppReady } from '../../utils/wait-helpers'
 
 function messageJson(id: string, topicId: string, content: string): Record<string, unknown> {
   return { id, topicId, role: 'user', content, status: 'success', createdAt: new Date().toISOString() }
@@ -125,12 +130,12 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
 
       // Explicit Connect registers both devices (stable public codes).
       const connectedA = await connectViaApi(pageA)
@@ -194,11 +199,11 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const codeBefore = (await getDeviceCodeViaApi(pageB)).deviceCode
 
@@ -206,11 +211,10 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       // membership persist, sync resumes without re-pairing.
       profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       expect((await getDeviceCodeViaApi(pageB)).deviceCode).toBe(codeBefore)
       expect((await getPairStateViaApi(pageB)).state).toBe('paired')
       expect((await runSyncViaApi(pageB)).threw).toBeNull()
@@ -252,11 +256,11 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const codeBefore = (await getDeviceCodeViaApi(pageB)).deviceCode
 
@@ -294,11 +298,11 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-unpair-topic-1'
@@ -336,11 +340,11 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await connectViaApi(pageA)
       await connectViaApi(pageB)
       const codeA = (await getDeviceCodeViaApi(pageA)).deviceCode as string
@@ -364,15 +368,15 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // A raw third device joins A's channel through the production accept.
-      const observer = await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, pageA)
+      const observer = await provisionObserverViaRaw(relay.endpoint, pageA)
       const topic = 'e2e-join-topic-1'
       const msg = 'e2e-join-msg-1'
       const blk = 'e2e-join-blk-1'
@@ -386,11 +390,7 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       let seen = false
       while (Date.now() < deadline) {
         const res = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=${encodeURIComponent('raw-observer')}`, {
-          headers: {
-            Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-code': observer.code,
-            'x-sync-device-secret': observer.secret
-          }
+          headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
         })
         expect(res.status).toBe(200)
         const body = (await res.json()) as { operations: any[] }
@@ -415,11 +415,11 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await connectViaApi(pageA)
       await connectViaApi(pageB)
       const codeA = (await getDeviceCodeViaApi(pageA)).deviceCode as string
@@ -429,7 +429,7 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       // A raw outsider requests B; B accepts and becomes paired first.
       const outReg = await fetch(`${relay.endpoint}/sync/register`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
       })
       expect(outReg.status).toBe(200)
@@ -437,7 +437,6 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       const reqOB = await fetch(`${relay.endpoint}/sync/pair/request`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${RELAY_TOKEN}`,
           'Content-Type': 'application/json',
           'x-sync-device-code': out.deviceCode,
           'x-sync-device-secret': out.deviceSecret
@@ -485,19 +484,19 @@ test.describe('Sync connection/pairing two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // A second independent channel (two raw devices) carries its own traffic.
-      const authed = { Authorization: `Bearer ${RELAY_TOKEN}`, 'Content-Type': 'application/json' }
+      const jsonHeaders = { 'Content-Type': 'application/json' }
       const reg = async (): Promise<{ code: string; secret: string }> => {
         const res = await fetch(`${relay!.endpoint}/sync/register`, {
           method: 'POST',
-          headers: authed,
+          headers: jsonHeaders,
           body: JSON.stringify({})
         })
         const body = (await res.json()) as { deviceCode: string; deviceSecret: string }
@@ -507,14 +506,14 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       const devD = await reg()
       const reqCD = await fetch(`${relay.endpoint}/sync/pair/request`, {
         method: 'POST',
-        headers: { ...authed, 'x-sync-device-code': devD.code, 'x-sync-device-secret': devD.secret },
+        headers: { 'x-sync-device-code': devD.code, 'x-sync-device-secret': devD.secret },
         body: JSON.stringify({ targetCode: devC.code })
       })
       expect(reqCD.status).toBe(200)
       const reqCDBody = (await reqCD.json()) as { requestId: string }
       const accCD = await fetch(`${relay.endpoint}/sync/pair/accept`, {
         method: 'POST',
-        headers: { ...authed, 'x-sync-device-code': devC.code, 'x-sync-device-secret': devC.secret },
+        headers: { 'x-sync-device-code': devC.code, 'x-sync-device-secret': devC.secret },
         body: JSON.stringify({ requestId: reqCDBody.requestId })
       })
       expect(accCD.status).toBe(200)
@@ -529,7 +528,7 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       }
       const pushOther = await fetch(`${relay.endpoint}/sync/push`, {
         method: 'POST',
-        headers: { ...authed, 'x-sync-device-code': devC.code, 'x-sync-device-secret': devC.secret },
+        headers: { 'x-sync-device-code': devC.code, 'x-sync-device-secret': devC.secret },
         body: JSON.stringify({ deviceId: 'raw-other', operations: [otherOp] })
       })
       expect(pushOther.status).toBe(200)
@@ -552,15 +551,11 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       expect(statusAfter.cursor).toBeGreaterThan(statusBefore.cursor)
       // No cross-channel leakage: the apps never observe the other op, and
       // the other channel never observes the apps' ops.
-      const observer = await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, pageA)
+      const observer = await provisionObserverViaRaw(relay.endpoint, pageA)
       const pullApps = await fetch(
         `${relay.endpoint}/sync/pull?cursor=0&deviceId=${encodeURIComponent('raw-observer')}`,
         {
-          headers: {
-            Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-code': observer.code,
-            'x-sync-device-secret': observer.secret
-          }
+          headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
         }
       )
       const pullAppsBody = (await pullApps.json()) as { operations: any[]; cursor: number }
@@ -571,15 +566,139 @@ test.describe('Sync connection/pairing two-profile real path', () => {
       const pullOther = await fetch(
         `${relay.endpoint}/sync/pull?cursor=0&deviceId=${encodeURIComponent('raw-other')}`,
         {
-          headers: {
-            Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-code': devD.code,
-            'x-sync-device-secret': devD.secret
-          }
+          headers: { 'x-sync-device-code': devD.code, 'x-sync-device-secret': devD.secret }
         }
       )
       const pullOtherBody = (await pullOther.json()) as { operations: any[] }
       expect((pullOtherBody.operations as any[]).some((o) => o?.entityId === msg)).toBe(false)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  test('zh-CN address-only connect shows code, waits, then pairs via request/accept', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    test.setTimeout(180000)
+    // Start in zh-CN through the app's own persisted language path. A fresh
+    // profile defaults Redux settings.language to navigator.language (en-US),
+    // which useAppInit then applies over bare localStorage, so localStorage
+    // alone leaves the UI in English. Mirror the production GeneralSettings
+    // language path coherently after reload: Redux + persisted storage +
+    // preload, then let the app's own language effect drive i18n.
+    await mainWindow.evaluate(() => {
+      window.localStorage.setItem('language', 'zh-CN')
+    })
+    await mainWindow.reload()
+    await waitForAppReady(mainWindow)
+
+    await mainWindow.evaluate(async () => {
+      window.localStorage.setItem('language', 'zh-CN')
+      ;(window as any).store?.dispatch({ type: 'settings/setLanguage', payload: 'zh-CN' })
+      try {
+        await (window as any).api?.setLanguage?.('zh-CN')
+      } catch {}
+    })
+    await waitForAppReady(mainWindow)
+
+    const page = mainWindow
+    const syncPage = new SyncSettingsPage(page)
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay()
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      const endpoint = relay.endpoint
+      // Address-only configuration on both disposable profiles: no shared
+      // token exists anywhere in this flow.
+      await setSyncConfigViaApi(page, { endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
+      await syncPage.openSync()
+      await syncPage.waitForHydrated()
+
+      // No token field exists anywhere on the page.
+      await expect(page.getByTestId('sync-token-input')).toHaveCount(0)
+
+      // Prove zh-CN is actually rendered: the Connect control must read
+      // 连接, not Connect. Ant Design inserts a space between two CJK
+      // characters in Buttons ("连 接"), so match whitespace-tolerantly
+      // while still requiring both Chinese characters (not English).
+      await expect(syncPage.connectButton).toContainText(/连\s*接/)
+
+      // Address-only connect: service attached with the own device code
+      // visible and the partner-code input offered for request -> accept.
+      await syncPage.connectButton.click()
+      await expect(syncPage.serviceStatus).toContainText('已连接')
+      await expect(syncPage.deviceCode).toBeVisible()
+      await expect(syncPage.targetCodeInput).toBeVisible()
+
+      // Expected waiting before pairing (not a failure): the pairing pill
+      // reads 未配对 and the data badge reads 等待配对; manual sync stays
+      // disabled with an explanatory hint.
+      await expect(syncPage.pairingPill).toContainText('未配对')
+      await expect(syncPage.statusBadge).toContainText('等待配对')
+      await expect(page.getByTestId('sync-now-button')).toBeDisabled()
+
+      // Polished header: the enable switch lives in the title bar (far
+      // right of 同步) with the sync-scoped accessible name, and the
+      // server address uses the fixed wording.
+      await expect(syncPage.titleBar).toContainText('同步')
+      await expect(syncPage.titleBar.getByTestId('sync-enabled-switch')).toBeVisible()
+      await expect(page.getByText('同步服务器地址')).toBeVisible()
+      await expect(syncPage.servicePill).toContainText('已连接')
+
+      // No HTTP banner for a LAN HTTP endpoint: HTTP and HTTPS are
+      // accepted identically. Restore the fixture endpoint afterwards.
+      await syncPage.fillEndpointAndBlur('http://192.168.1.10:3030')
+      await expect(page.getByTestId('sync-http-warning')).toHaveCount(0)
+      await syncPage.fillEndpointAndBlur(endpoint)
+      await expect(page.getByTestId('sync-http-warning')).toHaveCount(0)
+
+      // Bounded control proof: a pairing request against an unknown code
+      // fails closed with a visible error (no state change, no secrets).
+      // B is connected but never involved, so it stays unpaired.
+      await connectViaApi(pageB)
+      await syncPage.targetCodeInput.fill('EEEE0000')
+      await page.getByTestId('sync-request-pairing').click()
+      await expect(syncPage.pairingError).toBeVisible()
+      expect((await getPairStateViaApi(pageB)).state).toBe('unpaired')
+
+      // Real request -> accept across the two disposable profiles: B's
+      // public code goes into A's rendered input; B accepts via IPC.
+      const codeB = (await getDeviceCodeViaApi(pageB)).deviceCode as string
+      await syncPage.targetCodeInput.fill(codeB)
+      await page.getByTestId('sync-request-pairing').click()
+      await expect(syncPage.pairingPill).toContainText('请求待处理')
+      let incomingId = ''
+      await expect
+        .poll(
+          async () => {
+            const state = await getPairStateViaApi(pageB)
+            incomingId = state.incoming[0]?.id ?? ''
+            return incomingId
+          },
+          { timeout: 30000 }
+        )
+        .not.toBe('')
+      await pageB.evaluate(async (requestId: string) => {
+        return await (window as any).api.sync.acceptPairing(requestId)
+      }, incomingId)
+      await expect(syncPage.pairingPill).toContainText('已配对')
+
+      // Post-pairing convergence on a covered edit path (both directions).
+      const topic = 'e2e-zhcn-pair-topic-1'
+      const msg = 'e2e-zhcn-pair-msg-1'
+      const blk = 'e2e-zhcn-pair-blk-1'
+      await ensureTopicViaApi(page, topic, 'Zh Pair Topic')
+      await appendMessageViaApi(page, topic, messageJson(msg, topic, 'zh pair hello'), [
+        blockJson(blk, msg, 'zh pair hello')
+      ])
+      expect((await runSyncViaApi(page)).threw).toBeNull()
+      expect((await runSyncViaApi(pageB)).threw).toBeNull()
+      await pollForMessageContent(pageB, topic, msg, 'zh pair hello')
     } finally {
       await closeProfileAndRelay(profileB, relay)
     }

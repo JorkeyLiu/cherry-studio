@@ -4,7 +4,7 @@
  * LOCK-SYNC-E2E-001: only MVP-supported stable operations (ensureTopic +
  * appendMessage with blocks); no broadened capture semantics.
  * LOCK-SYNC-E2E-002: relay is per-spec, in-process, loopback-bound to an
- * ephemeral port, token-protected, fully closed/cleaned in teardown.
+ * ephemeral port, fully closed/cleaned in teardown.
  * LOCK-SYNC-E2E-003: two profiles are independent children of the same owned
  * temp root, exact-token cleanup, no production single-instance change.
  * LOCK-SYNC-E2E-004: sync status via typed window.api.sync.getStatus() and
@@ -25,7 +25,6 @@ import {
 import { startTestRelay, type TestRelayHandle } from '../../utils/sync-relay'
 import {
   appendMessageViaApi,
-  assertSyncTokenExactRedacted,
   deleteMessageViaApi,
   ensureTopicViaApi,
   fetchMessagesViaApi,
@@ -50,8 +49,6 @@ import {
 } from '../../pages/sync.page'
 import { getOutboxDiagViaApp } from '../../utils/sync-outbox'
 
-const RELAY_TOKEN = 'e2e-sync-token-1'
-
 /**
  * Raw relay diagnostics (SYNC-CC-*): test-side raw pulls and replay pushes
  * authenticate as a dedicated observer device that joins the apps' channel
@@ -65,15 +62,11 @@ const RELAY_TOKEN = 'e2e-sync-token-1'
 type RawObserver = ProvisionedObserver
 
 async function ensureRawObserver(relay: TestRelayHandle, approverPage: Page): Promise<RawObserver> {
-  return await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, approverPage)
+  return await provisionObserverViaRaw(relay.endpoint, approverPage)
 }
 
 function relayDeviceHeaders(observer: RawObserver): Record<string, string> {
-  return {
-    Authorization: `Bearer ${RELAY_TOKEN}`,
-    'x-sync-device-code': observer.code,
-    'x-sync-device-secret': observer.secret
-  }
+  return { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
 }
 
 function relayPullUrl(relay: TestRelayHandle, cursor: number | string): string {
@@ -387,13 +380,13 @@ test.describe('Sync MVP two-profile real path', () => {
     let profileB: SecondSyncProfile | null = null
     let offlineBlocker: OfflineBlocker | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
       // Both profiles configure the same endpoint/token.
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const statusA0 = await getSyncStatusViaApi(pageA)
       const statusB0 = await getSyncStatusViaApi(pageB)
@@ -434,7 +427,7 @@ test.describe('Sync MVP two-profile real path', () => {
       // The blocker holds its loopback port with immediate socket destroy, so
       // the failure is independent of arbitrary port occupancy.
       offlineBlocker = await startOfflineBlocker()
-      await setSyncConfigViaApi(pageA, { endpoint: offlineBlocker.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: offlineBlocker.endpoint, enabled: true })
       const topic2 = 'e2e-sync-topic-2'
       const msg2 = 'e2e-sync-msg-2'
       const blk2 = 'e2e-sync-blk-2'
@@ -457,7 +450,7 @@ test.describe('Sync MVP two-profile real path', () => {
       } finally {
         offlineBlocker = null
       }
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
       const retry = await runSyncViaApi(pageA)
       expect(retry.threw).toBeNull()
       expect(retry.status.lastError).toBeNull()
@@ -473,29 +466,28 @@ test.describe('Sync MVP two-profile real path', () => {
     }
   })
 
-  test('wrong token fails truthfully without convergence', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
+  test('unpaired sync is refused without convergence', async ({ mainWindow, ownedTmpRoot, mockPort }) => {
     const pageA = mainWindow
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: 'wrong-token', enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
 
-      // A connects and pairs with a raw observer (wrong-token B can never
-      // attach, so it cannot be the pairing peer).
+      // A connects and pairs with a raw observer; B connects but never
+      // pairs, so B stays unpaired and cannot converge.
       await connectViaApi(pageA)
-      await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, pageA)
-      // B's explicit Connect fails closed on the wrong token (401 wins).
-      await expect(connectViaApi(pageB)).rejects.toThrow(/401/)
+      await connectViaApi(pageB)
+      await provisionObserverViaRaw(relay.endpoint, pageA)
 
       const topic = 'e2e-sync-topic-denied'
       const msg = 'e2e-sync-msg-denied'
       const blk = 'e2e-sync-blk-denied'
-      const content = 'must not converge on wrong token'
+      const content = 'must not converge while unpaired'
       await ensureTopicViaApi(pageA, topic, 'Sync Denied Topic')
       await appendMessageViaApi(pageA, topic, messageJson(msg, topic, content), [blockJson(blk, msg, content)])
 
@@ -505,8 +497,9 @@ test.describe('Sync MVP two-profile real path', () => {
 
       const syncB = await runSyncViaApi(pageB)
       expect(syncB.threw).not.toBeNull()
+      expect(String(syncB.threw)).toContain('pairing-required')
       const statusB = await getSyncStatusViaApi(pageB)
-      expect(statusB.lastError).not.toBeNull()
+      expect(String(statusB.lastError)).toContain('pairing-required')
       const exists = await topicExistsViaApi(pageB, topic)
       expect(exists).toBe(false)
     } finally {
@@ -523,13 +516,13 @@ test.describe('Sync MVP two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
       // Both profiles configure the same relay; automation starts on save.
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Profile A makes a supported mutation; neither profile invokes manual sync.
@@ -545,7 +538,7 @@ test.describe('Sync MVP two-profile real path', () => {
 
       // Short subscriber interruption: B disables sync, A writes again.
       // B must not converge while disabled.
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: false })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: false })
       const topic2 = 'e2e-sync-auto-topic-2'
       const msg2 = 'e2e-sync-auto-msg-2'
       const blk2 = 'e2e-sync-auto-blk-2'
@@ -558,7 +551,7 @@ test.describe('Sync MVP two-profile real path', () => {
 
       // Re-enable B: reconnect uses the strict existing cursor pull and
       // converges without any manual sync invocation.
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       await pollForConvergence(pageB, topic2, msg2, blk2, content2, 90000)
     } finally {
@@ -586,11 +579,11 @@ test.describe('Sync delete/recovery convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-del-topic-1'
@@ -640,11 +633,11 @@ test.describe('Sync delete/recovery convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-del-topic-2'
@@ -708,11 +701,11 @@ test.describe('Sync delete/recovery convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-late-topic-1'
@@ -869,11 +862,11 @@ test.describe('Sync delete/recovery convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-trash-topic-1'
@@ -920,11 +913,11 @@ test.describe('Sync delete/recovery convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = 'e2e-sync-race-topic-1'
@@ -1244,7 +1237,6 @@ interface RelayMessageUpsert {
  */
 async function pollForRelayLwwWinner(
   endpoint: string,
-  token: string,
   baseCursor: number,
   entityId: string,
   candidates: string[],
@@ -1254,14 +1246,11 @@ async function pollForRelayLwwWinner(
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    // Channel-member framing via the provisioned observer; the legacy
-    // token-only form is kept only for callers without an observer.
-    let url = `${endpoint}/sync/pull?cursor=${baseCursor}`
-    let headers: Record<string, string> = { Authorization: `Bearer ${token}` }
-    if (observer) {
-      url = `${endpoint}/sync/pull?cursor=${baseCursor}&deviceId=${encodeURIComponent('raw-observer')}`
-      headers = relayDeviceHeaders(observer)
-    }
+    // Channel-member framing via the provisioned observer (device
+    // credential only; there is no shared service token).
+    if (!observer) throw new Error('pollForRelayLwwWinner requires a paired observer')
+    const url = `${endpoint}/sync/pull?cursor=${baseCursor}&deviceId=${encodeURIComponent('raw-observer')}`
+    const headers: Record<string, string> = relayDeviceHeaders(observer)
     const res = await fetch(url, { headers })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { operations: any[] }
@@ -1307,11 +1296,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -1371,11 +1360,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -1457,11 +1446,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -1507,7 +1496,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const lwwObserver = await ensureRawObserver(relay, pageA)
       const lwwWinner = await pollForRelayLwwWinner(
         relay.endpoint,
-        RELAY_TOKEN,
         relayCursorBase,
         msg,
         [contentA, contentB],
@@ -1551,11 +1539,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -1588,7 +1576,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const userDataDirBefore = profileB.userDataDir
       profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
@@ -1598,20 +1585,20 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       // cursor did not advance while gated, and sync config persisted. The
       // raw persisted config is asserted BEFORE any repair (the relaunch
       // helper performs no repair; repairSecondSyncConfig is setup-only and
-      // is not called on this path). Missing/empty token fails.
+      // is not called on this path).
       const rawRelaunchedConfig = (await pageB.evaluate(async () => {
         return await (window as any).api.sync.getConfig()
       })) as any
       expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(rawRelaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in rawRelaunchedConfig).toBe(false)
       const afterRelaunch = await getSyncStatusViaApi(pageB)
       expect(afterRelaunch.pendingCount).toBeGreaterThan(0)
       expect(afterRelaunch.cursor).toBe(beforeClose.cursor)
       const relaunchedConfig = await getSyncConfigViaApi(pageB)
       expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(relaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in relaunchedConfig).toBe(false)
       await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
 
       // Release transport; the recovered pending edit converges automatically
@@ -1648,11 +1635,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -1741,7 +1728,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const userDataDirBefore = profileB.userDataDir
       profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
@@ -1755,7 +1741,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       })) as any
       expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(rawRelaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in rawRelaunchedConfig).toBe(false)
       await pollForOutboxFilteredCount(
         profileB,
         3,
@@ -1772,7 +1758,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const relaunchedConfig = await getSyncConfigViaApi(pageB)
       expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(relaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in relaunchedConfig).toBe(false)
       await pollForMessageContent(pageB, topic, msg, edit3, 30000)
 
       // Release transport; recovery is automatic only (no post-release manual
@@ -1783,7 +1769,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const lwwObserver = await ensureRawObserver(relay, pageA)
       const lwwWinner = await pollForRelayLwwWinner(
         relay.endpoint,
-        RELAY_TOKEN,
         relayCursorBase,
         msg,
         [edit1, edit2, edit3],
@@ -1864,11 +1849,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
@@ -1961,7 +1946,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const userDataDirBefore = profileB.userDataDir
       profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
@@ -1974,7 +1958,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       })) as any
       expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(rawRelaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in rawRelaunchedConfig).toBe(false)
       await pollForOutboxFilteredCount(
         profileB,
         3,
@@ -1993,7 +1977,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const relaunchedConfig = await getSyncConfigViaApi(pageB)
       expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(relaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in relaunchedConfig).toBe(false)
       await pollForMessageContent(pageB, topic, msgA, editA, 30000)
       await pollForMessageContent(pageB, topic, msgB, editB, 30000)
       await pollForMessageContent(pageB, topic, msgC, editC, 30000)
@@ -2083,11 +2067,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
@@ -2184,7 +2168,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const userDataDirBefore = profileB.userDataDir
       profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
@@ -2197,7 +2180,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       })) as any
       expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(rawRelaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in rawRelaunchedConfig).toBe(false)
       await pollForOutboxFilteredCount(
         profileB,
         4,
@@ -2216,7 +2199,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const relaunchedConfig = await getSyncConfigViaApi(pageB)
       expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(relaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after relaunch')
+      expect('token' in relaunchedConfig).toBe(false)
       await pollForMessageContent(pageB, topic, msgA, editA2, 30000)
       await pollForMessageContent(pageB, topic, msgB, editB, 30000)
       await pollForMessageContent(pageB, topic, msgC, editC, 30000)
@@ -2301,11 +2284,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -2359,7 +2342,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const userDataDirBefore = profileB.userDataDir
       profileB = await relaunchSecondSyncProfileAfterControlledSigterm(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
@@ -2374,7 +2356,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       })) as any
       expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(rawRelaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after SIGTERM')
+      expect('token' in rawRelaunchedConfig).toBe(false)
       const afterRelaunch = await getSyncStatusViaApi(pageB)
       expect(afterRelaunch.pendingCount).toBeGreaterThan(0)
       expect(afterRelaunch.cursor).toBe(beforeSigterm.cursor)
@@ -2383,7 +2365,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const relaunchedConfig = await getSyncConfigViaApi(pageB)
       expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(relaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after SIGTERM')
+      expect('token' in relaunchedConfig).toBe(false)
       await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
 
       // Release transport; the recovered pending edit converges automatically
@@ -2424,11 +2406,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -2483,7 +2465,6 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const userDataDirBefore = profileB.userDataDir
       profileB = await relaunchSecondSyncProfileAfterDirectSigkill(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page
@@ -2501,7 +2482,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       })) as any
       expect(rawRelaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(rawRelaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(rawRelaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after SIGKILL')
+      expect('token' in rawRelaunchedConfig).toBe(false)
       const afterRelaunch = await getSyncStatusViaApi(pageB)
       expect(afterRelaunch.pendingCount).toBeGreaterThan(0)
       expect(afterRelaunch.cursor).toBe(beforeSigkill.cursor)
@@ -2510,7 +2491,7 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
       const relaunchedConfig = await getSyncConfigViaApi(pageB)
       expect(relaunchedConfig.endpoint).toBe(relay.endpoint)
       expect(relaunchedConfig.enabled).toBe(true)
-      assertSyncTokenExactRedacted(relaunchedConfig.token, RELAY_TOKEN, 'persisted sync token after SIGKILL')
+      expect('token' in relaunchedConfig).toBe(false)
       await pollForMessageContent(pageB, topic, msg, recoveryContent, 30000)
       const relaunchedLocal = await fetchMessagesViaApi(pageB, topic)
       expect(relaunchedLocal.messages.some((m: any) => m?.id === msg && m?.content === recoveryContent)).toBe(true)
@@ -2558,11 +2539,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageWriter = profileB.page
-      await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageReader, pageWriter)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
@@ -2729,11 +2710,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageWriter = profileB.page
-      await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageReader, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageWriter, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageReader, pageWriter)
 
       // Deterministic baseline: one topic with 3 messages, drained via manual rounds.
@@ -2900,11 +2881,11 @@ test.describe('Sync ordinary edit and concurrent edit semantics', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Deterministic baseline, drained via labeled manual setup rounds.
@@ -3186,12 +3167,12 @@ test.describe('Sync streaming promotion convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const cursorA0 = (await getSyncStatusViaApi(pageA)).cursor
       const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
@@ -3363,19 +3344,15 @@ test.describe('Sync streaming promotion convergence', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       const endpoint = relay.endpoint
 
       // Channel first, data later: A configures + connects, then a raw
       // observer pairs with A so the channel exists while it is still empty.
-      await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint, enabled: true })
       await connectViaApi(pageA)
-      const observer = await provisionObserverViaRaw(endpoint, RELAY_TOKEN, pageA)
-      const observerHeaders = {
-        Authorization: `Bearer ${RELAY_TOKEN}`,
-        'x-sync-device-code': observer.code,
-        'x-sync-device-secret': observer.secret
-      }
+      const observer = await provisionObserverViaRaw(endpoint, pageA)
+      const observerHeaders = { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
       const rawBaselineGet = async (): Promise<{ status: number; body: any }> => {
         const res = await fetch(`${endpoint}/sync/baseline`, { headers: observerHeaders })
         return { status: res.status, body: await res.json().catch(() => ({})) }
@@ -3485,7 +3462,7 @@ test.describe('Sync streaming promotion convergence', () => {
       // sync reads it.
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
       // Public device code only (never the secret); per-device baseline GET

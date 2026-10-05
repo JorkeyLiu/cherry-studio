@@ -8,7 +8,7 @@
  * the disposable cert — no verification bypass anywhere), and the spec
  * process verifies relay reads with explicit `ca` trust. Pairing/trust uses
  * the production flow, convergence uses production IPC ChatDb state, restart
- * reuses the same DB/cert/key/token, and cleanup deletes only the disposable
+ * reuses the same DB/cert/key, and cleanup deletes only the disposable
  * owned root. Skips truthfully when no suitable non-loopback interface (or
  * no openssl to mint the disposable cert) is available; never hardcodes a
  * user-specific IP. No WAN, rotation, backup, or capacity claim.
@@ -46,8 +46,6 @@ import {
   type UserEntrypointRelayHandle
 } from '../../utils/sync-relay-user-entrypoint'
 import { getOutboxDiagViaApp } from '../../utils/sync-outbox'
-
-const RELAY_TOKEN = 'e2e-lan-https-token-1'
 
 function discoverLanIpv4(): string | null {
   for (const addrs of Object.values(networkInterfaces())) {
@@ -260,11 +258,7 @@ async function pollForBaselineQuiescent(
         'GET',
         `/sync/pull?cursor=0&deviceId=${encodeURIComponent('raw-observer')}`,
         certPath,
-        {
-          Authorization: `Bearer ${RELAY_TOKEN}`,
-          'x-sync-device-code': observer.code,
-          'x-sync-device-secret': observer.secret
-        }
+        { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
       )
       const relayCursor = relayPull.status === 200 ? (relayPull.body?.cursor as number) : -1
       const cursorsMatch = relayCursor >= 0 && sA.cursor === relayCursor && sB.cursor === relayCursor
@@ -279,11 +273,7 @@ async function pollForBaselineQuiescent(
           'GET',
           `/sync/pull?cursor=0&deviceId=${encodeURIComponent('raw-observer')}`,
           certPath,
-          {
-            Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-code': observer.code,
-            'x-sync-device-secret': observer.secret
-          }
+          { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
         )
         const relayCursor2 = relayPull2.status === 200 ? (relayPull2.body?.cursor as number) : -1
         if (
@@ -403,7 +393,6 @@ test.describe('Sync native LAN HTTPS relay', () => {
       try {
         relay = await startUserEntrypointRelay({
           ownedTmpRoot,
-          token: RELAY_TOKEN,
           host,
           certPath,
           keyPath,
@@ -413,11 +402,10 @@ test.describe('Sync native LAN HTTPS relay', () => {
         relay = getUserRelayHandle(e) ?? relay
         throw e
       }
-      // User-entrypoint proof: native HTTPS readiness on the LAN host,
-      // disposable DB under the owned root, explicit token (not env-only).
+      // User-entrypoint proof: native HTTPS readiness on the LAN host and
+      // disposable DB under the owned root.
       expect(relay.endpoint.startsWith(`https://${host}:`)).toBe(true)
       expect(relay.dbPath.startsWith(ownedTmpRoot)).toBe(true)
-      expect(relay.token).toBe(RELAY_TOKEN)
       expect(fs.existsSync(relay.dbPath)).toBe(true)
       expect(await httpsHealthOk(relay.endpoint, certPath)).toBe(true)
 
@@ -431,8 +419,8 @@ test.describe('Sync native LAN HTTPS relay', () => {
       const pageB = profileB.page
       const endpoint = relay.endpoint
 
-      await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       // Independent paired observer proves retained registration/channel/cursor.
       const targetCode = (await pageA.evaluate(async () => await (window as any).api.sync.getDeviceCode())) as {
@@ -441,14 +429,7 @@ test.describe('Sync native LAN HTTPS relay', () => {
       if (!targetCode || typeof targetCode.deviceCode !== 'string') {
         throw new Error('observer pairing: approver device code missing')
       }
-      const regRes = await httpsJson(
-        endpoint,
-        'POST',
-        '/sync/register',
-        certPath,
-        { Authorization: `Bearer ${RELAY_TOKEN}` },
-        {}
-      )
+      const regRes = await httpsJson(endpoint, 'POST', '/sync/register', certPath, {}, {})
       if (regRes.status !== 200) throw new Error(`observer pairing: register ${regRes.status}`)
       if (typeof regRes.body.deviceCode !== 'string' || typeof regRes.body.deviceSecret !== 'string') {
         throw new Error('observer pairing: malformed register response')
@@ -459,11 +440,7 @@ test.describe('Sync native LAN HTTPS relay', () => {
         'POST',
         '/sync/pair/request',
         certPath,
-        {
-          Authorization: `Bearer ${RELAY_TOKEN}`,
-          'x-sync-device-code': observer.code,
-          'x-sync-device-secret': observer.secret
-        },
+        { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret },
         { targetCode: targetCode.deviceCode }
       )
       if (reqRes.status !== 200) throw new Error(`observer pairing: request ${reqRes.status}`)
@@ -480,11 +457,7 @@ test.describe('Sync native LAN HTTPS relay', () => {
           'GET',
           `/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`,
           certPath,
-          {
-            Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-code': observer.code,
-            'x-sync-device-secret': observer.secret
-          }
+          { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
         )
 
       const topic = 'e2e-lan-https-topic-1'
@@ -533,7 +506,7 @@ test.describe('Sync native LAN HTTPS relay', () => {
       const cursorA0 = statusABase.cursor
       const cursorB0 = statusBBase.cursor
 
-      // Short interruption: stop the relay (DB/cert/key/token retained).
+      // Short interruption: stop the relay (DB/cert/key retained).
       await relay.stop()
       expect(relay.isRunning()).toBe(false)
       expect(fs.existsSync(relay.dbPath)).toBe(true)
@@ -550,7 +523,7 @@ test.describe('Sync native LAN HTTPS relay', () => {
       expect(failedStatus.cursor).toBe(cursorA0)
       expect((await getSyncStatusViaApi(pageB)).cursor).toBe(cursorB0)
 
-      // Restart the same entrypoint against the same DB/cert/key/token.
+      // Restart the same entrypoint against the same DB/cert/key.
       await relay.restart()
       expect(relay.isRunning()).toBe(true)
       expect(relay.endpoint).toBe(endpoint)

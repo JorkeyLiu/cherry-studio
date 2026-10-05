@@ -49,7 +49,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   configStore.set('sync:deviceCode', 'ABCD2345')
   configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
   sqlite = openInMemory()
@@ -75,7 +74,7 @@ describe('setConfig prior-read failure is durable and lifecycle-invalidating', (
     const { SyncAutoService: Cls } = await import('../syncAuto')
     const stopSpy = vi.fn()
     const svc = new Cls({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -124,7 +123,7 @@ describe('setConfig post-write-read failure leaves no stale subscriber', () => {
     const { SyncAutoService: Cls } = await import('../syncAuto')
     const stopSpy = vi.fn()
     const svc = new Cls({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -140,7 +139,7 @@ describe('setConfig post-write-read failure leaves no stale subscriber', () => {
     let calls = 0
     const getSpy = vi.spyOn(syncService, 'getConfig').mockImplementation(() => {
       calls += 1
-      if (calls === 1) return { endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }
+      if (calls === 1) return { endpoint: 'http://127.0.0.1:9999', enabled: true }
       throw new Error('post-boom-marker')
     })
     expect(() => syncService.setConfig({ enabled: false })).toThrow(/post-boom-marker/)
@@ -178,7 +177,7 @@ describe('nested sync config preflight invalidates auto without retry', () => {
     })
     const stopSpy = vi.fn()
     const svc = new Cls({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -210,7 +209,7 @@ describe('nested sync config preflight invalidates auto without retry', () => {
     void SYNC_AUTO_BUSY_RETRY_MS
     const runSync = vi.fn(() => Promise.reject(new Error('transport-boom')))
     const svc = new Cls({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -225,5 +224,20 @@ describe('nested sync config preflight invalidates auto without retry', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(runSync.mock.calls.length).toBeGreaterThanOrEqual(1)
     svc.stopSync()
+  })
+})
+
+describe('legacy shared-token config is rejected and never used', () => {
+  it('setConfig rejects a token key and getConfig ignores persisted sync:token', () => {
+    configStore.set('sync:token', 'stale-shared-secret')
+    expect(() => syncService.setConfig({ token: 'x' } as never)).toThrow(/no longer supported/)
+    const cfg = syncService.getConfig()
+    expect(cfg).toEqual({ endpoint: 'http://127.0.0.1:9999', enabled: true })
+    expect('token' in cfg).toBe(false)
+    // Legacy value is left untouched (no migration wipe, no arbitrary delete).
+    expect(configStore.get('sync:token')).toBe('stale-shared-secret')
+    // Ordinary endpoint+enabled storage is unchanged.
+    syncService.setConfig({ endpoint: 'http://127.0.0.1:9998', enabled: false })
+    expect(syncService.getConfig()).toEqual({ endpoint: 'http://127.0.0.1:9998', enabled: false })
   })
 })

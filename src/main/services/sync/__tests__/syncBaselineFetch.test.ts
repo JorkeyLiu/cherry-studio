@@ -76,7 +76,7 @@ describe('SyncClient.fetchBaseline', () => {
         return { ok: true, status: 200, text: async () => raw } as never
       })
     )
-    const res = await syncClient.fetchBaseline(ENDPOINT, 'tok', CODE, SECRET)
+    const res = await syncClient.fetchBaseline(ENDPOINT, CODE, SECRET)
     expect(res.found).toBe(true)
     if (res.found) {
       expect(res.envelope.channelId).toBe('ch-1')
@@ -85,7 +85,8 @@ describe('SyncClient.fetchBaseline', () => {
     }
     expect(seenUrl).toBe(`${ENDPOINT}/sync/baseline`)
     expect(seenHeaders['x-sync-device-code']).toBe(CODE)
-    expect(seenHeaders['Authorization']).toBe('Bearer tok')
+    expect(seenHeaders['x-sync-device-secret']).toBe(SECRET)
+    expect(seenHeaders['Authorization']).toBeUndefined()
   })
 
   it('404 with strict baseline-not-found body is explicit no-baseline', async () => {
@@ -93,7 +94,7 @@ describe('SyncClient.fetchBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: false, status: 404, text: async () => '{"error":"baseline-not-found"}' }) as never)
     )
-    const res = await syncClient.fetchBaseline(ENDPOINT, undefined, CODE, SECRET)
+    const res = await syncClient.fetchBaseline(ENDPOINT, CODE, SECRET)
     expect(res).toEqual({ found: false })
   })
 
@@ -108,9 +109,7 @@ describe('SyncClient.fetchBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: false, status: 404, text: async () => body }) as never)
     )
-    await expect(syncClient.fetchBaseline(ENDPOINT, undefined, CODE, SECRET)).rejects.toThrow(
-      /baseline fetch failed 404/
-    )
+    await expect(syncClient.fetchBaseline(ENDPOINT, CODE, SECRET)).rejects.toThrow(/baseline fetch failed 404/)
   })
 
   it('other errors retain relay {error} via safe mapping', async () => {
@@ -118,7 +117,7 @@ describe('SyncClient.fetchBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: false, status: 403, text: async () => '{"error":"pairing-required"}' }) as never)
     )
-    await expect(syncClient.fetchBaseline(ENDPOINT, undefined, CODE, SECRET)).rejects.toThrow(
+    await expect(syncClient.fetchBaseline(ENDPOINT, CODE, SECRET)).rejects.toThrow(
       /baseline fetch failed 403.*pairing-required/
     )
   })
@@ -133,7 +132,7 @@ describe('SyncClient.fetchBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: true, status: 200, text: async () => dup }) as never)
     )
-    await expect(syncClient.fetchBaseline(ENDPOINT, undefined, CODE, SECRET)).rejects.toThrow(
+    await expect(syncClient.fetchBaseline(ENDPOINT, CODE, SECRET)).rejects.toThrow(
       /baseline fetch response malformed.*duplicate key "channelId"/
     )
   })
@@ -145,14 +144,12 @@ describe('SyncClient.fetchBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: true, status: 200, text: async () => JSON.stringify(envelope) }) as never)
     )
-    await expect(syncClient.fetchBaseline(ENDPOINT, undefined, CODE, SECRET)).rejects.toThrow(
-      /baseline fetch response malformed/
-    )
+    await expect(syncClient.fetchBaseline(ENDPOINT, CODE, SECRET)).rejects.toThrow(/baseline fetch response malformed/)
   })
 
   it('external abort propagates AbortError', async () => {
     const controller = new AbortController()
     controller.abort()
-    await expect(syncClient.fetchBaseline(ENDPOINT, undefined, CODE, SECRET, controller.signal)).rejects.toThrow()
+    await expect(syncClient.fetchBaseline(ENDPOINT, CODE, SECRET, controller.signal)).rejects.toThrow()
   })
 })

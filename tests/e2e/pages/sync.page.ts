@@ -13,7 +13,6 @@ import { BasePage } from './base.page'
 
 export interface SyncConfigInput {
   endpoint: string
-  token: string
   enabled: boolean
 }
 
@@ -31,14 +30,12 @@ export interface SyncStatusShape {
 
 export interface SyncConfigShape {
   endpoint: string
-  token?: string
   enabled: boolean
 }
 
 export class SyncSettingsPage extends BasePage {
   readonly syncMenuItem: Locator
   readonly endpointInput: Locator
-  readonly tokenInput: Locator
   readonly enabledSwitch: Locator
   readonly saveButton: Locator
   readonly refreshButton: Locator
@@ -47,12 +44,21 @@ export class SyncSettingsPage extends BasePage {
   readonly pendingCount: Locator
   readonly cursor: Locator
   readonly lastError: Locator
+  readonly connectButton: Locator
+  readonly serviceStatus: Locator
+  readonly deviceCode: Locator
+  readonly pairingStatus: Locator
+  readonly pairingError: Locator
+  readonly targetCodeInput: Locator
+  readonly titleBar: Locator
+  readonly servicePill: Locator
+  readonly pairingPill: Locator
+  readonly statusBadge: Locator
 
   constructor(page: Page) {
     super(page)
     this.syncMenuItem = page.getByTestId('data-menu-sync')
     this.endpointInput = page.getByTestId('sync-endpoint-input')
-    this.tokenInput = page.getByTestId('sync-token-input')
     this.enabledSwitch = page.getByTestId('sync-enabled-switch')
     this.saveButton = page.getByTestId('sync-save-button')
     // No Refresh control exists in production (autosave contract): this
@@ -63,6 +69,16 @@ export class SyncSettingsPage extends BasePage {
     this.pendingCount = page.getByTestId('sync-pending-count')
     this.cursor = page.getByTestId('sync-cursor')
     this.lastError = page.getByTestId('sync-last-error')
+    this.connectButton = page.getByTestId('sync-connect')
+    this.serviceStatus = page.getByTestId('sync-service-status')
+    this.deviceCode = page.getByTestId('sync-device-code')
+    this.pairingStatus = page.getByTestId('sync-pairing-status')
+    this.pairingError = page.getByTestId('sync-pairing-error')
+    this.targetCodeInput = page.getByTestId('sync-target-code-input')
+    this.titleBar = page.getByTestId('sync-title-bar')
+    this.servicePill = page.getByTestId('sync-service-pill')
+    this.pairingPill = page.getByTestId('sync-pairing-pill')
+    this.statusBadge = page.getByTestId('sync-status-badge')
   }
 
   /** Navigate to Data settings where SyncSettings is rendered. */
@@ -104,12 +120,6 @@ export class SyncSettingsPage extends BasePage {
   async fillEndpointAndBlur(value: string): Promise<void> {
     await this.endpointInput.fill(value)
     await this.endpointInput.blur()
-  }
-
-  /** Edit the access token through the rendered input and blur to autosave. */
-  async fillTokenAndBlur(value: string): Promise<void> {
-    await this.tokenInput.fill(value)
-    await this.tokenInput.blur()
   }
 }
 
@@ -166,16 +176,6 @@ function toStrictSyncStatusShape(raw: unknown, source: string): SyncStatusShape 
   }
 }
 
-/**
- * Exact redacted sync-token assertion. Preserves strict equality while
- * reporting only presence/shape/mismatch — never credential values.
- */
-export function assertSyncTokenExactRedacted(actual: unknown, expectedToken: string, context = 'sync token'): void {
-  if (typeof actual !== 'string' || actual.length === 0) throw new Error(`${context} missing or empty`)
-  if (typeof expectedToken !== 'string' || expectedToken.length === 0) throw new Error(`${context} expectation missing`)
-  if (actual !== expectedToken) throw new Error(`${context} mismatch`)
-}
-
 /** Typed getStatus via the production preload surface (fail-closed, no defaults). */
 export async function getSyncStatusViaApi(page: Page): Promise<SyncStatusShape> {
   const status = await page.evaluate(async () => {
@@ -192,7 +192,6 @@ export async function getSyncConfigViaApi(page: Page): Promise<SyncConfigShape> 
   if (!config || typeof config !== 'object') throw new Error('getSyncConfigViaApi returned non-object')
   return {
     endpoint: String((config as any).endpoint ?? ''),
-    token: typeof (config as any).token === 'string' ? ((config as any).token as string) : undefined,
     enabled: Boolean((config as any).enabled)
   }
 }
@@ -367,16 +366,12 @@ export interface ProvisionedObserver {
  * member traffic only). Secrets live in the test process only and are never
  * logged.
  */
-export async function provisionObserverViaRaw(
-  endpoint: string,
-  token: string,
-  approverPage: Page
-): Promise<ProvisionedObserver> {
+export async function provisionObserverViaRaw(endpoint: string, approverPage: Page): Promise<ProvisionedObserver> {
   const base = endpoint.replace(/\/$/, '')
-  const authedJson = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+  const jsonHeaders = { 'Content-Type': 'application/json' }
   const regRes = await fetch(`${base}/sync/register`, {
     method: 'POST',
-    headers: authedJson,
+    headers: jsonHeaders,
     body: JSON.stringify({ deviceId: RAW_OBSERVER_CLIENT_DEVICE_ID })
   })
   if (regRes.status !== 200) throw new Error(`observer register failed: ${regRes.status}`)
@@ -386,7 +381,7 @@ export async function provisionObserverViaRaw(
   const reqRes = await fetch(`${base}/sync/pair/request`, {
     method: 'POST',
     headers: {
-      ...authedJson,
+      ...jsonHeaders,
       'x-sync-device-code': reg.deviceCode,
       'x-sync-device-secret': reg.deviceSecret
     },
@@ -404,7 +399,6 @@ export async function provisionObserverViaRaw(
 /** Raw authenticated pull for relay-level diagnostics (observer must be paired). */
 export async function rawObserverPull(
   endpoint: string,
-  token: string,
   observer: { code: string; secret: string },
   cursor: number | string,
   queryDeviceId = 'raw-observer'
@@ -413,7 +407,6 @@ export async function rawObserverPull(
     `${endpoint.replace(/\/$/, '')}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent(queryDeviceId)}`,
     {
       headers: {
-        Authorization: `Bearer ${token}`,
         'x-sync-device-code': observer.code,
         'x-sync-device-secret': observer.secret
       }
@@ -425,7 +418,6 @@ export async function rawObserverPull(
 /** Raw authenticated push for relay-level diagnostics (observer must be paired). */
 export async function rawObserverPush(
   endpoint: string,
-  token: string,
   observer: { code: string; secret: string },
   bodyDeviceId: string,
   operations: unknown[]
@@ -434,7 +426,6 @@ export async function rawObserverPush(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
       'x-sync-device-code': observer.code,
       'x-sync-device-secret': observer.secret
     },

@@ -125,7 +125,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', ENDPOINT)
-  configStore.set('sync:token', '')
   sqlite = new Database(':memory:')
   sqlite.pragma('journal_mode = WAL')
   sqlite.pragma('foreign_keys = ON')
@@ -155,7 +154,7 @@ describe('stale-409 bounded recovery', () => {
     setCursor(CURSOR_N)
     seedPublishableTopic()
     mockEmptyPull()
-    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       const raw = JSON.stringify(envelope)
       const { parseEnvelopeJson } = await import('@shared/sync')
       return { envelope: parseEnvelopeJson(raw), rawText: raw }
@@ -174,7 +173,7 @@ describe('stale-409 bounded recovery', () => {
     seedPublishableTopic()
     mockEmptyPull()
     const events: string[] = []
-    const putMock = vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    const putMock = vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       events.push('put')
       if (putMock.mock.calls.length === 1) throw conflict409()
       const raw = JSON.stringify(envelope)

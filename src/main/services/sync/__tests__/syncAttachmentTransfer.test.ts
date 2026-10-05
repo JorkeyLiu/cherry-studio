@@ -17,7 +17,6 @@ import { SyncClient } from '../SyncClient'
 const ENDPOINT = 'http://127.0.0.1:3030'
 const DEVICE_CODE = 'ABCDEFGH'
 const DEVICE_SECRET = 'a'.repeat(64)
-const TOKEN = 'transfer-test-token'
 
 function shaHex(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -50,7 +49,6 @@ describe('SyncClient.uploadAttachment', () => {
     await expect(
       client.uploadAttachment(
         ENDPOINT,
-        TOKEN,
         { digest: shaHex(payload).toUpperCase(), body: Buffer.from(payload) },
         DEVICE_CODE,
         DEVICE_SECRET
@@ -67,7 +65,6 @@ describe('SyncClient.uploadAttachment', () => {
     const client = new SyncClient()
     const receipt = await client.uploadAttachment(
       ENDPOINT,
-      TOKEN,
       { digest, byteLength: payload.length, body: payload },
       DEVICE_CODE,
       DEVICE_SECRET
@@ -79,7 +76,6 @@ describe('SyncClient.uploadAttachment', () => {
     await expect(
       client.uploadAttachment(
         ENDPOINT,
-        TOKEN,
         { digest, byteLength: payload.length + 1, body: payload },
         DEVICE_CODE,
         DEVICE_SECRET
@@ -96,7 +92,7 @@ describe('SyncClient.uploadAttachment', () => {
     vi.stubGlobal('fetch', fetchMock)
     const client = new SyncClient()
     const err = (await client
-      .uploadAttachment(ENDPOINT, TOKEN, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET)
+      .uploadAttachment(ENDPOINT, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET)
       .catch((e: unknown) => e as Error)) as Error
     expect(err.message).toContain('attachment upload failed 413')
     expect(err.message).not.toContain(DEVICE_SECRET)
@@ -109,7 +105,7 @@ describe('SyncClient.uploadAttachment', () => {
     vi.stubGlobal('fetch', fetchMock)
     const client = new SyncClient()
     await expect(
-      client.uploadAttachment(ENDPOINT, TOKEN, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET)
+      client.uploadAttachment(ENDPOINT, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET)
     ).rejects.toThrow('attachment upload failed 400: {"error":"digest-mismatch"}')
   })
 
@@ -124,12 +120,12 @@ describe('SyncClient.uploadAttachment', () => {
     )
     const client = new SyncClient()
     await expect(
-      client.uploadAttachment(ENDPOINT, TOKEN, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET)
+      client.uploadAttachment(ENDPOINT, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET)
     ).rejects.toThrow('attachment upload timeout')
     const external = new AbortController()
     external.abort()
     await expect(
-      client.uploadAttachment(ENDPOINT, TOKEN, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET, external.signal)
+      client.uploadAttachment(ENDPOINT, { digest, body: payload }, DEVICE_CODE, DEVICE_SECRET, external.signal)
     ).rejects.toMatchObject({ name: 'AbortError' })
   })
 })
@@ -146,7 +142,6 @@ describe('SyncClient.downloadAttachment', () => {
     const seen: Buffer[] = []
     const out = await client.downloadAttachment(
       ENDPOINT,
-      TOKEN,
       { digest, expectedByteLength: payload.length },
       DEVICE_CODE,
       DEVICE_SECRET,
@@ -168,7 +163,7 @@ describe('SyncClient.downloadAttachment', () => {
     )
     const client = new SyncClient()
     const err = (await client
-      .downloadAttachment(ENDPOINT, TOKEN, { digest }, DEVICE_CODE, DEVICE_SECRET)
+      .downloadAttachment(ENDPOINT, { digest }, DEVICE_CODE, DEVICE_SECRET)
       .catch((e: unknown) => e as Error)) as Error
     expect(err.message).toContain('digest-mismatch')
     expect(err.message).not.toContain(payload.toString('utf8'))
@@ -185,7 +180,6 @@ describe('SyncClient.downloadAttachment', () => {
     await expect(
       client.downloadAttachment(
         ENDPOINT,
-        TOKEN,
         { digest, expectedByteLength: payload.length + 1 },
         DEVICE_CODE,
         DEVICE_SECRET
@@ -204,7 +198,7 @@ describe('SyncClient.downloadAttachment', () => {
       )
     )
     const client = new SyncClient()
-    await expect(client.downloadAttachment(ENDPOINT, TOKEN, { digest }, DEVICE_CODE, DEVICE_SECRET)).rejects.toThrow(
+    await expect(client.downloadAttachment(ENDPOINT, { digest }, DEVICE_CODE, DEVICE_SECRET)).rejects.toThrow(
       'content type must be application/octet-stream'
     )
 
@@ -213,7 +207,7 @@ describe('SyncClient.downloadAttachment', () => {
       vi.fn(async () => jsonResponse(404, { error: 'attachment-not-found' }))
     )
     const err = (await client
-      .downloadAttachment(ENDPOINT, TOKEN, { digest }, DEVICE_CODE, DEVICE_SECRET)
+      .downloadAttachment(ENDPOINT, { digest }, DEVICE_CODE, DEVICE_SECRET)
       .catch((e: unknown) => e as Error)) as Error
     expect(err.message).toContain('attachment download failed 404')
     expect(err.message).not.toContain(DEVICE_SECRET)

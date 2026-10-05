@@ -43,14 +43,14 @@ describe('relay SSE notification-only', () => {
     db = new Database(':memory:')
     const { ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
     ensureRelaySchema(db)
-    server = createRelayServer(db, { token: relayToken })
+    server = createRelayServer(db)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     baseUrl = `http://127.0.0.1:${addr.port}`
     // Register two devices and pair them so the data plane is reachable.
     // Registrations carry their real client device ids (operation identity
     // binding: push deviceId must equal the registered client id).
-    const authed = { Authorization: `Bearer ${relayToken}`, 'Content-Type': 'application/json' }
+    const authed = { 'Content-Type': 'application/json' }
     const regA = (await (
       await fetch(`${baseUrl}/sync/register`, {
         method: 'POST',
@@ -89,15 +89,15 @@ describe('relay SSE notification-only', () => {
     } catch {}
   })
 
-  it('rejects subscribe without Bearer token', async () => {
+  it('rejects subscribe without device credential', async () => {
     const res = await fetch(`${baseUrl}/sync/subscribe?cursor=0`)
-    expect(res.status).toBe(401)
+    expect(res.status).toBe(403)
     await res.text().catch(() => '')
   })
 
   it('rejects subscribe with invalid cursor framing', async () => {
     const res = await fetch(`${baseUrl}/sync/subscribe?cursor=-1`, {
-      headers: { Authorization: `Bearer ${relayToken}` }
+      headers: { 'x-sync-device-code': codeA, 'x-sync-device-secret': secretA }
     })
     expect(res.status).toBe(400)
     await res.text().catch(() => '')
@@ -107,7 +107,6 @@ describe('relay SSE notification-only', () => {
     const controller = new AbortController()
     const res = await fetch(`${baseUrl}/sync/subscribe?cursor=0`, {
       headers: {
-        Authorization: `Bearer ${relayToken}`,
         Accept: 'text/event-stream',
         'x-sync-device-code': codeA,
         'x-sync-device-secret': secretA
@@ -189,7 +188,7 @@ describe('auto coalescing vs manual semantics', () => {
       release = resolve
     })
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -230,7 +229,7 @@ describe('auto coalescing vs manual semantics', () => {
     const { SyncAutoService } = await import('../syncAuto')
     let calls = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -326,7 +325,7 @@ describe('relay idempotent push acknowledgement', () => {
     db = new Database(':memory:')
     const { ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
     ensureRelaySchema(db)
-    server = createRelayServer(db, { token })
+    server = createRelayServer(db)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     baseUrl = `http://127.0.0.1:${addr.port}`
@@ -434,7 +433,6 @@ describe('SyncService clears only confirmed current-chunk IDs', () => {
     const origSet = configManager.set.bind(configManager)
     vi.spyOn(configManager, 'get').mockImplementation(((k: string, def?: unknown) => {
       if (k === 'sync:endpoint') return 'http://127.0.0.1:9'
-      if (k === 'sync:token') return ''
       if (k === 'sync:enabled') return true
       if (k === 'sync:deviceCode') return 'ABCD2345'
       if (k === 'sync:deviceAuth') return 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
@@ -547,7 +545,7 @@ describe('auto bounded retry with active subscriber', () => {
     const { SyncAutoService, SYNC_AUTO_RETRY_MAX_ATTEMPTS } = await import('../syncAuto')
     let calls = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -576,7 +574,7 @@ describe('auto bounded retry with active subscriber', () => {
     const { SyncAutoService, SYNC_AUTO_RETRY_MAX_ATTEMPTS } = await import('../syncAuto')
     let calls = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -610,7 +608,7 @@ describe('auto cancellation and reconciliation lifecycle', () => {
       release = resolve
     })
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -640,7 +638,7 @@ describe('auto cancellation and reconciliation lifecycle', () => {
     expect(SYNC_AUTO_RECONCILE_MS).toBeGreaterThanOrEqual(15000)
     let calls = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -671,7 +669,7 @@ describe('auto cancellation and reconciliation lifecycle', () => {
     const { SyncAutoService } = await import('../syncAuto')
     let calls = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: '', token: undefined, enabled: false }),
+      getConfig: () => ({ endpoint: '', enabled: false }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',

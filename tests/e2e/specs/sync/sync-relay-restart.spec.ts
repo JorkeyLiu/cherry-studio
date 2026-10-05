@@ -46,8 +46,6 @@ import {
   type FileBackedRelayHandle
 } from '../../utils/sync-relay-process'
 
-const RELAY_TOKEN = 'e2e-sync-restart-token-1'
-
 function messageJson(id: string, topicId: string, content: string): Record<string, unknown> {
   const now = isoNow()
   return {
@@ -163,31 +161,24 @@ interface RelayObserver {
  * channel member. No pairing state is ever minted outside the explicit flow.
  */
 async function ensureObserverPaired(endpoint: string, approverPage: Page): Promise<RelayObserver> {
-  return await provisionObserverViaRaw(endpoint, RELAY_TOKEN, approverPage)
+  return await provisionObserverViaRaw(endpoint, approverPage)
 }
 
 async function authedPull(
   endpoint: string,
-  token: string,
   cursor: number,
   observer?: RelayObserver
 ): Promise<{ status: number; body: RelayPullBody }> {
-  // Without an observer the token-only form is used (401-first negative
-  // paths); positive diagnostics pass the paired observer.
-  if (!observer) {
-    const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    })
-    const body = (await res.json().catch(() => ({ operations: [], cursor }))) as RelayPullBody
-    return { status: res.status, body }
-  }
-  const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-sync-device-code': observer.code,
-      'x-sync-device-secret': observer.secret
-    }
-  })
+  // Without an observer the bad-secret negative form is used (403-first
+  // negative paths); positive diagnostics pass the paired observer.
+  const headers: Record<string, string> = observer
+    ? {
+        'x-sync-device-code': observer.code,
+        'x-sync-device-secret': observer.secret
+      }
+    : { 'x-sync-device-code': 'ZZZZ9999', 'x-sync-device-secret': '0'.repeat(64) }
+  const query = observer ? `?cursor=${cursor}&deviceId=${encodeURIComponent('raw-observer')}` : `?cursor=${cursor}`
+  const res = await fetch(`${endpoint}/sync/pull${query}`, { headers })
   const body = (await res.json().catch(() => ({ operations: [], cursor }))) as RelayPullBody
   return { status: res.status, body }
 }
@@ -307,7 +298,7 @@ test.describe('Sync file-backed relay restart', () => {
     let testError: unknown = null
     try {
       try {
-        relay = await startFileBackedRelay({ ownedTmpRoot, token: RELAY_TOKEN })
+        relay = await startFileBackedRelay({ ownedTmpRoot })
       } catch (e) {
         // Retain the owned handle from a failed start so finally cleanup can
         // stop the exact child; the global registry blocks root removal while
@@ -319,8 +310,8 @@ test.describe('Sync file-backed relay restart', () => {
       const pageB = profileB.page
       const endpoint = relay.endpoint
 
-      await setSyncConfigViaApi(pageA, { endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       // Diagnostic observer for raw pull evidence (trusted via pairing flow).
       const observer = await ensureObserverPaired(endpoint, pageA)
@@ -337,7 +328,7 @@ test.describe('Sync file-backed relay restart', () => {
       await pollForConvergence(pageB, topic, msg, blk, base)
 
       // Strict pull evidence from cursor 0: contiguous retained operations.
-      const baseline = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      const baseline = await authedPull(endpoint, 0, observer)
       expect(baseline.status).toBe(200)
       expect(baseline.body.operations.length).toBeGreaterThan(0)
       const seqs = baseline.body.operations.map((o: any) => o.seq as number)
@@ -345,39 +336,45 @@ test.describe('Sync file-backed relay restart', () => {
       const cursorBefore = baseline.body.cursor
       expect(cursorBefore).toBe(seqs[seqs.length - 1])
 
-      // Wrong-token pull stays 401 and does not mutate relay state: compare
-      // the complete stable operation projection, not just count/cursor.
+      // Bad device-secret pull stays 403 and does not mutate relay state:
+      // compare the complete stable operation projection, not just
+      // count/cursor.
       const denied = await fetch(`${endpoint}/sync/pull?cursor=0`, {
-        headers: { Authorization: 'Bearer wrong-token' }
+        headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': '0'.repeat(64) }
       })
-      expect(denied.status).toBe(401)
+      expect(denied.status).toBe(403)
       await denied.json().catch(() => ({}))
-      const afterDenied = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      const afterDenied = await authedPull(endpoint, 0, observer)
       expect(afterDenied.status).toBe(200)
       expect(afterDenied.body.cursor).toBe(cursorBefore)
       expect(stableOpProjection(afterDenied.body.operations)).toEqual(stableOpProjection(baseline.body.operations))
 
-      // Wrong-token push stays 401 with no mutation either.
+      // Bad device-secret push stays 403 with no mutation either.
       const deniedPush = await fetch(`${endpoint}/sync/push`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wrong-token' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sync-device-code': observer.code,
+          'x-sync-device-secret': '0'.repeat(64)
+        },
         body: JSON.stringify({
+          deviceId: 'raw-observer',
           operations: [
             {
-              id: 'e2e-wrong-token-op-1',
+              id: 'e2e-bad-secret-op-1',
               entityType: 'topic',
               op: 'upsert',
-              entityId: 'e2e-wrong-token-topic-1',
+              entityId: 'e2e-bad-secret-topic-1',
               timestamp: 1000,
-              deviceId: 'd-wrong',
-              payload: { id: 'e2e-wrong-token-topic-1', name: 'Wrong' }
+              deviceId: 'raw-observer',
+              payload: { id: 'e2e-bad-secret-topic-1', name: 'Wrong' }
             }
           ]
         })
       })
-      expect(deniedPush.status).toBe(401)
+      expect(deniedPush.status).toBe(403)
       await deniedPush.json().catch(() => ({}))
-      const afterDeniedPush = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      const afterDeniedPush = await authedPull(endpoint, 0, observer)
       expect(afterDeniedPush.status).toBe(200)
       expect(afterDeniedPush.body.cursor).toBe(cursorBefore)
       expect(stableOpProjection(afterDeniedPush.body.operations)).toEqual(stableOpProjection(baseline.body.operations))
@@ -401,11 +398,7 @@ test.describe('Sync file-backed relay restart', () => {
 
       // Capture the observer channel for post-restart membership retention.
       const observerStateBeforeRes = await fetch(`${endpoint}/sync/state`, {
-        headers: {
-          Authorization: `Bearer ${RELAY_TOKEN}`,
-          'x-sync-device-code': observer.code,
-          'x-sync-device-secret': observer.secret
-        }
+        headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
       })
       expect(observerStateBeforeRes.status).toBe(200)
       const observerStateBefore = (await observerStateBeforeRes.json()) as {
@@ -421,7 +414,7 @@ test.describe('Sync file-backed relay restart', () => {
       const rawRegister = async (): Promise<RelayObserver> => {
         const res = await fetch(`${endpoint}/sync/register`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_TOKEN}` },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({})
         })
         expect(res.status).toBe(200)
@@ -434,7 +427,6 @@ test.describe('Sync file-backed relay restart', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${RELAY_TOKEN}`,
           'x-sync-device-code': pendingRequester.code,
           'x-sync-device-secret': pendingRequester.secret
         },
@@ -471,7 +463,7 @@ test.describe('Sync file-backed relay restart', () => {
       await assertOutageHoldsBaseline(pageB, topic, msg, base, edited, 10000)
       expect((await getSyncStatusViaApi(pageB)).cursor).toBe(cursorB0)
 
-      // Restart the same relay child against the same DB/token/port.
+      // Restart the same relay child against the same DB/port.
       // Single-owner restart carries the same handle on failure; retain a
       // DISTINCT failed handle only (never double-close the original).
       try {
@@ -489,7 +481,7 @@ test.describe('Sync file-backed relay restart', () => {
 
       // Retained operations and sequence continuity after restart.
       // After restart, auto-sync may have already pushed the pending edit (1) plus assistant_config seeds (2) that were queued during outage, so retained may be larger than baseline. Check prefix and cursor >= baseline.
-      const retained = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      const retained = await authedPull(endpoint, 0, observer)
       expect(retained.status).toBe(200)
       expect(retained.body.cursor).toBeGreaterThanOrEqual(cursorBefore)
       const retainedSeqs = retained.body.operations.map((o: any) => o.seq) as number[]
@@ -497,11 +489,11 @@ test.describe('Sync file-backed relay restart', () => {
       expect(retainedSeqs).toEqual([...retainedSeqs].sort((a, b) => a - b))
       expect(new Set(retainedSeqs).size).toBe(retainedSeqs.length)
 
-      // Stable device code/credential reattach on the same DB/token: the
+      // Stable device code/credential reattach on the same DB: the
       // observer reattaches with its durable secret (same code, no rotation).
       const reattachRes = await fetch(`${endpoint}/sync/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_TOKEN}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deviceCode: observer.code, deviceSecret: observer.secret })
       })
       expect(reattachRes.status).toBe(200)
@@ -511,7 +503,7 @@ test.describe('Sync file-backed relay restart', () => {
       // Unknown credentials still fail closed after restart.
       const unknownRes = await fetch(`${endpoint}/sync/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RELAY_TOKEN}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deviceCode: 'ZZZZ9999', deviceSecret: '0'.repeat(64) })
       })
       expect(unknownRes.status).toBe(403)
@@ -519,11 +511,7 @@ test.describe('Sync file-backed relay restart', () => {
 
       // Membership/channel retained for the observer.
       const observerStateAfterRes = await fetch(`${endpoint}/sync/state`, {
-        headers: {
-          Authorization: `Bearer ${RELAY_TOKEN}`,
-          'x-sync-device-code': observer.code,
-          'x-sync-device-secret': observer.secret
-        }
+        headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
       })
       expect(observerStateAfterRes.status).toBe(200)
       const observerStateAfter = (await observerStateAfterRes.json()) as {
@@ -535,11 +523,7 @@ test.describe('Sync file-backed relay restart', () => {
 
       // Pending request retained across restart and resolvable afterwards.
       const pendingStateBeforeRes = await fetch(`${endpoint}/sync/state`, {
-        headers: {
-          Authorization: `Bearer ${RELAY_TOKEN}`,
-          'x-sync-device-code': pendingRequester.code,
-          'x-sync-device-secret': pendingRequester.secret
-        }
+        headers: { 'x-sync-device-code': pendingRequester.code, 'x-sync-device-secret': pendingRequester.secret }
       })
       expect(pendingStateBeforeRes.status).toBe(200)
       const pendingStateBefore = (await pendingStateBeforeRes.json()) as {
@@ -550,7 +534,6 @@ test.describe('Sync file-backed relay restart', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${RELAY_TOKEN}`,
           'x-sync-device-code': pendingTarget.code,
           'x-sync-device-secret': pendingTarget.secret
         },
@@ -567,7 +550,6 @@ test.describe('Sync file-backed relay restart', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${RELAY_TOKEN}`,
           'x-sync-device-code': observer.code,
           'x-sync-device-secret': observer.secret
         },
@@ -592,7 +574,7 @@ test.describe('Sync file-backed relay restart', () => {
       // After restart, baseline may have included assistant ops, and pending edit may have been auto-pushed, so cursor may be > cursorBefore+1. Check >= and that it increased by exactly 1 from retained.
       expect(rawPushBody.cursor).toBeGreaterThan(cursorBefore)
       expect(rawPushBody.cursor).toBe(retained.body.cursor + 1)
-      const afterRaw = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      const afterRaw = await authedPull(endpoint, 0, observer)
       expect(afterRaw.status).toBe(200)
       expect(afterRaw.body.cursor).toBe(rawPushBody.cursor)
       expect(afterRaw.body.operations.map((o: any) => o.seq)).toEqual(
@@ -605,7 +587,6 @@ test.describe('Sync file-backed relay restart', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${RELAY_TOKEN}`,
           'x-sync-device-code': observer.code,
           'x-sync-device-secret': observer.secret
         },
@@ -627,7 +608,7 @@ test.describe('Sync file-backed relay restart', () => {
       expect(spoofRes.status).toBe(403)
       const spoofBody = (await spoofRes.json().catch(() => ({}))) as { error?: string }
       expect(String(spoofBody.error ?? '')).toContain('device identity mismatch')
-      const afterSpoof = await authedPull(endpoint, RELAY_TOKEN, 0, observer)
+      const afterSpoof = await authedPull(endpoint, 0, observer)
       expect(afterSpoof.status).toBe(200)
       expect(afterSpoof.body.cursor).toBe(cursorAfterRaw)
       expect(stableOpProjection(afterSpoof.body.operations)).toEqual(stableOpProjection(afterRaw.body.operations))

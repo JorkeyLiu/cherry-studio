@@ -43,7 +43,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as any, sqlite)
@@ -133,57 +132,55 @@ describe('fourth audit 1: topic-tombstone suppression materializes exact message
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
     const base = Date.now() - 100000
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-4a-pull-t',
-                entityType: 'topic',
-                op: 'upsert',
-                entityId: 't-pull-ghost',
-                timestamp: base,
-                deviceId: 'remote',
-                payload: { id: 't-pull-ghost', name: 'T' }
-              },
-              {
-                seq: 2,
-                id: 'op-4a-pull-tdel',
-                entityType: 'topic',
-                op: 'delete',
-                entityId: 't-pull-ghost',
-                timestamp: base + 1000,
-                deviceId: 'remote'
-              },
-              {
-                seq: 3,
-                id: 'op-4a-pull-msg',
-                entityType: 'message',
-                op: 'upsert',
-                entityId: 'm-pull-ghost',
-                timestamp: base + 500,
-                deviceId: 'remote',
-                payload: { id: 'm-pull-ghost', topicId: 't-pull-ghost', role: 'user', content: 'late' }
-              },
-              {
-                seq: 4,
-                id: 'op-4a-pull-block',
-                entityType: 'message_block',
-                op: 'upsert',
-                entityId: 'b-pull-ghost',
-                timestamp: base + 500,
-                deviceId: 'remote',
-                payload: { id: 'b-pull-ghost', messageId: 'm-pull-ghost', type: 'text', content: 'late' }
-              }
-            ],
-            cursor: 4
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-4a-pull-t',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 't-pull-ghost',
+              timestamp: base,
+              deviceId: 'remote',
+              payload: { id: 't-pull-ghost', name: 'T' }
+            },
+            {
+              seq: 2,
+              id: 'op-4a-pull-tdel',
+              entityType: 'topic',
+              op: 'delete',
+              entityId: 't-pull-ghost',
+              timestamp: base + 1000,
+              deviceId: 'remote'
+            },
+            {
+              seq: 3,
+              id: 'op-4a-pull-msg',
+              entityType: 'message',
+              op: 'upsert',
+              entityId: 'm-pull-ghost',
+              timestamp: base + 500,
+              deviceId: 'remote',
+              payload: { id: 'm-pull-ghost', topicId: 't-pull-ghost', role: 'user', content: 'late' }
+            },
+            {
+              seq: 4,
+              id: 'op-4a-pull-block',
+              entityType: 'message_block',
+              op: 'upsert',
+              entityId: 'b-pull-ghost',
+              timestamp: base + 500,
+              deviceId: 'remote',
+              payload: { id: 'b-pull-ghost', messageId: 'm-pull-ghost', type: 'text', content: 'late' }
+            }
+          ],
+          cursor: 4
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await syncService.sync()
     expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-pull-ghost')).toBeUndefined()
     expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-pull-ghost')).toBeUndefined()
@@ -212,12 +209,10 @@ describe('fourth audit 2: push progress validation fails closed', () => {
     const pushMock = vi
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_e: string, _t: string | undefined, c: number) => {
-        pullCalls++
-        return { operations: [], cursor: c } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_e: string, c: number) => {
+      pullCalls++
+      return { operations: [], cursor: c } as any
+    })
     await expect(syncService.sync()).rejects.toThrow(/no progress/)
     // Finite: outbox retained (no loss), pull never reached, no success timestamp
     expect(syncService.listOutbox().length).toBe(1)
@@ -242,22 +237,18 @@ describe('fourth audit 2: push progress validation fails closed', () => {
     expect(syncService.listOutbox().length).toBe(2)
     const { syncClient } = await import('../SyncClient')
     let pushCalls = 0
-    const pushMock = vi
-      .spyOn(syncClient, 'push')
-      .mockImplementation(async (_ep: string, _t: string | undefined, req: any) => {
-        pushCalls++
-        const ids = (req.operations as Array<{ id: string }>).map((o) => o.id)
-        if (pushCalls === 1) {
-          // Partial: ack only the first id
-          return { acceptedIds: [ids[0]], cursor: 0 } as any
-        }
-        return { acceptedIds: ids, cursor: 0 } as any
-      })
+    const pushMock = vi.spyOn(syncClient, 'push').mockImplementation(async (_ep: string, req: any) => {
+      pushCalls++
+      const ids = (req.operations as Array<{ id: string }>).map((o) => o.id)
+      if (pushCalls === 1) {
+        // Partial: ack only the first id
+        return { acceptedIds: [ids[0]], cursor: 0 } as any
+      }
+      return { acceptedIds: ids, cursor: 0 } as any
+    })
     const pullMock = vi
       .spyOn(syncClient, 'pull')
-      .mockImplementation(
-        async (_e: string, _t: string | undefined, c: number) => ({ operations: [], cursor: c }) as any
-      )
+      .mockImplementation(async (_e: string, c: number) => ({ operations: [], cursor: c }) as any)
     await syncService.sync()
     expect(pushCalls).toBe(2)
     expect(syncService.listOutbox().length).toBe(0)
@@ -279,10 +270,8 @@ describe('fourth audit 3: contiguous pull framing rejects gaps', () => {
       try {
         return await syncClient.pull(
           'http://127.0.0.1:9',
-          undefined,
           cursor,
           'd1',
-          undefined,
           'ABCD2345',
           'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
         )
@@ -329,38 +318,36 @@ describe('fourth audit 3: contiguous pull framing rejects gaps', () => {
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
     // Bypass client validation via stubbed pull: seq 1 then 3 (gap skips 2)
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-gap-svc-1',
-                entityType: 'topic',
-                op: 'upsert',
-                entityId: 't-gap-svc-1',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 't-gap-svc-1', name: 'G1' }
-              },
-              {
-                seq: 3,
-                id: 'op-gap-svc-3',
-                entityType: 'topic',
-                op: 'upsert',
-                entityId: 't-gap-svc-3',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 't-gap-svc-3', name: 'G3' }
-              }
-            ],
-            cursor: 3
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-gap-svc-1',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 't-gap-svc-1',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 't-gap-svc-1', name: 'G1' }
+            },
+            {
+              seq: 3,
+              id: 'op-gap-svc-3',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 't-gap-svc-3',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 't-gap-svc-3', name: 'G3' }
+            }
+          ],
+          cursor: 3
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await expect(syncService.sync()).rejects.toThrow(/non-contiguous/)
     // Nothing applied past the gap: neither op materialized, cursor unmoved, no success
     expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-gap-svc-1')).toBeUndefined()

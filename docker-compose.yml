@@ -7,23 +7,25 @@
 # clients at `http://<server>:<port>` (unencrypted — see the Sync Settings
 # warning) or terminate HTTPS outside the relay and use `https://...`.
 #
-# User flow:
+# User flow (2026-10-05, no shared token):
 #   1. Start the relay:
 #        docker compose up -d --build
-#   2. Read the first-start log lines (port, token-file path, config path —
-#      never the token itself):
+#   2. Read the first-start log lines (port, config path, auth note —
+#      never any secret):
 #        docker compose logs sync-relay
-#   3. Fetch the persistent bearer token from the protected file:
-#        docker compose exec sync-relay cat /data/relay-token
-#   4. On the first Cherry Chat client, enter the server endpoint
+#   3. On each Cherry Chat client, enter the server endpoint only
 #      (`http://<server>:<port>` or your externally provided `https://...`)
-#      plus the token, and connect: that client becomes the founder and
-#      accepts later devices through the existing client pairing UI. There
-#      is no independent web admin UI.
+#      and Connect: each client registers and shows its own public device
+#      code, then pair devices with an explicit device-code request ->
+#      accept through the existing client pairing UI. A reachable server
+#      allows registration and pair requests, but no data flows without
+#      acceptance. There is no token to fetch and no independent web admin UI.
 #
 # All relay state persists in one user-owned bind mount (./relay-data):
-# the SQLite DB/WAL sidecars, the mode-0600 token file, and (only when
-# RELAY_PUBLIC_URL is set) the public relay-config.cherry artifact.
+# the SQLite DB/WAL sidecars and (only when RELAY_PUBLIC_URL is set) the
+# public relay-config.cherry artifact. Legacy `relay-token` files, if
+# present from earlier deployments, are ignored untouched (never read,
+# never deleted, never exposed).
 name: cherry-chat-relay
 
 services:
@@ -67,8 +69,6 @@ services:
       # public relay-config.cherry artifact; when unset, no config artifact
       # is written and users enter the endpoint manually.
       RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-}
-      # Optional: custom token-file location (default /data/relay-token).
-      RELAY_TOKEN_FILE: ${RELAY_TOKEN_FILE:-}
       # Optional: user-supplied certificate/key passthrough pair for native
       # relay HTTPS (both or neither; mount your files and set both paths).
       # The relay never generates certificates itself.

@@ -13,14 +13,12 @@ import {
   type TestRelayHandle
 } from './sync-relay'
 
-const TOKEN = 'bootstrap-defer-token'
-
 let relay: TestRelayHandle
 let dev: ProvisionedDevice
 
 beforeEach(async () => {
-  relay = await startTestRelay(TOKEN)
-  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
+  relay = await startTestRelay()
+  dev = (await provisionPairedDevices(relay.endpoint, 2))[0]
 })
 
 afterEach(async () => {
@@ -41,7 +39,6 @@ describe('in-memory relay validates before any channel write', () => {
     const res = await fetch(`${relay.endpoint}/sync/push`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
         ...provisionedHeaders(dev)
       },
@@ -56,7 +53,7 @@ describe('in-memory relay validates before any channel write', () => {
 
   it('malformed pull cursor is rejected before any data access', async () => {
     const res = await fetch(`${relay.endpoint}/sync/pull?cursor=12junk&deviceId=d-mem`, {
-      headers: { Authorization: `Bearer ${TOKEN}`, ...provisionedHeaders(dev) }
+      headers: { ...provisionedHeaders(dev) }
     })
     expect(res.status).toBe(400)
     const body = (await res.json().catch(() => ({}))) as { deviceSecret?: unknown }
@@ -65,7 +62,7 @@ describe('in-memory relay validates before any channel write', () => {
 
   it('noncanonical pull limit is rejected without channel access', async () => {
     const res = await fetch(`${relay.endpoint}/sync/pull?cursor=0&limit=07&deviceId=d-mem`, {
-      headers: { Authorization: `Bearer ${TOKEN}`, ...provisionedHeaders(dev) }
+      headers: { ...provisionedHeaders(dev) }
     })
     expect(res.status).toBe(400)
     expect(relay.getOperationCount()).toBe(0)

@@ -151,7 +151,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   const opened = openChatDb()
   sqlite = opened.sqlite
   db = opened.db
@@ -408,7 +407,7 @@ describe('cloneMessagesToTopic ordinary success sync', () => {
   it('dual-profile real relay converges the cloned target with no baseline and remote file refs local-only', async () => {
     const rdb = new Database(':memory:')
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'clone-dual' })
+    const server = createRelayServer(rdb)
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
         resolve()

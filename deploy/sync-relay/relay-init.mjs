@@ -5,8 +5,20 @@
  * deployment (see deploy/sync-relay/ and docs/work/multi-device-sync.md). It
  * prepares the persistent relay state, then the entrypoint `exec`s the
  * unchanged relay CLI (`scripts/sync-relay/server.ts`), which keeps its own
- * startup order (token/TLS validation before DB open/listen) and graceful
+ * startup order (TLS validation before DB open/listen) and graceful
  * shutdown.
+ *
+ * Service-wide shared bearer token removed (2026-10-05 user decision):
+ * this script never generates, reads, requires, exports, logs, or prints
+ * any shared token. `SYNC_RELAY_TOKEN` is never read or exported; a
+ * non-empty value fails closed with a redacted deprecation error (never
+ * echoed). `RELAY_TOKEN_FILE` is no longer supported; blank/whitespace
+ * (the default Compose `${VAR:-}` expansion) is treated as unset and
+ * ignored for compatibility, while a non-blank value fails closed with a
+ * redacted error. An existing legacy `relay-token` file in the data
+ * directory, if present, is IGNORED and LEFT byte-identical untouched:
+ * never read, never validated, never chmodded, never deleted, never
+ * logged, never exposed. No migration wipes it and no rewrite occurs.
  *
  * The relay does NOT generate, manage, install, or rotate any CA, server
  * certificate, trust anchor, fingerprint, or TLS lifecycle artifact
@@ -17,31 +29,34 @@
  * What this script does, in order:
  *   1. Set a restrictive umask (077) and validate platform (Linux unless
  *      RELAY_ALLOW_NON_LINUX=1), RELAY_NAME (1-128 chars), port, the data
- *      directory, the token-file location, the optional RELAY_PUBLIC_URL,
- *      and the optional user-supplied TLS passthrough files — all BEFORE any
+ *      directory, the optional RELAY_PUBLIC_URL, and the optional
+ *      user-supplied TLS passthrough files — all BEFORE any
  *      mutation (fail-closed). A legacy RELAY_LAN_IP variable is rejected
  *      explicitly so stale Compose files fail fast instead of being ignored.
- *   2. Create a cryptographically strong bearer token once (mode 0600,
- *      atomic temp + rename); reuse byte-identical on restart, fail closed
- *      on empty/corrupt file.
+ *      Legacy shared-token inputs (`RELAY_TOKEN_FILE` non-blank,
+ *      `SYNC_RELAY_TOKEN` non-empty) are rejected explicitly with redacted
+ *      errors (values never echoed) so stale Compose files fail fast.
+ *   2. (No token step — removed. Legacy `relay-token` files are ignored
+ *      untouched, never a blocker.)
  *   3. Optionally write a small versioned public config artifact (mode 0644,
  *      atomic) when RELAY_PUBLIC_URL is supplied. It carries only endpoint
  *      metadata supplied by the operator (public URL, relay name, versions)
- *      — never any token, certificate, or private key. Without
+ *      — never any token, secret, certificate, or private key. Without
  *      RELAY_PUBLIC_URL no config artifact is written and users enter the
  *      server endpoint manually. An existing config is strictly validated
  *      first (exact keys, types, issuedAt, public-URL consistency, no
- *      secrets); invalid artifacts fail closed without a rewrite. An
+ *      secrets — including `token`/`secret` keys rejected); invalid
+ *      artifacts fail closed without a rewrite. An
  *      existing valid config with identical semantic content is left
  *      byte-identical (issuedAt preserved).
  *   4. Ensure the relay DB path exists (empty placeholder when absent,
  *      mode 0600 atomic; existing DB/WAL/SHM/journal constrained to 0600;
  *      the relay CLI owns schema creation). Never delete existing state.
  *      Host bind-mount ownership/permissions still matter.
- *   5. Log only safe values: token-file path, DB path, config path (when
+ *   5. Log only safe values: DB path, config path (when
  *      written), public URL (when supplied), TLS passthrough paths (when
- *      supplied), and first-start/reuse status with instructions to fetch
- *      the token. Never log the token.
+ *      supplied), and first-start/reuse status. Never log any secret, token,
+ *      device code, or credential; no retrieval instructions are printed.
  *
  * No network access, no `eval`, no shell interpolation, no OpenSSL
  * dependency: all filesystem work uses stdlib calls. Importing this module
@@ -69,9 +84,12 @@ import { fileURLToPath } from 'node:url'
 
 export const RELAY_CONFIG_SCHEMA_VERSION = 2
 export const RELAY_INIT_VERSION = 2
-export const TOKEN_BYTES = 32
-export const MIN_TOKEN_LENGTH = 20
 
+// Legacy shared-token filename (2026-10-05 removed): existing files with
+// this name in the data directory are IGNORED byte-identical untouched —
+// never read, validated, chmodded, deleted, logged, or exposed. Kept as a
+// constant only so deployment notes and tests name the legacy artifact
+// without inventing new spellings. Init never creates this file.
 export const FILE_TOKEN = 'relay-token'
 export const FILE_CONFIG = 'relay-config.cherry'
 export const FILE_DB = 'relay.db'
@@ -135,14 +153,24 @@ export function validateRelayName(raw) {
 }
 
 /**
- * Resolve the token-file location. Blank/whitespace (the default Compose
- * `${RELAY_TOKEN_FILE:-}` expansion) is treated as unset and resolves to
- * `<dataDir>/relay-token`; otherwise the trimmed explicit path is resolved.
+ * Reject legacy shared-token inputs with redacted fail-closed errors.
+ * Blank/whitespace is treated as unset (default Compose `${VAR:-}`
+ * expansion) and ignored; non-blank/non-empty values fail without echoing
+ * the value. Never logs or returns any secret material.
  */
-export function resolveTokenFilePath(raw, dataDir) {
-  const v = String(raw ?? '').trim()
-  if (v.length === 0) return join(dataDir, FILE_TOKEN)
-  return resolve(v)
+export function rejectLegacyTokenInputs(env = process.env) {
+  const tokenFileRaw = env.RELAY_TOKEN_FILE
+  if (tokenFileRaw !== undefined && String(tokenFileRaw).trim().length > 0) {
+    throw new Error(
+      'RELAY_TOKEN_FILE is no longer supported (service-wide shared token removed 2026-10-05; per-device code+secret only; remove RELAY_TOKEN_FILE)'
+    )
+  }
+  const relayTokenRaw = env.SYNC_RELAY_TOKEN
+  if (relayTokenRaw !== undefined && String(relayTokenRaw).length > 0) {
+    throw new Error(
+      'SYNC_RELAY_TOKEN is no longer supported (service-wide shared token removed 2026-10-05; per-device code+secret only; unset SYNC_RELAY_TOKEN)'
+    )
+  }
 }
 
 /**
@@ -310,24 +338,10 @@ export function writeFileAtomic(path, content, mode) {
   }
 }
 
-/** Fail-closed token handling: reuse a valid stored token, else create once. */
-export function ensureToken(tokenPath) {
-  if (existsSync(tokenPath)) {
-    const current = readTextFile(tokenPath, 'token file').trim()
-    if (current.length < MIN_TOKEN_LENGTH) {
-      throw new Error('token file is corrupt (empty or too short); refusing to overwrite it automatically')
-    }
-    return { token: current, created: false }
-  }
-  const token = randomBytes(TOKEN_BYTES).toString('hex')
-  writeFileAtomic(tokenPath, `${token}\n`, 0o600)
-  return { token, created: true }
-}
-
 /**
  * Build the public relay config artifact (JSON-serializable). Contains only
  * operator-supplied endpoint metadata — relay name, public URL, and
- * schema/init version metadata — never any token, certificate, or key.
+ * schema/init version metadata — never any token, secret, certificate, or key.
  */
 export function buildPublicConfig({ relayName, publicUrl, issuedAt }) {
   return {
@@ -473,17 +487,19 @@ function modeOf(path) {
  * Run first-start initialization (or reuse validation) from environment.
  * Returns safe summary lines for logging. Throws fail-closed on any problem.
  * Reads: RELAY_PORT (default 3030), RELAY_DATA_DIR (default /data),
- * RELAY_NAME (default cherry-relay), RELAY_TOKEN_FILE (default
- * <dataDir>/relay-token), RELAY_PUBLIC_URL (optional; when unset no public
- * config artifact is written), RELAY_TLS_CERT_FILE/RELAY_TLS_KEY_FILE
- * (optional user-supplied passthrough pair, forwarded only),
- * RELAY_ALLOW_NON_LINUX. A legacy RELAY_LAN_IP variable is rejected so
- * stale Compose files fail fast.
+ * RELAY_NAME (default cherry-relay), RELAY_PUBLIC_URL (optional; when unset
+ * no public config artifact is written), RELAY_TLS_CERT_FILE/
+ * RELAY_TLS_KEY_FILE (optional user-supplied passthrough pair, forwarded
+ * only), RELAY_ALLOW_NON_LINUX. A legacy RELAY_LAN_IP variable is rejected
+ * so stale Compose files fail fast. Legacy shared-token inputs
+ * (non-blank RELAY_TOKEN_FILE, non-empty SYNC_RELAY_TOKEN) are rejected
+ * with redacted errors; an existing legacy `relay-token` file is ignored
+ * untouched and never blocks init.
  */
 export function initFromEnv(env = process.env) {
   // Restrictive creation mask first: DB WAL/SHM sidecars and any new files
   // default to owner-only. The public config (when written) is explicitly
-  // chmodded to 0644 afterwards; secrets stay 0600. Host bind-mount
+  // chmodded to 0644 afterwards. Host bind-mount
   // ownership/permissions still matter and are not overridden here.
   try {
     process.umask(0o077)
@@ -498,6 +514,7 @@ export function initFromEnv(env = process.env) {
       'RELAY_LAN_IP is no longer supported (the relay uses standard Docker bridge networking with ports:; remove RELAY_LAN_IP from your Compose file)'
     )
   }
+  rejectLegacyTokenInputs(env)
   const port = validatePort(env.RELAY_PORT ?? '3030')
   const dataDir = resolve(String(env.RELAY_DATA_DIR ?? '/data'))
   const relayName = validateRelayName(env.RELAY_NAME ?? 'cherry-relay')
@@ -516,12 +533,8 @@ export function initFromEnv(env = process.env) {
   }
   if (!dirStat.isDirectory()) throw new Error(`data path is not a directory (${dataDir})`)
 
-  const tokenPath = resolveTokenFilePath(env.RELAY_TOKEN_FILE, dataDir)
   const configPath = join(dataDir, FILE_CONFIG)
   const dbPath = join(dataDir, FILE_DB)
-
-  const token = ensureToken(tokenPath)
-  chmodSync(tokenPath, 0o600)
 
   let config = null
   if (publicUrl !== null) {
@@ -548,21 +561,22 @@ export function initFromEnv(env = process.env) {
       } catch {}
     }
   }
+  // Legacy `relay-token` files are deliberately never touched here:
+  // no read, no stat, no chmod, no delete. They stay byte-identical and
+  // never block init.
 
-  const firstStart = token.created || (config?.created ?? false) || dbCreated
-  const fileModes = { token: modeOf(tokenPath).toString(8), db: modeOf(dbPath).toString(8) }
+  const firstStart = (config?.created ?? false) || dbCreated
+  const fileModes = { db: modeOf(dbPath).toString(8) }
   if (config !== null) fileModes.config = modeOf(configPath).toString(8)
   return {
     port,
     dataDir,
-    tokenPath,
     configPath: config !== null ? configPath : null,
     dbPath,
     publicUrl,
     tls,
     firstStart,
     status: {
-      token: token.created ? 'created' : 'reused',
       config:
         config === null ? 'skipped' : config.created ? 'created' : config.reused ? 'reused-identical' : 'rewritten',
       db: dbCreated ? 'created' : 'reused',
@@ -575,7 +589,6 @@ export function initFromEnv(env = process.env) {
 function printSafeSummary(result) {
   const lines = [
     `[relay-init] port: ${result.port} (container-internal bind 0.0.0.0; host exposure via Docker ports:)`,
-    `[relay-init] token file: ${result.tokenPath} (mode 600; retrieve with: cat ${result.tokenPath})`,
     `[relay-init] db file: ${result.dbPath}`,
     result.configPath !== null
       ? `[relay-init] config file: ${result.configPath}`
@@ -584,8 +597,9 @@ function printSafeSummary(result) {
     result.tls !== null
       ? `[relay-init] TLS: user-supplied passthrough cert=${result.tls.certFile} key=${result.tls.keyFile} (no relay-owned certificates)`
       : '[relay-init] TLS: none (plain HTTP; the relay generates no certificates)',
+    `[relay-init] auth: per-device code+secret only (no shared token; registration open, pairing request/accept required)`,
     `[relay-init] status: ${result.firstStart ? 'first-start' : 'reuse'} ` +
-      `(token=${result.status.token} config=${result.status.config} db=${result.status.db} tls=${result.status.tls})`
+      `(config=${result.status.config} db=${result.status.db} tls=${result.status.tls})`
   ]
   for (const line of lines) console.log(line)
 }

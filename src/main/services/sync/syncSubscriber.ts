@@ -64,10 +64,10 @@ export function parseSseCursorHints(buffer: string): { hints: number[]; rest: st
 }
 
 /**
- * Main-owned notification-only SSE subscriber over fetch streaming so the
- * Authorization header is retained (no EventSource, no query token, no new
- * dependency). The stream carries only a non-authoritative cursor hint;
- * all data moves through the existing authenticated HTTP push/pull path.
+ * Main-owned notification-only SSE subscriber over fetch streaming (no
+ * EventSource, no query credential, no new dependency). The stream carries
+ * only a non-authoritative cursor hint; all data moves through the existing
+ * device-authenticated HTTP push/pull path.
  */
 export interface SyncSubscriberDevice {
   deviceCode: string
@@ -83,19 +83,14 @@ export class SyncSubscriber {
     return this.running
   }
 
-  start(
-    endpoint: string,
-    token: string | undefined,
-    events: SyncSubscriberEvents,
-    device?: SyncSubscriberDevice
-  ): void {
+  start(endpoint: string, events: SyncSubscriberEvents, device?: SyncSubscriberDevice): void {
     this.stop()
     this.stopped = false
     const url = `${endpoint.replace(/\/$/, '')}/sync/subscribe?cursor=0`
     const controller = new AbortController()
     this.abort = controller
     this.running = true
-    void this.connect(url, token, events, controller.signal, device)
+    void this.connect(url, events, controller.signal, device)
   }
 
   stop(): void {
@@ -112,7 +107,6 @@ export class SyncSubscriber {
 
   private async connect(
     url: string,
-    token: string | undefined,
     events: SyncSubscriberEvents,
     signal: AbortSignal,
     device?: SyncSubscriberDevice
@@ -132,7 +126,6 @@ export class SyncSubscriber {
     }
     try {
       const headers: Record<string, string> = { Accept: 'text/event-stream' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
       // Channel-scoped SSE (SYNC-CC-016): the subscription authenticates as
       // the registered device so the relay binds it to exactly one channel.
       // Validation failures throw before transport (fail closed).

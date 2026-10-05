@@ -66,7 +66,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   configStore.set('sync:deviceCode', 'ABCD2345')
   configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
   sqlite = openInMemory()
@@ -93,7 +92,7 @@ describe('config refresh failure is visible and invalidates stale cycles', () =>
     const captureSpy = vi.spyOn(syncService, 'recordCaptureFailure')
     const fakeSubscriber = { start: vi.fn(), stop: vi.fn() }
     const svc = new Cls({
-      getConfig: (): { endpoint: string; token?: string; enabled: boolean } => {
+      getConfig: (): { endpoint: string; enabled: boolean } => {
         throw new Error('config-refresh-boom')
       },
       isAttached: () => true,

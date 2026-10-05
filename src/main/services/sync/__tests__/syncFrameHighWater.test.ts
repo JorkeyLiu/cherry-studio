@@ -89,7 +89,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   const opened = openChatDb()
   sqlite = opened.sqlite
   db = opened.db
@@ -316,7 +315,7 @@ describe('frame high-water monotonicity across invalidate/remint', () => {
       const rdb = new Database(':memory:')
       relayDbs.push(rdb)
       ensureRelaySchema(rdb)
-      const server = createRelayServer(rdb, { token: 'hw-token' })
+      const server = createRelayServer(rdb)
       relayServers.push(server as unknown as { close: (cb?: () => void) => void })
       await new Promise<void>((resolve) => {
         ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>

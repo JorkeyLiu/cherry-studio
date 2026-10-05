@@ -134,15 +134,14 @@ export class SyncClient {
 
   async push(
     endpoint: string,
-    token: string | undefined,
     req: SyncPushRequest,
-    externalSignal?: AbortSignal,
-    deviceCode?: string,
-    deviceSecret?: string
+    deviceCode: string,
+    deviceSecret: string,
+    externalSignal?: AbortSignal
   ): Promise<{ cursor: number; acceptedIds: string[]; channelId?: string }> {
     const validation = validateEndpointUrl(endpoint)
     if (validation) throw new Error(validation)
-    if (deviceCode === undefined || deviceSecret === undefined) {
+    if (!deviceCode || !deviceSecret) {
       throw new Error('push failed: service not connected (registration required)')
     }
     const url = endpoint.replace(/\/$/, '') + '/sync/push'
@@ -162,7 +161,7 @@ export class SyncClient {
         'Content-Type': 'application/json',
         ...this.deviceHeaders(deviceCode, deviceSecret)
       }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       const res = await fetch(url, {
         method: 'POST',
         headers,
@@ -210,12 +209,11 @@ export class SyncClient {
 
   async pull(
     endpoint: string,
-    token: string | undefined,
     cursor: number,
     deviceId: string,
-    externalSignal?: AbortSignal,
-    deviceCode?: string,
-    deviceSecret?: string
+    deviceCode: string,
+    deviceSecret: string,
+    externalSignal?: AbortSignal
   ): Promise<SyncPullResponse> {
     const validation = validateEndpointUrl(endpoint)
     if (validation) throw new Error(validation)
@@ -223,7 +221,7 @@ export class SyncClient {
     // unsafe cursor into the relay request; fail closed before any transport.
     assertSafeCursor(cursor, 'pull request')
     if (!isValidSyncDeviceId(deviceId)) throw new Error('device id invalid')
-    if (deviceCode === undefined || deviceSecret === undefined) {
+    if (!deviceCode || !deviceSecret) {
       throw new Error('pull failed: service not connected (registration required)')
     }
     const url = new URL(endpoint.replace(/\/$/, '') + '/sync/pull')
@@ -242,7 +240,7 @@ export class SyncClient {
     }
     try {
       const headers: Record<string, string> = { ...this.deviceHeaders(deviceCode, deviceSecret) }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       const res = await fetch(url.toString(), { method: 'GET', headers, signal: controller.signal })
       if (!res.ok) {
         const text = await res.text().catch(() => '')
@@ -319,8 +317,7 @@ export class SyncClient {
   /**
    * Receiver bootstrap fetch (SYNC-CC-022/023, SYNC-DATA-046/047): GET the
    * caller's channel current-effective `sync-baseline-wire-v1` envelope.
-   * Auth follows the existing device-header plane; Bearer token added when
-   * present. 200 strictly parses the raw body via the shared
+   * Auth follows the device-header plane. 200 strictly parses the raw body via the shared
    * `parseEnvelopeJson` (exact keys/duplicate-key rejection, no reinterpret);
    * digest recompute stays in the wire apply adapter. 404 with the strict
    * `{error:'baseline-not-found'}` body is the explicit no-baseline typed
@@ -330,7 +327,6 @@ export class SyncClient {
    */
   async fetchBaseline(
     endpoint: string,
-    token: string | undefined,
     deviceCode: string,
     deviceSecret: string,
     externalSignal?: AbortSignal
@@ -354,7 +350,7 @@ export class SyncClient {
     }
     try {
       const headers: Record<string, string> = { ...this.deviceHeaders(deviceCode, deviceSecret) }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       const res = await fetch(url, { method: 'GET', headers, signal: controller.signal })
       if (res.status === 404) {
         const text = await res.text().catch(() => '')
@@ -393,17 +389,15 @@ export class SyncClient {
    * Publisher single-stage publish (SYNC-CC-022/SYNC-DATA-025/046): exactly one
    * client-declared `PUT /sync/baseline` per call with the locked
    * `sync-baseline-wire-v1` envelope as the direct JSON body. No relay-issued
-   * fence, token, or prepare handshake exists and none is performed here.
-   * Auth follows the existing device-header plane; Bearer token added when
-   * present. The envelope is strictly validated before transport (fail closed,
+   * fence or prepare handshake exists and none is performed here.
+   * Auth follows the device-header plane. The envelope is strictly validated before transport (fail closed,
    * never PUT); the 200 body is strictly parsed via the shared
    * `parseEnvelopeJson` (exact keys/duplicate-key rejection). Non-2xx
-   * (400/401/403/409/500) retain the relay `{error}` via the existing safe
+   * (400/403/409/500) retain the relay `{error}` via the existing safe
    * mapping with no silent overwrite and no automatic fallback.
    */
   async publishBaseline(
     endpoint: string,
-    token: string | undefined,
     envelope: SyncEnvelopeAny,
     deviceCode: string,
     deviceSecret: string,
@@ -436,7 +430,7 @@ export class SyncClient {
         'Content-Type': 'application/json',
         ...this.deviceHeaders(deviceCode, deviceSecret)
       }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       const res = await fetch(url, {
         method: 'PUT',
         headers,
@@ -483,7 +477,6 @@ export class SyncClient {
    */
   async uploadAttachment(
     endpoint: string,
-    token: string | undefined,
     args: { digest: string; byteLength?: number; body: unknown },
     deviceCode: string,
     deviceSecret: string,
@@ -522,7 +515,7 @@ export class SyncClient {
         'Content-Type': 'application/octet-stream',
         ...this.deviceHeaders(deviceCode, deviceSecret)
       }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       if (args.byteLength !== undefined) headers['Content-Length'] = String(args.byteLength)
       const init: Record<string, unknown> = {
         method: 'PUT',
@@ -587,7 +580,6 @@ export class SyncClient {
    */
   async downloadAttachment(
     endpoint: string,
-    token: string | undefined,
     args: { digest: string; expectedByteLength?: number },
     deviceCode: string,
     deviceSecret: string,
@@ -621,7 +613,7 @@ export class SyncClient {
     }
     try {
       const headers: Record<string, string> = { ...this.deviceHeaders(deviceCode, deviceSecret) }
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       const res = await fetch(url, { method: 'GET', headers, signal: controller.signal })
       if (!res.ok) {
         const text = await res.text().catch(() => '')
@@ -686,7 +678,6 @@ export class SyncClient {
 
   private async requestJson(
     endpoint: string,
-    token: string | undefined,
     path: string,
     init: {
       method: string
@@ -717,7 +708,7 @@ export class SyncClient {
     }
     try {
       const headers: Record<string, string> = {}
-      if (token) headers['Authorization'] = `Bearer ${token}`
+
       if (init.deviceCode !== undefined || init.deviceSecret !== undefined) {
         if (init.deviceCode === undefined || init.deviceSecret === undefined) {
           throw new Error('device code and secret are both required')
@@ -761,7 +752,6 @@ export class SyncClient {
    */
   async register(
     endpoint: string,
-    token: string | undefined,
     args: { deviceCode?: string; deviceSecret?: string; deviceId?: string }
   ): Promise<{ deviceCode: string; deviceSecret?: string }> {
     const endpointErr = validateEndpointUrl(endpoint)
@@ -780,7 +770,7 @@ export class SyncClient {
     if (args.deviceCode !== undefined) body.deviceCode = normalizePairingCode(args.deviceCode)
     if (args.deviceSecret !== undefined) body.deviceSecret = args.deviceSecret
     if (args.deviceId !== undefined) body.deviceId = args.deviceId
-    const data = await this.requestJson(endpoint, token, '/sync/register', { method: 'POST', body })
+    const data = await this.requestJson(endpoint, '/sync/register', { method: 'POST', body })
     if (!data || typeof data.deviceCode !== 'string' || validatePairingCode(data.deviceCode)) {
       throw new Error('register response malformed: deviceCode must be a device code')
     }
@@ -793,13 +783,8 @@ export class SyncClient {
   }
 
   /** Pairing/channel state for the calling device (SYNC-CC-003/006). */
-  async getPairState(
-    endpoint: string,
-    token: string | undefined,
-    deviceCode: string,
-    deviceSecret: string
-  ): Promise<SyncPairStateResponse> {
-    const data = await this.requestJson(endpoint, token, '/sync/state', {
+  async getPairState(endpoint: string, deviceCode: string, deviceSecret: string): Promise<SyncPairStateResponse> {
+    const data = await this.requestJson(endpoint, '/sync/state', {
       method: 'GET',
       deviceCode,
       deviceSecret
@@ -856,7 +841,6 @@ export class SyncClient {
    */
   async requestPairing(
     endpoint: string,
-    token: string | undefined,
     args: { targetCode: string },
     deviceCode: string,
     deviceSecret: string
@@ -864,7 +848,7 @@ export class SyncClient {
     this.assertPairingTransport(endpoint)
     const codeErr = validatePairingCode(args.targetCode)
     if (codeErr) throw new Error(codeErr)
-    const data = await this.requestJson(endpoint, token, '/sync/pair/request', {
+    const data = await this.requestJson(endpoint, '/sync/pair/request', {
       method: 'POST',
       body: { targetCode: normalizePairingCode(args.targetCode) },
       deviceCode,
@@ -878,7 +862,6 @@ export class SyncClient {
 
   async cancelPairing(
     endpoint: string,
-    token: string | undefined,
     args: { requestId?: string },
     deviceCode: string,
     deviceSecret: string
@@ -888,7 +871,7 @@ export class SyncClient {
       const idErr = validatePairingRequestId(args.requestId)
       if (idErr) throw new Error(idErr)
     }
-    const data = await this.requestJson(endpoint, token, '/sync/pair/cancel', {
+    const data = await this.requestJson(endpoint, '/sync/pair/cancel', {
       method: 'POST',
       body: args.requestId !== undefined ? { requestId: args.requestId } : {},
       deviceCode,
@@ -902,14 +885,13 @@ export class SyncClient {
 
   async acceptPairing(
     endpoint: string,
-    token: string | undefined,
     args: { requestId: string },
     deviceCode: string,
     deviceSecret: string
   ): Promise<{ channelId: string; seedBaselinePending?: boolean }> {
     const idErr = validatePairingRequestId(args.requestId)
     if (idErr) throw new Error(idErr)
-    const data = await this.requestJson(endpoint, token, '/sync/pair/accept', {
+    const data = await this.requestJson(endpoint, '/sync/pair/accept', {
       method: 'POST',
       body: args,
       deviceCode,
@@ -927,14 +909,13 @@ export class SyncClient {
 
   async rejectPairing(
     endpoint: string,
-    token: string | undefined,
     args: { requestId: string },
     deviceCode: string,
     deviceSecret: string
   ): Promise<void> {
     const idErr = validatePairingRequestId(args.requestId)
     if (idErr) throw new Error(idErr)
-    const data = await this.requestJson(endpoint, token, '/sync/pair/reject', {
+    const data = await this.requestJson(endpoint, '/sync/pair/reject', {
       method: 'POST',
       body: args,
       deviceCode,
@@ -948,8 +929,8 @@ export class SyncClient {
    * connected relay. Service registration and local chats are preserved by
    * contract (client-side; the relay only drops membership).
    */
-  async unpair(endpoint: string, token: string | undefined, deviceCode: string, deviceSecret: string): Promise<void> {
-    const data = await this.requestJson(endpoint, token, '/sync/pair/unpair', {
+  async unpair(endpoint: string, deviceCode: string, deviceSecret: string): Promise<void> {
+    const data = await this.requestJson(endpoint, '/sync/pair/unpair', {
       method: 'POST',
       body: {},
       deviceCode,

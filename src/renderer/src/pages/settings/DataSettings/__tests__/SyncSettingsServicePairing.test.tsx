@@ -38,7 +38,7 @@ interface MockSetup {
 
 function mockSyncApi(setup: MockSetup): Record<string, ReturnType<typeof vi.fn>> {
   const api = {
-    getConfig: vi.fn(async () => ({ endpoint: 'http://127.0.0.1:3030', token: '', enabled: true })),
+    getConfig: vi.fn(async () => ({ endpoint: 'http://127.0.0.1:3030', enabled: true })),
     setConfig: vi.fn(async (cfg: unknown) => cfg),
     getStatus: vi.fn(async () => ({
       enabled: true,

@@ -69,7 +69,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:3999')
-  configStore.set('sync:token', 'test-token')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -153,7 +152,7 @@ describe('channel-change signal drives subscriber restart', () => {
     const { SyncAutoService } = await import('../syncAuto')
     let starts = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:3999', token: 'test-token', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:3999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({ deviceCode: DEVICE_CODE, deviceSecret: secret }),
       runSync: async () => ({ ok: true }),

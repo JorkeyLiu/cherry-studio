@@ -117,7 +117,7 @@ function seedPublishableTopic(topicId = 'auto-pub-topic-1', ts = 7, op = 'aupub7
 
 function validDeps(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    getConfig: () => ({ endpoint: ENDPOINT, token: undefined, enabled: true }),
+    getConfig: () => ({ endpoint: ENDPOINT, enabled: true }),
     isAttached: () => true,
     getCredentials: () => ({ deviceCode: CODE, deviceSecret: SECRET }),
     createSubscriber: () => ({ start: vi.fn(), stop: vi.fn() }) as never,
@@ -129,7 +129,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', ENDPOINT)
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -402,7 +401,7 @@ describe('publishBaselineIfEligible production eligibility', () => {
     seedPublishableTopic()
     mockEmptyPull()
     let puts = 0
-    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       puts += 1
       const raw = JSON.stringify(envelope)
       const { parseEnvelopeJson } = await import('@shared/sync')

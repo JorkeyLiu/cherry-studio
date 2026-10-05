@@ -4,7 +4,6 @@
  * child+frame race that previously deadlocked as incomplete fail-closed, plus
  * unit coverage for order/clock/atomicity/negatives/failure-injection.
  */
-import { randomBytes } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -48,7 +47,6 @@ let dbB: BetterSQLite3Database<typeof schema> | null = null
 let relayDb: Database.Database | null = null
 let relayServer: { close: (cb?: () => void) => void } | null = null
 let relayEndpoint = ''
-let relayToken = ''
 let relayDbPath = ''
 let ownedTmp = ''
 let credA = { deviceId: '', code: '', secret: '' }
@@ -70,7 +68,6 @@ function bindProfile(which: 'A' | 'B', creds: { deviceId: string; code: string; 
   ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:endpoint', relayEndpoint)
-  configStore.set('sync:token', relayToken)
   configStore.set('sync:enabled', true)
   if (creds.deviceId) configStore.set('deviceId', creds.deviceId)
   else configStore.delete('deviceId')
@@ -165,7 +162,6 @@ beforeEach(() => {
   credB = { deviceId: '', code: '', secret: '' }
   ownedTmp = mkdtempSync(join(tmpdir(), 'sync-upsert-repair-'))
   relayDbPath = join(ownedTmp, 'relay.db')
-  relayToken = `repair-${randomBytes(8).toString('hex')}`
   relayDb = new Database(relayDbPath)
   relayDb.pragma('journal_mode = WAL')
   ensureRelaySchema(relayDb)
@@ -214,7 +210,7 @@ afterEach(async () => {
 
 async function startRelay(): Promise<void> {
   if (!relayDb) throw new Error('relay db not initialized')
-  const server = createRelayServer(relayDb, { token: relayToken })
+  const server = createRelayServer(relayDb)
   relayServer = server as unknown as { close: (cb?: () => void) => void }
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const addr = server.address() as { port: number }
@@ -451,7 +447,6 @@ describe('3) orphan buffer paths converge', () => {
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -553,7 +548,6 @@ describe('4) order prefix stable and clock/entity rules', () => {
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -630,7 +624,6 @@ describe('5) negatives never mint repair', () => {
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -919,7 +912,6 @@ describe('6) failure injection rolls back whole apply tx', () => {
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -989,7 +981,6 @@ describe('7) existing paths never gain repair frames', () => {
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -1100,7 +1091,6 @@ describe('8) covering-frame complete-clock semantics (timestamp,operationId)', (
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -1186,7 +1176,6 @@ describe('8) covering-frame complete-clock semantics (timestamp,operationId)', (
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -1242,7 +1231,6 @@ describe('9) extreme cross-device skew: huge peer obsolete frame heals via known
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db
@@ -1466,7 +1454,6 @@ describe('10) incoming-incomplete repair failure rolls back whole apply tx', () 
     configStore.clear()
     configStore.set('sync:enabled', true)
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     const { sqlite, db } = openChatDb()
     ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
     ;(chatDbService as unknown as { db: unknown }).db = db

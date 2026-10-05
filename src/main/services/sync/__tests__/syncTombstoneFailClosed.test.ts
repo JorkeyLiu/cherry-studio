@@ -46,7 +46,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as any, sqlite)
@@ -203,28 +202,26 @@ describe('fail closed 3: tombstone read failure rejects apply rather than treats
     const pushMock = vi
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-fc3-pull-m',
-                entityType: 'message',
-                op: 'upsert',
-                entityId: 'm-fc3-pull',
-                timestamp: T,
-                deviceId: 'remote',
-                payload: { id: 'm-fc3-pull', topicId: 't-fc3-pull', role: 'user', content: 'hi' }
-              }
-            ],
-            cursor: 1
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-fc3-pull-m',
+              entityType: 'message',
+              op: 'upsert',
+              entityId: 'm-fc3-pull',
+              timestamp: T,
+              deviceId: 'remote',
+              payload: { id: 'm-fc3-pull', topicId: 't-fc3-pull', role: 'user', content: 'hi' }
+            }
+          ],
+          cursor: 1
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     try {
       await expect(syncService.sync()).rejects.toThrow(/injected pull tombstone read failure/)
     } finally {
@@ -361,28 +358,26 @@ describe('fail closed 5: malformed persisted tombstones throw, never treated as 
     const pushMock = vi
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-fc5-sync-m',
-                entityType: 'message',
-                op: 'upsert',
-                entityId: 'm-fc5-sync',
-                timestamp: T,
-                deviceId: 'remote',
-                payload: { id: 'm-fc5-sync', topicId: 't-fc5-sync', role: 'user', content: 'hi' }
-              }
-            ],
-            cursor: 1
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-fc5-sync-m',
+              entityType: 'message',
+              op: 'upsert',
+              entityId: 'm-fc5-sync',
+              timestamp: T,
+              deviceId: 'remote',
+              payload: { id: 'm-fc5-sync', topicId: 't-fc5-sync', role: 'user', content: 'hi' }
+            }
+          ],
+          cursor: 1
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     try {
       await expect(syncService.sync()).rejects.toThrow(/malformed tombstone/)
     } finally {

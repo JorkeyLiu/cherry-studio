@@ -7,7 +7,7 @@
  * appendMessage/updateMessage with branchId). No legacy clone-prefix
  * (branchMessagesToTopic) anywhere in this spec.
  * LOCK-BRANCH-E2E-002: relay is per-test, in-process, loopback-bound to an
- * ephemeral port, token-protected, fully closed/cleaned in teardown (same
+ * ephemeral port, fully closed/cleaned in teardown (same
  * contract as sync-two-profiles.spec.ts).
  * LOCK-BRANCH-E2E-003: profiles are independent children of the same owned
  * temp root with exact-token cleanup; no hand-rolled Electron launch and no
@@ -49,8 +49,6 @@ import {
 } from '../../utils/sync-second-profile'
 import type { TestRelayHandle } from '../../utils/sync-relay'
 import { startTestRelay } from '../../utils/sync-relay'
-
-const RELAY_TOKEN = 'e2e-branch-sync-token-1'
 
 // Verified against packages/shared/sync/baselineWire.ts (actual source):
 // WIRE_VERSION_V5 = 'sync-baseline-wire-v5',
@@ -480,7 +478,6 @@ export interface RelayBaselineV3View {
 
 async function pollForRelayBaselineV3(
   endpoint: string,
-  token: string,
   observer: { code: string; secret: string },
   timeoutMs = 120000
 ): Promise<RelayBaselineV3View> {
@@ -488,11 +485,7 @@ async function pollForRelayBaselineV3(
   let last = 'no-response'
   while (Date.now() < deadline) {
     const res = await fetch(`${endpoint.replace(/\/$/, '')}/sync/baseline`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'x-sync-device-code': observer.code,
-        'x-sync-device-secret': observer.secret
-      }
+      headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
     })
     if (res.status === 200) {
       const body = (await res.json()) as Record<string, unknown>
@@ -564,12 +557,12 @@ test.describe('Branch sync two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // A establishes the versioned main route: two main-owned messages.
@@ -648,12 +641,12 @@ test.describe('Branch sync two-profile real path', () => {
     let profileB: SecondSyncProfile | null = null
     let offlineBlocker: OfflineBlocker | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Converged branch world first (manual rounds are setup only).
@@ -683,7 +676,7 @@ test.describe('Branch sync two-profile real path', () => {
       // Offline gate: A points at a test-owned unavailable endpoint, then
       // renames the branch header and edits the owned suffix message.
       offlineBlocker = await startOfflineBlocker()
-      await setSyncConfigViaApi(pageA, { endpoint: offlineBlocker.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: offlineBlocker.endpoint, enabled: true })
       const renamed = await renameBranchViaApi(pageA, topic, branchId, 'AutoB-renamed')
       expect(renamed.name).toBe('AutoB-renamed')
       await updateBranchMessageViaApi(pageA, topic, branchId, 'e2e-branch2-mb1', { content: 'auto owned edited' })
@@ -703,7 +696,7 @@ test.describe('Branch sync two-profile real path', () => {
       } finally {
         offlineBlocker = null
       }
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
 
       // A's automation drains the queued rename/edit; B's automation pulls
       // them via the relay hint. Both are asserted by polling only.
@@ -729,12 +722,12 @@ test.describe('Branch sync two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // Main prefix plus a nested subtree (B2 under B1) and a sibling (B3).
@@ -855,11 +848,11 @@ test.describe('Branch sync two-profile real path', () => {
       if (errors.length > 1) throw new AggregateError(errors, 'branch baseline E2E cleanup failed')
     }
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // A builds the branch inventory; the op path converges B first.
@@ -894,8 +887,8 @@ test.describe('Branch sync two-profile real path', () => {
       // intent -> publishBaselineIfEligible -> relay PUT). Poll the relay
       // until it holds the full branch domain; no production publish IPC
       // exists or is added for this.
-      const observer = await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, pageA)
-      const baseline = await pollForRelayBaselineV3(relay.endpoint, RELAY_TOKEN, observer)
+      const observer = await provisionObserverViaRaw(relay.endpoint, pageA)
+      const baseline = await pollForRelayBaselineV3(relay.endpoint, observer)
       expect(baseline.branchIds).toContain(branchId)
       expect(baseline.branchSuffixParents).toContain(branchId)
 
@@ -906,7 +899,7 @@ test.describe('Branch sync two-profile real path', () => {
       // relay's per-device baseline GET-200 counter plus the converged state.
       profileC = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageC = profileC.page
-      await setSyncConfigViaApi(pageC, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageC, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageC)
       const deviceC = await getDeviceCodeViaApi(pageC)
       if (!deviceC.deviceCode) throw new Error('receiver device code missing')
@@ -940,12 +933,12 @@ test.describe('Branch sync two-profile real path', () => {
     let relay: TestRelayHandle | null = null
     let profileB: SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       let pageB = profileB.page
 
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       // A establishes four synced main-route turns (user + askId assistant each).
@@ -1015,7 +1008,6 @@ test.describe('Branch sync two-profile real path', () => {
       // and ownership survive with the relay still alive.
       profileB = await relaunchSecondSyncProfile(profileB, ownedTmpRoot, mockPort, {
         expectedEndpoint: relay.endpoint,
-        expectedToken: RELAY_TOKEN,
         expectedEnabled: true
       })
       pageB = profileB.page

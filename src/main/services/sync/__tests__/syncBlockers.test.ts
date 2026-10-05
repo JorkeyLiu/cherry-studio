@@ -293,7 +293,6 @@ describe('cursor semantics: push must not advance pull cursor', () => {
   it('push cursor does not overwrite pull cursor, pull pages correctly', async () => {
     // Setup config
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     configStore.set('sync:deviceCode', 'ABCD2345')
     configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     configStore.set('sync:enabled', true)
@@ -312,39 +311,37 @@ describe('cursor semantics: push must not advance pull cursor', () => {
     })
     // Mock pull to return 3 ops in first page, cursor 8, then empty
     let pullCalls = 0
-    const pullSpy = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        pullCalls++
-        if (cursor === 5) {
-          return {
-            operations: [
-              {
-                seq: 6,
-                id: 'op-6',
-                entityType: 'topic',
-                op: 'upsert',
-                entityId: 't-6',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 't-6', name: 'N6' }
-              },
-              {
-                seq: 7,
-                id: 'op-7',
-                entityType: 'topic',
-                op: 'upsert',
-                entityId: 't-7',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 't-7', name: 'N7' }
-              }
-            ],
-            cursor: 7
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullSpy = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      pullCalls++
+      if (cursor === 5) {
+        return {
+          operations: [
+            {
+              seq: 6,
+              id: 'op-6',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 't-6',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 't-6', name: 'N6' }
+            },
+            {
+              seq: 7,
+              id: 'op-7',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 't-7',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 't-7', name: 'N7' }
+            }
+          ],
+          cursor: 7
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
 
     await syncService.sync()
     // After sync, outbox cleared, pull cursor should be 7 (last returned seq), NOT 9999 from push
@@ -361,7 +358,6 @@ describe('cursor semantics: push must not advance pull cursor', () => {
 
   it('orphan block prevents cursor advancement beyond it', async () => {
     configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-    configStore.set('sync:token', '')
     configStore.set('sync:deviceCode', 'ABCD2345')
     configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     configStore.set('sync:enabled', true)
@@ -373,38 +369,36 @@ describe('cursor semantics: push must not advance pull cursor', () => {
     const pushMock = vi
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
-    const pull1 = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-orphan-b',
-                entityType: 'message_block',
-                op: 'upsert',
-                entityId: 'b-orphan-2',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 'b-orphan-2', messageId: 'm-parent-missing', type: 'text', content: 'hi' }
-              },
-              {
-                seq: 2,
-                id: 'op-good-t',
-                entityType: 'topic',
-                op: 'upsert',
-                entityId: 't-after-orphan',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 't-after-orphan', name: 'After' }
-              }
-            ],
-            cursor: 2
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pull1 = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-orphan-b',
+              entityType: 'message_block',
+              op: 'upsert',
+              entityId: 'b-orphan-2',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 'b-orphan-2', messageId: 'm-parent-missing', type: 'text', content: 'hi' }
+            },
+            {
+              seq: 2,
+              id: 'op-good-t',
+              entityType: 'topic',
+              op: 'upsert',
+              entityId: 't-after-orphan',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 't-after-orphan', name: 'After' }
+            }
+          ],
+          cursor: 2
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await expect(syncService.sync()).rejects.toThrow(/orphan|blocked/i)
     const cur = db.select().from(schema.syncState).where(eq(schema.syncState.key, 'cursor')).get()
     // Deferred orphan recovery: the later topic IS applied, but the cursor

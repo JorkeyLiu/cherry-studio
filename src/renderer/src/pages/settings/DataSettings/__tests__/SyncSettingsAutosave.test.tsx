@@ -1,9 +1,8 @@
 /**
  * Sync Settings auto-save contract (renderer refinement unit).
  *
- * - Endpoint/token persist on blur via the existing setConfig contract with
- *   the full normalized config (partial-field saves never overwrite another
- *   current form value); Enabled persists immediately on toggle.
+ * - The endpoint persists on blur via the existing setConfig contract with
+ *   the full normalized config; Enabled persists immediately on toggle.
  * - Blurring an unchanged value is a no-op; ordinary auto-save emits no
  *   success toast; failures preserve local edits and surface visibly.
  * - No explicit Save / Refresh controls remain.
@@ -38,7 +37,6 @@ vi.mock('@renderer/context/ThemeProvider', () => ({
 
 interface MockOptions {
   endpoint?: string
-  token?: string
   enabled?: boolean
   service?: {
     state: 'unregistered' | 'connected' | 'disconnected'
@@ -93,14 +91,13 @@ afterEach(() => {
 function mockSyncApi(options: MockOptions = {}): Record<string, ReturnType<typeof vi.fn>> {
   const {
     endpoint = 'http://127.0.0.1:3030',
-    token = '',
     enabled = true,
     service = { state: 'connected', deviceCode: 'ABCD2345', explicitDisconnect: false },
     pairState = { deviceCode: 'ABCD2345', state: 'unpaired', outgoing: null, incoming: [] },
     pairError = null
   } = options
   const api = {
-    getConfig: vi.fn(async () => ({ endpoint, token, enabled })),
+    getConfig: vi.fn(async () => ({ endpoint, enabled })),
     setConfig: vi.fn(async (cfg: unknown) => cfg),
     getStatus: vi.fn(async () => ({
       enabled,
@@ -162,7 +159,7 @@ async function renderSettings(options: MockOptions = {}): Promise<{ api: Record<
 
 describe('SyncSettings auto-save', () => {
   it('saves the endpoint on blur with the full normalized config', async () => {
-    const { api } = await renderSettings({ token: 'tok-1', enabled: true })
+    const { api } = await renderSettings({ enabled: true })
     fireEvent.change(screen.getByTestId('sync-endpoint-input'), {
       target: { value: '  http://192.168.1.20:3030  ' }
     })
@@ -173,7 +170,6 @@ describe('SyncSettings auto-save', () => {
     // Atomic full config: trimmed endpoint plus the other current form values.
     expect(api.setConfig).toHaveBeenCalledWith({
       endpoint: 'http://192.168.1.20:3030',
-      token: 'tok-1',
       enabled: true
     })
     expect(screen.getByTestId('sync-endpoint-input')).toHaveValue('http://192.168.1.20:3030')
@@ -181,18 +177,17 @@ describe('SyncSettings auto-save', () => {
     expect(window.toast.success as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
   })
 
-  it('saves the token on blur without overwriting the current endpoint', async () => {
-    const { api } = await renderSettings({ endpoint: 'http://127.0.0.1:3030', enabled: true })
+  it('endpoint blur preserves the current enabled value', async () => {
+    const { api } = await renderSettings({ endpoint: 'http://127.0.0.1:3030', enabled: false })
     fireEvent.change(screen.getByTestId('sync-endpoint-input'), {
       target: { value: 'http://10.0.0.5:3030' }
     })
-    fireEvent.change(screen.getByTestId('sync-token-input'), { target: { value: '  secret-2  ' } })
-    fireEvent.blur(screen.getByTestId('sync-token-input'))
+    fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
     await waitFor(() => {
       expect(api.setConfig).toHaveBeenCalled()
     })
-    const last = api.setConfig.mock.calls.at(-1)?.[0] as { endpoint: string; token: string; enabled: boolean }
-    expect(last).toEqual({ endpoint: 'http://10.0.0.5:3030', token: 'secret-2', enabled: true })
+    const last = api.setConfig.mock.calls.at(-1)?.[0] as { endpoint: string; enabled: boolean }
+    expect(last).toEqual({ endpoint: 'http://10.0.0.5:3030', enabled: false })
   })
 
   it('persists Enabled immediately on toggle', async () => {
@@ -201,7 +196,6 @@ describe('SyncSettings auto-save', () => {
     await waitFor(() => {
       expect(api.setConfig).toHaveBeenCalledWith({
         endpoint: 'http://127.0.0.1:3030',
-        token: '',
         enabled: true
       })
     })
@@ -210,7 +204,6 @@ describe('SyncSettings auto-save', () => {
   it('does not save unchanged values on blur', async () => {
     const { api } = await renderSettings()
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
-    fireEvent.blur(screen.getByTestId('sync-token-input'))
     // Real settlement: drain the blur-triggered persistConfig microtask chain
     // plus every in-flight status observation, then flush React effects. A
     // buggy save would have called setConfig by the time these settle (the
@@ -247,7 +240,6 @@ describe('SyncSettings auto-save', () => {
     await waitFor(() => {
       expect(api.setConfig).toHaveBeenLastCalledWith({
         endpoint: 'http://10.9.9.9:3030',
-        token: '',
         enabled: true
       })
     })
@@ -359,8 +351,8 @@ describe('SyncSettings auto-save', () => {
   })
 
   it('config controls are unavailable and persist nothing before hydration', async () => {
-    let resolveConfig!: (v: { endpoint: string; token: string; enabled: boolean }) => void
-    const configGate = new Promise<{ endpoint: string; token: string; enabled: boolean }>((res) => {
+    let resolveConfig!: (v: { endpoint: string; enabled: boolean }) => void
+    const configGate = new Promise<{ endpoint: string; enabled: boolean }>((res) => {
       resolveConfig = res
     })
     const api = mockSyncApi()
@@ -370,10 +362,10 @@ describe('SyncSettings auto-save', () => {
     await waitFor(() => {
       expect(screen.getByTestId('sync-endpoint-input')).toBeInTheDocument()
     })
-    // Hydration pending: endpoint/token/Enabled are disabled so defaults can
+    // Hydration pending: endpoint/Enabled are disabled so defaults can
     // never be persisted as authoritative; blurring persists nothing.
     expect(screen.getByTestId('sync-endpoint-input')).toBeDisabled()
-    expect(screen.getByTestId('sync-token-input')).toBeDisabled()
+    expect(screen.queryByTestId('sync-token-input')).toBeNull()
     expect(screen.getByTestId('sync-enabled-switch')).toBeDisabled()
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
     // Service observation proceeds independently of hydration (no fixed sleep).
@@ -384,13 +376,12 @@ describe('SyncSettings auto-save', () => {
     expect(screen.queryByTestId('sync-config-error')).toBeNull()
     // Hydration enables the controls with the authoritative values.
     await act(async () => {
-      resolveConfig({ endpoint: 'http://127.0.0.1:3030', token: '', enabled: true })
+      resolveConfig({ endpoint: 'http://127.0.0.1:3030', enabled: true })
     })
     await waitFor(() => {
       expect(screen.getByTestId('sync-endpoint-input')).toHaveValue('http://127.0.0.1:3030')
     })
     expect(screen.getByTestId('sync-endpoint-input')).not.toBeDisabled()
-    expect(screen.getByTestId('sync-token-input')).not.toBeDisabled()
     expect(screen.getByTestId('sync-enabled-switch')).not.toBeDisabled()
   })
 
@@ -398,12 +389,12 @@ describe('SyncSettings auto-save', () => {
     // StrictMode double-mounts the load effect, producing two overlapping
     // initial config requests: the first hydrates, the user edits, then the
     // stale second response resolves and must not clobber the edit.
-    let resolveFirst!: (v: { endpoint: string; token: string; enabled: boolean }) => void
-    let resolveSecond!: (v: { endpoint: string; token: string; enabled: boolean }) => void
-    const firstGate = new Promise<{ endpoint: string; token: string; enabled: boolean }>((res) => {
+    let resolveFirst!: (v: { endpoint: string; enabled: boolean }) => void
+    let resolveSecond!: (v: { endpoint: string; enabled: boolean }) => void
+    const firstGate = new Promise<{ endpoint: string; enabled: boolean }>((res) => {
       resolveFirst = res
     })
-    const secondGate = new Promise<{ endpoint: string; token: string; enabled: boolean }>((res) => {
+    const secondGate = new Promise<{ endpoint: string; enabled: boolean }>((res) => {
       resolveSecond = res
     })
     const api = mockSyncApi()
@@ -418,7 +409,7 @@ describe('SyncSettings auto-save', () => {
       expect(screen.getByTestId('sync-endpoint-input')).toBeInTheDocument()
     })
     await act(async () => {
-      resolveFirst({ endpoint: 'http://127.0.0.1:3030', token: '', enabled: true })
+      resolveFirst({ endpoint: 'http://127.0.0.1:3030', enabled: true })
     })
     await waitFor(() => {
       expect(screen.getByTestId('sync-endpoint-input')).toHaveValue('http://127.0.0.1:3030')
@@ -427,7 +418,7 @@ describe('SyncSettings auto-save', () => {
       target: { value: 'http://10.3.3.3:3030' }
     })
     await act(async () => {
-      resolveSecond({ endpoint: 'http://192.168.0.1:3030', token: 'stale', enabled: false })
+      resolveSecond({ endpoint: 'http://192.168.0.1:3030', enabled: false })
     })
     // No fixed sleep: the stale response has resolved inside act, so the
     // preserved edit is asserted as final state.
@@ -439,7 +430,6 @@ describe('SyncSettings auto-save', () => {
     await waitFor(() => {
       expect(api.setConfig).toHaveBeenCalledWith({
         endpoint: 'http://10.3.3.3:3030',
-        token: '',
         enabled: true
       })
     })
@@ -458,7 +448,7 @@ describe('SyncSettings auto-save', () => {
     })
     // Config controls stay disabled; defaults are not treated as authoritative.
     expect(screen.getByTestId('sync-endpoint-input')).toBeDisabled()
-    expect(screen.getByTestId('sync-token-input')).toBeDisabled()
+    expect(screen.queryByTestId('sync-token-input')).toBeNull()
     expect(screen.getByTestId('sync-enabled-switch')).toBeDisabled()
     fireEvent.blur(screen.getByTestId('sync-endpoint-input'))
     // Service observation still proceeds independently of the config failure.
@@ -513,11 +503,14 @@ describe('SyncSettings auto-save', () => {
 
   it('renders concise experimental copy with semantic section groups', async () => {
     await renderSettings()
-    expect(screen.getByText(/Automatic personal-device sync/)).toBeInTheDocument()
+    // The experimental disclaimer lives in the title help tooltip, available
+    // by hover/focus through its accessible label — not as a prose block.
+    expect(screen.getByLabelText(/Automatic personal-device sync/)).toBeInTheDocument()
     // The dense operation enumeration no longer lives in the page header.
     expect(screen.queryByText(/stable checkpoints/)).toBeNull()
-    expect(screen.getByRole('group', { name: 'Relay service' })).toBeInTheDocument()
-    expect(screen.getByRole('group', { name: 'Device pairing' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Sync server' })).toBeInTheDocument()
+    // The pairing heading carries its tooltip trigger, so match by prefix.
+    expect(screen.getByRole('group', { name: /Device pairing/ })).toBeInTheDocument()
     expect(screen.getByRole('group', { name: 'Status' })).toBeInTheDocument()
   })
 
@@ -573,11 +566,9 @@ describe('SyncSettings auto-save', () => {
     expect(screen.getByTestId('sync-last-error')).toHaveStyle('overflow-wrap: break-word')
   })
 
-  it('keeps endpoint/token inputs within a bounded responsive width', async () => {
+  it('keeps the endpoint input within a bounded responsive width', async () => {
     await renderSettings()
     expect(screen.getByTestId('sync-endpoint-input')).toHaveStyle('max-width: 320px')
-    // Input.Password carries the test id on the inner input; the bounded
-    // width lives on its affix wrapper flex child.
-    expect(screen.getByTestId('sync-token-input').closest('.ant-input-affix-wrapper')).toHaveStyle('max-width: 320px')
+    expect(screen.queryByTestId('sync-token-input')).toBeNull()
   })
 })

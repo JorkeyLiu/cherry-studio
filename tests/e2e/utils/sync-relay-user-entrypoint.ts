@@ -3,7 +3,7 @@
  *
  * Spawns the exact first-party user entrypoint file
  * (`scripts/sync-relay/server.ts`, wired as `pnpm sync:relay`) with the same
- * stable CLI args (`--port/--db/--token`, plus `--host/--cert/--key` for the
+ * stable CLI args (`--port/--db`, plus `--host/--cert/--key` for the
  * LAN HTTPS opt-in) a user passes. The only deliberate
  * difference from a shell `pnpm sync:relay` is the runtime launcher: the E2E
  * lane runs the entrypoint under the Electron binary as Node
@@ -32,7 +32,6 @@ import { formatRelayHostForUrl, normalizeRelayBindHost } from '../../../scripts/
 
 export interface UserEntrypointRelayOptions {
   ownedTmpRoot: string
-  token: string
   dbFileName?: string
   readyTimeoutMs?: number
   stopTimeoutMs?: number
@@ -53,7 +52,6 @@ export interface UserEntrypointRelayOptions {
 export interface UserEntrypointRelayHandle {
   readonly endpoint: string
   readonly port: number
-  readonly token: string
   readonly dbPath: string
   pid(): number | null
   isRunning(): boolean
@@ -95,8 +93,9 @@ const HEALTH_POLL_MS = 250
 /**
  * Launcher gate mirroring the relay transport contract: both plain HTTP and
  * native HTTPS are explicit supported transports for loopback and explicit
- * numeric non-loopback hosts. Plain HTTP is unencrypted (the client shows a
- * visible warning); HTTPS uses ordinary verification. The relay itself owns
+ * numeric non-loopback hosts. Plain HTTP is unencrypted (the client accepts
+ * HTTP and HTTPS identically with no client-side warning); HTTPS uses
+ * ordinary verification. The relay itself owns
  * no certificates. This gate keeps its signature for compatibility and no
  * longer rejects plaintext LAN — it only exists to document the policy.
  * Throws before any child is spawned or DB path is touched only for hosts
@@ -236,8 +235,6 @@ export async function startUserEntrypointRelay(
 ): Promise<UserEntrypointRelayHandle> {
   if (!options || typeof options !== 'object') throw new Error('startUserEntrypointRelay requires options')
   const ownedTmpRoot = validateOwnedRoot(options.ownedTmpRoot)
-  const token = options.token
-  if (!token || typeof token !== 'string') throw new Error('startUserEntrypointRelay requires a non-empty token')
   const readyTimeoutMs = options.readyTimeoutMs ?? READY_DEFAULT_MS
   const stopTimeoutMs = options.stopTimeoutMs ?? STOP_DEFAULT_MS
   const repoRoot = resolveRepoRoot()
@@ -344,7 +341,7 @@ export async function startUserEntrypointRelay(
     const tlsArgs = useTls ? ['--cert', lanCert as string, '--key', lanKey as string] : []
     const proc = spawn(
       electronBinary,
-      [tsxCli, serverTs, '--port', String(requestedPort), '--db', dbPath, '--token', token, ...hostArgs, ...tlsArgs],
+      [tsxCli, serverTs, '--port', String(requestedPort), '--db', dbPath, ...hostArgs, ...tlsArgs],
       {
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe']
@@ -456,7 +453,6 @@ export async function startUserEntrypointRelay(
       get port() {
         return boundPort ?? 0
       },
-      token,
       dbPath,
       pid: () => child?.pid ?? null,
       isRunning: () => child !== null && child.exitCode === null && child.signalCode === null,

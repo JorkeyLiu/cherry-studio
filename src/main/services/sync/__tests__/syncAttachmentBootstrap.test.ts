@@ -100,7 +100,6 @@ function bind(which: 'A' | 'C'): void {
   ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:endpoint', relayEndpoint)
-  configStore.set('sync:token', relayToken)
   configStore.set('sync:enabled', true)
   if (creds.deviceId) configStore.set('deviceId', creds.deviceId)
   else configStore.delete('deviceId')
@@ -146,7 +145,7 @@ describe('attachment V5 bootstrap three domains over real relay', () => {
     relayDb = new Database(relayDbPath)
     relayDb.pragma('journal_mode = WAL')
     ensureRelaySchema(relayDb)
-    relayServer = createRelayServer(relayDb, { token: relayToken, blobDir: relayBlobDir })
+    relayServer = createRelayServer(relayDb, { blobDir: relayBlobDir })
     await new Promise<void>((resolve) =>
       (relayServer as unknown as { listen: (a: number, b: string, cb: () => void) => void }).listen(
         0,

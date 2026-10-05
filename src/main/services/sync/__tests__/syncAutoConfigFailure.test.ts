@@ -65,7 +65,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   configStore.set('sync:deviceCode', 'ABCD2345')
   configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
   sqlite = openInMemory()
@@ -89,7 +88,7 @@ afterEach(() => {
 describe('requestAutoSync config-read failure is visible and invalidates stale work', () => {
   it('logs + persists durable error, invalidates generations, stops subscriber, never runs sync', async () => {
     const { SyncAutoService: Cls } = await import('../syncAuto')
-    const valid = () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined as string | undefined, enabled: true })
+    const valid = () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true })
     const runSync = vi.fn(() => Promise.resolve(null))
     const stopSpy = vi.fn()
     const fakeSubscriber = { start: vi.fn(), stop: stopSpy }
@@ -131,7 +130,7 @@ describe('requestAutoSync config-read failure is visible and invalidates stale w
   it('rethrows when durable reporting is damaged, preserving the original error', async () => {
     const { SyncAutoService: Cls } = await import('../syncAuto')
     const svc = new Cls({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -161,7 +160,7 @@ describe('reconciliation config-read failure is visible and invalidates stale wo
     const stopSpy = vi.fn()
     const fakeSubscriber = { start: vi.fn(), stop: stopSpy }
     const svc = new Cls({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9999', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',
@@ -212,7 +211,7 @@ describe('setConfig prior config-read failure never uses a fabricated snapshot',
     let calls = 0
     const getSpy = vi.spyOn(syncService, 'getConfig').mockImplementation(() => {
       calls += 1
-      if (calls === 1) return { endpoint: 'http://127.0.0.1:9999', token: undefined, enabled: true }
+      if (calls === 1) return { endpoint: 'http://127.0.0.1:9999', enabled: true }
       throw new Error('post-config-boom')
     })
     expect(() => syncService.setConfig({ enabled: false })).toThrow(/post-config-boom/)

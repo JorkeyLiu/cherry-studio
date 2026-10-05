@@ -19,6 +19,7 @@
     "native:run": "tsx scripts/native-abi/run-cli.ts",
     "dev": "pnpm native:run electron -- pnpm dev:run",
     "dev:run": "npm run generate:openapi && dotenv electron-vite dev",
+    "dev:sync": "pnpm native:run electron -- tsx scripts/dev-sync/cli.ts",
     "dev:watch": "pnpm native:run electron -- dotenv electron-vite dev -- -w",
     "debug": "pnpm native:run electron -- electron-vite -- --inspect --sourcemap --remote-debugging-port=9222",
     "build": "pnpm native:run electron -- pnpm build:run",

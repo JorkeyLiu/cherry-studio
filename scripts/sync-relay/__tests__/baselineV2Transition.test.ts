@@ -26,8 +26,6 @@ import {
 } from '../../../packages/shared/sync/baselineWire'
 import { createRelayServer, ensureRelaySchema } from '../server'
 
-const TOKEN = 'baseline-v2-token'
-
 let dbs: Database.Database[] = []
 let servers: Array<{ close: (cb?: () => void) => void }> = []
 
@@ -59,7 +57,7 @@ afterEach(async () => {
 
 async function startServer(db: Database.Database): Promise<string> {
   ensureRelaySchema(db)
-  const server = createRelayServer(db, { token: TOKEN })
+  const server = createRelayServer(db)
   servers.push(server as unknown as { close: (cb?: () => void) => void })
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve())
@@ -70,7 +68,6 @@ async function startServer(db: Database.Database): Promise<string> {
 
 function authed(code: string, secret: string): Record<string, string> {
   return {
-    Authorization: `Bearer ${TOKEN}`,
     'Content-Type': 'application/json',
     'x-sync-device-code': code,
     'x-sync-device-secret': secret
@@ -80,7 +77,7 @@ function authed(code: string, secret: string): Record<string, string> {
 async function register(base: string, deviceId: string): Promise<{ code: string; secret: string }> {
   const res = await fetch(`${base}/sync/register`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceId })
   })
   expect(res.status).toBe(200)

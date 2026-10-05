@@ -78,7 +78,6 @@ export interface SyncPullResponse {
 
 export interface SyncConfig {
   endpoint: string
-  token?: string
   enabled: boolean
 }
 

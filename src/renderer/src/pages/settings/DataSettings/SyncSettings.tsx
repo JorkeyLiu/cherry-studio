@@ -1,8 +1,8 @@
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { loggerService } from '@renderer/services/LoggerService'
-import { isNonLoopbackHttpEndpoint } from '@shared/sync'
-import { Alert, Button, Input, Switch } from 'antd'
+import { Button, Flex, Input, Switch, Tag, Tooltip } from 'antd'
 import dayjs from 'dayjs'
+import { Info } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -18,13 +18,54 @@ import {
 
 const logger = loggerService.withContext('SyncSettings')
 
+// Presentation-only pairing-required detector (renderer-local, no protocol or
+// IPC change). Matches only the actual safe relay signature: an HTTP 403
+// status plus the exact `{"error":"pairing-required"}` body the Main sanitizer
+// emits — including its `... failed 403:` prefix and Electron's
+// `Error occurred in handler ...` wrapping. A bare `pairing-required`
+// without the 403 status, or any other 403 error (unknown-credential,
+// invalid-credential, channel-mismatch, grant/seed/digest failures, ENOSPC),
+// never matches.
+const PAIRING_REQUIRED_403_PATTERN = /failed\s+403\s*:\s*\{\s*"error"\s*:\s*"pairing-required"\s*\}/
+
+export const isPairingRequired403 = (raw: string): boolean =>
+  typeof raw === 'string' && PAIRING_REQUIRED_403_PATTERN.test(raw)
+
 // Wrapped, keyboard-accessible error text: full content is rendered inline
-// (never Tooltip-only) so long URLs/tokens remain readable without hover.
+// (never Tooltip-only) so long URLs remain readable without hover.
 const errorTextStyle: CSSProperties = {
   color: 'var(--color-error)',
   fontSize: 12,
   overflowWrap: 'break-word',
   wordBreak: 'break-word'
+}
+
+const helpIconStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  marginLeft: 6,
+  cursor: 'help',
+  color: 'var(--color-text-2)'
+}
+
+// Compact keyboard-focusable help trigger: dense explanations live in the
+// tooltip while only short next-action guidance stays visible inline. The
+// tip doubles as the accessible label so tooltip content stays queryable
+// without hovering.
+const SyncHelpIcon: React.FC<{ tip: string; label: string }> = ({ tip, label }) => (
+  <Tooltip title={tip}>
+    <span tabIndex={0} role="img" aria-label={label} style={helpIconStyle}>
+      <Info size={14} />
+    </span>
+  </Tooltip>
+)
+
+// Narrow-pane label treatment: the address label never wraps (it would
+// squeeze the input at ~460px right-pane widths); the input keeps a usable
+// minimum instead of collapsing to zero.
+const nowrapLabelStyle: CSSProperties = {
+  whiteSpace: 'nowrap',
+  flexShrink: 0
 }
 
 interface SyncDataStatus {
@@ -52,31 +93,71 @@ interface PairState {
   incoming: Array<{ id: string; requesterCode: string; createdAt: string }>
 }
 
-// Configuration form (user intent: enabled/endpoint/token). Service state
+// Configuration form (user intent: enabled/endpoint). Service state
 // (attached/detached/device code) is a separate observation and is never
 // mixed into this form: config edits persist via setConfig, service state
-// changes only via connect/disconnect/live polling.
+// changes only via connect/disconnect/live polling. There is no shared
+// service access token: the server address plus the per-device code/secret
+// request/accept flow is the only credential mechanism. Per-device secrets
+// never pass through this component and are never displayed or logged.
 interface SyncForm {
   endpoint: string
-  token: string
   enabled: boolean
 }
 
 const normalizeConfig = (form: SyncForm): SyncForm => ({
   endpoint: form.endpoint.trim(),
-  token: form.token.trim(),
   enabled: form.enabled
 })
 
-const sameConfig = (a: SyncForm, b: SyncForm): boolean =>
-  a.endpoint === b.endpoint && a.token === b.token && a.enabled === b.enabled
+const sameConfig = (a: SyncForm, b: SyncForm): boolean => a.endpoint === b.endpoint && a.enabled === b.enabled
+
+// Data-status badge derived only from observed status/service/pairing fields:
+// never claims convergence — idle means no pending work and no recorded
+// error, not proof that every device converged. Waiting means the device is
+// connected but not yet paired (or carries a durable pairing-required
+// failure): sync cannot succeed until pairing completes, so this surfaces as
+// awaiting pairing rather than a sync failure. Genuine errors (capture
+// errors, or any non-pairing-required lastError) always stay failures, even
+// when unpaired. A stale pairing-required lastError observed while live
+// paired is treated as recovery (resolved on next sync), not failure.
+export type SyncBadgeState = 'disabled' | 'syncing' | 'failed' | 'waiting' | 'pending' | 'idle'
+
+export interface SyncBadgeInput {
+  status: SyncDataStatus | null
+  service: ServiceStatus | null
+  pairing: PairState | null
+}
+
+export const resolveSyncBadge = ({ status, service, pairing }: SyncBadgeInput): SyncBadgeState | null => {
+  if (!status || typeof status.enabled !== 'boolean') return null
+  if (!status.enabled) return 'disabled'
+  if (status.syncing) return 'syncing'
+  const lastErrorPairingRequired = !!status.lastError && isPairingRequired403(status.lastError)
+  const genuineError = !!status.lastCaptureError || (!!status.lastError && !lastErrorPairingRequired)
+  if (genuineError) return 'failed'
+  const serviceConnected = service?.state === 'connected'
+  const knownUnpaired = !!(serviceConnected && pairing && pairing.state !== 'paired')
+  const livePaired = !!(serviceConnected && pairing && pairing.state === 'paired')
+  // Stale persisted pairing-required while live paired: recovery, not
+  // failure and not waiting — fall through to pending/idle below.
+  if (livePaired && lastErrorPairingRequired) {
+    return status.pendingCount > 0 ? 'pending' : 'idle'
+  }
+  if (knownUnpaired || lastErrorPairingRequired) return 'waiting'
+  if (status.pendingCount > 0) return 'pending'
+  return 'idle'
+}
+
+/** True when manual sync cannot succeed because pairing is still pending. */
+export const isKnownUnpaired = (service: ServiceStatus | null, pairing: PairState | null): boolean =>
+  service?.state === 'connected' && !!pairing && pairing.state !== 'paired'
 
 const SyncSettings: React.FC = () => {
   const { t } = useTranslation()
   const { theme } = useTheme()
 
   const [endpoint, setEndpoint] = useState('')
-  const [token, setToken] = useState('')
   const [enabled, setEnabled] = useState(false)
   const [status, setStatus] = useState<SyncDataStatus | null>(null)
   const [service, setService] = useState<ServiceStatus | null>(null)
@@ -92,7 +173,7 @@ const SyncSettings: React.FC = () => {
   // Mutually exclusive with save errors: without hydration no save can run.
   const [configLoadError, setConfigLoadError] = useState<string | null>(null)
   // Hydration gate: no setConfig may be sent before a valid getConfig result
-  // has established the full persisted config. Until then the endpoint/token/
+  // has established the full persisted config. Until then the endpoint/
   // Enabled controls stay disabled so defaults can never be persisted as if
   // they were authoritative. Service/pairing/status observation is unaffected.
   const [hydrated, setHydrated] = useState(false)
@@ -109,9 +190,9 @@ const SyncSettings: React.FC = () => {
   // Live form mirror: blur/toggle handlers persist the full normalized config
   // atomically, so a partial-field save never overwrites another current form
   // value with a stale closure.
-  const formRef = useRef<SyncForm>({ endpoint: '', token: '', enabled: false })
+  const formRef = useRef<SyncForm>({ endpoint: '', enabled: false })
   // Last successfully persisted config: saves of unchanged values are no-ops.
-  const persistedRef = useRef<SyncForm>({ endpoint: '', token: '', enabled: false })
+  const persistedRef = useRef<SyncForm>({ endpoint: '', enabled: false })
   // Single-flight save guard: overlapping saves coalesce to the latest form
   // instead of running concurrently, and completion only records the exact
   // payload it sent, so stale completion can never revert newer edits.
@@ -193,12 +274,13 @@ const SyncSettings: React.FC = () => {
     try {
       // getConfig is isolated from the live observations: its failure must
       // neither block status/service updates nor mark defaults authoritative.
-      const cfgResult:
-        | { ok: true; cfg: { endpoint?: string; token?: string; enabled?: boolean } }
-        | { ok: false; error: unknown } = await window.api.sync.getConfig().then(
-        (cfg) => ({ ok: true as const, cfg }),
-        (error: unknown) => ({ ok: false as const, error })
-      )
+      // A legacy persisted `token` field, if present, is ignored and never
+      // re-persisted: only endpoint/enabled form this component's config.
+      const cfgResult: { ok: true; cfg: { endpoint?: string; enabled?: boolean } } | { ok: false; error: unknown } =
+        await window.api.sync.getConfig().then(
+          (cfg) => ({ ok: true as const, cfg }),
+          (error: unknown) => ({ ok: false as const, error })
+        )
       const [st, svc] = await Promise.all([
         window.api.sync.getStatus().catch(() => null),
         window.api.sync.getServiceStatus().catch(() => null)
@@ -219,11 +301,9 @@ const SyncSettings: React.FC = () => {
       const cfg = cfgResult.cfg
       const loaded: SyncForm = {
         endpoint: cfg.endpoint ?? '',
-        token: cfg.token ?? '',
         enabled: !!cfg.enabled
       }
       setEndpoint(loaded.endpoint)
-      setToken(loaded.token)
       setEnabled(loaded.enabled)
       formRef.current = loaded
       persistedRef.current = normalizeConfig(loaded)
@@ -252,7 +332,7 @@ const SyncSettings: React.FC = () => {
     // Disconnected/offline retains the last known pairing observation: only
     // a successful (non-null) fetch replaces it, so membership semantics are
     // never reset to unknown by a failed poll. Live polling never touches the
-    // endpoint/token/enabled form, so active local edits are preserved.
+    // endpoint/enabled form, so active local edits are preserved.
     if (pair !== null) setPairing(pair)
   }, [updateService])
 
@@ -294,7 +374,7 @@ const SyncSettings: React.FC = () => {
     void loadConfigAndStatus()
     void loadPairing()
     // Poll live state only — never the config form, so the five-second poll
-    // cannot overwrite endpoint/token edits in progress.
+    // cannot overwrite endpoint edits in progress.
     const id = setInterval(() => {
       void loadLiveState()
     }, 5000)
@@ -307,27 +387,11 @@ const SyncSettings: React.FC = () => {
     formGen.current += 1
   }
 
-  const onTokenChange = (value: string) => {
-    setToken(value)
-    formRef.current.token = value
-    formGen.current += 1
-  }
-
   const onEndpointBlur = () => {
     const trimmed = formRef.current.endpoint.trim()
     if (trimmed !== formRef.current.endpoint) {
       formRef.current.endpoint = trimmed
       setEndpoint(trimmed)
-      formGen.current += 1
-    }
-    void persistConfig()
-  }
-
-  const onTokenBlur = () => {
-    const trimmed = formRef.current.token.trim()
-    if (trimmed !== formRef.current.token) {
-      formRef.current.token = trimmed
-      setToken(trimmed)
       formGen.current += 1
     }
     void persistConfig()
@@ -372,6 +436,10 @@ const SyncSettings: React.FC = () => {
       window.toast.success(t('settings.sync.connect_success', 'Connected to relay'))
     } catch (e) {
       if (gen !== refreshGen.current) return
+      // Connection failures surface verbatim (safe Main-sanitized detail):
+      // there is no shared access token anymore, so no credential guidance
+      // applies here. Pairing-required and other membership errors stay
+      // visible for the pairing section to classify.
       const msg = String((e as Error).message)
       setPairingError(msg.slice(0, 500))
       window.toast.error(msg)
@@ -421,6 +489,7 @@ const SyncSettings: React.FC = () => {
     serviceConnected || (service?.state === 'disconnected' && !service?.explicitDisconnect && !!service?.deviceCode)
   const showConnect = !serviceConnected
   const pairingActionsDisabled = !serviceConnected || pairingBusy
+  const knownUnpaired = isKnownUnpaired(service, pairing)
   const pairingStateLabel = !pairing
     ? '—'
     : pairing.state === 'paired'
@@ -430,72 +499,117 @@ const SyncSettings: React.FC = () => {
         : pairing.state === 'incoming'
           ? t('settings.sync.incoming_state', 'Approval needed')
           : t('settings.sync.unpaired_state', 'Not paired')
+  const serviceStateLabel = !service
+    ? '—'
+    : service.state === 'connected'
+      ? t('settings.sync.connected_state', 'Connected')
+      : service.state === 'unregistered'
+        ? t('settings.sync.unregistered_state', 'Not connected')
+        : t('settings.sync.disconnected_state', 'Disconnected')
+
+  const titleHelp = t(
+    'settings.sync.help',
+    'Automatic personal-device sync through your own relay is experimental with limited coverage and pending validation — not production-ready.'
+  )
+  const endpointTip = t(
+    'settings.sync.endpoint_help',
+    'Use http:// for direct LAN access or https:// when your deployment provides TLS.'
+  )
+  const deviceCodeTip = t(
+    'settings.sync.device_code_hint',
+    'The device code is public: read it aloud to pair another of your devices. It cannot authorize anything by itself.'
+  )
+  const pairingTip = t(
+    'settings.sync.pairing_help',
+    'Pairing joins your own devices into a private channel. To pair: connect the relay first to get this device code, then enter the other device code to request pairing; the other device accepts. Channels are private per device group. Device codes are public identifiers and cannot authorize anything by themselves.'
+  )
+
+  // Data-status badge derived only from observed status fields: never claims
+  // convergence — idle means no pending work and no recorded error, not
+  // proof that every device converged.
+  const syncBadge = resolveSyncBadge({ status, service, pairing })
+  const waitingHint = t(
+    'settings.sync.waiting_hint',
+    'Waiting for pairing: complete pairing to sync. Pending edits stay queued until then.'
+  )
+  const pairingRequiredHint = t(
+    'settings.sync.pairing_required_hint',
+    'Waiting for pairing: this device is not yet paired. Complete pairing to sync; pending edits are kept.'
+  )
+  const pairingRecoveredHint = t(
+    'settings.sync.pairing_recovered_hint',
+    'Pairing completed after a previous request: the pending sync will proceed on the next run.'
+  )
+  const syncBadgeMeta =
+    syncBadge === 'disabled'
+      ? { color: 'default' as const, text: t('settings.sync.status_disabled', 'Off') }
+      : syncBadge === 'syncing'
+        ? { color: 'processing' as const, text: t('settings.sync.syncing', 'Syncing...') }
+        : syncBadge === 'failed'
+          ? { color: 'error' as const, text: t('settings.sync.status_failed', 'Sync error') }
+          : syncBadge === 'waiting'
+            ? {
+                color: 'warning' as const,
+                text: t('settings.sync.waiting_state', 'Waiting for pairing')
+              }
+            : syncBadge === 'pending'
+              ? { color: 'warning' as const, text: t('settings.sync.pending', 'Pending') }
+              : syncBadge === 'idle'
+                ? { color: 'default' as const, text: t('settings.sync.status_idle', 'Idle') }
+                : null
+
+  // Durable-error presentation: a pairing-required lastError is expected
+  // waiting (helpful guidance, not a raw stack) unless a genuine unrelated
+  // error or a capture error is also present — those always stay visible.
+  // A stale pairing-required observed while live paired is recovery, not an
+  // error at all.
+  const lastErrorPairingRequired = !!status?.lastError && isPairingRequired403(status.lastError)
+  const hasGenuineError = !!status?.lastCaptureError || (!!status?.lastError && !lastErrorPairingRequired)
+  const livePaired = !!(serviceConnected && pairing?.state === 'paired')
+  const stalePairingRecovery = !!(livePaired && lastErrorPairingRequired && !status?.lastCaptureError)
+  const showPairingRequiredHint = !!(
+    status?.enabled &&
+    lastErrorPairingRequired &&
+    !hasGenuineError &&
+    !stalePairingRecovery
+  )
+  // Manual sync cannot succeed while pairing is pending: the button stays
+  // disabled with an explanatory hint. This is presentation only — the sync
+  // API itself is unchanged.
+  const syncWaitingDisabled = enabled && knownUnpaired
 
   return (
     <SettingGroup theme={theme}>
-      <SettingTitle>{t('settings.sync.title', 'Synchronization')}</SettingTitle>
-      <SettingHelpText>
-        {t(
-          'settings.sync.help',
-          'Automatic personal-device sync through your own relay is experimental with limited coverage and pending validation — not production-ready.'
-        )}
-      </SettingHelpText>
+      <SettingTitle data-testid="sync-title-bar">
+        <span style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+          <span>{t('settings.sync.title', 'Synchronization')}</span>
+          <SyncHelpIcon tip={titleHelp} label={titleHelp} />
+        </span>
+        <Switch
+          checked={enabled}
+          onChange={onEnabledChange}
+          disabled={!hydrated}
+          data-testid="sync-enabled-switch"
+          aria-label={t('settings.sync.enabled_switch_label', 'Enable sync')}
+        />
+      </SettingTitle>
       <SettingDivider />
       <div role="group" aria-labelledby="sync-section-relay">
-        <SettingSubtitle id="sync-section-relay">{t('settings.sync.service_title', 'Relay service')}</SettingSubtitle>
+        <SettingSubtitle id="sync-section-relay">{t('settings.sync.service_title', 'Sync server')}</SettingSubtitle>
         <SettingRow>
-          <SettingRowTitle>{t('settings.sync.enabled', 'Enabled')}</SettingRowTitle>
-          <Switch checked={enabled} onChange={onEnabledChange} disabled={!hydrated} data-testid="sync-enabled-switch" />
-        </SettingRow>
-        <SettingRow>
-          <SettingRowTitle>{t('settings.sync.endpoint', 'Relay Endpoint')}</SettingRowTitle>
+          <SettingRowTitle>
+            <span style={nowrapLabelStyle}>{t('settings.sync.endpoint', 'Sync server address')}</span>
+            <SyncHelpIcon tip={endpointTip} label={endpointTip} />
+          </SettingRowTitle>
           <Input
             placeholder={t('settings.sync.endpoint_placeholder', 'http://127.0.0.1:3030')}
             value={endpoint}
             onChange={(e) => onEndpointChange(e.target.value)}
             onBlur={onEndpointBlur}
             disabled={!hydrated}
-            style={{ flex: '1 1 auto', maxWidth: 320, minWidth: 0, marginLeft: 12 }}
+            style={{ flex: '1 1 200px', maxWidth: 320, minWidth: 120, marginLeft: 12 }}
             data-testid="sync-endpoint-input"
           />
-        </SettingRow>
-        <SettingRow>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <SettingHelpText>
-              {t(
-                'settings.sync.endpoint_help',
-                'Use http:// for direct LAN access or https:// when your deployment provides TLS. Plain HTTP is unencrypted.'
-              )}
-            </SettingHelpText>
-            {isNonLoopbackHttpEndpoint(endpoint) && (
-              <Alert
-                type="warning"
-                showIcon
-                data-testid="sync-http-warning"
-                message={t(
-                  'settings.sync.http_warning',
-                  'This endpoint uses unencrypted HTTP on a non-local host. Anyone on the network path can read or modify synced data. Use HTTPS when available.'
-                )}
-              />
-            )}
-          </div>
-        </SettingRow>
-        <SettingRow>
-          <SettingRowTitle>{t('settings.sync.token', 'Access Token')}</SettingRowTitle>
-          <Input.Password
-            placeholder={t('settings.sync.token_placeholder', 'Optional bearer token')}
-            value={token}
-            onChange={(e) => onTokenChange(e.target.value)}
-            onBlur={onTokenBlur}
-            disabled={!hydrated}
-            style={{ flex: '1 1 auto', maxWidth: 320, minWidth: 0, marginLeft: 12 }}
-            data-testid="sync-token-input"
-          />
-        </SettingRow>
-        <SettingRow>
-          <SettingHelpText>
-            {t('settings.sync.token_help', 'Token is never included in sync payload or logs.')}
-          </SettingHelpText>
         </SettingRow>
         {(configLoadError || configError) && (
           <SettingRow>
@@ -509,7 +623,12 @@ const SyncSettings: React.FC = () => {
           </SettingRow>
         )}
         <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Flex
+            gap={8}
+            align="center"
+            wrap="wrap"
+            data-testid="sync-service-status"
+            data-state={service?.state ?? 'unknown'}>
             <span
               data-testid="sync-service-indicator"
               data-state={service?.state ?? 'unknown'}
@@ -524,28 +643,25 @@ const SyncSettings: React.FC = () => {
                     : 'var(--color-error, #ff4d4f)'
               }}
             />
-            <span data-testid="sync-service-status">
-              {t('settings.sync.service_status', 'Service')}:{' '}
-              {!service
-                ? '—'
-                : service.state === 'connected'
-                  ? t('settings.sync.connected_state', 'Connected')
-                  : service.state === 'unregistered'
-                    ? t('settings.sync.unregistered_state', 'Not connected')
-                    : t('settings.sync.disconnected_state', 'Disconnected')}
-            </span>
-          </div>
-          {service?.deviceCode && (
-            <span data-testid="sync-device-code">
-              {t('settings.sync.device_code_label', 'This device code')}: {service.deviceCode}
-            </span>
-          )}
-          <SettingHelpText>
-            {t(
-              'settings.sync.device_code_hint',
-              'The device code is public: read it aloud to pair another of your devices. It cannot authorize anything by itself.'
+            <span>{t('settings.sync.service_status', 'Service status')}</span>
+            {service && (
+              <Tag
+                color={
+                  service.state === 'connected' ? 'success' : service.state === 'unregistered' ? 'default' : 'error'
+                }
+                data-testid="sync-service-pill">
+                {serviceStateLabel}
+              </Tag>
             )}
-          </SettingHelpText>
+          </Flex>
+          {service?.deviceCode && (
+            <Flex gap={8} align="center" wrap="wrap">
+              <span data-testid="sync-device-code">
+                {t('settings.sync.device_code_label', 'This device code')}: {service.deviceCode}
+              </span>
+              <SyncHelpIcon tip={deviceCodeTip} label={deviceCodeTip} />
+            </Flex>
+          )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {showConnect && (
               <Button type="primary" onClick={onConnect} loading={connecting} data-testid="sync-connect">
@@ -563,23 +679,41 @@ const SyncSettings: React.FC = () => {
       <SettingDivider />
       <div role="group" aria-labelledby="sync-section-pairing">
         <SettingSubtitle id="sync-section-pairing">
-          {t('settings.sync.pairing_title', 'Device pairing')}
+          <span style={{ display: 'flex', alignItems: 'center' }}>
+            <span>{t('settings.sync.pairing_title', 'Device pairing')}</span>
+            <SyncHelpIcon tip={pairingTip} label={pairingTip} />
+          </span>
         </SettingSubtitle>
         <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <SettingHelpText>
-            {t(
-              'settings.sync.pairing_help',
-              'Pairing joins your own devices into a private channel. Enter the other device code to request pairing; the other device accepts. Channels are private per device group.'
-            )}
-          </SettingHelpText>
-          <span data-testid="sync-pairing-status">
-            {t('settings.sync.pairing_status', 'Pairing status')}: {pairingStateLabel}
-          </span>
+          <Flex
+            gap={8}
+            align="center"
+            wrap="wrap"
+            data-testid="sync-pairing-status"
+            data-state={pairing?.state ?? 'unknown'}>
+            <span>{t('settings.sync.pairing_status', 'Pairing status')}</span>
+            <Tag
+              color={
+                !pairing
+                  ? 'default'
+                  : pairing.state === 'paired'
+                    ? 'success'
+                    : pairing.state === 'outgoing'
+                      ? 'processing'
+                      : pairing.state === 'incoming'
+                        ? 'warning'
+                        : 'default'
+              }
+              data-testid="sync-pairing-pill"
+              data-state={pairing?.state ?? 'unknown'}>
+              {pairingStateLabel}
+            </Tag>
+          </Flex>
           {!serviceConnected && (
             <SettingHelpText>
               {t(
                 'settings.sync.pairing_disabled_hint',
-                'Connect the relay service first; pairing actions are unavailable while disconnected.'
+                'Connect to the server to show the device code and continue pairing.'
               )}
             </SettingHelpText>
           )}
@@ -682,21 +816,46 @@ const SyncSettings: React.FC = () => {
       <div role="group" aria-labelledby="sync-section-data">
         <SettingSubtitle id="sync-section-data">{t('settings.sync.status', 'Status')}</SettingSubtitle>
         <div style={{ flex: 1, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {syncBadgeMeta && syncBadge && (
+            <div>
+              <Tag color={syncBadgeMeta.color} data-testid="sync-status-badge" data-state={syncBadge}>
+                {syncBadgeMeta.text}
+              </Tag>
+            </div>
+          )}
           <div style={{ flex: 1, fontSize: 12, color: 'var(--color-text-2)' }} data-testid="sync-status">
             {status ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <span data-testid="sync-pending-cursor">
+                <span>
                   {t('settings.sync.pending', 'Pending')}:{' '}
-                  <span data-testid="sync-pending-count">{status.pendingCount}</span> |{' '}
-                  {t('settings.sync.cursor', 'Cursor')}: <span data-testid="sync-cursor">{status.cursor}</span>
+                  <span data-testid="sync-pending-count">{status.pendingCount}</span>
                 </span>
+                <details style={{ fontSize: 12, color: 'var(--color-text-3)' }}>
+                  <summary>{t('settings.sync.cursor', 'Cursor')}</summary>
+                  <span data-testid="sync-cursor">{status.cursor}</span>
+                </details>
                 {status.lastSyncAt && (
                   <span>
                     {t('settings.sync.last_sync', 'Last sync')}:{' '}
                     {dayjs(status.lastSyncAt).format('YYYY-MM-DD HH:mm:ss')}
                   </span>
                 )}
-                {status.lastError && (
+                {showPairingRequiredHint && (
+                  <span style={{ color: 'var(--color-text-2)' }} data-testid="sync-pairing-required-hint">
+                    {pairingRequiredHint}
+                  </span>
+                )}
+                {stalePairingRecovery && (
+                  <span style={{ color: 'var(--color-text-2)' }} data-testid="sync-recovery-hint">
+                    {pairingRecoveredHint}
+                  </span>
+                )}
+                {status.lastError && !lastErrorPairingRequired && (
+                  <span style={errorTextStyle} data-testid="sync-last-error">
+                    {t('settings.sync.last_error', 'Last error')}: {status.lastError}
+                  </span>
+                )}
+                {status.lastError && lastErrorPairingRequired && hasGenuineError && (
                   <span style={errorTextStyle} data-testid="sync-last-error">
                     {t('settings.sync.last_error', 'Last error')}: {status.lastError}
                   </span>
@@ -721,15 +880,21 @@ const SyncSettings: React.FC = () => {
               <span>{t('settings.sync.no_status', 'No status yet')}</span>
             )}
           </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <Button
               type="primary"
               onClick={onSync}
               loading={syncing || !!status?.syncing}
-              disabled={!enabled || !endpoint}
+              disabled={!enabled || !endpoint || syncWaitingDisabled}
+              title={syncWaitingDisabled ? waitingHint : undefined}
               data-testid="sync-now-button">
               {t('settings.sync.sync_now', 'Sync Now')}
             </Button>
+            {syncWaitingDisabled && (
+              <span style={{ color: 'var(--color-text-2)' }} data-testid="sync-waiting-hint">
+                {waitingHint}
+              </span>
+            )}
           </div>
         </div>
       </div>

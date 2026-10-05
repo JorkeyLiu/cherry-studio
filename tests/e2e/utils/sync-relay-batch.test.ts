@@ -8,8 +8,6 @@ import {
   type TestRelayHandle
 } from './sync-relay'
 
-const TOKEN = 'batch-atomicity-token'
-
 function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Record<string, unknown> {
   return {
     id,
@@ -26,8 +24,8 @@ let relay: TestRelayHandle | null = null
 let dev: ProvisionedDevice | null = null
 
 beforeEach(async () => {
-  relay = await startTestRelay(TOKEN)
-  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
+  relay = await startTestRelay()
+  dev = (await provisionPairedDevices(relay.endpoint, 2))[0]
 })
 
 afterEach(async () => {
@@ -40,7 +38,6 @@ afterEach(async () => {
 async function push(ops: Record<string, unknown>[]): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${TOKEN}`,
     ...provisionedHeaders(dev!)
   }
   const res = await fetch(`${relay!.endpoint}/sync/push`, {
@@ -54,7 +51,6 @@ async function push(ops: Record<string, unknown>[]): Promise<{ status: number; b
 
 async function pull(cursor = 0): Promise<any> {
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${TOKEN}`,
     ...provisionedHeaders(dev!)
   }
   const res = await fetch(`${relay!.endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, {

@@ -1,7 +1,7 @@
 /**
  * SYNC-CC review findings 4-7 (Main lane):
  * 4) connect() async boundaries are guarded by config/lifecycle generation,
- *    shutdown, explicitDisconnect, and endpoint/token snapshot; stale results
+ *    shutdown, explicitDisconnect, and endpoint snapshot; stale results
  *    never write credential/status/channel/cursor.
  * 5) Device code + secret persist as one atomic logical unit with rollback;
  *    half state fails closed and the secret never travels on the error object.
@@ -65,7 +65,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:3999')
-  configStore.set('sync:token', 'test-token')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)

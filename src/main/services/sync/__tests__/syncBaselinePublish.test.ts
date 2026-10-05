@@ -173,7 +173,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', ENDPOINT)
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -210,11 +209,12 @@ describe('SyncClient.publishBaseline', () => {
         return { ok: true, status: 200, text: async () => raw } as never
       })
     )
-    const res = await syncClient.publishBaseline(ENDPOINT, 'tok', envelope as never, CODE, SECRET)
+    const res = await syncClient.publishBaseline(ENDPOINT, envelope as never, CODE, SECRET)
     expect(calls).toHaveLength(1)
     expect(calls[0]).toEqual({ url: `${ENDPOINT}/sync/baseline`, method: 'PUT' })
     expect(seenHeaders['x-sync-device-code']).toBe(CODE)
-    expect(seenHeaders['Authorization']).toBe('Bearer tok')
+    expect(seenHeaders['x-sync-device-secret']).toBe(SECRET)
+    expect(seenHeaders['Authorization']).toBeUndefined()
     expect(seenHeaders['Content-Type']).toBe('application/json')
     const bodyKeys = Object.keys(JSON.parse(seenBody))
     expect(bodyKeys).toEqual(['wireVersion', 'channelId', 'watermark', 'digestScheme', 'digest', 'payload'])
@@ -229,7 +229,7 @@ describe('SyncClient.publishBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: false, status: 409, text: async () => '{"error":"baseline-conflict"}' }) as never)
     )
-    await expect(syncClient.publishBaseline(ENDPOINT, undefined, envelope as never, CODE, SECRET)).rejects.toThrow(
+    await expect(syncClient.publishBaseline(ENDPOINT, envelope as never, CODE, SECRET)).rejects.toThrow(
       /baseline publish failed 409.*baseline-conflict/
     )
     vi.unstubAllGlobals()
@@ -241,14 +241,14 @@ describe('SyncClient.publishBaseline', () => {
       'fetch',
       vi.fn(async () => ({ ok: false, status: 400, text: async () => '{"error":"digest-mismatch"}' }) as never)
     )
-    await expect(syncClient.publishBaseline(ENDPOINT, undefined, envelope as never, CODE, SECRET)).rejects.toThrow(
+    await expect(syncClient.publishBaseline(ENDPOINT, envelope as never, CODE, SECRET)).rejects.toThrow(
       /baseline publish failed 400.*digest-mismatch/
     )
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({ ok: true, status: 200, text: async () => '<html>ok</html>' }) as never)
     )
-    await expect(syncClient.publishBaseline(ENDPOINT, undefined, envelope as never, CODE, SECRET)).rejects.toThrow(
+    await expect(syncClient.publishBaseline(ENDPOINT, envelope as never, CODE, SECRET)).rejects.toThrow(
       /baseline publish response malformed/
     )
     vi.unstubAllGlobals()
@@ -258,7 +258,7 @@ describe('SyncClient.publishBaseline', () => {
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{}' }) as never)
     vi.stubGlobal('fetch', fetchMock)
     const bad = { wireVersion: WIRE_VERSION_V2, channelId: CHANNEL } as never
-    await expect(syncClient.publishBaseline(ENDPOINT, undefined, bad, CODE, SECRET)).rejects.toThrow(
+    await expect(syncClient.publishBaseline(ENDPOINT, bad, CODE, SECRET)).rejects.toThrow(
       /baseline publish envelope invalid/
     )
     expect(fetchMock).not.toHaveBeenCalled()
@@ -270,7 +270,7 @@ describe('SyncClient.publishBaseline', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(
-      syncClient.publishBaseline(ENDPOINT, undefined, envelope as never, CODE, SECRET, controller.signal)
+      syncClient.publishBaseline(ENDPOINT, envelope as never, CODE, SECRET, controller.signal)
     ).rejects.toThrow()
     vi.unstubAllGlobals()
   })
@@ -284,7 +284,7 @@ describe('publishBaseline barrier', () => {
   }
 
   function mockEmptyPull(order: string[]): void {
-    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, _t, cursor) => {
+    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, cursor) => {
       order.push(`pull:${cursor}`)
       expect(cursor).toBe(CURSOR_N)
       return { operations: [], cursor: CURSOR_N } as never
@@ -296,7 +296,7 @@ describe('publishBaseline barrier', () => {
     const order: string[] = []
     mockEmptyPull(order)
     let sentEnvelope: Record<string, unknown> | null = null
-    const publishMock = vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    const publishMock = vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       order.push('put')
       sentEnvelope = envelope as unknown as Record<string, unknown>
       const raw = JSON.stringify(envelope)
@@ -489,7 +489,7 @@ describe('publishBaseline barrier', () => {
       await gate
       return { operations: [], cursor: CURSOR_N } as never
     })
-    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       const raw = JSON.stringify(envelope)
       const { parseEnvelopeJson } = await import('@shared/sync')
       const parsed = parseEnvelopeJson(raw)
@@ -551,7 +551,7 @@ describe('publish barrier quiescence', () => {
       await pullGate
       return { operations: [], cursor: CURSOR_N } as never
     })
-    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       putCalls += 1
       await putGate
       const raw = JSON.stringify(envelope)
@@ -649,7 +649,7 @@ describe('publish barrier quiescence', () => {
       await pullGate
       return { operations: [], cursor: CURSOR_N } as never
     })
-    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       putCalls += 1
       await putGate
       const raw = JSON.stringify(envelope)
@@ -745,7 +745,7 @@ describe('publish barrier quiescence', () => {
       await pullGate
       return { operations: [], cursor: CURSOR_N } as never
     })
-    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, _t, envelope) => {
+    vi.spyOn(syncClient, 'publishBaseline').mockImplementation(async (_e, envelope) => {
       const raw = JSON.stringify(envelope)
       const { parseEnvelopeJson } = await import('@shared/sync')
       const parsed = parseEnvelopeJson(raw)

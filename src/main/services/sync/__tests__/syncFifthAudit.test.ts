@@ -75,7 +75,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as any, sqlite)
@@ -199,26 +198,29 @@ describe('blocker 2: parent closure never emits a transient assistant parent (LO
 })
 
 describe('blocker 3: config generation cancels stale in-flight sync (LOCK-PERSONAL-001)', () => {
-  it('setConfig bumps the generation only on disable/endpoint/token transitions', () => {
+  it('setConfig bumps the generation only on disable/endpoint transitions; legacy token is rejected', () => {
     const g0 = syncService.getConfigGeneration()
     syncService.setConfig({})
     expect(syncService.getConfigGeneration()).toBe(g0)
-    syncService.setConfig({ token: 'rotated' })
+    syncService.setConfig({ endpoint: 'http://127.0.0.1:9998' })
     expect(syncService.getConfigGeneration()).toBe(g0 + 1)
-    syncService.setConfig({ token: 'rotated' })
+    syncService.setConfig({ endpoint: 'http://127.0.0.1:9998' })
     expect(syncService.getConfigGeneration()).toBe(g0 + 1)
     syncService.setConfig({ enabled: false })
     expect(syncService.getConfigGeneration()).toBe(g0 + 2)
+    // Legacy shared token is rejected without a generation bump (no stale invalidation).
+    expect(() => syncService.setConfig({ token: 'rotated' } as never)).toThrow(/no longer supported/)
+    expect(syncService.getConfigGeneration()).toBe(g0 + 2)
   })
 
-  it('mid-flight token rotation aborts before stale outbox clears or cursor/status writes', async () => {
+  it('mid-flight endpoint rotation aborts before stale outbox clears or cursor/status writes', async () => {
     const { syncClient } = await import('../SyncClient')
     syncService.recordUpsert('topic', 't-stale', { id: 't-stale', name: 'S' }, Date.now())
     const outboxBefore = syncService.listOutbox().length
     expect(outboxBefore).toBeGreaterThan(0)
-    const pushMock = vi.spyOn(syncClient, 'push').mockImplementation(async (_ep, _tok, req) => {
-      // Simulate a disable/endpoint/token transition racing the in-flight push.
-      syncService.setConfig({ token: 'rotated-mid-flight' })
+    const pushMock = vi.spyOn(syncClient, 'push').mockImplementation(async (_ep, req) => {
+      // Simulate a disable/endpoint transition racing the in-flight push.
+      syncService.setConfig({ endpoint: 'http://127.0.0.1:9998' })
       return { cursor: 0, acceptedIds: (req.operations as Array<{ id: string }>).map((o) => o.id) } as never
     })
     const pullMock = vi.spyOn(syncClient, 'pull').mockResolvedValue({ operations: [], cursor: 0 } as never)
@@ -240,7 +242,7 @@ describe('blocker 3: config generation cancels stale in-flight sync (LOCK-PERSON
     const { SyncAutoService } = await import('../syncAuto')
     let calls = 0
     const svc = new SyncAutoService({
-      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', token: 't', enabled: true }),
+      getConfig: () => ({ endpoint: 'http://127.0.0.1:9', enabled: true }),
       isAttached: () => true,
       getCredentials: () => ({
         deviceCode: 'ABCD2345',

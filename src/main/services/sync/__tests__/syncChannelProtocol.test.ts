@@ -35,7 +35,7 @@ interface Registered {
   secret: string
 }
 
-async function listenRelay(token?: string): Promise<{
+async function listenRelay(): Promise<{
   base: string
   db: Database.Database
   close: () => Promise<void>
@@ -43,7 +43,7 @@ async function listenRelay(token?: string): Promise<{
   const { createRelayServer } = await import('../../../../../scripts/sync-relay/server')
   const db = new Database(':memory:')
   ensureRelaySchema(db)
-  const server = createRelayServer(db, token ? { token } : {})
+  const server = createRelayServer(db)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const addr = server.address() as { port: number }
   return {
@@ -733,15 +733,14 @@ describe('paired-membership data plane and per-channel sequencing', () => {
 
 describe('shared SYNC-CC core conformance (production SQLite :memory: observable contract)', () => {
   it('memory and production share the observable cases/error vocabulary', async () => {
-    const token = 'cc-conformance-token'
-    const { base, db, close } = await listenRelay(token)
+    const { base, db, close } = await listenRelay()
     try {
       // Implementation-level SSE rebind evidence for the production relay:
       // the shared core runs directly against createRelayServer, so channel
       // isolation and departed-stream close are proven here without a
       // fragile E2E stream read. SQLite atomicity/concurrency stays in the
       // exclusive tests above; this case locks only the shared vocabulary.
-      await runRelayConformanceCore({ endpoint: base, token })
+      await runRelayConformanceCore({ endpoint: base })
     } finally {
       await close()
       db.close()

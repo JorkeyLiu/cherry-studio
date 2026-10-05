@@ -120,7 +120,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   const opened = openChatDb()
   sqlite = opened.sqlite
   db = opened.db
@@ -701,7 +700,7 @@ describe('relay persistence: real push/pull round-trip with 400/409/idempotent',
     const rdb = new Database(':memory:')
     relayDbs.push(rdb)
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'order-frame-token' })
+    const server = createRelayServer(rdb)
     relayServers.push(server as unknown as { close: (cb?: () => void) => void })
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
@@ -857,7 +856,7 @@ describe('dual-profile real-relay integration without baseline', () => {
     const rdb = new Database(':memory:')
     relayDbs.push(rdb)
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'dual-token' })
+    const server = createRelayServer(rdb)
     relayServers.push(server as unknown as { close: (cb?: () => void) => void })
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
@@ -1211,7 +1210,7 @@ describe('transient errata: exclusion invalidates locally with 0 op; promotion i
       const rdb = new Database(':memory:')
       relayDbs.push(rdb)
       ensureRelaySchema(rdb)
-      const server = createRelayServer(rdb, { token: 'f1-token' })
+      const server = createRelayServer(rdb)
       relayServers.push(server as unknown as { close: (cb?: () => void) => void })
       await new Promise<void>((resolve) => {
         ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>

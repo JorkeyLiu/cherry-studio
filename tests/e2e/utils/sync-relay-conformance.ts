@@ -39,7 +39,6 @@ export interface RelayCredential {
 
 export interface ConformanceTarget {
   endpoint: string
-  token: string
 }
 
 const CODE_RE = /^[A-HJ-NP-Z2-9]{8}$/
@@ -49,13 +48,8 @@ function baseOf(target: ConformanceTarget): string {
   return target.endpoint.replace(/\/$/, '')
 }
 
-function bearer(target: ConformanceTarget): Record<string, string> {
-  return { Authorization: `Bearer ${target.token}` }
-}
-
-function credHeaders(target: ConformanceTarget, cred: RelayCredential): Record<string, string> {
+function credHeaders(_target: ConformanceTarget, cred: RelayCredential): Record<string, string> {
   return {
-    ...bearer(target),
     'x-sync-device-code': cred.code,
     'x-sync-device-secret': cred.secret
   }
@@ -327,7 +321,7 @@ export function conformanceTopicOp(
 export async function conformanceRegister(target: ConformanceTarget, deviceId?: string): Promise<RelayCredential> {
   const res = await fetch(`${baseOf(target)}/sync/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...bearer(target) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(deviceId !== undefined ? { deviceId } : {})
   })
   const body = await readJson(res)
@@ -409,7 +403,7 @@ export async function conformanceRegistrationReattach(target: ConformanceTarget)
   const reg = await conformanceRegister(target, `cc-reg-${Date.now() % 100000}`)
   const again = await fetch(`${baseOf(target)}/sync/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...bearer(target) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceCode: reg.code, deviceSecret: reg.secret })
   })
   const againBody = await readJson(again)
@@ -426,7 +420,7 @@ export async function conformanceUnknownCredential(target: ConformanceTarget): P
   const reg = await conformanceRegister(target)
   const unknown = await fetch(`${baseOf(target)}/sync/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...bearer(target) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceCode: 'ZZZZ9999', deviceSecret: '0'.repeat(64) })
   })
   const unknownBody = await readJson(unknown)
@@ -434,7 +428,7 @@ export async function conformanceUnknownCredential(target: ConformanceTarget): P
   expectErrorContains(unknownBody, 'unknown-credential', 'unknown-credential reattach')
   const wrong = await fetch(`${baseOf(target)}/sync/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...bearer(target) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceCode: reg.code, deviceSecret: '0'.repeat(64) })
   })
   const wrongBody = await readJson(wrong)
@@ -445,7 +439,6 @@ export async function conformanceUnknownCredential(target: ConformanceTarget): P
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...bearer(target),
       'x-sync-device-code': reg.code
     },
     body: JSON.stringify({ deviceId: 'x', operations: [] })
@@ -454,23 +447,21 @@ export async function conformanceUnknownCredential(target: ConformanceTarget): P
   expectStatus(forged.status, 403, 'code-without-secret push', forgedBody)
 }
 
-/** Bearer auth fails closed before device-credential checks. */
+/** Device-credential auth fails closed before any data access. */
 export async function conformanceAuthFailClosed(target: ConformanceTarget): Promise<void> {
   const reg = await conformanceRegister(target)
-  const noAuth = await fetch(`${baseOf(target)}/sync/pull?cursor=0&deviceId=x`, {
-    headers: { 'x-sync-device-code': reg.code, 'x-sync-device-secret': reg.secret }
-  })
-  await readJson(noAuth)
-  expectStatus(noAuth.status, 401, 'pull without Bearer')
+  // A request without any device credential fails closed (no data access).
+  const noAuth = await fetch(`${baseOf(target)}/sync/pull?cursor=0&deviceId=x`, { headers: {} })
+  const noAuthBody = await readJson(noAuth)
+  expectStatus(noAuth.status, 403, 'pull without device credential', noAuthBody)
+  expectErrorContains(noAuthBody, 'invalid-credential', 'pull without device credential')
+  // A wrong device secret fails closed with the shared vocabulary.
   const badAuth = await fetch(`${baseOf(target)}/sync/pull?cursor=0&deviceId=x`, {
-    headers: {
-      Authorization: 'Bearer wrong-token',
-      'x-sync-device-code': reg.code,
-      'x-sync-device-secret': reg.secret
-    }
+    headers: { 'x-sync-device-code': reg.code, 'x-sync-device-secret': '0'.repeat(64) }
   })
-  await readJson(badAuth)
-  expectStatus(badAuth.status, 401, 'pull with wrong Bearer')
+  const badAuthBody = await readJson(badAuth)
+  expectStatus(badAuth.status, 403, 'pull with wrong device secret', badAuthBody)
+  expectErrorContains(badAuthBody, 'invalid-credential', 'pull with wrong device secret')
   // Unknown device credential fails closed with the shared vocabulary.
   const ghost = await conformancePush(target, { code: 'ZZZZ9999', secret: '0'.repeat(64) }, 'ghost-dev', [])
   expectStatus(ghost.status, 403, 'ghost push', ghost.body)
@@ -988,7 +979,6 @@ export async function runRelayConformanceCore(target: ConformanceTarget): Promis
   if (!target || typeof target.endpoint !== 'string' || target.endpoint.length === 0) {
     fail('runRelayConformanceCore requires endpoint')
   }
-  if (!target.token || typeof target.token !== 'string') fail('runRelayConformanceCore requires token')
   await conformanceRegistrationReattach(target)
   await conformanceUnknownCredential(target)
   await conformanceAuthFailClosed(target)

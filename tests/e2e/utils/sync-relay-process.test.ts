@@ -3,7 +3,8 @@
  *
  * The runner stays ABI-neutral (no better-sqlite3 import); the native
  * binding loads only in the owned Electron-as-Node child (ABI 145).
- * Covers: startup/readiness, authenticated push/pull, wrong-token 401
+ * Covers: startup/readiness, device-authenticated push/pull, wrong device
+ * secret 403
  * without state mutation, bounded stop/restart on the same DB with retained
  * cursor/seq and sequence continuity, and exact fail-closed cleanup.
  */
@@ -29,8 +30,6 @@ import {
   waitForRelayHealth,
   type FileBackedRelayHandle
 } from './sync-relay-process'
-
-const TOKEN = 'relay-process-test-token'
 
 const require = createRequire(import.meta.url)
 
@@ -137,20 +136,30 @@ let provisionedEndpoint = ''
 
 async function ensureProvisioned(endpoint: string): Promise<ProvisionedDevice> {
   if (provisioned && provisionedEndpoint === endpoint) return provisioned
-  const devices = await provisionPairedDevices(endpoint, TOKEN, 2)
+  const devices = await provisionPairedDevices(endpoint, 2)
   provisioned = devices[0]
   provisionedEndpoint = endpoint
   return provisioned
 }
 
+type RawCred = 'valid' | 'none' | 'wrong'
+
+async function credHeadersFor(endpoint: string, cred: RawCred): Promise<Record<string, string>> {
+  if (cred === 'none') return {}
+  const dev = await ensureProvisioned(endpoint)
+  if (cred === 'wrong') return { 'x-sync-device-code': dev.code, 'x-sync-device-secret': '0'.repeat(64) }
+  return provisionedHeaders(dev)
+}
+
 async function pushRaw(
   endpoint: string,
   ops: Record<string, unknown>[],
-  token: string | null
+  cred: RawCred = 'valid'
 ): Promise<{ status: number; body: any }> {
-  const dev = await ensureProvisioned(endpoint)
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...provisionedHeaders(dev) }
-  if (token !== null) headers.Authorization = `Bearer ${token}`
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(await credHeadersFor(endpoint, cred))
+  }
   const res = await fetch(`${endpoint}/sync/push`, {
     method: 'POST',
     headers,
@@ -163,11 +172,9 @@ async function pushRaw(
 async function pullRaw(
   endpoint: string,
   cursor: number,
-  token: string | null = TOKEN
+  cred: RawCred = 'valid'
 ): Promise<{ status: number; body: any }> {
-  const dev = await ensureProvisioned(endpoint)
-  const headers: Record<string, string> = { ...provisionedHeaders(dev) }
-  if (token !== null) headers.Authorization = `Bearer ${token}`
+  const headers: Record<string, string> = { ...(await credHeadersFor(endpoint, cred)) }
   const res = await fetch(`${endpoint}/sync/pull?cursor=${cursor}&deviceId=d1`, { headers })
   const body = await res.json().catch(() => ({}))
   return { status: res.status, body }
@@ -265,7 +272,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   }
 
   it('starts under the Electron lane and serves health plus authenticated push/pull', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
     expect(relay.isRunning()).toBe(true)
     expect(relay.pid()).toBeGreaterThan(0)
     expect(relay.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
@@ -273,50 +280,50 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     const health = await fetch(`${relay.endpoint}/health`)
     expect(health.status).toBe(200)
 
-    const pushed = await pushRaw(relay.endpoint, [topicOp('op-lc-1', 't-lc-1', 'One', 1000)], TOKEN)
+    const pushed = await pushRaw(relay.endpoint, [topicOp('op-lc-1', 't-lc-1', 'One', 1000)])
     expect(pushed.status).toBe(200)
     expect(pushed.body.acceptedIds).toEqual(['op-lc-1'])
 
-    const pulled = await pullRaw(relay.endpoint, 0, TOKEN)
+    const pulled = await pullRaw(relay.endpoint, 0)
     expect(pulled.status).toBe(200)
     expect(pulled.body.cursor).toBe(1)
     expect((pulled.body.operations as any[]).map((o) => o.id)).toEqual(['op-lc-1'])
     expect((pulled.body.operations as any[]).map((o) => o.seq)).toEqual([1])
   }, 90000)
 
-  it('wrong-token requests stay 401 and do not mutate relay state', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
-    const seed = await pushRaw(relay.endpoint, [topicOp('op-auth-seed', 't-auth-seed', 'Seed', 1000)], TOKEN)
+  it('wrong device-secret requests stay 403 and do not mutate relay state', async () => {
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
+    const seed = await pushRaw(relay.endpoint, [topicOp('op-auth-seed', 't-auth-seed', 'Seed', 1000)])
     expect(seed.status).toBe(200)
 
-    const badPush = await pushRaw(relay.endpoint, [topicOp('op-auth-bad', 't-auth-bad', 'Bad', 1001)], 'wrong-token')
-    expect(badPush.status).toBe(401)
-    const noPush = await pushRaw(relay.endpoint, [topicOp('op-auth-none', 't-auth-none', 'None', 1002)], null)
-    expect(noPush.status).toBe(401)
-    const badPull = await pullRaw(relay.endpoint, 0, 'wrong-token')
-    expect(badPull.status).toBe(401)
-    const noPull = await pullRaw(relay.endpoint, 0, null)
-    expect(noPull.status).toBe(401)
+    const badPush = await pushRaw(relay.endpoint, [topicOp('op-auth-bad', 't-auth-bad', 'Bad', 1001)], 'wrong')
+    expect(badPush.status).toBe(403)
+    const noPush = await pushRaw(relay.endpoint, [topicOp('op-auth-none', 't-auth-none', 'None', 1002)], 'none')
+    expect(noPush.status).toBe(403)
+    const badPull = await pullRaw(relay.endpoint, 0, 'wrong')
+    expect(badPull.status).toBe(403)
+    const noPull = await pullRaw(relay.endpoint, 0, 'none')
+    expect(noPull.status).toBe(403)
 
     // Rejected auth attempts never touch the log: cursor stays at the seed.
-    const after = await pullRaw(relay.endpoint, 0, TOKEN)
+    const after = await pullRaw(relay.endpoint, 0)
     expect(after.status).toBe(200)
     expect(after.body.cursor).toBe(1)
     expect((after.body.operations as any[]).map((o) => o.id)).toEqual(['op-auth-seed'])
   }, 90000)
 
   it('identical replay is idempotent without duplicate seq', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
     const op = topicOp('op-replay-1', 't-replay-1', 'Replay', 1000)
-    const first = await pushRaw(relay.endpoint, [op], TOKEN)
+    const first = await pushRaw(relay.endpoint, [op])
     expect(first.status).toBe(200)
     expect(first.body.cursor).toBe(1)
-    const replay = await pushRaw(relay.endpoint, [op], TOKEN)
+    const replay = await pushRaw(relay.endpoint, [op])
     expect(replay.status).toBe(200)
     expect(replay.body.acceptedIds).toEqual(['op-replay-1'])
     // No duplicate seq: cursor stays at 1 and pull still yields a single seq-1 row.
     expect(replay.body.cursor).toBe(1)
-    const pulled = await pullRaw(relay.endpoint, 0, TOKEN)
+    const pulled = await pullRaw(relay.endpoint, 0)
     expect(pulled.status).toBe(200)
     expect(pulled.body.cursor).toBe(1)
     expect((pulled.body.operations as any[]).map((o) => o.seq)).toEqual([1])
@@ -324,14 +331,14 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   }, 90000)
 
   it('mismatched same-ID collision is rejected with 409 and no mutation', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
-    const seed = await pushRaw(relay.endpoint, [topicOp('op-collide-1', 't-collide-1', 'Seed', 1000)], TOKEN)
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
+    const seed = await pushRaw(relay.endpoint, [topicOp('op-collide-1', 't-collide-1', 'Seed', 1000)])
     expect(seed.status).toBe(200)
     expect(seed.body.cursor).toBe(1)
     // Same ID with a different payload/timestamp collides rather than replays.
-    const clash = await pushRaw(relay.endpoint, [topicOp('op-collide-1', 't-collide-1', 'Mutated', 9999)], TOKEN)
+    const clash = await pushRaw(relay.endpoint, [topicOp('op-collide-1', 't-collide-1', 'Mutated', 9999)])
     expect(clash.status).toBe(409)
-    const after = await pullRaw(relay.endpoint, 0, TOKEN)
+    const after = await pullRaw(relay.endpoint, 0)
     expect(after.status).toBe(200)
     expect(after.body.cursor).toBe(1)
     expect((after.body.operations as any[]).map((o) => o.seq)).toEqual([1])
@@ -339,23 +346,20 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   }, 90000)
 
   it('malformed operations are rejected with 400 and no mutation', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
-    const seed = await pushRaw(relay.endpoint, [topicOp('op-mal-seed', 't-mal-seed', 'Seed', 1000)], TOKEN)
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
+    const seed = await pushRaw(relay.endpoint, [topicOp('op-mal-seed', 't-mal-seed', 'Seed', 1000)])
     expect(seed.status).toBe(200)
-    const badId = await pushRaw(relay.endpoint, [{ ...topicOp('op-mal-bad', 't-mal-bad', 'Bad', 1001), id: '' }], TOKEN)
+    const badId = await pushRaw(relay.endpoint, [{ ...topicOp('op-mal-bad', 't-mal-bad', 'Bad', 1001), id: '' }])
     expect(badId.status).toBe(400)
-    const badType = await pushRaw(
-      relay.endpoint,
-      [{ ...topicOp('op-mal-type', 't-mal-type', 'Bad', 1001), entityType: 'nope' }],
-      TOKEN
-    )
+    const badType = await pushRaw(relay.endpoint, [
+      { ...topicOp('op-mal-type', 't-mal-type', 'Bad', 1001), entityType: 'nope' }
+    ])
     expect(badType.status).toBe(400)
     const nonArray = await (async () => {
       const res = await fetch(`${relay!.endpoint}/sync/push`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${TOKEN}`,
           ...provisionedHeaders(await ensureProvisioned(relay!.endpoint))
         },
         body: JSON.stringify({ deviceId: 'd1', operations: 'not-an-array' })
@@ -363,20 +367,19 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
       return { status: res.status, body: await res.json().catch(() => ({})) }
     })()
     expect(nonArray.status).toBe(400)
-    const after = await pullRaw(relay.endpoint, 0, TOKEN)
+    const after = await pullRaw(relay.endpoint, 0)
     expect(after.status).toBe(200)
     expect(after.body.cursor).toBe(1)
     expect((after.body.operations as any[]).map((o) => o.id)).toEqual(['op-mal-seed'])
   }, 90000)
 
   it('noncanonical/unsafe cursors are rejected and limits follow exact server behavior', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
-    const seed = await pushRaw(relay.endpoint, [topicOp('op-cur-1', 't-cur-1', 'Seed', 1000)], TOKEN)
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
+    const seed = await pushRaw(relay.endpoint, [topicOp('op-cur-1', 't-cur-1', 'Seed', 1000)])
     expect(seed.status).toBe(200)
     for (const bad of ['07', '00', '01', ' 1', '1 ', '12junk', '-1', 'abc', '1.5', '..', '%2e%2e']) {
       const res = await fetch(`${relay.endpoint}/sync/pull?cursor=${encodeURIComponent(bad)}&deviceId=d1`, {
         headers: {
-          Authorization: `Bearer ${TOKEN}`,
           ...provisionedHeaders(await ensureProvisioned(relay!.endpoint))
         }
       })
@@ -387,7 +390,6 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     // limit=0 falls back to the default window (200) instead of 400.
     const badLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=d1&limit=abc`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
         ...provisionedHeaders(await ensureProvisioned(relay.endpoint))
       }
     })
@@ -395,7 +397,6 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     expect(badLimit.status).toBe(400)
     const zeroLimit = await fetch(`${relay.endpoint}/sync/pull?cursor=0&deviceId=d1&limit=0`, {
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
         ...provisionedHeaders(await ensureProvisioned(relay.endpoint))
       }
     })
@@ -404,21 +405,21 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     expect(zeroBody.cursor).toBe(1)
     expect((zeroBody.operations as any[]).map((o) => o.id)).toEqual(['op-cur-1'])
     // State is untouched by rejected cursor/limit probes.
-    const after = await pullRaw(relay.endpoint, 0, TOKEN)
+    const after = await pullRaw(relay.endpoint, 0)
     expect(after.status).toBe(200)
     expect(after.body.cursor).toBe(1)
   }, 90000)
 
   it('bounded stop/restart on the same DB retains operations/cursor and continues the sequence', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
     const dbPath = relay.dbPath
     expect(fs.existsSync(dbPath)).toBe(true)
     const pidBefore = relay.pid()
     expect(pidBefore).toBeGreaterThan(0)
 
-    const push1 = await pushRaw(relay.endpoint, [topicOp('op-rs-1', 't-rs-1', 'One', 1000)], TOKEN)
+    const push1 = await pushRaw(relay.endpoint, [topicOp('op-rs-1', 't-rs-1', 'One', 1000)])
     expect(push1.status).toBe(200)
-    const push2 = await pushRaw(relay.endpoint, [topicOp('op-rs-2', 't-rs-2', 'Two', 1001)], TOKEN)
+    const push2 = await pushRaw(relay.endpoint, [topicOp('op-rs-2', 't-rs-2', 'Two', 1001)])
     expect(push2.status).toBe(200)
     expect(push2.body.cursor).toBe(2)
 
@@ -437,24 +438,24 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
     expect(relay.endpoint).toBe(endpointBefore)
 
     // Retained operations are contiguous from cursor 0 with cursor continuity.
-    const retained = await pullRaw(relay.endpoint, 0, TOKEN)
+    const retained = await pullRaw(relay.endpoint, 0)
     expect(retained.status).toBe(200)
     expect(retained.body.cursor).toBe(2)
     expect((retained.body.operations as any[]).map((o) => o.seq)).toEqual([1, 2])
     expect((retained.body.operations as any[]).map((o) => o.id)).toEqual(['op-rs-1', 'op-rs-2'])
 
     // The sequence continues after restart: next push lands at seq 3.
-    const push3 = await pushRaw(relay.endpoint, [topicOp('op-rs-3', 't-rs-3', 'Three', 1002)], TOKEN)
+    const push3 = await pushRaw(relay.endpoint, [topicOp('op-rs-3', 't-rs-3', 'Three', 1002)])
     expect(push3.status).toBe(200)
     expect(push3.body.cursor).toBe(3)
-    const tail = await pullRaw(relay.endpoint, 2, TOKEN)
+    const tail = await pullRaw(relay.endpoint, 2)
     expect(tail.status).toBe(200)
     expect(tail.body.cursor).toBe(3)
     expect((tail.body.operations as any[]).map((o) => o.seq)).toEqual([3])
   }, 120000)
 
   it('failed restart keeps single ownership: no second tracked handle, one close resolves all', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
     const rootDir = ownedTmpRoot as string
     await relay.stop()
     expect(relay.isRunning()).toBe(false)
@@ -486,7 +487,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   }, 120000)
 
   it('close stops the exact owned child and removes bundle plus DB artifacts', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
     const endpoint = relay.endpoint
     const dbPath = relay.dbPath
     expect(relay.isRunning()).toBe(true)
@@ -505,7 +506,7 @@ describe.skipIf(!abiProbe.ok)('file-backed relay child lifecycle', () => {
   }, 90000)
 
   it('close failure preserves artifacts and retryability (directory blocks DB removal)', async () => {
-    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string, token: TOKEN })
+    relay = await startTrackedRelay({ ownedTmpRoot: ownedTmpRoot as string })
     const dbPath = relay.dbPath
     await relay.stop()
     expect(relay.isRunning()).toBe(false)
@@ -532,10 +533,10 @@ describe('file-backed relay failure paths (no Electron ABI required)', () => {
     try {
       const unsafe = ['../escape.cjs', 'a/b.cjs', 'a\\b.cjs', '/abs.cjs', '..', '.', '', `${'x'.repeat(256)}.cjs`]
       for (const name of unsafe) {
-        await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, bundleFileName: name })).rejects.toThrow(
+        await expect(startFileBackedRelay({ ownedTmpRoot: root, bundleFileName: name })).rejects.toThrow(
           /file name|absolute|separators|dot entry|too long|non-empty|traversal|bare/
         )
-        await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, dbFileName: name })).rejects.toThrow(
+        await expect(startFileBackedRelay({ ownedTmpRoot: root, dbFileName: name })).rejects.toThrow(
           /file name|absolute|separators|dot entry|too long|non-empty|traversal|bare/
         )
       }
@@ -648,7 +649,7 @@ describe('file-backed relay failure paths (no Electron ABI required)', () => {
     try {
       // Absurdly small budget forces a startup/readiness failure deterministically;
       // the owned bundle/child must remain tracked via the retained handle.
-      await startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, readyTimeoutMs: 1 })
+      await startFileBackedRelay({ ownedTmpRoot: root, readyTimeoutMs: 1 })
     } catch (e) {
       failed = getFailedRelayHandle(e)
       expect(failed).not.toBeNull()
@@ -684,14 +685,14 @@ describe('file-backed relay failure paths (no Electron ABI required)', () => {
     const root = createOwnedTmpRoot()
     try {
       for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -1, -100]) {
-        await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, readyTimeoutMs: bad })).rejects.toThrow(
+        await expect(startFileBackedRelay({ ownedTmpRoot: root, readyTimeoutMs: bad })).rejects.toThrow(
           /finite positive timeout/
         )
-        await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, stopTimeoutMs: bad })).rejects.toThrow(
+        await expect(startFileBackedRelay({ ownedTmpRoot: root, stopTimeoutMs: bad })).rejects.toThrow(
           /finite positive timeout/
         )
       }
-      await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, readyTimeoutMs: 300001 })).rejects.toThrow(
+      await expect(startFileBackedRelay({ ownedTmpRoot: root, readyTimeoutMs: 300001 })).rejects.toThrow(
         /finite positive timeout/
       )
       await expect(waitForRelayHealth('http://127.0.0.1:1', Number.NaN)).rejects.toThrow(/finite positive timeout/)
@@ -767,18 +768,14 @@ describe('file-backed relay failure paths (no Electron ABI required)', () => {
           const linkPath = path.join(root, `${dbFileName}${suffix}`)
           clearStaleLink(linkPath)
           fs.symlinkSync(outsideTarget, linkPath)
-          await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, dbFileName })).rejects.toThrow(
-            /symlink/
-          )
+          await expect(startFileBackedRelay({ ownedTmpRoot: root, dbFileName })).rejects.toThrow(/symlink/)
           removeLinkAndVerifyAbsent(linkPath)
           // Dangling symlink (target absent) is also rejected via lstat.
           const danglingTarget = path.join(root, `dangling-${suffix}-target`)
           assertLstatAbsent(danglingTarget)
           clearStaleLink(linkPath)
           fs.symlinkSync(danglingTarget, linkPath)
-          await expect(startFileBackedRelay({ ownedTmpRoot: root, token: TOKEN, dbFileName })).rejects.toThrow(
-            /symlink/
-          )
+          await expect(startFileBackedRelay({ ownedTmpRoot: root, dbFileName })).rejects.toThrow(/symlink/)
           removeLinkAndVerifyAbsent(linkPath)
           assertLstatAbsent(danglingTarget)
         }

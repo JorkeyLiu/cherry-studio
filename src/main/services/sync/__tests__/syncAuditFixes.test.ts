@@ -89,7 +89,6 @@ describe('blocker 1: dependency ordering / orphan recovery', () => {
   })
 
   it('child-precedes-parent recovers within one sync via deferred retry', async () => {
-    configStore.set('sync:token', '')
     configStore.set('sync:deviceCode', 'ABCD2345')
     configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
@@ -101,38 +100,36 @@ describe('blocker 1: dependency ordering / orphan recovery', () => {
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
     const now = Date.now()
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-child-first',
-                entityType: 'message_block',
-                op: 'upsert',
-                entityId: 'b-defer',
-                timestamp: now,
-                deviceId: 'remote',
-                payload: { id: 'b-defer', messageId: 'm-defer', type: 'text', content: 'child' }
-              },
-              {
-                seq: 2,
-                id: 'op-parent-second',
-                entityType: 'message',
-                op: 'upsert',
-                entityId: 'm-defer',
-                timestamp: now - 1000,
-                deviceId: 'remote',
-                payload: { id: 'm-defer', topicId: 't-defer', role: 'user', content: 'parent' }
-              }
-            ],
-            cursor: 2
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-child-first',
+              entityType: 'message_block',
+              op: 'upsert',
+              entityId: 'b-defer',
+              timestamp: now,
+              deviceId: 'remote',
+              payload: { id: 'b-defer', messageId: 'm-defer', type: 'text', content: 'child' }
+            },
+            {
+              seq: 2,
+              id: 'op-parent-second',
+              entityType: 'message',
+              op: 'upsert',
+              entityId: 'm-defer',
+              timestamp: now - 1000,
+              deviceId: 'remote',
+              payload: { id: 'm-defer', topicId: 't-defer', role: 'user', content: 'parent' }
+            }
+          ],
+          cursor: 2
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await syncService.sync()
     // Both applied and cursor advanced contiguously (no skip, no stall)
     expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-defer')).toBeTruthy()
@@ -439,10 +436,8 @@ describe('blocker 5: entity-specific strict validation', () => {
       await expect(
         syncClient.pull(
           'http://127.0.0.1:9',
-          undefined,
           0,
           'd1',
-          undefined,
           'ABCD2345',
           'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
         )
@@ -583,7 +578,6 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
   })
 
   it('second-audit B2: later-page parent resolves early-page orphan', async () => {
-    configStore.set('sync:token', '')
     configStore.set('sync:deviceCode', 'ABCD2345')
     configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
@@ -597,55 +591,53 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
     const now = Date.now()
     const limit = SYNC_MAX_OPERATIONS_PER_PULL
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          const ops: any[] = [
-            {
-              seq: 1,
-              id: 'op-late-b',
-              entityType: 'message_block',
-              op: 'upsert',
-              entityId: 'b-late-page',
-              timestamp: now,
-              deviceId: 'remote',
-              payload: { id: 'b-late-page', messageId: 'm-late-page', type: 'text', content: 'child' }
-            }
-          ]
-          for (let s = 2; s <= limit; s++) {
-            ops.push({
-              seq: s,
-              id: `op-fill-${s}`,
-              entityType: 'topic',
-              op: 'upsert',
-              entityId: `t-fill-${s}`,
-              timestamp: now,
-              deviceId: 'remote',
-              payload: { id: `t-fill-${s}`, name: `F${s}` }
-            })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        const ops: any[] = [
+          {
+            seq: 1,
+            id: 'op-late-b',
+            entityType: 'message_block',
+            op: 'upsert',
+            entityId: 'b-late-page',
+            timestamp: now,
+            deviceId: 'remote',
+            payload: { id: 'b-late-page', messageId: 'm-late-page', type: 'text', content: 'child' }
           }
-          return { operations: ops, cursor: limit } as any
+        ]
+        for (let s = 2; s <= limit; s++) {
+          ops.push({
+            seq: s,
+            id: `op-fill-${s}`,
+            entityType: 'topic',
+            op: 'upsert',
+            entityId: `t-fill-${s}`,
+            timestamp: now,
+            deviceId: 'remote',
+            payload: { id: `t-fill-${s}`, name: `F${s}` }
+          })
         }
-        if (cursor === limit) {
-          return {
-            operations: [
-              {
-                seq: limit + 1,
-                id: 'op-late-parent',
-                entityType: 'message',
-                op: 'upsert',
-                entityId: 'm-late-page',
-                timestamp: now - 1000,
-                deviceId: 'remote',
-                payload: { id: 'm-late-page', topicId: 't-late-page', role: 'user', content: 'parent' }
-              }
-            ],
-            cursor: limit + 1
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+        return { operations: ops, cursor: limit } as any
+      }
+      if (cursor === limit) {
+        return {
+          operations: [
+            {
+              seq: limit + 1,
+              id: 'op-late-parent',
+              entityType: 'message',
+              op: 'upsert',
+              entityId: 'm-late-page',
+              timestamp: now - 1000,
+              deviceId: 'remote',
+              payload: { id: 'm-late-page', topicId: 't-late-page', role: 'user', content: 'parent' }
+            }
+          ],
+          cursor: limit + 1
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await syncService.sync()
     expect(sqlite.prepare('SELECT id FROM messages WHERE id=?').get('m-late-page')).toBeTruthy()
     expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-late-page')).toBeTruthy()
@@ -660,7 +652,6 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
   })
 
   it('second-audit B2b: unresolved orphan is a durable blocked error, not success', async () => {
-    configStore.set('sync:token', '')
     configStore.set('sync:deviceCode', 'ABCD2345')
     configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
@@ -671,28 +662,26 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
     const pushMock = vi
       .spyOn(syncClient, 'push')
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-never-parented',
-                entityType: 'message_block',
-                op: 'upsert',
-                entityId: 'b-never',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 'b-never', messageId: 'm-never', type: 'text', content: 'x' }
-              }
-            ],
-            cursor: 1
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-never-parented',
+              entityType: 'message_block',
+              op: 'upsert',
+              entityId: 'b-never',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 'b-never', messageId: 'm-never', type: 'text', content: 'x' }
+            }
+          ],
+          cursor: 1
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     await expect(syncService.sync()).rejects.toThrow(/orphan|blocked/i)
     const cur = db.select().from(schema.syncState).where(eq(schema.syncState.key, 'cursor')).get()
     expect(cur?.value ?? '0').toBe('0')
@@ -885,7 +874,7 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
     const { createRelayServer, ensureRelaySchema } = await import('../../../../../scripts/sync-relay/server')
     const relayDb = new Database(':memory:')
     ensureRelaySchema(relayDb as any)
-    const server = createRelayServer(relayDb as any, {})
+    const server = createRelayServer(relayDb as any)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
     const addr = server.address() as { port: number }
     const base = `http://127.0.0.1:${addr.port}`
@@ -978,10 +967,8 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
       try {
         return await syncClient.pull(
           'http://127.0.0.1:9',
-          undefined,
           cursor,
           'd1',
-          undefined,
           'ABCD2345',
           'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
         )
@@ -1008,7 +995,6 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
   })
 
   it('malformed apply produces truthful durable sync failure (no success report)', async () => {
-    configStore.set('sync:token', '')
     configStore.set('sync:deviceCode', 'ABCD2345')
     configStore.set('sync:deviceAuth', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90')
     db.insert(schema.syncState)
@@ -1021,28 +1007,26 @@ describe('blocker 7+8: narrow scope and durable capture failure', () => {
       .mockImplementation(async () => ({ acceptedIds: [], cursor: 0 }) as any)
     // Bypass client validation by stubbing pull to return a malformed op that
     // only service-level strict validation catches (direct apply path).
-    const pullMock = vi
-      .spyOn(syncClient, 'pull')
-      .mockImplementation(async (_ep: string, _tok: string | undefined, cursor: number) => {
-        if (cursor === 0) {
-          return {
-            operations: [
-              {
-                seq: 1,
-                id: 'op-apply-bad',
-                entityType: 'message',
-                op: 'upsert',
-                entityId: 'm-apply-bad',
-                timestamp: Date.now(),
-                deviceId: 'remote',
-                payload: { id: 'm-apply-bad', role: 'user' }
-              }
-            ],
-            cursor: 1
-          } as any
-        }
-        return { operations: [], cursor } as any
-      })
+    const pullMock = vi.spyOn(syncClient, 'pull').mockImplementation(async (_ep: string, cursor: number) => {
+      if (cursor === 0) {
+        return {
+          operations: [
+            {
+              seq: 1,
+              id: 'op-apply-bad',
+              entityType: 'message',
+              op: 'upsert',
+              entityId: 'm-apply-bad',
+              timestamp: Date.now(),
+              deviceId: 'remote',
+              payload: { id: 'm-apply-bad', role: 'user' }
+            }
+          ],
+          cursor: 1
+        } as any
+      }
+      return { operations: [], cursor } as any
+    })
     // The service apply throws; sync() must record lastError and must not
     // report success (no lastSyncAt, cursor unmoved). sync() rejects with the
     // durable apply error so IPC/renderer observe failure, not success.

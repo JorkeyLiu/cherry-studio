@@ -17,29 +17,32 @@ export function registerSyncIpc(): () => void {
 
   register(IpcChannel.Sync_GetConfig, async () => {
     const cfg = syncService.getConfig()
-    // never leak token in logs; mask in response? Keep token for renderer to edit, but UI will mask
     return cfg
   })
 
-  register(IpcChannel.Sync_SetConfig, async (_e, config: { endpoint?: string; token?: string; enabled?: boolean }) => {
-    if (!config || typeof config !== 'object') throw new Error('invalid config')
-    if (config.endpoint !== undefined) {
-      if (typeof config.endpoint !== 'string') throw new Error('endpoint must be string')
-      if (config.endpoint !== '') {
-        const err = validateEndpointUrl(config.endpoint)
-        if (err) throw new Error(err)
+  register(
+    IpcChannel.Sync_SetConfig,
+    async (_e, config: { endpoint?: string; enabled?: boolean } & Record<string, unknown>) => {
+      if (!config || typeof config !== 'object') throw new Error('invalid config')
+      if ('token' in config) throw new Error('unknown config key: token is no longer supported')
+      if (config.endpoint !== undefined) {
+        if (typeof config.endpoint !== 'string') throw new Error('endpoint must be string')
+        if (config.endpoint !== '') {
+          const err = validateEndpointUrl(config.endpoint)
+          if (err) throw new Error(err)
+        }
       }
+      if (config.enabled !== undefined && typeof config.enabled !== 'boolean')
+        throw new Error('enabled must be boolean')
+      const updated = syncService.setConfig(config)
+      logger.info('[Sync_SetConfig] updated')
+      try {
+        const { syncAutoService } = await import('./syncAuto')
+        syncAutoService.refresh()
+      } catch {}
+      return updated
     }
-    if (config.token !== undefined && typeof config.token !== 'string') throw new Error('token must be string')
-    if (config.enabled !== undefined && typeof config.enabled !== 'boolean') throw new Error('enabled must be boolean')
-    const updated = syncService.setConfig(config)
-    logger.info('[Sync_SetConfig] updated')
-    try {
-      const { syncAutoService } = await import('./syncAuto')
-      syncAutoService.refresh()
-    } catch {}
-    return updated
-  })
+  )
 
   register(IpcChannel.Sync_GetStatus, async () => {
     return syncService.getStatus()

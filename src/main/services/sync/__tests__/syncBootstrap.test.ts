@@ -137,7 +137,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as never, sqlite)
@@ -205,7 +204,7 @@ describe('receiver bootstrap orchestration', () => {
       deviceId: 'd1',
       payload: { id: 'local-prepair', name: 'Local' }
     } as never)
-    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, _t, cursor) => {
+    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, cursor) => {
       order.push(`pull:${cursor}`)
       expect(cursor).toBe(5)
       return { operations: [], cursor: 5 } as never
@@ -383,7 +382,7 @@ describe('receiver bootstrap orchestration', () => {
       expect(sqlite.prepare("SELECT name FROM topics WHERE id='local-keep'").get()).toBeTruthy()
       return { cursor: 5, acceptedIds: ['outbox-ref-1'] }
     })
-    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, _t, cursor) => {
+    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, cursor) => {
       order.push(`pull:${cursor}`)
       expect(cursor).toBe(5)
       return { operations: [], cursor: 5 } as never
@@ -416,7 +415,7 @@ describe('receiver bootstrap orchestration', () => {
       sqlite.prepare("SELECT COUNT(*) as c FROM topics WHERE id='btZero'").get() as { c: number }
     ).c
     expect(countAfterFirst).toBe(1)
-    vi.spyOn(syncClient, 'pull').mockImplementationOnce(async (_e, _t, cursor) => {
+    vi.spyOn(syncClient, 'pull').mockImplementationOnce(async (_e, cursor) => {
       expect(cursor).toBe(0)
       return {
         operations: [

@@ -118,7 +118,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   const opened = openChatDb()
   sqlite = opened.sqlite
   db = opened.db
@@ -524,7 +523,7 @@ describe('relay transport for messageBlock frames', () => {
   it('stores verbatim; illegal 400; idempotent replay; divergent 409', async () => {
     const rdb = new Database(':memory:')
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'blk-token' })
+    const server = createRelayServer(rdb)
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
         resolve()
@@ -636,7 +635,7 @@ describe('dual-profile real-relay block convergence without baseline (no manual 
   it('stable create/promotion/delete converge incrementally with winning-frame order', async () => {
     const rdb = new Database(':memory:')
     ensureRelaySchema(rdb)
-    const server = createRelayServer(rdb, { token: 'blk-dual' })
+    const server = createRelayServer(rdb)
     await new Promise<void>((resolve) => {
       ;(server as unknown as { listen: (p: number, h: string, cb: () => void) => void }).listen(0, '127.0.0.1', () =>
         resolve()

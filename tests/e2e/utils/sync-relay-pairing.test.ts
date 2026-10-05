@@ -9,15 +9,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runRelayConformanceCore } from './sync-relay-conformance'
 import { startTestRelay, type TestRelayHandle } from './sync-relay'
 
-const TOKEN = 'pairing-test-token'
-
 let relay: TestRelayHandle
 
 const secrets = new Map<string, string>()
 const codes = new Map<string, string>()
 
 beforeEach(async () => {
-  relay = await startTestRelay(TOKEN)
+  relay = await startTestRelay()
   secrets.clear()
   codes.clear()
 })
@@ -29,7 +27,7 @@ afterEach(async () => {
 async function registerAs(alias: string): Promise<{ code: string; secret: string }> {
   const res = await fetch(`${relay.endpoint}/sync/register`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceId: alias })
   })
   expect(res.status).toBe(200)
@@ -40,7 +38,7 @@ async function registerAs(alias: string): Promise<{ code: string; secret: string
 }
 
 function authHeaders(alias: string): Record<string, string> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const code = codes.get(alias)
   if (code) headers['x-sync-device-code'] = code
   const held = secrets.get(alias)
@@ -49,7 +47,7 @@ function authHeaders(alias: string): Record<string, string> {
 }
 
 function pullHeaders(alias: string): Record<string, string> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${TOKEN}` }
+  const headers: Record<string, string> = {}
   const code = codes.get(alias)
   if (code) headers['x-sync-device-code'] = code
   const held = secrets.get(alias)
@@ -75,11 +73,10 @@ describe('channel pairing on the test relay', () => {
   it('registration issues code + secret; the code alone authorizes nothing', async () => {
     const reg = await registerAs('device-a')
     expect(reg.code).toMatch(/^[A-HJ-NP-Z2-9]{8}$/)
-    // Same token but an unregistered well-formed code is rejected.
+    // An unregistered well-formed code is rejected.
     const ghost = await fetch(`${relay.endpoint}/sync/push`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
         'x-sync-device-code': 'ZZZZ9999',
         'x-sync-device-secret': '0'.repeat(64)
@@ -98,7 +95,6 @@ describe('channel pairing on the test relay', () => {
     const forged = await fetch(`${relay.endpoint}/sync/push`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
         'x-sync-device-code': reg.code
       },
@@ -244,7 +240,7 @@ describe('channel pairing on the test relay', () => {
   })
 
   it('shared SYNC-CC core conformance (memory TestRelay observable contract)', async () => {
-    await runRelayConformanceCore({ endpoint: relay.endpoint, token: TOKEN })
+    await runRelayConformanceCore({ endpoint: relay.endpoint })
   })
 
   it('channels isolate traffic with independent contiguous cursors', async () => {

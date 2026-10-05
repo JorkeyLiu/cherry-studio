@@ -487,7 +487,7 @@ export class SyncService {
   private activeFetchControllers = new Set<AbortController>()
   /**
    * Config generation (LOCK-PERSONAL-001): bumped on every disable /
-   * endpoint / token transition. An active sync() snapshots the generation at
+   * endpoint transition. An active sync() snapshots the generation at
    * start and aborts with SyncStaleConfigError before any further stale
    * transport or post-transition database/status effect.
    */
@@ -532,7 +532,7 @@ export class SyncService {
   }
 
   /**
-   * Invalidate in-flight sync() cycles for a disable/endpoint/token change
+   * Invalidate in-flight sync() cycles for a disable/endpoint change
    * that bypassed setConfig (e.g. direct store writes observed by refresh).
    * Idempotent: callers bump only on a detected transition.
    */
@@ -670,7 +670,6 @@ export class SyncService {
 
   private async drainAttachmentIntents(
     endpoint: string,
-    token: string | undefined,
     deviceCode: string,
     deviceSecret: string,
     syncGen: number
@@ -825,7 +824,7 @@ export class SyncService {
         }
       } catch {}
       try {
-        await service.uploadAsset(asset, endpoint, token, deviceCode, deviceSecret)
+        await service.uploadAsset(asset, endpoint, deviceCode, deviceSecret)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         reportDrainFailure(`attachment drain failed: upload ${fileId} ${msg.slice(0, 200)}`)
@@ -1118,7 +1117,6 @@ export class SyncService {
   private async ensureFileAssetDownloaded(
     op: SyncOperation,
     endpoint: string,
-    token: string | undefined,
     deviceCode: string,
     deviceSecret: string
   ): Promise<void> {
@@ -1137,17 +1135,19 @@ export class SyncService {
     const service = this.getAttachmentService()
     if (!service) throw new Error('attachment service unavailable')
     // Download and install before DB Tx
-    await service.downloadAndInstall(asset, endpoint, token, deviceCode, deviceSecret)
+    await service.downloadAndInstall(asset, endpoint, deviceCode, deviceSecret)
   }
 
   getConfig(): SyncConfig {
     const endpoint = configManager.get<string>('sync:endpoint', '') ?? ''
-    const token = configManager.get<string>('sync:token', '') ?? ''
     const enabled = configManager.get<boolean>('sync:enabled', false) ?? false
-    return { endpoint, token: token || undefined, enabled }
+    // Legacy `sync:token` (service-wide shared Bearer) is ignored: never
+    // copied, used, logged, or exported. The stored value is left untouched
+    // (no arbitrary user-data deletion, no migration wipe).
+    return { endpoint, enabled }
   }
 
-  setConfig(config: Partial<SyncConfig>): SyncConfig {
+  setConfig(config: Partial<SyncConfig> & Record<string, unknown>): SyncConfig {
     // Fail closed (LOCK-PERSONAL-001/006): the previous routing snapshot must
     // be knowable before comparing. Never fabricate a disabled snapshot; on
     // prior-read failure conservatively invalidate stale work and rethrow the
@@ -1176,8 +1176,8 @@ export class SyncService {
       if (config.endpoint !== '' && err) throw new Error(err)
       configManager.set('sync:endpoint', config.endpoint)
     }
-    if (config.token !== undefined) {
-      configManager.set('sync:token', config.token)
+    if ('token' in (config as Record<string, unknown>)) {
+      throw new Error('unknown config key: token is no longer supported')
     }
     if (config.enabled !== undefined) {
       configManager.set('sync:enabled', !!config.enabled)
@@ -1203,10 +1203,10 @@ export class SyncService {
       this.emitConfigFailure(e)
       throw e instanceof Error ? e : new Error(String(e))
     }
-    // Any disable/endpoint/token transition invalidates in-flight sync()
+    // Any disable/endpoint transition invalidates in-flight sync()
     // cycles so they never continue on stale transport or commit
     // post-transition database/status effects.
-    if (before.enabled !== after.enabled || before.endpoint !== after.endpoint || before.token !== after.token) {
+    if (before.enabled !== after.enabled || before.endpoint !== after.endpoint) {
       this.configGeneration += 1
     }
     return after
@@ -8965,7 +8965,7 @@ export class SyncService {
     }
     // Snapshot the config generation with the validated transport: every
     // subsequent transport and database commit re-checks it so a
-    // disable/endpoint/token transition aborts the stale cycle before any
+    // disable/endpoint transition aborts the stale cycle before any
     // further stale-config work (LOCK-PERSONAL-001). An already-started
     // SQLite transaction finishes atomically; the stale check fires between
     // operations. Manual sync semantics are unchanged when no transition
@@ -9060,7 +9060,7 @@ export class SyncService {
         this.throwIfStaleConfig(syncGen)
         let fetched: BaselineFetchResult
         try {
-          fetched = await this.fetchBaselineWithShutdown(cfg.endpoint, cfg.token, deviceCode, deviceSecret)
+          fetched = await this.fetchBaselineWithShutdown(cfg.endpoint, deviceCode, deviceSecret)
           this.throwIfShutdown()
           this.throwIfStaleConfig(syncGen)
           this.markRelayContact(true)
@@ -9143,7 +9143,7 @@ export class SyncService {
               }
             } as unknown as SyncOperation
             try {
-              await this.ensureFileAssetDownloaded(op, cfg.endpoint, cfg.token, deviceCode, deviceSecret)
+              await this.ensureFileAssetDownloaded(op, cfg.endpoint, deviceCode, deviceSecret)
             } catch (dlErr) {
               const msg = dlErr instanceof Error ? dlErr.message : String(dlErr)
               try {
@@ -9169,7 +9169,7 @@ export class SyncService {
 
       // Incremental attachment drain: upload blobs before metadata pushes
       try {
-        await this.drainAttachmentIntents(cfg.endpoint, cfg.token, deviceCode, deviceSecret, syncGen)
+        await this.drainAttachmentIntents(cfg.endpoint, deviceCode, deviceSecret, syncGen)
       } catch (e) {
         if (e instanceof SyncShutdownError) throw e
         if (e instanceof SyncStaleConfigError) throw e
@@ -9198,7 +9198,7 @@ export class SyncService {
         const chunkIds = new Set(chunk.map((o) => o.id))
         const pushReq: SyncPushRequest = { deviceId, operations: chunk }
         try {
-          const pushRes = await this.pushWithShutdown(cfg.endpoint, cfg.token, pushReq, deviceCode, deviceSecret)
+          const pushRes = await this.pushWithShutdown(cfg.endpoint, pushReq, deviceCode, deviceSecret)
           this.throwIfShutdown()
           this.throwIfStaleConfig(syncGen)
           this.markRelayContact(true)
@@ -9311,14 +9311,7 @@ export class SyncService {
         this.throwIfStaleConfig(syncGen)
         let pullRes: { operations: any[]; cursor: number; channelId?: string }
         try {
-          pullRes = await this.pullWithShutdown(
-            cfg.endpoint,
-            cfg.token,
-            fetchCursor,
-            deviceId,
-            deviceCode,
-            deviceSecret
-          )
+          pullRes = await this.pullWithShutdown(cfg.endpoint, fetchCursor, deviceId, deviceCode, deviceSecret)
           this.throwIfShutdown()
           this.throwIfStaleConfig(syncGen)
           this.markRelayContact(true)
@@ -9392,13 +9385,7 @@ export class SyncService {
             if (op.entityType === 'file_asset' && op.op === 'upsert') {
               this.throwIfShutdown()
               this.throwIfStaleConfig(syncGen)
-              await this.ensureFileAssetDownloaded(
-                op as SyncOperation,
-                cfg.endpoint,
-                cfg.token,
-                deviceCode,
-                deviceSecret
-              )
+              await this.ensureFileAssetDownloaded(op as SyncOperation, cfg.endpoint, deviceCode, deviceSecret)
             }
             this.applyIncomingOperation(op as SyncOperation)
             if (typeof op.seq === 'number') resolved.set(op.seq, true)
@@ -9602,7 +9589,6 @@ export class SyncService {
    */
   private async pushWithShutdown(
     endpoint: string,
-    token: string | undefined,
     req: SyncPushRequest,
     deviceCode: string,
     deviceSecret: string
@@ -9610,7 +9596,7 @@ export class SyncService {
     const controller = new AbortController()
     const untrack = this.trackFetchController(controller)
     try {
-      return await syncClient.push(endpoint, token, req, controller.signal, deviceCode, deviceSecret)
+      return await syncClient.push(endpoint, req, deviceCode, deviceSecret, controller.signal)
     } catch (e) {
       if (this.shutdownRequested || (e as Error)?.name === 'AbortError') {
         try {
@@ -9626,7 +9612,6 @@ export class SyncService {
 
   private async pullWithShutdown(
     endpoint: string,
-    token: string | undefined,
     cursor: number,
     deviceId: string,
     deviceCode: string,
@@ -9637,12 +9622,11 @@ export class SyncService {
     try {
       return (await syncClient.pull(
         endpoint,
-        token,
         cursor,
         deviceId,
-        controller.signal,
         deviceCode,
-        deviceSecret
+        deviceSecret,
+        controller.signal
       )) as unknown as {
         operations: any[]
         cursor: number
@@ -9658,14 +9642,13 @@ export class SyncService {
 
   private async fetchBaselineWithShutdown(
     endpoint: string,
-    token: string | undefined,
     deviceCode: string,
     deviceSecret: string
   ): Promise<BaselineFetchResult> {
     const controller = new AbortController()
     const untrack = this.trackFetchController(controller)
     try {
-      return await syncClient.fetchBaseline(endpoint, token, deviceCode, deviceSecret, controller.signal)
+      return await syncClient.fetchBaseline(endpoint, deviceCode, deviceSecret, controller.signal)
     } catch (e) {
       if (this.shutdownRequested) throw new SyncShutdownError()
       throw e
@@ -9681,7 +9664,6 @@ export class SyncService {
    */
   private async publishWithShutdown(
     endpoint: string,
-    token: string | undefined,
     envelope: BaselinePublishResult['envelope'],
     deviceCode: string,
     deviceSecret: string
@@ -9689,7 +9671,7 @@ export class SyncService {
     const controller = new AbortController()
     const untrack = this.trackFetchController(controller)
     try {
-      return await syncClient.publishBaseline(endpoint, token, envelope, deviceCode, deviceSecret, controller.signal)
+      return await syncClient.publishBaseline(endpoint, envelope, deviceCode, deviceSecret, controller.signal)
     } catch (e) {
       if (this.shutdownRequested) throw new SyncShutdownError()
       throw e
@@ -9827,7 +9809,7 @@ export class SyncService {
    * Verification-only explicit entry (no auto-publish from `sync()`): the
    * caller drains via `sync()` first, then publishes one barrier-proven
    * snapshot with a single client-declared `PUT /sync/baseline` (no
-   * fence/token/prepare). Strict barrier order, fail closed with no PUT when
+   * fence/prepare). Strict barrier order, fail closed with no PUT when
    * any precondition is unmet:
    *
    * 1. Attached + channel-bound + exclusive barrier (quiescence: no concurrent
@@ -9843,7 +9825,7 @@ export class SyncService {
    * 5. Locked wire envelope built from the proven snapshot (payload-only
    *    `jcs-sha256-v1` digest; manifest recomputed by the shared validator).
    * 6. Single PUT; barrier releases after success or any failure. 200 with a
-   *    full-match (channel/N/digest) response is success; 400/401/403/409/500
+   *    full-match (channel/N/digest) response is success; 400/403/409/500
    *    are truthful errors with no silent overwrite and no automatic fallback.
    *
    * Shutdown/config/channel transitions abort with no PUT and no
@@ -9972,7 +9954,7 @@ export class SyncService {
       // converges first). Channel switches abort with no post-transition write.
       let pullRes: { operations: any[]; cursor: number; channelId?: string }
       try {
-        pullRes = await this.pullWithShutdown(cfg.endpoint, cfg.token, cursor, deviceId, deviceCode, deviceSecret)
+        pullRes = await this.pullWithShutdown(cfg.endpoint, cursor, deviceId, deviceCode, deviceSecret)
         this.throwIfShutdown()
         this.throwIfStaleConfig(syncGen)
         this.markRelayContact(true)
@@ -10107,12 +10089,12 @@ export class SyncService {
       }
       this.throwIfShutdown()
       this.throwIfStaleConfig(syncGen)
-      // Single client-declared PUT. Any failure (400/401/403/409/500,
+      // Single client-declared PUT. Any failure (400/403/409/500,
       // shutdown, stale config) releases the barrier with no silent overwrite
       // and no automatic fallback; cursor/outbox/chat stay truthful.
       let returned: BaselinePublishResult
       try {
-        returned = await this.publishWithShutdown(cfg.endpoint, cfg.token, envelope, deviceCode, deviceSecret)
+        returned = await this.publishWithShutdown(cfg.endpoint, envelope, deviceCode, deviceSecret)
         this.throwIfShutdown()
         this.throwIfStaleConfig(syncGen)
         this.markRelayContact(true)
@@ -10361,7 +10343,8 @@ export class SyncService {
 
   /**
    * Per-device relay credential: issued once by the relay at registration
-   * (Connect) or pairing-request accept, persisted in config alongside the token,
+   * (Connect) or pairing-request accept, persisted in config
+   * alongside the endpoint,
    * and presented on every device-authenticated call. Never logged.
    * Returns undefined when no credential was ever issued (pre-registration).
    * A present-but-malformed value fails closed.
@@ -10550,10 +10533,10 @@ export class SyncService {
     }
     if (error instanceof SyncShutdownError || error instanceof SyncStaleConfigError) return
     const msg = error instanceof Error ? error.message : String(error ?? '')
-    // Attachment-breaking responses surface as disconnected: wrong relay
-    // token (401) or a broken device credential means this client is not
-    // attached, even though the relay itself is reachable.
-    if (/failed 401:|unknown-credential|invalid-credential/.test(msg)) {
+    // Attachment-breaking responses surface as disconnected: a broken
+    // device credential means this client is not attached, even though
+    // the relay itself is reachable.
+    if (/unknown-credential|invalid-credential/.test(msg)) {
       this.serviceConnected = false
       return
     }
@@ -10599,11 +10582,11 @@ export class SyncService {
 
   /**
    * Guard an in-flight connect() continuation: shutdown, config/lifecycle
-   * generation, explicit disconnect, and endpoint/token identity. A stale
-   * (expired endpoint/token) result must never write credential, status,
+   * generation, explicit disconnect, and endpoint identity. A stale
+   * (expired endpoint) result must never write credential, status,
    * channel, or cursor.
    */
-  private assertConnectFresh(snapshot: { endpoint: string; token: string | undefined }, connectGen: number): void {
+  private assertConnectFresh(snapshot: { endpoint: string }, connectGen: number): void {
     this.throwIfShutdown()
     this.throwIfStaleConfig(connectGen)
     if (this.isExplicitlyDisconnected()) throw new SyncStaleConfigError('sync cancelled: disconnected during connect')
@@ -10615,8 +10598,8 @@ export class SyncService {
         `sync cancelled: config unreadable during connect: ${e instanceof Error ? e.message : String(e)}`
       )
     }
-    if (current.endpoint !== snapshot.endpoint || (current.token ?? undefined) !== (snapshot.token ?? undefined)) {
-      throw new SyncStaleConfigError('sync cancelled: endpoint/token changed during connect')
+    if (current.endpoint !== snapshot.endpoint) {
+      throw new SyncStaleConfigError('sync cancelled: endpoint changed during connect')
     }
   }
 
@@ -10688,7 +10671,7 @@ export class SyncService {
     }
     this.configGeneration += 1
     const connectGen = this.configGeneration
-    const snapshot = { endpoint: cfg.endpoint, token: cfg.token }
+    const snapshot = { endpoint: cfg.endpoint }
     // Fail-closed registration coherence (SYNC-CC-004/013): malformed
     // fragments throw here (secret never logged); a half-persisted record
     // (exactly one side present) requires explicit recovery and is never
@@ -10718,7 +10701,7 @@ export class SyncService {
       // reconcile membership/channel observation.
       let state: { channelId: string | null; seedBaselinePending?: boolean }
       try {
-        state = await syncClient.getPairState(cfg.endpoint, cfg.token, existingCode, existingSecret)
+        state = await syncClient.getPairState(cfg.endpoint, existingCode, existingSecret)
       } catch (e) {
         if (e instanceof SyncShutdownError || e instanceof SyncStaleConfigError) throw e
         try {
@@ -10751,7 +10734,7 @@ export class SyncService {
     // holding the credential.
     let res: { deviceCode: string; deviceSecret?: string }
     try {
-      res = await syncClient.register(cfg.endpoint, cfg.token, { deviceId: this.getDeviceId() })
+      res = await syncClient.register(cfg.endpoint, { deviceId: this.getDeviceId() })
     } catch (e) {
       if (e instanceof SyncShutdownError || e instanceof SyncStaleConfigError) throw e
       try {
@@ -11053,23 +11036,22 @@ export class SyncService {
     return false
   }
 
-  private pairingTransport(): { endpoint: string; token: string | undefined } {
+  private pairingTransport(): { endpoint: string } {
     const cfg = this.getConfig()
     const endpointErr = validateEndpointUrl(cfg.endpoint)
     if (endpointErr) throw new Error(endpointErr)
-    return { endpoint: cfg.endpoint, token: cfg.token }
+    return { endpoint: cfg.endpoint }
   }
 
   /** Fail-closed transport requirement for pairing actions (must Connect first). */
   private requirePairingTransport(): {
     endpoint: string
-    token: string | undefined
     deviceCode: string
     deviceSecret: string
   } {
     const attached = this.requireAttachedService()
-    const { endpoint, token } = this.pairingTransport()
-    return { endpoint, token, deviceCode: attached.deviceCode, deviceSecret: attached.deviceSecret }
+    const { endpoint } = this.pairingTransport()
+    return { endpoint, deviceCode: attached.deviceCode, deviceSecret: attached.deviceSecret }
   }
 
   /**
@@ -11083,7 +11065,7 @@ export class SyncService {
     } catch (e) {
       throw e instanceof Error ? e : new Error(String(e))
     }
-    const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+    const { endpoint, deviceCode, deviceSecret } = this.requirePairingTransport()
     let res: {
       deviceCode: string
       paired: boolean
@@ -11093,7 +11075,7 @@ export class SyncService {
       seedBaselinePending?: boolean
     }
     try {
-      res = await syncClient.getPairState(endpoint, token, deviceCode, deviceSecret)
+      res = await syncClient.getPairState(endpoint, deviceCode, deviceSecret)
       this.markRelayContact(true)
     } catch (e) {
       this.markRelayContact(false, e)
@@ -11145,11 +11127,11 @@ export class SyncService {
     if (current.state === 'paired') {
       throw new Error('already paired (unpair before requesting a new pairing)')
     }
-    const { endpoint, token } = this.pairingTransport()
+    const { endpoint } = this.pairingTransport()
     const secret = this.getDeviceAuth()
     if (!secret) throw new Error('service not connected (registration required; Connect to register)')
     try {
-      const res = await syncClient.requestPairing(endpoint, token, { targetCode }, current.deviceCode, secret)
+      const res = await syncClient.requestPairing(endpoint, { targetCode }, current.deviceCode, secret)
       this.markRelayContact(true)
       logger.info('[requestPairing] request submitted')
       return res
@@ -11166,9 +11148,9 @@ export class SyncService {
       const idErr = validatePairingRequestId(requestId)
       if (idErr) throw new Error(idErr)
     }
-    const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+    const { endpoint, deviceCode, deviceSecret } = this.requirePairingTransport()
     try {
-      const res = await syncClient.cancelPairing(endpoint, token, { requestId }, deviceCode, deviceSecret)
+      const res = await syncClient.cancelPairing(endpoint, { requestId }, deviceCode, deviceSecret)
       this.markRelayContact(true)
       logger.info('[cancelPairing] request cancelled')
       return res
@@ -11189,9 +11171,9 @@ export class SyncService {
     this.throwIfShutdown()
     const idErr = validatePairingRequestId(requestId)
     if (idErr) throw new Error(idErr)
-    const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+    const { endpoint, deviceCode, deviceSecret } = this.requirePairingTransport()
     try {
-      const res = await syncClient.acceptPairing(endpoint, token, { requestId }, deviceCode, deviceSecret)
+      const res = await syncClient.acceptPairing(endpoint, { requestId }, deviceCode, deviceSecret)
       this.markRelayContact(true)
       this.reconcileChannelFull(res.channelId)
       if (res.seedBaselinePending === true) {
@@ -11229,12 +11211,12 @@ export class SyncService {
     }
     this.seedBaselineRunning = true
     try {
-      const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+      const { endpoint, deviceCode, deviceSecret } = this.requirePairingTransport()
       // Fresh pending observation (network, no tx held). Restart recovery uses
       // this same state read; no secret is persisted.
       let pending = this.seedBaselineIntent
       try {
-        const st = await syncClient.getPairState(endpoint, token, deviceCode, deviceSecret)
+        const st = await syncClient.getPairState(endpoint, deviceCode, deviceSecret)
         this.markRelayContact(true)
         this.reconcileChannelFull(st.channelId)
         pending = st.seedBaselinePending === true
@@ -11311,9 +11293,9 @@ export class SyncService {
     this.throwIfShutdown()
     const idErr = validatePairingRequestId(requestId)
     if (idErr) throw new Error(idErr)
-    const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+    const { endpoint, deviceCode, deviceSecret } = this.requirePairingTransport()
     try {
-      await syncClient.rejectPairing(endpoint, token, { requestId }, deviceCode, deviceSecret)
+      await syncClient.rejectPairing(endpoint, { requestId }, deviceCode, deviceSecret)
       this.markRelayContact(true)
       logger.info('[rejectPairing] request rejected')
     } catch (e) {
@@ -11331,9 +11313,9 @@ export class SyncService {
    */
   async unpair(): Promise<void> {
     this.throwIfShutdown()
-    const { endpoint, token, deviceCode, deviceSecret } = this.requirePairingTransport()
+    const { endpoint, deviceCode, deviceSecret } = this.requirePairingTransport()
     try {
-      await syncClient.unpair(endpoint, token, deviceCode, deviceSecret)
+      await syncClient.unpair(endpoint, deviceCode, deviceSecret)
       this.markRelayContact(true)
     } catch (e) {
       this.markRelayContact(false, e)

@@ -89,7 +89,6 @@ function bindProfile(which: 'A' | 'B'): void {
   ;(chatDbService as unknown as { sqlite: unknown }).sqlite = sqlite
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:endpoint', relayEndpoint)
-  configStore.set('sync:token', relayToken)
   configStore.set('sync:enabled', true)
   if (creds.deviceId) configStore.set('deviceId', creds.deviceId)
   else configStore.delete('deviceId')
@@ -257,7 +256,7 @@ afterEach(async () => {
 
 async function startRelay(): Promise<void> {
   if (!relayDb) throw new Error('relay db not initialized')
-  const server = createRelayServer(relayDb, { token: relayToken })
+  const server = createRelayServer(relayDb)
   relayServer = server as unknown as { close: (cb?: () => void) => void }
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const addr = server.address() as { port: number }

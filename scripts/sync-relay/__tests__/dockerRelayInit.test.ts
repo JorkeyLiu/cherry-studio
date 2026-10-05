@@ -5,22 +5,38 @@
  * `deploy/sync-relay/relay-init.mjs` (LOCK-001: no relay-owned CA, server
  * certificates, trust installation, fingerprints, or TLS lifecycle) through
  * bounded `node` subprocess runs plus direct imports of its pure helpers:
- * - First init creates only the token file (0600, strong) and the DB
- *   placeholder (0600); no certificate/private-key artifacts are generated
- *   and no OpenSSL dependency exists.
+ * - First init creates only the DB placeholder (0600); NO shared-token file
+ *   is generated, read, required, or exported (2026-10-05 removal). No
+ *   certificate/private-key artifacts are generated and no OpenSSL
+ *   dependency exists. A stale legacy `relay-token` file, when present, is
+ *   ignored byte-identical untouched (never read/validated/deleted/logged)
+ *   and never blocks init — including corrupted content.
+ * - Legacy shared-token inputs (`RELAY_TOKEN_FILE` non-blank,
+ *   `SYNC_RELAY_TOKEN` non-empty) fail closed with redacted errors before
+ *   any mutation; blank `RELAY_TOKEN_FILE` (stale Compose `${VAR:-}`
+ *   expansion) is treated as unset for compatibility.
  * - Without RELAY_PUBLIC_URL no public config artifact is written; with it,
  *   a small versioned config carries only operator-supplied endpoint
- *   metadata (public URL, relay name, versions) — never any token, cert, or
- *   key — with safe modes and secret-free logs.
+ *   metadata (public URL, relay name, versions) — never any token, secret,
+ *   cert, or key — with safe modes and secret-free logs. `token`/`secret`
+ *   keys in the public config are rejected (no secret injection).
  * - Second init reuses byte-identical artifacts (config stays identical via
- *   preserved issuedAt); corrupt token/config fails closed without silent
+ *   preserved issuedAt); corrupt config fails closed without silent
  *   replacement; legacy RELAY_LAN_IP fails fast before any mutation.
  * - Dockerfile/Compose/entrypoint/lockfile/ignore/schema structural checks
  *   (Linux-targeted standard bridge networking with `ports:`, no
  *   RELAY_LAN_IP/host network, container-internal 0.0.0.0 bind with the
  *   deployment flag, frozen lockfile with build-script approval,
  *   secret-free build context, minimal public-config schema, umask 077,
- *   exec of the unchanged relay CLI).
+ *   exec of the unchanged relay CLI with no token flags/env).
+ *
+ * Intentionally replaces (not merely deletes) the previous
+ * token-requirement tests: creation/reuse/corruption expectations for the
+ * shared token are superseded by no-generation + legacy-ignore + redacted
+ * rejection coverage below.
+ *
+ * No lane/ABI tests here: core alone owns Node-check authoring; later
+ * aggregate gates cover the exact worktree state.
  *
  * All runs use disposable temp roots with exact cleanup. The init itself is
  * allowed off-Linux here via RELAY_ALLOW_NON_LINUX=1 (test-only escape
@@ -38,10 +54,10 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPublicConfig,
   ensurePublicConfig,
-  ensureToken,
+  FILE_TOKEN,
   isValidIssuedAt,
   isWildcardPublicHostname,
-  resolveTokenFilePath,
+  rejectLegacyTokenInputs,
   validatePort,
   validatePublicConfigShape,
   validatePublicUrl,
@@ -79,12 +95,14 @@ function runInit(
     RELAY_NAME: 'test-relay',
     ...overrides
   }
-  // RELAY_PUBLIC_URL / RELAY_TOKEN_FILE default to unset for tests that do
-  // not opt in; explicit empty/whitespace overrides simulate the default
-  // Compose `${VAR:-}` expansion and must be preserved.
+  // RELAY_PUBLIC_URL / RELAY_LAN_IP / RELAY_TOKEN_FILE / SYNC_RELAY_TOKEN
+  // default to unset for tests that do not opt in; explicit empty/whitespace
+  // RELAY_TOKEN_FILE overrides simulate stale Compose `${VAR:-}` expansion
+  // and must be preserved.
   if (!('RELAY_PUBLIC_URL' in overrides)) delete env.RELAY_PUBLIC_URL
   if (!('RELAY_LAN_IP' in overrides)) delete env.RELAY_LAN_IP
   if (!('RELAY_TOKEN_FILE' in overrides)) delete env.RELAY_TOKEN_FILE
+  if (!('SYNC_RELAY_TOKEN' in overrides)) delete env.SYNC_RELAY_TOKEN
   const child = spawnSync(process.execPath, [INIT_ENTRY], { env: env as NodeJS.ProcessEnv, encoding: 'utf8' })
   return { status: child.status ?? -1, stdout: child.stdout ?? '', stderr: child.stderr ?? '' }
 }
@@ -114,6 +132,24 @@ describe('docker relay init pure helpers', () => {
     expect(validateRelayName('cherry-relay')).toBe('cherry-relay')
     expect(() => validateRelayName('')).toThrow()
     expect(() => validateRelayName('x'.repeat(129))).toThrow()
+  })
+
+  it('rejects legacy shared-token inputs with redacted errors (blank treated as unset)', () => {
+    expect(() => rejectLegacyTokenInputs({})).not.toThrow()
+    expect(() => rejectLegacyTokenInputs({ RELAY_TOKEN_FILE: '', SYNC_RELAY_TOKEN: undefined })).not.toThrow()
+    expect(() => rejectLegacyTokenInputs({ RELAY_TOKEN_FILE: '   ' })).not.toThrow()
+    for (const badFile of ['/tmp/custom-token', '/data/relay-token', 'relative-token']) {
+      expect(() => rejectLegacyTokenInputs({ RELAY_TOKEN_FILE: badFile }), badFile).toThrow(/no longer supported/)
+    }
+    const secret = 'supersecret-shared-token-value-123'
+    try {
+      rejectLegacyTokenInputs({ SYNC_RELAY_TOKEN: secret })
+      expect.unreachable('SYNC_RELAY_TOKEN must fail')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      expect(msg).toMatch(/no longer supported/)
+      expect(msg).not.toContain(secret)
+    }
   })
 
   it('validates the optional public URL (http/https only, fail-closed)', () => {
@@ -173,15 +209,6 @@ describe('docker relay init pure helpers', () => {
     }
   })
 
-  it('treats blank/whitespace RELAY_TOKEN_FILE as unset (default Compose expansion)', () => {
-    const dataDir = join(tmpdir(), 'cherry-relay-token-test')
-    expect(resolveTokenFilePath(undefined, dataDir)).toBe(join(dataDir, 'relay-token'))
-    expect(resolveTokenFilePath('', dataDir)).toBe(join(dataDir, 'relay-token'))
-    expect(resolveTokenFilePath('   ', dataDir)).toBe(join(dataDir, 'relay-token'))
-    expect(resolveTokenFilePath(' \t\n ', dataDir)).toBe(join(dataDir, 'relay-token'))
-    expect(resolveTokenFilePath(join(dataDir, 'custom-token'), dataDir)).toBe(resolve(join(dataDir, 'custom-token')))
-  })
-
   it('validates TLS passthrough as both-or-neither with readable files', () => {
     const root = makeRoot()
     try {
@@ -207,26 +234,7 @@ describe('docker relay init pure helpers', () => {
     const config = buildPublicConfig({ relayName: 'r', publicUrl: PUBLIC_URL, issuedAt: '2026-09-06T12:00:00Z' })
     expect(config).toMatchObject({ schemaVersion: 2, relayInitVersion: 2, relayName: 'r', publicUrl: PUBLIC_URL })
     const serialized = JSON.stringify(config)
-    expect(serialized).not.toMatch(/token|PRIVATE KEY|BEGIN CERTIFICATE|fingerprint/i)
-  })
-
-  it('writes tokens atomically with restrictive mode and no temp residue', () => {
-    const root = makeRoot()
-    try {
-      const target = join(root, 'relay-token')
-      const first = ensureToken(target)
-      expect(first.created).toBe(true)
-      expect(first.token.length).toBeGreaterThanOrEqual(64)
-      expect(modeOf(target)).toBe(0o600)
-      const second = ensureToken(target)
-      expect(second.created).toBe(false)
-      expect(second.token).toBe(first.token)
-      expect(readdirSync(root).filter((n) => n.endsWith('.tmp'))).toEqual([])
-      writeFileSync(target, '\n')
-      expect(() => ensureToken(target)).toThrow(/corrupt/)
-    } finally {
-      rmSync(root, { recursive: true, force: true })
-    }
+    expect(serialized).not.toMatch(/token|secret|PRIVATE KEY|BEGIN CERTIFICATE|fingerprint/i)
   })
 
   it('writes files atomically with restrictive mode and no temp residue', () => {
@@ -247,6 +255,8 @@ describe('docker relay init pure helpers', () => {
     expect(() => validatePublicConfigShape(good, PUBLIC_URL)).not.toThrow()
     const cases: Array<{ name: string; mutate: (c: Record<string, unknown>) => void }> = [
       { name: 'extra-token', mutate: (c) => (c.token = 'secret') },
+      { name: 'extra-secret', mutate: (c) => (c.secret = 'secret') },
+      { name: 'extra-private-key', mutate: (c) => (c.privateKey = 'secret') },
       { name: 'extra-cert', mutate: (c) => (c.caCertificate = 'secret') },
       { name: 'extra-fingerprint', mutate: (c) => (c.caFingerprint = 'secret') },
       { name: 'unknown-prop', mutate: (c) => (c.unexpected = 1) },
@@ -299,12 +309,12 @@ describe('docker relay init pure helpers', () => {
 })
 
 describe('docker relay first-start init (bounded subprocess)', () => {
-  it('creates token + DB with safe modes and safe logs, and no certificate artifacts', () => {
+  it('creates DB only with safe modes and safe logs, never a shared-token file', () => {
     const root = makeRoot()
     try {
       const run = runInit(root)
       expect(run.status).toBe(0)
-      expect(existsSync(join(root, 'relay-token'))).toBe(true)
+      expect(existsSync(join(root, FILE_TOKEN))).toBe(false)
       expect(existsSync(join(root, 'relay.db'))).toBe(true)
       // No public config without RELAY_PUBLIC_URL; no certificate material ever.
       expect(existsSync(join(root, 'relay-config.cherry'))).toBe(false)
@@ -312,41 +322,97 @@ describe('docker relay first-start init (bounded subprocess)', () => {
         expect(existsSync(join(root, name)), name).toBe(false)
       }
       expect(readdirSync(root).some((n) => n.endsWith('.pem'))).toBe(false)
-      expect(modeOf(join(root, 'relay-token'))).toBe(0o600)
       expect(modeOf(join(root, 'relay.db'))).toBe(0o600)
       expect(readdirSync(root).filter((n) => n.includes('.tmp'))).toEqual([])
 
-      const token = readFileSync(join(root, 'relay-token'), 'utf8').trim()
-      expect(token.length).toBeGreaterThanOrEqual(64)
-
-      // Safe logs only: token-file path, db path, status; never the token.
-      expect(run.stdout).toContain('relay-token')
+      // Safe logs only: db path, auth note, status; never any secret and no
+      // retrieval instructions.
       expect(run.stdout).toContain('relay.db')
-      expect(run.stdout).not.toContain(token)
+      expect(run.stdout).toContain('per-device code+secret')
+      expect(run.stdout).not.toContain('relay-token')
+      expect(run.stdout).not.toMatch(/cat \/data\/relay-token|retrieve with: cat/i)
       expect(run.stdout).not.toContain('PRIVATE KEY')
       expect(run.stdout).not.toContain('CERTIFICATE')
       expect(run.stdout).not.toContain('fingerprint')
+      expect(run.stdout).not.toMatch(/SYNC_RELAY_TOKEN=.+/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
   })
 
-  it('initializes with default Compose empty RELAY_TOKEN_FILE (no env override required)', () => {
+  it('treats blank RELAY_TOKEN_FILE as unset (stale Compose compat) without creating a token file', () => {
     for (const tokenOverride of ['', '   ']) {
       const root = makeRoot()
       try {
-        // Default Compose sets `RELAY_TOKEN_FILE: ${RELAY_TOKEN_FILE:-}` which
+        // Stale Compose sets `RELAY_TOKEN_FILE: ${RELAY_TOKEN_FILE:-}` which
         // expands to an empty string when the operator sets nothing. Init
-        // must treat it as unset and create `<dataDir>/relay-token`.
+        // must treat it as unset: succeed and create no token file.
         const run = runInit(root, { RELAY_TOKEN_FILE: tokenOverride })
         expect(run.status).toBe(0)
-        expect(existsSync(join(root, 'relay-token'))).toBe(true)
+        expect(existsSync(join(root, FILE_TOKEN))).toBe(false)
         expect(existsSync(join(root, 'relay.db'))).toBe(true)
-        expect(modeOf(join(root, 'relay-token'))).toBe(0o600)
-        const token = readFileSync(join(root, 'relay-token'), 'utf8').trim()
-        expect(token.length).toBeGreaterThanOrEqual(64)
-        expect(run.stdout).toContain('relay-token')
-        expect(run.stdout).not.toContain(token)
+        expect(modeOf(join(root, 'relay.db'))).toBe(0o600)
+        expect(run.stdout).not.toContain('relay-token')
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('rejects legacy shared-token inputs before any mutation with redacted errors', () => {
+    const secret = 'legacy-shared-secret-do-not-echo-987654321'
+    for (const overrides of [
+      { RELAY_TOKEN_FILE: '/tmp/custom-token' },
+      { RELAY_TOKEN_FILE: '/data/relay-token' },
+      { SYNC_RELAY_TOKEN: secret }
+    ]) {
+      const root = makeRoot()
+      try {
+        const run = runInit(root, overrides)
+        expect(run.status, JSON.stringify(Object.keys(overrides))).not.toBe(0)
+        expect(readdirSync(root)).toEqual([])
+        const combined = `${run.stdout}${run.stderr}`
+        expect(combined).toMatch(/no longer supported/)
+        expect(combined).not.toContain(secret)
+        expect(combined).not.toContain('/tmp/custom-token')
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('leaves a stale legacy token artifact byte-identical untouched and never logs it', () => {
+    const root = makeRoot()
+    try {
+      const legacyPath = join(root, FILE_TOKEN)
+      const legacyContent = 'stale-legacy-token-bytes-do-not-use-0123456789abcdef\n'
+      writeFileSync(legacyPath, legacyContent, { mode: 0o600 })
+      const beforeHash = sha256Of(legacyPath)
+      const run = runInit(root)
+      expect(run.status).toBe(0)
+      expect(existsSync(legacyPath)).toBe(true)
+      expect(sha256Of(legacyPath)).toBe(beforeHash)
+      expect(readFileSync(legacyPath, 'utf8')).toBe(legacyContent)
+      expect(existsSync(join(root, 'relay.db'))).toBe(true)
+      expect(run.stdout).not.toContain(legacyContent.trim())
+      expect(run.stdout).not.toContain('relay-token')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores a corrupted legacy token file without blocking init and without rewriting it', () => {
+    for (const corrupt of ['\n', 'short', '   \n']) {
+      const root = makeRoot()
+      try {
+        const legacyPath = join(root, FILE_TOKEN)
+        writeFileSync(legacyPath, corrupt, { mode: 0o600 })
+        const beforeHash = sha256Of(legacyPath)
+        const run = runInit(root)
+        expect(run.status, JSON.stringify(corrupt)).toBe(0)
+        expect(sha256Of(legacyPath), 'legacy preserved').toBe(beforeHash)
+        expect(existsSync(join(root, 'relay.db'))).toBe(true)
+        expect(run.stdout).not.toContain('relay-token')
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
@@ -358,6 +424,7 @@ describe('docker relay first-start init (bounded subprocess)', () => {
     try {
       const run = runInit(root, { RELAY_PUBLIC_URL: PUBLIC_URL })
       expect(run.status).toBe(0)
+      expect(existsSync(join(root, FILE_TOKEN))).toBe(false)
       expect(existsSync(join(root, 'relay-config.cherry'))).toBe(true)
       expect(modeOf(join(root, 'relay-config.cherry'))).toBe(0o644)
       const config = JSON.parse(readFileSync(join(root, 'relay-config.cherry'), 'utf8')) as Record<string, unknown>
@@ -365,9 +432,9 @@ describe('docker relay first-start init (bounded subprocess)', () => {
       expect(config.publicUrl).toBe(PUBLIC_URL)
       expect(config.relayName).toBe('test-relay')
       const serialized = JSON.stringify(config)
-      expect(serialized).not.toContain(readFileSync(join(root, 'relay-token'), 'utf8').trim())
-      expect(serialized).not.toMatch(/PRIVATE KEY|BEGIN CERTIFICATE|fingerprint/i)
+      expect(serialized).not.toMatch(/token|secret|PRIVATE KEY|BEGIN CERTIFICATE|fingerprint/i)
       expect(run.stdout).toContain(PUBLIC_URL)
+      expect(run.stdout).not.toContain('relay-token')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -380,6 +447,7 @@ describe('docker relay first-start init (bounded subprocess)', () => {
         const firstArgs = withUrl ? { RELAY_PUBLIC_URL: PUBLIC_URL } : {}
         expect(runInit(root, firstArgs).status).toBe(0)
         const before = snapshotFiles(root)
+        expect(before.has(FILE_TOKEN)).toBe(false)
         const second = runInit(root, firstArgs)
         expect(second.status).toBe(0)
         expect(second.stdout).toContain('reuse')
@@ -393,19 +461,18 @@ describe('docker relay first-start init (bounded subprocess)', () => {
     }
   })
 
-  it('fails closed on corrupt token without replacing it', () => {
+  it('reuses byte-identical artifacts with a stale legacy token present (legacy still untouched)', () => {
     const root = makeRoot()
     try {
-      expect(runInit(root).status).toBe(0)
-      const tokenPath = join(root, 'relay-token')
+      expect(runInit(root, { RELAY_PUBLIC_URL: PUBLIC_URL }).status).toBe(0)
+      const legacyPath = join(root, FILE_TOKEN)
+      writeFileSync(legacyPath, 'stale-legacy-after-first-start-abcdef0123456789\n', { mode: 0o600 })
       const before = snapshotFiles(root)
-      writeFileSync(tokenPath, '\n')
-      const run = runInit(root)
-      expect(run.status).not.toBe(0)
-      for (const [name, hash] of before) {
-        if (name === 'relay-token') continue
-        expect(sha256Of(join(root, name)), name).toBe(hash)
-      }
+      const second = runInit(root, { RELAY_PUBLIC_URL: PUBLIC_URL })
+      expect(second.status).toBe(0)
+      const after = snapshotFiles(root)
+      expect([...after.keys()].sort()).toEqual([...before.keys()].sort())
+      for (const [name, hash] of before) expect(after.get(name), name).toBe(hash)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -420,6 +487,7 @@ describe('docker relay first-start init (bounded subprocess)', () => {
       const before = snapshotFiles(root)
       const tamperCases: Array<{ name: string; mutate: (c: Record<string, unknown>) => void }> = [
         { name: 'extra-token', mutate: (c) => (c.token = 'secret') },
+        { name: 'extra-secret', mutate: (c) => (c.secret = 'secret') },
         { name: 'extra-cert', mutate: (c) => (c.caCertificate = 'secret') },
         { name: 'unknown-prop', mutate: (c) => (c.unexpected = 1) },
         { name: 'bad-issuedAt', mutate: (c) => (c.issuedAt = 'not-a-date') },
@@ -517,6 +585,8 @@ describe('docker relay first-start init (bounded subprocess)', () => {
       expect(config.publicUrl).toBe(PUBLIC_URL)
       expect('caCertificate' in config).toBe(false)
       expect('caFingerprint' in config).toBe(false)
+      expect('token' in config).toBe(false)
+      expect('secret' in config).toBe(false)
       expect('lanIp' in config).toBe(false)
       expect('endpoint' in config).toBe(false)
     } finally {
@@ -569,7 +639,9 @@ describe('docker relay deployment structure (no daemon required)', () => {
     for (const required of ['relay-data', 'node_modules', '.git/', 'relay-token', '.env', 'test-results/']) {
       expect(ignore, required).toContain(required)
     }
-    // No relay-owned certificate artifacts exist anymore.
+    // Legacy relay-token exclusion stays as build-context hygiene so a stale
+    // legacy file never reaches the Docker daemon; no relay-owned
+    // certificate artifacts exist.
     expect(ignore).not.toContain('ca-key.pem')
     expect(ignore).not.toContain('ca-cert.pem')
     expect(ignore).not.toContain('server-key.pem')
@@ -592,6 +664,8 @@ describe('docker relay deployment structure (no daemon required)', () => {
     )
     expect(Object.keys(schema.properties)).not.toContain('caCertificate')
     expect(Object.keys(schema.properties)).not.toContain('caFingerprint')
+    expect(Object.keys(schema.properties)).not.toContain('token')
+    expect(Object.keys(schema.properties)).not.toContain('secret')
     expect(Object.keys(schema.properties)).not.toContain('lanIp')
     expect(Object.keys(schema.properties)).not.toContain('endpoint')
     const root = makeRoot()
@@ -604,7 +678,7 @@ describe('docker relay deployment structure (no daemon required)', () => {
     }
   })
 
-  it('compose uses standard bridge networking with ports (no host network, no LAN IP)', () => {
+  it('compose uses standard bridge networking with ports (no host network, no LAN IP, no token inputs)', () => {
     const content = readFileSync(COMPOSE, 'utf8')
     expect(content).toContain('ports:')
     expect(content).toMatch(/\$\{RELAY_PORT:-3030\}:3030/)
@@ -612,14 +686,17 @@ describe('docker relay deployment structure (no daemon required)', () => {
     expect(content).toContain('dockerfile: deploy/sync-relay/Dockerfile')
     expect(content).not.toContain('network_mode')
     expect(content).not.toContain('RELAY_LAN_IP')
+    expect(content).not.toContain('RELAY_TOKEN_FILE:')
+    expect(content).not.toContain('SYNC_RELAY_TOKEN')
+    expect(content).not.toContain('cat /data/relay-token')
+    expect(content).not.toContain('cat $TOKEN_FILE')
   })
 
-  it('entrypoint binds the container-internal address and execs the unchanged relay CLI', () => {
+  it('entrypoint binds the container-internal address and execs the unchanged relay CLI with no token handling', () => {
     const content = readFileSync(ENTRYPOINT, 'utf8')
     expect(content).toContain('uname -s')
     expect(content).toContain('umask 077')
     expect(content).toContain('relay-init.mjs')
-    expect(content).toContain('SYNC_RELAY_TOKEN')
     expect(content).toContain('scripts/sync-relay/server.ts')
     expect(content).toContain('--host 0.0.0.0')
     expect(content).toContain('--allow-unspecified-bind')
@@ -629,10 +706,16 @@ describe('docker relay deployment structure (no daemon required)', () => {
     expect(content).not.toContain('exec npx')
     expect(content).not.toContain('exec npm')
     expect(content).not.toMatch(/\bnpx\s+tsx\b/)
-    // Blank/whitespace token file is treated as unset (default Compose empty).
-    expect(content).toContain('RELAY_TOKEN_TRIMMED')
-    expect(content).toContain('unset RELAY_TOKEN_FILE')
-    // Internal bridge attestation set only here after init/token validation.
+    // Legacy token compat: blank RELAY_TOKEN_FILE treated as unset, then
+    // rejected when non-blank; SYNC_RELAY_TOKEN rejected when non-empty.
+    // Values are never echoed and never exported to the relay.
+    expect(content).toContain('RELAY_TOKEN_FILE is no longer supported')
+    expect(content).toContain('SYNC_RELAY_TOKEN is no longer supported')
+    expect(content).not.toContain('export SYNC_RELAY_TOKEN')
+    expect(content).not.toMatch(/SYNC_RELAY_TOKEN="\$\(cat/)
+    expect(content).not.toContain('--token')
+    expect(content).not.toContain('token file missing after init')
+    // Internal bridge attestation set only here after init validation.
     expect(content).toContain("CHERRY_RELAY_BRIDGE_BIND='docker-bridge-v1'")
     expect(content).toMatch(/^exec /m)
     expect(content).not.toContain('eval')

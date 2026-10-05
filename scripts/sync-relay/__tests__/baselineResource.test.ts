@@ -31,8 +31,6 @@ import {
 } from '../../../packages/shared/sync/baselineWire'
 import { createRelayServer, ensureRelaySchema, RELAY_SCHEMA_VERSION } from '../server'
 
-const TOKEN = 'baseline-resource-token'
-
 let dbs: Database.Database[] = []
 let servers: Array<{ close: (cb?: () => void) => void }> = []
 let tmpDirs: string[] = []
@@ -71,7 +69,7 @@ afterEach(async () => {
 
 async function startServer(db: Database.Database): Promise<string> {
   ensureRelaySchema(db)
-  const server = createRelayServer(db, { token: TOKEN })
+  const server = createRelayServer(db)
   servers.push(server as unknown as { close: (cb?: () => void) => void })
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve())
@@ -82,7 +80,6 @@ async function startServer(db: Database.Database): Promise<string> {
 
 function authed(code: string, secret: string): Record<string, string> {
   return {
-    Authorization: `Bearer ${TOKEN}`,
     'Content-Type': 'application/json',
     'x-sync-device-code': code,
     'x-sync-device-secret': secret
@@ -92,7 +89,7 @@ function authed(code: string, secret: string): Record<string, string> {
 async function register(base: string, deviceId: string): Promise<{ code: string; secret: string }> {
   const res = await fetch(`${base}/sync/register`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceId })
   })
   expect(res.status).toBe(200)
@@ -487,26 +484,25 @@ describe('relay baseline resource', () => {
     expect(other.json).toEqual({ error: 'baseline-not-found' })
   })
 
-  it('auth: missing Bearer is 401, bad device secret is 403, unpaired is 403 pairing-required', async () => {
+  it('auth: bad device secret is 403, unpaired is 403 pairing-required', async () => {
     const db = trackDb(new Database(':memory:'))
     const base = await startServer(db)
     const { a, channelId } = await pairDevices(base, 'bl-auth-a', 'bl-auth-b')
     const lone = await register(base, 'bl-auth-lone')
 
     const envelope = JSON.stringify(makeEnvelope(channelId, 0, emptyPayload()))
-    const noBearerPut = await putBaseline(base, a, envelope, {
+    const authedPut = await putBaseline(base, a, envelope, {
       'Content-Type': 'application/json',
       'x-sync-device-code': a.code,
       'x-sync-device-secret': a.secret
     })
-    expect(noBearerPut.status).toBe(401)
-    expect(noBearerPut.json).toEqual({ error: 'unauthorized' })
+    expect(authedPut.status).toBe(200)
 
-    const noBearerGet = await getBaseline(base, a, {
+    const authedGet = await getBaseline(base, a, {
       'x-sync-device-code': a.code,
       'x-sync-device-secret': a.secret
     })
-    expect(noBearerGet.status).toBe(401)
+    expect(authedGet.status).toBe(200)
 
     const badSecretPut = await putBaseline(base, a, envelope, authed(a.code, 'f'.repeat(64)))
     expect(badSecretPut.status).toBe(403)

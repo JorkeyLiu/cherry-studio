@@ -18,8 +18,6 @@ import {
 import { closeSecondSyncProfile, launchSecondSyncProfile } from '../../utils/sync-second-profile'
 import { startTestRelay, type TestRelayHandle } from '../../utils/sync-relay'
 
-const RELAY_TOKEN = 'e2e-attachment-sync-token-1'
-
 function shaHex(_buf: Buffer): string {
   return createHash('sha256').update(_buf).digest('hex')
 }
@@ -163,11 +161,11 @@ test.describe('Attachment sync E2E', () => {
     let relay: TestRelayHandle | null = null
     let profileB: import('../../utils/sync-second-profile').SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
 
       const topic = `e2e-attach-topic-1`
@@ -369,11 +367,11 @@ test.describe('Attachment sync E2E', () => {
     let profileB: import('../../utils/sync-second-profile').SecondSyncProfile | null = null
     let profileC: import('../../utils/sync-second-profile').SecondSyncProfile | null = null
     try {
-      relay = await startTestRelay(RELAY_TOKEN)
+      relay = await startTestRelay()
       profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageB = profileB.page
-      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
-      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageB)
       const topic = `e2e-attach-topic-bootstrap-${randomUUID().slice(0, 6)}`
       await ensureTopicViaApi(pageA, topic, 'Bootstrap Topic')
@@ -428,16 +426,12 @@ test.describe('Attachment sync E2E', () => {
         const r = await fetchRoute(pageB, topic, null)
         return r.messages.some((m) => m.id === mf)
       })
-      const observer = await provisionObserverViaRaw(relay.endpoint, RELAY_TOKEN, pageA)
+      const observer = await provisionObserverViaRaw(relay.endpoint, pageA)
       let watermark = 0
       await poll(async () => {
         if (!relay) return false
         const res = await fetch(`${relay.endpoint}/sync/baseline`, {
-          headers: {
-            Authorization: `Bearer ${RELAY_TOKEN}`,
-            'x-sync-device-code': observer.code,
-            'x-sync-device-secret': observer.secret
-          }
+          headers: { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
         })
         if (res.status !== 200) return false
         const body = (await res.json()) as { watermark: number }
@@ -450,7 +444,7 @@ test.describe('Attachment sync E2E', () => {
       expect(watermark).toBeGreaterThan(0)
       profileC = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
       const pageC = profileC.page
-      await setSyncConfigViaApi(pageC, { endpoint: relay.endpoint, token: RELAY_TOKEN, enabled: true })
+      await setSyncConfigViaApi(pageC, { endpoint: relay.endpoint, enabled: true })
       await pairProfilesViaApi(pageA, pageC)
       const codeC = (await getDeviceCodeViaApi(pageC)).deviceCode
       expect(codeC).toBeTruthy()

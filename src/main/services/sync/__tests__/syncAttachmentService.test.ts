@@ -115,24 +115,22 @@ describe('SyncAttachmentService upload', () => {
     writeFileSync(join(filesDir, `${id}.txt`), bytes)
     const seen: Array<{ digest: string; byteLength?: number; body: unknown }> = []
     const client = {
-      uploadAttachment: vi.fn(
-        async (_e: string, _t: string | undefined, args: { digest: string; byteLength?: number; body: unknown }) => {
-          seen.push(args)
-          const streamed = await collectBody(args.body)
-          expect(streamed.equals(bytes)).toBe(true)
-          return { digest: args.digest, byteLength: streamed.length, deduplicated: false }
-        }
-      ),
+      uploadAttachment: vi.fn(async (_e: string, args: { digest: string; byteLength?: number; body: unknown }) => {
+        seen.push(args)
+        const streamed = await collectBody(args.body)
+        expect(streamed.equals(bytes)).toBe(true)
+        return { digest: args.digest, byteLength: streamed.length, deduplicated: false }
+      }),
       downloadAttachment: vi.fn()
     }
     const svc = new SyncAttachmentService({ filesDir, tempDir, client: client as never })
     const asset = await svc.discoverAsset(`${id}.txt`)
-    const receipt = await svc.uploadAsset(asset, 'http://127.0.0.1:3030', 'tok', 'ABCDEFGH', 'b'.repeat(64))
+    const receipt = await svc.uploadAsset(asset, 'http://127.0.0.1:3030', 'ABCDEFGH', 'b'.repeat(64))
     expect(receipt).toMatchObject({ digest: asset.sha256, byteLength: bytes.length })
     expect(seen).toHaveLength(1)
     // Stale metadata (size changed after discover) throws without transport.
     const stale: FileAsset = { ...asset, byteLength: asset.byteLength + 1 }
-    await expect(svc.uploadAsset(stale, 'http://127.0.0.1:3030', 'tok', 'ABCDEFGH', 'b'.repeat(64))).rejects.toThrow(
+    await expect(svc.uploadAsset(stale, 'http://127.0.0.1:3030', 'ABCDEFGH', 'b'.repeat(64))).rejects.toThrow(
       'stale metadata'
     )
     expect(seen).toHaveLength(1)
@@ -158,7 +156,6 @@ describe('SyncAttachmentService downloadAndInstall', () => {
       downloadAttachment: vi.fn(
         async (
           _e: string,
-          _t: string | undefined,
           args: { digest: string; expectedByteLength?: number },
           _c: string,
           _s: string,
@@ -189,7 +186,6 @@ describe('SyncAttachmentService downloadAndInstall', () => {
     const installed = await svc.downloadAndInstall(
       assetFor(bytes, id),
       'http://127.0.0.1:3030',
-      'tok',
       'ABCDEFGH',
       'b'.repeat(64)
     )
@@ -198,13 +194,7 @@ describe('SyncAttachmentService downloadAndInstall', () => {
     expect(installed.asset).toMatchObject({ id, sha256: shaHex(bytes) })
     expect(installed.asset).not.toHaveProperty('path')
     // Second download dedups against the identical final.
-    const again = await svc.downloadAndInstall(
-      assetFor(bytes, id),
-      'http://127.0.0.1:3030',
-      'tok',
-      'ABCDEFGH',
-      'b'.repeat(64)
-    )
+    const again = await svc.downloadAndInstall(assetFor(bytes, id), 'http://127.0.0.1:3030', 'ABCDEFGH', 'b'.repeat(64))
     expect(again.deduplicated).toBe(true)
     expect(again.localPath).toBe(installed.localPath)
   })
@@ -219,7 +209,7 @@ describe('SyncAttachmentService downloadAndInstall', () => {
       client: downloadStub(bytes, 'digest-mismatch') as never
     })
     await expect(
-      svc.downloadAndInstall(assetFor(bytes, id), 'http://127.0.0.1:3030', 'tok', 'ABCDEFGH', 'b'.repeat(64))
+      svc.downloadAndInstall(assetFor(bytes, id), 'http://127.0.0.1:3030', 'ABCDEFGH', 'b'.repeat(64))
     ).rejects.toThrow('digest-mismatch')
     let filesLeft: string[] = []
     try {
@@ -247,7 +237,7 @@ describe('SyncAttachmentService downloadAndInstall', () => {
     const incoming = Buffer.from('incoming-other-content-xxxxx')
     const svc = new SyncAttachmentService({ filesDir, tempDir, client: downloadStub(incoming) as never })
     await expect(
-      svc.downloadAndInstall(assetFor(incoming, id), 'http://127.0.0.1:3030', 'tok', 'ABCDEFGH', 'b'.repeat(64))
+      svc.downloadAndInstall(assetFor(incoming, id), 'http://127.0.0.1:3030', 'ABCDEFGH', 'b'.repeat(64))
     ).rejects.toThrow('stored content conflict')
     // Existing final untouched.
     const { readFileSync } = await import('node:fs')

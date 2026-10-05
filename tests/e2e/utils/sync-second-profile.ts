@@ -125,17 +125,15 @@ export async function closeSecondSyncProfile(profile: SecondSyncProfile | null |
 export interface RelaunchSecondSyncProfileOptions {
   /** Expected persisted sync endpoint after relaunch (strict, no repair). */
   expectedEndpoint: string
-  /** Expected persisted sync token (strict when supplied; omitted when unknowable). */
-  expectedToken?: string
   /** Expected persisted sync enabled flag after relaunch (strict, no repair). */
   expectedEnabled: boolean
 }
 
 /**
  * Strict persisted-config assertion for the raw post-relaunch getConfig
- * shape. Fails closed without repairing and without exposing credential
- * values in the thrown message. When expectedToken is supplied, an
- * undefined/empty/non-string/mismatched token fails.
+ * shape. Fails closed without repairing. There is no shared service token:
+ * only endpoint/enabled are asserted (credential values never appear in the
+ * thrown message).
  */
 export function assertPersistedSyncConfigStrict(raw: unknown, expected: RelaunchSecondSyncProfileOptions): void {
   if (!raw || typeof raw !== 'object') throw new Error('persisted sync config missing after relaunch')
@@ -145,12 +143,6 @@ export function assertPersistedSyncConfigStrict(raw: unknown, expected: Relaunch
   }
   if (typeof current.enabled !== 'boolean' || current.enabled !== expected.expectedEnabled) {
     throw new Error('persisted sync enabled mismatch after relaunch')
-  }
-  if (expected.expectedToken !== undefined) {
-    if (typeof current.token !== 'string' || current.token.length === 0) {
-      throw new Error('persisted sync token missing or empty after relaunch')
-    }
-    if (current.token !== expected.expectedToken) throw new Error('persisted sync token mismatch after relaunch')
   }
 }
 
@@ -168,12 +160,11 @@ export async function readRawSyncConfig(page: Page): Promise<unknown> {
  */
 export async function repairSecondSyncConfig(page: Page, expected: RelaunchSecondSyncProfileOptions): Promise<void> {
   await page.evaluate(
-    async (cfg: { endpoint: string; token?: string; enabled: boolean }) => {
+    async (cfg: { endpoint: string; enabled: boolean }) => {
       return await (window as any).api.sync.setConfig(cfg)
     },
     {
       endpoint: expected.expectedEndpoint,
-      token: expected.expectedToken,
       enabled: expected.expectedEnabled
     }
   )

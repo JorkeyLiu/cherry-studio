@@ -75,7 +75,6 @@ function bind(which: 'A' | 'B'): void {
   ;(chatDbService as unknown as { db: unknown }).db = db
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   configStore.set('deviceId', which === 'A' ? 'device-A' : 'device-B')
   configStore.set('sync:explicitDisconnect', false)
 }
@@ -84,7 +83,7 @@ function installRelayMock(): void {
   relayOps = []
   relaySeq = 0
   vi.spyOn(syncClient, 'push').mockImplementation(async (...args: unknown[]) => {
-    const req = args[2] as { operations: Array<Record<string, unknown>> }
+    const req = args[1] as { operations: Array<Record<string, unknown>> }
     const accepted: string[] = []
     for (const op of req.operations) {
       const id = op.id as string
@@ -96,7 +95,7 @@ function installRelayMock(): void {
     return { acceptedIds: accepted, cursor: relaySeq } as never
   })
   vi.spyOn(syncClient, 'pull').mockImplementation(async (...args: unknown[]) => {
-    const cursor = args[2] as number
+    const cursor = args[1] as number
     const ops = relayOps.filter((r) => r.seq > cursor).map((r) => ({ ...r.op, seq: r.seq }))
     return { operations: ops, cursor: relaySeq } as never
   })

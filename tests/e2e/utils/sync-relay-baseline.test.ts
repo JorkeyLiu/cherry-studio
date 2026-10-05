@@ -39,12 +39,10 @@ import {
   type TestRelayHandle
 } from './sync-relay'
 
-const TOKEN = 'inmemory-baseline-token'
-
 let relay: TestRelayHandle
 
 beforeEach(async () => {
-  relay = await startTestRelay(TOKEN)
+  relay = await startTestRelay()
 })
 
 afterEach(async () => {
@@ -189,7 +187,7 @@ function v2Envelope(channelId: string, watermark: number, registers: unknown[] =
 
 async function channelIdOf(dev: ProvisionedDevice): Promise<string> {
   const res = await fetch(`${relay.endpoint}/sync/state`, {
-    headers: { Authorization: `Bearer ${TOKEN}`, ...provisionedHeaders(dev) }
+    headers: { ...provisionedHeaders(dev) }
   })
   expect(res.status).toBe(200)
   const body = (await res.json()) as { channelId: string | null }
@@ -199,7 +197,6 @@ async function channelIdOf(dev: ProvisionedDevice): Promise<string> {
 
 function authed(dev: ProvisionedDevice): Record<string, string> {
   return {
-    Authorization: `Bearer ${TOKEN}`,
     'Content-Type': 'application/json',
     ...provisionedHeaders(dev)
   }
@@ -277,7 +274,7 @@ async function pushTopicOp(
 
 describe('in-memory relay baseline contract', () => {
   it('empty channel: GET strict 404, first PUT N=0 succeeds, GET returns it verbatim', async () => {
-    const [a] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     const empty = await getBaseline(a)
@@ -296,7 +293,7 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('same-N exact and canonical-equivalent re-PUT are idempotent 200; divergent same-N is 409', async () => {
-    const [a] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     const envelope = v1Envelope(channelId, 0, singleTopicPayload('blt-idem'))
@@ -337,7 +334,7 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('lower N conflicts, higher N replaces, above-head is 400, N+1 pull retention holds', async () => {
-    const [a, b] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a, b] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     const first = await putBaseline(a, v1Envelope(channelId, 0))
@@ -372,7 +369,7 @@ describe('in-memory relay baseline contract', () => {
     expect(pushed2.status).toBe(200)
     expect(pushed2.cursor).toBe(2)
     const pull = await fetch(`${relay.endpoint}/sync/pull?cursor=1&deviceId=${encodeURIComponent('bl-dev')}`, {
-      headers: { Authorization: `Bearer ${TOKEN}`, ...provisionedHeaders(b) }
+      headers: { ...provisionedHeaders(b) }
     })
     expect(pull.status).toBe(200)
     const pullBody = (await pull.json()) as { operations: Array<{ seq: number }>; cursor: number }
@@ -381,22 +378,23 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('auth, pairing-required, and channel-mismatch match the reference order', async () => {
-    const [a] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
-    const [other] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [other] = await provisionPairedDevices(relay.endpoint, 2)
     const otherChannel = await channelIdOf(other)
     expect(otherChannel).not.toBe(channelId)
 
     const envelope = v1Envelope(channelId, 0)
 
-    // Bearer precedes everything (401 even with valid device headers).
-    const noBearerPut = await putBaselineRaw(a, JSON.stringify(envelope), {
-      'Content-Type': 'application/json',
-      ...provisionedHeaders(a)
+    // Missing device credential precedes everything (403 invalid-credential).
+    const noCredPut = await putBaselineRaw(a, JSON.stringify(envelope), {
+      'Content-Type': 'application/json'
     })
-    expect(noBearerPut.status).toBe(401)
-    const noBearerGet = await getBaseline(a, { ...provisionedHeaders(a) })
-    expect(noBearerGet.status).toBe(401)
+    expect(noCredPut.status).toBe(403)
+    expect(noCredPut.json).toEqual({ error: 'invalid-credential' })
+    const noCredGet = await getBaseline(a, {})
+    expect(noCredGet.status).toBe(403)
+    expect(noCredGet.json).toEqual({ error: 'invalid-credential' })
 
     // Unknown device credential fails closed.
     const ghostPut = await putBaselineRaw(
@@ -410,7 +408,7 @@ describe('in-memory relay baseline contract', () => {
     // Unpaired device: pairing-required on both verbs.
     const soloRes = await fetch(`${relay.endpoint}/sync/register`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({})
     })
     expect(soloRes.status).toBe(200)
@@ -430,7 +428,7 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('malformed, duplicate-key, and digest-tampered envelopes are 400', async () => {
-    const [a] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     const truncated = await putBaselineRaw(a, '{"wireVersion":')
@@ -455,7 +453,7 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('v1 current upgrades to v2 under the gate; any later v1 is 409 and never downgrades', async () => {
-    const [a] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     const v1 = await putBaseline(a, v1Envelope(channelId, 0))
@@ -492,7 +490,7 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('baseline traffic never touches op count/cursor and ignores pause barriers', async () => {
-    const [a] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     const pushed = await pushTopicOp(a, 'bl-dev', 'counts', 1)
@@ -530,7 +528,7 @@ describe('in-memory relay baseline contract', () => {
   })
 
   it('baseline GET 200 counts per device: 404 uncounted, 200 isolated, op/cursor/pause untouched', async () => {
-    const [a, b] = await provisionPairedDevices(relay.endpoint, TOKEN, 2)
+    const [a, b] = await provisionPairedDevices(relay.endpoint, 2)
     const channelId = await channelIdOf(a)
 
     // Fresh counters read 0 fail-closed (unknown code also 0).

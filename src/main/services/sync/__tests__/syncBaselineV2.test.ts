@@ -199,7 +199,6 @@ beforeEach(() => {
   configStore.clear()
   configStore.set('sync:enabled', true)
   configStore.set('sync:endpoint', 'http://127.0.0.1:9999')
-  configStore.set('sync:token', '')
   sqlite = openInMemory()
   db = drizzle(sqlite, { schema })
   runMigrations(db as any, sqlite)
@@ -448,7 +447,7 @@ describe('baseline v2 publish/fetch/bootstrap N+1', () => {
     })
     vi.spyOn(syncClient, 'push').mockResolvedValue({ cursor: 5, acceptedIds: [] })
     const pullOrder: number[] = []
-    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, _t, cursor) => {
+    vi.spyOn(syncClient, 'pull').mockImplementation(async (_e, cursor) => {
       pullOrder.push(cursor)
       expect(cursor).toBe(5)
       return { operations: [], cursor: 5 } as never

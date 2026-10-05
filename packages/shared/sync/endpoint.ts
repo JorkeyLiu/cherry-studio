@@ -3,10 +3,12 @@
  * endpoint policy.
  * - Only http/https schemes are accepted.
  * - Both http and https are accepted for loopback and non-loopback hosts.
- *   Plaintext HTTP to a non-loopback host is unencrypted: callers surface a
- *   visible non-blocking warning (see `isNonLoopbackHttpEndpoint`) instead
- *   of rejecting the endpoint. HTTPS uses ordinary default certificate
- *   verification; there is no bypass or auto-trust anywhere in this path.
+ *   Plaintext HTTP to a non-loopback host is unencrypted: Sync Settings
+ *   accepts HTTP and HTTPS identically with no client-side warning, and
+ *   `isNonLoopbackHttpEndpoint` remains only for existing tests/consumers
+ *   to classify such endpoints instead of rejecting them. HTTPS uses
+ *   ordinary default certificate verification; there is no bypass or
+ *   auto-trust anywhere in this path.
  * - Loopback hosts for warning purposes: `localhost`, `127.0.0.1`, `::1`.
  * - Wildcard/unspecified hosts (`0.0.0.0`, `::` and equivalent all-zero /
  *   IPv4-mapped-unspecified / zone-suffixed forms) are never valid
@@ -29,9 +31,10 @@ export function isLoopbackHostname(hostname: string): boolean {
 
 /**
  * True when `raw` parses as an `http://` URL whose host is not loopback.
- * Used by Sync Settings to show a visible non-blocking warning that the
- * endpoint is unencrypted. Never throws; unparseable input returns false
- * (validation itself reports the parse error via `validateSyncEndpointUrl`).
+ * Retained for existing tests/consumers to classify unencrypted endpoints;
+ * Sync Settings no longer renders a client-side warning for them. Never
+ * throws; unparseable input returns false (validation itself reports the
+ * parse error via `validateSyncEndpointUrl`).
  */
 function hasExplicitHttpAuthorityPrefix(trimmed: string, httpOnly: boolean): boolean {
   const m = httpOnly ? /^http:\/\//i.exec(trimmed) : /^https?:\/\//i.exec(trimmed)

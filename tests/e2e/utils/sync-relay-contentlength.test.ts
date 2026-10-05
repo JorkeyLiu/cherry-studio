@@ -10,8 +10,6 @@ import {
   type TestRelayHandle
 } from './sync-relay'
 
-const TOKEN = 'content-length-parity-token'
-
 function topicOp(id: string, entityId: string, name = 'N', ts = Date.now()): Record<string, unknown> {
   return {
     id,
@@ -28,8 +26,8 @@ let relay: TestRelayHandle | null = null
 let dev: ProvisionedDevice | null = null
 
 beforeEach(async () => {
-  relay = await startTestRelay(TOKEN)
-  dev = (await provisionPairedDevices(relay.endpoint, TOKEN, 2))[0]
+  relay = await startTestRelay()
+  dev = (await provisionPairedDevices(relay.endpoint, 2))[0]
 })
 
 afterEach(async () => {
@@ -55,7 +53,6 @@ function rawPushWithContentLength(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${TOKEN}`,
           'Content-Length': contentLengthHeader,
           ...(dev ? provisionedHeaders(dev) : {})
         }
@@ -108,12 +105,115 @@ describe('test relay content-length parity (LOCK-RT-005/006)', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${TOKEN}`,
         'x-sync-device-code': 'd1'
       },
       body
     })
     expect(res.status).toBe(413)
     await res.text().catch(() => '')
+  })
+
+  it('size/auth/pause matrix: 413 first, then 403, then 503, with no data mutation', async () => {
+    const bigPayload = 'x'.repeat(3 * 1024 * 1024)
+    const bigBody = JSON.stringify({
+      deviceId: 'd1',
+      operations: [topicOp('op-cl-matrix-big', 't-cl-matrix-big', bigPayload)]
+    })
+    const tinyBody = JSON.stringify({ deviceId: 'd1', operations: [topicOp('op-cl-matrix-tiny', 't-cl-matrix-tiny')] })
+
+    // Oversize + missing device credential (unpaused) -> 413 wins over 403.
+    const noAuthBig = await rawPushWithContentLength(relay!.endpoint, String(bigBody.length), bigBody)
+    expect(noAuthBig.status).toBe(413)
+    await relay!.waitForQuiescent()
+    expect(relay!.getOperationCount()).toBe(0)
+    expect(relay!.getCursor()).toBe(0)
+
+    // Oversize with a malformed Content-Length still 413 via the bounded body
+    // read (no header silent bypass). Node truncates the stream to the leading
+    // numeric prefix, so use a declared length that still delivers the full
+    // oversize body: chunked framing (no Content-Length at all).
+    const chunkedBig: { status: number; body: string } = await new Promise((resolve, reject) => {
+      const url = new URL(`${relay!.endpoint}/sync/push`)
+      const req = httpRequest(
+        {
+          hostname: url.hostname,
+          port: Number(url.port),
+          path: '/sync/push',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        },
+        (res) => {
+          let data = ''
+          res.on('data', (c) => (data += c))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
+        }
+      )
+      req.on('error', reject)
+      req.write(bigBody)
+      req.end()
+    })
+    expect(chunkedBig.status).toBe(413)
+    await relay!.waitForQuiescent()
+    expect(relay!.getOperationCount()).toBe(0)
+    expect(relay!.getCursor()).toBe(0)
+
+    // Normal-size + missing device while paused -> 403 wins over 503.
+    relay!.setPaused(true)
+    try {
+      const pausedNoAuth = await rawPushWithContentLength(relay!.endpoint, String(tinyBody.length), tinyBody)
+      expect(pausedNoAuth.status).toBe(403)
+      // Oversize + missing device while paused -> 413 still wins over 403/503.
+      const pausedNoAuthBig = await rawPushWithContentLength(relay!.endpoint, String(bigBody.length), bigBody)
+      expect(pausedNoAuthBig.status).toBe(413)
+      // Valid device while paused -> 503 with no data change.
+      const pausedValid = await fetch(`${relay!.endpoint}/sync/push`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...provisionedHeaders(dev!) },
+        body: tinyBody
+      })
+      expect(pausedValid.status).toBe(503)
+      await pausedValid.text().catch(() => '')
+    } finally {
+      relay!.setPaused(false)
+    }
+    await relay!.waitForQuiescent()
+    expect(relay!.getOperationCount()).toBe(0)
+    expect(relay!.getCursor()).toBe(0)
+  })
+
+  it('unpaired valid device stays 403 pairing-required; paired push stays 200', async () => {
+    const soloRes = await fetch(`${relay!.endpoint}/sync/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })
+    expect(soloRes.status).toBe(200)
+    const solo = (await soloRes.json()) as { deviceCode: string; deviceSecret: string }
+    const tinyBody = JSON.stringify({ deviceId: 'd1', operations: [topicOp('op-cl-solo', 't-cl-solo')] })
+    const unpaired = await fetch(`${relay!.endpoint}/sync/push`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-sync-device-code': solo.deviceCode,
+        'x-sync-device-secret': solo.deviceSecret
+      },
+      body: tinyBody
+    })
+    expect(unpaired.status).toBe(403)
+    await unpaired.text().catch(() => '')
+    await relay!.waitForQuiescent()
+    expect(relay!.getOperationCount()).toBe(0)
+    expect(relay!.getCursor()).toBe(0)
+
+    const allowed = await fetch(`${relay!.endpoint}/sync/push`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...provisionedHeaders(dev!) },
+      body: tinyBody
+    })
+    expect(allowed.status).toBe(200)
+    await allowed.json().catch(() => ({}))
+    await relay!.waitForQuiescent()
+    expect(relay!.getOperationCount()).toBe(1)
+    expect(relay!.getCursor()).toBe(1)
   })
 })
