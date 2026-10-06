@@ -500,14 +500,19 @@ describe('SyncSettings tokenless connection (zh-CN)', () => {
     })
     const badge = screen.getByTestId('sync-status-badge')
     expect(badge.textContent).toBe('等待配对')
-    // Helpful awaiting-pairing guidance replaces the raw error stack.
-    expect(screen.getByTestId('sync-pairing-required-hint').textContent).toMatch(/等待配对/)
+    // Waiting-only explanatory hints were removed: no hint nodes remain and
+    // the raw pairing-required stack stays hidden (waiting, not failure).
+    expect(screen.queryByTestId('sync-pairing-required-hint')).toBeNull()
+    expect(screen.queryByTestId('sync-waiting-hint')).toBeNull()
     expect(screen.queryByTestId('sync-last-error')).toBeNull()
+    // Pairing status plus partner controls stay usable while waiting.
+    expect(screen.getByTestId('sync-pairing-pill').textContent).toMatch(/未配对/)
+    expect(screen.getByTestId('sync-target-code-input')).toBeInTheDocument()
+    expect(screen.getByTestId('sync-request-pairing')).toBeInTheDocument()
     // Pending intent is retained and visible.
     expect(screen.getByTestId('sync-pending-count').textContent).toBe('2')
-    // Manual sync cannot succeed before pairing: disabled with explanation.
+    // Manual sync cannot succeed before pairing: stays disabled.
     expect(screen.getByTestId('sync-now-button')).toBeDisabled()
-    expect(screen.getByTestId('sync-waiting-hint').textContent).toMatch(/等待配对/)
   })
 
   it('still displays a genuine capture error even when unpaired', async () => {
@@ -525,6 +530,7 @@ describe('SyncSettings tokenless connection (zh-CN)', () => {
     expect(screen.getByTestId('sync-status-badge').textContent).toBe('同步异常')
     expect(screen.getByTestId('sync-capture-error').textContent).toContain('capture pipeline boom')
     expect(screen.queryByTestId('sync-pairing-required-hint')).toBeNull()
+    expect(screen.queryByTestId('sync-waiting-hint')).toBeNull()
   })
 
   it('still displays a genuine unrelated lastError even when unpaired', async () => {
@@ -569,6 +575,8 @@ describe('SyncSettings tokenless connection (zh-CN)', () => {
       })
       expect(screen.getByTestId('sync-status-badge').textContent).toBe('等待配对')
       expect(screen.getByTestId('sync-now-button')).toBeDisabled()
+      expect(screen.queryByTestId('sync-pairing-required-hint')).toBeNull()
+      expect(screen.queryByTestId('sync-waiting-hint')).toBeNull()
       expect(screen.queryByText(/同步完成/)).toBeNull()
       for (const m of mounted.splice(0)) {
         try {

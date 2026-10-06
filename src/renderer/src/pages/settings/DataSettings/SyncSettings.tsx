@@ -2,7 +2,7 @@ import { useTheme } from '@renderer/context/ThemeProvider'
 import { loggerService } from '@renderer/services/LoggerService'
 import { Button, Flex, Input, Switch, Tag, Tooltip } from 'antd'
 import dayjs from 'dayjs'
-import { Info } from 'lucide-react'
+import { Copy, Info } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -515,10 +515,6 @@ const SyncSettings: React.FC = () => {
     'settings.sync.endpoint_help',
     'Use http:// for direct LAN access or https:// when your deployment provides TLS.'
   )
-  const deviceCodeTip = t(
-    'settings.sync.device_code_hint',
-    'The device code is public: read it aloud to pair another of your devices. It cannot authorize anything by itself.'
-  )
   const pairingTip = t(
     'settings.sync.pairing_help',
     'Pairing joins your own devices into a private channel. To pair: connect the relay first to get this device code, then enter the other device code to request pairing; the other device accepts. Channels are private per device group. Device codes are public identifiers and cannot authorize anything by themselves.'
@@ -528,14 +524,6 @@ const SyncSettings: React.FC = () => {
   // convergence — idle means no pending work and no recorded error, not
   // proof that every device converged.
   const syncBadge = resolveSyncBadge({ status, service, pairing })
-  const waitingHint = t(
-    'settings.sync.waiting_hint',
-    'Waiting for pairing: complete pairing to sync. Pending edits stay queued until then.'
-  )
-  const pairingRequiredHint = t(
-    'settings.sync.pairing_required_hint',
-    'Waiting for pairing: this device is not yet paired. Complete pairing to sync; pending edits are kept.'
-  )
   const pairingRecoveredHint = t(
     'settings.sync.pairing_recovered_hint',
     'Pairing completed after a previous request: the pending sync will proceed on the next run.'
@@ -559,7 +547,7 @@ const SyncSettings: React.FC = () => {
                 : null
 
   // Durable-error presentation: a pairing-required lastError is expected
-  // waiting (helpful guidance, not a raw stack) unless a genuine unrelated
+  // waiting (waiting badge, raw stack hidden) unless a genuine unrelated
   // error or a capture error is also present — those always stay visible.
   // A stale pairing-required observed while live paired is recovery, not an
   // error at all.
@@ -567,16 +555,24 @@ const SyncSettings: React.FC = () => {
   const hasGenuineError = !!status?.lastCaptureError || (!!status?.lastError && !lastErrorPairingRequired)
   const livePaired = !!(serviceConnected && pairing?.state === 'paired')
   const stalePairingRecovery = !!(livePaired && lastErrorPairingRequired && !status?.lastCaptureError)
-  const showPairingRequiredHint = !!(
-    status?.enabled &&
-    lastErrorPairingRequired &&
-    !hasGenuineError &&
-    !stalePairingRecovery
-  )
   // Manual sync cannot succeed while pairing is pending: the button stays
-  // disabled with an explanatory hint. This is presentation only — the sync
-  // API itself is unchanged.
+  // disabled. This is presentation only — the sync API itself is unchanged.
   const syncWaitingDisabled = enabled && knownUnpaired
+
+  // The independent copy button copies the exact public code only, never
+  // any secret (secrets never pass through this component). No code means
+  // nothing copyable (the block is not rendered at all). The device-code
+  // text itself is plain inherited-color text with no interaction.
+  const handleCopyDeviceCode = useCallback(async () => {
+    const code = service?.deviceCode
+    if (!code) return
+    try {
+      await navigator.clipboard.writeText(code)
+      window.toast.success(t('message.copy.success', 'Copied!'))
+    } catch {
+      window.toast.error(t('message.copy.failed', 'Copy failed'))
+    }
+  }, [service?.deviceCode, t])
 
   return (
     <SettingGroup theme={theme}>
@@ -659,7 +655,14 @@ const SyncSettings: React.FC = () => {
               <span data-testid="sync-device-code">
                 {t('settings.sync.device_code_label', 'This device code')}: {service.deviceCode}
               </span>
-              <SyncHelpIcon tip={deviceCodeTip} label={deviceCodeTip} />
+              <Button
+                type="text"
+                size="small"
+                data-testid="sync-device-code-copy"
+                onClick={handleCopyDeviceCode}
+                aria-label={t('common.copy', 'Copy')}
+                icon={<Copy size={14} />}
+              />
             </Flex>
           )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -840,11 +843,6 @@ const SyncSettings: React.FC = () => {
                     {dayjs(status.lastSyncAt).format('YYYY-MM-DD HH:mm:ss')}
                   </span>
                 )}
-                {showPairingRequiredHint && (
-                  <span style={{ color: 'var(--color-text-2)' }} data-testid="sync-pairing-required-hint">
-                    {pairingRequiredHint}
-                  </span>
-                )}
                 {stalePairingRecovery && (
                   <span style={{ color: 'var(--color-text-2)' }} data-testid="sync-recovery-hint">
                     {pairingRecoveredHint}
@@ -886,15 +884,9 @@ const SyncSettings: React.FC = () => {
               onClick={onSync}
               loading={syncing || !!status?.syncing}
               disabled={!enabled || !endpoint || syncWaitingDisabled}
-              title={syncWaitingDisabled ? waitingHint : undefined}
               data-testid="sync-now-button">
               {t('settings.sync.sync_now', 'Sync Now')}
             </Button>
-            {syncWaitingDisabled && (
-              <span style={{ color: 'var(--color-text-2)' }} data-testid="sync-waiting-hint">
-                {waitingHint}
-              </span>
-            )}
           </div>
         </div>
       </div>

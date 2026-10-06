@@ -637,10 +637,106 @@ test.describe('Sync connection/pairing two-profile real path', () => {
 
       // Expected waiting before pairing (not a failure): the pairing pill
       // reads 未配对 and the data badge reads 等待配对; manual sync stays
-      // disabled with an explanatory hint.
+      // disabled. Waiting-only explanatory hints were removed: neither hint
+      // node renders.
       await expect(syncPage.pairingPill).toContainText('未配对')
       await expect(syncPage.statusBadge).toContainText('等待配对')
       await expect(page.getByTestId('sync-now-button')).toBeDisabled()
+      await expect(page.getByTestId('sync-pairing-required-hint')).toHaveCount(0)
+      await expect(page.getByTestId('sync-waiting-hint')).toHaveCount(0)
+
+      // The device code is plain text: it is a span, not a button or
+      // link, and carries no tooltip. Only the independent copy button
+      // copies the exact public code (no secret material).
+      await expect(syncPage.deviceCode).toBeVisible()
+      const deviceKind = await syncPage.deviceCode.evaluate((el) => ({
+        tag: (el as HTMLElement).tagName,
+        role: (el as HTMLElement).getAttribute('role'),
+        title: (el as HTMLElement).getAttribute('title')
+      }))
+      expect(deviceKind.tag).toBe('SPAN')
+      expect(deviceKind.role).toBeNull()
+      expect(deviceKind.title).toBeNull()
+      const deviceCodeCopy = page.getByTestId('sync-device-code-copy')
+      await expect(deviceCodeCopy).toBeVisible()
+      await expect(deviceCodeCopy).toHaveAttribute('aria-label', /.+/)
+      // Scoped to the device-code row only: no question-mark help lives
+      // beside the code, while other sync help stays available.
+      const deviceRowHasHelp = await page.evaluate(() => {
+        const code = document.querySelector('[data-testid="sync-device-code"]')
+        const row = code?.parentElement
+        return row ? row.querySelector('[role="img"]') !== null : false
+      })
+      expect(deviceRowHasHelp).toBe(false)
+      await expect(page.getByTestId('sync-title-bar')).toContainText('同步')
+      const expectedCode = (await getDeviceCodeViaApi(page)).deviceCode as string
+      expect(expectedCode).toBeTruthy()
+      const marker = 'e2e-sync-copy-marker'
+      let priorClipboard: string | null = null
+      try {
+        priorClipboard = await page.evaluate(async () => {
+          try {
+            if ((window as any).api?.clipboard?.readText) {
+              return await (window as any).api.clipboard.readText()
+            }
+            return await navigator.clipboard.readText()
+          } catch {
+            return null
+          }
+        })
+        await page.evaluate(async (text: string) => {
+          try {
+            if ((window as any).api?.clipboard?.writeText) {
+              await (window as any).api.clipboard.writeText(text)
+              return
+            }
+            await navigator.clipboard.writeText(text)
+          } catch {}
+        }, marker)
+        // Clicking the plain code text copies nothing: the marker survives.
+        await syncPage.deviceCode.click()
+        await page.waitForTimeout(300)
+        const afterCodeClick = await page.evaluate(async () => {
+          try {
+            if ((window as any).api?.clipboard?.readText) {
+              return await (window as any).api.clipboard.readText()
+            }
+            return await navigator.clipboard.readText()
+          } catch {
+            return null
+          }
+        })
+        expect(afterCodeClick).toBe(marker)
+        // The independent copy button copies exactly the public code.
+        await deviceCodeCopy.click()
+        let clipboardCode: string | null = null
+        for (let attempt = 0; attempt < 15; attempt++) {
+          clipboardCode = await page.evaluate(async () => {
+            try {
+              if ((window as any).api?.clipboard?.readText) {
+                return await (window as any).api.clipboard.readText()
+              }
+              return await navigator.clipboard.readText()
+            } catch {
+              return null
+            }
+          })
+          if (clipboardCode === expectedCode) break
+          await page.waitForTimeout(200)
+        }
+        expect(clipboardCode).toBe(expectedCode)
+      } finally {
+        await page.evaluate(async (text: string | null) => {
+          const restore = typeof text === 'string' ? text : 'e2e-sync-copy-marker'
+          try {
+            if ((window as any).api?.clipboard?.writeText) {
+              await (window as any).api.clipboard.writeText(restore)
+              return
+            }
+            await navigator.clipboard.writeText(restore)
+          } catch {}
+        }, priorClipboard)
+      }
 
       // Polished header: the enable switch lives in the title bar (far
       // right of 同步) with the sync-scoped accessible name, and the

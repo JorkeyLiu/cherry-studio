@@ -9,8 +9,9 @@
  * - The public device code is displayable; the durable secret is never
  *   rendered and never passes through the component.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -337,5 +338,204 @@ describe('SyncSettings service indicator and pairing matrix', () => {
     await waitFor(() => {
       expect(screen.getByTestId('sync-pairing-error').textContent).toMatch(/pairing-already-paired/)
     })
+  })
+})
+
+describe('SyncSettings device code copy (plain text plus independent copy button)', () => {
+  const writeText = vi.fn()
+  let successToast: ReturnType<typeof vi.fn>
+  let errorToast: ReturnType<typeof vi.fn>
+  let origClipboardDescriptor: PropertyDescriptor | undefined
+  let clipboardDescriptorCaptured = false
+
+  beforeEach(() => {
+    // jsdom exposes navigator.clipboard as a getter-only accessor (and
+    // user-event may restub it), so assignment throws: always define an own
+    // property instead.
+    if (!clipboardDescriptorCaptured) {
+      origClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+      clipboardDescriptorCaptured = true
+    }
+    writeText.mockReset()
+    writeText.mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+      writable: true
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    if (origClipboardDescriptor) {
+      Object.defineProperty(navigator, 'clipboard', origClipboardDescriptor)
+    } else {
+      try {
+        delete (navigator as unknown as Record<string, unknown>).clipboard
+      } catch {}
+    }
+    clipboardDescriptorCaptured = false
+    vi.clearAllMocks()
+  })
+
+  async function renderCopyable(): Promise<void> {
+    mockSyncApi(unpaired)
+    successToast = vi.fn()
+    errorToast = vi.fn()
+    Object.defineProperty(window, 'toast', {
+      value: { success: successToast, error: errorToast },
+      configurable: true,
+      writable: true
+    })
+    const { default: SyncSettings } = await import('../SyncSettings')
+    render(<SyncSettings />)
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-device-code')).toBeInTheDocument()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-device-code-copy')).toBeInTheDocument()
+    })
+  }
+
+  it('renders the code as plain text with an independent neutral copy button', async () => {
+    await renderCopyable()
+    const code = screen.getByTestId('sync-device-code')
+    expect(code.tagName).toBe('SPAN')
+    expect(code.textContent).toContain('ABCD2345')
+    // Plain text carries no interactive role, no click target, and no
+    // hover tooltip: no button/link role, no tabindex, no title.
+    expect(code.getAttribute('role')).toBeNull()
+    expect(code.getAttribute('tabindex')).toBeNull()
+    expect(code.getAttribute('title')).toBeNull()
+    expect(code.getAttribute('aria-label')).toBeNull()
+    const copyButton = screen.getByTestId('sync-device-code-copy')
+    expect(copyButton.tagName).toBe('BUTTON')
+    // Localized accessible label reuses the existing house key, never a
+    // hand-coded string: the mock t returns its fallback argument.
+    expect(copyButton.getAttribute('aria-label')).toBe('Copy')
+  })
+
+  it('clicking the code text copies nothing', async () => {
+    await renderCopyable()
+    fireEvent.click(screen.getByTestId('sync-device-code'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(writeText).not.toHaveBeenCalled()
+    expect(successToast).not.toHaveBeenCalled()
+    expect(errorToast).not.toHaveBeenCalled()
+  })
+
+  it('clicking the independent copy button copies the exact public code', async () => {
+    await renderCopyable()
+    fireEvent.click(screen.getByTestId('sync-device-code-copy'))
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledTimes(1)
+    })
+    expect(writeText).toHaveBeenCalledWith('ABCD2345')
+    await waitFor(() => {
+      expect(successToast).toHaveBeenCalledTimes(1)
+    })
+    expect(errorToast).not.toHaveBeenCalled()
+  })
+
+  it('keyboard activation on the copy button copies the exact public code', async () => {
+    await renderCopyable()
+    const user = userEvent.setup()
+    // user-event setup replaces navigator.clipboard with its own stub:
+    // re-apply the test spy afterwards so the exact copied code is observed.
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+      writable: true
+    })
+    const copyButton = screen.getByTestId('sync-device-code-copy')
+    copyButton.focus()
+    expect(document.activeElement).toBe(copyButton)
+    // Native button activation: Space fires click on key-up in real browsers
+    // (Enter on key-down); user-event reproduces the keyboard path.
+    await user.keyboard(' ')
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('ABCD2345')
+    })
+    expect(successToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the failure toast when the clipboard write fails', async () => {
+    await renderCopyable()
+    writeText.mockRejectedValueOnce(new Error('denied'))
+    fireEvent.click(screen.getByTestId('sync-device-code-copy'))
+    await waitFor(() => {
+      expect(errorToast).toHaveBeenCalledTimes(1)
+    })
+    expect(successToast).not.toHaveBeenCalled()
+  })
+
+  it('removes the device-code help icon while other sync help stays', async () => {
+    await renderCopyable()
+    // Scoped to the device-code row only: no question-mark help trigger
+    // lives beside the code or its copy button.
+    const rowHasHelp = (() => {
+      const code = document.querySelector('[data-testid="sync-device-code"]')
+      const row = code?.parentElement
+      return row ? row.querySelector('[role="img"]') !== null : false
+    })()
+    expect(rowHasHelp).toBe(false)
+    // Other sync help tooltips are unaffected (pairing help still present).
+    expect(document.body.textContent).toMatch(/Device pairing|pairing/i)
+  })
+
+  it('copies only the public code even when a response carries a decoy secret', async () => {
+    const decoy = 'cd'.repeat(32)
+    const api = mockSyncApi(unpaired)
+    successToast = vi.fn()
+    errorToast = vi.fn()
+    Object.defineProperty(window, 'toast', {
+      value: { success: successToast, error: errorToast },
+      configurable: true,
+      writable: true
+    })
+    api.getPairState.mockResolvedValueOnce({
+      deviceCode: 'ABCD2345',
+      state: 'unpaired',
+      outgoing: null,
+      incoming: [],
+      deviceSecret: decoy
+    } as unknown as Awaited<ReturnType<typeof api.getPairState>>)
+    api.getServiceStatus.mockResolvedValueOnce({
+      state: 'connected',
+      deviceCode: 'ABCD2345',
+      explicitDisconnect: false,
+      deviceSecret: decoy
+    } as unknown as Awaited<ReturnType<typeof api.getServiceStatus>>)
+    const { default: SyncSettings } = await import('../SyncSettings')
+    render(<SyncSettings />)
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-device-code-copy')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId('sync-device-code-copy'))
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('ABCD2345')
+    })
+    for (const call of writeText.mock.calls) {
+      expect(String(call[0] ?? '')).not.toContain(decoy)
+    }
+    for (const el of Array.from(document.body.querySelectorAll('*'))) {
+      expect(el.textContent ?? '').not.toContain(decoy)
+    }
+    expect(document.body.innerHTML).not.toContain(decoy)
+  })
+
+  it('renders nothing copyable when no code is available', async () => {
+    mockSyncApi({
+      service: { state: 'unregistered', deviceCode: null, explicitDisconnect: false },
+      pairing: null
+    })
+    const { default: SyncSettings } = await import('../SyncSettings')
+    render(<SyncSettings />)
+    await waitFor(() => {
+      expect(screen.getByTestId('sync-service-status')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('sync-device-code')).toBeNull()
+    expect(screen.queryByTestId('sync-device-code-copy')).toBeNull()
+    expect(writeText).not.toHaveBeenCalled()
   })
 })
