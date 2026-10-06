@@ -193,28 +193,47 @@ Docker).
 
 One command for repeated manual sync testing with two isolated development
 profiles A/B plus a local loopback test relay (user-authorized 2026-10-05;
-tooling only, no protocol/behavior change). Fixed semantics (current):
+tooling only, no protocol/behavior change; persistent-pair semantics
+user-approved 2026-10-06). Fixed semantics (current):
 
 - Start: `pnpm dev:sync` (help: `pnpm dev:sync -- --help`). Stop: standard
-  Ctrl-C (`SIGTERM`/`SIGINT`) stops owned children exactly and frees ports;
-  it never deletes remote state or production profiles. Main-process changes
-  need a `dev:sync` restart; renderer changes hot-reload in the shared
-  instance. Settings save on graceful stop; no `SIGKILL` durability claimed.
-- Settings (`renderer general`, `providers/model`, `assistantConfig`) are
-  retained local-only (seeds `0600`); topics/messages/assets/anchors/translate
-  input/device credentials/cursor/channel/outbox plus the relay DB are fresh
-  on EACH run — no old-profile copy or deletion. Every run uses new device
-  codes and requires re-pairing A/B (last-run pairing is not kept). Legacy
-  persisted dev profiles are left unused with no auto-migration.
+  Ctrl-C (`SIGTERM`/`SIGINT`) detaches CDP, stops owned children exactly,
+  and frees ports; it never deletes durable profiles, the relay DB, or
+  production profiles. Main-process changes need a `dev:sync` restart;
+  renderer changes hot-reload in the shared instance. The app persists on
+  its own normal close path; the runner snapshots nothing, so no `SIGKILL`
+  durability is claimed beyond what a normal close provides.
+ - Prerequisite: the command auto-selects the already-installed pinned Node v24.11.1 (ABI 137) for itself and its children (command-local PATH prepend; no shell/dotfile change, no install/download), so a Node22 host terminal needs no manual `export PATH` first. It fails closed before the lane/install/ports/children only when no usable runtime exists (unreadable pin, or unsupported host with no installed pin); then install the pinned Node (e.g. `nvm install 24.11.1`, `which -a node` shows what the host resolves) and retry. A pnpm engine warning from the outer host Node does not stop the launcher.
+- Natural app persistence (nothing cleared, nothing injected): the SAME
+  adopted pair `sessions/<active>/profile-A/B + relay-data/relay.db` is
+  reused every run. Profiles A/B, chat, assets, providers, settings, device
+  auth, channel, cursor, outbox, and relay state are preserved by the app
+  itself, exactly like a normal close. The runner performs no store
+  injection, no settings-seed restore, no settings snapshot, no sync
+  endpoint/configure/connect override, and no data copy/overwrite/delete.
+  Sync endpoint/enabled stays exactly as the user left it in the app — pair
+  once in the app and the pairing persists across restarts. Active pair:
+  `.dev-sync-active.json` records the one-time adopted existing session
+  basename (relative only); the current pointer adopts the latest complete
+  pair `sess-20261006-051530-*`. A valid pointer is always reused; a
+  corrupted pointer or a missing/incomplete target fails closed. Legacy
+  seeds (`settings-a/b.json`), legacy v1 root dirs, and non-adopted sessions
+  stay on disk untouched with no auto-migration and their content is never
+  read.
 - Fixed loopback relay on `3039`; one Electron instance with shared HMR serves
   both profile windows (`CDP A 9223` / `B 9224`, fixed `B 9224`); the relay
   runs as an isolated Node runtime with a cached dependency runtime.
   No remote/profile deletion. No secret paths, raw content, or provider
   logging.
-- Tool smoke (diagnostic only, not E2E regression): two `dev:sync` runs —
-  A/B settings retained (`fontSize 15/18` + assistant config), fresh sessions
-  show chat `0`/unpaired with new codes, snapshots taken on BOTH before
-  close, Ctrl-C stop exit `0` with exact children stopped and ports free.
+- Profile setup is diagnostic readiness only: persisted identity proof
+  (runtime `appDataPath` equals the adopted `--user-data-dir`) plus
+  window-runtime availability on the current route. No forced language,
+  theme, model, onboarding, navigation, reload, or store write; first-run
+  onboarding (when present) is shown as-is for the user.
+- Tool smoke (diagnostic only, not E2E regression): two `dev:sync` runs on
+  the persistent pair — same app/relay paths both times, user settings and
+  chat preserved across the restart, no fresh session dir on repeat,
+  Ctrl-C stop exit `0` with exact children stopped and ports free.
 
 ## 3. What current evidence establishes
 

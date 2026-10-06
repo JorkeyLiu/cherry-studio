@@ -6,17 +6,25 @@
  * dev session; every child below is spawned directly (no nested `native:run`,
  * no `ELECTRON_RUN_AS_NODE`) and reuses that lane:
  *
- * 1. fixture layout + marker (legacy v1 migrates in place; legacy dirs stay
- *    on disk untouched) + supervisor lock (duplicate `dev:sync` fails fast,
- *    never kills the old owner);
+ * 1. fixture layout + marker + durable active-pair pointer (one-time adoption
+ *    of the latest complete existing pair, then fixed; valid pointers are
+ *    ALWAYS reused; corruption/missing/partial targets fail closed) +
+ *    supervisor lock (duplicate `dev:sync` fails fast, never kills the old
+ *    owner; a live owner blocks pointer adoption — the runner returns the
+ *    blocker instead of mutating while live);
  * 2. fixed ports fail-fast (relay + CDP A/B);
- * 3. a FRESH unique session dir (`sessions/<session-id>/`) with fresh
- *    profile-a/profile-b + fresh relay-data (DB + adjacent attachment
- *    blobs). Previous session dirs are never replayed and never deleted;
+ * 3. the SAME durable pair every run: `sessions/<active>/profile-a`,
+ *    `profile-b`, `relay-data/relay.db` (+ adjacent attachment blobs). The
+ *    app itself persists chat, assets, providers, settings, device auth,
+ *    channel, cursor, outbox, and relay state exactly like a normal close.
+ *    The runner performs NO settings-seed restore, NO settings snapshot, NO
+ *    store injection, and NO sync endpoint/configure/connect override.
+ *    Legacy v1 root dirs, retired seed files, and non-adopted sessions stay
+ *    on disk untouched and their content is never read;
  * 4. relay runtime mirror + conditional `--prod --frozen-lockfile` install +
  *    an isolated better-sqlite3 probe from the relay runtime's own binding
  *    (ABI-independence proof without touching the root binding), then the
- *    relay child against the FRESH session DB (address + device-code pairing
+ *    relay child against the REUSED durable DB (address + device-code pairing
  *    only — no shared token exists);
  * 5. ONE canonical `electron-vite dev` child for profile A (owns the single
  *    shared renderer dev server; canonical `electron.vite.config.ts`, no
@@ -28,20 +36,18 @@
  *    launch, which hardcodes `--remote-debugging-port=0` first (so the
  *    requested fixed port never binds) and installs
  *    `handleSIGINT/SIGTERM/SIGHUP` handlers that auto-close B on a
- *    supervisor SIGTERM before the settings snapshot can run;
- * 7. per-profile setup via Playwright (runtime path assertion, diagnostic
- *    title, zh-CN, durable settings-seed restore, typed sync endpoint +
- *    enabled + connect, Sync Settings shown); pairing itself stays manual
- *    EVERY run (fresh relay DBs start unpaired);
- * 8. Ctrl-C/TERM snapshots the allowlisted settings seeds for A/B BEFORE any
- *    browser detach, signal forward, or app close (so edits survive repeated
- *    commands), then stops exactly the owned children and releases the lock
- *    — settings seeds and the relay-runtime cache are NEVER deleted. An
- *    abnormal owned-child exit still shuts everything down (the in-flight
- *    snapshot may be lost).
+ *    supervisor SIGTERM before graceful detach can run;
+ * 7. per-profile DIAGNOSTIC readiness only (persisted identity proof +
+ *    window-runtime availability on the current route; no language, store,
+ *    navigation, reload, onboarding bypass, or sync mutation). Sync stays
+ *    exactly as the user left it in the app;
+ * 8. Ctrl-C/TERM detaches CDP, forwards signals to exactly the owned
+ *    children, and terminates exact-token profile leftovers — durable
+ *    profiles, the relay DB, and the relay-runtime cache are NEVER deleted.
+ *    An abnormal owned-child exit still shuts everything down.
  */
 import { type ChildProcess, spawn } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
@@ -50,15 +56,22 @@ import { chromium } from '@playwright/test'
 
 import { findProcessesByUserDataDir, killProcess, waitForProcessExit } from '../../tests/e2e/utils/process-cleanup'
 import type { DevSyncArgs } from './args'
-import { DEV_SYNC_DEFAULT_RELAY_HOST, DEV_SYNC_LEGACY_PROFILE_A, DEV_SYNC_LEGACY_PROFILE_B } from './constants'
+import {
+  DEV_SYNC_DEFAULT_RELAY_HOST,
+  DEV_SYNC_LEGACY_PROFILE_A,
+  DEV_SYNC_LEGACY_PROFILE_B,
+  DEV_SYNC_LEGACY_RELAY_DATA_DIR,
+  DEV_SYNC_SETTINGS_SEED_A_FILE,
+  DEV_SYNC_SETTINGS_SEED_B_FILE
+} from './constants'
 import {
   acquireSupervisorLock,
   createSessionId,
   type DevSyncLayout,
   type DevSyncSessionLayout,
   ensureFixtureMarker,
-  resolveDevSyncLayout,
-  resolveSessionLayout
+  resolveActiveSessionLayout,
+  resolveDevSyncLayout
 } from './paths'
 import { assertTcpPortFree } from './ports'
 import {
@@ -77,8 +90,7 @@ import {
   relayServerEntry,
   stampRelayInstall
 } from './relay-runtime'
-import type { DevSyncSeedLabel } from './settings-seed'
-import { captureProfileSettings, formatProfileSummary, setupDevSyncProfile } from './setup-profile'
+import { formatProfileSummary, setupDevSyncProfile } from './setup-profile'
 
 export interface SupervisorResult {
   exitCode: number
@@ -146,12 +158,6 @@ interface OwnedChildren {
   appBProc: ChildProcess | null
   browserA: Browser | null
   browserB: Browser | null
-}
-
-interface LiveProfilePage {
-  page: Page
-  label: DevSyncSeedLabel
-  expectedUserDataDir: string
 }
 
 function spawnTracked(
@@ -271,14 +277,14 @@ async function findDevPage(browser: Browser, timeoutMs = 120000): Promise<Page> 
     for (const context of browser.contexts()) {
       for (const page of context.pages()) {
         try {
-          const root = await page.$('#root')
+          const root = await page.$('#root, body')
           if (root) return page
         } catch {
           // Page not ready yet.
         }
       }
     }
-    if (Date.now() >= deadline) throw new Error('[dev-sync] timed out attaching to profile A window')
+    if (Date.now() >= deadline) throw new Error('[dev-sync] timed out attaching to a profile window')
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
   }
 }
@@ -321,21 +327,40 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
   }
   const lock = acquireSupervisorLock(layout.lockFile)
 
-  // Fresh unique session every invocation: new profiles + new relay DB.
-  const session: DevSyncSessionLayout = resolveSessionLayout(layout, createSessionId())
-  mkdirSync(session.profileA, { recursive: true })
-  mkdirSync(session.profileB, { recursive: true })
-  mkdirSync(session.relayDataDir, { recursive: true })
-  logLine(`[dev-sync] fresh session: ${session.id}`)
-  for (const legacy of [join(layout.root, DEV_SYNC_LEGACY_PROFILE_A), join(layout.root, DEV_SYNC_LEGACY_PROFILE_B)]) {
+  // ONE durable adopted pair (one-time adoption, then fixed). The run id is
+  // ephemeral logs/ownership context only and never decides app dirs.
+  const runId = createSessionId()
+  const adopted = resolveActiveSessionLayout(layout)
+  const session: DevSyncSessionLayout = adopted.session
+  if (adopted.reused) {
+    logLine(`[dev-sync] persistent session (reused durable pair): ${session.id}`)
+  } else {
+    logLine(`[dev-sync] persistent session (adopted durable pair): ${session.id}`)
+  }
+  logLine(`[dev-sync] run id (ephemeral, logs only): ${runId}`)
+  logLine('[dev-sync] natural app persistence: profiles + relay DB reused as-is; no settings/sync injection')
+  // Legacy presence is reported WITHOUT reading content (existence only).
+  for (const legacy of [
+    join(layout.root, DEV_SYNC_LEGACY_PROFILE_A),
+    join(layout.root, DEV_SYNC_LEGACY_PROFILE_B),
+    join(layout.root, DEV_SYNC_LEGACY_RELAY_DATA_DIR)
+  ]) {
     if (existsSync(legacy)) {
-      logLine(`[dev-sync] legacy v1 fixture dir present and left untouched: ${legacy}`)
+      logLine(`[dev-sync] legacy v1 fixture path present and left untouched (content never read): ${legacy}`)
+      break
+    }
+  }
+  for (const retired of [
+    join(layout.root, DEV_SYNC_SETTINGS_SEED_A_FILE),
+    join(layout.root, DEV_SYNC_SETTINGS_SEED_B_FILE)
+  ]) {
+    if (existsSync(retired)) {
+      logLine(`[dev-sync] retired settings seed present and ignored (content never read): ${retired}`)
       break
     }
   }
 
   const children: OwnedChildren = { relay: null, viteDev: null, appBProc: null, browserA: null, browserB: null }
-  const livePages: LiveProfilePage[] = []
   let shuttingDown = false
   let shutdownDone: Promise<void> = Promise.resolve()
   let exitCode = 0
@@ -347,32 +372,14 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
     }
     // Set synchronously: disables spawnTracked unexpected-exit callbacks at
     // once, and no Playwright-managed app remains that could auto-close B on
-    // this signal (B is an owned child + CDP attach only). Nothing is
-    // detached, signalled, or closed until BOTH snapshots below complete.
+    // this signal (B is an owned child + CDP attach only). The app persists
+    // on its own normal close path; the runner snapshots nothing.
     shuttingDown = true
     shutdownDone = (async (): Promise<void> => {
       logLine(`[dev-sync] shutting down (${reason})…`)
       const stops: string[] = []
-      // Snapshot allowlisted settings for BOTH profiles BEFORE any browser
-      // detach, signal forward, or process termination so edits survive
-      // repeated commands. Best-effort per profile: a failed snapshot is a
-      // redacted warning, never a shutdown failure, and never deletes seeds.
-      const snapshotSteps = livePages.map((live) => async (): Promise<void> => {
-        try {
-          const summary = await captureProfileSettings(live.page, {
-            expectedUserDataDir: live.expectedUserDataDir,
-            settingsRoot: layout.root,
-            label: live.label
-          })
-          logLine(summary)
-        } catch (error) {
-          logLine(
-            `[dev-sync] settings snapshot skipped for profile ${live.label}: ${error instanceof Error ? error.message.slice(0, 160) : 'unknown'} (previous seed kept)`
-          )
-        }
-      })
       const teardownSteps: Array<() => Promise<void>> = [
-        // Detach CDP only (never kills the apps) — after snapshots.
+        // Detach CDP only (never kills the apps).
         async (): Promise<void> => {
           if (children.browserB) {
             try {
@@ -393,7 +400,7 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
             children.browserA = null
           }
         },
-        // Forward SIGTERM to exactly the owned children — after snapshots.
+        // Forward SIGTERM to exactly the owned children.
         async (): Promise<void> => {
           for (const child of [children.appBProc, children.viteDev, children.relay] as const) {
             if (child && child.exitCode === null) {
@@ -420,9 +427,9 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
           }
         },
         // The vite child never owns the Electron app it spawned: terminate any
-        // exact-token leftovers per session profile (plus a B safety net for
-        // helper processes). Exact tokens only; session data, settings seeds,
-        // and the relay-runtime cache are untouched.
+        // exact-token leftovers per adopted profile (plus a B safety net for
+        // helper processes). Exact tokens only; durable session data and the
+        // relay-runtime cache are untouched.
         async (): Promise<void> => {
           const leftoversA = await terminateExactProfileProcesses(session.profileA)
           if (leftoversA > 0) stops.push(`profile-A leftovers (${leftoversA})`)
@@ -431,11 +438,11 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
           if (leftoversB > 0) stops.push(`profile-B leftovers (${leftoversB})`)
         }
       ]
-      await snapshotAllBeforeTeardown(snapshotSteps, teardownSteps)
+      await snapshotAllBeforeTeardown([], teardownSteps)
       logLine(
         describeCleanup(stops, [
-          `session ${session.id} (profiles + relay DB, kept for inspection)`,
-          'settings seeds (retained)',
+          `persistent session ${session.id} (profiles + relay DB preserved, never deleted)`,
+          'retired seeds + legacy dirs + non-adopted sessions (untouched, content never read)',
           'relay-runtime cache (reusable)'
         ])
       )
@@ -465,8 +472,9 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
     await assertTcpPortFree(DEV_SYNC_DEFAULT_RELAY_HOST, args.cdpA, 'profile-A CDP')
     await assertTcpPortFree(DEV_SYNC_DEFAULT_RELAY_HOST, args.cdpB, 'profile-B CDP')
 
-    // Relay runtime: mirror newer sources every run; the session DB is fresh
-    // and is never rewritten by the mirror step.
+    // Relay runtime: mirror newer sources every run; the durable relay DB is
+    // never rewritten by the mirror step. The cache step touches ONLY the
+    // relay runtime dir (mirror + install), never session/profile data.
     const { reinstall } = mirrorRelaySources(layout.repoRoot, layout.relayRuntimeDir)
     if (reinstall) {
       logLine('[dev-sync] installing isolated relay runtime dependencies (relay-runtime cache only)…')
@@ -483,7 +491,7 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
     await probeRelayBinding(layout.relayRuntimeDir)
 
     // Relay child under plain pinned Node with the runtime's own binding,
-    // against the FRESH session DB. No shared token anywhere.
+    // against the REUSED durable DB. No shared token anywhere.
     const tsxCli = join(layout.relayRuntimeDir, 'node_modules', 'tsx', 'dist', 'cli.mjs')
     if (!existsSync(tsxCli)) {
       throw new Error('[dev-sync] relay runtime tsx missing; reinstall the relay runtime cache')
@@ -566,35 +574,26 @@ export async function runDevSyncSupervisor(repoRoot: string, args: DevSyncArgs):
     children.browserA = browserA
     const pageA = await findDevPage(browserA)
 
-    // Per-profile setup: runtime assertion, title, zh-CN, settings restore,
-    // typed sync endpoint + enabled + connect, Sync UI shown. Pairing stays
-    // manual every run. Pages are tracked so graceful stop can snapshot
-    // settings BEFORE the apps close.
-    logLine('[dev-sync] setting up profile A…')
+    // Per-profile DIAGNOSTIC readiness only: persisted identity proof +
+    // window-runtime availability on the current route. No store writes, no
+    // navigation, no reload, no sync mutation. Sync stays exactly as the
+    // user left it in the app.
+    logLine('[dev-sync] verifying profile A (diagnostic readiness only)…')
     const resultA = await setupDevSyncProfile(pageA, {
-      endpoint: relayEndpointUrl(DEV_SYNC_DEFAULT_RELAY_HOST, args.relayPort),
-      label: 'A',
       sessionId: session.id,
       expectedUserDataDir: session.profileA,
-      settingsRoot: layout.root
+      label: 'A'
     })
-    livePages.push({ page: pageA, label: 'A', expectedUserDataDir: session.profileA })
     logLine(formatProfileSummary(resultA))
-    logLine('[dev-sync] setting up profile B…')
+    logLine('[dev-sync] verifying profile B (diagnostic readiness only)…')
     const resultB = await setupDevSyncProfile(pageB, {
-      endpoint: relayEndpointUrl(DEV_SYNC_DEFAULT_RELAY_HOST, args.relayPort),
-      label: 'B',
       sessionId: session.id,
       expectedUserDataDir: session.profileB,
-      settingsRoot: layout.root
+      label: 'B'
     })
-    livePages.push({ page: pageB, label: 'B', expectedUserDataDir: session.profileB })
     logLine(formatProfileSummary(resultB))
 
-    logLine('[dev-sync] both profiles live on a fresh session. Manual pairing: copy one device code into the other')
-    logLine(
-      '[dev-sync] profile (Settings → Data → Sync → request), then accept there. Ctrl-C snapshots settings and stops.'
-    )
+    logLine('[dev-sync] both profiles live on the persistent pair. Sync/Settings stay as the app left them.')
     logLine(`[dev-sync] A CDP: http://127.0.0.1:${args.cdpA} | B CDP: http://127.0.0.1:${args.cdpB}`)
 
     // Park until a signal or an abnormal child exit resolves shutdown.

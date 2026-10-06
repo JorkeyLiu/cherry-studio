@@ -4,12 +4,21 @@
  * Durable dev-sync state lives under `<repo>/local/dev-sync` (the `local/`
  * prefix is already gitignored):
  *
- * - durable: fixture marker, supervisor lock, owner-only settings seeds
- *   (`settings-a.json` / `settings-b.json`), reusable relay-runtime cache;
- * - fresh per run: `sessions/<session-id>/` holding `profile-a`, `profile-b`,
- *   and `relay-data/` (relay DB + adjacent attachment blobs);
- * - legacy v1: root-level `profile-a`, `profile-b`, `relay-data` are
- *   preserved as-is — never read, copied, or deleted by the runner.
+ * - durable: the adopted persistent pair
+ *   `sessions/<active-session>/` holding `profile-a`, `profile-b`, and
+ *   `relay-data/` (relay DB + adjacent attachment blobs). The SAME pair is
+ *   reused every run; the app itself persists chat, assets, providers,
+ *   settings, device auth, channel, cursor, outbox, and relay state exactly
+ *   like a normal close. The runner never clears, copies, renames, or deletes
+ *   profile/relay data;
+ * - pointer: `.dev-sync-active.json` records the one-time adopted existing
+ *   session basename (relative only). A valid pointer is ALWAYS reused; a
+ *   corrupted pointer or a missing/incomplete target fails closed;
+ * - lock: `.dev-sync.lock` single-owner supervisor lock;
+ * - reusable: `relay-runtime` isolated relay dependency cache;
+ * - legacy (left untouched, never read): root-level `profile-a`,
+ *   `profile-b`, `relay-data` (v1), `settings-a.json` / `settings-b.json`
+ *   (retired seeds), and every non-adopted `sessions/<id>/` dir.
  *
  * These helpers resolve the root and per-session layouts and enforce the
  * isolation boundary before any child starts:
@@ -17,20 +26,37 @@
  * - the root and every session/profile subpath must canonically contain
  *   inside the repository checkout (no escape, no symlink hop);
  * - profile dirs must never be a production user-data name and never resolve
- *   to a real home-config location — only the exact owned fixture marker
- *   identifies reusable dev test data;
- * - a session dir must be fresh (must not already exist) so a new DB can
- *   never replay previous content;
+ *   to a real home-config location — only the exact owned session paths
+ *   identify reusable dev test data;
+ * - the active pointer carries a session BASENAME only (never an absolute
+ *   private path, never credentials) with strict kind/version validation;
  * - a second supervisor against the same fixture fails fast via the lock
  *   file (never kills the old owner).
  *
  * Pure where possible (realpath/containment take injectable fs seams) so the
- * contract is unit-testable without touching real profiles.
+ * contract is unit-testable without touching real profiles. Completeness
+ * checks are metadata-only (existence + symlink kind): they never read file
+ * content, profile config, seed JSON, provider keys, chat content, or DB
+ * bytes/sizes.
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 
 import {
+  DEV_SYNC_ACTIVE_FILE,
+  DEV_SYNC_ACTIVE_KIND,
+  DEV_SYNC_ACTIVE_VERSION,
   DEV_SYNC_DIR_NAME,
   DEV_SYNC_FIXTURE_FILE,
   DEV_SYNC_FIXTURE_KIND,
@@ -42,10 +68,10 @@ import {
   DEV_SYNC_PROFILE_A,
   DEV_SYNC_PROFILE_B,
   DEV_SYNC_RELAY_DATA_DIR,
+  DEV_SYNC_RELAY_DB_FILE,
   DEV_SYNC_RELAY_RUNTIME_DIR,
   DEV_SYNC_SESSIONS_DIR,
-  DEV_SYNC_SETTINGS_SEED_A_FILE,
-  DEV_SYNC_SETTINGS_SEED_B_FILE
+  DEV_SYNC_STABLE_SESSION_ID
 } from './constants'
 
 export interface DevSyncLayout {
@@ -53,10 +79,9 @@ export interface DevSyncLayout {
   root: string
   sessionsDir: string
   relayRuntimeDir: string
-  settingsSeedA: string
-  settingsSeedB: string
   lockFile: string
   fixtureFile: string
+  activeFile: string
 }
 
 export interface DevSyncSessionLayout {
@@ -65,6 +90,7 @@ export interface DevSyncSessionLayout {
   profileA: string
   profileB: string
   relayDataDir: string
+  relayDb: string
 }
 
 export interface FsSeam {
@@ -126,10 +152,9 @@ export function resolveDevSyncLayout(repoRoot: string, fs: FsSeam = nodeFsSeam):
     root,
     sessionsDir: join(root, DEV_SYNC_SESSIONS_DIR),
     relayRuntimeDir: join(root, DEV_SYNC_RELAY_RUNTIME_DIR),
-    settingsSeedA: join(root, DEV_SYNC_SETTINGS_SEED_A_FILE),
-    settingsSeedB: join(root, DEV_SYNC_SETTINGS_SEED_B_FILE),
     lockFile: join(root, DEV_SYNC_LOCK_FILE),
-    fixtureFile: join(root, DEV_SYNC_FIXTURE_FILE)
+    fixtureFile: join(root, DEV_SYNC_FIXTURE_FILE),
+    activeFile: join(root, DEV_SYNC_ACTIVE_FILE)
   }
 }
 
@@ -138,7 +163,11 @@ export function isValidSessionId(sessionId: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(sessionId)
 }
 
-/** Build a fresh unique session id for one invocation (time + pid + rand). */
+/**
+ * Build a fresh unique ephemeral run id for one invocation (time + pid +
+ * rand). The run id is for LOGS/OWNERSHIP ONLY and never decides the app
+ * profile/relay dirs: profiles always come from the durable active pointer.
+ */
 export function createSessionId(
   now: Date = new Date(),
   pid: number = process.pid,
@@ -150,12 +179,13 @@ export function createSessionId(
 }
 
 /**
- * Resolve the per-session layout for a fresh session id. The session dir
- * must NOT already exist (fail-closed: a new DB must never replay previous
- * content). Session profile/relay subpaths get the same containment,
- * symlink, and production-name checks as the fixture root.
+ * Resolve the persistent per-session layout for an adopted session id.
+ * Validates id shape, containment, symlink, and production-name guards.
+ * Existence is NOT required here: completeness is checked separately via
+ * `isCompleteSessionPair` so first-adoption and reuse share one resolver.
+ * Never creates, copies, renames, or deletes anything.
  */
-export function resolveSessionLayout(
+export function resolvePersistentSessionLayout(
   layout: DevSyncLayout,
   sessionId: string,
   fs: FsSeam = nodeFsSeam
@@ -166,9 +196,6 @@ export function resolveSessionLayout(
   const dir = join(layout.sessionsDir, sessionId)
   assertOwnedSubpath(layout.repoRoot, dir, 'session dir')
   assertNoSymlinkOnPath(fs, dir, layout.repoRoot, 'session dir')
-  if (fs.existsSync(dir)) {
-    throw new Error(`[dev-sync] refusing session: session dir already exists (${dir}); refusing to replay old content`)
-  }
   const profileA = join(dir, DEV_SYNC_PROFILE_A)
   const profileB = join(dir, DEV_SYNC_PROFILE_B)
   const relayDataDir = join(dir, DEV_SYNC_RELAY_DATA_DIR)
@@ -181,7 +208,228 @@ export function resolveSessionLayout(
   }
   assertNoSymlinkOnPath(fs, profileA, layout.repoRoot, 'session profile-a')
   assertNoSymlinkOnPath(fs, profileB, layout.repoRoot, 'session profile-b')
-  return { id: sessionId, dir, profileA, profileB, relayDataDir }
+  assertNoSymlinkOnPath(fs, join(relayDataDir, DEV_SYNC_RELAY_DB_FILE), layout.repoRoot, 'session relay DB')
+  return { id: sessionId, dir, profileA, profileB, relayDataDir, relayDb: join(relayDataDir, DEV_SYNC_RELAY_DB_FILE) }
+}
+
+/**
+ * Backwards-compatible alias for the retired fresh-session resolver.
+ * Fresh per-run sessions no longer exist: this resolves the persistent
+ * layout for an explicit session id (same validation, no freshness rule).
+ * Prefer `resolvePersistentSessionLayout` for new code.
+ */
+export function resolveSessionLayout(
+  layout: DevSyncLayout,
+  sessionId: string,
+  fs: FsSeam = nodeFsSeam
+): DevSyncSessionLayout {
+  return resolvePersistentSessionLayout(layout, sessionId, fs)
+}
+
+/**
+ * Metadata-only completeness probe for one session pair. True only when
+ * `profile-a/`, `profile-b/`, and `relay-data/relay.db` all exist and none
+ * is a symlink. Reads NO file content (no profile config, no chat, no keys,
+ * no DB bytes/sizes) — existence + link kind only.
+ */
+export function isCompleteSessionPair(session: DevSyncSessionLayout, fs: FsSeam = nodeFsSeam): boolean {
+  for (const candidate of [session.profileA, session.profileB, session.relayDataDir, session.relayDb]) {
+    try {
+      if (!fs.existsSync(candidate)) return false
+      if (fs.lstatSync(candidate).isSymbolicLink()) return false
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * List candidate session basenames under the sessions dir, sorted ascending
+ * (lexicographic order matches chronological `sess-<stamp>` order). Returns
+ * [] when the dir is missing. Metadata-only (names only, no content read).
+ * Root-legacy dirs are never listed: only `sessions/` is scanned.
+ */
+export function listSessionBasenames(sessionsDir: string): string[] {
+  let entries: string[]
+  try {
+    entries = readdirSync(sessionsDir)
+  } catch {
+    return []
+  }
+  return entries.filter((entry) => isValidSessionId(entry)).sort()
+}
+
+export interface ActivePointer {
+  kind: string
+  version: number
+  /** Adopted session BASENAME only (relative, never absolute, never secret). */
+  session: string
+  adoptedAt: string
+}
+
+function failActivePointer(what: string): never {
+  throw new Error(`[dev-sync] refusing active pair pointer: ${what}`)
+}
+
+/**
+ * Read + strictly validate the durable active-pair pointer. Returns null only
+ * when the pointer file does not exist (first activation). Any present but
+ * malformed pointer fails closed (never silently reset or re-chosen).
+ * Metadata-only: validates shape/kind/version/basename, never reads profile
+ * content.
+ */
+export function readActivePointer(activeFile: string): ActivePointer | null {
+  if (!existsSync(activeFile)) return null
+  let text: string
+  try {
+    text = readFileSync(activeFile, 'utf8')
+  } catch {
+    failActivePointer('unreadable pointer file')
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text!)
+  } catch {
+    failActivePointer('malformed JSON (not parsed, not reset)')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    failActivePointer('top-level is not an object')
+  }
+  const record = parsed as Record<string, unknown>
+  if (record.kind !== DEV_SYNC_ACTIVE_KIND) {
+    failActivePointer(`unknown kind (${String(record.kind).slice(0, 64)})`)
+  }
+  if (record.version !== DEV_SYNC_ACTIVE_VERSION) {
+    failActivePointer(`unknown version (${String(record.version).slice(0, 16)})`)
+  }
+  if (typeof record.session !== 'string' || !isValidSessionId(record.session)) {
+    failActivePointer('session must be a valid session basename (relative only, never an absolute path)')
+  }
+  const session = record.session
+  if (session.includes('/') || session.includes('\\')) {
+    failActivePointer('session must be a bare basename (no path separators)')
+  }
+  if (typeof record.adoptedAt !== 'string' || record.adoptedAt.length === 0) {
+    failActivePointer('adoptedAt must be a non-empty string')
+  }
+  return { kind: DEV_SYNC_ACTIVE_KIND, version: DEV_SYNC_ACTIVE_VERSION, session, adoptedAt: record.adoptedAt }
+}
+
+/**
+ * Atomically publish the durable active-pair pointer (owner-only temp +
+ * rename, mode 0600). Validates BEFORE any write. Value is the session
+ * basename only — absolute private paths are refused.
+ */
+export function writeActivePointerAtomic(activeFile: string, sessionBasename: string): { file: string } {
+  if (!isValidSessionId(sessionBasename) || sessionBasename.includes('/') || sessionBasename.includes('\\')) {
+    throw new Error('[dev-sync] refusing active pair pointer: session must be a valid session basename')
+  }
+  const pointer: ActivePointer = {
+    kind: DEV_SYNC_ACTIVE_KIND,
+    version: DEV_SYNC_ACTIVE_VERSION,
+    session: sessionBasename,
+    adoptedAt: new Date().toISOString()
+  }
+  const text = `${JSON.stringify(pointer, null, 2)}\n`
+  mkdirSync(dirname(activeFile), { recursive: true })
+  const tmp = `${activeFile}.${process.pid}.tmp`
+  writeFileSync(tmp, text, { mode: 0o600 })
+  try {
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, activeFile)
+  } catch {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      // Best effort temp cleanup.
+    }
+    throw new Error('[dev-sync] failed to publish the active pair pointer')
+  }
+  try {
+    chmodSync(activeFile, 0o600)
+  } catch {
+    // Best effort: the atomic rename already published owner-only bytes.
+  }
+  return { file: activeFile }
+}
+
+export interface AdoptedSession {
+  session: DevSyncSessionLayout
+  /** True when this call created the stable pair / adopted the pointer. */
+  created: boolean
+  /** True when a valid existing pointer was reused (never re-chosen). */
+  reused: boolean
+}
+
+/**
+ * Resolve the ONE durable session pair for this fixture.
+ *
+ * - A valid existing pointer is ALWAYS reused (even when newer complete
+ *   sessions exist elsewhere in metadata): the target must validate
+ *   (containment/symlink) and be a complete pair, else fail closed.
+ * - With NO pointer and existing complete pairs: adopt the LATEST complete
+ *   initialized pair (lexicographically greatest basename) and record the
+ *   pointer. Existing but all-incomplete sessions fail closed (partial run
+ *   data is never discarded for a silent fresh empty pair).
+ * - With NO pointer and NO sessions: create ONE stable pair
+ *   (`sess-persistent-pair-v1` dirs) and record the pointer; later runs reuse
+ *   it (never fresh).
+ * - Root-legacy v1 dirs are never scanned, adopted, or migrated here.
+ *
+ * Only metadata (names/existence/link kind) is inspected; no profile/seed/
+ * chat/DB content is ever read. On adoption/creation the pointer file is the
+ * ONLY metadata write (plus the stable pair dirs on a clean fixture).
+ */
+export function resolveActiveSessionLayout(layout: DevSyncLayout, fs: FsSeam = nodeFsSeam): AdoptedSession {
+  const pointer = readActivePointer(layout.activeFile)
+  if (pointer) {
+    const session = resolvePersistentSessionLayout(layout, pointer.session, fs)
+    if (!isCompleteSessionPair(session, fs)) {
+      throw new Error(
+        `[dev-sync] refusing active pair pointer: adopted session is incomplete or missing ` +
+          `(${pointer.session}); refusing to silently reset or choose another pair`
+      )
+    }
+    return { session, created: false, reused: true }
+  }
+
+  const basenames = listSessionBasenames(layout.sessionsDir)
+  if (basenames.length > 0) {
+    const complete: string[] = []
+    for (const basenameEntry of basenames) {
+      let session: DevSyncSessionLayout
+      try {
+        session = resolvePersistentSessionLayout(layout, basenameEntry, fs)
+      } catch {
+        continue
+      }
+      if (isCompleteSessionPair(session, fs)) complete.push(basenameEntry)
+    }
+    if (complete.length === 0) {
+      throw new Error(
+        '[dev-sync] refusing session adoption: existing sessions found but none is a complete ' +
+          'initialized pair (profile-a + profile-b + relay DB); refusing to silently start a fresh ' +
+          'empty pair over existing data'
+      )
+    }
+    complete.sort()
+    const latest = complete[complete.length - 1]
+    writeActivePointerAtomic(layout.activeFile, latest)
+    return { session: resolvePersistentSessionLayout(layout, latest, fs), created: true, reused: false }
+  }
+
+  // Clean fixture: create ONE stable pair for initial use; later runs reuse it.
+  // The relay DB placeholder is zero bytes (the relay opens it as an empty
+  // database on first boot and runs its own migrations); no profile, seed,
+  // chat, or credential content is fabricated.
+  const stable = resolvePersistentSessionLayout(layout, DEV_SYNC_STABLE_SESSION_ID, fs)
+  mkdirSync(stable.profileA, { recursive: true })
+  mkdirSync(stable.profileB, { recursive: true })
+  mkdirSync(stable.relayDataDir, { recursive: true })
+  if (!existsSync(stable.relayDb)) writeFileSync(stable.relayDb, Buffer.alloc(0))
+  writeActivePointerAtomic(layout.activeFile, stable.id)
+  return { session: stable, created: true, reused: false }
 }
 
 export interface FixtureMarker {
