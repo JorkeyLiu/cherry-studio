@@ -320,7 +320,7 @@ describe('MessageGroup', () => {
     expect(lastCallPropsAfterToggle?.[0]).toMatchObject({ resetToken: true })
   })
 
-  it('selects a message via ONE atomic answer-group command (PERF-100) and preserves the 200ms scroll timer', () => {
+  it('selects a message via ONE atomic answer-group command and retains the reading viewport (no forced scroll)', () => {
     const messages = [
       { ...createMessage('msg-1', 0, 'fold'), foldSelected: true },
       { ...createMessage('msg-2', 1, 'fold'), foldSelected: false }
@@ -341,20 +341,37 @@ describe('MessageGroup', () => {
     expect(mocks.selectAnswerMessage).toHaveBeenCalledWith({ topicId: 'topic-1', messageId: 'msg-2' })
     expect(mocks.editMessage).not.toHaveBeenCalled()
 
-    // The 200ms setTimeoutTimer smooth-scroll contract is preserved exactly.
-    expect(mocks.setTimeoutTimer).toHaveBeenCalledTimes(1)
-    const [timerKey, timerCallback, delay] = mocks.setTimeoutTimer.mock.calls[0]
-    expect(timerKey).toBe('setSelectedMessage')
-    expect(delay).toBe(200)
-    expect(typeof timerCallback).toBe('function')
+    // Viewport: selecting an answer tab must not force-scroll to
+    // answer/start/bottom — the current reading viewport is retained,
+    // including variants with differing heights (fold switches visibility,
+    // heights differ, no scroll is issued).
+    expect(mocks.setTimeoutTimer).not.toHaveBeenCalled()
+    expect(mocks.scrollIntoView).not.toHaveBeenCalled()
+  })
 
-    // The timer callback dispatches a smooth scroll into view on the target.
-    mocks.setTimeoutTimer.mock.calls[0][1]()
-    expect(mocks.scrollIntoView).toHaveBeenCalledWith(expect.anything(), {
-      behavior: 'smooth',
-      block: 'start',
-      container: 'nearest'
-    })
+  it('retains viewport when switching to a different-height answer variant (no scroll to start/bottom)', () => {
+    // Differing heights: msg-1 short, msg-2 tall (fold shows only selected).
+    // The selection must still issue no scroll.
+    const shortMsg = { ...createMessage('msg-1', 0, 'fold'), foldSelected: true } as unknown as Message & {
+      index: number
+    }
+    const tallMsg = {
+      ...createMessage('msg-2', 1, 'fold'),
+      foldSelected: false,
+      blocks: [{ id: 'b-tall', content: 'x'.repeat(5000) }]
+    } as unknown as Message & { index: number }
+    const messages = [shortMsg, tallMsg]
+    const topic = { id: 'topic-1' } as Topic
+
+    render(<MessageGroup messages={messages} topic={topic} />)
+
+    const setSelectedMessage = mocks.lastMenuBarProps?.setSelectedMessage
+    expect(setSelectedMessage).toBeDefined()
+    setSelectedMessage!(messages[1])
+
+    expect(mocks.selectAnswerMessage).toHaveBeenCalledWith({ topicId: 'topic-1', messageId: 'msg-2' })
+    expect(mocks.setTimeoutTimer).not.toHaveBeenCalled()
+    expect(mocks.scrollIntoView).not.toHaveBeenCalled()
   })
 
   it('separate same-askId groups produce unique deterministic outer DOM ids (S6.2a duplicate-id fix)', () => {

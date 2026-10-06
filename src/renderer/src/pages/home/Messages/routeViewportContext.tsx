@@ -39,6 +39,7 @@ import {
 import { findViewportTopAnchorWithOffset } from './domVisibility'
 import {
   displayedRouteKey,
+  normalizeFoldAnchorOffset,
   type RouteId,
   type RouteRef,
   RouteViewportController,
@@ -460,11 +461,13 @@ export const buildContainerCapturer = (containerRef: React.RefObject<HTMLElement
 // --- Persistent stable anchoring ------------------------------------------------
 
 export interface StableVisualAnchorMaintainer {
-  /** Visual-only compensation (never takeover/snapshot/anchor change). */
+  /** Visual hold plus validated fold-reconciliation snapshot sync (never takeover/release/epoch change). */
   requestHold: (reason: string) => void
 }
 
 /**
+ * Stable visual anchor keeper (persistent, not commit-then-stop).
+ *
  * Hold the controller's active visual anchor at its offset while the displayed
  * route is stable (or aligned): scoped ResizeObserver + MutationObserver on
  * the container compensate `scrollTop` synchronously on layout/content change.
@@ -483,13 +486,202 @@ export interface StableVisualAnchorMaintainer {
  * - no-intent scroll: a scroll with no live user session holds once (visual
  *   compensation only); self compensation echoes are swallowed via the
  *   expected guard so they never recurse.
+ * - bottom semantic (no row anchor): pins column-reverse bottom (scrollTop 0)
+ *   through layout/insertion so an explicit send bottom survives new rows
+ *   and stream growth; never fights a live genuine session (gated above).
+ * - fold replacement: a hidden/collapsed answer row is never measured; when
+ *   the held anchor is the replaced hidden answer, it is reconciled to the
+ *   visible same-group sibling (offset preserved) via the controller, then
+ *   the visible row is held. Never a takeover, never a release or epoch
+ *   change. Ordinary holds never write snapshots; only this validated
+ *   same-group reconciliation may synchronize the route-local committed
+ *   stable snapshot (explicit same-group visible row, corrected offset,
+ *   actual scrollTop, isAtBottom false) after layout-quiet validation via
+ *   the existing programmatic adopt + stable writer. The commit never waits
+ *   for a later page-departure freeze (detach skips sampling by design).
  */
+
+// --- Keeper hidden-anchor helpers (fold `display:none` replacement) ---
+/**
+ * Positive hidden proof for a keeper anchor row (fold `display:none`).
+ * True only when the row or an ancestor up to (excluding) the container is
+ * inline/computed `display:none` or `hidden`. Never infers hidden from zero
+ * rects alone (jsdom has no layout), so visible jsdom surfaces keep holding.
+ */
+export const isKeeperAnchorRowHidden = (row: HTMLElement, container: HTMLElement): boolean => {
+  try {
+    let el: HTMLElement | null = row
+    while (el && el !== container) {
+      try {
+        const inline = el.style as CSSStyleDeclaration | undefined
+        if (inline && inline.display === 'none') return true
+      } catch {}
+      try {
+        if (el.hidden === true) return true
+      } catch {}
+      try {
+        const computed = window.getComputedStyle(el)
+        if (computed && computed.display === 'none') return true
+      } catch {}
+      el = el.parentElement
+    }
+  } catch {}
+  return false
+}
+
+const keeperMessageIdFromRow = (row: HTMLElement): string | null => {
+  try {
+    const id = row.id ?? ''
+    if (typeof id === 'string' && id.startsWith('message-') && !id.startsWith('message-group-')) {
+      const mid = id.replace(/^message-/, '')
+      if (mid.length > 0) return mid
+    }
+    const attr = typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null
+    if (typeof attr === 'string' && attr.length > 0) return attr
+  } catch {}
+  return null
+}
+
+/**
+ * Real message content box for a stable message id (fold-safe).
+ *
+ * The DOM carries duplicate wrappers for the same answer: the outer fold
+ * wrapper (`id="message-<id>"`, no `data-message-id`) and the inner content
+ * box (`id="message-<id>" + `data-message-id="<id>"`), plus the tab strip
+ * selectors (`data-message-id="<id>"` + `data-testid="answer-group-selector"`,
+ * no `message-<id>`). Only the inner content box is real reading geometry —
+ * never the fold wrapper rectangle and never the tab rectangle. Prefer the
+ * element carrying BOTH attributes; fall back fail-closed (null) instead of
+ * measuring a tab/wrapper.
+ */
+export const resolveRealMessageBox = (container: HTMLElement, messageId: string): HTMLElement | null => {
+  try {
+    if (!messageId) return null
+    let api: { escape?: (x: string) => string } | undefined
+    try {
+      api = (globalThis as unknown as { CSS?: { escape?: (x: string) => string } }).CSS
+    } catch {
+      api = undefined
+    }
+    const esc = (v: string): string => {
+      try {
+        if (api?.escape) return api.escape(v)
+        return v
+      } catch {
+        return v
+      }
+    }
+    const sel = `[id="message-${esc(messageId)}"][data-message-id="${esc(messageId)}"]:not([data-testid="answer-group-selector"])`
+    let el: HTMLElement | null = null
+    try {
+      el = container.querySelector(sel) as HTMLElement | null
+    } catch {
+      el = null
+    }
+    if (el && el.isConnected && container.contains(el)) return el
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Visible same-group sibling for a hidden fold answer row: the nearest
+ * `message-group-*` ancestor scopes the group; the first connected,
+ * non-hidden sibling row in that scope wins. Returns its stable message id
+ * or null when no visible sibling exists (then the keeper must not
+ * compensate at all — a hidden row is never measurable stable geometry).
+ * Fail-closed when no provable group scope exists: never fall back to an
+ * unscoped direct parent whose same-group membership cannot be proven.
+ * Tab-strip selectors (`answer-group-selector`) never count as siblings and
+ * hidden proof resolves against the real content box, never the tab rectangle.
+ */
+export const findVisibleFoldSiblingId = (hiddenRow: HTMLElement, container: HTMLElement): string | null => {
+  try {
+    let scope: HTMLElement | null = null
+    let p: HTMLElement | null = hiddenRow.parentElement
+    while (p && p !== container) {
+      try {
+        const pid = p.id ?? ''
+        if (typeof pid === 'string' && pid.startsWith('message-group-')) {
+          scope = p
+          break
+        }
+      } catch {}
+      p = p.parentElement
+    }
+    if (!scope) return null
+    if (!scope || scope === container) return null
+    const rows = scope.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+    for (const cand of rows) {
+      if (!(cand instanceof HTMLElement)) continue
+      if (cand === hiddenRow) continue
+      try {
+        if (typeof cand.getAttribute === 'function' && cand.getAttribute('data-testid') === 'answer-group-selector') {
+          continue
+        }
+      } catch {}
+      try {
+        if (!cand.isConnected || !container.contains(cand)) continue
+      } catch {
+        continue
+      }
+      const mid = keeperMessageIdFromRow(cand)
+      if (!mid) continue
+      // Resolve the real content box for this sibling and prove visibility
+      // against it (wrapper/tab rectangles never count).
+      const real = resolveRealMessageBox(container, mid) ?? (isKeeperAnchorRowHidden(cand, container) ? null : cand)
+      if (!real) continue
+      if (isKeeperAnchorRowHidden(real, container)) continue
+      return mid
+    }
+  } catch {}
+  return null
+}
+
 export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement | null>): StableVisualAnchorMaintainer {
   const viewport = useOptionalRouteViewport()
   const compensatingRef = useRef<{ expected: number } | null>(null)
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
   const holdRef = useRef<(reason: string) => void>(() => {})
+  // Same-route fold-reconciliation pending stable commit (single queued
+  // validation per reconciliation, coalesced across observer reruns). Bound
+  // to the original displayed topic/route/epoch + reconciled identity/offset
+  // + layout basis (row box h/top, container h/top, content scrollHeight,
+  // viewport height, window generation). The queued rAF validates layout-quiet
+  // (unchanged basis across consecutive observations) + currency before the
+  // legal stable programmatic adopt + snapshot write. Ordinary holds never
+  // arm this; an ordinary layout/window change resets/drops the quiet
+  // validation. Invalid geometry drops (never writes).
+  const foldPendingRef = useRef<{
+    displayed: RouteRef
+    epoch: number
+    siblingId: string
+    correctedOffset: number
+    rowH: number
+    rowTop: number
+    containerH: number
+    containerTop: number
+    scrollHeight: number
+    viewportHeight: number
+    windowGeneration: number
+  } | null>(null)
+  const foldRafRef = useRef<number | null>(null)
+  const cancelFoldCommitLocked = (): void => {
+    try {
+      const id = foldRafRef.current
+      foldRafRef.current = null
+      if (id !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id)
+    } catch {}
+  }
+  useEffect(() => {
+    return () => {
+      foldPendingRef.current = null
+      cancelFoldCommitLocked()
+    }
+    // Stable identity: pending lifetime is component-scoped, never versioned.
+  }, [containerRef])
 
   // Real user interaction session (controller-owned token, component-scoped).
   // Genuine input opens/refreshes the session BEFORE its scroll effect lands;
@@ -606,12 +798,16 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
   }, [containerRef, stableController])
 
   // Scroll ownership stays SOLELY in Messages via the atomic
-  // `controller.userTakeover()` (single writer → `commitSnapshotForRoute`).
-  // This keeper never takes over, never writes a snapshot, never changes the
-  // anchor: a no-intent scroll (not a self echo, no live user session,
-  // stable/aligned + clean + active anchor) holds once via the same visual
-  // compensation. Self compensation echoes are swallowed by the expected
-  // guard so they never recurse.
+  // `controller.userTakeover()` (single writer → `commitSnapshotForRoute`)
+  // plus the single validated fold-reconciliation programmatic adopt below
+  // (same single-writer discipline). This keeper never takes over, never
+  // releases ownership or bumps the epoch: a no-intent scroll (not a self
+  // echo, no live user session, stable/aligned + clean + active anchor)
+  // holds once via the same visual compensation. The sole anchor-identity
+  // move here is the hidden fold-answer reconciliation (same-group visible
+  // sibling, offset preserved, no epoch/release); only that validated path
+  // may queue its layout-quiet stable snapshot sync. Self compensation
+  // echoes are swallowed by the expected guard so they never recurse.
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -673,13 +869,34 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     // Container-scoped live anchor resolution only (never global document):
     // React may replace the row element for the same id across
     // reconciliations, so the observer must rebind the new connected node.
+    // Fold-safe: the real content box carries BOTH `id="message-<id>"` and
+    // `data-message-id="<id>"`; the fold wrapper carries only the id and the
+    // tab strip carries only `data-message-id` + selector testid. The real
+    // box wins so hidden proof/geometry never measures a tab rectangle.
     const resolveRow = (anchor: RouteVisualAnchor): HTMLElement | null => {
       try {
         let el: HTMLElement | null = null
         if (anchor.kind === 'message') {
-          el = container.querySelector(`[data-message-id="${escapeId(anchor.messageId)}"]`) as HTMLElement | null
+          try {
+            el = container.querySelector(
+              `[id="message-${escapeId(anchor.messageId)}"][data-message-id="${escapeId(anchor.messageId)}"]:not([data-testid="answer-group-selector"])`
+            ) as HTMLElement | null
+          } catch {
+            el = null
+          }
+          if (!el) {
+            el = resolveRealMessageBox(container, anchor.messageId)
+          }
+          if (!el) {
+            el = container.querySelector(
+              `[data-message-id="${escapeId(anchor.messageId)}"]:not([data-testid="answer-group-selector"])`
+            ) as HTMLElement | null
+          }
           if (!el) {
             el = container.querySelector(`#${escapeId(`message-${anchor.messageId}`)}`) as HTMLElement | null
+            try {
+              if (el && el.getAttribute('data-testid') === 'answer-group-selector') el = null
+            } catch {}
           }
           if (el && !container.contains(el)) return null
         } else {
@@ -709,6 +926,315 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         } catch {}
       }
     }
+    const FOLD_QUIET_EPS_PX = 0.5
+    interface FoldLayoutBasis {
+      rowH: number
+      rowTop: number
+      containerH: number
+      containerTop: number
+      scrollHeight: number
+      viewportHeight: number
+      windowGeneration: number
+    }
+    // Real positive finite geometry only: invalid dimensions yield null so the
+    // caller drops (never queues, never commits). The helper
+    // `normalizeFoldAnchorOffset` returns the original on invalid geometry,
+    // which would self-pass — this explicit guard closes that hole.
+    const readFoldLayoutBasis = (
+      liveContainer: HTMLElement,
+      siblingId: string,
+      windowGeneration: number
+    ): FoldLayoutBasis | null => {
+      try {
+        const real = resolveRealMessageBox(liveContainer, siblingId)
+        if (!real || !real.isConnected || !liveContainer.contains(real)) return null
+        let rowRect: { height: number; top: number }
+        let containerRect: { height: number; top: number }
+        try {
+          const r = real.getBoundingClientRect()
+          rowRect = { height: r.height, top: r.top }
+        } catch {
+          return null
+        }
+        try {
+          const c = liveContainer.getBoundingClientRect()
+          containerRect = { height: c.height, top: c.top }
+        } catch {
+          return null
+        }
+        let viewportHeight = NaN
+        try {
+          viewportHeight =
+            Number.isFinite(liveContainer.clientHeight) && liveContainer.clientHeight > 0
+              ? liveContainer.clientHeight
+              : containerRect.height
+        } catch {
+          viewportHeight = NaN
+        }
+        let scrollHeight = NaN
+        try {
+          scrollHeight = liveContainer.scrollHeight
+        } catch {
+          scrollHeight = NaN
+        }
+        if (!Number.isFinite(rowRect.height) || rowRect.height <= 0) return null
+        if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return null
+        if (!Number.isFinite(containerRect.height) || containerRect.height <= 0) return null
+        if (!Number.isFinite(scrollHeight) || scrollHeight <= 0) return null
+        if (!Number.isFinite(rowRect.top) || !Number.isFinite(containerRect.top)) return null
+        if (!Number.isFinite(windowGeneration)) return null
+        return {
+          rowH: rowRect.height,
+          rowTop: rowRect.top,
+          containerH: containerRect.height,
+          containerTop: containerRect.top,
+          scrollHeight,
+          viewportHeight,
+          windowGeneration
+        }
+      } catch {
+        return null
+      }
+    }
+    const isSameFoldLayoutBasis = (a: FoldLayoutBasis, b: FoldLayoutBasis): boolean => {
+      if (a.windowGeneration !== b.windowGeneration) return false
+      if (Math.abs(a.rowH - b.rowH) > FOLD_QUIET_EPS_PX) return false
+      if (Math.abs(a.rowTop - b.rowTop) > FOLD_QUIET_EPS_PX) return false
+      if (Math.abs(a.containerH - b.containerH) > FOLD_QUIET_EPS_PX) return false
+      if (Math.abs(a.containerTop - b.containerTop) > FOLD_QUIET_EPS_PX) return false
+      if (Math.abs(a.scrollHeight - b.scrollHeight) > FOLD_QUIET_EPS_PX) return false
+      if (Math.abs(a.viewportHeight - b.viewportHeight) > FOLD_QUIET_EPS_PX) return false
+      return true
+    }
+    const runFoldValidation = (): void => {
+      foldRafRef.current = null
+      const pending = foldPendingRef.current
+      if (!pending) return
+      const liveContainer = containerRef.current
+      if (!liveContainer || !liveContainer.isConnected) {
+        foldPendingRef.current = null
+        return
+      }
+      try {
+        if (isCaptureContainerHidden(liveContainer)) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      const vpNow = viewportRef.current
+      if (!vpNow) {
+        foldPendingRef.current = null
+        return
+      }
+      const ctrl = vpNow.controller
+      try {
+        if (ctrl.programmaticOwned || ctrl.hasActiveUserInteraction()) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      try {
+        if (!ctrl.isDomProvenanceClean) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      try {
+        if (ctrl.currentEpoch !== pending.epoch) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      try {
+        const curDisplayed = ctrl.displayedRoute
+        if (curDisplayed.topicId !== pending.displayed.topicId || curDisplayed.route !== pending.displayed.route) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      try {
+        const liveAnchor = ctrl.getAnchorFor(pending.displayed)
+        if (!liveAnchor || liveAnchor.kind !== 'message') {
+          foldPendingRef.current = null
+          return
+        }
+        if (liveAnchor.messageId !== pending.siblingId) {
+          foldPendingRef.current = null
+          return
+        }
+        // Original vs corrected meaning stays consistent: the live anchor must
+        // still carry the queued corrected offset. Never re-normalize the
+        // user's stable intent here.
+        if (liveAnchor.offset !== pending.correctedOffset) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      let real: HTMLElement | null = null
+      try {
+        real = resolveRealMessageBox(liveContainer, pending.siblingId)
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      if (!real) {
+        foldPendingRef.current = null
+        return
+      }
+      try {
+        if (isKeeperAnchorRowHidden(real, liveContainer)) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      // Layout-quiet proof: the layout basis must be unchanged across
+      // consecutive observations (queue basis vs this frame). A row/container
+      // shift, scrollHeight growth, viewport-height change, or window
+      // generation bump re-arms one more quiet frame instead of
+      // committing intermediate geometry; the single pending coalesces until
+      // layout-quiet or real epoch/route/anchor/user/detach invalidation.
+      let liveGen = NaN
+      try {
+        liveGen = ctrl.windowGeneration
+      } catch {
+        liveGen = NaN
+      }
+      const basisNow = readFoldLayoutBasis(liveContainer, pending.siblingId, liveGen)
+      if (!basisNow) {
+        foldPendingRef.current = null
+        return
+      }
+      const prevBasis: FoldLayoutBasis = {
+        rowH: pending.rowH,
+        rowTop: pending.rowTop,
+        containerH: pending.containerH,
+        containerTop: pending.containerTop,
+        scrollHeight: pending.scrollHeight,
+        viewportHeight: pending.viewportHeight,
+        windowGeneration: pending.windowGeneration
+      }
+      if (!isSameFoldLayoutBasis(prevBasis, basisNow)) {
+        foldPendingRef.current = {
+          ...pending,
+          rowH: basisNow.rowH,
+          rowTop: basisNow.rowTop,
+          containerH: basisNow.containerH,
+          containerTop: basisNow.containerTop,
+          scrollHeight: basisNow.scrollHeight,
+          viewportHeight: basisNow.viewportHeight,
+          windowGeneration: basisNow.windowGeneration
+        }
+        try {
+          scheduleFoldValidation()
+        } catch {
+          foldPendingRef.current = null
+        }
+        return
+      }
+      // Target real-box identity + offset revalidation (frame-quiet):
+      // the queued corrected offset must still be representable. A shift that
+      // changes the representable range invalidates this pending commit (no
+      // write; the live anchor already holds the visual position and a later
+      // genuine user scroll or stable commit owns the snapshot).
+      try {
+        const rechecked = normalizeFoldAnchorOffset(pending.correctedOffset, basisNow.rowH, basisNow.viewportHeight)
+        if (!Number.isFinite(rechecked) || rechecked !== pending.correctedOffset) {
+          foldPendingRef.current = null
+          return
+        }
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      let liveScrollTop = NaN
+      try {
+        liveScrollTop = liveContainer.scrollTop
+      } catch {
+        foldPendingRef.current = null
+        return
+      }
+      if (!Number.isFinite(liveScrollTop)) {
+        foldPendingRef.current = null
+        return
+      }
+      // Consume before the adopt so a re-entrant notify cannot double-commit.
+      foldPendingRef.current = null
+      let adopted: unknown = null
+      try {
+        adopted = ctrl.adoptProgrammaticViewport(
+          pending.displayed,
+          {
+            messageId: pending.siblingId,
+            intraRowOffset: pending.correctedOffset,
+            scrollTop: liveScrollTop,
+            isAtBottom: false
+          },
+          { expectedEpoch: pending.epoch }
+        )
+      } catch {
+        return
+      }
+      if (!adopted || typeof adopted !== 'object' || (adopted as { taken: unknown }).taken !== true) return
+      const taken = adopted as {
+        taken: true
+        routeKey: string
+        snapshot: { scrollTop: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
+      }
+      try {
+        writeRouteSnapshot(taken.routeKey, {
+          scrollTop: taken.snapshot.scrollTop,
+          messageId: taken.snapshot.messageId,
+          intraRowOffset: taken.snapshot.intraRowOffset,
+          isAtBottom: false
+        })
+      } catch {
+        return
+      }
+      try {
+        vpNow.notifyChanged()
+      } catch {}
+    }
+    const scheduleFoldValidation = (): void => {
+      cancelFoldCommitLocked()
+      const schedule =
+        typeof requestAnimationFrame === 'function'
+          ? requestAnimationFrame
+          : (cb: FrameRequestCallback): number => {
+              try {
+                cb(0)
+              } catch {}
+              return 0
+            }
+      try {
+        foldRafRef.current = schedule(() => {
+          runFoldValidation()
+        })
+      } catch {
+        foldPendingRef.current = null
+        foldRafRef.current = null
+      }
+    }
     const hold = (reason: string): void => {
       void reason
       const vp = viewportRef.current
@@ -720,11 +1246,78 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       // Provenance-guarded hold: the keeper may hold only the displayed
       // route's own anchor. A foreign live anchor (provenance != displayed)
       // is inert here — never compensated as if it belonged to this route.
+      // Bottom semantic (no row anchor): pin the column-reverse bottom
+      // (scrollTop 0) through layout/insertion so true bottom survives new
+      // user/assistant rows and stream growth. Gated above on unowned +
+      // no live user session, so a subsequent genuine wheel scroll-away is
+      // never fought here (its takeover owns the new anchor instead).
       const displayed = vp.controller.displayedRoute
-      const anchor = vp.controller.getAnchorFor(displayed)
-      if (!anchor) return
-      const el = resolveRow(anchor)
+      let anchor = vp.controller.getAnchorFor(displayed)
+      if (!anchor) {
+        try {
+          if (Math.abs(container.scrollTop) > 1) {
+            container.scrollTop = 0
+            compensatingRef.current = { expected: container.scrollTop }
+          }
+        } catch {}
+        return
+      }
+      let el = resolveRow(anchor)
       if (!el) return
+      // Fold answer replacement: a hidden/collapsed selected answer is not
+      // measurable stable geometry — never compensate using it. When the held
+      // reading anchor is the replaced (now hidden) answer, reconcile it to
+      // the visible answer in the SAME group (shared group scope). The
+      // original offset is preserved EXACTLY when the replacement real box can
+      // still represent it as visible; otherwise it clamps to the nearest
+      // valid visible in-row position (minimal local adjustment, same group,
+      // never global bottom/unrelated message). A held anchor that is a
+      // different visible message is preserved normally below. No restore, no
+      // epoch change. The reconciled live anchor is held below; its
+      // route-local committed stable snapshot is synchronized by the queued
+      // layout-quiet validation at the end of this hold (same-group visible
+      // row only, never crossing-first) so a later page reactivation never
+      // reselects the hidden old answer. Detach skips outgoing sampling by
+      // design, so this sync must not wait for a later departure freeze.
+      let reconciledFold: { siblingId: string; correctedOffset: number } | null = null
+      if (anchor.kind === 'message' && isKeeperAnchorRowHidden(el, container)) {
+        const siblingId = findVisibleFoldSiblingId(el, container)
+        if (!siblingId) return
+        const siblingEl =
+          resolveRealMessageBox(container, siblingId) ??
+          resolveRow({ kind: 'message', messageId: siblingId, offset: 0 })
+        if (!siblingEl) return
+        if (isKeeperAnchorRowHidden(siblingEl, container)) return
+        let corrected = anchor.offset
+        try {
+          const siblingRect = siblingEl.getBoundingClientRect()
+          const containerRectForViewport = container.getBoundingClientRect()
+          const viewportHeight =
+            Number.isFinite(container.clientHeight) && container.clientHeight > 0
+              ? container.clientHeight
+              : containerRectForViewport.height
+          corrected = normalizeFoldAnchorOffset(anchor.offset, siblingRect.height, viewportHeight)
+        } catch {
+          corrected = anchor.offset
+        }
+        let transferred = false
+        try {
+          transferred = vp.controller.reconcileAnchorToVisibleMessage(displayed, siblingId, {
+            correctedOffset: corrected
+          })
+        } catch {
+          transferred = false
+        }
+        if (!transferred) return
+        const next = vp.controller.getAnchorFor(displayed)
+        if (!next) return
+        const nextEl = resolveRow(next)
+        if (!nextEl) return
+        if (isKeeperAnchorRowHidden(nextEl, container)) return
+        anchor = next
+        el = nextEl
+        reconciledFold = { siblingId, correctedOffset: corrected }
+      }
       // Rebind the row observation to the live anchor element (React may
       // replace rows across reconciliations; same id must bind the new node).
       if (observedRow !== el) {
@@ -743,11 +1336,103 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         return
       }
       const delta = current - anchor.offset
-      if (Math.abs(delta) <= 1) return
+      if (Math.abs(delta) > 1) {
+        try {
+          container.scrollTop += delta
+          compensatingRef.current = { expected: container.scrollTop }
+        } catch {}
+      }
+      // Validated fold sync: queue a single layout-quiet check for THIS
+      // reconciliation only. The rAF re-proves target real-box identity +
+      // offset, layout-basis quiet, and currency before the legal stable
+      // programmatic adopt + snapshot write. Coalesced: a newer
+      // reconciliation replaces the pending payload and its frame; ordinary
+      // holds never arm.
+      if (!reconciledFold) {
+        // Ordinary hold notifies the pending quiet validation: a layout or
+        // window-generation change while pending re-arms the single pending
+        // quiet check so a stale snapshot never survives. Quiet
+        // continuations leave the scheduled frame alone.
+        const pendingOrd = foldPendingRef.current
+        if (pendingOrd) {
+          let curGen = NaN
+          try {
+            curGen = vp.controller.windowGeneration
+          } catch {
+            curGen = NaN
+          }
+          const basisNow = readFoldLayoutBasis(container, pendingOrd.siblingId, curGen)
+          if (!basisNow) {
+            foldPendingRef.current = null
+            cancelFoldCommitLocked()
+          } else {
+            const prevBasis: FoldLayoutBasis = {
+              rowH: pendingOrd.rowH,
+              rowTop: pendingOrd.rowTop,
+              containerH: pendingOrd.containerH,
+              containerTop: pendingOrd.containerTop,
+              scrollHeight: pendingOrd.scrollHeight,
+              viewportHeight: pendingOrd.viewportHeight,
+              windowGeneration: pendingOrd.windowGeneration
+            }
+            if (!isSameFoldLayoutBasis(prevBasis, basisNow)) {
+              foldPendingRef.current = {
+                ...pendingOrd,
+                rowH: basisNow.rowH,
+                rowTop: basisNow.rowTop,
+                containerH: basisNow.containerH,
+                containerTop: basisNow.containerTop,
+                scrollHeight: basisNow.scrollHeight,
+                viewportHeight: basisNow.viewportHeight,
+                windowGeneration: basisNow.windowGeneration
+              }
+              try {
+                scheduleFoldValidation()
+              } catch {
+                foldPendingRef.current = null
+              }
+            }
+          }
+        }
+        return
+      }
+      const pendingDisplayed: RouteRef = { ...displayed }
+      const pendingEpoch = vp.controller.currentEpoch
+      const pendingSiblingId = reconciledFold.siblingId
+      const pendingCorrected = reconciledFold.correctedOffset
+      // Queue-time geometry must be real positive finite; invalid geometry
+      // drops (never queues, never writes).
+      let queueGen = NaN
       try {
-        container.scrollTop += delta
-        compensatingRef.current = { expected: container.scrollTop }
-      } catch {}
+        queueGen = vp.controller.windowGeneration
+      } catch {
+        queueGen = NaN
+      }
+      const queueBasis = readFoldLayoutBasis(container, pendingSiblingId, queueGen)
+      if (!queueBasis) {
+        foldPendingRef.current = null
+        cancelFoldCommitLocked()
+        return
+      }
+      foldPendingRef.current = {
+        displayed: pendingDisplayed,
+        epoch: pendingEpoch,
+        siblingId: pendingSiblingId,
+        correctedOffset: pendingCorrected,
+        rowH: queueBasis.rowH,
+        rowTop: queueBasis.rowTop,
+        containerH: queueBasis.containerH,
+        containerTop: queueBasis.containerTop,
+        scrollHeight: queueBasis.scrollHeight,
+        viewportHeight: queueBasis.viewportHeight,
+        windowGeneration: queueBasis.windowGeneration
+      }
+      try {
+        scheduleFoldValidation()
+      } catch {
+        foldPendingRef.current = null
+        foldRafRef.current = null
+      }
     }
     holdRef.current = hold
     // Observer creation precedes the first rebind/hold (no TDZ swallow):

@@ -3,14 +3,12 @@ import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
-import { useTimer } from '@renderer/hooks/useTimer'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { isLoadedAnswerGroupMutable, resolveLoadedAnswerGroup } from '@renderer/store/routeAnswerGroup'
 import { reorderMessageGroupThunk } from '@renderer/store/thunk/messageGroupReorder'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
-import { scrollIntoView } from '@renderer/utils/dom'
 import type { ComponentProps } from 'react'
 import { memo, useCallback, useEffect, useMemo } from 'react'
 import styled from 'styled-components'
@@ -39,7 +37,6 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   // Hooks
   const { selectAnswer, selectUseful } = useMessageActionController()
   const { isMultiSelectMode } = useChatContext(topic)
-  const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
@@ -84,22 +81,13 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       // S3.4: explicit target IDs resolved at event time to the latest
       // complete answer group. No captured messages array is used so a
       // projection update that expands the group is observed.
+      // Viewport: selecting a multi-model answer tab retains the current
+      // reading viewport (no forced scroll to answer/start/bottom), including
+      // variants with differing heights. Authority selection still flows
+      // through selectAnswer; permission guards above are unchanged.
       void selectAnswer({ topicId: topic.id, messageId: message.id })
-
-      // LOCK-105/PERF-100: the 200ms setTimeoutTimer smooth-scroll contract
-      // is preserved exactly — do not optimize, remove, or retime it.
-      setTimeoutTimer(
-        'setSelectedMessage',
-        () => {
-          const messageElement = document.getElementById(`message-${message.id}`)
-          if (messageElement) {
-            scrollIntoView(messageElement, { behavior: 'smooth', block: 'start', container: 'nearest' })
-          }
-        },
-        200
-      )
     },
-    [groupMutable, selectAnswer, topic.id, setTimeoutTimer]
+    [groupMutable, selectAnswer, topic.id]
   )
   // NOTE: registerMessageElement logic is kept for future use (currently not used for navigation)
   useEffect(() => {

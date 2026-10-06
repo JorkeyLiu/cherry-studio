@@ -5,6 +5,12 @@
  *   snapshot = { scrollTop, anchorId, isAtBottom }
  *   bootstrap restore priority: bottom > anchorId > scrollTop
  *   fresh bottom snapshots are valid; browser/layout clamps pixels.
+ *   Canonical storage key is the route key `scroll:topic-<id>::main`
+ *   (production `useScrollPosition('topic-<id>::main')`); the legacy
+ *   `scroll:topic-<id>` read exists only as the production
+ *   getLegacyMainSavedPosition fallback and is tried second here, matching
+ *   the established newer-viewport pattern (e.g. page-viewport-resume,
+ *   route-settings-session).
  *
  * Oracles (production-observable UI behavior):
  *   - visible anchor/bottom within tolerance, active-topic DOM membership,
@@ -199,13 +205,32 @@ async function getScrollPosition(
   page: import('@playwright/test').Page,
   topicId: string
 ): Promise<{ scrollTop: number; anchorId: string | null; isAtBottom: boolean } | null> {
-  return page.evaluate((key: string) => {
-    const val = (window as any).keyv?.get(key)
-    if (val && typeof val === 'object' && 'scrollTop' in val) {
-      return val as { scrollTop: number; anchorId: string | null; isAtBottom: boolean }
-    }
-    return null
-  }, `scroll:topic-${topicId}`)
+  return page.evaluate(
+    ({ topicId }: { topicId: string }) => {
+      // Canonical route key first; legacy fallback only per production
+      // getLegacyMainSavedPosition schema compatibility.
+      const keys = [`scroll:topic-${topicId}::main`, `scroll:topic-${topicId}`]
+      for (const key of keys) {
+        const val = (window as any).keyv?.get(key)
+        if (val && typeof val === 'object' && 'scrollTop' in val) {
+          const rec = val as Record<string, unknown>
+          const anchor =
+            typeof rec.anchorId === 'string'
+              ? (rec.anchorId as string)
+              : typeof rec.messageId === 'string'
+                ? (rec.messageId as string)
+                : null
+          return {
+            scrollTop: rec.scrollTop as number,
+            anchorId: anchor,
+            isAtBottom: !!(rec.isAtBottom as boolean)
+          }
+        }
+      }
+      return null
+    },
+    { topicId }
+  )
 }
 
 async function getContainerScrollTop(page: import('@playwright/test').Page): Promise<number> {
@@ -300,11 +325,16 @@ async function waitForNonBottomSnapshot(
   timeout = 5000
 ): Promise<{ scrollTop: number; anchorId: string | null; isAtBottom: boolean }> {
   await page.waitForFunction(
-    ({ key }: { key: string }) => {
-      const v = (window as any).keyv?.get(key)
-      return v && typeof v === 'object' && 'isAtBottom' in v && v.isAtBottom === false
+    ({ topicId }: { topicId: string }) => {
+      // Canonical route oracle; legacy key accepted only as schema-compat fallback.
+      const keys = [`scroll:topic-${topicId}::main`, `scroll:topic-${topicId}`]
+      for (const key of keys) {
+        const v = (window as any).keyv?.get(key)
+        if (v && typeof v === 'object' && 'isAtBottom' in v && v.isAtBottom === false) return true
+      }
+      return false
     },
-    { key: `scroll:topic-${topicId}` },
+    { topicId },
     { timeout }
   )
   const snap = await getScrollPosition(page, topicId)
@@ -317,34 +347,91 @@ async function scrollMessageIntoViewAndPersist(
   topicId: string,
   messageId: string
 ): Promise<number> {
+  // Test precondition correction: synthetic scrollIntoView + synthetic scroll
+  // event alone never declares a live wheel/touch/pointer session, so the
+  // production handleScroll path only keeper-holds and never commits a
+  // snapshot. Use ordinary real wheel input (which declares intent via
+  // onWheel before the scroll commits) to establish the same browsing intent:
+  // the target message visible at a verified non-bottom reading position.
   await ensureOverflow(page, topicId)
-  const scrollTop = await page.evaluate(
-    ({ mid }) => {
+  const box = await page.locator('#messages').first().boundingBox()
+  if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  const isTargetVisible = (): Promise<boolean> =>
+    page.evaluate((mid: string) => {
       const container = document.getElementById('messages')
-      const target = document.getElementById(`message-${mid}`)
-      if (!container) throw new Error('#messages not found')
-      if (!target) throw new Error(`message-${mid} not found`)
-      target.scrollIntoView({ block: 'start', behavior: 'auto' })
-      container.dispatchEvent(new Event('scroll', { bubbles: true }))
-      return container.scrollTop
-    },
-    { mid: messageId }
-  )
+      const el = document.getElementById(`message-${mid}`)
+      if (!container || !el || !el.isConnected) return false
+      if (window.getComputedStyle(el).display === 'none') return false
+      const c = container.getBoundingClientRect()
+      const r = el.getBoundingClientRect()
+      if (r.height === 0) return false
+      return Math.min(r.bottom, c.bottom) - Math.max(r.top, c.top) > 0
+    }, messageId)
+  const isNonBottom = (): Promise<boolean> =>
+    page.evaluate(() => {
+      const el = document.getElementById('messages')
+      if (!el) return false
+      return Math.abs(el.scrollTop) > 300
+    })
+  // Sweep both wheel signs (no column-reverse assumption) until the target is
+  // visible at a non-bottom offset; each wheel is ordinary user input.
+  for (let i = 0; i < 40; i++) {
+    if ((await isTargetVisible()) && (await isNonBottom())) break
+    await page.mouse.wheel(0, -640)
+    await page.waitForTimeout(220)
+  }
+  if (!((await isTargetVisible()) && (await isNonBottom()))) {
+    for (let i = 0; i < 40; i++) {
+      if ((await isTargetVisible()) && (await isNonBottom())) break
+      await page.mouse.wheel(0, 640)
+      await page.waitForTimeout(220)
+    }
+  }
+  const scrollTop = await getContainerScrollTop(page)
   return scrollTop
 }
 
-async function setContainerScrollTopWithoutEvent(
+/**
+ * Diverge to a second committed non-bottom viewport with ordinary real wheel
+ * input. A programmatic scrollTop write is NOT a substitute here: with no
+ * live wheel/touch/pointer session it never commits (production handleScroll
+ * only keeper-holds) AND the keeper hold compensates it away before any
+ * transition freeze runs — so the freeze would (correctly) capture the held
+ * viewport, not the poke. Real wheel input declares intent via onWheel,
+ * commits via userTakeover, and stays keeper-held, giving the transition
+ * save a genuine distinct current viewport to freeze.
+ */
+async function wheelToSecondCommittedPosition(
   page: import('@playwright/test').Page,
   topicId: string,
-  targetScrollTop: number
-): Promise<number> {
-  await ensureOverflow(page, topicId)
-  return page.evaluate((target: number) => {
-    const el = document.getElementById('messages')
-    if (!el) throw new Error('#messages container not found')
-    el.scrollTop = target
-    return el.scrollTop
-  }, targetScrollTop)
+  fromScrollTop: number
+): Promise<{ scrollTop: number; anchorId: string | null; isAtBottom: boolean }> {
+  const box = await page.locator('#messages').first().boundingBox()
+  if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  const committedTop = async (): Promise<number | null> => (await getScrollPosition(page, topicId))?.scrollTop ?? null
+  // Older-edge direction first (away from bottom: no bottom collapse), then
+  // the reverse sweep (no column-reverse sign assumption baked in).
+  for (const delta of [-640, 640]) {
+    for (let i = 0; i < 30; i++) {
+      const committed = await committedTop()
+      if (committed !== null && Math.abs(committed - fromScrollTop) > 400) break
+      await page.mouse.wheel(0, delta)
+      await page.waitForTimeout(220)
+      // Never collapse to bottom while seeking the divergent position.
+      if (Math.abs(await getContainerScrollTop(page)) <= 300) break
+    }
+    const committed = await committedTop()
+    if (committed !== null && Math.abs(committed - fromScrollTop) > 400) break
+  }
+  // Let scrollend close the session and the keeper settle, then read the
+  // final committed value as the transition baseline.
+  await page.waitForTimeout(1200)
+  const diverged = await getScrollPosition(page, topicId)
+  if (!diverged) throw new Error('no committed snapshot after wheel divergence')
+  expect(diverged.isAtBottom).toBe(false)
+  expect(Math.abs(diverged.scrollTop - fromScrollTop)).toBeGreaterThan(400)
+  expect(Math.abs(await getContainerScrollTop(page))).toBeGreaterThan(300)
+  return diverged
 }
 
 async function waitForAnchorOrVisibleRestoration(
@@ -482,11 +569,10 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     const firstVisibleBefore = await getFirstVisibleMessageId(mainWindow)
     expect(firstVisibleBefore).toBeTruthy()
 
-    // Change live DOM to a distinct unsaved non-bottom state WITHOUT scroll event
-    const transitionTarget = initialSnapshot.scrollTop + 200
-    const actualTransitionDomTop = await setContainerScrollTopWithoutEvent(mainWindow, topicA, transitionTarget)
-    // Ensure DOM actually moved to a different non-bottom offset
-    expect(actualTransitionDomTop).not.toBe(initialSnapshot.scrollTop)
+    // Diverge with ordinary real wheel input to a second committed non-bottom
+    // viewport (keeper-compatible; see wheelToSecondCommittedPosition). This
+    // is the transition save's baseline: the freeze must capture THIS viewport.
+    const diverged = await wheelToSecondCommittedPosition(mainWindow, topicA, initialSnapshot.scrollTop)
 
     // A→B: transition coordinator saves old-topic snapshot to old key
     await clickTopicById(mainWindow, topicB, topicA)
@@ -495,7 +581,11 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     const afterSnapshotA = await getScrollPosition(mainWindow, topicA)
     expect(afterSnapshotA).toBeTruthy()
     expect(afterSnapshotA!.isAtBottom).toBe(false)
-    expect(afterSnapshotA!.scrollTop).not.toBe(initialSnapshot.scrollTop)
+    // The transition freeze must capture the current (diverged) viewport, not
+    // the stale initial one — and must capture it exactly (same held layout,
+    // ±4px readback guard only).
+    expect(Math.abs(afterSnapshotA!.scrollTop - initialSnapshot.scrollTop)).toBeGreaterThan(100)
+    expect(Math.abs(afterSnapshotA!.scrollTop - diverged.scrollTop)).toBeLessThanOrEqual(4)
 
     const snapshotB = await getScrollPosition(mainWindow, topicB)
     if (snapshotB && !snapshotB.isAtBottom) {

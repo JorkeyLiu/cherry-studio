@@ -5,8 +5,8 @@
  * (2) divider switch restores the same divider row offset (not nearest msg),
  * (3) top selector freezes outgoing + restores with precise offset through
  *     the single controller (no module-global saver/ownership),
- * (5) persistent stable anchoring via scoped observers (no rAF polling) plus
- *     pure frame-step primitives, (6) anchor namespaces.
+ * (5) persistent stable anchoring via scoped observers plus pure frame
+ *     steps (bounded same-route reconciliation frame only), (6) anchor namespaces.
  */
 import * as fs from 'node:fs'
 
@@ -180,13 +180,101 @@ describe('visual position contracts', () => {
     expect(context).not.toMatch(/globalThis.*emitter|EventEmitter/)
   })
 
-  it('(5) persistent stable anchoring via scoped observers (no rAF polling) plus pure frame steps', () => {
+  it('(5) persistent stable anchoring via scoped observers plus pure frame steps (bounded same-route reconciliation frame only)', () => {
     const context = contextSrc()
     expect(context).toMatch(/useStableVisualAnchor/)
     expect(context).toMatch(/ResizeObserver/)
     expect(context).toMatch(/MutationObserver/)
-    expect(context).not.toMatch(/requestAnimationFrame/)
+    // No interval polling anywhere in the keeper adapter.
     expect(context).not.toMatch(/setInterval/)
+    // Bounded same-route fold-reconciliation scheduler (single cancellable
+    // frame, never permanent polling): exactly one scheduling site
+    // (`scheduleFoldValidation` with its `requestAnimationFrame` tokens) plus
+    // its cancellation mate (`cancelFoldCommitLocked` with
+    // `cancelAnimationFrame`). Ordinary keeper holds never arm; quiet
+    // consumes; route/epoch/anchor/user/owned/provenance/detach/
+    // invalid-geometry cancels; re-arm happens only on a genuine layout-basis
+    // mismatch while exactly one pending reconciliation is current.
+    expect(context).toMatch(/foldPendingRef/)
+    expect(context).toMatch(/foldRafRef/)
+    expect(context).toMatch(/scheduleFoldValidation/)
+    expect(context).toMatch(/cancelFoldCommitLocked/)
+    expect(context).toMatch(/runFoldValidation/)
+    const schedulerIdx = context.indexOf('const scheduleFoldValidation')
+    expect(schedulerIdx).toBeGreaterThan(-1)
+    const cancelIdx = context.indexOf('const cancelFoldCommitLocked')
+    expect(cancelIdx).toBeGreaterThan(-1)
+    // The scheduling call references `requestAnimationFrame` twice at one
+    // site (the `typeof` guard plus the sole schedule call); both tokens must
+    // sit inside the scheduler body and nowhere else in the file.
+    const rafIdxs: number[] = []
+    let rafFrom = 0
+    while (true) {
+      const at = context.indexOf('requestAnimationFrame', rafFrom)
+      if (at < 0) break
+      rafIdxs.push(at)
+      rafFrom = at + 1
+    }
+    expect(rafIdxs.length).toBe(2)
+    for (const at of rafIdxs) {
+      expect(at).toBeGreaterThan(schedulerIdx)
+      expect(at).toBeLessThan(schedulerIdx + 1200)
+    }
+    // The cancellation references `cancelAnimationFrame` twice at one site
+    // (the `typeof` guard plus the sole cancel call); both tokens must sit
+    // inside the canceller body and nowhere else in the file.
+    const cafIdxs: number[] = []
+    let cafFrom = 0
+    while (true) {
+      const at = context.indexOf('cancelAnimationFrame', cafFrom)
+      if (at < 0) break
+      cafIdxs.push(at)
+      cafFrom = at + 1
+    }
+    expect(cafIdxs.length).toBe(2)
+    for (const at of cafIdxs) {
+      expect(at).toBeGreaterThan(cancelIdx)
+      expect(at).toBeLessThan(cancelIdx + 600)
+    }
+    expect(context.slice(schedulerIdx, schedulerIdx + 1200)).toMatch(/requestAnimationFrame/)
+    expect(context.slice(cancelIdx, cancelIdx + 600)).toMatch(/cancelAnimationFrame/)
+    // Arming sites: exactly one queue (reconciled fold) plus two quiet
+    // re-arms (validation basis mismatch, ordinary-hold basis shift). No
+    // other arm may exist (that would be a second polling loop).
+    const armSites = context.match(/scheduleFoldValidation\(\)/g) ?? []
+    expect(armSites.length).toBe(3)
+    // Ordinary holds never queue a NEW reconciliation: the `!reconciledFold`
+    // branch only re-arms an already-pending quiet check behind a
+    // pending-exists guard, never builds the displayed/epoch payload.
+    const ordinaryIdx = context.indexOf('if (!reconciledFold)')
+    expect(ordinaryIdx).toBeGreaterThan(-1)
+    // Bound the slice to the ordinary-hold branch only (ends where the
+    // reconciled-fold queue payload begins): the queued payload below is the
+    // one legitimate creation site, never ordinary-hold arming.
+    const ordinaryEnd = context.indexOf('const pendingDisplayed', ordinaryIdx)
+    expect(ordinaryEnd).toBeGreaterThan(ordinaryIdx)
+    const ordinarySlice = context.slice(ordinaryIdx, ordinaryEnd)
+    expect(ordinarySlice).toMatch(/if \(pendingOrd\)/)
+    expect(ordinarySlice).not.toMatch(/pendingDisplayed/)
+    expect(ordinarySlice).not.toMatch(/pendingSiblingId/)
+    // Validation consumes before adopt (no re-entrant double commit) and
+    // re-arms ONLY on layout-basis mismatch; currency/anchor/user/owned/
+    // provenance/detach/geometry paths drop without scheduling.
+    const validationIdx = context.indexOf('const runFoldValidation')
+    expect(validationIdx).toBeGreaterThan(-1)
+    const validationSlice = context.slice(validationIdx, validationIdx + 9500)
+    expect(validationSlice).toMatch(/foldPendingRef\.current = null/)
+    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    expect(validationSlice.indexOf('foldPendingRef.current = null')).toBeLessThan(
+      validationSlice.indexOf('adoptProgrammaticViewport')
+    )
+    expect(validationSlice).toMatch(/isSameFoldLayoutBasis/)
+    expect(validationSlice).toMatch(/currentEpoch !== pending\.epoch/)
+    expect(validationSlice).toMatch(/programmaticOwned/)
+    expect(validationSlice).toMatch(/hasActiveUserInteraction/)
+    expect(validationSlice).toMatch(/isDomProvenanceClean/)
+    expect(validationSlice).toMatch(/isKeeperAnchorRowHidden/)
+    expect(validationSlice).toMatch(/isCaptureContainerHidden/)
     // User input declares intent first (wheel/touch/pointer/key, inputs
     // excluded by the shared key guard). Pending-only, never terminates.
     expect(context).toMatch(/declareUserIntent/)

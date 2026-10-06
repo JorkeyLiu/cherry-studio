@@ -129,6 +129,42 @@ export const isSnapshotWriteAllowed = (source: SnapshotWriteSource, phase: Route
 /** Canonical route scroll key (`topic-<id>::<branch|main>`). */
 export const routeViewportKey = (topicId: string, route: RouteId): string => `topic-${topicId}::${route ?? 'main'}`
 
+/**
+ * Meaningful visible portion for a reconciled fold answer row (px).
+ * Matches the E2E 12px anchor budget: avoids a 1px artifact that the
+ * capture predicate (`visibleHeight > 0`) would still call visible but a
+ * user cannot read. Deterministic existing convention, not a new threshold.
+ */
+export const FOLD_ANCHOR_MIN_VISIBLE_PX = 12
+
+/**
+ * Pure same-group fold offset normalization (tall→short shrink).
+ *
+ * The held intra-row offset is valid only when the replacement row can still
+ * represent it as a visible reading position: `intra ∈ (-h + MIN, vh - MIN)`
+ * where `h` is the replacement real-box height and `vh` the viewport height.
+ * Feasible offsets preserve the EXACT original (no drift); infeasible offsets
+ * clamp to the nearest valid visible in-row position (minimal local
+ * adjustment, e.g. a far-above `-2235` on a `159.6px` short answer becomes
+ * `-h + MIN`, the nearest surviving bottom segment). Non-finite or
+ * non-positive geometry returns the original fail-closed (caller holds
+ * nothing new).
+ */
+export const normalizeFoldAnchorOffset = (
+  originalOffset: number,
+  replacementHeight: number,
+  viewportHeight: number
+): number => {
+  if (!Number.isFinite(originalOffset)) return originalOffset
+  if (!Number.isFinite(replacementHeight) || replacementHeight <= 0) return originalOffset
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return originalOffset
+  const lower = -replacementHeight + FOLD_ANCHOR_MIN_VISIBLE_PX
+  const upper = viewportHeight - FOLD_ANCHOR_MIN_VISIBLE_PX
+  if (originalOffset < lower) return lower
+  if (originalOffset > upper) return upper
+  return originalOffset
+}
+
 export interface RouteViewportIntent {
   kind: RouteViewportIntentKind
   topicId: string
@@ -203,6 +239,16 @@ export class RouteViewportController {
   private interactionSeq = 0
   private activeInteractionId: number | null = null
   private activeInteractionScrolls = 0
+  /**
+   * Monotonic declare generation (controller-owned source of truth).
+   * Bumped on EVERY genuine `declareUserIntent()` — including refreshes that
+   * reuse the same interaction id for multi-scroll gestures. A new real wheel
+   * while a session is live therefore advances the generation even though the
+   * id stays identical; id-only comparisons would miss it. `null` exactly
+   * when no live session exists.
+   */
+  private interactionDeclareSeq = 0
+  private activeInteractionGeneration: number | null = null
   /**
    * Explicit attach/detach activation requirement (Activity hidden boundary).
    * `detach()` cancels the short-lived transaction (via `invalidateAll`) and
@@ -929,6 +975,8 @@ export class RouteViewportController {
       this.activeInteractionId = this.interactionSeq
       this.activeInteractionScrolls = 0
     }
+    this.interactionDeclareSeq += 1
+    this.activeInteractionGeneration = this.interactionDeclareSeq
     return { interactionId: this.activeInteractionId, epoch: this.epoch }
   }
 
@@ -961,6 +1009,17 @@ export class RouteViewportController {
   /** Adopted scroll count in the live session (fallback close rule). */
   get activeInteractionScrollCount(): number {
     return this.activeInteractionScrolls
+  }
+
+  /**
+   * Monotonic declare generation of the live user session, or null when no
+   * session is live. Advances on every `declareUserIntent()` even when the
+   * interaction id is reused (wheel momentum refresh). Send-bottom gates
+   * compare this alongside the id so a new real wheel during an entry-live
+   * session aborts instead of being mistaken for the same input.
+   */
+  get activeInteractionDeclareGeneration(): number | null {
+    return this.activeInteractionGeneration
   }
 
   /** Explicit end (event-driven `scrollend` path and compatibility). */
@@ -1006,6 +1065,7 @@ export class RouteViewportController {
   private closeInteractionLocked(): void {
     this.activeInteractionId = null
     this.activeInteractionScrolls = 0
+    this.activeInteractionGeneration = null
   }
 
   /**
@@ -1053,7 +1113,13 @@ export class RouteViewportController {
       }
     | {
         taken: false
-        reason: 'no-user-intent' | 'stale-interaction' | 'unknown-rendered' | 'window-mismatch' | 'not-owned-dirty'
+        reason:
+          | 'no-user-intent'
+          | 'stale-interaction'
+          | 'unknown-rendered'
+          | 'window-mismatch'
+          | 'not-owned-dirty'
+          | 'nonbottom-null'
         epoch: number
       } {
     if (this.activeInteractionId === null) {
@@ -1063,6 +1129,12 @@ export class RouteViewportController {
     if (interactionToken !== undefined) {
       const id = typeof interactionToken === 'number' ? interactionToken : interactionToken.interactionId
       if (id !== this.activeInteractionId) return { taken: false, reason: 'stale-interaction', epoch: this.epoch }
+    }
+    // Bottom/non-bottom separation (shared with the programmatic path): a
+    // missing/null identity without proven bottom is unmeasurable, never
+    // bottom. Refuse before any anchor/provenance mutation.
+    if (!measured.messageId && measured.isAtBottom !== true) {
+      return { taken: false, reason: 'nonbottom-null', epoch: this.epoch }
     }
     const live = typeof liveWindowId === 'string' && liveWindowId.length > 0 ? liveWindowId : null
     const isSyntheticWindow = (w: string): boolean => w === 'init' || w.startsWith('legacy-')
@@ -1141,7 +1213,8 @@ export class RouteViewportController {
       ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
       : null
     // Stable takeover provenance: clean displayed == rendered, so the
-    // measured viewport belongs to the displayed route.
+    // measured viewport belongs to the displayed route. (Non-bottom null was
+    // already refused above: null here is proven bottom only.)
     this.setAnchorLocked(nextAnchor, nextAnchor ? { ...this.displayed } : null)
     try {
       const key = routeViewportKey(this.displayed.topicId, this.displayed.route)
@@ -1157,6 +1230,170 @@ export class RouteViewportController {
       routeKey: routeViewportKey(this.displayed.topicId, this.displayed.route),
       snapshot,
       reason: 'stable-update',
+      epoch: this.epoch
+    }
+  }
+
+  /**
+   * Same-route hidden-anchor reconciliation (fold answer replacement).
+   *
+   * When the held reading anchor is the replaced (now hidden/collapsed)
+   * selected answer, transfer it to the visible answer representing the SAME
+   * answer group, preserving the intended reading offset when the replacement
+   * can still represent it, otherwise clamping to the nearest valid visible
+   * in-row position (caller-computed via `normalizeFoldAnchorOffset` from the
+   * replacement real-box height + viewport height). The caller proves
+   * same-group membership (shared group scope in the DOM) and hidden state;
+   * this method only moves anchor identity + cache. No epoch bump, no phase
+   * change, no ownership release, no snapshot write, no interaction touch —
+   * it is never a takeover and never opens a restore. Fail-closed on
+   * owned/dirty/unadoptable states. A no-op `true` when already there.
+   */
+  reconcileAnchorToVisibleMessage(
+    target: RouteRef,
+    visibleMessageId: string,
+    opts?: { correctedOffset?: number }
+  ): boolean {
+    if (typeof visibleMessageId !== 'string' || visibleMessageId.length === 0) return false
+    if (this.ownershipHeld) return false
+    if (!this.isDomProvenanceClean) return false
+    if (this.phase !== 'stable' && this.phase !== 'aligned' && this.phase !== 'idle' && this.phase !== 'terminal') {
+      return false
+    }
+    if (this.displayed.topicId !== target.topicId || this.displayed.route !== target.route) return false
+    const cur = this.anchor
+    const prov = this.anchorRoute
+    if (!cur || cur.kind !== 'message' || !prov) return false
+    if (prov.topicId !== target.topicId || prov.route !== target.route) return false
+    const nextOffset =
+      typeof opts?.correctedOffset === 'number' && Number.isFinite(opts.correctedOffset)
+        ? opts.correctedOffset
+        : cur.offset
+    if (cur.messageId === visibleMessageId) {
+      if (nextOffset !== cur.offset) {
+        this.setAnchorLocked({ kind: 'message', messageId: visibleMessageId, offset: nextOffset }, { ...target })
+        try {
+          const key = routeViewportKey(target.topicId, target.route)
+          if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
+        } catch {
+          // best-effort
+        }
+      }
+      return true
+    }
+    this.setAnchorLocked({ kind: 'message', messageId: visibleMessageId, offset: nextOffset }, { ...target })
+    try {
+      const key = routeViewportKey(target.topicId, target.route)
+      if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
+      else this.anchorCache.delete(key)
+    } catch {
+      // best-effort
+    }
+    return true
+  }
+
+  /**
+   * Explicit same-route programmatic viewport adoption (send-to-bottom).
+   *
+   * Adopts a measured programmatic viewport as the new stable anchor for the
+   * displayed route WITHOUT requiring or creating a user-gesture session.
+   * Unlike `userTakeover`, it never opens/refreshes/closes the genuine
+   * interaction session (co-active wheel momentum and its scroll count are
+   * untouched) and never releases ownership or bumps the epoch — so it can
+   * neither steal nor release a live restore. Fail-closed when a transition
+   * owns the viewport, when provenance is dirty, when the target is not the
+   * displayed route, on epoch supersession, or outside adoptable phases.
+   * Bottom takes priority over top-row identity for this bottom intent: a
+   * measured `isAtBottom` viewport clears the row keeper (live anchor null)
+   * so the keeper bottom-holds through insertion/stream instead of pulling
+   * back to the old reading row. The returned snapshot still carries the
+   * measured identity for ADR-governed resume; only the live anchor is
+   * bottom. Only the returned `{taken:true}` authorizes a snapshot commit.
+   */
+  beginSendBottom(target: RouteRef, opts?: { expectedEpoch?: number }): boolean {
+    if (typeof opts?.expectedEpoch === 'number' && opts.expectedEpoch !== this.epoch) return false
+    if (this.ownershipHeld) return false
+    if (!this.rendered) return false
+    if (!this.isDomProvenanceClean) return false
+    if (this.displayed.topicId !== target.topicId || this.displayed.route !== target.route) return false
+    if (this.phase !== 'stable' && this.phase !== 'idle' && this.phase !== 'terminal') return false
+    // Pre-scroll suspension: replace the incompatible prior row keeper with
+    // the bottom semantic BEFORE the navigation scroll runs, so keeper
+    // layout/mutation holds pin the bottom through insertion instead of
+    // pulling back to the old reading row. No snapshot write, no ownership
+    // release, no epoch change, no interaction touch.
+    this.setAnchorLocked(null, null)
+    return true
+  }
+
+  adoptProgrammaticViewport(
+    target: RouteRef,
+    measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
+    opts?: { expectedEpoch?: number }
+  ):
+    | { taken: true; routeKey: string; snapshot: RouteViewportSnapshot; epoch: number }
+    | {
+        taken: false
+        reason:
+          | 'owned-active'
+          | 'unknown-rendered'
+          | 'not-owned-dirty'
+          | 'route-mismatch'
+          | 'stale-epoch'
+          | 'phase-not-adoptable'
+          | 'nonbottom-null'
+        epoch: number
+      } {
+    if (typeof opts?.expectedEpoch === 'number' && opts.expectedEpoch !== this.epoch) {
+      return { taken: false, reason: 'stale-epoch', epoch: this.epoch }
+    }
+    if (this.ownershipHeld) {
+      return { taken: false, reason: 'owned-active', epoch: this.epoch }
+    }
+    if (!this.rendered) {
+      return { taken: false, reason: 'unknown-rendered', epoch: this.epoch }
+    }
+    if (!this.isDomProvenanceClean) {
+      return { taken: false, reason: 'not-owned-dirty', epoch: this.epoch }
+    }
+    if (this.displayed.topicId !== target.topicId || this.displayed.route !== target.route) {
+      return { taken: false, reason: 'route-mismatch', epoch: this.epoch }
+    }
+    if (this.phase !== 'stable' && this.phase !== 'idle' && this.phase !== 'terminal') {
+      return { taken: false, reason: 'phase-not-adoptable', epoch: this.epoch }
+    }
+    // Bottom/non-bottom separation: a missing/null identity WITHOUT proven
+    // bottom is unmeasurable, never bottom. Refuse fail-closed so the keeper
+    // never pins bottom on a ghost measurement (null anchor always means
+    // proven bottom or an explicit bottom intent).
+    if (!measured.messageId && measured.isAtBottom !== true) {
+      return { taken: false, reason: 'nonbottom-null', epoch: this.epoch }
+    }
+    const snapshot: RouteViewportSnapshot = {
+      scrollTop: measured.scrollTop,
+      messageId: measured.messageId,
+      intraRowOffset: measured.intraRowOffset,
+      isAtBottom: measured.isAtBottom
+    }
+    const nextAnchor: RouteVisualAnchor | null =
+      snapshot.isAtBottom === true
+        ? null
+        : snapshot.messageId
+          ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
+          : null
+    this.setAnchorLocked(nextAnchor, nextAnchor ? { ...this.displayed } : null)
+    try {
+      const key = routeViewportKey(this.displayed.topicId, this.displayed.route)
+      if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
+      else this.anchorCache.delete(key)
+    } catch {
+      // best-effort
+    }
+    this.phase = 'stable'
+    return {
+      taken: true,
+      routeKey: routeViewportKey(this.displayed.topicId, this.displayed.route),
+      snapshot,
       epoch: this.epoch
     }
   }

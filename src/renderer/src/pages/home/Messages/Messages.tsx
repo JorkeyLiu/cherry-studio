@@ -34,6 +34,7 @@ import {
   chooseNavigationWindow,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
+  type MessageNavigationResult,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
   resolveMessageNavigation,
@@ -198,7 +199,7 @@ import {
   useStableVisualAnchor,
   viewportPhaseAttrFor
 } from './routeViewportContext'
-import { displayedRouteKey, RouteViewportController } from './routeViewportController'
+import { displayedRouteKey, RouteViewportController, type RouteViewportSnapshot } from './routeViewportController'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
 import TopicSegmentLine from './TopicSegmentLine'
 import { requestTopicBranches, useBranchTree } from './useBranchTree'
@@ -231,6 +232,237 @@ export interface MessagesHandle {
 }
 
 const logger = loggerService.withContext('Messages')
+
+/**
+ * SEND_MESSAGE topic guard (pure, focused-test entry): only the matching
+ * topic may reposition this displayed route. Unrelated topic sends are
+ * ignored. A missing/empty payload is treated as same-topic (legacy
+ * emission without topicId still scrolls); an explicit mismatched topicId
+ * never repositions.
+ */
+export const shouldHandleSendMessageForTopic = (
+  payload: { topicId?: string } | undefined,
+  currentTopicId: string
+): boolean => {
+  if (!payload || typeof payload.topicId !== 'string' || payload.topicId.length === 0) return true
+  return payload.topicId === currentTopicId
+}
+
+/**
+ * Explicit send-to-bottom intent (SEND_MESSAGE) dependencies (focused-test
+ * entry; production wires the live refs below). Every eventual DOM scroll and
+ * every anchor adoption rechecks entry currency — no fabricated user gesture
+ * is ever declared, and no genuine interaction session is ever closed.
+ */
+export interface SendBottomIntentDeps {
+  controller: RouteViewportController
+  navigateToBottom: () => Promise<MessageNavigationResult>
+  captureSnapshot: () => {
+    scrollTop: number
+    messageId?: string | null
+    anchorId?: string | null
+    intraRowOffset?: number | null
+    isAtBottom: boolean
+  } | null
+  commitSnapshot: (routeKey: string, snapshot: RouteViewportSnapshot) => void
+  notifyViewport: () => void
+  setSuppressUserWrite: (suppress: boolean) => void
+  getSelectedTopicId: () => string
+  getSelectedRoute: () => string | null
+  getWindowId: () => string | null
+  getActiveInteractionId?: () => number | null
+  getActiveInteractionGeneration?: () => number | null
+  isUnmounted: () => boolean
+}
+
+export type SendBottomIntentResult =
+  | { outcome: 'ignored-unrelated-topic' }
+  | { outcome: 'completed-bottom-adopted'; routeKey: string }
+  | {
+      outcome: 'aborted'
+      reason:
+        | 'unmounted'
+        | 'topic-route-changed'
+        | 'epoch-superseded'
+        | 'owned-active'
+        | 'user-intent'
+        | 'navigate-not-success'
+        | 'dirty-provenance'
+        | 'displayed-changed'
+        | 'window-cleared'
+        | 'no-measurement'
+        | 'adopt-rejected'
+        | 'send-bottom-not-started'
+    }
+
+/**
+ * Same-route programmatic bottom navigation for an accepted send.
+ *
+ * Binds at entry to the selected topic/route, the displayed route, the
+ * controller epoch, the window identity, and the genuine interaction id. A
+ * programmatic restore that owns the viewport at entry is sequenced
+ * explicitly: the intent defers (cancellable local wait, existing owner
+ * reads only) until the owner releases through its own API instead of
+ * stealing or releasing its ownership, and every wait step rechecks
+ * unmounted/topic/route/epoch plus a new genuine interaction so a
+ * superseded send or a later real wheel aborts instead of touching the new
+ * session. No fixed timeout silently loses an accepted send. Before the DOM
+ * scroll the incompatible prior row keeper is suspended to the bottom
+ * semantic (`beginSendBottom`) so keeper layout/mutation holds pin the
+ * bottom through insertion instead of pulling back to the old reading row;
+ * the measured bottom viewport is then adopted through the gesture-free
+ * programmatic path. Genuine interaction sessions are never opened, closed,
+ * or counted by this path; a later real wheel (new interaction id versus
+ * entry) cancels the pending bottom work and its own scroll adopts normally
+ * through `userTakeover` with no held-bottom fight (keeper bottom-hold is
+ * gated on no live session). No write suppression blankets genuine input.
+ */
+export const runSendBottomIntent = async (
+  payload: { topicId?: string } | undefined,
+  currentTopicId: string,
+  deps: SendBottomIntentDeps
+): Promise<SendBottomIntentResult> => {
+  if (!shouldHandleSendMessageForTopic(payload, currentTopicId)) {
+    return { outcome: 'ignored-unrelated-topic' }
+  }
+  const entryTopicId = deps.getSelectedTopicId()
+  if (
+    payload &&
+    typeof payload.topicId === 'string' &&
+    payload.topicId.length > 0 &&
+    entryTopicId !== payload.topicId
+  ) {
+    return { outcome: 'aborted', reason: 'topic-route-changed' }
+  }
+  const entryRoute = deps.getSelectedRoute()
+  const entryDisplayed = deps.controller.displayedRoute
+  const entryEpoch = deps.controller.currentEpoch
+  const entryWindowId = deps.getWindowId()
+  const readInteractionId = (): number | null => {
+    try {
+      if (typeof deps.getActiveInteractionId === 'function') return deps.getActiveInteractionId()
+    } catch {}
+    try {
+      return deps.controller.activeInteractionToken?.interactionId ?? null
+    } catch {
+      return null
+    }
+  }
+  // Monotonic declare generation: a new real wheel while a session is live
+  // reuses the same interaction id (refresh) but always bumps the
+  // generation. Id-only comparisons would miss it.
+  const readInteractionGeneration = (): number | null => {
+    try {
+      if (typeof deps.getActiveInteractionGeneration === 'function') return deps.getActiveInteractionGeneration()
+    } catch {}
+    try {
+      return deps.controller.activeInteractionDeclareGeneration
+    } catch {
+      return null
+    }
+  }
+  const entryInteractionId = readInteractionId()
+  const entryInteractionGeneration = readInteractionGeneration()
+  const hasNewUserIntent = (): boolean =>
+    readInteractionId() !== entryInteractionId || readInteractionGeneration() !== entryInteractionGeneration
+  const displayedMatchesEntry = (): boolean => {
+    try {
+      const cur = deps.controller.displayedRoute
+      return cur.topicId === entryDisplayed.topicId && cur.route === entryDisplayed.route
+    } catch {
+      return false
+    }
+  }
+
+  if (deps.controller.programmaticOwned) {
+    for (;;) {
+      if (deps.isUnmounted()) return { outcome: 'aborted', reason: 'unmounted' }
+      if (deps.getSelectedTopicId() !== entryTopicId || deps.getSelectedRoute() !== entryRoute) {
+        return { outcome: 'aborted', reason: 'topic-route-changed' }
+      }
+      if (hasNewUserIntent()) return { outcome: 'aborted', reason: 'user-intent' }
+      if (!displayedMatchesEntry()) return { outcome: 'aborted', reason: 'displayed-changed' }
+      if (!deps.controller.programmaticOwned) break
+      if (deps.controller.currentEpoch !== entryEpoch) return { outcome: 'aborted', reason: 'epoch-superseded' }
+      await new Promise<void>((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
+  if (deps.isUnmounted()) return { outcome: 'aborted', reason: 'unmounted' }
+  if (deps.getSelectedTopicId() !== entryTopicId || deps.getSelectedRoute() !== entryRoute) {
+    return { outcome: 'aborted', reason: 'topic-route-changed' }
+  }
+  if (hasNewUserIntent()) return { outcome: 'aborted', reason: 'user-intent' }
+  if (!displayedMatchesEntry()) return { outcome: 'aborted', reason: 'displayed-changed' }
+  if (deps.controller.currentEpoch !== entryEpoch) return { outcome: 'aborted', reason: 'epoch-superseded' }
+  if (deps.controller.programmaticOwned) return { outcome: 'aborted', reason: 'owned-active' }
+
+  // Suspend the incompatible prior row keeper BEFORE the navigation scroll
+  // runs: adopting the bottom semantic now lets keeper layout/mutation holds
+  // pin scrollTop 0 through the insertion that follows instead of undoing
+  // the scroll back to the old reading row. Fail-closed when the session
+  // moved under us (owned/dirty/route/epoch) — no mutation on refusal paths
+  // below except this bottom suspension which itself refuses then.
+  if (!deps.controller.beginSendBottom({ topicId: entryTopicId, route: entryRoute }, { expectedEpoch: entryEpoch })) {
+    if (deps.isUnmounted()) return { outcome: 'aborted', reason: 'unmounted' }
+    if (deps.getSelectedTopicId() !== entryTopicId || deps.getSelectedRoute() !== entryRoute) {
+      return { outcome: 'aborted', reason: 'topic-route-changed' }
+    }
+    if (deps.controller.currentEpoch !== entryEpoch) return { outcome: 'aborted', reason: 'epoch-superseded' }
+    if (deps.controller.programmaticOwned) return { outcome: 'aborted', reason: 'owned-active' }
+    if (!deps.controller.isDomProvenanceClean) return { outcome: 'aborted', reason: 'dirty-provenance' }
+    return { outcome: 'aborted', reason: 'send-bottom-not-started' }
+  }
+  deps.notifyViewport()
+
+  const result: MessageNavigationResult = await deps.navigateToBottom()
+  if (!shouldPersistNavigationResult(result)) return { outcome: 'aborted', reason: 'navigate-not-success' }
+
+  if (deps.isUnmounted()) return { outcome: 'aborted', reason: 'unmounted' }
+  if (deps.getSelectedTopicId() !== entryTopicId || deps.getSelectedRoute() !== entryRoute) {
+    return { outcome: 'aborted', reason: 'topic-route-changed' }
+  }
+  if (hasNewUserIntent()) return { outcome: 'aborted', reason: 'user-intent' }
+  if (deps.controller.currentEpoch !== entryEpoch) return { outcome: 'aborted', reason: 'epoch-superseded' }
+  if (deps.controller.programmaticOwned) return { outcome: 'aborted', reason: 'owned-active' }
+  if (!deps.controller.isDomProvenanceClean) return { outcome: 'aborted', reason: 'dirty-provenance' }
+  const curDisplayed = deps.controller.displayedRoute
+  if (curDisplayed.topicId !== entryDisplayed.topicId || curDisplayed.route !== entryDisplayed.route) {
+    return { outcome: 'aborted', reason: 'displayed-changed' }
+  }
+  // Same-route window growth (insertion/stream appending newest rows) keeps
+  // the identity prefix but changes newest/length — that is expected and must
+  // not abort. Only a cleared projection (window lost while entry had one)
+  // aborts, since there is no proven window to adopt from.
+  if (entryWindowId !== null && deps.getWindowId() === null) {
+    return { outcome: 'aborted', reason: 'window-cleared' }
+  }
+  const measured = deps.captureSnapshot()
+  if (!measured) return { outcome: 'aborted', reason: 'no-measurement' }
+  const out = deps.controller.adoptProgrammaticViewport(
+    { topicId: entryTopicId, route: entryRoute },
+    {
+      messageId: measured.messageId ?? null,
+      intraRowOffset: measured.intraRowOffset ?? null,
+      scrollTop: measured.scrollTop,
+      isAtBottom: measured.isAtBottom
+    },
+    { expectedEpoch: entryEpoch }
+  )
+  if (!out.taken) return { outcome: 'aborted', reason: 'adopt-rejected' }
+  try {
+    deps.commitSnapshot(out.routeKey, {
+      scrollTop: out.snapshot.scrollTop,
+      messageId: out.snapshot.messageId,
+      intraRowOffset: out.snapshot.intraRowOffset,
+      isAtBottom: out.snapshot.isAtBottom
+    })
+  } catch {
+    // fail-closed: controller state already advanced above
+  }
+  deps.notifyViewport()
+  return { outcome: 'completed-bottom-adopted', routeKey: out.routeKey }
+}
 
 interface MessagesContentProps {
   assistant: Assistant
@@ -1845,8 +2077,23 @@ const Messages = ({
   }, [cancelActiveLoads, clearTimeoutTimer])
 
   const runTransaction = useCallback(
-    (intent: MessageNavigationIntent) =>
-      runMessageNavigationTransaction(intent, {
+    (intent: MessageNavigationIntent) => {
+      // Route/epoch currency bound at call time: the actual DOM scroll below
+      // rechecks topic/route/controller-epoch/unmounted plus a new genuine
+      // interaction before mutating, so a topic/branch swap or a later real
+      // wheel across the transaction awaits cancels the stale scrollTo the
+      // new container instead of scrolling it. Token-only `isCurrent` alone
+      // cannot cover this (same token can survive a route swap).
+      const topicAtStart = topicIdRef.current
+      const routeAtStart = routeRef.current
+      const ctrlEpochAtStart = controller.currentEpoch
+      let interactionAtStart: number | null = null
+      try {
+        interactionAtStart = controller.activeInteractionToken?.interactionId ?? null
+      } catch {
+        interactionAtStart = null
+      }
+      return runMessageNavigationTransaction(intent, {
         begin: (token, targetId, source, alignment) => {
           const generation = viewportStateRef.current.navigation.generation
           const committed = waitForNavigationCommit(token, generation)
@@ -1875,18 +2122,50 @@ const Messages = ({
           return beginScroll('programmatic', {})
         },
         scroll: (resolved) => {
-          applyColumnReverseScroll(resolved, scrollContainerRef.current, (targetId, alignment) => {
+          // Currency gate immediately before the DOM mutation: superseded
+          // (topic/route/epoch/unmounted), detached container, or a new
+          // genuine interaction since entry all skip the programmatic write
+          // so the user's actual geometry wins and no stale scrollTo lands
+          // on the new container.
+          try {
+            if (unmountedRef.current) return
+          } catch {}
+          try {
+            if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return
+          } catch {
+            return
+          }
+          try {
+            if (controller.currentEpoch !== ctrlEpochAtStart) return
+          } catch {
+            return
+          }
+          try {
+            const cur = controller.activeInteractionToken?.interactionId ?? null
+            if (cur !== interactionAtStart) return
+          } catch {
+            return
+          }
+          const live = scrollContainerRef.current
+          try {
+            if (!live || !live.isConnected) return
+          } catch {
+            return
+          }
+          applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
             const target = document.getElementById(`message-${targetId}`)
             if (target) scrollIntoView(target, { behavior: 'auto', block: alignment, container: 'nearest' })
           })
         },
         finish: (token) => viewportDispatch({ type: 'navigation/finish', token }),
         cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token })
-      }),
+      })
+    },
     [
       beginScroll,
       cancelNavigationLoadsAndTimers,
       checkElement,
+      controller,
       displayCount,
       isCurrentNavigation,
       scrollContainerRef,
@@ -2082,10 +2361,77 @@ const Messages = ({
     navigateAndSave({ kind: 'bottom', source: 'imperative' })
   }, [navigateAndSave])
 
-  /** Internal auto-scroll without persistence — for SEND_MESSAGE. */
-  const autoScrollToBottom = useCallback(() => {
-    void navigate({ kind: 'bottom', source: 'imperative' })
-  }, [navigate])
+  /**
+   * Explicit send intent (SEND_MESSAGE): only the matching topic may
+   * reposition this displayed route; unrelated topic sends are ignored. The
+   * shared `runSendBottomIntent` binds entry topic/route/epoch/window plus
+   * the genuine interaction id, suspends the prior row keeper to the bottom
+   * semantic before scrolling, runs the currency-bound bottom navigation
+   * (stale route/epoch or a later real wheel skips the scroll), then adopts
+   * the bottom viewport through the gesture-free programmatic path so the
+   * keeper pins the bottom (not the old reading position) through
+   * insertion/stream. No synthetic user gesture is declared, no genuine
+   * interaction session is closed, and no write-suppression blankets real
+   * input by this path.
+   */
+  const autoScrollToBottom = useCallback(
+    (payload?: { topicId?: string }) => {
+      void runSendBottomIntent(payload, topic.id, {
+        controller,
+        navigateToBottom: () => navigate({ kind: 'bottom', source: 'imperative' }),
+        captureSnapshot,
+        commitSnapshot: (routeKey, snapshot) => {
+          try {
+            commitSnapshotForRoute(routeKey, {
+              scrollTop: snapshot.scrollTop,
+              anchorId: snapshot.messageId,
+              messageId: snapshot.messageId,
+              intraRowOffset: snapshot.intraRowOffset,
+              rawScrollTop: snapshot.scrollTop,
+              isAtBottom: snapshot.isAtBottom
+            })
+          } catch {
+            // fail-closed: controller state already advanced above
+          }
+        },
+        notifyViewport,
+        setSuppressUserWrite: (suppress) => {
+          suppressUserWriteRef.current = suppress
+        },
+        getSelectedTopicId: () => topicIdRef.current,
+        getSelectedRoute: () => routeRef.current,
+        getWindowId: () => {
+          try {
+            const w = viewportStateRef.current.window as {
+              oldestMessageId?: unknown
+              newestMessageId?: unknown
+              displayMessages?: unknown[]
+            } | null
+            if (!w || !Array.isArray(w.displayMessages)) return null
+            return `${String(w.oldestMessageId ?? '')}::${String(w.newestMessageId ?? '')}::${w.displayMessages.length}`
+          } catch {
+            return null
+          }
+        },
+        getActiveInteractionId: () => {
+          try {
+            return controller.activeInteractionToken?.interactionId ?? null
+          } catch {
+            return null
+          }
+        },
+        getActiveInteractionGeneration: () => {
+          try {
+            return controller.activeInteractionDeclareGeneration
+          } catch {
+            return null
+          }
+        },
+        isUnmounted: () => unmountedRef.current
+      })
+    },
+    [captureSnapshot, controller, navigate, notifyViewport, topic.id]
+  )
 
   const scrollToTop = useCallback(() => {
     navigateAndSave({ kind: 'top', source: 'imperative' })

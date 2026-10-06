@@ -570,6 +570,68 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
   })
 })
 
+describe('keeper scheduler quiescence (no pending ⇒ zero frame work)', () => {
+  let rafQueue: FrameRequestCallback[]
+  let rafSpy: ReturnType<typeof vi.fn>
+  let cafSpy: ReturnType<typeof vi.fn>
+  const installManualRaf = (): void => {
+    rafQueue = []
+    rafSpy = vi.fn((cb: FrameRequestCallback): number => {
+      rafQueue.push(cb)
+      return rafQueue.length
+    })
+    cafSpy = vi.fn((_id: number): void => {
+      rafQueue.length = 0
+    })
+    vi.stubGlobal('requestAnimationFrame', rafSpy)
+    vi.stubGlobal('cancelAnimationFrame', cafSpy)
+  }
+
+  it('ordinary holds schedule zero frames across observer/scroll/generation signals', () => {
+    installManualRaf()
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(rafSpy).not.toHaveBeenCalled()
+    expect(rafQueue.length).toBe(0)
+    // Ordinary layout shift (no hidden fold): synchronous hold only.
+    act(() => {
+      rects.set('m2', { top: 160, height: 40 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(220)
+    expect(rafSpy).not.toHaveBeenCalled()
+    expect(rafQueue.length).toBe(0)
+    // No-intent scroll echo plus observer fires plus same-route generation
+    // bump: still purely synchronous, zero frame work.
+    act(() => {
+      container.dispatchEvent(new Event('scroll'))
+    })
+    for (const ro of FakeResizeObserver.instances) {
+      try {
+        ;(ro as unknown as { fire: () => void }).fire()
+      } catch {}
+    }
+    for (const mo of FakeMutationObserver.instances) {
+      try {
+        ;(mo as unknown as { fire: () => void }).fire()
+      } catch {}
+    }
+    expect(controller.noteSameRouteWindowUpdate({ topicId: 't1', route: null }, 'a::b::28')).toBe(true)
+    act(() => {
+      keeper.rerender(2)
+    })
+    expect(rafSpy).not.toHaveBeenCalled()
+    expect(cafSpy).not.toHaveBeenCalled()
+    expect(rafQueue.length).toBe(0)
+    keeper.unmount()
+  })
+})
+
 describe('user input takes over the anchor', () => {
   it('wheel declares pending-only; the atomic takeover adopts the real scroll result', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
@@ -641,6 +703,141 @@ describe('user input takes over the anchor', () => {
     expect(controller.userIntentPending).toBe(true)
     expect(controller.noteInteractionScrollEnd()).toBe(true)
     expect(controller.userIntentPending).toBe(false)
+    keeper.unmount()
+  })
+})
+
+describe('fold hidden answer reconciliation (same-group transfer, offset preserved)', () => {
+  const buildFoldSurface = (): {
+    container: HTMLDivElement
+    ref: { current: HTMLDivElement | null }
+    oldRow: HTMLDivElement
+    newRow: HTMLDivElement
+  } => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { value: 4000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const group = document.createElement('div')
+    group.id = 'message-group-ask-1'
+    const oldRow = document.createElement('div')
+    oldRow.id = 'message-old-short'
+    oldRow.setAttribute('data-message-id', 'old-short')
+    mockRect(oldRow, 'old-short')
+    const newRow = document.createElement('div')
+    newRow.id = 'message-new-tall'
+    newRow.setAttribute('data-message-id', 'new-tall')
+    mockRect(newRow, 'new-tall')
+    group.append(oldRow, newRow)
+    container.append(group)
+    document.body.append(container)
+    return { container, ref: { current: container }, oldRow: oldRow, newRow: newRow }
+  }
+
+  it('hidden held answer transfers to the visible same-group sibling; the hidden row is never measured', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'old-short', -60)
+    rects.set('old-short', { top: -60, height: 120 })
+    rects.set('new-tall', { top: -60, height: 120 })
+    const { container, ref, oldRow, newRow } = buildFoldSurface()
+    // The tall variant starts hidden (fold shows only the selected short answer).
+    newRow.style.display = 'none'
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+
+    // Answer-tab switch: the held short answer collapses (display:none) and
+    // the tall sibling becomes visible at a shifted position (+300).
+    const oldRectSpy = vi.spyOn(oldRow, 'getBoundingClientRect')
+    act(() => {
+      oldRow.style.display = 'none'
+      newRow.style.display = 'inline-block'
+      rects.set('new-tall', { top: 240, height: 900 })
+      keeper.rerender(1)
+    })
+    // The keeper held the transferred visible sibling at the intended offset.
+    expect(container.scrollTop).toBe(300)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'new-tall',
+      offset: -60
+    })
+    // The hidden replaced row was never measured as stable geometry.
+    expect(oldRectSpy).not.toHaveBeenCalled()
+    oldRectSpy.mockRestore()
+
+    // Settled geometry holds without further drift.
+    act(() => {
+      rects.set('new-tall', { top: -60, height: 900 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(300)
+    keeper.unmount()
+  })
+
+  it('a different held visible message is preserved normally (no transfer)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'reader', -40)
+    rects.set('reader', { top: -40, height: 60 })
+    rects.set('old-short', { top: 400, height: 120 })
+    rects.set('new-tall', { top: 400, height: 900 })
+    const { container, ref, oldRow, newRow } = buildFoldSurface()
+    const reader = document.createElement('div')
+    reader.id = 'message-reader'
+    reader.setAttribute('data-message-id', 'reader')
+    mockRect(reader, 'reader')
+    container.prepend(reader)
+    oldRow.style.display = 'none'
+    newRow.style.display = 'inline-block'
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    // Layout shifts the held reader row while the fold group sits elsewhere.
+    act(() => {
+      rects.set('reader', { top: 110, height: 60 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(150)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'reader',
+      offset: -40
+    })
+    keeper.unmount()
+  })
+
+  it('hidden held answer with no visible sibling holds nothing (no hidden compensation)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'lonely', -60)
+    rects.set('lonely', { top: -60, height: 80 })
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { value: 4000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const group = document.createElement('div')
+    group.id = 'message-group-ask-9'
+    const lonely = document.createElement('div')
+    lonely.id = 'message-lonely'
+    lonely.setAttribute('data-message-id', 'lonely')
+    mockRect(lonely, 'lonely')
+    group.append(lonely)
+    container.append(group)
+    document.body.append(container)
+    const ref = { current: container }
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      lonely.style.display = 'none'
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'lonely',
+      offset: -60
+    })
     keeper.unmount()
   })
 })
