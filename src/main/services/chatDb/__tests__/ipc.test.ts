@@ -2,7 +2,7 @@
  * ChatDb IPC Registration Tests — mocked ipcMain, real validation.
  *
  * Covers:
- * - Exactly 58 handlers registered
+ * - Exactly 59 handlers registered
  * - Request validation before dispatch
  * - All result/error mapping categories
  * - Null result for void commands
@@ -107,16 +107,16 @@ describe('ChatDb IPC Registration', () => {
   // Handler count
   // =========================================================================
 
-  it('registers exactly 58 handlers', () => {
+  it('registers exactly 59 handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
   })
 
   // =========================================================================
   // All channels
   // =========================================================================
 
-  it('registers all 58 ChatDb channels', () => {
+  it('registers all 59 ChatDb channels', () => {
     disposer = registerChatDbIpc()
 
     const expectedChannels = [
@@ -170,6 +170,7 @@ describe('ChatDb IPC Registration', () => {
       IpcChannel.ChatDb_EmptyTrashTopics,
       IpcChannel.ChatDb_TransferTopicOwnership,
       IpcChannel.ChatDb_ResetAssistantTopics,
+      IpcChannel.ChatDb_EnsureAssistantTopics,
       // S6.1: windowed reads
       IpcChannel.ChatDb_FetchMessagesWindow,
       // S6.2b R-05: authoritative answer-group READ
@@ -210,11 +211,11 @@ describe('ChatDb IPC Registration', () => {
 
   it('disposer removes all handlers', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     disposer()
     expect(handlers.size).toBe(0)
-    expect(mockRemoveHandler).toHaveBeenCalledTimes(58)
+    expect(mockRemoveHandler).toHaveBeenCalledTimes(59)
   })
 
   // =========================================================================
@@ -801,6 +802,113 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
+  // ensure-assistant-topics — typed capability door
+  //
+  // Exact contract guards are covered direct at the shared contract
+  // (ensureAssistantTopicsContracts.test.ts) and the atomic semantics at the
+  // aggregate (ensureAssistantTopics.test.ts). Here proves the IPC boundary:
+  // contract validation before dispatch, exact arg mapping
+  // (assistantId, candidateTopicId, candidateName ?? null), backend failure
+  // surfacing, and the actual success wire.
+  // =========================================================================
+
+  it('ensure-assistant-topics rejects invalid requests at the IPC boundary', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_EnsureAssistantTopics)!
+    // Missing assistantId → contract rejects before dispatch.
+    const missingAssistant = await handler({}, { candidateTopicId: 't-c' } as any)
+    expect(missingAssistant.ok).toBe(false)
+    expect(missingAssistant.error.code).toBe('VALIDATION_ERROR')
+
+    // Missing candidateTopicId → contract rejects before dispatch.
+    const missingCandidate = await handler({}, { assistantId: 'a-1' } as any)
+    expect(missingCandidate.ok).toBe(false)
+    expect(missingCandidate.error.code).toBe('VALIDATION_ERROR')
+
+    // Unknown key → validation error.
+    const unknown = await handler({}, { assistantId: 'a-1', candidateTopicId: 't-c', unknown: 1 } as any)
+    expect(unknown.ok).toBe(false)
+    expect(unknown.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('ensure-assistant-topics accepts a valid request at the IPC boundary', async () => {
+    disposer = registerChatDbIpc()
+
+    const handler = handlers.get(IpcChannel.ChatDb_EnsureAssistantTopics)!
+    const minimal = await handler({}, { assistantId: 'a-1', candidateTopicId: 't-c' })
+    // Validation passes; DB is not initialised → UNAVAILABLE (not VALIDATION_ERROR).
+    expect(minimal.ok).toBe(false)
+    expect(minimal.error.code).toBe('UNAVAILABLE')
+
+    const named = await handler({}, { assistantId: 'a-1', candidateTopicId: 't-c', candidateName: 'Default' })
+    expect(named.ok).toBe(false)
+    expect(named.error.code).toBe('UNAVAILABLE')
+  })
+
+  it('ensure-assistant-topics maps (assistantId, candidateTopicId, candidateName) to aggregate and surfaces backend failure', async () => {
+    const { ChatDbAggregateService } = await import('../ChatDbAggregateService')
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue({} as any)
+    mockGetSqlite.mockReturnValue({} as any)
+    const spy = vi.spyOn(ChatDbAggregateService.prototype, 'ensureAssistantTopics')
+    try {
+      spy.mockReturnValueOnce({
+        ok: false as const,
+        error: { code: 'CONFLICT', message: 'candidate topic t-c is owned by another assistant', retryable: false }
+      } as any)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_EnsureAssistantTopics)!
+      const result = await handler({}, { assistantId: 'a-1', candidateTopicId: 't-c', candidateName: 'Default' })
+
+      expect(spy).toHaveBeenCalledWith('a-1', 't-c', 'Default')
+      expect(result.ok).toBe(false)
+      expect(result.error.code).toBe('CONFLICT')
+    } finally {
+      spy.mockRestore()
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+
+  it('ensure-assistant-topics passes null candidateName when absent and returns the actual wire on success', async () => {
+    const { ChatDbAggregateService } = await import('../ChatDbAggregateService')
+    const { validateChatDbResult } = await import('@shared/chatDb')
+    mockIsInitialised.mockReturnValue(true)
+    mockGetDatabase.mockReturnValue({} as any)
+    mockGetSqlite.mockReturnValue({} as any)
+    const spy = vi.spyOn(ChatDbAggregateService.prototype, 'ensureAssistantTopics')
+    try {
+      const wire = {
+        id: 't-c',
+        assistantId: 'a-1',
+        name: 'Default',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      }
+      spy.mockReturnValueOnce({ ok: true as const, value: { topics: [wire], created: true } } as any)
+      disposer = registerChatDbIpc()
+
+      const handler = handlers.get(IpcChannel.ChatDb_EnsureAssistantTopics)!
+      const result = await handler({}, { assistantId: 'a-1', candidateTopicId: 't-c' })
+
+      expect(spy).toHaveBeenCalledWith('a-1', 't-c', null)
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.value.topics.map((t: { id: string }) => t.id)).toEqual(['t-c'])
+        expect(result.value.created).toBe(true)
+        expect(() => validateChatDbResult('chatdb:ensure-assistant-topics', result)).not.toThrow()
+      }
+    } finally {
+      spy.mockRestore()
+      mockIsInitialised.mockReturnValue(false)
+      mockGetDatabase.mockReset()
+      mockGetSqlite.mockReset()
+    }
+  })
+  // =========================================================================
   // Segment no-color IPC regression (STORAGE_ERROR root fix)
   //
   // A legal no-color segment must cross the full IPC path
@@ -978,7 +1086,7 @@ describe('ChatDb IPC Registration', () => {
   it('uses ipcMain.handle for registration', () => {
     disposer = registerChatDbIpc()
 
-    expect(mockHandle).toHaveBeenCalledTimes(58)
+    expect(mockHandle).toHaveBeenCalledTimes(59)
     for (const call of mockHandle.mock.calls) {
       expect(typeof call[0]).toBe('string')
       expect(typeof call[1]).toBe('function')
@@ -1054,19 +1162,19 @@ describe('ChatDb IPC Registration', () => {
   })
 
   // =========================================================================
-  // All 58 commands preserve 58-registration invariant
+  // All 59 commands preserve 59-registration invariant
   // =========================================================================
 
-  it('preserves exactly 58 registrations after multiple calls', () => {
+  it('preserves exactly 59 registrations after multiple calls', () => {
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // Call disposer, re-register
     disposer()
     expect(handlers.size).toBe(0)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
   })
 
   // =========================================================================
@@ -1075,15 +1183,15 @@ describe('ChatDb IPC Registration', () => {
 
   it('re-registration disposes prior handlers before installing new ones', () => {
     const disposer1 = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // Register again without calling disposer1 — should auto-dispose
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // disposer1 is now stale — calling it should be a no-op
     disposer1()
-    expect(handlers.size).toBe(58) // still 57
+    expect(handlers.size).toBe(59) // still 57
 
     // The current disposer works
     disposer()
@@ -1095,32 +1203,32 @@ describe('ChatDb IPC Registration', () => {
 
     // Re-register — disposer1 becomes stale
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // Stale disposer1 is a no-op
     disposer1()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // Active disposer still works
     disposer()
     expect(handlers.size).toBe(0)
   })
 
-  it('three sequential registrations produce exactly 58 handlers each time', () => {
+  it('three sequential registrations produce exactly 59 handlers each time', () => {
     const d1 = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     const d2 = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     disposer = registerChatDbIpc()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // Stale discarders are no-ops
     d1()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
     d2()
-    expect(handlers.size).toBe(58)
+    expect(handlers.size).toBe(59)
 
     // Active disposer works
     disposer()

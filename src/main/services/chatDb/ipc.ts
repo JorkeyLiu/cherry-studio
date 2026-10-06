@@ -41,6 +41,7 @@ import type {
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
+  EnsureAssistantTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
@@ -115,6 +116,7 @@ const logger = loggerService.withContext('ChatDbIpc')
  */
 const TX_OWNED_SYNC_CHANNELS: ReadonlySet<string> = new Set<string>([
   IpcChannel.ChatDb_EnsureTopic,
+  IpcChannel.ChatDb_EnsureAssistantTopics,
   IpcChannel.ChatDb_AppendMessage,
   IpcChannel.ChatDb_UpdateMessage,
   IpcChannel.ChatDb_UpdateMessageAndBlocks,
@@ -695,6 +697,10 @@ export function registerChatDbIpc(): () => void {
 
   handleCommand(IpcChannel.ChatDb_ResetAssistantTopics, (agg, req: ResetAssistantTopicsRequest) => {
     return agg.resetAssistantTopics(req.assistantId, req.replacementTopicId)
+  })
+
+  handleCommand(IpcChannel.ChatDb_EnsureAssistantTopics, (agg, req: EnsureAssistantTopicsRequest) => {
+    return agg.ensureAssistantTopics(req.assistantId, req.candidateTopicId, req.candidateName ?? null)
   })
 
   logger.info(`Registered ${handlers.length} ChatDb IPC handlers (registration #${registrationId})`)

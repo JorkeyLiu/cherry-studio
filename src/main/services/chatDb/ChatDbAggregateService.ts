@@ -27,6 +27,7 @@ import type {
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
   EmptyTrashTopicsResponse,
+  EnsureAssistantTopicsResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -7167,6 +7168,107 @@ export class ChatDbAggregateService {
 
       return result
     }, `resetAssistantTopics(${assistantId})`)
+  }
+
+  /**
+   * Atomic find-or-create for one ordinary assistant (application integrity).
+   *
+   * ONE root SQLite transaction: read ALL LIVE topics (deleted_at IS NULL)
+   * for `assistantId` in (createdAt, id) order. Any live row → complete
+   * TopicWire list, no mutation, no sync capture, no stale overwrite.
+   * No live row → create ONE default topic from the candidate id + name
+   * (Main owns timestamps) with the same-Tx topic upsert + empty parent
+   * order-frame intent as `ensureTopic`, then commit-notify.
+   *
+   * Fail-closed: a candidate id hitting another assistant's row or any
+   * soft-deleted row never resurrects/overwrites — the call fails with no
+   * write. Two callers with different candidates serialize: the second sees
+   * the first's committed row and returns it instead of a second row.
+   * Branches are independent and never listed/created here (no fake root).
+   */
+  ensureAssistantTopics(
+    assistantId: string,
+    candidateTopicId: string,
+    candidateName?: string | null
+  ): ChatDbResult<EnsureAssistantTopicsResponse> {
+    return wrapResult(() => {
+      if (typeof assistantId !== 'string' || assistantId.length === 0) {
+        throw new ChatDbValidationError('assistantId must be a non-empty string')
+      }
+      if (typeof candidateTopicId !== 'string' || candidateTopicId.length === 0) {
+        throw new ChatDbValidationError('candidateTopicId must be a non-empty string')
+      }
+      if (candidateName !== undefined && candidateName !== null) {
+        if (typeof candidateName !== 'string' || candidateName.length === 0) {
+          throw new ChatDbValidationError('candidateName must be a non-empty string or null')
+        }
+      }
+      const ctx = this.syncCtx('ensureAssistantTopics')
+      let notify = false
+      let result: EnsureAssistantTopicsResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const live = repos.topics.listLiveByAssistant(assistantId)
+          if (live.length > 0) {
+            return {
+              topics: live.map((t) => topicToWireFull(t) as unknown as TopicWire),
+              created: false
+            }
+          }
+          const existing = repos.topics.getById(candidateTopicId)
+          if (existing.found) {
+            if (existing.data.deletedAt !== null && existing.data.deletedAt !== undefined) {
+              throw new ChatDbValidationError(
+                `candidate topic ${candidateTopicId} is soft-deleted and cannot be reused`
+              )
+            }
+            if ((existing.data.assistantId ?? null) !== assistantId) {
+              throw new ChatDbConflictError(`candidate topic ${candidateTopicId} is owned by another assistant`)
+            }
+            return {
+              topics: [topicToWireFull(existing.data) as unknown as TopicWire],
+              created: false
+            }
+          }
+          const now = new Date().toISOString()
+          const createdRow = repos.topics.create({
+            id: candidateTopicId,
+            assistantId,
+            name: candidateName ?? null,
+            createdAt: now,
+            updatedAt: now,
+            deletedAt: null,
+            overflow: {}
+          })
+          if (ctx) {
+            syncService.enqueueUpsertInTx(
+              tx as unknown as SyncTxExecutor,
+              'topic',
+              candidateTopicId,
+              this.syncTopicPayload(createdRow),
+              ctx.ts,
+              ctx.deviceId
+            )
+            notify = true
+            syncService.refreshTopicMessageFrameAndEnqueueInTx(
+              tx as unknown as SyncTxExecutor,
+              candidateTopicId,
+              ctx.deviceId
+            )
+          }
+          return {
+            topics: [topicToWireFull(createdRow) as unknown as TopicWire],
+            created: true
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('ensureAssistantTopics', ctx, e)
+        throw e
+      }
+      if (notify) syncService.notifyEnqueued()
+      return result
+    }, `ensureAssistantTopics(${assistantId})`)
   }
 
   // =========================================================================

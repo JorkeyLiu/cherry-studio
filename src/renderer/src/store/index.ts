@@ -767,6 +767,39 @@ async function finalizeFreshChatBootstrapForBoot(applied: boolean): Promise<void
       await ensureOrdinaryTopicOwnership(target.id, target.assistantId, target.name ?? null)
     }
   })
+  // Application-layer ordinary-assistant integrity (user-authorized repair):
+  // after the import outcome is final and BEFORE ImportProjectionGate READY,
+  // repair every really-empty ordinary assistant via the atomic Main
+  // find-or-create, then flush the renderer config projection so Chat first
+  // render never sees `topics: []` / `undefined.id`. Existing topics are
+  // preserved verbatim; failures keep the tree gated for retry (no fake
+  // Redux topics on genuine SQL failure).
+  const { ensureAllEmptyAssistantsTopics } = await import('../services/assistantTopicIntegrity')
+  const { dbService } = await import('../services/db')
+  const { addTopic } = await import('./assistants')
+  await ensureAllEmptyAssistantsTopics({
+    reader: {
+      findAssistant: (assistantId: string) =>
+        (store.getState().assistants?.assistants ?? []).find((a) => a.id === assistantId),
+      listAssistants: () => store.getState().assistants?.assistants ?? []
+    },
+    ensure: (assistantId, candidateTopicId, candidateName) =>
+      dbService.ensureAssistantTopics(assistantId, candidateTopicId, candidateName),
+    dispatchAddTopic: (assistantId, topic) => {
+      store.dispatch(addTopic({ assistantId, topic: topic as never }))
+    },
+    // Scoped boot context: this finalizer runs only after the import apply
+    // promise settled verified (no-pending import) and the fresh bootstrap
+    // finished, so the projection outcome is loaded and known — the
+    // capability-loaded state, not the UI READY state. The global
+    // `isImportProjectionReady()` gate is still pending here by construction
+    // (finalize runs before READY settles), so the default guard would
+    // no-op the entire sweep. This override applies ONLY to this finalizer;
+    // runtime/Home callers keep the default pending-ignore guard. READY still
+    // settles only after this sweep + flush complete — never early.
+    importReady: () => true
+  })
+  await handleSaveData()
 }
 
 const store = configureStore({

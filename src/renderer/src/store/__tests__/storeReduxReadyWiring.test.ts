@@ -25,9 +25,10 @@
 import { IpcChannel } from '@shared/IpcChannel'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockApplyProjection, mockEnsureOrdinaryTopicOwnership } = vi.hoisted(() => ({
+const { mockApplyProjection, mockEnsureOrdinaryTopicOwnership, mockEnsureAllEmpty } = vi.hoisted(() => ({
   mockApplyProjection: vi.fn(),
-  mockEnsureOrdinaryTopicOwnership: vi.fn()
+  mockEnsureOrdinaryTopicOwnership: vi.fn(),
+  mockEnsureAllEmpty: vi.fn()
 }))
 
 // The store module statically imports `applyPendingImportProjection` from
@@ -43,6 +44,15 @@ vi.mock('../../services/importProjection', () => ({
 // the real IPC bridge; each test controls ensure success/failure.
 vi.mock('../../services/db/topicTrashLifecycle', () => ({
   ensureOrdinaryTopicOwnership: (...args: unknown[]) => mockEnsureOrdinaryTopicOwnership(...args)
+}))
+
+// The boot finalize also sweeps really-empty ordinary assistants through the
+// application integrity normalizer (dynamic import). Mock it with the same
+// controllable pattern: default is a no-op repair so pre-existing tests keep
+// their production meaning; new wiring tests below control its outcome.
+vi.mock('../../services/assistantTopicIntegrity', () => ({
+  ensureAssistantTopicsIntegrity: vi.fn(),
+  ensureAllEmptyAssistantsTopics: (...args: unknown[]) => mockEnsureAllEmpty(...args)
 }))
 
 const EXISTING_PERSIST_SENTINEL = '{"_persist":{"version":225,"rehydrated":true}}'
@@ -96,6 +106,8 @@ describe('store/index.ts persistStore callback wiring (LOCK-003)', () => {
     mockApplyProjection.mockReset()
     mockEnsureOrdinaryTopicOwnership.mockReset()
     mockEnsureOrdinaryTopicOwnership.mockResolvedValue(undefined)
+    mockEnsureAllEmpty.mockReset()
+    mockEnsureAllEmpty.mockResolvedValue({ repaired: [] })
     ;(window.api as { getAppInfo?: unknown }).getAppInfo = vi.fn().mockResolvedValue({ notesPath: '/mock/notes' })
     // The renderer setup stubs `window.electron.ipcRenderer.invoke`; spy on
     // the same fn so the real callback's invoke is observable per test.
@@ -274,5 +286,98 @@ describe('store/index.ts persistStore callback wiring (LOCK-003)', () => {
     })
     expect(mockEnsureOrdinaryTopicOwnership).toHaveBeenCalled()
     expect(localStorage.getItem('cherry-chat:fresh-bootstrap-pending')).toBeNull()
+  })
+
+  it('boot integrity runs after fresh ensure and before READY with notify first', async () => {
+    // Fresh profile, verified no-pending: the finalize must run the fresh
+    // ensure first, then the integrity sweep, then flush — READY settles only
+    // after all three, while ReduxStoreReady fired immediately at rehydration.
+    let resolveIntegrity!: (value: { repaired: string[] }) => void
+    mockApplyProjection.mockResolvedValue(false)
+    mockEnsureAllEmpty.mockImplementation(
+      () =>
+        new Promise<{ repaired: string[] }>((resolve) => {
+          resolveIntegrity = resolve
+        })
+    )
+    trackStoreModule(await import('../index'))
+
+    // Notify fires while both fresh ensure AND integrity are still pending.
+    await vi.waitFor(() => {
+      expect(invokeSpy).toHaveBeenCalledWith(IpcChannel.ReduxStoreReady)
+    })
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => {
+      expect(mockEnsureOrdinaryTopicOwnership).toHaveBeenCalled()
+    })
+    await vi.waitFor(() => {
+      expect(mockEnsureAllEmpty).toHaveBeenCalledTimes(1)
+    })
+    // Fresh ensure precedes the integrity sweep in the same finalize.
+    expect(mockEnsureOrdinaryTopicOwnership.mock.invocationCallOrder[0]).toBeLessThan(
+      mockEnsureAllEmpty.mock.invocationCallOrder[0]
+    )
+    // The gate stays pending until the integrity (+ flush) completes.
+    const { getImportProjectionReadinessState } = await import('../../services/importProjectionReadiness')
+    expect(getImportProjectionReadinessState()).toBe('pending')
+
+    resolveIntegrity({ repaired: ['default'] })
+    await vi.waitFor(() => {
+      expect(getImportProjectionReadinessState()).toBe('ready')
+    })
+    // No re-notification on settle; marker cleared by the fresh finalize.
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('cherry-chat:fresh-bootstrap-pending')).toBeNull()
+  })
+
+  it('catastrophic integrity failure keeps the tree gated with notify already fired and no fake topics', async () => {
+    mockApplyProjection.mockResolvedValue(false)
+    mockEnsureAllEmpty.mockRejectedValue(new Error('integrity IPC unavailable'))
+    const storeModule = trackStoreModule(await import('../index'))
+
+    const { getImportProjectionReadinessState } = await import('../../services/importProjectionReadiness')
+    await vi.waitFor(() => {
+      expect(getImportProjectionReadinessState()).toBe('failed')
+    })
+    // Notify still fired independently at rehydration (LOCK-003).
+    expect(invokeSpy).toHaveBeenCalledWith(IpcChannel.ReduxStoreReady)
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
+    // No fake Redux topics were written by the failed sweep: the fresh
+    // default assistant keeps exactly its single initial topic.
+    const assistants = storeModule.default.getState().assistants?.assistants ?? []
+    const fresh = assistants.find((a: { id: string }) => a.id === 'default')
+    expect(fresh?.topics).toHaveLength(1)
+  })
+
+  it('integrity retry reuses the same assistant ids without recreating', async () => {
+    // First boot fails catastrophically, then the in-session retry reruns the
+    // captured apply → finalize path and succeeds.
+    mockApplyProjection.mockResolvedValue(false)
+    mockEnsureAllEmpty.mockRejectedValue(new Error('integrity IPC unavailable'))
+    trackStoreModule(await import('../index'))
+    const { getImportProjectionReadinessState, retryImportProjectionReadiness } = await import(
+      '../../services/importProjectionReadiness'
+    )
+    await vi.waitFor(() => {
+      expect(getImportProjectionReadinessState()).toBe('failed')
+    })
+
+    const seenIds: string[][] = []
+    mockEnsureAllEmpty.mockImplementation((deps: { reader: { listAssistants: () => Array<{ id: string }> } }) => {
+      seenIds.push(deps.reader.listAssistants().map((a) => a.id))
+      return Promise.resolve({ repaired: [] })
+    })
+    const outcome = await retryImportProjectionReadiness()
+    expect(outcome).toBe('ready')
+    await vi.waitFor(() => {
+      expect(getImportProjectionReadinessState()).toBe('ready')
+    })
+    // Two finalize runs total (failed boot + retry), same assistant id tuple —
+    // never a recreated assistant, never a second topic (Main dedup is
+    // unit-proven; the wiring must not invent new identities).
+    expect(mockEnsureAllEmpty).toHaveBeenCalledTimes(2)
+    expect(seenIds).toHaveLength(1)
+    expect(seenIds[0]).toContain('default')
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
   })
 })

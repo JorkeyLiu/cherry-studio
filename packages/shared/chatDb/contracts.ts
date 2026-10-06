@@ -29,6 +29,7 @@ import type {
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
+  EnsureAssistantTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
@@ -1494,6 +1495,81 @@ const transferTopicOwnershipContract: ChatDbContract = {
     validateNonEmptyString(req.assistantId, 'request.assistantId')
   },
   validateResult: voidResult('chatdb:transfer-topic-ownership')
+}
+
+const ENSURE_ASSISTANT_TOPICS_VALUE_KEYS = new Set(['topics', 'created'])
+
+const ensureAssistantTopicsContract: ChatDbContract = {
+  allowedKeys: keySet('assistantId', 'candidateTopicId', 'candidateName'),
+  validate(value: unknown): void {
+    validateRequest(value, ensureAssistantTopicsContract.allowedKeys)
+    const req = value as EnsureAssistantTopicsRequest
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+    validateNonEmptyString(req.candidateTopicId, 'request.candidateTopicId')
+    if (req.candidateName !== undefined && req.candidateName !== null) {
+      if (typeof req.candidateName !== 'string' || req.candidateName.length === 0) {
+        throw new ValidationError('request.candidateName', 'Expected a non-empty string or null')
+      }
+    }
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:ensure-assistant-topics')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:ensure-assistant-topics] Expected object with "topics" and "created"'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:ensure-assistant-topics] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!ENSURE_ASSISTANT_TOPICS_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:ensure-assistant-topics] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      if (!Array.isArray(v.topics)) {
+        throw new ValidationError('result.value.topics', '[chatdb:ensure-assistant-topics] Expected topics array')
+      }
+      if (typeof v.created !== 'boolean') {
+        throw new ValidationError('result.value.created', '[chatdb:ensure-assistant-topics] Expected boolean created')
+      }
+      const arr = v.topics as unknown[]
+      if (arr.length === 0) {
+        throw new ValidationError('result.value.topics', '[chatdb:ensure-assistant-topics] topics must not be empty')
+      }
+      const seen = new Set<string>()
+      for (let i = 0; i < arr.length; i++) {
+        const item = arr[i] as Record<string, unknown>
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          throw new ValidationError(
+            `result.value.topics[${i}]`,
+            '[chatdb:ensure-assistant-topics] Expected TopicWire object'
+          )
+        }
+        validateTopicWireValueFields(item, 'chatdb:ensure-assistant-topics')
+        const id = item.id as string
+        if (seen.has(id)) {
+          throw new ValidationError(
+            `result.value.topics[${i}].id`,
+            '[chatdb:ensure-assistant-topics] Duplicate topic id'
+          )
+        }
+        seen.add(id)
+      }
+    }
+  }
 }
 
 const resetAssistantTopicsContract: ChatDbContract = {
@@ -4557,6 +4633,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:empty-trash-topics': emptyTrashTopicsContract,
   'chatdb:transfer-topic-ownership': transferTopicOwnershipContract,
   'chatdb:reset-assistant-topics': resetAssistantTopicsContract,
+  'chatdb:ensure-assistant-topics': ensureAssistantTopicsContract,
   // S6.2c-1: branch by stable anchor (additive, keeps old clone path intact)
   'chatdb:branch-messages-to-topic': branchMessagesToTopicContract,
   // Topic-internal branches (local-only, no prefix cloning)

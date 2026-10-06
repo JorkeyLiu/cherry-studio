@@ -50,6 +50,8 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EmptyTrashTopicsResponse,
+  EnsureAssistantTopicsRequest,
+  EnsureAssistantTopicsResponse,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
@@ -224,6 +226,7 @@ export interface ChatDbApi {
     assistantId: string
     replacementTopicId: string
   }): Promise<ChatDbResult<ResetAssistantTopicsResponse>>
+  ensureAssistantTopics?(request: EnsureAssistantTopicsRequest): Promise<ChatDbResult<EnsureAssistantTopicsResponse>>
   // Phase 5.1B: compound mutations
   cloneMessagesToTopic(request: CloneMessagesToTopicRequest): Promise<ChatDbResult<CloneMessagesToTopicResponse>>
   resetMessagesForResend(request: ResetMessagesForResendRequest): Promise<ChatDbResult<ResetMessagesForResendResponse>>
@@ -946,6 +949,16 @@ export class SqliteMessageDataSource implements MessageDataSource {
       invalidateTopicsDeletion(result.deletedTopicIds)
     }
     return result
+  }
+
+  async ensureAssistantTopics(
+    assistantId: string,
+    candidateTopicId: string,
+    candidateName?: string | null
+  ): Promise<EnsureAssistantTopicsResponse> {
+    if (!this.api.ensureAssistantTopics) throw new Error('ensureAssistantTopics is unavailable')
+    const request: EnsureAssistantTopicsRequest = cloneForWire({ assistantId, candidateTopicId, candidateName })
+    return unwrap(await this.api.ensureAssistantTopics(request))
   }
 
   // ============ S6.2c-1: Branch by stable anchor (additive) ============

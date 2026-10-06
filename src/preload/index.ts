@@ -17,6 +17,7 @@ import type {
   DeleteMessagesWithSegmentsRequest,
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
+  EnsureAssistantTopicsRequest,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
@@ -784,6 +785,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_TransferTopicOwnership, request),
     resetAssistantTopics: (request: ResetAssistantTopicsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_ResetAssistantTopics, request),
+    ensureAssistantTopics: (request: EnsureAssistantTopicsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_EnsureAssistantTopics, request),
     // S6.2c-1: branch by stable anchor (additive, keeps old clone intact)
     branchMessagesToTopic: (request: BranchMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_BranchMessagesToTopic, request),

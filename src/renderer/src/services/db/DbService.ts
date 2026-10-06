@@ -259,6 +259,9 @@ class DbService implements MessageDataSource {
   resetAssistantTopics(assistantId: string, replacementTopicId: string) {
     return this.ordinarySource.resetAssistantTopics(assistantId, replacementTopicId)
   }
+  ensureAssistantTopics(assistantId: string, candidateTopicId: string, candidateName?: string | null) {
+    return this.ordinarySource.ensureAssistantTopics(assistantId, candidateTopicId, candidateName)
+  }
   listSegments(topicId: string) {
     return this.ordinarySource.listSegments(topicId)
   }

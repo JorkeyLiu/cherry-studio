@@ -62,9 +62,10 @@ describe('chatDbContracts', () => {
     'chatdb:search-messages',
     // Phase 5.2B: atomic assistant empty-trash
     'chatdb:empty-trash-topics',
-    // Phase 5.3: ownership transfer + assistant reset
+    // Phase 5.3: ownership transfer + assistant reset + assistant integrity
     'chatdb:transfer-topic-ownership',
     'chatdb:reset-assistant-topics',
+    'chatdb:ensure-assistant-topics',
     // S6.1: windowed reads
     'chatdb:fetch-messages-window',
     // S6.2b R-05: authoritative answer-group READ
@@ -3971,9 +3972,10 @@ describe('coverage consistency', () => {
     'chatdb:purge-expired-topics',
     // Phase 5.2B: atomic assistant empty-trash
     'chatdb:empty-trash-topics',
-    // Phase 5.3: ownership transfer + assistant reset
+    // Phase 5.3: ownership transfer + assistant reset + assistant integrity
     'chatdb:transfer-topic-ownership',
     'chatdb:reset-assistant-topics',
+    'chatdb:ensure-assistant-topics',
     // Phase 5.1B: compound mutations
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',

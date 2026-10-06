@@ -55,6 +55,22 @@ export class TopicsRepository {
     return row !== undefined
   }
 
+  /**
+   * List ALL LIVE topics for one assistant in deterministic nav order.
+   * Ordinary roots only (`topics` rows with deleted_at IS NULL); branch rows
+   * live in `topic_branches` and are never listed here. Ordered by
+   * (createdAt ASC, id ASC) for stable nav recovery.
+   */
+  listLiveByAssistant(assistantId: string): TopicData[] {
+    const rows = this.db
+      .select()
+      .from(topics)
+      .where(and(eq(topics.assistantId, assistantId), isNull(topics.deletedAt)))
+      .orderBy(asc(topics.createdAt), asc(topics.id))
+      .all()
+    return rows.map((r) => fromDrizzleResult<TopicData>(r, 'topics', (r as any).id))
+  }
+
   count(options?: { assistantId?: string; excludeDeleted?: boolean }): number {
     const conditions: ReturnType<typeof eq>[] = []
     if (options?.assistantId) conditions.push(eq(topics.assistantId, options.assistantId))

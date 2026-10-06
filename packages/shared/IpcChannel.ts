@@ -377,6 +377,7 @@ export enum IpcChannel {
   ChatDb_EmptyTrashTopics = 'chatdb:empty-trash-topics',
   ChatDb_TransferTopicOwnership = 'chatdb:transfer-topic-ownership',
   ChatDb_ResetAssistantTopics = 'chatdb:reset-assistant-topics',
+  ChatDb_EnsureAssistantTopics = 'chatdb:ensure-assistant-topics',
 
   // S6.2c-1 — Main-authoritative branch by stable anchor
   ChatDb_BranchMessagesToTopic = 'chatdb:branch-messages-to-topic',

@@ -1113,6 +1113,29 @@ export interface ResetAssistantTopicsResponse {
   deletedTopicIds: string[]
 }
 
+/**
+ * @see IpcChannel.ChatDb_EnsureAssistantTopics
+ *
+ * Atomic find-or-create for one ordinary assistant: Main reads ALL LIVE
+ * topics (deleted_at IS NULL) for `assistantId` in ONE SQLite transaction.
+ * Any live row → returned verbatim, no mutation. No live row → ONE default
+ * topic created from the renderer-supplied candidate id + localized name
+ * (Main owns timestamps). Candidate collisions fail closed.
+ */
+export interface EnsureAssistantTopicsRequest {
+  assistantId: string
+  candidateTopicId: string
+  candidateName?: string | null
+}
+
+/** @see IpcChannel.ChatDb_EnsureAssistantTopics */
+export interface EnsureAssistantTopicsResponse {
+  /** ALL LIVE topics in (createdAt, id) order — complete nav recovery. */
+  topics: TopicWire[]
+  /** True only when this call created the single default topic. */
+  created: boolean
+}
+
 // ---------------------------------------------------------------------------
 // Branch by stable anchor DTOs (S6.2c-1)
 // ---------------------------------------------------------------------------
@@ -1730,6 +1753,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     response: TransferTopicOwnershipResponse
   }
   'chatdb:reset-assistant-topics': { request: ResetAssistantTopicsRequest; response: ResetAssistantTopicsResponse }
+  'chatdb:ensure-assistant-topics': {
+    request: EnsureAssistantTopicsRequest
+    response: EnsureAssistantTopicsResponse
+  }
   // S6.2c-1: Main-authoritative branch by stable anchor
   'chatdb:branch-messages-to-topic': {
     request: BranchMessagesToTopicRequest

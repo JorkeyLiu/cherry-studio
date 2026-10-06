@@ -75,6 +75,7 @@ import {
   test,
   verifyChatDbViaElectronWithRetry
 } from '../../fixtures/electron.fixture'
+import { findChatRequestsAfter } from '../../fixtures/mock-openai-server'
 import { closeElectronWithExactCleanup } from '../../utils/electron-cleanup'
 import {
   createDisposableSeedZip,
@@ -394,6 +395,13 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       assertImportedNavigation(nav, PROJECTION_TOPICS.visible.updatedAt)
       await assertImportedNavigationUI(page)
 
+      // Application integrity: the repaired second-assistant topic owns a
+      // Main SQLite row (typed API), switches without TypeError into a ready
+      // Chat (no central "new topic" CTA), and leaves the first chat intact.
+      const repairedTopicId = nav.assistants[1].topics[0]!.id
+      await assertRepairedTopicIntegrity(page, repairedTopicId)
+      await openRepairedSecondTopic(page, repairedTopicId)
+
       // Open the imported topic and see the historical content (LOCK-UI4).
       await openImportedTopic(page)
       await expect(messageContainer(page, TARGET_MESSAGE_ID)).toBeVisible({ timeout: 30000 })
@@ -416,9 +424,29 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       // The imported topic has 0 assistant messages before the send.
       await waitForAssistantResponseComplete(page, SOURCE_IDS.topic, 0)
 
-      // LOCK-TF2: the assistant completion mutates the topic's updatedAt to a
-      // fresh ISO timestamp (updateTopicUpdatedAt). Capture the settled
-      // post-send value and verify it advanced past the source projection.
+      // Ordinary app auto-naming legitimately renames the topic after the
+      // intentional send (mock provider summary). Wait for that async rename
+      // to settle BEFORE capturing clocks, or the captured updatedAt predates
+      // the rename persist and the relaunch comparison races it.
+      await waitForTopicRenameSettled(page)
+      // Deterministic expectation from the SAME mock naming pipeline (not a
+      // hardcoded string): the mock echoes the naming request's last user
+      // content sliced to 100 chars. Must differ from the source name.
+      const expectedPostSendName = computeExpectedRenamedTopicName(preSendSequence)
+      const renamedNow = await readVisibleTopicName(page)
+      // Byte-exact: the helper replicates the full production pipeline
+      // (mock echo + topic-name sanitizer), so no normalization is needed.
+      expect(renamedNow, 'Redux topic name must equal the deterministic mock naming result').toBe(expectedPostSendName)
+      expect(renamedNow, 'the settled rename must be a real name').toBeTruthy()
+      // Byte-exact anchor from here on: persistence and relaunch compare the
+      // OBSERVED wire value (identical string the Main row stores), while the
+      // assertion above already proved its mock-pipeline provenance.
+      const settledPostSendName = renamedNow as string
+
+      // LOCK-TF2: the assistant completion (+ settled rename) mutates the
+      // topic's updatedAt to a fresh ISO timestamp (updateTopicUpdatedAt).
+      // Capture the settled post-send value and verify it advanced past the
+      // source projection.
       const postSendUpdatedAt = await captureSettledTopicUpdatedAt(page)
       expect(postSendUpdatedAt, 'post-send topic.updatedAt must be defined').toBeTruthy()
       expect(new Date(postSendUpdatedAt).toISOString(), 'post-send topic.updatedAt must be a valid ISO timestamp').toBe(
@@ -444,8 +472,14 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       expect(afterSend.assistantContents.some((c) => c.includes('[Mock mock-model]'))).toBe(true)
 
       // UI evidence: the new user message container and the assistant reply render.
+      // Scoped to the assistant message body: the reply text also surfaces in
+      // a `div[title]` control, so a global getByText is strict-mode ambiguous.
       await expect(messageContainer(page, afterSend.newUserMessageId)).toBeVisible()
-      await expect(page.getByText('[Mock mock-model] You said:', { exact: false })).toBeVisible()
+      await expect(
+        page
+          .locator('.message-assistant .message-content-container')
+          .getByText(`[Mock mock-model] You said: "${POST_IMPORT_MESSAGE}"`, { exact: false })
+      ).toBeVisible()
 
       // --- 8. Close the entire app + post-close SQLite evidence ---------------
       // LOCK-UI4: full app close (fixture-owned close + exact-token verify,
@@ -463,6 +497,9 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       await assertRetainedPreImportSnapshot(dataDir)
       // NEW: the post-import user + assistant messages persisted to SQLite.
       assertPostImportMessagesInSql(chatDbPath!, POST_IMPORT_MESSAGE)
+      // The deterministic rename persisted in Main (exact name; Main clock
+      // well-formed and advanced past the source timestamp).
+      assertRenamedTopicNameInSql(chatDbPath!, SOURCE_IDS.topic, settledPostSendName)
 
       // --- 9. Relaunch against the SAME disposable profile (LOCK-UI4) ---------
       relaunched = await relaunchSameProfile({ userDataDir, ownedTmpRoot, mockPort })
@@ -474,9 +511,19 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       const navAfterRestart = await readImportedNavigation(relaunched.page)
       // LOCK-TF2: the SAME captured post-send updatedAt must rehydrate
       // unchanged after the full close/restart, while createdAt still equals
-      // the source projection exactly (LOCK-TF1).
-      assertImportedNavigation(navAfterRestart, postSendUpdatedAt)
-      await assertImportedNavigationUI(relaunched.page)
+      // the source projection exactly (LOCK-TF1). The visible name is the
+      // deterministic post-send rename (ordinary auto-naming), not the
+      // source name — every other field stays exactly on the source.
+      assertImportedNavigation(navAfterRestart, postSendUpdatedAt, settledPostSendName)
+      await assertImportedNavigationUI(relaunched.page, settledPostSendName)
+      // Stable repair: the SAME repaired id survives the same-profile
+      // relaunch with no second row (count stays 1).
+      expect(
+        navAfterRestart.assistants[1].topics[0]!.id,
+        'repaired topic id must be stable across the same-profile relaunch'
+      ).toBe(repairedTopicId)
+      expect(navAfterRestart.assistants[1].topics, 'repaired count stays 1 after relaunch').toHaveLength(1)
+      await assertRepairedTopicIntegrity(relaunched.page, repairedTopicId)
 
       // Re-open the imported topic: historical AND new messages must remain.
       await openImportedTopic(relaunched.page)
@@ -502,6 +549,7 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       // The same DB is quiesced again — replacement + post-import rows intact.
       assertReplacementContents(chatDbPath!)
       assertPostImportMessagesInSql(chatDbPath!, POST_IMPORT_MESSAGE)
+      assertRenamedTopicNameInSql(chatDbPath!, SOURCE_IDS.topic, settledPostSendName)
     } catch (error) {
       bodyFailure = error
       throw error
@@ -545,6 +593,166 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       // LOCK-T1: cleanup failures must fail the test. seed.cleanup() throws on
       // unresolved owned resources, and every exact seed path is verified
       // absent afterwards.
+      if (seed) {
+        try {
+          await seed.cleanup()
+          for (const dir of [seed.workDir, seed.profileDir, seed.runtimeProfileDir]) {
+            if (fs.existsSync(dir)) {
+              cleanupErrors.push(`Seed dir still exists after cleanup: ${dir}`)
+            }
+          }
+          if (fs.existsSync(seed.zipPath)) {
+            cleanupErrors.push(`Seed ZIP still exists after cleanup: ${seed.zipPath}`)
+          }
+        } catch (err) {
+          cleanupErrors.push(`finally seed cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+      if (cleanupErrors.length > 0) {
+        const bodyNote = bodyFailure
+          ? ` (body also failed: ${bodyFailure instanceof Error ? bodyFailure.message : String(bodyFailure)})`
+          : ''
+        throw new Error(`E2E cleanup failed (${cleanupErrors.length} error(s)): ${cleanupErrors.join('; ')}${bodyNote}`)
+      }
+    }
+  })
+
+  test('genuine ZIP import repairs missing default topics without changing imported history', async ({
+    electronApp,
+    mainWindow,
+    userDataDir,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    // Focused repair proof (no send — never requires provider requests):
+    // a legal import whose source second assistant has zero live topics is
+    // automatically repaired to ONE new default topic; the imported history
+    // (visible topic id/name/timestamps/pinned, deleted drop, order) is
+    // unchanged; switching to the second assistant never throws; the Main
+    // row exists once and stays stable across a same-profile relaunch.
+    test.setTimeout(600000)
+    const page = mainWindow
+    const originalPidValue = electronApp.process().pid as number
+
+    let bodyFailure: unknown = null
+    const cleanupErrors: string[] = []
+    let seed: Awaited<ReturnType<typeof createDisposableSeedZip>> | null = null
+    let observer: Awaited<ReturnType<typeof observeImportStatuses>> | null = null
+    let relaunched: Awaited<ReturnType<typeof relaunchSameProfile>> | null = null
+
+    try {
+      await page.evaluate(() => {
+        ;(window as any).__e2eRepairMarker = true
+      })
+      seed = await createDisposableSeedZip(ownedTmpRoot)
+      // Source fidelity stays pure: 2 assistants, 2 topic records (one live,
+      // one deleted-only). The repair is applied-runtime only, never source.
+      expect(seed.evidence.projectionAssistantCount).toBe(2)
+      expect(seed.evidence.projectionTopicCount).toBe(2)
+
+      observer = await observeImportStatuses(page)
+      const startResult = await page.evaluate(
+        (zipPath) => (window as any).api.cherryImport.start(zipPath),
+        seed.zipPath
+      )
+      expect(startResult?.ok, `cherryImport.start failed: ${JSON.stringify(startResult)}`).toBe(true)
+      observer.setSessionId(startResult.sessionId as string)
+      const finalizing = await observer.waitForState('finalizing', 120000)
+      expect(finalizing.state).toBe('finalizing')
+
+      await page.waitForFunction(() => (window as any).__e2eRepairMarker !== true, { timeout: 120000 })
+      await waitForMainWindowReady(page)
+      await waitForImportedNavigationInRedux(page)
+      await observer.stop()
+      observer = null
+      expect(electronApp.process().pid).toBe(originalPidValue)
+
+      // Automatic ready Chat: no central "new topic" CTA blocks the tree.
+      await expect(page.locator('.topics-tab')).toBeVisible()
+      const nav = await readImportedNavigation(page)
+      assertImportedNavigation(nav, PROJECTION_TOPICS.visible.updatedAt)
+      const repairedTopicId = nav.assistants[1].topics[0]!.id
+      await assertRepairedTopicIntegrity(page, repairedTopicId)
+
+      // Switch to the second assistant: no TypeError, default name locale,
+      // ready Chat on the repaired topic.
+      await openRepairedSecondTopic(page, repairedTopicId)
+      const repairedName = await page.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const assistants = s.assistants?.assistants ?? []
+        for (const a of assistants) {
+          const t = (a.topics ?? []).find((x: { id: string }) => x.id === topicId)
+          if (t) return t.name ?? ''
+        }
+        return ''
+      }, repairedTopicId)
+      expect(repairedName, 'repaired topic must carry the localized default name').toBeTruthy()
+      expect(repairedName).not.toBe(PROJECTION_TOPICS.deleted.name)
+
+      // Existing first chat untouched: visible topic + historical message.
+      await openImportedTopic(page)
+      await expect(messageContainer(page, TARGET_MESSAGE_ID)).toBeVisible({ timeout: 30000 })
+      const historical = await readImportedMessages(page)
+      expect(historical.messageIds).toContain(TARGET_MESSAGE_ID)
+
+      // Same-profile relaunch: same repaired id, count still 1, no new row.
+      await closeElectronWithExactCleanup(userDataDir, {
+        close: () => electronApp.close(),
+        findExactProcesses: findProcessesByUserDataDir,
+        terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
+      })
+      await sleep(3000)
+      relaunched = await relaunchSameProfile({ userDataDir, ownedTmpRoot, mockPort })
+      await waitForMainWindowReady(relaunched.page)
+      await waitForImportedNavigationInRedux(relaunched.page)
+      const navAfter = await readImportedNavigation(relaunched.page)
+      assertImportedNavigation(navAfter, PROJECTION_TOPICS.visible.updatedAt)
+      expect(navAfter.assistants[1].topics[0]!.id, 'repaired id stable across relaunch').toBe(repairedTopicId)
+      expect(navAfter.assistants[1].topics, 'repaired count stays 1 after relaunch').toHaveLength(1)
+      await assertRepairedTopicIntegrity(relaunched.page, repairedTopicId)
+      await openRepairedSecondTopic(relaunched.page, repairedTopicId)
+
+      const toClose = relaunched
+      await closeElectronWithExactCleanup(userDataDir, {
+        close: () => toClose.app.close(),
+        findExactProcesses: findProcessesByUserDataDir,
+        terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
+      })
+      relaunched = null
+      await sleep(3000)
+    } catch (error) {
+      bodyFailure = error
+      throw error
+    } finally {
+      if (observer) {
+        try {
+          await observer.stop()
+        } catch {
+          // best-effort
+        }
+      }
+      if (relaunched) {
+        try {
+          await closeElectronWithExactCleanup(userDataDir, {
+            close: () => relaunched!.app.close(),
+            findExactProcesses: findProcessesByUserDataDir,
+            terminateExactProcesses: (profileDir) => terminateProcessesByUserDataDir(profileDir, null)
+          })
+        } catch (err) {
+          cleanupErrors.push(`relaunched app cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+      try {
+        const leftover = await terminateProcessesByUserDataDir(userDataDir, originalPidValue)
+        if (leftover.remainingPids.length > 0) {
+          cleanupErrors.push(`Processes remained after finally: ${leftover.remainingPids.join(', ')}`)
+        }
+        if (leftover.errors.length > 0) {
+          cleanupErrors.push(`Process cleanup errors: ${leftover.errors.join('; ')}`)
+        }
+      } catch (err) {
+        cleanupErrors.push(`finally process cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
       if (seed) {
         try {
           await seed.cleanup()
@@ -668,24 +876,51 @@ async function waitForMainWindowReady(page: import('@playwright/test').Page): Pr
 
 /**
  * Wait until the imported navigation is present in Redux: the first source
- * assistant (a-e2e-1) exists with the visible IDB-matched topic t-e2e-1.
- * This is the authoritative signal that the one-shot projection applied
- * (post-reload) or that rehydration restored the durably flushed state
- * (post-restart).
+ * assistant (a-e2e-1) exists with the visible IDB-matched topic t-e2e-1 AND
+ * the second assistant (a-e2e-2) has completed the user-authorized
+ * application integrity repair (exactly one live topic). This waits for the
+ * full applied-application completion (projection apply + boot integrity
+ * sweep + flush) — never just the raw projection — so callers never race a
+ * pre-flush/finalize snapshot. On timeout the error carries the observed
+ * navigation snapshot instead of a vague wait message.
  */
 async function waitForImportedNavigationInRedux(page: import('@playwright/test').Page): Promise<void> {
-  await page.waitForFunction(
-    ({ firstAssistantId, topicId }) => {
-      const s = (window as any).store?.getState()
-      const list = s?.assistants?.assistants
-      if (!Array.isArray(list) || list.length === 0) return false
-      const first = list.find((a: any) => a.id === firstAssistantId)
-      if (!first) return false
-      return Array.isArray(first.topics) && first.topics.some((t: any) => t.id === topicId)
-    },
-    { firstAssistantId: PROJECTION_ASSISTANTS.first.id, topicId: SOURCE_IDS.topic },
-    { timeout: 60000 }
-  )
+  try {
+    await page.waitForFunction(
+      ({ firstAssistantId, secondAssistantId, topicId }) => {
+        const s = (window as any).store?.getState()
+        const list = s?.assistants?.assistants
+        if (!Array.isArray(list) || list.length === 0) return false
+        const first = list.find((a: any) => a.id === firstAssistantId)
+        if (!first) return false
+        if (!Array.isArray(first.topics) || !first.topics.some((t: any) => t.id === topicId)) return false
+        const second = list.find((a: any) => a.id === secondAssistantId)
+        if (!second) return false
+        return Array.isArray(second.topics) && second.topics.length === 1
+      },
+      {
+        firstAssistantId: PROJECTION_ASSISTANTS.first.id,
+        secondAssistantId: PROJECTION_ASSISTANTS.second.id,
+        topicId: SOURCE_IDS.topic
+      },
+      { timeout: 120000 }
+    )
+  } catch (error) {
+    const snapshot = await page
+      .evaluate(() => {
+        const s = (window as any).store?.getState()
+        const list = s?.assistants?.assistants ?? []
+        return list.map((a: any) => ({
+          id: a?.id,
+          topics: Array.isArray(a?.topics) ? a.topics.map((t: any) => t?.id) : a?.topics
+        }))
+      })
+      .catch(() => 'unreadable')
+    throw new Error(
+      `waitForImportedNavigationInRedux timed out waiting for applied-application integrity ` +
+        `(first topic present + second assistant repaired to 1 topic); observed: ${JSON.stringify(snapshot)}`
+    )
+  }
 }
 
 interface NavigationSnapshot {
@@ -741,21 +976,59 @@ async function readImportedNavigation(page: import('@playwright/test').Page): Pr
  * dropped; no recovered shell for this fixture (the IDB topic matches LS
  * metadata, so recoveredTopicIds is empty).
  *
+ * Application integrity (user-authorized repair): the source projection
+ * carries the second assistant with zero live topics (pure source fidelity —
+ * `projectionTopicCount` stays 2 and the LS-only deleted id stays dropped).
+ * The applied runtime MUST repair it to exactly ONE new default topic whose
+ * id differs from every source/deleted id. Timestamps/ordering of the
+ * imported visible topic stay exactly on the source projection (LOCK-TF1).
+ *
  * The visible topic's updatedAt is parameterized: call with the source
  * projection updatedAt immediately after import (LOCK-TF1 — exact source
  * contract before any send), and with the captured post-send updatedAt after
  * a same-profile restart (LOCK-TF2 — the legitimate mutation must rehydrate
  * unchanged). createdAt is ALWAYS asserted exactly against the source
  * projection.
+ *
+ * The visible topic's name is likewise parameterized: the source projection
+ * name ('Seed Topic') holds before any send (source fidelity), while after
+ * the intentional post-import send the ordinary app auto-naming legitimately
+ * renames it via the mock provider — callers pass the deterministic
+ * post-send name computed from the mock naming request (see
+ * `computeExpectedRenamedTopicName`). All other metadata (id, owner,
+ * pinned, flags, createdAt, deletedAt) stays exactly on the source.
  */
-function assertImportedNavigation(nav: NavigationSnapshot, expectedUpdatedAt: string): void {
+function assertImportedNavigation(
+  nav: NavigationSnapshot,
+  expectedUpdatedAt: string,
+  expectedVisibleName: string = PROJECTION_TOPICS.visible.name
+): void {
   expect(
     nav.assistants.map((a) => a.id),
     'imported assistant order must be source order (LOCK-E4)'
   ).toEqual([PROJECTION_ASSISTANTS.first.id, PROJECTION_ASSISTANTS.second.id])
   expect(nav.assistants[0].name).toBe(PROJECTION_ASSISTANTS.first.name)
   expect(nav.assistants[1].name).toBe(PROJECTION_ASSISTANTS.second.name)
-  expect(nav.assistants[1].topics, 'the LS-only deleted topic must be dropped (LOCK-PROD-3)').toEqual([])
+  // Source fidelity: the LS-only deleted topic never surfaces …
+  expect(nav.hasDeletedTopic, 'the LS-only deleted topic must not surface in navigation').toBe(false)
+  // … but the applied runtime repairs the second assistant to ONE new default
+  // topic (user-authorized integrity), never the deleted/source ids.
+  expect(
+    nav.assistants[1].topics,
+    'the second assistant must be repaired to exactly one new default topic'
+  ).toHaveLength(1)
+  const repaired = nav.assistants[1].topics[0]!
+  expect(repaired.id, 'repaired topic id must be a real id').toBeTruthy()
+  expect(
+    [SOURCE_IDS.topic, PROJECTION_TOPICS.deleted.id],
+    'repaired topic id must differ from every source/deleted id'
+  ).not.toContain(repaired.id)
+  expect(repaired.assistantId, 'repaired topic must belong to the second assistant').toBe(
+    PROJECTION_ASSISTANTS.second.id
+  )
+  expect(repaired.name, 'repaired topic must carry a default name').toBeTruthy()
+  expect(repaired.name).not.toBe(PROJECTION_TOPICS.deleted.name)
+  expect(repaired.deletedAt).toBeNull()
 
   const visibleTopic = nav.assistants[0].topics.find((t) => t.id === SOURCE_IDS.topic)
   expect(visibleTopic, `visible topic ${SOURCE_IDS.topic} must be present under the first assistant`).toBeTruthy()
@@ -763,19 +1036,21 @@ function assertImportedNavigation(nav: NavigationSnapshot, expectedUpdatedAt: st
     PROJECTION_ASSISTANTS.first.id
   )
   expect(visibleTopic!.assistantId).not.toBe(STALE_TOPIC_ASSISTANT_ID)
-  expect(visibleTopic!.name).toBe(PROJECTION_TOPICS.visible.name)
+  expect(visibleTopic!.name).toBe(expectedVisibleName)
   expect(visibleTopic!.pinned).toBe(PROJECTION_TOPICS.visible.pinned)
   expect(visibleTopic!.isNameManuallyEdited).toBe(PROJECTION_TOPICS.visible.isNameManuallyEdited)
   expect(visibleTopic!.createdAt).toBe(PROJECTION_TOPICS.visible.createdAt)
   expect(visibleTopic!.updatedAt).toBe(expectedUpdatedAt)
   expect(visibleTopic!.deletedAt).toBeNull()
 
-  expect(nav.hasDeletedTopic, 'the LS-only deleted topic must not surface in navigation').toBe(false)
   expect(nav.hasRecoveredShell, 'no recovered-conversations shell for this fixture (LOCK-PROD-4)').toBe(false)
 }
 
 /** Sidebar/topic UI presence assertions (LOCK-UI4: visible interactions). */
-async function assertImportedNavigationUI(page: import('@playwright/test').Page): Promise<void> {
+async function assertImportedNavigationUI(
+  page: import('@playwright/test').Page,
+  expectedVisibleName: string = PROJECTION_TOPICS.visible.name
+): Promise<void> {
   // LOCK-NAV: the assistant list panel always renders; no tab switching.
   await expect(page.locator('.assistants-tab')).toBeVisible()
   await expect(
@@ -791,7 +1066,7 @@ async function assertImportedNavigationUI(page: import('@playwright/test').Page)
   await expect(page.locator('.topics-tab')).toBeVisible()
   const item = topicItem(page, SOURCE_IDS.topic)
   await expect(item, 'the imported topic must be visible in the topic list').toBeVisible()
-  await expect(item, 'the imported topic must carry its projected name').toContainText(PROJECTION_TOPICS.visible.name)
+  await expect(item, 'the imported topic must carry its projected name').toContainText(expectedVisibleName)
   await expect(
     item.locator('.pin'),
     'the imported topic must render the pinned indicator (pinned metadata)'
@@ -828,6 +1103,68 @@ async function openImportedTopic(page: import('@playwright/test').Page): Promise
     SOURCE_IDS.topic,
     { timeout: 30000 }
   )
+}
+
+/**
+ * Main-owns-row verification for the repaired default topic (typed API):
+ * the row exists in SQLite and the runtime nav groups it under the second
+ * assistant. Count stability (exactly 1) is asserted by the callers via the
+ * Redux nav snapshot before/after relaunch.
+ */
+async function assertRepairedTopicIntegrity(
+  page: import('@playwright/test').Page,
+  repairedTopicId: string
+): Promise<void> {
+  const exists = await page.evaluate((topicId) => (window as any).api.chatDb.topicExists({ topicId }), repairedTopicId)
+  expect(exists?.ok, `repaired topicExists failed: ${JSON.stringify(exists)}`).toBe(true)
+  expect(exists?.value, `repaired topic ${repairedTopicId} must exist in Main SQLite`).toBe(true)
+  const owner = await page.evaluate((topicId: string) => {
+    const s = (window as any).store.getState()
+    const assistants = s.assistants?.assistants ?? []
+    for (const a of assistants) {
+      if ((a.topics ?? []).some((t: { id: string }) => t.id === topicId)) return a.id
+    }
+    return null
+  }, repairedTopicId)
+  expect(owner, 'repaired topic must stay grouped under the second assistant').toBe(PROJECTION_ASSISTANTS.second.id)
+}
+
+/**
+ * Switch to the repaired second assistant through the visible sidebar:
+ * no TypeError, no central "new topic" CTA — the repaired topic renders in
+ * the always-visible topics panel and Chat becomes ready on it.
+ */
+async function openRepairedSecondTopic(page: import('@playwright/test').Page, repairedTopicId: string): Promise<void> {
+  await expect(page.locator('.assistants-tab')).toBeVisible()
+  const assistantName = page
+    .locator('[class*="home-tabs"]')
+    .getByText(PROJECTION_ASSISTANTS.second.name, { exact: true })
+    .first()
+  await assistantName.waitFor({ state: 'visible', timeout: 10000 })
+  await assistantName.click()
+  await expect(page.locator('.topics-tab')).toBeVisible()
+  const item = topicItem(page, repairedTopicId)
+  await item.waitFor({ state: 'visible', timeout: 10000 })
+  await item.click()
+  // The repaired empty topic is ready (never loading forever, never throw).
+  await page.waitForFunction(
+    (topicId: string) => {
+      const s = (window as any).store?.getState()
+      if (s?.messages?.loadingByTopic?.[topicId]) return false
+      const assistants = s?.assistants?.assistants ?? []
+      return assistants.some((a: { topics?: Array<{ id: string }> }) => (a.topics ?? []).some((t) => t.id === topicId))
+    },
+    repairedTopicId,
+    { timeout: 30000 }
+  )
+  // No uncaught TypeError surface: the active Chat topic id matches.
+  const activeId = await page.evaluate(() => {
+    const s = (window as any).store.getState()
+    const assistants = s.assistants?.assistants ?? []
+    const second = assistants.find((a: { id: string }) => a.id === 'a-e2e-2')
+    return (second?.topics ?? [])[0]?.id ?? null
+  })
+  expect(activeId, 'second assistant must expose the repaired topic without throwing').toBe(repairedTopicId)
 }
 
 interface MessageSnapshot {
@@ -887,6 +1224,79 @@ async function readTopicUpdatedAt(page: import('@playwright/test').Page): Promis
     }
     return null
   }, SOURCE_IDS.topic)
+}
+
+/**
+ * Read the imported topic's Redux `name` (post-send rename tracking).
+ */
+async function readVisibleTopicName(page: import('@playwright/test').Page): Promise<string | null> {
+  return page.evaluate((topicId: string) => {
+    const s = (window as any).store?.getState()
+    for (const assistant of s?.assistants?.assistants ?? []) {
+      const topic = (assistant.topics ?? []).find((t: any) => t.id === topicId)
+      if (topic && typeof topic.name === 'string') return topic.name as string
+    }
+    return null
+  }, SOURCE_IDS.topic)
+}
+
+/**
+ * Wait for the ordinary post-send auto-naming rename to settle: the visible
+ * topic name must move off the source projection name and then stay stable
+ * across two consecutive reads. Fire-and-forget by design, so the flow must
+ * not capture clocks until this settles — otherwise the captured updatedAt
+ * predates the rename persist.
+ */
+async function waitForTopicRenameSettled(page: import('@playwright/test').Page): Promise<string> {
+  const sourceName = PROJECTION_TOPICS.visible.name
+  let previous: string | null = null
+  for (let i = 0; i < 240; i++) {
+    const current = await readVisibleTopicName(page)
+    if (current !== null && current !== sourceName && previous !== null && current === previous) {
+      return current
+    }
+    previous = current
+    await page.waitForTimeout(250)
+  }
+  throw new Error(
+    `[E2E] topic ${SOURCE_IDS.topic} name never renamed off the source name; last read: ${JSON.stringify(previous)}`
+  )
+}
+
+/**
+ * Deterministic post-send topic-name expectation from the SAME mock naming
+ * pipeline — never a hardcoded string. The ordinary auto-naming summary
+ * request is the chat/completions call whose last user content is the
+ * structured conversation JSON (it carries `"mainText"` keys; the turn send
+ * carries the plain prompt). The mock echoes
+ * `[Mock <model>] You said: "<content sliced to 100 chars>"`, so the
+ * expected name is recomputed with that exact formula from the observed
+ * request. Also asserts the mock prefix and the prompt's presence.
+ */
+function computeExpectedRenamedTopicName(preSendSequence: number): string {
+  const chatRequests = findChatRequestsAfter(preSendSequence)
+  expect(
+    chatRequests.length,
+    'the post-import send plus the auto-naming summary must both reach the mock'
+  ).toBeGreaterThanOrEqual(2)
+  const naming = chatRequests.find((entry) => {
+    const messages = (entry.parsed as { messages?: Array<{ role?: string; content?: unknown }> })?.messages
+    const lastUser = messages?.filter((m) => m?.role === 'user').pop()
+    return typeof lastUser?.content === 'string' && (lastUser.content as string).includes('"mainText"')
+  })
+  expect(naming, 'an auto-naming summary request (structured conversation JSON) must reach the mock').toBeTruthy()
+  const messages = (naming!.parsed as { messages: Array<{ role: string; content: string }> }).messages
+  const lastUser = messages.filter((m) => m.role === 'user').pop()!
+  // Exact production pipeline: the mock echoes
+  // `[Mock <model>] You said: "<content sliced to 100 chars>"`, then the
+  // summary path sanitizes it for topic names via
+  // `removeSpecialCharactersForTopicName` (quotes/newlines → space, trim;
+  // `src/renderer/src/utils/naming.ts`). Replicated exactly — byte-exact.
+  const rawEcho = `[Mock mock-model] You said: "${String(lastUser.content).slice(0, 100)}"`
+  const expected = rawEcho.replace(/["'\r\n]+/g, ' ').trim()
+  expect(expected, 'the deterministic rename must carry the mock prefix').toContain('[Mock mock-model] You said:')
+  expect(expected.length).toBeGreaterThan('[Mock mock-model] You said:  '.length)
+  return expected
 }
 
 /**
@@ -1288,4 +1698,28 @@ function assertPostImportMessagesInSql(dbPath: string, userContent: string): voi
     ),
     'the historical block content must be persisted'
   ).toBe(true)
+}
+
+/**
+ * Main-persist proof for the legitimate post-send rename: the topics row
+ * carries EXACTLY the deterministic rename. Clocks are lane-owned by design
+ * (store `updateTopic`/`UpdatedAt` and Main `updateTopicMetadata` each stamp
+ * their own `new Date`, and updatedAt never crosses IPC), so the Main clock
+ * is only required to be well-formed and ADVANCE past the source projection
+ * timestamp — never byte-equal to the Redux clock. Ids/owner/pinned/source
+ * history are covered by the sibling asserts.
+ */
+function assertRenamedTopicNameInSql(dbPath: string, topicId: string, expectedName: string): void {
+  const esc = (s: string) => s.replace(/'/g, "''")
+  const rows = queryRows(dbPath, `SELECT id, name, updated_at FROM topics WHERE id = '${esc(topicId)}'`)
+  expect(rows, `topic ${topicId} must exist in SQLite`).toHaveLength(1)
+  expect(String(rows[0].name), 'the Main topics row must persist the deterministic rename').toBe(expectedName)
+  const mainUpdatedAt = String(rows[0].updated_at ?? '')
+  expect(new Date(mainUpdatedAt).toISOString(), 'the Main topics row clock must be a valid ISO timestamp').toBe(
+    mainUpdatedAt
+  )
+  expect(
+    new Date(mainUpdatedAt).getTime(),
+    'the Main topics row clock must advance past the source projection updatedAt'
+  ).toBeGreaterThan(new Date(PROJECTION_TOPICS.visible.updatedAt).getTime())
 }

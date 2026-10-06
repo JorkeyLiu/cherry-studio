@@ -47,6 +47,8 @@ export type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EmptyTrashTopicsResponse,
+  EnsureAssistantTopicsRequest,
+  EnsureAssistantTopicsResponse,
   EnsureTopicRequest,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
