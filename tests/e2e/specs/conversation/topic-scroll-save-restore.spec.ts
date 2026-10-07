@@ -201,28 +201,44 @@ async function clickTopicById(
   await waitForTopicDomActivation(page, topicId)
 }
 
+type ScrollSnapshot = {
+  scrollTop: number
+  anchorId: string | null
+  messageId: string | null
+  intraRowOffset: number | null
+  isAtBottom: boolean
+}
+
+const OFFSET_TOL = 12
+
 async function getScrollPosition(
   page: import('@playwright/test').Page,
   topicId: string
-): Promise<{ scrollTop: number; anchorId: string | null; isAtBottom: boolean } | null> {
+): Promise<ScrollSnapshot | null> {
   return page.evaluate(
     ({ topicId }: { topicId: string }) => {
       // Canonical route key first; legacy fallback only per production
-      // getLegacyMainSavedPosition schema compatibility.
+      // getLegacyMainSavedPosition schema compatibility. Canonical contract
+      // is { scrollTop, messageId, intraRowOffset, isAtBottom }; anchorId is
+      // retained only as the legacy compatibility alias for the same identity.
       const keys = [`scroll:topic-${topicId}::main`, `scroll:topic-${topicId}`]
       for (const key of keys) {
         const val = (window as any).keyv?.get(key)
         if (val && typeof val === 'object' && 'scrollTop' in val) {
           const rec = val as Record<string, unknown>
-          const anchor =
-            typeof rec.anchorId === 'string'
-              ? (rec.anchorId as string)
-              : typeof rec.messageId === 'string'
-                ? (rec.messageId as string)
+          const canonical =
+            typeof rec.messageId === 'string' && (rec.messageId as string).length > 0
+              ? (rec.messageId as string)
+              : typeof rec.anchorId === 'string'
+                ? (rec.anchorId as string)
                 : null
+          const rawOffset = rec.intraRowOffset
+          const offset = typeof rawOffset === 'number' && Number.isFinite(rawOffset) ? rawOffset : null
           return {
             scrollTop: rec.scrollTop as number,
-            anchorId: anchor,
+            anchorId: canonical,
+            messageId: canonical,
+            intraRowOffset: offset,
             isAtBottom: !!(rec.isAtBottom as boolean)
           }
         }
@@ -323,7 +339,7 @@ async function waitForNonBottomSnapshot(
   page: import('@playwright/test').Page,
   topicId: string,
   timeout = 5000
-): Promise<{ scrollTop: number; anchorId: string | null; isAtBottom: boolean }> {
+): Promise<ScrollSnapshot> {
   await page.waitForFunction(
     ({ topicId }: { topicId: string }) => {
       // Canonical route oracle; legacy key accepted only as schema-compat fallback.
@@ -405,7 +421,7 @@ async function wheelToSecondCommittedPosition(
   page: import('@playwright/test').Page,
   topicId: string,
   fromScrollTop: number
-): Promise<{ scrollTop: number; anchorId: string | null; isAtBottom: boolean }> {
+): Promise<ScrollSnapshot> {
   const box = await page.locator('#messages').first().boundingBox()
   if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
   const committedTop = async (): Promise<number | null> => (await getScrollPosition(page, topicId))?.scrollTop ?? null
@@ -434,43 +450,109 @@ async function wheelToSecondCommittedPosition(
   return diverged
 }
 
-async function waitForAnchorOrVisibleRestoration(
+/**
+ * Narrow ADR oracle: the DOM row for the PRE-AWAY requested snapshot identity
+ * itself (never a post-return rewritten snapshot, never any-visible row) must
+ * land at its saved intra-row offset (rect.top - container.top vs saved offset,
+ * <=12px, matching keyboard-viewport-scroll/page-viewport-resume). A broad
+ * |rowTop - containerTop| < containerHeight check is NOT a valid oracle for a
+ * tall row: a correct restore in the middle of a 2772px row with a 402px
+ * viewport is ~1932px from the container top and legitimately fails nearTop.
+ * Legacy snapshots without a finite intraRowOffset keep the prior visible-only
+ * fallback with this truthful limitation: visibility proves presence, not the
+ * saved reading position.
+ */
+async function measureRequestedRow(
   page: import('@playwright/test').Page,
-  expectedAnchorId: string | null,
-  fallbackVisibleId: string | null,
-  timeout = 10000
+  requestedId: string
+): Promise<{
+  found: boolean
+  height: number
+  offset: number
+  containerHeight: number
+  visibleHeight: number
+} | null> {
+  return page.evaluate((mid: string) => {
+    const container = document.getElementById('messages')
+    if (!container) return null
+    const cRect = container.getBoundingClientRect()
+    const el =
+      (document.querySelector(`#messages [data-message-id="${mid}"]`) as HTMLElement | null) ??
+      (document.getElementById(`message-${mid}`) as HTMLElement | null)
+    if (!el || !el.isConnected) {
+      return { found: false, height: 0, offset: NaN, containerHeight: cRect.height, visibleHeight: 0 }
+    }
+    if (window.getComputedStyle(el).display === 'none') {
+      return { found: false, height: 0, offset: NaN, containerHeight: cRect.height, visibleHeight: 0 }
+    }
+    const r = el.getBoundingClientRect()
+    if (r.height === 0) {
+      return { found: false, height: 0, offset: NaN, containerHeight: cRect.height, visibleHeight: 0 }
+    }
+    return {
+      found: true,
+      height: r.height,
+      offset: r.top - cRect.top,
+      containerHeight: cRect.height,
+      visibleHeight: Math.min(r.bottom, cRect.bottom) - Math.max(r.top, cRect.top)
+    }
+  }, requestedId)
+}
+
+async function waitForRequestedRowOffsetRestoration(
+  page: import('@playwright/test').Page,
+  requested: Pick<ScrollSnapshot, 'messageId' | 'anchorId' | 'intraRowOffset'>,
+  timeout = 15000
 ): Promise<void> {
-  const oracleId = expectedAnchorId || fallbackVisibleId
-  if (!oracleId) throw new Error('no anchor or fallback visible id for restoration oracle')
-  await page.waitForFunction(
-    ({ id }: { id: string }) => {
-      const container = document.getElementById('messages')
-      if (!container) return false
-      const el = document.getElementById(`message-${id}`)
-      if (!el) return false
-      if (window.getComputedStyle(el).display === 'none') return false
-      const rect = el.getBoundingClientRect()
-      if (rect.height === 0) return false
-      const cRect = container.getBoundingClientRect()
-      const visibleHeight = Math.min(rect.bottom, cRect.bottom) - Math.max(rect.top, cRect.top)
-      return visibleHeight > 0
-    },
-    { id: oracleId },
-    { timeout }
-  )
-  // Also ensure it is near the container top (within viewport) — relative position
-  const nearTop = await page.evaluate(
-    ({ id }) => {
-      const container = document.getElementById('messages')
-      const el = document.getElementById(`message-${id}`)
-      if (!container || !el) return false
-      const cRect = container.getBoundingClientRect()
-      const r = el.getBoundingClientRect()
-      return Math.abs(r.top - cRect.top) < cRect.height
-    },
-    { id: oracleId }
-  )
-  expect(nearTop).toBe(true)
+  const requestedId = requested.messageId || requested.anchorId
+  if (!requestedId) throw new Error('no requested snapshot identity for restoration oracle')
+  const savedOffset = requested.intraRowOffset
+  if (savedOffset === null || !Number.isFinite(savedOffset)) {
+    // Compatibility limitation: legacy snapshot without a finite offset can
+    // only prove the requested row is present and visible, not that the saved
+    // reading position restored. All canonical new snapshots carry a finite
+    // offset and must use the exact identity+offset path below.
+    await page.waitForFunction(
+      ({ id }: { id: string }) => {
+        const container = document.getElementById('messages')
+        if (!container) return false
+        const el =
+          (document.querySelector(`#messages [data-message-id="${id}"]`) as HTMLElement | null) ??
+          (document.getElementById(`message-${id}`) as HTMLElement | null)
+        if (!el || !el.isConnected) return false
+        if (window.getComputedStyle(el).display === 'none') return false
+        const rect = el.getBoundingClientRect()
+        if (rect.height === 0) return false
+        const cRect = container.getBoundingClientRect()
+        return Math.min(rect.bottom, cRect.bottom) - Math.max(rect.top, cRect.top) > 0
+      },
+      { id: requestedId },
+      { timeout }
+    )
+    return
+  }
+  await expect
+    .poll(
+      async () => {
+        const m = await measureRequestedRow(page, requestedId)
+        if (!m || !m.found || !Number.isFinite(m.offset)) return NaN
+        return Math.abs(m.offset - (savedOffset as number))
+      },
+      { timeout, intervals: [250] }
+    )
+    .toBeLessThanOrEqual(OFFSET_TOL)
+  const target = await measureRequestedRow(page, requestedId)
+  const diag =
+    `requested=${requestedId.slice(0, 8)}… savedOff=${Math.round(savedOffset as number)} ` +
+    `rect=${target ? `found=${target.found} h=${Math.round(target.height)} off=${Number.isFinite(target.offset) ? Math.round(target.offset) : '?'} vis=${Math.round(target.visibleHeight)} ch=${Math.round(target.containerHeight)}` : 'null'}`
+  expect(target, `requested target row must be measurable (${diag})`).not.toBeNull()
+  expect(target!.found, `requested snapshot identity must be present in the DOM (${diag})`).toBe(true)
+  expect(target!.height, `requested target row must have real height (${diag})`).toBeGreaterThan(0)
+  expect(target!.visibleHeight, `requested target row must be visible (${diag})`).toBeGreaterThan(0)
+  expect(
+    Math.abs(target!.offset - (savedOffset as number)),
+    `saved stable message identity must land at its saved intra-row offset (<=${OFFSET_TOL}px) (${diag})`
+  ).toBeLessThanOrEqual(OFFSET_TOL)
 }
 
 async function captureMessagesHost(page: import('@playwright/test').Page): Promise<void> {
@@ -626,9 +708,13 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     const anchorA = idsA[0]
     await scrollMessageIntoViewAndPersist(mainWindow, topicA, anchorA)
     const snapA = await waitForNonBottomSnapshot(mainWindow, topicA)
-    const visibleA = await getFirstVisibleMessageId(mainWindow)
-    expect(visibleA).toBeTruthy()
-    const savedAnchorA = snapA.anchorId || visibleA
+    // PRE-AWAY requested oracle: the saved identity + saved intra-row offset
+    // before leaving. The return must restore THIS, never a post-return
+    // rewritten snapshot.
+    const requestedIdA = snapA.messageId || snapA.anchorId
+    expect(requestedIdA, 'pre-away snapshot must carry the requested stable identity').toBeTruthy()
+    expect(snapA.intraRowOffset, 'canonical pre-away snapshot must carry a finite intra-row offset').not.toBeNull()
+    expect(Number.isFinite(snapA.intraRowOffset as number)).toBe(true)
 
     // A→B: establish B at bottom (fresh) then later restore A
     await clickTopicById(mainWindow, topicB, topicA)
@@ -636,7 +722,7 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     await expectBottomWithinTolerance(mainWindow, topicB)
     await assertTopicDomExclusive(mainWindow, topicB, topicA)
 
-    // B→A: restore must show A's anchor/visible message near top, or bottom if snapshot says bottom
+    // B→A: restore must show the requested identity at its saved offset, or bottom if snapshot says bottom
     await clickTopicById(mainWindow, topicA, topicB)
     await waitForTopicDomActivation(mainWindow, topicA)
     const snapARestored = await getScrollPosition(mainWindow, topicA)
@@ -644,7 +730,16 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     if (snapARestored!.isAtBottom) {
       await expectBottomWithinTolerance(mainWindow, topicA)
     } else {
-      await waitForAnchorOrVisibleRestoration(mainWindow, snapARestored!.anchorId, visibleA)
+      expect(snapARestored!.messageId || snapARestored!.anchorId, 'snapshot must preserve the requested identity').toBe(
+        requestedIdA
+      )
+      if (snapARestored!.intraRowOffset !== null && snapA.intraRowOffset !== null) {
+        expect(
+          Math.abs(snapARestored!.intraRowOffset - (snapA.intraRowOffset as number)),
+          'snapshot must preserve the requested intra-row offset'
+        ).toBeLessThanOrEqual(OFFSET_TOL)
+      }
+      await waitForRequestedRowOffsetRestoration(mainWindow, snapA)
       // Also assert DOM still belongs to A, not B
       await assertTopicDomExclusive(mainWindow, topicA, topicB)
     }
@@ -674,19 +769,21 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     const anchorA = idsA[0]
     await scrollMessageIntoViewAndPersist(mainWindow, topicA, anchorA)
     const snapA1 = await waitForNonBottomSnapshot(mainWindow, topicA)
-    const visibleA1 = await getFirstVisibleMessageId(mainWindow)
-    const oracleA = snapA1.anchorId || visibleA1
-    expect(oracleA).toBeTruthy()
+    // PRE-AWAY requested oracle for A: saved identity + saved offset.
+    const requestedIdA = snapA1.messageId || snapA1.anchorId
+    expect(requestedIdA, 'pre-away A snapshot must carry the requested stable identity').toBeTruthy()
+    expect(snapA1.intraRowOffset, 'canonical pre-away A snapshot must carry a finite intra-row offset').not.toBeNull()
 
     await clickTopicById(mainWindow, topicB, topicA)
     // Anchor B at a different position (second message) to prove independence
     const anchorB = idsB[1] || idsB[0]
     await scrollMessageIntoViewAndPersist(mainWindow, topicB, anchorB)
     const snapB1 = await waitForNonBottomSnapshot(mainWindow, topicB)
-    const visibleB1 = await getFirstVisibleMessageId(mainWindow)
-    const oracleB = snapB1.anchorId || visibleB1
-    expect(oracleB).toBeTruthy()
-    expect(oracleB).not.toBe(oracleA)
+    // PRE-AWAY requested oracle for B: saved identity + saved offset.
+    const requestedIdB = snapB1.messageId || snapB1.anchorId
+    expect(requestedIdB, 'pre-away B snapshot must carry the requested stable identity').toBeTruthy()
+    expect(snapB1.intraRowOffset, 'canonical pre-away B snapshot must carry a finite intra-row offset').not.toBeNull()
+    expect(requestedIdB).not.toBe(requestedIdA)
 
     // A→B already done; now B→A must restore A's oracle
     await clickTopicById(mainWindow, topicA, topicB)
@@ -695,7 +792,16 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     if (snapAAfter?.isAtBottom) {
       await expectBottomWithinTolerance(mainWindow, topicA)
     } else {
-      await waitForAnchorOrVisibleRestoration(mainWindow, snapAAfter?.anchorId || null, visibleA1)
+      expect(snapAAfter?.messageId || snapAAfter?.anchorId, 'A snapshot must preserve the requested identity').toBe(
+        requestedIdA
+      )
+      if (snapAAfter?.intraRowOffset !== null && snapA1.intraRowOffset !== null) {
+        expect(
+          Math.abs((snapAAfter?.intraRowOffset as number) - (snapA1.intraRowOffset as number)),
+          'A snapshot must preserve the requested intra-row offset'
+        ).toBeLessThanOrEqual(OFFSET_TOL)
+      }
+      await waitForRequestedRowOffsetRestoration(mainWindow, snapA1)
     }
     await assertTopicDomExclusive(mainWindow, topicA, topicB)
     await assertHostStable(mainWindow)
@@ -707,7 +813,16 @@ test.describe('Topic Switch Scroll Save/Restore (S3.2)', () => {
     if (snapBAfter?.isAtBottom) {
       await expectBottomWithinTolerance(mainWindow, topicB)
     } else {
-      await waitForAnchorOrVisibleRestoration(mainWindow, snapBAfter?.anchorId || null, visibleB1)
+      expect(snapBAfter?.messageId || snapBAfter?.anchorId, 'B snapshot must preserve the requested identity').toBe(
+        requestedIdB
+      )
+      if (snapBAfter?.intraRowOffset !== null && snapB1.intraRowOffset !== null) {
+        expect(
+          Math.abs((snapBAfter?.intraRowOffset as number) - (snapB1.intraRowOffset as number)),
+          'B snapshot must preserve the requested intra-row offset'
+        ).toBeLessThanOrEqual(OFFSET_TOL)
+      }
+      await waitForRequestedRowOffsetRestoration(mainWindow, snapB1)
     }
     await assertTopicDomExclusive(mainWindow, topicB, topicA)
     await assertHostStable(mainWindow)

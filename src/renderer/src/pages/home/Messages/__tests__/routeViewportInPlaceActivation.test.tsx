@@ -1159,3 +1159,96 @@ describe('retained same-window pre-paint trigger (regression)', () => {
     expect(c.currentPhase).toBe('fetch-hold')
   })
 })
+
+describe('bootstrap restore identity-commit gate (isBootstrapRestoreAnchorCommittable)', () => {
+  const base = {
+    requestedId: 'id21',
+    wantOffset: -66,
+    projectionCovers: true,
+    domResident: true,
+    rowVisible: true,
+    topicMatch: true,
+    routeMatch: true,
+    epochCurrent: true,
+    mounted: true,
+    aligned: true
+  } as const
+  it('commits only when the immutable requested id+offset is covered, resident, visible, current and aligned', async () => {
+    const { isBootstrapRestoreAnchorCommittable } = await import('../routeViewportActivation')
+    expect(isBootstrapRestoreAnchorCommittable({ ...base })).toBe(true)
+  })
+  it('never commits a fabricated target: null id, non-finite offset, or uncovered projection refuses', async () => {
+    const { isBootstrapRestoreAnchorCommittable } = await import('../routeViewportActivation')
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, requestedId: null })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, wantOffset: null })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, wantOffset: NaN })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, projectionCovers: false })).toBe(false)
+  })
+  it('stale guards: route/epoch/topic/unmounted refuse so a superseded completion cannot commit', async () => {
+    const { isBootstrapRestoreAnchorCommittable } = await import('../routeViewportActivation')
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, routeMatch: false })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, epochCurrent: false })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, topicMatch: false })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, mounted: false })).toBe(false)
+  })
+  it('failed/clamped/missing geometry refuses: hidden row or unverified align never commits', async () => {
+    const { isBootstrapRestoreAnchorCommittable } = await import('../routeViewportActivation')
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, domResident: false })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, rowVisible: false })).toBe(false)
+    expect(isBootstrapRestoreAnchorCommittable({ ...base, aligned: false })).toBe(false)
+  })
+  it('requested-row geometry verifies via the shared align helper (write+remeasure, 1px epsilon)', async () => {
+    const { alignRetainedViewportOnce } = await import('../routeViewportActivation')
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientHeight', { value: 600, configurable: true })
+    let scrollTop = 200
+    Object.defineProperty(container, 'scrollTop', {
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = v
+      },
+      configurable: true
+    })
+    const row = document.createElement('div')
+    Object.defineProperty(row, 'isConnected', { value: true, configurable: true })
+    // Mismatch of 60px: one synchronous correction must verify within epsilon.
+    let have = 100
+    const want = 40
+    container.getBoundingClientRect = () =>
+      ({ top: 0, width: 300, height: 600, left: 0, right: 300, bottom: 600, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+    row.getBoundingClientRect = () =>
+      ({
+        top: have,
+        width: 300,
+        height: 40,
+        left: 0,
+        right: 300,
+        bottom: have + 40,
+        x: 0,
+        y: have,
+        toJSON: () => ({})
+      }) as DOMRect
+    const origScroll = container.scrollTop
+    void origScroll
+    // Simulate the helper's write effect: moving scrollTop moves the row rect.
+    Object.defineProperty(container, 'scrollTop', {
+      get: () => scrollTop,
+      set: (v: number) => {
+        const delta = v - scrollTop
+        scrollTop = v
+        have -= delta
+      },
+      configurable: true
+    })
+    const res = alignRetainedViewportOnce({
+      container,
+      rowEl: row,
+      anchorId: 'id21',
+      wantOffset: want,
+      isAtBottom: false,
+      isRowVisible: true
+    })
+    expect(res.aligned).toBe(true)
+    expect(res.writes).toBe(1)
+  })
+})

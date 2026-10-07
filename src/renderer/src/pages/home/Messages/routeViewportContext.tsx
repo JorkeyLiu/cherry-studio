@@ -747,11 +747,14 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
   // Genuine input opens/refreshes the session BEFORE its scroll effect lands;
   // only scrolls inside the live session may `userTakeover()` (Messages owns
   // the scroll). The session survives multi-scroll gestures (wheel momentum /
-  // touch / scrollbar drag: each scroll updates the stable snapshot) and
-  // closes ONLY on native `scrollend`, on a no-scroll pointer/touch/key end
-  // (event-driven fallback when `scrollend` never fires), or forcibly on the
-  // next programmatic `request()`/supersede and `invalidateAll()`. No timers,
-  // no fences, no global bus. Never terminates/releases the transition.
+  // touch / scrollbar drag / native keyboard paging: each scroll updates the
+  // stable snapshot) and closes ONLY on native `scrollend`, on a no-scroll
+  // pointer/touch end (event-driven fallback when `scrollend` never fires),
+  // or forcibly on the next programmatic `request()`/supersede and
+  // `invalidateAll()`. Keyboard has no keyup idle fallback: native PageUp/
+  // PageDown paging is asynchronous (the scroll lands after keyup), so the
+  // declaration stays pending for the forthcoming `scrollend` like wheel. No
+  // timers, no fences, no global bus. Never terminates/releases the transition.
   const stableController = viewport?.controller ?? null
   useEffect(() => {
     const container = containerRef.current
@@ -827,18 +830,17 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     const onScrollEnd: EventListener = () => endOnScrollEnd()
     addTyped(container, 'scrollend', onScrollEnd, { passive: true } as AddEventListenerOptions)
     // Event-driven fallback when `scrollend` is unsupported/never fires:
-    // pointer/touch/key ends close ONLY idle sessions (no scroll landed yet).
+    // pointer/touch ends close ONLY idle sessions (no scroll landed yet).
     // Sessions with adopted scrolls stay open for `scrollend`; the next
     // programmatic `request()`/supersede or `invalidateAll()` force-closes.
-    // Wheel only refreshes (never closes here): momentum needs the session.
+    // Wheel and keyboard only refresh (never close here): wheel momentum and
+    // native keyboard paging need the session past keyup until `scrollend`.
     const onPointerUp: EventListener = () => cancelWhenIdle()
     const onTouchEnd: EventListener = () => cancelWhenIdle()
-    const onKeyUp: EventListener = () => cancelWhenIdle()
     addTyped(container, 'pointerup', onPointerUp, { passive: true } as AddEventListenerOptions)
     addTyped(container, 'pointercancel', onPointerUp, { passive: true } as AddEventListenerOptions)
     addTyped(container, 'touchend', onTouchEnd, { passive: true } as AddEventListenerOptions)
     addTyped(container, 'touchcancel', onTouchEnd, { passive: true } as AddEventListenerOptions)
-    addTyped(container, 'keyup', onKeyUp, { capture: true } as AddEventListenerOptions)
     return () => {
       container.removeEventListener('wheel', declare, { capture: true } as AddEventListenerOptions)
       container.removeEventListener('touchstart', declare, { capture: true } as AddEventListenerOptions)
@@ -849,7 +851,6 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       removeTyped(container, 'pointercancel', onPointerUp)
       removeTyped(container, 'touchend', onTouchEnd)
       removeTyped(container, 'touchcancel', onTouchEnd)
-      removeTyped(container, 'keyup', onKeyUp)
     }
     // Stable identity: listeners must never churn on viewport version bumps
     // (every declare/takeover/commit notifies). Re-registration would briefly

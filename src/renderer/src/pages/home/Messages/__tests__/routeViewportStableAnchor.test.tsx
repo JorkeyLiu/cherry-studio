@@ -707,6 +707,137 @@ describe('user input takes over the anchor', () => {
   })
 })
 
+describe('keyboard native paging lifecycle (no keyup idle close)', () => {
+  const keyDown = (target: HTMLElement, key: string): void => {
+    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  }
+  const keyUp = (target: HTMLElement, key: string): void => {
+    target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
+  }
+  // Native PageUp/PageDown paging is asynchronous: the browser scroll lands
+  // AFTER keyup (keydown t4176 -> keyup t4327 -> first smooth scroll t4328 in
+  // the E2E chronology). The keyup idle fallback therefore closed the session
+  // with scrolls==0 before the real scroll could adopt. Keyboard declarations
+  // stay pending for the forthcoming native `scrollend` (same lifecycle as
+  // wheel); pointer/touch idle fallback is unchanged.
+  it('keydown declares, keyup leaves pending, delayed scroll adopts, scrollend closes', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      keyDown(container, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(true)
+
+    // The native scroll has not landed yet: keyup must NOT close the session.
+    act(() => {
+      keyUp(container, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(true)
+    expect(controller.activeInteractionScrollCount).toBe(0)
+
+    // Delayed native paging lands inside the still-live session: the atomic
+    // takeover (Messages path) adopts the measured viewport as the new stable
+    // anchor. The keeper alone writes nothing; only the takeover return
+    // authorizes a snapshot write.
+    act(() => {
+      Object.defineProperty(container, 'scrollTop', { value: 500, writable: true, configurable: true })
+      rects.set('m1', { top: -900, height: 400 })
+      rects.set('m2', { top: -500, height: 40 })
+      rects.set('m3', { top: -10, height: 400 })
+      container.dispatchEvent(new Event('scroll'))
+    })
+    const token = controller.activeInteractionToken
+    expect(token).not.toBeNull()
+    const out = controller.userTakeover(
+      { messageId: 'm3', intraRowOffset: -10, scrollTop: 500, isAtBottom: false },
+      undefined,
+      token ?? undefined
+    )
+    expect(out.taken).toBe(true)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm3',
+      offset: -10
+    })
+    expect(controller.userIntentPending).toBe(true)
+
+    // Native `scrollend` closes the adopted session (same as wheel).
+    act(() => {
+      container.dispatchEvent(new Event('scrollend'))
+    })
+    expect(controller.userIntentPending).toBe(false)
+    keeper.unmount()
+  })
+
+  // Pending-only keyboard at a no-op boundary (e.g. PageUp at the oldest edge
+  // where the browser scrolls nothing) commits no geometry: the declaration
+  // stays pending like the existing wheel-at-boundary case, and the next
+  // pointer end / request / invalidate cancels it. Never invent completion.
+  it('pending-only keyboard commits nothing; next pointer end cancels it', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const takeoverSpy = vi.spyOn(controller, 'userTakeover')
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      keyDown(container, 'PageUp')
+    })
+    expect(controller.userIntentPending).toBe(true)
+    act(() => {
+      keyUp(container, 'PageUp')
+    })
+    expect(controller.userIntentPending).toBe(true)
+    // No scroll landed, no takeover ran, no geometry committed.
+    expect(takeoverSpy).not.toHaveBeenCalled()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+
+    // The existing pointer idle fallback still cancels a pending-only session.
+    act(() => {
+      container.dispatchEvent(new Event('pointerup'))
+    })
+    expect(controller.userIntentPending).toBe(false)
+    takeoverSpy.mockRestore()
+    keeper.unmount()
+  })
+
+  it('keyboard in an editable field declares nothing (no hijack)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    const input = document.createElement('input')
+    container.append(input)
+
+    act(() => {
+      keyDown(input, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(false)
+    act(() => {
+      keyUp(input, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(false)
+    keeper.unmount()
+  })
+})
+
 describe('fold hidden answer reconciliation (same-group transfer, offset preserved)', () => {
   const buildFoldSurface = (): {
     container: HTMLDivElement

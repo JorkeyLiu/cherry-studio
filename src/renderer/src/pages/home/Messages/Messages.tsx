@@ -188,6 +188,7 @@ import { buildRouteVisibleMessages, isRouteVisibleUnionExact, planTopVisibleReba
 import { decidePaginationCompensation, type PreferredRestoreAnchorSnapshot } from './routeRestoreAnchor'
 import {
   alignRetainedViewportOnce,
+  isBootstrapRestoreAnchorCommittable,
   shouldContinueRetainedViewport,
   shouldRestoreRetainedWindowInPlace,
   shouldTopPipelineRefuseDividerIntent
@@ -673,6 +674,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         id="messages"
         className="messages-container"
         data-viewport-phase={viewportPhase}
+        // Keyboard-focusable scroll host: ordinary click/tab navigation reaches
+        // the container so native PageUp/PageDown page #messages directly.
+        // No autofocus, no focus theft, no custom scroll arithmetic — the
+        // existing container-scoped key handler only observes the native keys.
+        tabIndex={0}
         ref={scrollContainerRef}
         onScroll={handleScrollPosition}
         onWheel={onStabilizerUserInput}
@@ -2978,6 +2984,21 @@ const Messages = ({
             ? { kind: 'scrollTop', scrollTop: decision.intent.scrollTop }
             : { kind: 'bottom' }
     const bootstrapRestoreEpoch = armBootstrapTransition(restorePlan, topic.id, routeRef.current)
+    // Immutable requested restore target: the identity + finite desired
+    // offset captured from the plan BEFORE the async navigate. The
+    // completion below must align + verify THIS row's geometry and commit
+    // it explicitly; a live crossing-first capture would forge a neighbor
+    // snapshot (row-offset 0) instead of the requested offset.
+    const requestedRestoreId = restorePlan.kind === 'message' ? restorePlan.messageId : null
+    const requestedRestoreOffset =
+      restorePlan.kind === 'message' &&
+      typeof restorePlan.wantOffset === 'number' &&
+      Number.isFinite(restorePlan.wantOffset)
+        ? restorePlan.wantOffset
+        : null
+    // Armed target route: the stale guard below must compare the CURRENT
+    // route against THIS value, not against itself.
+    const restoreRouteAtArm = routeRef.current
     void navigate(decision.intent).then((result) => {
       if (controller.currentEpoch !== bootstrapRestoreEpoch) return
       if (transitionEpochRef.current !== restoreEpoch) {
@@ -3028,11 +3049,13 @@ const Messages = ({
         }
       }
       // Stable completion commit (same epoch gate already checked above):
-      // the final visible viewport is the route's stable snapshot even with
-      // no user input. Positive placement (aligned/searching) plus a
-      // non-empty committed window is required; a non-persisted result or an
-      // unplaced/empty target terminates visibly without committing.
-      // Advances displayed provenance.
+      // - Anchored restore (immutable requested id + finite desired offset):
+      //   align + verify the REQUESTED row's actual geometry, then commit it
+      //   explicitly via the identity commit. A failed/clamped/missing
+      //   geometry fails visible preserving the prior lawful snapshot — never
+      //   a fabricated identity commit, never a crossing-first capture.
+      // - Anchorless/bottom/offset-less restores keep the existing
+      //   capture/default commit below. Advances displayed provenance.
       if (shouldPersistNavigationResult(result)) {
         const phaseNow = controller.currentPhase as string
         if (phaseNow !== 'aligned' && phaseNow !== 'searching') {
@@ -3051,6 +3074,85 @@ const Messages = ({
           failVisibleTransition(bootstrapRestoreEpoch)
           return
         }
+        if (requestedRestoreId !== null && requestedRestoreOffset !== null) {
+          // Stale guard: the committed projection must still cover the
+          // immutable requested target on the current route.
+          let projectionCovers = false
+          try {
+            projectionCovers = messagesRef.current.some((m) => m.id === requestedRestoreId)
+          } catch {
+            projectionCovers = false
+          }
+          if (!projectionCovers) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          const liveForRestore = scrollContainerRef.current
+          if (!liveForRestore) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          let restoreAligned = false
+          let restoreDomResident = false
+          let restoreRowVisible = false
+          try {
+            const rowEl = getMessageRowById(requestedRestoreId)
+            restoreDomResident = rowEl !== null
+            restoreRowVisible = checkElement(requestedRestoreId) === 'visible'
+            if (rowEl && restoreRowVisible) {
+              const aligned = alignRetainedViewportOnce({
+                container: liveForRestore,
+                rowEl,
+                anchorId: requestedRestoreId,
+                wantOffset: requestedRestoreOffset,
+                isAtBottom: false,
+                isRowVisible: true
+              })
+              restoreAligned = aligned.aligned
+            } else {
+              restoreAligned = false
+            }
+          } catch {
+            restoreAligned = false
+          }
+          const restoreCommittable = isBootstrapRestoreAnchorCommittable({
+            requestedId: requestedRestoreId,
+            wantOffset: requestedRestoreOffset,
+            projectionCovers,
+            domResident: restoreDomResident,
+            rowVisible: restoreRowVisible,
+            topicMatch: topicIdRef.current === topic.id,
+            routeMatch: routeRef.current === restoreRouteAtArm,
+            epochCurrent: controller.isSessionCurrent(bootstrapRestoreEpoch),
+            mounted: !unmountedRef.current,
+            aligned: restoreAligned
+          })
+          if (!restoreCommittable) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          if (
+            topicIdRef.current !== topic.id ||
+            !controller.isSessionCurrent(bootstrapRestoreEpoch) ||
+            unmountedRef.current
+          ) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+            return
+          }
+          controller.revealed(bootstrapRestoreEpoch)
+          notifyViewport()
+          const anchoredCommitted = commitDisplayedStableWithAnchor(
+            topic.id,
+            routeRef.current,
+            bootstrapRestoreEpoch,
+            requestedRestoreId,
+            requestedRestoreOffset
+          )
+          if (!anchoredCommitted && controller.isSessionCurrent(bootstrapRestoreEpoch)) {
+            failVisibleTransition(bootstrapRestoreEpoch)
+          }
+          return
+        }
         controller.revealed(bootstrapRestoreEpoch)
         notifyViewport()
         commitDisplayedStable(topic.id, routeRef.current, bootstrapRestoreEpoch)
@@ -3060,7 +3162,9 @@ const Messages = ({
     })
   }, [
     armBootstrapTransition,
+    checkElement,
     commitDisplayedStable,
+    commitDisplayedStableWithAnchor,
     failVisibleTransition,
     isTopicLoading,
     messages,

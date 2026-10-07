@@ -180,7 +180,7 @@ export interface StableCommit {
  * Controller-owned real user interaction token (generation/id + liveness).
  * Opened/refreshed ONLY by genuine wheel/touch/pointer/keyboard/scrollbar
  * input via `declareUserIntent()`; closed by native `scrollend`, by an
- * event-driven no-scroll pointer/touch/key end, or forcibly by the next
+ * event-driven no-scroll pointer/touch end, or forcibly by the next
  * programmatic `request()`/supersede and by `invalidateAll()`.
  * Never a boolean guess: `userTakeover()` requires a live session and
  * rejects stale tokens.
@@ -230,10 +230,10 @@ export class RouteViewportController {
    * - Non-null = a genuine input gesture opened/refreshed the session; every
    *   scroll inside it may `userTakeover()` (multi-scroll gestures: wheel
    *   momentum, touch, scrollbar drag). The session survives each takeover —
-   *   it closes ONLY on native `scrollend`, on a no-scroll pointer/touch/key
+   *   it closes ONLY on native `scrollend`, on a no-scroll pointer/touch
    *   end, or forcibly on `request()`/supersede and `invalidateAll()`.
    * - `activeInteractionScrolls` counts adopted scrolls in this session (used
-   *   by the event-driven fallback: pointer/touch/key ends close only when no
+   *   by the event-driven fallback: pointer/touch ends close only when no
    *   scroll has landed yet; momentum scrolls stay open for `scrollend`).
    */
   private interactionSeq = 0
@@ -1072,7 +1072,7 @@ export class RouteViewportController {
    * session) without terminating/releasing/touching
    * displayed/rendered/anchor/epoch. Every scroll in the session must go
    * through `userTakeover()` with the live token; the session closes ONLY on
-   * native `scrollend`, on a no-scroll pointer/touch/key end, or forcibly on
+   * native `scrollend`, on a no-scroll pointer/touch end, or forcibly on
    * `request()`/supersede and `invalidateAll()`. No timers, no fences.
    */
   declareUserIntent(): UserInteractionToken {
@@ -1153,7 +1153,7 @@ export class RouteViewportController {
   }
 
   /**
-   * Event-driven fallback for pointer/touch/key ends WITHOUT `scrollend`:
+   * Event-driven fallback for pointer/touch ends WITHOUT `scrollend`:
    * close only when no scroll has landed in this session yet (a press that
    * never scrolled). When at least one scroll adopted, the session stays
    * open for the forthcoming native `scrollend` (momentum / drag); the next
@@ -1188,8 +1188,8 @@ export class RouteViewportController {
    * rejected — tests must open a real session first (no test-only bypass).
    * The session SURVIVES each takeover (scroll count grows) so wheel
    * momentum / touch / scrollbar-drag sequences keep updating the stable
-   * snapshot; it closes only on `scrollend`, on a no-scroll pointer/touch/
-   * key end, or forcibly on `request()`/supersede and `invalidateAll()`.
+   * snapshot; it closes only on `scrollend`, on a no-scroll pointer/touch
+   * end, or forcibly on `request()`/supersede and `invalidateAll()`.
    *
    * - Owned with rendered provenance (positioning/searching/aligned, or
    *   fetch-hold whose rendered is still the outgoing route): the rendered
