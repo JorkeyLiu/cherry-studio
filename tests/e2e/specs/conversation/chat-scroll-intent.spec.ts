@@ -1,42 +1,35 @@
 /**
- * Chat scroll intent — answer-tab retention + send-from-reading reaches latest bottom.
+ * Chat scroll intent — answer-tab SWITCHING + send-from-reading reaches latest bottom.
  *
  * Two independently runnable regressions (same file, shared helpers, no
- * cross-test state): `answer-tab unequal-height repeated switches retain the
- * reading viewport` (A1/A2/A3) and `send-from-reading reaches actual latest
+ * cross-test state): `answer-tab unequal-height repeated switches keep the
+ * clicked tab stationary` (A1/A2/A3 + additional mid-topic A4; true-tail
+ * covers the route bottom) and `send-from-reading reaches actual latest
  * bottom` (B + post-bottom wheel scroll-away). Each test seeds its own
- * disposable topic via setupScrollIntentTopic() so a production drift block
- * at A1 no longer leaves send untested — run either via `-g`.
+ * disposable topic via setupScrollIntentTopic() — run either via `-g`.
  *
- * Bounded regression coverage ONLY (no production fix here; sibling owns
- * renderer + unit tests). Real Electron DOM, shared fixture, disposable
- * profile, mock provider, deterministic assertions.
+ * Bounded regression coverage ONLY. Real Electron DOM, shared fixture,
+ * disposable profile, mock provider, deterministic assertions.
  *
- * Contract A (answer-tab retention): from a verified non-bottom Chat reading
- * viewport on a topic whose mid-topic ask has two model answers (unequal
- * heights), clicking the actual `answer-group-selector` tab must change the
+ * Contract A (answer-tab SWITCHING, not reading-position restoration): from
+ * a verified non-bottom Chat viewport on a topic whose mid-topic ask has two
+ * model answers (unequal heights), clicking the actual
+ * `answer-group-selector` tab at its recorded screen point must change the
  * AUTHORITATIVE selection (Redux `foldSelected` + read-only Main
- * `getRawTopic`, not merely DOM tab styling) while the viewport stays at the
- * same reading location (stable visible anchor identity — or same-group
- * replaced-answer transfer — + normalized offset within ±12px, no bottom
- * jump), including repeated switches in both height directions. Raw
- * `scrollTop` invariance does NOT hold here: in column-reverse a different
- * answer height below the viewport necessarily changes `scrollTop` for the
- * SAME visual anchor, so the raw counter is not the user '保持位置' contract;
- * geometry (anchor identity + normalized offset + non-bottom) is primary and
- * any scroll-range delta is supporting only.
- *
- * Normalization (production policy, mirrored here — no implementation-ID
- * assert): the held intra-row offset survives EXACTLY when the selected
- * visible answer's real box can still represent it as a readable position;
- * otherwise it clamps to the nearest valid visible in-row position
- * `normalizeFoldAnchorOffset(original, h, vh)` = clamp into
- * `[-h+12, vh-12]` (min-visible 12px). Tall→short shrink with a far-above
- * pre offset therefore lands deterministically clamped, never at an
- * impossible offset and never at an unrelated tail/bottom. The E2E asserts
- * the authoritative selected answer, same-group membership, visible portion
- * >= 12px (minus the existing 1px geometry tolerance), and actual offset
- * within ±12px of the deterministic expected value.
+ * `getRawTopic`, not merely DOM tab styling) while the CLICKED TAB stays at
+ * its previous screen location: with no mouse reposition after the click,
+ * the selected tab remains at the same viewport geometry (pixel/subpixel
+ * rendering tolerance, never enough to hide a jump) and elementFromPoint at
+ * the original click point still resolves to the same tab — never a jump to
+ * a body anchor, another message, or global bottom. Raw `scrollTop`
+ * invariance does NOT hold in column-reverse (a height swap below the
+ * viewport necessarily changes `scrollTop` for the SAME tab position), so
+ * tab geometry + hit-testing is primary. Covers long→short and short→long,
+ * repeated switches without wheel repair between every click, a delayed
+ * selection hold with observer churn (A1), and an additional mid-topic
+ * switch (A4); the true-tail test covers the route bottom in both
+ * directions. Painted transition frames are sampled where practical, not
+ * only the eventual final.
  *
  * Contract B (send-from-reading): from a verified non-bottom reading position
  * (after loading the older window so the bootstrap is paginated), sending via
@@ -71,7 +64,11 @@ import { waitForAppReady, waitForChatReady, waitForSettingsLoad } from '../../ut
 const DISPLAY_COUNT = 10
 const BOTTOM_TOL = 100
 const OFFSET_TOL = 12
-const FOLD_MIN_VISIBLE_PX = 12
+// Stationary rendering tolerance: subpixel/style budget only (~2px). A real
+// jump must fail, never be absorbed. Transition frames get a marginally
+// larger budget for one painted intermediate frame (still far below a jump).
+const TAB_TOL = 2
+const TRANSITION_TOL = 4
 const RETAIN_SCROLL_DELTA = 120 // B-post settle only; never a retention gate for Contract A.
 const NON_BOTTOM_MIN = 300
 
@@ -190,6 +187,128 @@ function buildScrollIntentEntries(topicId: string, assistantId: string) {
     })
   }
   return { entries, askId, shortId, tallId }
+}
+
+/**
+ * True-tail variant: 7 single rounds + the LAST ask carrying TWO answers
+ * (short selected vs tall) at the route bottom. Total 17 authority rows with
+ * the answer group as the newest rows — the tab switch happens at the real
+ * tail, where column-reverse bottom clamp applies, not at a mid-topic group
+ * with four rounds after it.
+ */
+function buildTailScrollIntentEntries(topicId: string, assistantId: string) {
+  const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+  const stamp = '2026-01-01T00:00:00.000Z'
+  const push = (index: number, role: string, content: string, extra: Record<string, unknown> = {}) => {
+    const msgId = `${topicId}-msg-${pad(index, 5)}`
+    const blockId = `${topicId}-block-${pad(index, 5)}`
+    entries.push({
+      message: {
+        id: msgId,
+        topicId,
+        role,
+        assistantId,
+        createdAt: stamp,
+        updatedAt: stamp,
+        status: 'success',
+        blocks: [blockId],
+        sortOrder: index,
+        ...extra
+      },
+      blocks: [
+        {
+          id: blockId,
+          messageId: msgId,
+          type: 'main_text',
+          content,
+          status: 'success',
+          createdAt: stamp,
+          updatedAt: stamp
+        }
+      ]
+    })
+    return msgId
+  }
+  for (let round = 0; round < 7; round++) {
+    const userIndex = round * 2
+    const assistantIndex = round * 2 + 1
+    const userId = push(userIndex, 'user', `csi-tail-fill-user-${round} ${'filler words '.repeat(30)}`)
+    push(assistantIndex, 'assistant', `csi-tail-fill-assistant-${round} ${'filler words '.repeat(30)}`, {
+      askId: userId,
+      model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model', group: 'mock' },
+      modelId: 'mock-model'
+    })
+  }
+  const askId = push(14, 'user', `csi-tail-ask ${'filler words '.repeat(10)}`)
+  const shortId = push(15, 'assistant', `csi-tail-short-marker brief reply. ${'brief. '.repeat(10)}`, {
+    askId,
+    foldSelected: true,
+    model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model', group: 'mock' },
+    modelId: 'mock-model'
+  })
+  const tallParagraphs = Array.from({ length: 60 }, (_, i) => `tail tall paragraph ${pad(i, 3)} filler words`)
+  const tallId = push(16, 'assistant', `csi-tail-tall-marker\n\n${tallParagraphs.join('\n\n')}`, {
+    askId,
+    foldSelected: false,
+    model: { id: 'mock-model-tall', provider: 'mock-openai', name: 'Mock Tall Model', group: 'mock' },
+    modelId: 'mock-model-tall'
+  })
+  return { entries, askId, shortId, tallId }
+}
+
+/**
+ * All-short total-height variant: one ask with TWO brief answers, total
+ * content height below the viewport (no scrollable overflow). The switch is
+ * trivially stationary (no scroll change) but must still flip authority and
+ * keep the pointer over the tab.
+ */
+function buildAllShortEntries(topicId: string, assistantId: string) {
+  const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+  const stamp = '2026-01-01T00:00:00.000Z'
+  const push = (index: number, role: string, content: string, extra: Record<string, unknown> = {}) => {
+    const msgId = `${topicId}-msg-${pad(index, 5)}`
+    const blockId = `${topicId}-block-${pad(index, 5)}`
+    entries.push({
+      message: {
+        id: msgId,
+        topicId,
+        role,
+        assistantId,
+        createdAt: stamp,
+        updatedAt: stamp,
+        status: 'success',
+        blocks: [blockId],
+        sortOrder: index,
+        ...extra
+      },
+      blocks: [
+        {
+          id: blockId,
+          messageId: msgId,
+          type: 'main_text',
+          content,
+          status: 'success',
+          createdAt: stamp,
+          updatedAt: stamp
+        }
+      ]
+    })
+    return msgId
+  }
+  const askId = push(0, 'user', 'csi-tiny-ask brief?')
+  const shortId = push(1, 'assistant', 'csi-tiny-short-a brief reply one.', {
+    askId,
+    foldSelected: true,
+    model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model', group: 'mock' },
+    modelId: 'mock-model'
+  })
+  const shortBId = push(2, 'assistant', 'csi-tiny-short-b brief reply two.', {
+    askId,
+    foldSelected: false,
+    model: { id: 'mock-model-tall', provider: 'mock-openai', name: 'Mock Tall Model', group: 'mock' },
+    modelId: 'mock-model-tall'
+  })
+  return { entries, askId, shortId, tallId: shortBId }
 }
 
 async function seedTopicViaMainAuthority(
@@ -487,16 +606,83 @@ async function authoritySelectedId(page: Page, topicId: string, memberIds: strin
   return selected.length === 1 ? (selected[0].id as string) : null
 }
 
+interface TabGeometry {
+  rect: {
+    x: number
+    y: number
+    top: number
+    bottom: number
+    left: number
+    right: number
+    width: number
+    height: number
+  }
+  center: { x: number; y: number }
+  offset: number
+  containerRect: { top: number; bottom: number; height: number }
+}
+
 /**
- * Real Playwright pointer click on a visible answer-group-selector tab.
- * The tab must already sit fully inside the #messages viewport so the click
- * performs no test-induced auto-scroll (Playwright skips scrollIntoView when
- * the target is already fully visible). There is no DOM el.click() fallback:
- * a non-visible tab fails instead of bypassing pointer hit-testing.
- * Callers must establish the reading viewport with
- * wheelToReadingPositionWithTabVisible() first. Returns the delivery path.
+ * Tab geometry for the SWITCHING contract: the clicked tab's viewport rect,
+ * pointer center, and container-relative offset (tab top − container top).
+ * Fails when the tab is missing or has no box.
  */
-async function clickAnswerTab(page: Page, messageId: string): Promise<'pointer'> {
+async function captureTabGeometry(page: Page, messageId: string): Promise<TabGeometry> {
+  return page.evaluate((id: string) => {
+    const container = document.getElementById('messages') as HTMLElement | null
+    if (!container) throw new Error('#messages not found')
+    const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+    const el = document.querySelector(
+      `[data-testid="answer-group-selector"][data-message-id="${esc}"]`
+    ) as HTMLElement | null
+    if (!el) throw new Error(`answer tab for ${id} not found`)
+    const r = el.getBoundingClientRect()
+    const c = container.getBoundingClientRect()
+    if (!(r.width > 0 && r.height > 0)) throw new Error(`answer tab for ${id} has no box`)
+    return {
+      rect: {
+        x: r.x,
+        y: r.y,
+        top: r.top,
+        bottom: r.bottom,
+        left: r.left,
+        right: r.right,
+        width: r.width,
+        height: r.height
+      },
+      center: { x: r.x + r.width / 2, y: r.y + r.height / 2 },
+      offset: r.top - c.top,
+      containerRect: { top: c.top, bottom: c.bottom, height: c.height }
+    }
+  }, messageId)
+}
+
+/** elementFromPoint at a screen point must resolve to the same answer tab. */
+async function hitTestTabAtPoint(page: Page, point: { x: number; y: number }, messageId: string): Promise<boolean> {
+  return page.evaluate(
+    ({ x, y, id }: { x: number; y: number; id: string }) => {
+      const hit = document.elementFromPoint(x, y) as HTMLElement | null
+      if (!hit) return false
+      const tab = hit.closest?.('[data-testid="answer-group-selector"]') as HTMLElement | null
+      if (!tab) return false
+      return tab.getAttribute('data-message-id') === id
+    },
+    { x: point.x, y: point.y, id: messageId }
+  )
+}
+
+/**
+ * Real pointer click on a visible answer-group-selector tab at its recorded
+ * screen point. The tab must already sit fully inside #messages so the click
+ * performs no test-induced auto-scroll. Clicks via mouse at the recorded
+ * center (not DOM el.click), leaves the pointer where it landed (no
+ * reposition afterwards), and returns the pre-click geometry + click point
+ * for the stationary-pointer assertion.
+ */
+async function clickAnswerTab(
+  page: Page,
+  messageId: string
+): Promise<{ pre: TabGeometry; point: { x: number; y: number } }> {
   const tab = page.locator(`[data-testid="answer-group-selector"][data-message-id="${messageId}"]`)
   await expect(tab).toHaveCount(1)
   await expect(tab, `answer tab for ${messageId} must be visible for a real pointer click`).toBeVisible({
@@ -517,8 +703,10 @@ async function clickAnswerTab(page: Page, messageId: string): Promise<'pointer'>
     inViewport,
     `answer tab for ${messageId} must sit fully inside #messages viewport so the pointer click causes no auto-scroll`
   ).toBe(true)
-  await tab.click({ timeout: 10000 })
-  return 'pointer'
+  const pre = await captureTabGeometry(page, messageId)
+  const point = { x: pre.center.x, y: pre.center.y }
+  await page.mouse.click(point.x, point.y)
+  return { pre, point }
 }
 
 /**
@@ -598,6 +786,136 @@ async function wheelToReadingPositionWithTabVisible(page: Page, messageId: strin
   return pre
 }
 
+/**
+ * True-tail positioning: the LAST answer group sits at the route bottom, so
+ * the cold landing is already at bottom (scrollTop ~= 0) with the tail tab
+ * fully inside. A 300px-up non-bottom viewport would necessarily hide it, so
+ * no wheel repositioning is required when the tab is already fully visible:
+ * return the settled bottom reading directly. Only when the tab is not
+ * visible, nudge minimally (both signs, small steps) until it becomes fully
+ * visible. Fails loudly with measured geometry when physically impossible
+ * (no tolerance inflation, no spacers).
+ */
+async function wheelToTailTabVisible(page: Page, messageId: string): Promise<Reading> {
+  const isTabInViewport = (): Promise<boolean> =>
+    page.evaluate((id: string) => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+      const el = document.querySelector(
+        `[data-testid="answer-group-selector"][data-message-id="${esc}"]`
+      ) as HTMLElement | null
+      if (!container || !el) return false
+      const c = container.getBoundingClientRect()
+      const r = el.getBoundingClientRect()
+      return r.top >= c.top && r.bottom <= c.bottom && r.width > 0 && r.height > 0
+    }, messageId)
+  if (await isTabInViewport()) {
+    const anchor = await settledAnchor(page)
+    const fresh = await readScroll(page)
+    return {
+      anchorId: anchor.id,
+      offset: anchor.offset,
+      scrollTop: fresh.scrollTop,
+      scrollHeight: fresh.scrollHeight,
+      clientHeight: fresh.clientHeight
+    }
+  }
+  const box = await page.locator('#messages').first().boundingBox()
+  if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  for (let i = 0; i < 30; i++) {
+    await page.mouse.wheel(0, -120)
+    await page.waitForTimeout(200)
+    if (await isTabInViewport()) {
+      const anchor = await settledAnchor(page)
+      const fresh = await readScroll(page)
+      return {
+        anchorId: anchor.id,
+        offset: anchor.offset,
+        scrollTop: fresh.scrollTop,
+        scrollHeight: fresh.scrollHeight,
+        clientHeight: fresh.clientHeight
+      }
+    }
+  }
+  for (let i = 0; i < 30; i++) {
+    await page.mouse.wheel(0, 120)
+    await page.waitForTimeout(200)
+    if (await isTabInViewport()) {
+      const anchor = await settledAnchor(page)
+      const fresh = await readScroll(page)
+      return {
+        anchorId: anchor.id,
+        offset: anchor.offset,
+        scrollTop: fresh.scrollTop,
+        scrollHeight: fresh.scrollHeight,
+        clientHeight: fresh.clientHeight
+      }
+    }
+  }
+  const finTab = await captureTabGeometry(page, messageId).catch(() => null)
+  const finScroll = await readScroll(page).catch(
+    () => ({ scrollTop: NaN, scrollHeight: NaN, clientHeight: NaN }) as never
+  )
+  throw new Error(
+    `tail tab for ${messageId} unreachable (tab=${finTab ? `${Math.round(finTab.offset)}/${Math.round(finTab.rect.top)}x${Math.round(finTab.rect.height)} inH=${Math.round(finTab.containerRect.height)}` : 'missing'} st=${Math.round(finScroll.scrollTop)} h=${finScroll.scrollHeight}/${finScroll.clientHeight})`
+  )
+}
+
+/**
+ * Tail stationary assertion: same 2px tab geometry + mandatory hit + painted
+ * transition budget as the mid-topic contract, but WITHOUT the non-bottom
+ * gate — the true tail starts at bottom (scrollTop ~= 0) and staying at
+ * bottom is correct (not a jump). Still guards the live scroll range.
+ */
+async function expectTailTabStationary(
+  page: Page,
+  label: string,
+  messageId: string,
+  pre: TabGeometry,
+  point: { x: number; y: number },
+  opts?: { members?: string[]; transitionWorst?: number; sampleCount?: number }
+): Promise<void> {
+  const post = await captureTabGeometry(page, messageId)
+  const offsetDrift = Math.abs(post.offset - pre.offset)
+  const centerDrift = Math.hypot(post.center.x - pre.center.x, post.center.y - pre.center.y)
+  test.info().annotations.push({
+    type: 'csi-tail-geometry',
+    description: `${label} preOffset=${Math.round(pre.offset)} postOffset=${Math.round(post.offset)} drift=${offsetDrift.toFixed(1)} centerDrift=${centerDrift.toFixed(1)} preRect=${Math.round(pre.rect.top)},${Math.round(pre.rect.height)} postRect=${Math.round(post.rect.top)},${Math.round(post.rect.height)} point=${Math.round(point.x)},${Math.round(point.y)}`
+  })
+  expect(offsetDrift, `${label}: clicked tail tab stays at its previous viewport offset`).toBeLessThanOrEqual(TAB_TOL)
+  expect(centerDrift, `${label}: clicked tail tab center stays`).toBeLessThanOrEqual(TAB_TOL)
+  expect(
+    await hitTestTabAtPoint(page, point, messageId),
+    `${label}: stationary pointer still hits the same tail tab`
+  ).toBe(true)
+  await page.evaluate(
+    () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  )
+  const repainted = await captureTabGeometry(page, messageId)
+  expect(Math.abs(repainted.offset - pre.offset), `${label}: painted-frame tail offset stationary`).toBeLessThanOrEqual(
+    TAB_TOL
+  )
+  expect(await hitTestTabAtPoint(page, point, messageId), `${label}: painted-frame hit still resolves`).toBe(true)
+  if (typeof opts?.transitionWorst === 'number' && Number.isFinite(opts.transitionWorst)) {
+    test.info().annotations.push({
+      type: 'csi-tail-transition',
+      description: `${label} worst=${opts.transitionWorst.toFixed(1)} n=${opts.sampleCount ?? '?'} preOffset=${Math.round(pre.offset)} postOffset=${Math.round(post.offset)}`
+    })
+    expect(opts.transitionWorst, `${label}: painted transition frames never jump`).toBeLessThanOrEqual(TRANSITION_TOL)
+  }
+  const members = opts?.members ?? []
+  if (members.length >= 2) {
+    await expectSameFoldGroup(page, await currentTopicId(page), members[0], members[1], label)
+    expect(members, `${label}: stationary tail tab must be a same-group member`).toContain(messageId)
+  }
+  const scroll = await readScroll(page)
+  const topExtreme = -(scroll.scrollHeight - scroll.clientHeight)
+  expect(scroll.scrollTop, `${label}: post viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
+    topExtreme - OFFSET_TOL
+  )
+  expect(scroll.scrollTop, `${label}: post viewport stays at/above bottom`).toBeLessThanOrEqual(OFFSET_TOL)
+}
+
 async function waitForSelection(page: Page, topicId: string, memberIds: string[], expectedId: string): Promise<void> {
   await page.waitForFunction(
     ({ topicId, memberIds, expectedId }: { topicId: string; memberIds: string[]; expectedId: string }) => {
@@ -651,82 +969,329 @@ async function waitForScrollQuiescence(page: Page): Promise<number> {
 }
 
 /**
- * Production-policy mirror (pure geometry, no implementation ID): clamps the
- * held intra-row offset into the visible range the replacement real box can
- * represent, `[-h+12, vh-12]` with 12px min-visible. Feasible offsets return
- * the EXACT original; infeasible ones clamp to the nearest valid visible
- * in-row position. Non-finite/non-positive geometry returns the original
- * fail-closed (caller holds nothing new) — same as production.
+ * Painted transition tracking that starts BEFORE the pointer click and
+ * continues through the IPC wait, selected layout, and stabilization —
+ * never only the eventual final. The pointer is never repositioned during
+ * tracking (evaluate-only sampling), so the original click point stays under
+ * the cursor throughout. Returns extractable worst drift + sample count for
+ * the return report (logs only on failure via the caller's stationary
+ * assertion annotations).
  */
-function normalizeFoldAnchorOffset(originalOffset: number, replacementHeight: number, viewportHeight: number): number {
-  if (!Number.isFinite(originalOffset)) return originalOffset
-  if (!Number.isFinite(replacementHeight) || replacementHeight <= 0) return originalOffset
-  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return originalOffset
-  const lower = -replacementHeight + FOLD_MIN_VISIBLE_PX
-  const upper = viewportHeight - FOLD_MIN_VISIBLE_PX
-  if (originalOffset < lower) return lower
-  if (originalOffset > upper) return upper
-  return originalOffset
+async function readTabOffset(page: Page, messageId: string): Promise<number> {
+  return page
+    .evaluate((id: string) => {
+      const container = document.getElementById('messages') as HTMLElement | null
+      if (!container) return NaN
+      const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
+      const el = document.querySelector(
+        `[data-testid="answer-group-selector"][data-message-id="${esc}"]`
+      ) as HTMLElement | null
+      if (!el) return NaN
+      return el.getBoundingClientRect().top - container.getBoundingClientRect().top
+    }, messageId)
+    .catch(() => NaN)
+}
+
+async function clickAnswerTabAndTrack(
+  page: Page,
+  topicId: string,
+  members: string[],
+  messageId: string
+): Promise<{ pre: TabGeometry; point: { x: number; y: number }; worst: number; samples: number[] }> {
+  const pre = await captureTabGeometry(page, messageId)
+  const point = { x: pre.center.x, y: pre.center.y }
+  const samples: number[] = [0]
+  // Sampling starts BEFORE the click (pre drift 0 counts as frame 1) and the
+  // pointer never moves afterwards: mouse.click lands at the recorded center
+  // and every later sample is evaluate-only.
+  await page.mouse.click(point.x, point.y)
+  // Poll through the async DB-first selection + selected layout commit:
+  // each rAF-separated frame records drift; the loop exits only after the
+  // authoritative selection flips AND four additional painted frames prove the
+  // selected layout settled — never settling on the eventual final alone.
+  let selectedSeen = false
+  let settledExtra = 0
+  const deadline = Date.now() + 20000
+  while (Date.now() < deadline) {
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    )
+    const cur = await readTabOffset(page, messageId)
+    if (Number.isFinite(cur)) samples.push(Math.abs((cur as number) - pre.offset))
+    const selected = await authoritativeSelectedId(page, topicId, members).catch(() => null)
+    if (selected === messageId) {
+      selectedSeen = true
+      settledExtra += 1
+      if (settledExtra >= 4) break
+    } else {
+      settledExtra = 0
+    }
+  }
+  if (!selectedSeen) throw new Error(`selection never flipped to ${messageId} during transition tracking`)
+  const worst = samples.length > 0 ? Math.max(...samples) : Number.NaN
+  return { pre, point, worst, samples }
 }
 
 /**
- * Real-box geometry of the selected visible answer: actual rendered box
- * height `h`, viewport height `vh`, visible portion, and live offset. Uses
- * the same any-candidate resolution as isRowVisibleInMessages (disambiguated
- * row selector first, then any data-message-id row, then the bare id) and
- * reports the intersecting visible candidate's real box — never a hidden or
- * box-less duplicate.
+ * Faithful delayed selection via the existing store.dispatch seam (same style
+ * as route-settings-session installInFlightGate): contextBridge freezes
+ * window.api.chatDb (writable:false/configurable:false), so the IPC function
+ * cannot be wrapped — the dispatch boundary is the closest faithful point.
+ * Holds thunk-function dispatches while armed; the already-held selection
+ * thunk stays pending after disarm so unrelated dispatches pass while the
+ * target projection commit is genuinely delayed. Everything is removed in
+ * finally. No production delay hooks.
  */
-async function measureFoldGeometry(
-  page: Page,
-  messageId: string
-): Promise<{ h: number; vh: number; visible: number; offset: number; found: boolean }> {
-  return page.evaluate((id: string) => {
-    const container = document.getElementById('messages') as HTMLElement | null
-    if (!container) return { h: NaN, vh: NaN, visible: 0, offset: NaN, found: false }
-    const c = container.getBoundingClientRect()
-    const vh = Number.isFinite(container.clientHeight) && container.clientHeight > 0 ? container.clientHeight : c.height
-    const esc = typeof CSS !== 'undefined' && (CSS as any).escape ? (CSS as any).escape(id) : id
-    const seen = new Set<Element>()
-    const cands: HTMLElement[] = []
-    const collect = (list: ArrayLike<Element>): void => {
-      for (let i = 0; i < list.length; i++) {
-        const el = list[i]
-        if (el && !seen.has(el)) {
-          seen.add(el)
-          if (el instanceof HTMLElement) cands.push(el)
+async function installCsiSelectionGate(page: Page, key: string, topicId: string, targetId: string): Promise<void> {
+  await page.evaluate(
+    ({ k, tid, target }: { k: string; tid: string; target: string }) => {
+      const w = window as unknown as Record<string, any>
+      if (w[k]) throw new Error('csi selection gate already installed')
+      const store = w.store
+      if (!store || typeof store.dispatch !== 'function') throw new Error('store.dispatch unavailable for gate')
+      const orig = store.dispatch.bind(store)
+      const gate = {
+        armed: true,
+        tid,
+        target,
+        held: [] as Array<{
+          action: unknown
+          resolve: (v: unknown) => void
+          reject: (e: unknown) => void
+          heldAt: number
+        }>,
+        orig,
+        installedAt: Date.now(),
+        firstHeldAt: 0,
+        releasedAt: 0,
+        hit: 0
+      }
+      const wrapped = function (action: unknown, ...rest: unknown[]): unknown {
+        const g = (window as unknown as Record<string, any>)[k] as typeof gate | undefined
+        if (g && g.armed === true && typeof action === 'function') {
+          if (g.firstHeldAt === 0) g.firstHeldAt = Date.now()
+          g.hit += 1
+          return new Promise<unknown>((resolve, reject) => {
+            g.held.push({ action, resolve, reject, heldAt: Date.now() })
+          })
         }
+        const o = (g && (g as Record<string, unknown>).orig) || orig
+        return (o as (...a: unknown[]) => unknown)(action, ...rest)
+      }
+      ;(wrapped as unknown as Record<string, unknown>).__csi_gate = true
+      w[k] = gate
+      store.dispatch = wrapped
+    },
+    { k: key, tid: topicId, target: targetId }
+  )
+  const installed = await page.evaluate((k: string) => {
+    const w = window as unknown as Record<string, any>
+    return w.store?.dispatch?.__csi_gate === true && Boolean(w[k]?.armed)
+  }, key)
+  expect(installed, 'csi selection gate must wrap store.dispatch while armed').toBe(true)
+}
+
+async function disarmCsiSelectionGate(page: Page, key: string): Promise<void> {
+  await page.evaluate((k: string) => {
+    const g = (window as unknown as Record<string, any>)[k]
+    if (!g) throw new Error('csi selection gate missing at disarm')
+    g.armed = false
+  }, key)
+}
+
+async function releaseCsiSelectionGate(
+  page: Page,
+  key: string
+): Promise<{
+  total: number
+  errors: string[]
+  installedAt: number
+  firstHeldAt: number
+  releasedAt: number
+  heldMs: number
+}> {
+  return await page.evaluate(async (k: string) => {
+    const g = (window as unknown as Record<string, any>)[k] as
+      | {
+          armed: boolean
+          held: Array<{ action: unknown; resolve: (v: unknown) => void; reject: (e: unknown) => void }>
+          orig: (action: unknown) => Promise<unknown>
+          installedAt: number
+          firstHeldAt: number
+          releasedAt: number
+        }
+      | undefined
+    if (!g) throw new Error('csi selection gate missing at release')
+    g.armed = false
+    g.releasedAt = Date.now()
+    const heldMs = g.firstHeldAt > 0 ? g.releasedAt - g.firstHeldAt : 0
+    const queue = g.held.splice(0)
+    const errors: string[] = []
+    for (const h of queue) {
+      try {
+        const value = await g.orig(h.action)
+        h.resolve(value)
+      } catch (e) {
+        errors.push(e instanceof Error ? e.message : String(e))
+        h.reject(e)
       }
     }
-    try {
-      collect(
-        document.querySelectorAll(
-          `#message-${esc}[data-message-id="${esc}"]:not([data-testid="answer-group-selector"])`
-        )
-      )
-    } catch {}
-    try {
-      collect(
-        document.querySelectorAll(`#messages [data-message-id="${esc}"]:not([data-testid="answer-group-selector"])`)
-      )
-    } catch {}
-    const byId = document.getElementById(`message-${esc}`)
-    if (byId) collect([byId])
-    let best: { h: number; visible: number; offset: number } | null = null
-    for (const el of cands) {
-      if (!el.isConnected) continue
-      if (el.getAttribute('data-testid') === 'answer-group-selector') continue
-      if (window.getComputedStyle(el).display === 'none') continue
-      const r = el.getBoundingClientRect()
-      if (r.width === 0 && r.height === 0) continue
-      const visible = Math.min(r.bottom, c.bottom) - Math.max(r.top, c.top)
-      if (!(visible > 0)) continue
-      const offset = r.top - c.top
-      if (!best || visible > best.visible) best = { h: r.height, visible, offset }
+    return {
+      total: queue.length,
+      errors,
+      installedAt: g.installedAt,
+      firstHeldAt: g.firstHeldAt,
+      releasedAt: g.releasedAt,
+      heldMs
     }
-    if (!best) return { h: NaN, vh, visible: 0, offset: NaN, found: false }
-    return { h: best.h, vh, visible: best.visible, offset: best.offset, found: true }
-  }, messageId)
+  }, key)
+}
+
+async function removeCsiSelectionGate(page: Page, key: string): Promise<boolean> {
+  return await page
+    .evaluate(async (k: string) => {
+      const g = (window as unknown as Record<string, any>)[k] as
+        | {
+            armed: boolean
+            held: Array<{ action: unknown; resolve: (v: unknown) => void; reject: (e: unknown) => void }>
+            orig: (...args: unknown[]) => unknown
+          }
+        | undefined
+      try {
+        if (g) {
+          g.armed = false
+          const queue = g.held.splice(0)
+          for (const h of queue) {
+            try {
+              const value = await g.orig(h.action)
+              h.resolve(value)
+            } catch (e) {
+              h.reject(e)
+            }
+          }
+          try {
+            const store = (window as unknown as Record<string, any>).store
+            if (store && (store.dispatch as unknown as Record<string, unknown>).__csi_gate) {
+              store.dispatch = g.orig
+            }
+          } catch {}
+        }
+      } finally {
+        delete (window as unknown as Record<string, any>)[k]
+      }
+      const store = (window as unknown as Record<string, any>).store
+      return (
+        !(window as unknown as Record<string, any>)[k] &&
+        !(store?.dispatch as unknown as Record<string, unknown> | undefined)?.__csi_gate
+      )
+    }, key)
+    .catch(() => false)
+}
+
+interface CsiSample {
+  t: number
+  offset: number
+  drift: number
+  selected: boolean
+  hit: boolean
+}
+
+/**
+ * In-renderer rAF sampler: starts BEFORE the pointer click and records every
+ * painted frame through the held pending interval, release, first paint and
+ * settle. Node-side polling alone would swallow the gap; the renderer loop
+ * runs independently of the Node wait for the held thunk.
+ */
+async function startCsiSampler(
+  page: Page,
+  targetId: string,
+  point: { x: number; y: number },
+  preOffset: number
+): Promise<void> {
+  await page.evaluate(
+    ({ targetId, px, py, preOffset }: { targetId: string; px: number; py: number; preOffset: number }) => {
+      const w = window as unknown as Record<string, any>
+      w.__csiA1Samples = []
+      w.__csiA1Stop = false
+      w.__csiA1Meta = { targetId, px, py, preOffset }
+      const step = (): void => {
+        try {
+          const ww = window as unknown as Record<string, any>
+          if (ww.__csiA1Stop === true) return
+          const meta = ww.__csiA1Meta as { targetId: string; px: number; py: number; preOffset: number }
+          const container = document.getElementById('messages') as HTMLElement | null
+          let offset = NaN
+          let drift = NaN
+          if (container) {
+            const esc =
+              typeof CSS !== 'undefined' && (CSS as unknown as { escape: (v: string) => string }).escape
+                ? (CSS as unknown as { escape: (v: string) => string }).escape(meta.targetId)
+                : meta.targetId
+            const el = document.querySelector(
+              '[data-testid="answer-group-selector"][data-message-id="' + esc + '"]'
+            ) as HTMLElement | null
+            if (el) {
+              const c = container.getBoundingClientRect()
+              const r = el.getBoundingClientRect()
+              offset = r.top - c.top
+              drift = Math.abs(offset - meta.preOffset)
+            }
+          }
+          let hit = false
+          try {
+            const h = document.elementFromPoint(meta.px, meta.py) as HTMLElement | null
+            const tab =
+              h && h.closest ? (h.closest('[data-testid="answer-group-selector"]') as HTMLElement | null) : null
+            hit = !!tab && tab.getAttribute('data-message-id') === meta.targetId
+          } catch {}
+          let selected = false
+          try {
+            selected =
+              (window as unknown as Record<string, any>).store?.getState()?.messages?.entities?.[meta.targetId]
+                ?.foldSelected === true
+          } catch {}
+          ;(ww.__csiA1Samples as CsiSample[]).push({ t: Date.now(), offset, drift, selected, hit })
+        } catch {}
+        requestAnimationFrame(step)
+      }
+      requestAnimationFrame(step)
+    },
+    { targetId, px: point.x, py: point.y, preOffset }
+  )
+}
+
+async function readCsiSampler(page: Page): Promise<CsiSample[]> {
+  return await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>
+    return (Array.isArray(w.__csiA1Samples) ? w.__csiA1Samples.slice() : []) as CsiSample[]
+  })
+}
+
+async function stopCsiSampler(page: Page): Promise<CsiSample[]> {
+  return await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>
+    w.__csiA1Stop = true
+    return (Array.isArray(w.__csiA1Samples) ? w.__csiA1Samples.slice() : []) as CsiSample[]
+  })
+}
+
+async function clearCsiSampler(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      try {
+        delete (window as unknown as Record<string, any>).__csiA1Samples
+      } catch {}
+      try {
+        delete (window as unknown as Record<string, any>).__csiA1Stop
+      } catch {}
+      try {
+        delete (window as unknown as Record<string, any>).__csiA1Meta
+      } catch {}
+      try {
+        delete (window as unknown as Record<string, any>).__csiChurnPrev
+      } catch {}
+    })
+    .catch(() => {})
 }
 
 /** Same-group proof: both answers share one ask (Redux entities + Main authority). */
@@ -763,102 +1328,62 @@ async function expectSameFoldGroup(
   expect(aAsk, `${label}: Main authority same group`).toBe(bAsk)
 }
 
-async function expectReadingRetained(
+async function expectTabStationary(
   page: Page,
   label: string,
-  pre: Reading,
-  opts?: { members?: string[]; selectedId?: string }
+  messageId: string,
+  pre: TabGeometry,
+  point: { x: number; y: number },
+  opts?: { members?: string[]; transitionWorst?: number; sampleCount?: number }
 ): Promise<void> {
-  const anchor = await settledAnchor(page)
-  const scroll = await readScroll(page)
-  // Legitimate visible replacement only: if the pre-click anchor IS the replaced
-  // (now hidden) answer of the same answer group, the keeper transfers it to the
-  // selected visible sibling with production-policy normalization. Unrelated
-  // visible rows must stay identical. Feasible offsets keep the EXACT original
-  // (±12px); infeasible tall→short offsets clamp deterministically to the
-  // nearest visible in-row position — never an unrelated tail/bottom.
-  const members = opts?.members ?? []
-  const selectedId = opts?.selectedId
-  const isReplacedAnswer = !!selectedId && members.includes(pre.anchorId) && pre.anchorId !== selectedId
-  const expectedId = isReplacedAnswer ? selectedId! : pre.anchorId
-  if (isReplacedAnswer) {
-    // Transfer precondition without first-match ambiguity: the replaced
-    // answer must leave NO visible row (any-candidate resolution, same as
-    // the visibility gate below) before the selected sibling may inherit
-    // the anchor.
-    const preStillVisible = await isRowVisibleInMessages(page, pre.anchorId)
-    expect(preStillVisible, `${label}: pre anchor must be the hidden replaced answer to allow transfer`).toBe(false)
-    const visible = await isRowVisibleInMessages(page, expectedId)
-    expect(visible, `${label}: transferred anchor must be the visible selected answer`).toBe(true)
-  }
-  // Deterministic normalized expectation against the ACTUAL selected visible
-  // box: clamp the old offset with the real replacement height h and the live
-  // viewport vh (min-visible 12px). Feasible (A1/A3 short→tall) keeps the
-  // previous exact-offset expectation; infeasible (A2 tall→short) expects the
-  // clamped value. Geometry comes from the live DOM — narrow, never an
-  // arbitrary range broad enough to hide a jump.
-  const geo = await measureFoldGeometry(page, expectedId)
-  expect(geo.found, `${label}: selected answer must have a measurable visible real box`).toBe(true)
-  const expectedOffset = normalizeFoldAnchorOffset(pre.offset, geo.h, geo.vh)
-  const clamped = expectedOffset !== pre.offset
+  // No mouse reposition happened after the click by construction (callers
+  // never move the mouse between clickAnswerTab and here): the stationary
+  // pointer must still be over the clicked tab.
+  const post = await captureTabGeometry(page, messageId)
+  const offsetDrift = Math.abs(post.offset - pre.offset)
+  const centerDrift = Math.hypot(post.center.x - pre.center.x, post.center.y - pre.center.y)
   test.info().annotations.push({
-    type: 'csi-normalized-offset',
-    description: `${label} pre=${Math.round(pre.offset)} h=${Math.round(geo.h)} vh=${Math.round(geo.vh)} expected=${Math.round(expectedOffset)} clamped=${clamped} visible=${Math.round(geo.visible)}`
+    type: 'csi-tab-geometry',
+    description: `${label} preOffset=${Math.round(pre.offset)} postOffset=${Math.round(post.offset)} drift=${offsetDrift.toFixed(1)} centerDrift=${centerDrift.toFixed(1)} preRect=${Math.round(pre.rect.top)},${Math.round(pre.rect.height)} postRect=${Math.round(post.rect.top)},${Math.round(post.rect.height)}`
   })
-  expect(anchor.id, `${label}: anchor identity retained`).toBe(expectedId)
-  expect(
-    Math.abs(anchor.offset - expectedOffset),
-    `${label}: normalized anchor offset retained (expected=${Math.round(expectedOffset)} actual=${Math.round(anchor.offset)})`
-  ).toBeLessThanOrEqual(OFFSET_TOL)
-  // Same-group proof (production-policy min-visible, not an arbitrary ID):
-  // the retained anchor must be the authoritative selected answer in the same
-  // fold group — never an unrelated tail/bottom row.
-  if (selectedId && members.length >= 2) {
-    await expectSameFoldGroup(page, await currentTopicId(page), members[0], members[1], label)
-    expect(members, `${label}: retained anchor must be a same-group member`).toContain(anchor.id)
-  }
-  // Known production-policy min-visible: the selected answer keeps a readable
-  // visible portion (12px minus the existing 1px geometry tolerance).
-  expect(
-    geo.visible,
-    `${label}: selected answer keeps min-visible readable portion (h=${Math.round(geo.h)} vh=${Math.round(geo.vh)})`
-  ).toBeGreaterThanOrEqual(FOLD_MIN_VISIBLE_PX - 1)
-  expect(Math.abs(scroll.scrollTop), `${label}: must remain non-bottom (no bottom jump)`).toBeGreaterThan(BOTTOM_TOL)
-  // Painted-frame re-observation: after quiescence + settled anchor, two
-  // rAF-separated frames must still report the same visible anchor/offset —
-  // the retention is painted, not a transient layout sample. No raw
-  // `scrollTop` invariance is asserted here: in column-reverse a different
-  // answer height below the viewport necessarily changes `scrollTop` for the
-  // SAME visual anchor, so the raw counter cannot define '保持位置'.
+  expect(offsetDrift, `${label}: clicked tab stays at its previous viewport offset`).toBeLessThanOrEqual(TAB_TOL)
+  expect(centerDrift, `${label}: clicked tab center stays at its previous screen point`).toBeLessThanOrEqual(TAB_TOL)
+  const hit = await hitTestTabAtPoint(page, point, messageId)
+  expect(hit, `${label}: stationary pointer at the original click point still hits the same tab`).toBe(true)
+  // Painted-frame re-observation: two rAF-separated frames must still report
+  // the same tab geometry — the hold is painted, not a transient sample.
   await page.evaluate(
     () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   )
-  const repainted = await readAnchor(page)
-  expect(repainted?.id, `${label}: painted-frame anchor identity retained`).toBe(expectedId)
-  expect(
-    Math.abs((repainted?.offset ?? NaN) - expectedOffset),
-    `${label}: painted-frame normalized anchor offset retained`
-  ).toBeLessThanOrEqual(OFFSET_TOL)
-  // Supporting metric only (geometry primary): explained scroll-range delta.
-  // Height growth from the unequal-height answer swap shifts the valid
-  // scroll range; report the range shift alongside the raw scroll shift so a
-  // same-anchor retention with large `scrollTop` movement stays diagnosable
-  // without gating on it. The only hard range gate is containment: the post
-  // viewport must remain inside the live scroll range (no forced jump).
-  const heightDelta = scroll.scrollHeight - pre.scrollHeight
-  const scrollDelta = scroll.scrollTop - pre.scrollTop
-  const topExtreme = -(scroll.scrollHeight - scroll.clientHeight)
-  test.info().annotations.push({
-    type: 'csi-retention-range',
-    description: `${label} scrollDelta=${Math.round(scrollDelta)} heightDelta=${Math.round(heightDelta)} preTop=${Math.round(pre.scrollTop)} postTop=${Math.round(scroll.scrollTop)}`
-  })
-  expect(
-    scroll.scrollTop,
-    `${label}: post viewport stays inside the live scroll range (supporting)`
-  ).toBeGreaterThanOrEqual(topExtreme - OFFSET_TOL)
-  expect(scroll.scrollTop, `${label}: post viewport stays at/b above bottom (supporting)`).toBeLessThanOrEqual(
-    OFFSET_TOL
+  const repainted = await captureTabGeometry(page, messageId)
+  expect(Math.abs(repainted.offset - pre.offset), `${label}: painted-frame tab offset stationary`).toBeLessThanOrEqual(
+    TAB_TOL
   )
+  const repaintedHit = await hitTestTabAtPoint(page, point, messageId)
+  expect(repaintedHit, `${label}: painted-frame hit test still resolves to the same tab`).toBe(true)
+  if (typeof opts?.transitionWorst === 'number' && Number.isFinite(opts.transitionWorst)) {
+    const count = typeof opts?.sampleCount === 'number' ? ` n=${opts.sampleCount}` : ''
+    test.info().annotations.push({
+      type: 'csi-tab-transition',
+      description: `${label} worst painted transition drift=${opts.transitionWorst.toFixed(1)}${count} preOffset=${Math.round(pre.offset)} postOffset=${Math.round(post.offset)} point=${Math.round(point.x)},${Math.round(point.y)}`
+    })
+    expect(opts.transitionWorst, `${label}: painted transition frames never jump`).toBeLessThanOrEqual(TRANSITION_TOL)
+  }
+  // Same-group proof: the selected tab is the authoritative answer in the
+  // same fold group — never an unrelated tail/bottom row.
+  const members = opts?.members ?? []
+  if (members.length >= 2) {
+    await expectSameFoldGroup(page, await currentTopicId(page), members[0], members[1], label)
+    expect(members, `${label}: stationary tab must be a same-group member`).toContain(messageId)
+  }
+  // Never a jump to global bottom.
+  const scroll = await readScroll(page)
+  expect(Math.abs(scroll.scrollTop), `${label}: must remain non-bottom (no bottom jump)`).toBeGreaterThan(BOTTOM_TOL)
+  const topExtreme = -(scroll.scrollHeight - scroll.clientHeight)
+  expect(scroll.scrollTop, `${label}: post viewport stays inside the live scroll range`).toBeGreaterThanOrEqual(
+    topExtreme - OFFSET_TOL
+  )
+  expect(scroll.scrollTop, `${label}: post viewport stays at/above bottom`).toBeLessThanOrEqual(OFFSET_TOL)
 }
 
 async function expectTabSelectionRendered(page: Page, selectedId: string, hiddenId: string): Promise<void> {
@@ -1013,11 +1538,11 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
     await waitForAppReady(mainWindow)
   })
 
-  test('answer-tab unequal-height repeated switches retain the reading viewport', async ({ mainWindow }) => {
+  test('answer-tab unequal-height repeated switches keep the clicked tab stationary', async ({ mainWindow }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'CHAT SCROLL INTENT A: real answer-group-selector pointer clicks flip authoritative foldSelected (Redux + read-only Main getRawTopic) with stable anchor identity/offset and no bottom jump across repeated unequal-height switches (short->tall, tall->short, short->tall repeat).'
+        'CHAT SCROLL INTENT A: real answer-group-selector pointer clicks at recorded screen points flip authoritative foldSelected (Redux + read-only Main getRawTopic) while the clicked tab stays at its previous viewport geometry with the stationary pointer still hitting the same tab (short->tall, tall->short, immediate repeat without wheel repair, additional mid-topic; true-tail covers bottom).'
     })
     const page: Page = mainWindow
 
@@ -1026,43 +1551,209 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
         await setupScrollIntentTopic(page))
     const tail = { shortId, tallId }
 
-    await test.step('A1: switch short->tall from a verified non-bottom reading viewport without bottom jump', async () => {
-      const pre = await wheelToReadingPositionWithTabVisible(page, tail.tallId)
-      const delivery = await clickAnswerTab(page, tail.tallId)
-      test.info().annotations.push({ type: 'csi-a1-delivery', description: `tab click delivery=${delivery}` })
-      await waitForSelection(page, topicId, members, tail.tallId)
-      await waitForScrollQuiescence(page)
-      expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.tallId)
-      expect(await authoritySelectedId(page, topicId, members)).toBe(tail.tallId)
-      await expectTabSelectionRendered(page, tail.tallId, tail.shortId)
-      await expect(page.locator('#messages')).toContainText('csi-tall-answer-marker')
-      await expectReadingRetained(page, 'A1 short->tall', pre, { members, selectedId: tail.tallId })
+    await test.step('A1: delayed short->tall with observer churn keeps the clicked tab stationary', async () => {
+      // Faithful delayed selection via the store.dispatch seam (frozen
+      // window.api.chatDb cannot be wrapped): arm the gate BEFORE the
+      // gesture, hold the actual selection thunk ~900ms with unrelated real
+      // RO/MO churn INSIDE the gap, sample in-renderer from BEFORE the click
+      // through release + first paint + settle with the pointer never
+      // repositioned. Proves the seam was reached (held>=1, timestamps),
+      // the target stayed unselected throughout the hold, and Redux + Main
+      // both flip only after release.
+      await wheelToReadingPositionWithTabVisible(page, tail.tallId)
+      const gateKey = '__csi_a1_gate'
+      const HOLD_MS = 900
+      let pre: TabGeometry | null = null
+      let point: { x: number; y: number } | null = null
+      let gateRemoved = false
+      try {
+        await installCsiSelectionGate(page, gateKey, topicId, tail.tallId)
+        const installedAt = await page.evaluate(
+          (k: string) => (window as unknown as Record<string, any>)[k]?.installedAt ?? 0,
+          gateKey
+        )
+        expect(installedAt, 'A1 gate installed timestamp must exist').toBeGreaterThan(0)
+        pre = await captureTabGeometry(page, tail.tallId)
+        point = { x: pre.center.x, y: pre.center.y }
+        expect(await hitTestTabAtPoint(page, point, tail.tallId), 'A1 precondition: click point hits tall tab').toBe(
+          true
+        )
+        await startCsiSampler(page, tail.tallId, point, pre.offset)
+        await page.mouse.click(point.x, point.y)
+        await page.waitForFunction(
+          (k: string) => {
+            const g = (window as unknown as Record<string, any>)[k]
+            return Boolean(g) && (g.held?.length ?? 0) >= 1 && (g.firstHeldAt ?? 0) > 0
+          },
+          gateKey,
+          { timeout: 15000 }
+        )
+        const firstHeldAt = await page.evaluate(
+          (k: string) => (window as unknown as Record<string, any>)[k]?.firstHeldAt ?? 0,
+          gateKey
+        )
+        const hitCount = await page.evaluate(
+          (k: string) => (window as unknown as Record<string, any>)[k]?.hit ?? 0,
+          gateKey
+        )
+        expect(hitCount, 'A1 gate must have intercepted the selection thunk').toBeGreaterThanOrEqual(1)
+        expect(
+          await authoritativeSelectedId(page, topicId, members),
+          'A1 held: target stays unselected while held'
+        ).not.toBe(tail.tallId)
+        // Disarm so unrelated dispatches pass; the already-held selection stays pending.
+        await disarmCsiSelectionGate(page, gateKey)
+        // Unrelated real RO/MO churn INSIDE the held gap (not inside IPC).
+        await page.evaluate(() => {
+          const c = document.getElementById('messages') as HTMLElement | null
+          if (!c) return
+          ;(window as unknown as Record<string, any>).__csiChurnPrev = c.style.minHeight
+          c.style.minHeight = '5px'
+          void c.offsetHeight
+        })
+        await page.waitForTimeout(120)
+        await page.evaluate(() => {
+          const c = document.getElementById('messages') as HTMLElement | null
+          if (c) {
+            c.style.minHeight = ((window as unknown as Record<string, any>).__csiChurnPrev as string | undefined) ?? ''
+            void c.offsetHeight
+          }
+          try {
+            delete (window as unknown as Record<string, any>).__csiChurnPrev
+          } catch {}
+        })
+        const remaining = HOLD_MS - (Date.now() - firstHeldAt)
+        if (remaining > 0) await page.waitForTimeout(remaining)
+        expect(
+          await authoritativeSelectedId(page, topicId, members),
+          'A1 held: target still unselected after churn hold'
+        ).not.toBe(tail.tallId)
+        const pendingView = await readCsiSampler(page)
+        const pendingFrames = pendingView.filter((s) => s.selected !== true)
+        expect(pendingFrames.length, 'A1 sampler must capture pending frames before release').toBeGreaterThan(0)
+        const release = await releaseCsiSelectionGate(page, gateKey)
+        expect(release.total, 'A1 release must flush the held selection thunk').toBeGreaterThanOrEqual(1)
+        expect(release.errors, 'A1 release must resolve without transport error').toEqual([])
+        expect(release.heldMs, 'A1 held interval must be meaningful (~900ms)').toBeGreaterThanOrEqual(700)
+        test.info().annotations.push({
+          type: 'csi-a1-delivery',
+          description: `click at ${Math.round(point.x)},${Math.round(point.y)} heldMs=${release.heldMs} hit=${hitCount} pendingFrames=${pendingFrames.length} preOffset=${Math.round(pre.offset)}`
+        })
+        await waitForSelection(page, topicId, members, tail.tallId)
+        expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.tallId)
+        expect(await authoritySelectedId(page, topicId, members)).toBe(tail.tallId)
+        await expectTabSelectionRendered(page, tail.tallId, tail.shortId)
+        await expect(page.locator('#messages')).toContainText('csi-tall-answer-marker')
+        await waitForScrollQuiescence(page)
+        const all = await stopCsiSampler(page)
+        const finite = all.filter((s) => Number.isFinite(s.drift))
+        expect(finite.length, 'A1 sampler must record frames (n>5, time not count alone)').toBeGreaterThan(5)
+        const elapsed = finite.length >= 2 ? finite[finite.length - 1].t - finite[0].t : 0
+        expect(elapsed, 'A1 sampler must span the held interval').toBeGreaterThanOrEqual(700)
+        const worst = finite.length > 0 ? Math.max(...finite.map((s) => s.drift as number)) : Number.NaN
+        const post = await captureTabGeometry(page, tail.tallId)
+        const finalDrift = Math.abs(post.offset - (pre as TabGeometry).offset)
+        expect(finalDrift, 'A1 final tab offset stationary').toBeLessThanOrEqual(TAB_TOL)
+        expect(worst, 'A1 painted transition frames never jump').toBeLessThanOrEqual(TRANSITION_TOL)
+        expect(
+          await hitTestTabAtPoint(page, point as { x: number; y: number }, tail.tallId),
+          'A1 stationary pointer still hits tall tab'
+        ).toBe(true)
+        await expectTabStationary(
+          page,
+          'A1 short->tall',
+          tail.tallId,
+          pre as TabGeometry,
+          point as { x: number; y: number },
+          {
+            members,
+            transitionWorst: worst,
+            sampleCount: finite.length
+          }
+        )
+      } finally {
+        await stopCsiSampler(page).catch(() => [])
+        gateRemoved = await removeCsiSelectionGate(page, gateKey)
+        await clearCsiSampler(page)
+      }
+      expect(gateRemoved, 'A1 gate must restore store.dispatch exactly').toBe(true)
+      // Post-switch handoff proof: live anchor + snapshot now carry the
+      // CURRENT post-switch visible geometry (tall), not the old short body.
+      const snapA1: any = await page
+        .evaluate((tid: string) => {
+          try {
+            return (window as any).keyv?.get?.(`scroll:topic-${tid}::main`) ?? null
+          } catch {
+            return null
+          }
+        }, topicId)
+        .catch(() => null)
+      test.info().annotations.push({
+        type: 'csi-a1-handoff',
+        description: `snap=${snapA1 ? JSON.stringify(snapA1).slice(0, 300) : 'null'}`
+      })
+      if (snapA1 && typeof snapA1 === 'object' && 'messageId' in (snapA1 as Record<string, unknown>)) {
+        expect(
+          (snapA1 as { messageId: unknown }).messageId,
+          'A1 handoff snapshot carries the post-switch tall answer'
+        ).toBe(tail.tallId)
+      }
     })
 
-    await test.step('A2: switch tall->short (unequal height reverse) retains the reading viewport', async () => {
-      const pre = await wheelToReadingPositionWithTabVisible(page, tail.shortId)
-      const delivery = await clickAnswerTab(page, tail.shortId)
-      test.info().annotations.push({ type: 'csi-a2-delivery', description: `tab click delivery=${delivery}` })
-      await waitForSelection(page, topicId, members, tail.shortId)
+    await test.step('A2: switch tall->short (unequal height reverse) keeps the clicked tab stationary', async () => {
+      await wheelToReadingPositionWithTabVisible(page, tail.shortId)
+      const tracked = await clickAnswerTabAndTrack(page, topicId, members, tail.shortId)
+      test.info().annotations.push({
+        type: 'csi-a2-delivery',
+        description: `tab click at ${Math.round(tracked.point.x)},${Math.round(tracked.point.y)} n=${tracked.samples.length}`
+      })
       await waitForScrollQuiescence(page)
       expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.shortId)
       expect(await authoritySelectedId(page, topicId, members)).toBe(tail.shortId)
       await expectTabSelectionRendered(page, tail.shortId, tail.tallId)
       await expect(page.locator('#messages')).toContainText('csi-short-answer-marker')
-      await expectReadingRetained(page, 'A2 tall->short', pre, { members, selectedId: tail.shortId })
+      await expectTabStationary(page, 'A2 tall->short', tail.shortId, tracked.pre, tracked.point, {
+        members,
+        transitionWorst: tracked.worst,
+        sampleCount: tracked.samples.length
+      })
     })
 
-    await test.step('A2-snapshot: Settings roundtrip retains the normalized reconciled position', async () => {
-      // The keeper transfers/normalizes the held live anchor, but the stored
-      // route-key snapshot still refers to the old hidden answer until a
-      // departure capture runs. This ordinary Chat→Settings→Chat roundtrip
-      // (actual sidebar, existing seams only) proves the return shows the
-      // current reconciled normalized position — same selected identity +
-      // normalized offset — not a stale hidden snapshot.
-      const stable = await settledAnchor(page)
-      expect(stable.id, 'A2-snapshot precondition: reconciled anchor is the selected short answer').toBe(tail.shortId)
-      const geoBefore = await measureFoldGeometry(page, tail.shortId)
-      expect(geoBefore.found, 'A2-snapshot precondition: selected short answer has a visible real box').toBe(true)
+    await test.step('A3: immediate repeats without wheel repair keep each clicked tab stationary', async () => {
+      // No wheel repair between these clicks: directly after the converged
+      // A2 viewport, the tall tab sits in the same strip and must be
+      // clickable, then the short tab clickable again. The pointer stays over
+      // each clicked tab through its own switch (no reposition between the
+      // two clicks except the second click's own landing). Each click tracks
+      // from BEFORE its click through its own selection + settle.
+      const r1 = await clickAnswerTabAndTrack(page, topicId, members, tail.tallId)
+      await waitForScrollQuiescence(page)
+      expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.tallId)
+      expect(await authoritySelectedId(page, topicId, members)).toBe(tail.tallId)
+      await expectTabSelectionRendered(page, tail.tallId, tail.shortId)
+      await expectTabStationary(page, 'A3 repeat short->tall', tail.tallId, r1.pre, r1.point, {
+        members,
+        transitionWorst: r1.worst,
+        sampleCount: r1.samples.length
+      })
+
+      const r2 = await clickAnswerTabAndTrack(page, topicId, members, tail.shortId)
+      await waitForScrollQuiescence(page)
+      expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.shortId)
+      expect(await authoritySelectedId(page, topicId, members)).toBe(tail.shortId)
+      await expectTabSelectionRendered(page, tail.shortId, tail.tallId)
+      await expectTabStationary(page, 'A3 repeat tall->short', tail.shortId, r2.pre, r2.point, {
+        members,
+        transitionWorst: r2.worst,
+        sampleCount: r2.samples.length
+      })
+    })
+
+    await test.step('A2-snapshot: Settings roundtrip keeps the stable tab view', async () => {
+      // The departure freeze captures the converged tab-stable geometry; the
+      // return must show the same selected tab at the same viewport geometry
+      // with the pointer position still hitting it — not a stale body anchor.
+      const preTab = await captureTabGeometry(page, tail.shortId)
       const sidebar = new SidebarPage(page)
       await sidebar.goToSettings()
       await waitForSettingsLoad(page)
@@ -1074,21 +1765,13 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
       expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.shortId)
       expect(await authoritySelectedId(page, topicId, members)).toBe(tail.shortId)
       await expectTabSelectionRendered(page, tail.shortId, tail.tallId)
-      const after = await settledAnchor(page)
-      expect(after.id, 'A2-snapshot: return keeps the reconciled selected identity').toBe(tail.shortId)
+      const postTab = await captureTabGeometry(page, tail.shortId)
       expect(
-        Math.abs(after.offset - stable.offset),
-        `A2-snapshot: return keeps the normalized offset (before=${Math.round(stable.offset)} after=${Math.round(after.offset)})`
-      ).toBeLessThanOrEqual(OFFSET_TOL)
-      const geoAfter = await measureFoldGeometry(page, tail.shortId)
-      expect(geoAfter.found, 'A2-snapshot: selected short answer still has a visible real box').toBe(true)
-      expect(
-        geoAfter.visible,
-        'A2-snapshot: selected answer keeps min-visible readable portion'
-      ).toBeGreaterThanOrEqual(FOLD_MIN_VISIBLE_PX - 1)
+        Math.abs(postTab.offset - preTab.offset),
+        `A2-snapshot: return keeps the stable tab offset (before=${Math.round(preTab.offset)} after=${Math.round(postTab.offset)})`
+      ).toBeLessThanOrEqual(TAB_TOL)
       const scrollAfter = await readScroll(page)
       expect(Math.abs(scrollAfter.scrollTop), 'A2-snapshot: return stays non-bottom').toBeGreaterThan(BOTTOM_TOL)
-      // Supporting only: departure capture persists the reconciled snapshot.
       const snap = await page
         .evaluate((tid: string) => {
           try {
@@ -1106,19 +1789,118 @@ test.describe('Chat scroll intent — answer-tab retention + send reaches latest
         .catch(() => null)
       test.info().annotations.push({
         type: 'csi-a2-snapshot',
-        description: `return anchor=${after.id}@${Math.round(after.offset)} visible=${Math.round(geoAfter.visible)} snap=${snap ? JSON.stringify(snap).slice(0, 300) : 'null'}`
+        description: `return tabOffset=${Math.round(postTab.offset)} snap=${snap ? JSON.stringify(snap).slice(0, 300) : 'null'}`
       })
     })
 
-    await test.step('A3: repeated switch short->tall still retains the reading viewport', async () => {
-      const pre = await wheelToReadingPositionWithTabVisible(page, tail.tallId)
-      await clickAnswerTab(page, tail.tallId)
-      await waitForSelection(page, topicId, members, tail.tallId)
+    await test.step('A4: additional mid-topic short->tall keeps the clicked tab stationary', async () => {
+      // Additional mid-topic switch (not a near-bottom geometry claim): the
+      // true-tail test below covers the route bottom in both directions, so
+      // this step only proves another mid-topic switch stays stationary.
+      await wheelToReadingPositionWithTabVisible(page, tail.tallId)
+      const tracked = await clickAnswerTabAndTrack(page, topicId, members, tail.tallId)
       await waitForScrollQuiescence(page)
       expect(await authoritativeSelectedId(page, topicId, members)).toBe(tail.tallId)
       expect(await authoritySelectedId(page, topicId, members)).toBe(tail.tallId)
       await expectTabSelectionRendered(page, tail.tallId, tail.shortId)
-      await expectReadingRetained(page, 'A3 short->tall repeat', pre, { members, selectedId: tail.tallId })
+      await expectTabStationary(page, 'A4 mid-topic short->tall', tail.tallId, tracked.pre, tracked.point, {
+        members,
+        transitionWorst: tracked.worst,
+        sampleCount: tracked.samples.length
+      })
+    })
+  })
+
+  test('answer-tab true-tail group switches keep the clicked tab stationary', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CHAT SCROLL INTENT TAIL: the LAST answer group at the route bottom (true tail, not mid-topic) flips authoritative foldSelected both directions with the clicked tab stationary and the pointer still hitting it; plus an all-short total-height (no-overflow) switch. Scoped deterministic tail fixtures via shared helpers; mid-topic coverage above is unchanged (not renamed to tail).'
+    })
+    const page: Page = mainWindow
+    await ensureDisplayCount(page, DISPLAY_COUNT)
+    await ensureExpandedFoldMode(page)
+    const liveAssistantId = await getLiveAssistantId(page)
+    const tailTopicId = `csi-tail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const builtTail = buildTailScrollIntentEntries(tailTopicId, liveAssistantId)
+    await seedTopicViaMainAuthority(page, liveAssistantId, tailTopicId, builtTail.entries)
+    await activateTopicCold(page, tailTopicId, [builtTail.shortId, builtTail.tallId])
+    const tailMembers = [builtTail.shortId, builtTail.tallId]
+    expect(await authoritativeSelectedId(page, tailTopicId, tailMembers)).toBe(builtTail.shortId)
+
+    await test.step('TAIL short->long keeps the clicked tab stationary', async () => {
+      await wheelToTailTabVisible(page, builtTail.tallId)
+      const placed = await captureTabGeometry(page, builtTail.tallId)
+      test.info().annotations.push({
+        type: 'csi-tail-placement',
+        description: `tail tab offset=${Math.round(placed.offset)} containerH=${Math.round(placed.containerRect.height)}`
+      })
+      const tracked = await clickAnswerTabAndTrack(page, tailTopicId, tailMembers, builtTail.tallId)
+      await waitForScrollQuiescence(page)
+      expect(await authoritativeSelectedId(page, tailTopicId, tailMembers)).toBe(builtTail.tallId)
+      expect(await authoritySelectedId(page, tailTopicId, tailMembers)).toBe(builtTail.tallId)
+      await expectTabSelectionRendered(page, builtTail.tallId, builtTail.shortId)
+      await expect(page.locator('#messages')).toContainText('csi-tail-tall-marker')
+      await expectTailTabStationary(page, 'TAIL short->long', builtTail.tallId, tracked.pre, tracked.point, {
+        members: tailMembers,
+        transitionWorst: tracked.worst,
+        sampleCount: tracked.samples.length
+      })
+    })
+
+    await test.step('TAIL long->short keeps the clicked tab stationary', async () => {
+      await wheelToTailTabVisible(page, builtTail.shortId)
+      const tracked = await clickAnswerTabAndTrack(page, tailTopicId, tailMembers, builtTail.shortId)
+      await waitForScrollQuiescence(page)
+      expect(await authoritativeSelectedId(page, tailTopicId, tailMembers)).toBe(builtTail.shortId)
+      expect(await authoritySelectedId(page, tailTopicId, tailMembers)).toBe(builtTail.shortId)
+      await expectTabSelectionRendered(page, builtTail.shortId, builtTail.tallId)
+      await expect(page.locator('#messages')).toContainText('csi-tail-short-marker')
+      await expectTailTabStationary(page, 'TAIL long->short', builtTail.shortId, tracked.pre, tracked.point, {
+        members: tailMembers,
+        transitionWorst: tracked.worst,
+        sampleCount: tracked.samples.length
+      })
+    })
+
+    await test.step('TAIL all-short no-overflow switch keeps the clicked tab stationary', async () => {
+      const tinyTopicId = `csi-tiny-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const builtTiny = buildAllShortEntries(tinyTopicId, liveAssistantId)
+      await seedTopicViaMainAuthority(page, liveAssistantId, tinyTopicId, builtTiny.entries)
+      const tinyItem = page.locator(`[data-testid="topic-item"][data-topic-id="${tinyTopicId}"]`)
+      await tinyItem.waitFor({ state: 'attached', timeout: 15000 })
+      await tinyItem.scrollIntoViewIfNeeded()
+      await tinyItem.click()
+      await page.waitForFunction(
+        ({ topicId, tailIds }: { topicId: string; tailIds: string[] }) => {
+          const s = (window as any).store.getState()
+          const ids = s.messages?.messageIdsByTopic?.[topicId]
+          if (!Array.isArray(ids)) return false
+          return tailIds.every((id) => ids.includes(id))
+        },
+        { topicId: tinyTopicId, tailIds: [builtTiny.shortId, builtTiny.tallId] },
+        { timeout: 30000 }
+      )
+      const tinyMembers = [builtTiny.shortId, builtTiny.tallId]
+      expect(await authoritativeSelectedId(page, tinyTopicId, tinyMembers)).toBe(builtTiny.shortId)
+      // No wheel positioning: total height is below the viewport, every row
+      // is already fully visible. The click is still a real pointer click at
+      // the recorded point with the pointer left in place.
+      const tracked = await clickAnswerTabAndTrack(page, tinyTopicId, tinyMembers, builtTiny.tallId)
+      await waitForScrollQuiescence(page)
+      expect(await authoritativeSelectedId(page, tinyTopicId, tinyMembers)).toBe(builtTiny.tallId)
+      expect(await authoritySelectedId(page, tinyTopicId, tinyMembers)).toBe(builtTiny.tallId)
+      const post = await captureTabGeometry(page, builtTiny.tallId)
+      const drift = Math.abs(post.offset - tracked.pre.offset)
+      const centerDrift = Math.hypot(post.center.x - tracked.pre.center.x, post.center.y - tracked.pre.center.y)
+      test.info().annotations.push({
+        type: 'csi-tiny-geometry',
+        description: `tiny preOffset=${Math.round(tracked.pre.offset)} postOffset=${Math.round(post.offset)} drift=${drift.toFixed(1)} centerDrift=${centerDrift.toFixed(1)} worst=${tracked.worst.toFixed(1)} n=${tracked.samples.length}`
+      })
+      expect(drift, 'tiny: clicked tab stays at its previous viewport offset').toBeLessThanOrEqual(TAB_TOL)
+      expect(centerDrift, 'tiny: clicked tab center stays').toBeLessThanOrEqual(TAB_TOL)
+      expect(await hitTestTabAtPoint(page, tracked.point, builtTiny.tallId)).toBe(true)
+      expect(tracked.worst, 'tiny: painted transition frames never jump').toBeLessThanOrEqual(TRANSITION_TOL)
     })
   })
 
