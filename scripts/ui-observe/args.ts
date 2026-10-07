@@ -4,7 +4,7 @@
  * `scripts` Vitest project.
  *
  * Supported syntax (after the package script forwards args through the
- * native-abi lane wrapper):
+ * native-runtime wrapper):
  *
  *   pnpm ui:observe --help
  *   pnpm ui:observe --list
@@ -51,7 +51,7 @@ function parseOutputDirValue(value: string): string | null {
 }
 
 export function parseUiObserveArgs(argv: readonly string[]): ParseUiObserveResult {
-  // Standalone `--` tokens are no-op separators (the native-abi lane wrapper
+  // Standalone `--` tokens are no-op separators (the native-runtime wrapper
   // and pnpm forwarding may place them before or between arguments).
   const args = argv.filter((arg) => arg !== '--')
 

@@ -38,7 +38,7 @@ describe('classifyPath', () => {
 
   test('scripts paths', () => {
     expect(classifyPath('scripts/check-i18n.ts')).toBe('scripts')
-    expect(classifyPath('scripts/native-abi/run.ts')).toBe('scripts')
+    expect(classifyPath('scripts/native-runtime/run.ts')).toBe('scripts')
   })
 
   test('shared paths', () => {

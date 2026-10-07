@@ -1,31 +1,23 @@
 /**
- * Injectable child-process executor (bounded process primitive for the Native
- * ABI Runtime Lane lifecycle).
+ * Injectable child-process executor (narrow standard runner primitive).
  *
- * Runs an explicit executable + argv without enabling shell parsing, inherits a supplied
- * environment, preserves exit/signal/spawn outcomes, forwards parent
+ * Runs an explicit executable + argv without shell parsing, inherits a
+ * supplied environment, preserves exit/signal/spawn outcomes, forwards parent
  * SIGINT/SIGTERM to a running child, waits for child completion, and always
- * unregisters the parent signal handlers. It does not acquire locks, inspect
- * leases, ensure/restore lanes, or touch the repository ABI state — the later
- * lifecycle runner calls this module while holding a lane lease and owns
- * cleanup/finalization.
+ * unregisters the parent signal handlers. It never touches native bindings,
+ * locks, or package state, so concurrent invocations are safe.
  *
  * Contracts honored:
- *  - Commands are explicit executable + argv; no shell string parsing and no
- *    directory/import ABI inference.
+ *  - Commands are explicit executable + argv; no shell string parsing.
  *  - Outcomes are a discriminated union: `exited(code)`, `signaled(signal,
  *    exitCode)` with a deterministic conventional exit-code mapping (128 +
- *    signal number), or `spawn-error(message, code?)` — easy precedence logic
- *    for the lifecycle runner.
+ *    signal number), or `spawn-error(message, code?)`.
  *  - On parent SIGINT/SIGTERM the same signal is forwarded to the running
- *    child; `process.exit` is never called (cleanup/finalization is the later
- *    lifecycle runner's job), and SIGKILL stays uncatchable and unforwarded.
+ *    child; `process.exit` is never called.
  *  - Parent signal listeners are unregistered in every settlement path and an
  *    error/close race never double-settles the outcome.
- *  - A caller-supplied signal that cannot be registered (unsupported or
- *    uncatchable on the platform) is a spawn-error outcome, never a rejected
- *    promise or a leaked listener: every already-registered handler is
- *    unregistered first and the child stays observed.
+ *  - A caller-supplied signal that cannot be registered is a spawn-error
+ *    outcome, never a rejected promise or a leaked listener.
  *
  * All I/O goes through the injected `ProcessExecutorSeams` so the outcome and
  * forwarding logic is deterministically testable with fakes (Vitest scripts
@@ -65,13 +57,13 @@ export interface ExecuteOptions {
   env?: NodeJS.ProcessEnv
   /** Working directory for the child; default `process.cwd()`. */
   cwd?: string
-  /** stdio for the child; default `'inherit'` (real wiring preserves stdio inheritance). */
+  /** stdio for the child; default `'inherit'`. */
   stdio?: SpawnOptions['stdio']
   /** Parent signals forwarded to a running child; default `['SIGINT', 'SIGTERM']`. */
   forwardedSignals?: readonly NodeJS.Signals[]
 }
 
-/** Windows command shims used by the repository's native ABI lanes. */
+/** Windows command shims used by the repository's commands. */
 const WINDOWS_CMD_SHIMS = new Set([
   'pnpm',
   'pnpm.cmd',
@@ -88,8 +80,8 @@ const WINDOWS_CMD_SHIMS = new Set([
 ])
 
 /**
- * Discriminated outcome of a child run. `kind` is the single source the later
- * lifecycle precedence logic switches on:
+ * Discriminated outcome of a child run. `kind` is the single source the
+ * caller switches on:
  *  - `exited`: the child exited on its own with `code`.
  *  - `signaled`: the child was terminated by `signal`; `exitCode` is the
  *    deterministic conventional mapping (128 + signal number).
@@ -104,9 +96,9 @@ export type ProcessOutcome =
 /**
  * Stable signal-name → number fallback for the conventional exit-code mapping,
  * used only when the platform's `os.constants.signals` table lacks a known
- * signal (e.g. minimal libc or Windows builds). Numbers follow the conventional
- * Linux/glibc table so `128 + number` stays deterministic across platforms; the
- * platform table remains authoritative when it does define the signal.
+ * signal. Numbers follow the conventional Linux/glibc table so `128 + number`
+ * stays deterministic across platforms; the platform table remains
+ * authoritative when it does define the signal.
  */
 export const FALLBACK_SIGNAL_NUMBERS: Readonly<Record<string, number>> = {
   SIGHUP: 1,
@@ -169,8 +161,8 @@ export function createProcessExecutorSeams(): ProcessExecutorSeams {
   return {
     spawn: (command, args, options) => {
       // Windows package shims are .cmd files. Node cannot execute a .cmd file
-      // directly with spawn(), so route the fixed lane commands through the
-      // system command interpreter while preserving their explicit argv.
+      // directly with spawn(), so route the fixed commands through the system
+      // command interpreter while preserving their explicit argv.
       if (process.platform === 'win32' && WINDOWS_CMD_SHIMS.has(command)) {
         return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command, ...args], options)
       }
@@ -192,7 +184,7 @@ export function createProcessExecutorSeams(): ProcessExecutorSeams {
  * explicit argv. While it runs, parent `forwardedSignals` (default SIGINT and
  * SIGTERM) are forwarded to the child. `process.exit` is never called: when the
  * child settles, the parent signal listeners are unregistered and the promise
- * resolves; whatever the parent does next belongs to the lifecycle runner.
+ * resolves.
  *
  * Settlement is single-shot: the first `close`/`error` event resolves the
  * outcome and unregisters the signal handlers, so an `error` followed by
@@ -275,10 +267,7 @@ export function executeProcess(seams: ProcessExecutorSeams, options: ExecuteOpti
       } catch (error) {
         // A caller-supplied signal that cannot be registered (unsupported or
         // uncatchable on this platform) must never reject the promise or leak
-        // the handlers registered earlier in this loop: `settle` unregisters
-        // every handler registered so far and resolves the same discriminated
-        // spawn-error outcome the API uses for a child that never ran. The
-        // child stays observed by the listeners attached above.
+        // the handlers registered earlier in this loop.
         settle({
           kind: 'spawn-error',
           message: `unable to register parent signal handler: ${error instanceof Error ? error.message : String(error)}`,

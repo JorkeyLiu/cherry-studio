@@ -6,7 +6,7 @@
  * - verify:changed is local feedback only, never CI proof, never a substitute.
  * - Fast path is renderer-only; any Main/preload/shared/package/config/scripts/unknown
  *   path must fail closed with instruction to run `pnpm build:check`.
- * - Fast renderer test execution must enter canonical Node ABI lane via
+ * - Fast renderer test execution must enter the shared native runtime via
  *   `pnpm native:run node -- ...` and preserve real exit codes.
  * - CI workflows remain unchanged; no pool caps changed here.
  *
@@ -213,7 +213,7 @@ function usage(): string {
     '',
     'Strict renderer-only fast-feedback. Any Main/preload/shared/package/config/scripts/unknown',
     'path fails closed and instructs to run `pnpm build:check`. Renderer-only changes enter',
-    'the canonical Node ABI lane via `pnpm native:run node -- vitest --changed=<base>` and',
+    'the shared native runtime via `pnpm native:run node -- vitest --changed=<base>` and',
     'include untracked renderer files via explicit related invocation. Docs-only exits 0 with',
     'a no-op message and no validation claim. Never a substitute for `pnpm build:check` or CI proof.'
   ].join('\n')

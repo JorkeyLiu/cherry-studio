@@ -170,6 +170,19 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
         ;(window as any).__e2ePreImportMarker = true
       })
 
+      // Scoped contract (test-only isolation, NOT a product fix): this fixture
+      // proves import/persistence (replace-all + reload + restart), never the
+      // independent automatic topic-naming feature (covered separately by
+      // conversation/topic-auto-naming.spec.ts). The genuine Main-given
+      // baseline is intentionally NOT repaired here: the source IDB topic row
+      // carries no naming metadata and the import data plane drops the LS
+      // `isNameManuallyEdited` UI field, so Main `fetchTopicNamingContext`
+      // reports null and the post-send `autoRenameTopic` summary would rename
+      // the topic away from the hardcoded `Seed Topic` asserts below. Disable
+      // the feature noise through the existing settings Redux API before the
+      // import (persisted by the store, re-applied on each fresh page below).
+      await disableAutomaticTopicNaming(page)
+
       // Deterministic marker topic in Redux (visible in the sidebar) AND
       // SQLite (data plane) — the replace-all import must remove it from both.
       await createMarkerTopic(page, MARKER.topic, MARKER.name)
@@ -307,6 +320,11 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       // rehydration (imported assistants replace the pre-import navigation).
       await waitForImportedNavigationInRedux(page)
 
+      // Fresh-page re-apply (see scoped contract above): the in-process reload
+      // reset the page context, so re-disable on the fresh page and prove the
+      // isolation BEFORE the genuine post-import send below.
+      await disableAutomaticTopicNaming(page)
+
       expect(
         electronApp.process().pid,
         `original PID ${originalPidValue} must still be alive after the in-process reload (LOCK-UI1)`
@@ -443,9 +461,18 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       expect(afterSend.userContents).toContain(POST_IMPORT_MESSAGE)
       expect(afterSend.assistantContents.some((c) => c.includes('[Mock mock-model]'))).toBe(true)
 
-      // UI evidence: the new user message container and the assistant reply render.
+      // UI evidence: the new user message container and the assistant reply
+      // render. The mock prefix also surfaces in the auto-title topic <div>,
+      // so the unscoped getByText matches 2 — scope to the actual ASSISTANT
+      // reply container id from the Redux projection (never the user id).
+      expect(afterSend.newAssistantMessageId, 'assistant reply id must be defined').toBeTruthy()
       await expect(messageContainer(page, afterSend.newUserMessageId)).toBeVisible()
-      await expect(page.getByText('[Mock mock-model] You said:', { exact: false })).toBeVisible()
+      await expect(messageContainer(page, afterSend.newAssistantMessageId)).toBeVisible()
+      await expect(
+        messageContainer(page, afterSend.newAssistantMessageId).getByText('[Mock mock-model] You said:', {
+          exact: false
+        })
+      ).toBeVisible()
 
       // --- 8. Close the entire app + post-close SQLite evidence ---------------
       // LOCK-UI4: full app close (fixture-owned close + exact-token verify,
@@ -470,6 +497,10 @@ test.describe('Cherry Studio genuine ZIP full-flow import', () => {
       // The imported navigation was durably flushed by the projection apply,
       // so rehydration restores it directly (no pending one-shot row).
       await waitForImportedNavigationInRedux(relaunched.page)
+      // Same-profile relaunch re-assert (see scoped contract above): prove the
+      // disabled naming configuration survived; no further send follows, so
+      // this is persistence evidence only.
+      await disableAutomaticTopicNaming(relaunched.page)
 
       const navAfterRestart = await readImportedNavigation(relaunched.page)
       // LOCK-TF2: the SAME captured post-send updatedAt must rehydrate
@@ -629,6 +660,34 @@ async function createMarkerTopic(page: import('@playwright/test').Page, topicId:
   )
   expect(result.assistantId, 'the default assistant must host the marker topic').toBeTruthy()
   expect(result.ensured?.ok, `marker ensureTopic failed: ${JSON.stringify(result.ensured)}`).toBe(true)
+}
+
+/**
+ * Scoped contract — test-only automatic topic-naming isolation (NOT a product
+ * fix, NOT a global default change).
+ *
+ * This import/persistence fixture must not exercise the independent
+ * auto-naming feature (`autoRenameTopic`, covered separately by
+ * `conversation/topic-auto-naming.spec.ts`): the genuine Main-given baseline
+ * is left as-is (source IDB topic row carries no naming metadata and the
+ * import data plane drops the LS `isNameManuallyEdited` UI field, so Main
+ * `fetchTopicNamingContext` reports null and a post-send summary would rename
+ * the topic away from the hardcoded `Seed Topic` asserts). Disabling via the
+ * existing `settings/setEnableTopicNaming` Redux convention removes only that
+ * fixture noise; the genuine product send path (mock provider) is untouched
+ * and no request is blocked. The trailing assert proves the isolation at each
+ * call site (pre-import setup, fresh-page re-apply after the in-process
+ * reload before the send, and same-profile relaunch persistence).
+ */
+async function disableAutomaticTopicNaming(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(() => {
+    ;(window as any).store.dispatch({ type: 'settings/setEnableTopicNaming', payload: false })
+  })
+  const enabled = await page.evaluate(() => (window as any).store.getState().settings.enableTopicNaming)
+  expect(
+    enabled,
+    'automatic topic naming must be disabled for this import/persistence fixture (topic naming is covered separately)'
+  ).toBe(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -836,6 +895,8 @@ interface MessageSnapshot {
   assistantContents: string[]
   blocks: Record<string, string>
   newUserMessageId: string
+  assistantMessageIds: string[]
+  newAssistantMessageId: string
   totalMessages: number
 }
 
@@ -846,6 +907,7 @@ async function readImportedMessages(page: import('@playwright/test').Page): Prom
     const userContents: string[] = []
     const assistantContents: string[] = []
     const blocks: Record<string, string> = {}
+    const assistantMessageIds: string[] = []
     let newUserMessageId = ''
     for (const id of msgIds) {
       const msg = s.messages?.entities?.[id]
@@ -858,6 +920,7 @@ async function readImportedMessages(page: import('@playwright/test').Page): Prom
         newUserMessageId = id
       } else if (msg.role === 'assistant') {
         assistantContents.push(text)
+        assistantMessageIds.push(id)
       }
       for (const blockId of msg.blocks ?? []) {
         blocks[blockId] = s.messageBlocks?.entities?.[blockId]?.content ?? ''
@@ -869,6 +932,8 @@ async function readImportedMessages(page: import('@playwright/test').Page): Prom
       assistantContents,
       blocks,
       newUserMessageId,
+      assistantMessageIds,
+      newAssistantMessageId: assistantMessageIds.length > 0 ? assistantMessageIds[assistantMessageIds.length - 1] : '',
       totalMessages: msgIds.length
     }
   }, SOURCE_IDS.topic)

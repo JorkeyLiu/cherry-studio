@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
-import type { ProcessOutcome } from '../../native-abi/executor'
+import type { ProcessOutcome } from '../../native-runtime/executor'
 import {
   buildChildArgv,
   CHILD_COMMAND,

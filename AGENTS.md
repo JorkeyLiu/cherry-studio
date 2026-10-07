@@ -31,7 +31,7 @@ This is the canonical, always-on repository contract for AI coding assistants wo
   2. *Implementation regression evidence* — boundary-matched to the change (see Change Propagation); proves protected contracts do not regress.
   3. *Aggregate delivery validation* — the authoritative gate for the exact worktree state (see Validation gates).
 - **Proportionality.** Evidence cost and rigor scale with risk, irreversibility, uncertainty, expected reuse, and the boundary the change crosses.
-- **Universal safeguards.** Every evidence activity upholds privacy (no content/credentials/paths/raw DB size), truthful context/provenance, no false claims, including false baselines, thresholds, or root-cause assertions, and the applicable runtime lane for every command entering Node/Electron lanes. These apply unconditionally.
+- **Universal safeguards.** Every evidence activity upholds privacy (no content/credentials/paths/raw DB size), truthful context/provenance, no false claims, including false baselines, thresholds, or root-cause assertions, and the correct Node/Electron runtime for every command. These apply unconditionally.
 - **Formal measurement is opt-in.** Structured schemas, artifact emission/storage/retention, and formal provenance packaging apply only to explicitly selected formal quantitative or reusable claims; universal safeguards remain mandatory for all evidence work.
 - **Evidence-task contract.** Every evidence task binds to an explicitly activated decision/outcome, a specific claim, a minimum sufficient method, and a stopping condition — all four required. Evidence-only work lacking any field does not count as progress and cannot close a phase or workflow.
 - **Outcome-based completion.** Completion requires accepted outcomes plus boundary-matched regression plus mandatory governance/delivery validation plus explicitly accepted residual risk. Activity completeness alone never closes a phase.
@@ -48,11 +48,11 @@ Load the matching skill before starting the task. If a referenced skill is missi
 - **Release preparation** — use the `prepare-release` skill.
 - **Delivery validation** — use the `delivery-validation` skill when running completion gates, pre-commit checks, full tests, E2E/build/packaging, or other long-running validation commands.
 
-## Environment, Commands, and Native ABI
+## Environment, Commands, and Native Runtime
 
 ### Environment bootstrap (run before any pnpm command)
 
-The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (`package.json`). Another Node installation can shadow the pinned one (e.g., a `~/.local/bin/node` shim ahead of the nvm install), and a wrong Node version can silently produce an incompatible better-sqlite3 binding. Establish the pinned toolchain before the first `pnpm` command:
+The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (`package.json`). Another Node installation can shadow the pinned one (e.g., a `~/.local/bin/node` shim ahead of the nvm install). Establish the pinned toolchain before the first `pnpm` command. Pins protect reproducibility and the support baseline, not a per-V8 compiled binding (better-sqlite3 now ships as a Node-API prebuilt that loads under both runtimes):
 
 1. **Verify versions first** — `node -v` must print `v24.11.1` and `pnpm -v` must print `10.27.0`.
 2. **Activate the pinned Node** — `nvm use` / `fnm use`, or the session-local `PATH` override below.
@@ -65,18 +65,16 @@ The repository pins Node 24.11.1 (`.nvmrc` / `.node-version`) and pnpm 10.27.0 (
    ```
    This does not modify `~/.zshrc` and applies only to the current shell session.
 
-### Native ABI lanes (better-sqlite3)
+### Native runtime (better-sqlite3 Node-API)
 
-The single native module, `better-sqlite3`, is compiled for **either** Node 24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once. Which ABI is valid is a **package-command runtime lane contract**: it is decided by the lane of the command you run, never inferred from directories, tests, imports, or module graphs, and never switched by hand. The lane machinery lives in `scripts/native-abi/`; canonical commands are wired through it in `package.json`.
+The single native module, `better-sqlite3` 13.0.3, uses a Node-API prebuilt: the same packaged file loads under both Node 24.11.1 and Electron 41.2.1. There is no ABI switching, rebuilding, restoration, or checkout lock — Node and Electron commands may run in parallel. The runtime machinery lives in `scripts/native-runtime/`; canonical commands are wired through it in `package.json`.
 
-- **ABI is a runtime lane contract.** `node`-lane commands (`pnpm test`, `test:*`, `test:coverage`, `test:ui`, `test:watch`, `bench:*`, `ci:test-check`) run under Node 24 (ABI 137); `electron`-lane commands (`pnpm dev`, `pnpm dev:watch`, `pnpm start`, `pnpm debug`, `pnpm build`, `build:*`, `analyze:*`, `pnpm test:e2e`, `pnpm ui:observe`) run under Electron 41.2.1 (ABI 145). Neutral commands (`pnpm lint`, `pnpm format`, `pnpm typecheck`, `i18n:*`, `openapi:check`, `skills:check`, `ci:basic-check`) never enter a lane and never switch the binding.
-- **Canonical lane commands self-ensure their lane.** Each lane command probes the binding read-only first and rebuilds only when that probe fails. No manual `native:check:*` / `native:rebuild:*` sequencing is ever needed to reach a lane state.
-- **Local Node lanes restore the Electron ABI 145 default afterwards; CI skips restoration.** After a local `node`-lane run (for example `pnpm test`) the binding is restored to the Electron ABI, so the next dev/build/E2E command needs no manual switching. CI runs skip the restoration step.
-- **Concurrency is serialized per checkout.** Lane commands take a checkout-scoped lock for the duration of the run. A command for the opposite lane started while another lane holds the lock fails fast with a conflict diagnostic — wait for that lane to finish or run its command. The lane is never silently switched under another owner's run.
-- **`pnpm native:check:node` / `pnpm native:check:electron` are pure read-only diagnostics** — use them to inspect or prove the current binding state. **`pnpm native:rebuild:*` are explicit repair/debug tooling** — never routine workflow; a lane command repairs its own lane when its probe fails. Internal `*:run` helpers (`test:run`, `dev:run`, `build:run`, …) are not user/agent entrypoints; always use the canonical public command.
-- **`ELECTRON_RUN_AS_NODE=1`** is valid only inside the controlled Electron probe; never export it in a shell or launch Electron with it.
-- **Only a real runtime SQL probe proves success** — `Database(':memory:')` + `select 1 as ok` + close. `.forge-meta` markers are never trusted.
-- **ABI onboarding** — `.node-version` / `.nvmrc` are the source of truth for the required Node version. Confirm Node 24 is on PATH before installing; installing under the wrong Node can produce an incompatible binding.
+- **Runtime is a launch selection, not a lane.** `node`-runtime commands (`pnpm test`, `test:*`, `test:coverage`, `test:ui`, `test:watch`, `bench:*`, `ci:test-check`) run under Node 24; `electron`-runtime commands (`pnpm dev`, `pnpm dev:watch`, `pnpm start`, `pnpm debug`, `pnpm build`, `build:*`, `analyze:*`, `pnpm test:e2e`, `pnpm ui:observe`) run under Electron 41.2.1. Neutral commands (`pnpm lint`, `pnpm format`, `pnpm typecheck`, `i18n:*`, `openapi:check`, `skills:check`, `ci:basic-check`) never enter a native runtime.
+- **Public `pnpm native:run <node|electron> -- <cmd...>` is a lightweight launcher** — readonly SQL runtime probe plus sanitized spawn. It is NOT a lane manager: probes never recompile, switch, or share locked mutable state. Package platform/NAPI compatibility is still required; never try to rebuild or wait on locks.
+- **`pnpm native:check:node` / `pnpm native:check:electron` are pure read-only diagnostics** — `Database(':memory:')` + `select 1 as ok` + close under the target runtime. Only a real runtime SQL probe proves success; `.forge-meta` markers and filenames are never trusted. `native:rebuild:*` is removed. Internal `*:run` helpers (`test:run`, `dev:run`, `build:run`, …) are implementation helpers, still not normal user entrypoints; always use the canonical public command.
+- **`ELECTRON_RUN_AS_NODE=1` must never be exported in a shell or globally**, nor used to launch Electron. Only controlled Electron probe children (and the existing controlled E2E relay children) may set it.
+- **Parallelism is allowed.** No dev/test runtime exclusivity. Independently isolate real shared resources (DB files, profiles, output dirs) — parallel runs must never share them.
+- **ABI onboarding** — `.node-version` / `.nvmrc` are the source of truth for the required Node version. Confirm Node 24 is on PATH before installing.
 
 ### Commands
 
@@ -84,14 +82,14 @@ The single native module, `better-sqlite3`, is compiled for **either** Node 24 (
 - **Development**: `pnpm dev` — Electron app in development mode with hot reload
 - **Debug**: `pnpm debug` — debugging via `chrome://inspect` on port 9222
 - **Build Check**: `pnpm build:check` — **REQUIRED** before code-surface commits (`pnpm lint && pnpm openapi:check && pnpm test`); **do not run** `pnpm format`, `pnpm lint`, and `pnpm test` separately before `pnpm build:check` — `build:check` already runs lint + openapi:check + full test for the exact worktree state, so running them separately wastes time. Run `build:check` **once** per exact worktree state as the sole authoritative aggregate pre-commit gate. Pure documentation/governance-only changes outside the gate input surface follow the exception defined in Validation gates; run `pnpm i18n:sync` first if there are i18n sort issues, `pnpm format` first if there are formatting issues
-- **Verify Changed (renderer-only fast feedback)**: `pnpm verify:changed [--base=<ref>]` — strict renderer-only local feedback, **never a completion gate, never a substitute for `pnpm build:check`, never CI proof**. When changed/untracked paths (vs. base, default HEAD, including untracked files) are exclusively `src/renderer/**` plus docs-only paths (e.g., `*.md`, `docs/**`, `.agents/**`), it runs renderer-focused Vitest via the canonical Node ABI lane (`pnpm native:run node -- vitest --changed=<base>`) and includes untracked renderer files via explicit related invocation; file-scoped Biome/Oxlint/ESLint checks run as supported; docs-only/no-renderer-change sets exit 0 with an explicit no-op message without claiming validation proof. **Any** Main (`src/main/**`), preload (`src/preload/**`), shared (`packages/**`, `tests/**`), package/config (`package.json`, `pnpm-lock.yaml`, `tsconfig*.json`, `electron.vite.config.ts`, `vitest.config.ts`, `patches/**`, etc.), `scripts/**`, or unknown path **fails closed** with a nonzero exit and an instruction to run `pnpm build:check` — no partial green result.
+- **Verify Changed (renderer-only fast feedback)**: `pnpm verify:changed [--base=<ref>]` — strict renderer-only local feedback, **never a completion gate, never a substitute for `pnpm build:check`, never CI proof**. When changed/untracked paths (vs. base, default HEAD, including untracked files) are exclusively `src/renderer/**` plus docs-only paths (e.g., `*.md`, `docs/**`, `.agents/**`), it runs renderer-focused Vitest via `pnpm native:run node -- vitest --changed=<base>`) and includes untracked renderer files via explicit related invocation; file-scoped Biome/Oxlint/ESLint checks run as supported; docs-only/no-renderer-change sets exit 0 with an explicit no-op message without claiming validation proof. **Any** Main (`src/main/**`), preload (`src/preload/**`), shared (`packages/**`, `tests/**`), package/config (`package.json`, `pnpm-lock.yaml`, `tsconfig*.json`, `electron.vite.config.ts`, `vitest.config.ts`, `patches/**`, etc.), `scripts/**`, or unknown path **fails closed** with a nonzero exit and an instruction to run `pnpm build:check` — no partial green result.
 - **Full Build**: `pnpm build` — TypeScript typecheck + electron-vite build
-- **Test**: `pnpm test` — all Vitest tests under the Node ABI lane (main + renderer + aiCore + shared + scripts + e2e-utils); the lane is self-ensured and the Electron ABI is restored locally afterwards
+- **Test**: `pnpm test` — all Vitest tests under Node (main + renderer + aiCore + shared + scripts + e2e-utils)
   - `pnpm test:main` — Main process tests only (Node environment)
   - `pnpm test:renderer` — Renderer process tests only (jsdom environment)
   - `pnpm test:aicore` — aiCore package tests only
-  - `pnpm test:watch`, `pnpm test:coverage` — Vitest under the Node ABI lane
-  - `pnpm test:e2e` — Playwright E2E under the Electron ABI lane
+  - `pnpm test:watch`, `pnpm test:coverage` — Vitest under Node
+  - `pnpm test:e2e` — Playwright E2E under Electron
 - **UI Observation**: `pnpm ui:observe` — isolated diagnostic Playwright Electron observation harness for rendered/interactive behavior; diagnostic-only, never E2E regression proof. Procedural use and evidence classification route through `ui-verify-change`.
 - **Lint**: `pnpm lint` — oxlint + eslint fix + TypeScript typecheck + i18n check + format check
 - **Format**: `pnpm format` — Biome format + lint (write mode)

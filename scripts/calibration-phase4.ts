@@ -4,7 +4,7 @@
  * Purpose (LOCK-001..004):
  * - Deliver one cohesive, opt-in public package command that runs the existing
  *   C-01 logical payload calibration, pinned working-set calibration, and the
- *   C-02 mixed Electron heap matrix in the correct ordered runtime lanes,
+ *   C-02 mixed Electron heap matrix in the correct ordered runtimes,
  *   while preserving their independent schema-v1 artifacts and fail-closed
  *   behavior. Prefer one meaningful end-to-end increment over a fragmented
  *   small commit (LOCK-003).
@@ -14,15 +14,15 @@
  * - LOCK-002: Artifacts remain reproducible, privacy-safe schema-v1 outputs.
  * - LOCK-003: One meaningful increment.
  * - LOCK-004: Composite must be explicitly opt-in, run C-01 + pinned in Node
- *   lane then build + C-02 mixed in Electron lane; must not bypass canonical
- *   public lane commands or manually switch ABI.
+ *   runtime then build + C-02 mixed in Electron runtime; must not bypass canonical
+ *   public runtime commands or manually switch binaries.
  *
  * Implementation — smallest coherent public command:
  * - Public package command: `pnpm calibration:phase4` (also aliased
  *   `pnpm bench:phase4-calibration` for bench discoverability).
- * - Sequence uses existing canonical public commands so lane ownership remains
- *   governed by package scripts (native run lanes). No direct vitest bench
- *   invocation, no manual native ABI rebuild, no C02 env leakage beyond its step.
+ * - Sequence uses existing canonical public commands so runtime ownership remains
+ *   governed by package scripts (native run probes). No direct vitest bench
+ *   invocation, no manual native rebuild, no C02 env leakage beyond its step.
  * - C02 opt-in env `C02_HEAP_CALIBRATION=mixed` applies ONLY to the final
  *   step via cross-platform env merging (spawnSync env), not via shell prefix.
  * - Ordered lanes: Node (C-01), Node (pinned), Electron (build), Electron
@@ -37,7 +37,7 @@
  *
  * Cross-platform: uses Node `spawnSync` with explicit `env` merging per step;
  * no shell string interpolation, no `VAR=val command` prefix. Consistent with
- * this repository's tsx-script conventions (verify-changed.ts, native-abi/*).
+ * this repository's tsx-script conventions (verify-changed.ts, native-runtime/*).
  *
  * Measurement-only: does not close Phase 4/5, does not adopt B-01..B-05,
  * does not create baseline artifacts, does not change IPC/preload/schema/
@@ -147,7 +147,7 @@ export const PHASE4_CALIBRATION_STEPS: readonly CalibrationStep[] = [
     args: ['build'],
     env: {},
     lane: 'electron',
-    description: 'fresh production build establishing Electron lane/ABI (Electron lane, no calibration artifact)'
+    description: 'fresh production build establishing the Electron runtime (Electron lane, no calibration artifact)'
   },
   {
     id: 'c02-heap-mixed',
@@ -185,7 +185,7 @@ export function validateC02EnvIsolation(steps: readonly CalibrationStep[]): stri
   return problems
 }
 
-/** Validate canonical public lane commands — must not bypass native:run. */
+/** Validate canonical public runtime commands — must not bypass native:run. */
 export function validateCanonicalCommands(steps: readonly CalibrationStep[]): string[] {
   const problems: string[] = []
   const expected: Array<{ id: string; command: string; args: readonly string[] }> = [
@@ -222,7 +222,7 @@ export function validateCanonicalCommands(steps: readonly CalibrationStep[]): st
   return problems
 }
 
-/** Validate ordered lanes: Node, Node, Electron, Electron. */
+/** Validate ordered runtime targets: Node, Node, Electron, Electron. */
 export function validateOrderedLanes(steps: readonly CalibrationStep[]): string[] {
   const expectedLanes: Array<CalibrationStep['lane']> = ['node', 'node', 'electron', 'electron']
   const problems: string[] = []

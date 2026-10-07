@@ -1,41 +1,32 @@
 import path from 'node:path'
 
-import { resolveBindingPath } from './binding'
 import {
   ELECTRON_ABI,
-  ELECTRON_ARCH,
-  ELECTRON_PLATFORM,
   ELECTRON_VERSION,
   electronTargetFor,
-  NATIVE_BINDING_NAME,
   NATIVE_PACKAGE,
   NATIVE_PACKAGE_VERSION,
   NODE_ABI,
   NODE_MIN_VERSION,
-  PROBE_MARKER
+  PROBE_TIMEOUT_MS
 } from './constants'
+import { parseProbeOutput } from './effects'
 import type { CheckReport, Effects, ElectronProbeOutput } from './types'
 import { isAtLeast } from './versions'
 
-const REPAIR_NODE = 'pnpm native:rebuild:node'
-const REPAIR_ELECTRON = 'pnpm native:rebuild:electron'
-
-/** Parse the probe JSON line emitted by `probe.cjs` from child stdout. */
-export function parseProbeOutput(stdout: string): ElectronProbeOutput | undefined {
-  for (const line of stdout.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith(PROBE_MARKER)) {
-      continue
-    }
-    const json = trimmed.slice(PROBE_MARKER.length).trim()
-    try {
-      return JSON.parse(json) as ElectronProbeOutput
-    } catch {
-      return undefined
-    }
-  }
-  return undefined
-}
+/**
+ * Read-only runtime diagnostics for the shared better-sqlite3 Node-API binary.
+ *
+ * Both checks verify the locked dependency version and then prove success the
+ * only way that counts: a real `Database(':memory:')` + `select 1 as ok` +
+ * close under the target runtime. Observed ABI numbers are reported as
+ * informational diagnostics and never gate the result — the Node-API binary
+ * is runtime-agnostic.
+ *
+ * Failure remediation is dependency-level (`package.json` pin + reinstall).
+ * There is no rebuild, relink, restore, or lock concept: nothing here writes
+ * to node_modules, user databases, or package files.
+ */
 
 interface PackageResolution {
   packagePath?: string
@@ -60,11 +51,10 @@ function packageVersion(effects: Effects, packagePath: string): string {
 }
 
 /**
- * Enforce the locked better-sqlite3 version (finding A). Returns a failure
- * message when the resolved package version differs from the locked
- * `NATIVE_PACKAGE_VERSION`, or undefined on match. The failure deliberately
- * provides dependency remediation (`package.json` + `pnpm install`) and never
- * claims a native rebuild can repair a dependency-version mismatch.
+ * Enforce the locked better-sqlite3 version. Returns a failure message when
+ * the resolved package version differs from the locked
+ * `NATIVE_PACKAGE_VERSION`, or undefined on match. The failure provides
+ * dependency remediation and never suggests a native rebuild.
  */
 export function verifyPackageVersion(effects: Effects, packagePath: string): string | undefined {
   const actual = packageVersion(effects, packagePath)
@@ -73,29 +63,12 @@ export function verifyPackageVersion(effects: Effects, packagePath: string): str
   }
   return [
     `better-sqlite3 resolved version ${actual || 'unknown'} does not match the locked ${NATIVE_PACKAGE_VERSION} (package realpath: ${packagePath}).`,
-    'This is a dependency-version mismatch; a native rebuild cannot repair it.',
+    'This is a dependency-version mismatch; reinstall the locked dependency.',
     `Remediation: pin "better-sqlite3": "${NATIVE_PACKAGE_VERSION}" in package.json, re-run \`pnpm install\`, then retry this command.`
   ].join('\n')
 }
 
-function bindingPathFor(
-  effects: Effects,
-  packagePath: string,
-  opts: { platform: string; arch: string; abi: number; nodeRuntimeVersion: string }
-): string | undefined {
-  return resolveBindingPath({
-    packagePath,
-    name: NATIVE_BINDING_NAME,
-    nodeRuntimeVersion: opts.nodeRuntimeVersion,
-    platform: opts.platform,
-    arch: opts.arch,
-    abi: opts.abi,
-    exists: effects.exists,
-    resolve: effects.resolveFilePath
-  })
-}
-
-/** Check the better-sqlite3 binding against the Node runtime (in-process). */
+/** Check the shared binary against the running Node runtime (in-process). */
 export function runNodeCheck(effects: Effects): CheckReport {
   const info = effects.runtimeInfo()
   const report: CheckReport = {
@@ -106,28 +79,21 @@ export function runNodeCheck(effects: Effects): CheckReport {
     abi: info.modulesAbi,
     platform: info.platform,
     arch: info.arch,
-    markerState: 'ignored',
     sqlVerified: false,
-    failures: [],
-    repairCommand: REPAIR_NODE
+    failures: []
   }
 
-  const runtimeLabel = `node ${info.nodeVersion} (ABI ${info.modulesAbi}, ${info.platform}/${info.arch})`
+  const runtimeLabel = `node ${info.nodeVersion} (ABI ${info.modulesAbi} informational, ${info.platform}/${info.arch})`
   if (!isAtLeast(info.nodeVersion, NODE_MIN_VERSION)) {
     report.failures.push(
       `Unsupported Node runtime: ${runtimeLabel}; repository requires >= ${NODE_MIN_VERSION} (see .node-version).`,
-      `The better-sqlite3 binding is not compiled for this Node runtime.`,
-      `Run the command with a supported Node24 binary on PATH, then: ${REPAIR_NODE}`
+      `Run the command with a supported Node24 binary on PATH, then re-run \`pnpm install\` if the dependency is missing.`
     )
     return report
   }
   if (info.modulesAbi !== NODE_ABI) {
-    report.failures.push(
-      `Node ABI ${info.modulesAbi} detected (expected ${NODE_ABI}) for runtime ${runtimeLabel}.`,
-      `The better-sqlite3 binding is not built for this Node runtime.`,
-      `Run with a supported Node24 (ABI ${NODE_ABI}) on PATH, then: ${REPAIR_NODE}`
-    )
-    return report
+    // Informational only: the Node-API binary loads under any modules ABI.
+    // Recorded on the report for diagnostics; never a failure.
   }
 
   const resolved = resolvePackage(effects)
@@ -136,34 +102,28 @@ export function runNodeCheck(effects: Effects): CheckReport {
     return report
   }
   report.packagePath = resolved.packagePath
-  report.bindingPath = bindingPathFor(effects, resolved.packagePath, {
-    platform: info.platform,
-    arch: info.arch,
-    abi: NODE_ABI,
-    nodeRuntimeVersion: info.nodeVersion
-  })
+  try {
+    report.packageVersion = packageVersion(effects, resolved.packagePath)
+  } catch {
+    report.packageVersion = ''
+  }
 
   const versionFailure = verifyPackageVersion(effects, resolved.packagePath)
   if (versionFailure) {
     report.failures.push(versionFailure)
-    report.repairCommand = undefined
     return report
   }
 
-  // LOCK-ABI-2: only a real Database(':memory:') + select 1 + close proves success.
+  // Only a real Database(':memory:') + select 1 + close proves success.
   const probe = effects.probeNodeBinding()
   report.probeCloseError = probe.closeError
   if (!probe.sqlOk) {
     report.failures.push(
       `better-sqlite3 runtime SQL probe failed: ${probe.error ?? 'unknown error'}`,
-      `The binding does not load under ${runtimeLabel} (likely compiled for Electron ABI ${ELECTRON_ABI}).`,
+      `The shared binary does not load under ${runtimeLabel}.`,
       `Package realpath: ${resolved.packagePath}`,
-      `Resolved binding path: ${report.bindingPath ?? '(none found)'}`,
-      `Repair: ${REPAIR_NODE}`
+      `Remediation: re-run \`pnpm install\` to restore the locked ${NATIVE_PACKAGE_VERSION} prebuilds, then retry.`
     )
-    // Finding H: a close error is surfaced alongside the primary probe error
-    // (never replacing it); when the close error is itself the only failure it
-    // is already the primary error message above.
     if (probe.closeError && probe.error !== `Database close failed: ${probe.closeError}`) {
       report.failures.push(`Node probe close error: ${probe.closeError}`)
     }
@@ -175,7 +135,7 @@ export function runNodeCheck(effects: Effects): CheckReport {
   return report
 }
 
-/** Check the better-sqlite3 binding against the installed Electron runtime. */
+/** Check the shared binary against the installed Electron runtime. */
 export function runElectronCheck(effects: Effects): CheckReport {
   const info = effects.runtimeInfo()
   const target = electronTargetFor(info.platform, info.arch)
@@ -186,15 +146,13 @@ export function runElectronCheck(effects: Effects): CheckReport {
     // Expected locked facts; overwritten by probe-detected facts when available.
     runtimeVersion: ELECTRON_VERSION,
     abi: ELECTRON_ABI,
-    platform: target?.platform ?? ELECTRON_PLATFORM,
-    arch: target?.arch ?? ELECTRON_ARCH,
-    markerState: 'ignored',
+    platform: target?.platform ?? 'darwin',
+    arch: target?.arch ?? 'arm64',
     sqlVerified: false,
-    failures: [],
-    repairCommand: REPAIR_ELECTRON
+    failures: []
   }
 
-  const hostLabel = `host node ${info.nodeVersion} (ABI ${info.modulesAbi}, ${info.platform}/${info.arch})`
+  const hostLabel = `host node ${info.nodeVersion} (ABI ${info.modulesAbi} informational, ${info.platform}/${info.arch})`
   if (!target) {
     report.failures.push(
       `Electron native checks are currently supported on darwin arm64 or win32 x64; detected ${info.platform} ${info.arch}.`,
@@ -209,21 +167,18 @@ export function runElectronCheck(effects: Effects): CheckReport {
     return report
   }
   report.packagePath = resolved.packagePath
-  // Best-effort candidate before the probe (embedded Node version unknown yet).
-  report.bindingPath = bindingPathFor(effects, resolved.packagePath, {
-    platform: target.platform,
-    arch: target.arch,
-    abi: ELECTRON_ABI,
-    nodeRuntimeVersion: info.nodeVersion
-  })
+  try {
+    report.packageVersion = packageVersion(effects, resolved.packagePath)
+  } catch {
+    report.packageVersion = ''
+  }
 
   const installed = effects.electronVersion()
   if (installed !== ELECTRON_VERSION) {
     report.failures.push(
       `Installed Electron ${installed ?? 'unknown'} does not match expected ${ELECTRON_VERSION}.`,
       `Align the electron devDependency with the locked version before checking.`,
-      `Package realpath: ${resolved.packagePath}`,
-      `Resolved binding path: ${report.bindingPath ?? '(none found)'}`
+      `Package realpath: ${resolved.packagePath}`
     )
     return report
   }
@@ -231,8 +186,7 @@ export function runElectronCheck(effects: Effects): CheckReport {
   if (!bin) {
     report.failures.push(
       `Electron executable not found; run \`pnpm install\`.`,
-      `Package realpath: ${resolved.packagePath}`,
-      `Resolved binding path: ${report.bindingPath ?? '(none found)'}`
+      `Package realpath: ${resolved.packagePath}`
     )
     return report
   }
@@ -240,20 +194,29 @@ export function runElectronCheck(effects: Effects): CheckReport {
   const versionFailure = verifyPackageVersion(effects, resolved.packagePath)
   if (versionFailure) {
     report.failures.push(versionFailure)
-    report.repairCommand = undefined
     return report
   }
 
   const spawned = effects.spawnElectronProbe(bin, effects.probePath())
   // Preserve child stdout/stderr, the exit code, and any close error explicitly
-  // in the structured report (finding H) — never only buried in free text.
+  // in the structured report — never only buried in free text.
   const childLines = [spawned.stdout.trim(), spawned.stderr.trim()].filter(Boolean)
   report.probeExitCode = spawned.code
 
-  const probe = parseProbeOutput(spawned.stdout) ?? parseProbeOutput(spawned.stderr)
-  // Surface the probe's runtime facts and the resolved binding path even when
-  // it failed (finding E) — the embedded Node version is the correct value for
-  // the `compiled/<version>/...` candidate under Electron.
+  if (spawned.timedOut) {
+    report.failures.push(
+      `Electron runtime SQL probe timed out after ${Math.round(PROBE_TIMEOUT_MS / 1000)}s (bounded diagnostic timeout; child terminated, no retry).`,
+      `Probe exit code: ${spawned.code}`,
+      `The shared binary did not answer under Electron ${ELECTRON_VERSION} within the diagnostic bound.`,
+      `Package realpath: ${resolved.packagePath}`,
+      `Remediation: re-run \`pnpm install\` to restore the locked ${NATIVE_PACKAGE_VERSION} prebuilds, then retry.`
+    )
+    return report
+  }
+
+  const probe: ElectronProbeOutput | undefined = parseProbeOutput(spawned.stdout) ?? parseProbeOutput(spawned.stderr)
+  // Surface the probe's runtime facts even when it failed — the embedded
+  // runtime values are the correct diagnostics for this host.
   if (probe) {
     report.runtimeVersion = probe.version
     report.abi = probe.abi
@@ -262,16 +225,10 @@ export function runElectronCheck(effects: Effects): CheckReport {
     report.nodeVersion = probe.nodeVersion
     report.probeCloseError = probe.closeError
   }
-  report.bindingPath = bindingPathFor(effects, resolved.packagePath, {
-    platform: probe?.platform ?? ELECTRON_PLATFORM,
-    arch: probe?.arch ?? ELECTRON_ARCH,
-    abi: probe?.abi ?? ELECTRON_ABI,
-    nodeRuntimeVersion: probe?.nodeVersion ?? info.nodeVersion
-  })
 
   const electronLabel = probe
-    ? `Electron ${probe.version} (embedded node ${probe.nodeVersion}, ABI ${probe.abi}, ${probe.platform}/${probe.arch})`
-    : `Electron ${ELECTRON_VERSION} (expected ABI ${ELECTRON_ABI}, ${ELECTRON_PLATFORM}/${ELECTRON_ARCH})`
+    ? `Electron ${probe.version} (embedded node ${probe.nodeVersion}, ABI ${probe.abi} informational, ${probe.platform}/${probe.arch})`
+    : `Electron ${ELECTRON_VERSION} (expected ABI ${ELECTRON_ABI} informational, darwin/arm64)`
   if (spawned.code !== 0 || !probe || !probe.ok || !probe.sqlOk) {
     const probeDetail = probe
       ? (probe.error ?? `probe exited with code ${spawned.code}`)
@@ -280,12 +237,10 @@ export function runElectronCheck(effects: Effects): CheckReport {
       `Electron runtime SQL probe failed: ${probeDetail}`,
       `Probe exit code: ${spawned.code}`,
       `Detected: ${electronLabel}`,
-      `The binding does not load under Electron ${ELECTRON_VERSION} (likely compiled for Node ABI ${NODE_ABI}).`,
+      `The shared binary does not load under Electron ${ELECTRON_VERSION}.`,
       `Package realpath: ${resolved.packagePath}`,
-      `Resolved binding path: ${report.bindingPath ?? '(none found)'}`,
-      `Repair: ${REPAIR_ELECTRON}`
+      `Remediation: re-run \`pnpm install\` to restore the locked ${NATIVE_PACKAGE_VERSION} prebuilds, then retry.`
     )
-    // Finding H: a probe close error is always surfaced as its own line.
     if (probe?.closeError) {
       report.failures.push(`Electron probe close error: ${probe.closeError}`)
     }
@@ -298,26 +253,19 @@ export function runElectronCheck(effects: Effects): CheckReport {
   if (probe.version !== ELECTRON_VERSION) {
     report.failures.push(
       `Electron runtime reports ${probe.version}; expected ${ELECTRON_VERSION}.`,
-      `Resolved binding path: ${report.bindingPath ?? '(none found)'}`,
-      `Repair: ${REPAIR_ELECTRON}`
+      `Remediation: align the electron devDependency with the locked version, re-run \`pnpm install\`, then retry.`
     )
     return report
   }
-  if (probe.abi !== ELECTRON_ABI) {
-    report.failures.push(
-      `Electron runtime ABI ${probe.abi}; expected ${ELECTRON_ABI}.`,
-      `Resolved binding path: ${report.bindingPath ?? '(none found)'}`,
-      `Repair: ${REPAIR_ELECTRON}`
-    )
-    return report
-  }
+  // The observed Electron ABI is informational only (Node-API binary): a
+  // mismatch is recorded on the report for diagnostics but never fails it.
 
   report.ok = true
   report.sqlVerified = true
   return report
 }
 
-/** Dispatch entry used by the CLI and the post-rebuild self-check. */
+/** Dispatch entry used by the CLI. */
 export function runCheck(effects: Effects, target: 'node' | 'electron'): CheckReport {
   return target === 'node' ? runNodeCheck(effects) : runElectronCheck(effects)
 }
