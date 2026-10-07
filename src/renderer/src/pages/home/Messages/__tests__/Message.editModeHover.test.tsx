@@ -54,7 +54,14 @@ vi.mock('@renderer/hooks/useAssistant', () => ({
   useAssistant: () => ({
     assistant: null,
     setModel: vi.fn()
-  })
+  }),
+  useMessageAssistant: () => ({
+    assistant: null,
+    model: null,
+    setModel: vi.fn(),
+    updateAssistantSettings: vi.fn()
+  }),
+  useAssistantSettingsUpdater: () => vi.fn()
 }))
 
 vi.mock('@renderer/hooks/useChatContext', () => ({

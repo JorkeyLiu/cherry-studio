@@ -195,7 +195,14 @@ vi.mock('@renderer/hooks/useAssistant', () => ({
   useAssistant: () => ({
     addTopic: vi.fn(),
     updateAssistantSettings: vi.fn()
-  })
+  }),
+  useMessageAssistant: () => ({
+    assistant: null,
+    model: null,
+    setModel: vi.fn(),
+    updateAssistantSettings: vi.fn()
+  }),
+  useAssistantSettingsUpdater: () => vi.fn()
 }))
 
 vi.mock('@renderer/hooks/useChatContext', () => ({
@@ -482,7 +489,8 @@ vi.mock('@renderer/pages/home/Messages/messageViewportProjection', () => ({
   // `messagesRef` (topicMessages). The real projection is covered elsewhere;
   // returning `groups` directly would mismatch the projected-tuple shape and
   // crash on non-empty windows.
-  projectMessageViewportGroups: vi.fn(() => [])
+  projectMessageViewportGroups: vi.fn(() => []),
+  createViewportProjectionCache: () => ({ project: () => [], clear: () => {}, size: () => 0 })
 }))
 
 // Child component mocks — render with data-testid for identity/structure assertions

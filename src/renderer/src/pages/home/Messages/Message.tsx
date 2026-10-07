@@ -2,7 +2,7 @@ import HorizontalScrollContainer from '@renderer/components/HorizontalScrollCont
 import Scrollbar from '@renderer/components/Scrollbar'
 import { useOptionalEditMode } from '@renderer/context/EditModeContext'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
-import { useAssistant } from '@renderer/hooks/useAssistant'
+import { useMessageAssistant } from '@renderer/hooks/useAssistant'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useModel } from '@renderer/hooks/useModel'
@@ -27,6 +27,7 @@ import MessageErrorBoundary from './MessageErrorBoundary'
 import MessageHeader from './MessageHeader'
 import MessageMenubar from './MessageMenubar'
 import MessageOutline from './MessageOutline'
+import { areProjectedMessagesEqual, areTopicsViewportEqual, isSameViewportPosition } from './messageViewportProjection'
 
 interface Props {
   message: Message
@@ -79,7 +80,9 @@ const MessageItem: FC<Props> = ({
   onGroupClick,
   snapshotBlocksById
 }) => {
-  const { assistant, setModel } = useAssistant(message.assistantId)
+  // Narrow presentation subscription: configuration only, never topics, so
+  // ordinary-send topic updatedAt bumps cannot invalidate history messages.
+  const { assistant, setModel } = useMessageAssistant(message.assistantId)
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
   const { fontSize, showMessageOutline } = useSettings()
@@ -385,4 +388,38 @@ const MessageFooter = styled.div`
   }
 `
 
-export default memo(MessageItem)
+/**
+ * History-isolation comparator for the send/append hot path (mirrors the
+ * MessageGroup boundary one level down).
+ *
+ * The numeric `index` prop is compared by 0-boundary only: it feeds exactly
+ * `isLastMessage = index === 0 || isGrouped`, so a pure non-zero displacement
+ * after an append cannot change rendering while a newest-marker hand-off
+ * invalidates. The topic tolerates pure `updatedAt` send bumps and compares
+ * every other field. All message fields compare complete (no whitelist), so
+ * status/model/fold/useful/blocks-membership/branch changes always update.
+ * Store/context subscriptions inside (assistant/model/settings/editing/
+ * selection/blocks) bypass this boundary and never go stale.
+ */
+export const areMessageItemPropsEqual = (prev: Props, next: Props): boolean => {
+  if (prev === next) return true
+  if (!areProjectedMessagesEqual(prev.message, next.message)) return false
+  if (!isSameViewportPosition(prev.index, next.index)) return false
+  if (!areTopicsViewportEqual(prev.topic, next.topic)) return false
+  if (prev.assistant !== next.assistant) return false
+  if ((prev.total ?? 0) !== (next.total ?? 0)) return false
+  if ((prev.hideMenuBar ?? false) !== (next.hideMenuBar ?? false)) return false
+  if ((prev.isGrouped ?? false) !== (next.isGrouped ?? false)) return false
+  if ((prev.isStreaming ?? false) !== (next.isStreaming ?? false)) return false
+  if ((prev.isGroupContextMessage ?? false) !== (next.isGroupContextMessage ?? false)) return false
+  if ((prev.isHorizontalMultiModelLayout ?? false) !== (next.isHorizontalMultiModelLayout ?? false)) return false
+  if ((prev.isEditMode ?? false) !== (next.isEditMode ?? false)) return false
+  if (prev.style !== next.style) return false
+  if (prev.onSetMessages !== next.onSetMessages) return false
+  if (prev.onUpdateUseful !== next.onUpdateUseful) return false
+  if (prev.onGroupClick !== next.onGroupClick) return false
+  if (prev.snapshotBlocksById !== next.snapshotBlocksById) return false
+  return true
+}
+
+export default memo(MessageItem, areMessageItemPropsEqual)

@@ -49,7 +49,7 @@ import {
   type PendingOlderEdgeIntent,
   shouldQueueOlderIntent
 } from '@renderer/pages/home/Messages/messagePaginationIntent'
-import { projectMessageViewportGroups } from '@renderer/pages/home/Messages/messageViewportProjection'
+import { createViewportProjectionCache } from '@renderer/pages/home/Messages/messageViewportProjection'
 import {
   createMessageViewportState,
   type MessageViewportLoadDirection,
@@ -471,6 +471,12 @@ interface MessagesContentProps {
   handleScrollPosition: () => void
   displayMessages: Message[]
   displayGroups: MessageViewportGroup[]
+  /**
+   * Route scope for the stable projection cache (`topicId::route`). A change
+   * clears retained wrappers so a route switch never reuses another route's
+   * projected entities; window trims evict through the bounded sweep.
+   */
+  viewportRouteKey: string
   contextBoundaryMessageId: string | null
   hasMore: boolean
   isLoadingMore: boolean
@@ -501,6 +507,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   handleScrollPosition,
   displayMessages,
   displayGroups,
+  viewportRouteKey,
   contextBoundaryMessageId,
   hasMore,
   isLoadingMore,
@@ -541,10 +548,22 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   // outer), oldest message first within each group, viewport-local indices
   // (0 = newest in displayMessages), and canonical keys (group.key) with
   // stable entity-derived Fragment keys.
+  //
+  // History isolation: the per-instance bounded cache reuses the previous
+  // projected wrapper for referentially identical canonical entities whose
+  // render-relevant position (newest or not) is unchanged, so an append or a
+  // new stub only invalidates the brand-new group plus the former-newest
+  // marker hand-off. Unchanged history groups keep referential identity down
+  // to the memoized MessageGroup/MessageItem boundaries below.
+  const projectionCacheRef = useRef<ReturnType<typeof createViewportProjectionCache> | null>(null)
+  if (!projectionCacheRef.current) {
+    projectionCacheRef.current = createViewportProjectionCache()
+  }
   const groupedMessages = useMemo(() => {
+    const cache = projectionCacheRef.current as ReturnType<typeof createViewportProjectionCache>
     const active = currentPhaseCorrelation()
     const startedAt = active ? performance.now() : 0
-    const result = projectMessageViewportGroups(displayMessages, displayGroups)
+    const result = cache.project(displayMessages, displayGroups, viewportRouteKey)
     if (active && displayMessages.length > 0) {
       recordPhaseDurationForCorrelation(
         active.correlationId,
@@ -554,7 +573,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
       )
     }
     return result
-  }, [displayGroups, displayMessages])
+  }, [displayGroups, displayMessages, viewportRouteKey])
 
   // S3.3: Stable render layers — edit-mode segmentation runs first,
   // each segment is then classified live/history, then contiguous runs of
@@ -6862,6 +6881,7 @@ const Messages = ({
           handleScrollPosition={handleScroll}
           displayMessages={displayMessages}
           displayGroups={displayGroups}
+          viewportRouteKey={`${topic.id}::${activeBranchId ?? 'main'}`}
           contextBoundaryMessageId={contextBoundaryMessageId}
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}

@@ -231,7 +231,8 @@ vi.mock('@renderer/pages/home/Messages/messageNavigationLoader', () => ({
   NAVIGATION_LOADER_AFTER: 19
 }))
 vi.mock('@renderer/pages/home/Messages/messageViewportProjection', () => ({
-  projectMessageViewportGroups: vi.fn(() => [])
+  projectMessageViewportGroups: vi.fn(() => []),
+  createViewportProjectionCache: () => ({ project: () => [], clear: () => {}, size: () => 0 })
 }))
 vi.mock('@renderer/pages/home/Messages/MessageGroup', () => ({
   default: vi.fn(() => <div data-testid="message-group" />)

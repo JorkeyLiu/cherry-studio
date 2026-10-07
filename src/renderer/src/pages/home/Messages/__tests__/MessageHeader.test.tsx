@@ -162,6 +162,13 @@ describe('MessageHeader', () => {
     expect(document.body.textContent).toContain('J')
   })
 
+  it('missing assistant falls back to message model id initial instead of throwing', () => {
+    const message = makeMessage('assistant', { modelId: 'gpt-4o' } as any)
+    render(<MessageHeader assistant={undefined} message={message} topic={topic} />)
+    expect(screen.queryByTestId('model-avatar')).toBeNull()
+    expect(document.body.textContent).toContain('g')
+  })
+
   it('case-sensitive: "GPT-4o" vs "gpt-4o" still name-only', () => {
     const model = { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' } as any
     const message = makeMessage('assistant', { model } as any)

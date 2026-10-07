@@ -9,7 +9,7 @@ import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import type { MessageMenubarButtonId, MessageMenubarScope } from '@renderer/config/registry/messageMenubar'
 import { DEFAULT_MESSAGE_MENUBAR_SCOPE, getMessageMenubarConfig } from '@renderer/config/registry/messageMenubar'
 import { useMessageEditing } from '@renderer/context/MessageEditingContext'
-import { useAssistant } from '@renderer/hooks/useAssistant'
+import { type MessageAssistantConfig, useAssistantSettingsUpdater, withEmptyTopics } from '@renderer/hooks/useAssistant'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
 import { useMessageOperations } from '@renderer/hooks/useMessageOperations'
 import { useNotesSettings } from '@renderer/hooks/useNotesSettings'
@@ -31,7 +31,7 @@ import { isLoadedAnswerGroupMutable, resolveLoadedAnswerGroup } from '@renderer/
 import { insertMessagesThunk, removeBlocksThunk } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId, selectBranchNode } from '@renderer/store/topicBranch'
 import { TraceIcon } from '@renderer/trace/pages/Component'
-import type { Assistant, Model, Topic, TranslateLanguage } from '@renderer/types'
+import type { Model, Topic, TranslateLanguage } from '@renderer/types'
 import { type Message, type MessageBlock, MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
 import { captureScrollableAsBlob, captureScrollableAsDataURL, classNames } from '@renderer/utils'
 import { abortCompletion } from '@renderer/utils/abortController'
@@ -94,7 +94,9 @@ const abortTranslation = (messageId: string) => {
 
 interface Props {
   message: Message
-  assistant: Assistant
+  // Presentation configuration only (no topics subscription). Missing
+  // degrades to no toolbar via the guard below (fail-closed, never throws).
+  assistant: MessageAssistantConfig | undefined
   topic: Topic
   model?: Model
   isGrouped?: boolean
@@ -134,7 +136,7 @@ function resolveResendErrorToastKey(error: unknown): string {
 type MessageOperationsHandlers = ReturnType<typeof useMessageOperations>
 
 type MessageMenubarButtonContext = {
-  assistant: Assistant
+  assistant: MessageAssistantConfig
   blockEntities: ReturnType<typeof messageBlocksSelectors.selectEntities>
   confirmDeleteMessage: boolean
   confirmRegenerateMessage: boolean
@@ -194,7 +196,7 @@ type MessageMenubarButtonContext = {
 
 type MessageMenubarButtonRenderer = (ctx: MessageMenubarButtonContext) => ReactNode | null
 
-const MessageMenubar: FC<Props> = (props) => {
+const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAssistantConfig }> = (props) => {
   const {
     message,
     isGrouped,
@@ -221,7 +223,10 @@ const MessageMenubar: FC<Props> = (props) => {
   const { isBubbleStyle } = useMessageStyle()
   const { enableDeveloperMode } = useEnableDeveloperMode()
   const { confirmDeleteMessage, confirmRegenerateMessage } = useSettings()
-  const { updateAssistantSettings } = useAssistant(assistant.id)
+  // Dispatcher-only updater: the configuration arrives as a prop, so this
+  // consumer needs no entity subscription of its own (previously a second
+  // whole-assistant subscription per message).
+  const updateAssistantSettings = useAssistantSettingsUpdater(assistant.id)
 
   // Context-window anchor control for the single stable anchor-to-end model
   // (docs/adr/context-window.md §8). Clicking a message anchor is an explicit
@@ -236,7 +241,11 @@ const MessageMenubar: FC<Props> = (props) => {
   // settings; only a non-stale returned anchor is persisted (key removed on
   // empty). Transport failures preserve current settings. Metadata-only
   // anchor responses carry no messages/blocks and never enter normal Redux.
-  const assistantSettings = getAssistantSettings(assistant)
+  // Settings derive purely from configuration (settings/defaultModel), so
+  // they memoize on the stable config reference and survive topic-only
+  // store changes without recompute. withEmptyTopics only satisfies the
+  // Assistant-typed reader; topics are never consumed here.
+  const assistantSettings = useMemo(() => getAssistantSettings(withEmptyTopics(assistant)), [assistant])
   const handleSetContextAnchor = useCallback(async () => {
     const assistantId = assistant.id
     const topicId = topic.id
@@ -256,7 +265,7 @@ const MessageMenubar: FC<Props> = (props) => {
     const readFresh = () => {
       try {
         const assistants = store.getState().assistants.assistants
-        const found = assistants.find((a) => a.id === assistantId) ?? assistant
+        const found = assistants.find((a) => a.id === assistantId) ?? withEmptyTopics(assistant)
         const settings = getAssistantSettings(found)
         const anchor = settings.contextWindowAnchor?.[anchorKey]
         const key = anchor?.kind === 'active' ? anchor.groupKey : null
@@ -742,7 +751,7 @@ const MessageMenubar: FC<Props> = (props) => {
   const onMentionModel = useCallback(async () => {
     const selectedModel = await SelectChatModelPopup.show({ model, filter: mentionModelFilter })
     if (!selectedModel) return
-    void appendAssistantResponse(message, selectedModel, { ...assistant, model: selectedModel })
+    void appendAssistantResponse(message, selectedModel, withEmptyTopics({ ...assistant, model: selectedModel }))
   }, [appendAssistantResponse, assistant, mentionModelFilter, message, model])
 
   const hasTranslationBlocks = useMemo(() => {
@@ -1457,6 +1466,15 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Dropdown>
     )
   }
+}
+
+/**
+ * Fail-closed guard: a missing assistant (impossible in production; possible
+ * in isolated tests) renders no toolbar instead of throwing on `.id`.
+ */
+const MessageMenubar: FC<Props> = (props) => {
+  if (!props.assistant) return null
+  return <MessageMenubarInner {...props} assistant={props.assistant} />
 }
 
 export default memo(MessageMenubar)

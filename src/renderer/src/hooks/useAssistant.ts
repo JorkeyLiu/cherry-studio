@@ -8,6 +8,7 @@ import {
   restoreOrdinaryTopic,
   softDeleteOrdinaryTopic
 } from '@renderer/services/db/topicTrashLifecycle'
+import type { RootState } from '@renderer/store'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import {
   addAssistant,
@@ -218,6 +219,129 @@ export function useAssistant(id: string) {
     ),
     updateAssistantSettings
   }
+}
+
+/**
+ * Message-presentation assistant configuration: every Assistant field
+ * EXCEPT `topics`.
+ *
+ * History MessageItems must not subscribe to `assistant.topics` (or the
+ * topic `updatedAt` that rides it): every ordinary send bumps exactly one
+ * topic's `updatedAt` through `updateTopicUpdatedAt`, and the Immer nested
+ * draft assign produces a new topic -> topics array -> assistant reference,
+ * so the whole-assistant subscription in `useAssistant` invalidates EVERY
+ * mounted history message on every send. This projection carries only the
+ * configuration message presentation actually reads (name/avatar identity,
+ * prompt, settings, model/defaultModel, custom parameters); it never
+ * carries topic membership, so a topic-only store change cannot invalidate
+ * it.
+ *
+ * Contract: consumers must never read `.topics` from this value (it is
+ * absent by type). Sidebar/topic management keep using `useAssistant`,
+ * whose full topic behavior is unchanged.
+ */
+export type MessageAssistantConfig = Omit<Assistant, 'topics'>
+
+/** Shared stable empty topics for the honest Assistant-typed adapter below. */
+const EMPTY_MESSAGE_ASSISTANT_TOPICS: Topic[] = []
+
+/**
+ * Adapter for Assistant-typed readers that never consume topics
+ * (`getAssistantSettings`, mention-model append). It explicitly attaches the
+ * shared empty array instead of casting, so the "no topics" contract stays
+ * visible at every call site.
+ */
+export function withEmptyTopics(config: MessageAssistantConfig): Assistant {
+  return { ...config, topics: EMPTY_MESSAGE_ASSISTANT_TOPICS }
+}
+
+/** Configuration field-identity equality, ignoring `topics` (absent by type). */
+export function isMessageAssistantConfigEqual(
+  a: MessageAssistantConfig | undefined,
+  b: MessageAssistantConfig | undefined
+): boolean {
+  if (Object.is(a, b)) return true
+  if (!a || !b) return false
+  const keysA = Object.keys(a)
+  if (keysA.length !== Object.keys(b).length) return false
+  for (const key of keysA) {
+    if (!Object.is((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false
+  }
+  return true
+}
+
+function selectMessageAssistantConfig(state: RootState, id: string): MessageAssistantConfig | undefined {
+  const found = state.assistants.assistants.find((assistant) => assistant.id === id)
+  if (!found) return undefined
+  const { topics: _ignoredTopics, ...config } = found
+  return config
+}
+
+function selectMessageAssistantModel(state: RootState, id: string): Model | undefined {
+  const found = state.assistants.assistants.find((assistant) => assistant.id === id)
+  return found?.model ?? found?.defaultModel ?? state.llm.defaultModel
+}
+
+/**
+ * Narrow assistant subscription for message presentation (MessageItem and
+ * its header/menubar). Subscribes only to the per-assistant configuration
+ * plus the global default-model fallback -- never to `topics`, never to
+ * quick/translate models or provider churn.
+ *
+ * Deliberately NOT running the per-model reasoning-effort leave-save /
+ * enter-restore effect from `useAssistant`: presentation must never write
+ * settings. That ownership stays with the controllers (`useAssistant`
+ * consumers such as Inputbar/ThinkingButton), which keep a single effect
+ * instance instead of one per mounted message.
+ */
+export function useMessageAssistant(id: string) {
+  const selectConfig = useMemo(() => (state: RootState) => selectMessageAssistantConfig(state, id), [id])
+  const assistant = useAppSelector(selectConfig, isMessageAssistantConfigEqual)
+  // Resolved-model subscription with the identical fallback chain
+  // (assistant.model -> assistant.defaultModel -> global defaultModel):
+  // selecting the resolved value (not each input) means a pinned assistant
+  // model ignores global default-model churn, while the fallback follows it.
+  const selectModelForId = useMemo(() => (state: RootState) => selectMessageAssistantModel(state, id), [id])
+  const model = useAppSelector(selectModelForId)
+  const dispatch = useAppDispatch()
+
+  const assistantWithModel = useMemo(() => {
+    if (!assistant) return undefined
+    if (Object.is(assistant.model, model)) return assistant
+    return { ...assistant, model }
+  }, [assistant, model])
+
+  return {
+    assistant: assistantWithModel,
+    model,
+    setModel: useCallback(
+      (nextModel: Model) => {
+        if (id) dispatch(setModel({ assistantId: id, model: nextModel }))
+      },
+      [dispatch, id]
+    ),
+    updateAssistantSettings: useCallback(
+      (settings: Partial<AssistantSettings>) => {
+        if (id) dispatch(_updateAssistantSettings({ assistantId: id, settings }))
+      },
+      [dispatch, id]
+    )
+  }
+}
+
+/**
+ * Dispatcher-only assistant-settings updater for consumers that already hold
+ * the configuration (e.g. MessageMenubar receives it as a prop): stable
+ * id-captured callback with no entity subscription of its own.
+ */
+export function useAssistantSettingsUpdater(id: string | undefined) {
+  const dispatch = useAppDispatch()
+  return useCallback(
+    (settings: Partial<AssistantSettings>) => {
+      if (id) dispatch(_updateAssistantSettings({ assistantId: id, settings }))
+    },
+    [dispatch, id]
+  )
 }
 
 export function useAssistantDefaults() {

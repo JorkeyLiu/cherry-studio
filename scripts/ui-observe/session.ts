@@ -215,14 +215,17 @@ export async function runObservationSession(options: ObservationSessionOptions):
     // Run exactly one scenario with a bounded timeout. Track settlement so
     // the CLI can detect a body that is still pending after cleanup (it may
     // hold event-loop handles that would otherwise keep the process alive).
-    const scenarioPromise = Promise.resolve(options.scenario.run(context)).then(
-      () => {
-        scenarioSettled = true
-      },
-      () => {
-        scenarioSettled = true
-      }
-    )
+    const scenarioPromise = Promise.resolve()
+      .then(() => options.scenario.run(context))
+      .then(
+        () => {
+          scenarioSettled = true
+        },
+        (error) => {
+          scenarioSettled = true
+          throw error
+        }
+      )
     await withTimeout(scenarioPromise, timeoutMs, `scenario '${scenarioName}' timed out after ${timeoutMs}ms`)
   } catch (error) {
     runError = error

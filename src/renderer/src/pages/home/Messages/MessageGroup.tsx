@@ -10,12 +10,13 @@ import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
 import type { ComponentProps } from 'react'
-import { memo, useCallback, useEffect, useMemo } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
 import styled from 'styled-components'
 
 import MessageItem from './Message'
 import MessageGroupMenuBar from './MessageGroupMenuBar'
 import { deriveStableGroupId } from './messageRenderLayers'
+import { areProjectedMessagesEqual, areTopicsViewportEqual } from './messageViewportProjection'
 
 const logger = loggerService.withContext('MessageGroup')
 interface Props {
@@ -101,9 +102,16 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   // BRANCH-12: group-level atomic useful toggle. One Main transaction sets
   // the single useful member (or clears when already useful); the old
   // per-message forEach(editMessage) partial-write path is removed.
+  // History isolation: the member lookup resolves at event time through a
+  // live ref (S3.4 pattern, mirroring setSelectedMessage above), so this
+  // callback keeps a stable identity across parent rebuilds that reuse the
+  // same canonical entities — unchanged sibling MessageItems below stay
+  // referentially equal and skip re-render.
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
   const onUpdateUseful = useCallback(
     (msgId: string) => {
-      const message = messages.find((msg) => msg.id === msgId)
+      const message = messagesRef.current.find((msg) => msg.id === msgId)
       if (!message) {
         logger.error("the message to update doesn't exist in this group")
         return
@@ -113,7 +121,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         logger.error('[onUpdateUseful] Failed to toggle useful:', e as Error)
       })
     },
-    [groupMutable, messages, selectUseful, topic.id]
+    [groupMutable, selectUseful, topic.id]
   )
 
   const handleReorderMessages = useCallback(
@@ -270,4 +278,31 @@ const MessageWrapper = styled.div`
   }
 `
 
-export default memo(MessageGroup)
+/**
+ * History-isolation comparator for the send/append hot path.
+ *
+ * An unchanged history group skips re-render when: same member count, every
+ * member render-equal (canonical entity identity, or a field-identical entity
+ * with only a proven render-neutral non-zero index displacement), and a
+ * viewport-equal topic (pure `updatedAt` send bumps ignored, every other
+ * topic field compared). Callbacks are reference-compared: they are stable
+ * across sends (`registerMessageElement` has `[]` deps; `onGroupClick` is the
+ * stable non-edit-mode handler), while a genuine selection change yields a
+ * new handler and correctly invalidates. Edit mode, capability (internal
+ * selector subscription), and context-driven updates bypass this boundary by
+ * design and never go stale.
+ */
+export const areMessageGroupPropsEqual = (prev: Props, next: Props): boolean => {
+  if (prev === next) return true
+  if ((prev.isEditMode ?? false) !== (next.isEditMode ?? false)) return false
+  if (prev.registerMessageElement !== next.registerMessageElement) return false
+  if (prev.onGroupClick !== next.onGroupClick) return false
+  if (!areTopicsViewportEqual(prev.topic, next.topic)) return false
+  if (prev.messages.length !== next.messages.length) return false
+  for (let i = 0; i < prev.messages.length; i += 1) {
+    if (!areProjectedMessagesEqual(prev.messages[i], next.messages[i])) return false
+  }
+  return true
+}
+
+export default memo(MessageGroup, areMessageGroupPropsEqual)
