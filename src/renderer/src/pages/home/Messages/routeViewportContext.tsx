@@ -39,7 +39,6 @@ import {
 import { findViewportTopAnchorWithOffset } from './domVisibility'
 import {
   displayedRouteKey,
-  normalizeFoldAnchorOffset,
   type RouteId,
   type RouteRef,
   RouteViewportController,
@@ -639,46 +638,107 @@ export const findVisibleFoldSiblingId = (hiddenRow: HTMLElement, container: HTML
   return null
 }
 
+/**
+ * Resolve the clicked answer-tab element for a stable message id.
+ * Tab-strip selectors carry `data-testid="answer-group-selector"` +
+ * `data-message-id`; the first connected candidate inside the container wins.
+ */
+export const resolveAnswerTabElement = (container: HTMLElement, tabMessageId: string): HTMLElement | null => {
+  try {
+    if (!tabMessageId) return null
+    let api: { escape?: (x: string) => string } | undefined
+    try {
+      api = (globalThis as unknown as { CSS?: { escape?: (x: string) => string } }).CSS
+    } catch {
+      api = undefined
+    }
+    const esc = (v: string): string => {
+      try {
+        if (api?.escape) return api.escape(v)
+        return v
+      } catch {
+        return v
+      }
+    }
+    let el: HTMLElement | null = null
+    try {
+      el =
+        (container.querySelector(
+          `[data-testid="answer-group-selector"][data-message-id="${esc(tabMessageId)}"]`
+        ) as HTMLElement | null) ??
+        (document.querySelector(
+          `[data-testid="answer-group-selector"][data-message-id="${esc(tabMessageId)}"]`
+        ) as HTMLElement | null)
+    } catch {
+      el = null
+    }
+    if (el && el.isConnected && (container.contains(el) || el === container)) return el
+    if (el && el.isConnected && document.contains(el)) return el
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Capture a bounded route-local tab-switch intent BEFORE selection/layout
+ * change. Measures the clicked tab's viewport offset (tab top − container
+ * top) synchronously in the click handler and arms it on the existing
+ * viewport owner. Fail-closed (false) when the container/tab is missing,
+ * geometry is non-finite, or the controller refuses (owned/dirty/user-live).
+ */
+export const captureAnswerTabSwitchIntent = (
+  controller: { beginAnswerTabSwitch: (t: RouteRef, id: string, off: number) => boolean; displayedRoute: RouteRef },
+  tabMessageId: string,
+  container?: HTMLElement | null
+): boolean => {
+  try {
+    const liveContainer = container ?? document.getElementById('messages')
+    if (!liveContainer || !liveContainer.isConnected) return false
+    const tab = resolveAnswerTabElement(liveContainer, tabMessageId)
+    if (!tab) return false
+    let tabTop = NaN
+    let containerTop = NaN
+    try {
+      tabTop = tab.getBoundingClientRect().top
+      containerTop = liveContainer.getBoundingClientRect().top
+    } catch {
+      return false
+    }
+    if (!Number.isFinite(tabTop) || !Number.isFinite(containerTop)) return false
+    const offset = tabTop - containerTop
+    if (!Number.isFinite(offset)) return false
+    const target: RouteRef = { ...controller.displayedRoute }
+    return controller.beginAnswerTabSwitch(target, tabMessageId, offset)
+  } catch {
+    return false
+  }
+}
+
 export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement | null>): StableVisualAnchorMaintainer {
   const viewport = useOptionalRouteViewport()
   const compensatingRef = useRef<{ expected: number } | null>(null)
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
   const holdRef = useRef<(reason: string) => void>(() => {})
-  // Same-route fold-reconciliation pending stable commit (single queued
-  // validation per reconciliation, coalesced across observer reruns). Bound
-  // to the original displayed topic/route/epoch + reconciled identity/offset
-  // + layout basis (row box h/top, container h/top, content scrollHeight,
-  // viewport height, window generation). The queued rAF validates layout-quiet
-  // (unchanged basis across consecutive observations) + currency before the
-  // legal stable programmatic adopt + snapshot write. Ordinary holds never
-  // arm this; an ordinary layout/window change resets/drops the quiet
-  // validation. Invalid geometry drops (never writes).
-  const foldPendingRef = useRef<{
-    displayed: RouteRef
-    epoch: number
-    siblingId: string
-    correctedOffset: number
-    rowH: number
-    rowTop: number
-    containerH: number
-    containerTop: number
-    scrollHeight: number
-    viewportHeight: number
-    windowGeneration: number
-  } | null>(null)
-  const foldRafRef = useRef<number | null>(null)
-  const cancelFoldCommitLocked = (): void => {
+  // Bounded tab-switch quiet validation (single coalesced rAF, no polling).
+  // While a tab-switch intent is armed the keeper compensates the clicked
+  // tab offset on every observer trigger; the queued rAF re-proves the tab
+  // still sits at its captured offset + currency, then clears the intent so
+  // ordinary body anchoring resumes. No snapshot write here — the departure
+  // freeze captures the converged tab-stable geometry. Invalid geometry,
+  // route/epoch drift, user intent, or a missing tab drops the intent.
+  const tabRafRef = useRef<number | null>(null)
+  const cancelTabValidationLocked = (): void => {
     try {
-      const id = foldRafRef.current
-      foldRafRef.current = null
+      const id = tabRafRef.current
+      tabRafRef.current = null
       if (id !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id)
     } catch {}
   }
   useEffect(() => {
     return () => {
-      foldPendingRef.current = null
-      cancelFoldCommitLocked()
+      cancelTabValidationLocked()
     }
     // Stable identity: pending lifetime is component-scoped, never versioned.
   }, [containerRef])
@@ -926,297 +986,217 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         } catch {}
       }
     }
-    const FOLD_QUIET_EPS_PX = 0.5
-    interface FoldLayoutBasis {
-      rowH: number
-      rowTop: number
-      containerH: number
-      containerTop: number
-      scrollHeight: number
-      viewportHeight: number
-      windowGeneration: number
-    }
-    // Real positive finite geometry only: invalid dimensions yield null so the
-    // caller drops (never queues, never commits). The helper
-    // `normalizeFoldAnchorOffset` returns the original on invalid geometry,
-    // which would self-pass — this explicit guard closes that hole.
-    const readFoldLayoutBasis = (
-      liveContainer: HTMLElement,
-      siblingId: string,
-      windowGeneration: number
-    ): FoldLayoutBasis | null => {
-      try {
-        const real = resolveRealMessageBox(liveContainer, siblingId)
-        if (!real || !real.isConnected || !liveContainer.contains(real)) return null
-        let rowRect: { height: number; top: number }
-        let containerRect: { height: number; top: number }
-        try {
-          const r = real.getBoundingClientRect()
-          rowRect = { height: r.height, top: r.top }
-        } catch {
-          return null
-        }
-        try {
-          const c = liveContainer.getBoundingClientRect()
-          containerRect = { height: c.height, top: c.top }
-        } catch {
-          return null
-        }
-        let viewportHeight = NaN
-        try {
-          viewportHeight =
-            Number.isFinite(liveContainer.clientHeight) && liveContainer.clientHeight > 0
-              ? liveContainer.clientHeight
-              : containerRect.height
-        } catch {
-          viewportHeight = NaN
-        }
-        let scrollHeight = NaN
-        try {
-          scrollHeight = liveContainer.scrollHeight
-        } catch {
-          scrollHeight = NaN
-        }
-        if (!Number.isFinite(rowRect.height) || rowRect.height <= 0) return null
-        if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return null
-        if (!Number.isFinite(containerRect.height) || containerRect.height <= 0) return null
-        if (!Number.isFinite(scrollHeight) || scrollHeight <= 0) return null
-        if (!Number.isFinite(rowRect.top) || !Number.isFinite(containerRect.top)) return null
-        if (!Number.isFinite(windowGeneration)) return null
-        return {
-          rowH: rowRect.height,
-          rowTop: rowRect.top,
-          containerH: containerRect.height,
-          containerTop: containerRect.top,
-          scrollHeight,
-          viewportHeight,
-          windowGeneration
-        }
-      } catch {
-        return null
-      }
-    }
-    const isSameFoldLayoutBasis = (a: FoldLayoutBasis, b: FoldLayoutBasis): boolean => {
-      if (a.windowGeneration !== b.windowGeneration) return false
-      if (Math.abs(a.rowH - b.rowH) > FOLD_QUIET_EPS_PX) return false
-      if (Math.abs(a.rowTop - b.rowTop) > FOLD_QUIET_EPS_PX) return false
-      if (Math.abs(a.containerH - b.containerH) > FOLD_QUIET_EPS_PX) return false
-      if (Math.abs(a.containerTop - b.containerTop) > FOLD_QUIET_EPS_PX) return false
-      if (Math.abs(a.scrollHeight - b.scrollHeight) > FOLD_QUIET_EPS_PX) return false
-      if (Math.abs(a.viewportHeight - b.viewportHeight) > FOLD_QUIET_EPS_PX) return false
-      return true
-    }
-    const runFoldValidation = (): void => {
-      foldRafRef.current = null
-      const pending = foldPendingRef.current
-      if (!pending) return
+    // Bounded tab-switch validation: the pending interaction stays valid
+    // through the async DB-first selection and settles ONLY after the target
+    // answer is actually visible + layout-committed with the clicked tab back
+    // at its captured offset. Drift re-arms via hold(); a still-hidden
+    // target (selection not yet committed) re-arms without clearing so an
+    // unrelated layout/observer before the IPC response can never end the
+    // intent. On quiet + visible the keeper hands off to the current
+    // post-switch visible geometry via the existing same-route programmatic
+    // adopt + snapshot write (measured target offset + scrollTop, never the
+    // old hidden body anchor and never intermediate geometry), then the
+    // intent clears and ordinary anchoring resumes. Currency loss drops the
+    // intent; all clears are gesture-guarded so a stale frame never clears a
+    // newer gesture.
+    const runTabValidation = (): void => {
+      tabRafRef.current = null
       const liveContainer = containerRef.current
-      if (!liveContainer || !liveContainer.isConnected) {
-        foldPendingRef.current = null
-        return
-      }
-      try {
-        if (isCaptureContainerHidden(liveContainer)) {
-          foldPendingRef.current = null
-          return
-        }
-      } catch {
-        foldPendingRef.current = null
-        return
-      }
+      if (!liveContainer || !liveContainer.isConnected) return
       const vpNow = viewportRef.current
-      if (!vpNow) {
-        foldPendingRef.current = null
+      if (!vpNow) return
+      const ctrl = vpNow.controller
+      let intent: {
+        topicId: string
+        route: string | null
+        epoch: number
+        tabMessageId: string
+        tabOffset: number
+        gestureId: number
+      } | null
+      try {
+        intent = ctrl.activeAnswerTabIntent as typeof intent
+      } catch {
         return
       }
-      const ctrl = vpNow.controller
+      if (!intent) return
+      const clearGuarded = (): void => {
+        try {
+          ctrl.clearAnswerTabSwitch(intent.epoch, intent.tabMessageId, intent.gestureId)
+        } catch {}
+      }
       try {
         if (ctrl.programmaticOwned || ctrl.hasActiveUserInteraction()) {
-          foldPendingRef.current = null
+          clearGuarded()
           return
         }
       } catch {
-        foldPendingRef.current = null
+        clearGuarded()
         return
       }
       try {
-        if (!ctrl.isDomProvenanceClean) {
-          foldPendingRef.current = null
+        if (!ctrl.isDomProvenanceClean || ctrl.currentEpoch !== intent.epoch) {
+          clearGuarded()
+          return
+        }
+        const cur = ctrl.displayedRoute
+        if (cur.topicId !== intent.topicId || cur.route !== intent.route) {
+          clearGuarded()
           return
         }
       } catch {
-        foldPendingRef.current = null
         return
       }
+      let tab: HTMLElement | null = null
       try {
-        if (ctrl.currentEpoch !== pending.epoch) {
-          foldPendingRef.current = null
-          return
-        }
+        tab = resolveAnswerTabElement(liveContainer, intent.tabMessageId)
       } catch {
-        foldPendingRef.current = null
+        tab = null
+      }
+      if (!tab) {
+        clearGuarded()
         return
       }
+      let current = NaN
       try {
-        const curDisplayed = ctrl.displayedRoute
-        if (curDisplayed.topicId !== pending.displayed.topicId || curDisplayed.route !== pending.displayed.route) {
-          foldPendingRef.current = null
-          return
-        }
+        current = tab.getBoundingClientRect().top - liveContainer.getBoundingClientRect().top
       } catch {
-        foldPendingRef.current = null
+        clearGuarded()
         return
       }
-      try {
-        const liveAnchor = ctrl.getAnchorFor(pending.displayed)
-        if (!liveAnchor || liveAnchor.kind !== 'message') {
-          foldPendingRef.current = null
-          return
-        }
-        if (liveAnchor.messageId !== pending.siblingId) {
-          foldPendingRef.current = null
-          return
-        }
-        // Original vs corrected meaning stays consistent: the live anchor must
-        // still carry the queued corrected offset. Never re-normalize the
-        // user's stable intent here.
-        if (liveAnchor.offset !== pending.correctedOffset) {
-          foldPendingRef.current = null
-          return
-        }
-      } catch {
-        foldPendingRef.current = null
+      if (!Number.isFinite(current)) {
+        clearGuarded()
         return
       }
+      if (Math.abs(current - intent.tabOffset) > 1) {
+        // Still settling: compensate now and re-arm one more quiet frame.
+        try {
+          holdRef.current('tab-validate')
+        } catch {}
+        try {
+          scheduleTabValidation()
+        } catch {}
+        return
+      }
+      // Target-selection gate: the DB-first thunk commits the Redux group
+      // only after the IPC round-trip. While the target answer's real box is
+      // still hidden (selection not yet committed) the tab may already sit
+      // quiet at its old offset — clearing now would end the hold before the
+      // height swap. Re-arm instead so the pending interaction survives the
+      // async gap + any unrelated observer/resize inside it.
       let real: HTMLElement | null = null
       try {
-        real = resolveRealMessageBox(liveContainer, pending.siblingId)
+        real = resolveRealMessageBox(liveContainer, intent.tabMessageId)
       } catch {
-        foldPendingRef.current = null
-        return
-      }
-      if (!real) {
-        foldPendingRef.current = null
-        return
+        real = null
       }
       try {
-        if (isKeeperAnchorRowHidden(real, liveContainer)) {
-          foldPendingRef.current = null
+        if (
+          !real ||
+          !real.isConnected ||
+          !liveContainer.contains(real) ||
+          isKeeperAnchorRowHidden(real, liveContainer)
+        ) {
+          try {
+            scheduleTabValidation()
+          } catch {}
           return
         }
       } catch {
-        foldPendingRef.current = null
-        return
-      }
-      // Layout-quiet proof: the layout basis must be unchanged across
-      // consecutive observations (queue basis vs this frame). A row/container
-      // shift, scrollHeight growth, viewport-height change, or window
-      // generation bump re-arms one more quiet frame instead of
-      // committing intermediate geometry; the single pending coalesces until
-      // layout-quiet or real epoch/route/anchor/user/detach invalidation.
-      let liveGen = NaN
-      try {
-        liveGen = ctrl.windowGeneration
-      } catch {
-        liveGen = NaN
-      }
-      const basisNow = readFoldLayoutBasis(liveContainer, pending.siblingId, liveGen)
-      if (!basisNow) {
-        foldPendingRef.current = null
-        return
-      }
-      const prevBasis: FoldLayoutBasis = {
-        rowH: pending.rowH,
-        rowTop: pending.rowTop,
-        containerH: pending.containerH,
-        containerTop: pending.containerTop,
-        scrollHeight: pending.scrollHeight,
-        viewportHeight: pending.viewportHeight,
-        windowGeneration: pending.windowGeneration
-      }
-      if (!isSameFoldLayoutBasis(prevBasis, basisNow)) {
-        foldPendingRef.current = {
-          ...pending,
-          rowH: basisNow.rowH,
-          rowTop: basisNow.rowTop,
-          containerH: basisNow.containerH,
-          containerTop: basisNow.containerTop,
-          scrollHeight: basisNow.scrollHeight,
-          viewportHeight: basisNow.viewportHeight,
-          windowGeneration: basisNow.windowGeneration
-        }
         try {
-          scheduleFoldValidation()
-        } catch {
-          foldPendingRef.current = null
-        }
+          scheduleTabValidation()
+        } catch {}
         return
       }
-      // Target real-box identity + offset revalidation (frame-quiet):
-      // the queued corrected offset must still be representable. A shift that
-      // changes the representable range invalidates this pending commit (no
-      // write; the live anchor already holds the visual position and a later
-      // genuine user scroll or stable commit owns the snapshot).
+      let targetOffset = NaN
       try {
-        const rechecked = normalizeFoldAnchorOffset(pending.correctedOffset, basisNow.rowH, basisNow.viewportHeight)
-        if (!Number.isFinite(rechecked) || rechecked !== pending.correctedOffset) {
-          foldPendingRef.current = null
-          return
-        }
+        targetOffset = real.getBoundingClientRect().top - liveContainer.getBoundingClientRect().top
       } catch {
-        foldPendingRef.current = null
+        targetOffset = NaN
+      }
+      if (!Number.isFinite(targetOffset)) {
+        try {
+          scheduleTabValidation()
+        } catch {}
         return
       }
-      let liveScrollTop = NaN
+      // Stable handoff to the current post-switch visible geometry under the
+      // existing same-route owner: adopt the measured target offset +
+      // scrollTop (never the old hidden body anchor, never intermediate
+      // geometry) and persist the route-local snapshot so later layout holds
+      // and the departure freeze converge on the same geometry.
+      let scrollTop = NaN
       try {
-        liveScrollTop = liveContainer.scrollTop
+        scrollTop = liveContainer.scrollTop
       } catch {
-        foldPendingRef.current = null
+        scrollTop = NaN
+      }
+      if (!Number.isFinite(scrollTop)) {
+        try {
+          scheduleTabValidation()
+        } catch {}
         return
       }
-      if (!Number.isFinite(liveScrollTop)) {
-        foldPendingRef.current = null
-        return
-      }
-      // Consume before the adopt so a re-entrant notify cannot double-commit.
-      foldPendingRef.current = null
       let adopted: unknown = null
       try {
         adopted = ctrl.adoptProgrammaticViewport(
-          pending.displayed,
+          { topicId: intent.topicId, route: intent.route },
           {
-            messageId: pending.siblingId,
-            intraRowOffset: pending.correctedOffset,
-            scrollTop: liveScrollTop,
-            isAtBottom: false
+            messageId: intent.tabMessageId,
+            intraRowOffset: targetOffset,
+            scrollTop,
+            isAtBottom: isAtBottom(scrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
           },
-          { expectedEpoch: pending.epoch }
+          { expectedEpoch: intent.epoch }
         )
       } catch {
+        adopted = null
+      }
+      if (adopted && typeof adopted === 'object' && (adopted as { taken: unknown }).taken === true) {
+        const taken = adopted as {
+          taken: true
+          routeKey: string
+          snapshot: { scrollTop: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
+        }
+        // Adopt succeeded synchronously for the live-validated gesture above
+        // (validation always acts on the CURRENT live intent, and adopt is
+        // epoch-guarded, so a stale frame can never reach here for an older
+        // gesture). Adopt itself cleared the intent; persist the handoff
+        // snapshot for this same gesture and notify.
+        try {
+          writeRouteSnapshot(taken.routeKey, {
+            scrollTop: taken.snapshot.scrollTop,
+            messageId: taken.snapshot.messageId,
+            intraRowOffset: taken.snapshot.intraRowOffset,
+            isAtBottom: taken.snapshot.isAtBottom
+          })
+        } catch {}
+        try {
+          vpNow.notifyChanged()
+        } catch {}
         return
       }
-      if (!adopted || typeof adopted !== 'object' || (adopted as { taken: unknown }).taken !== true) return
-      const taken = adopted as {
-        taken: true
-        routeKey: string
-        snapshot: { scrollTop: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
-      }
+      // Adopt rejected on currency (route/epoch drift handled above) or on a
+      // transient phase: re-arm once more when still current, otherwise drop
+      // the stale gesture only.
       try {
-        writeRouteSnapshot(taken.routeKey, {
-          scrollTop: taken.snapshot.scrollTop,
-          messageId: taken.snapshot.messageId,
-          intraRowOffset: taken.snapshot.intraRowOffset,
-          isAtBottom: false
-        })
-      } catch {
-        return
-      }
-      try {
-        vpNow.notifyChanged()
+        const live = ctrl.activeAnswerTabIntent
+        if (
+          live &&
+          live.epoch === intent.epoch &&
+          live.tabMessageId === intent.tabMessageId &&
+          live.gestureId === intent.gestureId
+        ) {
+          try {
+            scheduleTabValidation()
+          } catch {}
+          return
+        }
       } catch {}
+      clearGuarded()
     }
-    const scheduleFoldValidation = (): void => {
-      cancelFoldCommitLocked()
+    const scheduleTabValidation = (): void => {
+      cancelTabValidationLocked()
       const schedule =
         typeof requestAnimationFrame === 'function'
           ? requestAnimationFrame
@@ -1227,12 +1207,11 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
               return 0
             }
       try {
-        foldRafRef.current = schedule(() => {
-          runFoldValidation()
+        tabRafRef.current = schedule(() => {
+          runTabValidation()
         })
       } catch {
-        foldPendingRef.current = null
-        foldRafRef.current = null
+        tabRafRef.current = null
       }
     }
     const hold = (reason: string): void => {
@@ -1243,6 +1222,67 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       if (phase !== 'stable' && phase !== 'aligned') return
       if (vp.controller.programmaticOwned || vp.controller.hasActiveUserInteraction()) return
       if (!vp.controller.isDomProvenanceClean) return
+      // SWITCHING contract (explicit tab gesture): a pending tab-switch
+      // intent owns same-route geometry. Hold the CLICKED TAB at its
+      // captured viewport offset across the async selection + height swap;
+      // the competing body-anchor hold must not fight it. Converge via the
+      // quiet validation (which additionally requires the target answer
+      // visible + hands off to the post-switch geometry), then ordinary
+      // anchoring resumes.
+      try {
+        const tabIntent = vp.controller.activeAnswerTabIntent as {
+          topicId: string
+          route: string | null
+          epoch: number
+          tabMessageId: string
+          tabOffset: number
+          gestureId: number
+        } | null
+        if (tabIntent) {
+          const clearHoldGuarded = (): void => {
+            try {
+              vp.controller.clearAnswerTabSwitch(tabIntent.epoch, tabIntent.tabMessageId, tabIntent.gestureId)
+            } catch {}
+          }
+          const curDisplayed = vp.controller.displayedRoute
+          if (
+            curDisplayed.topicId !== tabIntent.topicId ||
+            curDisplayed.route !== tabIntent.route ||
+            vp.controller.currentEpoch !== tabIntent.epoch
+          ) {
+            clearHoldGuarded()
+          } else {
+            const tabEl = resolveAnswerTabElement(container, tabIntent.tabMessageId)
+            if (!tabEl) {
+              clearHoldGuarded()
+            } else {
+              let tabCurrent = NaN
+              try {
+                tabCurrent = tabEl.getBoundingClientRect().top - container.getBoundingClientRect().top
+              } catch {
+                tabCurrent = NaN
+              }
+              if (!Number.isFinite(tabCurrent)) {
+                clearHoldGuarded()
+              } else {
+                const tabDelta = tabCurrent - tabIntent.tabOffset
+                if (Math.abs(tabDelta) > 1) {
+                  try {
+                    container.scrollTop += tabDelta
+                    compensatingRef.current = { expected: container.scrollTop }
+                  } catch {}
+                }
+                try {
+                  scheduleTabValidation()
+                } catch {}
+                return
+              }
+            }
+          }
+        }
+      } catch {
+        // Fail-closed to the ordinary hold below on helper errors.
+      }
       // Provenance-guarded hold: the keeper may hold only the displayed
       // route's own anchor. A foreign live anchor (provenance != displayed)
       // is inert here — never compensated as if it belonged to this route.
@@ -1252,7 +1292,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       // no live user session, so a subsequent genuine wheel scroll-away is
       // never fought here (its takeover owns the new anchor instead).
       const displayed = vp.controller.displayedRoute
-      let anchor = vp.controller.getAnchorFor(displayed)
+      const anchor = vp.controller.getAnchorFor(displayed)
       if (!anchor) {
         try {
           if (Math.abs(container.scrollTop) > 1) {
@@ -1262,61 +1302,18 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         } catch {}
         return
       }
-      let el = resolveRow(anchor)
+      const el = resolveRow(anchor)
       if (!el) return
-      // Fold answer replacement: a hidden/collapsed selected answer is not
-      // measurable stable geometry — never compensate using it. When the held
-      // reading anchor is the replaced (now hidden) answer, reconcile it to
-      // the visible answer in the SAME group (shared group scope). The
-      // original offset is preserved EXACTLY when the replacement real box can
-      // still represent it as visible; otherwise it clamps to the nearest
-      // valid visible in-row position (minimal local adjustment, same group,
-      // never global bottom/unrelated message). A held anchor that is a
-      // different visible message is preserved normally below. No restore, no
-      // epoch change. The reconciled live anchor is held below; its
-      // route-local committed stable snapshot is synchronized by the queued
-      // layout-quiet validation at the end of this hold (same-group visible
-      // row only, never crossing-first) so a later page reactivation never
-      // reselects the hidden old answer. Detach skips outgoing sampling by
-      // design, so this sync must not wait for a later departure freeze.
-      let reconciledFold: { siblingId: string; correctedOffset: number } | null = null
-      if (anchor.kind === 'message' && isKeeperAnchorRowHidden(el, container)) {
-        const siblingId = findVisibleFoldSiblingId(el, container)
-        if (!siblingId) return
-        const siblingEl =
-          resolveRealMessageBox(container, siblingId) ??
-          resolveRow({ kind: 'message', messageId: siblingId, offset: 0 })
-        if (!siblingEl) return
-        if (isKeeperAnchorRowHidden(siblingEl, container)) return
-        let corrected = anchor.offset
-        try {
-          const siblingRect = siblingEl.getBoundingClientRect()
-          const containerRectForViewport = container.getBoundingClientRect()
-          const viewportHeight =
-            Number.isFinite(container.clientHeight) && container.clientHeight > 0
-              ? container.clientHeight
-              : containerRectForViewport.height
-          corrected = normalizeFoldAnchorOffset(anchor.offset, siblingRect.height, viewportHeight)
-        } catch {
-          corrected = anchor.offset
-        }
-        let transferred = false
-        try {
-          transferred = vp.controller.reconcileAnchorToVisibleMessage(displayed, siblingId, {
-            correctedOffset: corrected
-          })
-        } catch {
-          transferred = false
-        }
-        if (!transferred) return
-        const next = vp.controller.getAnchorFor(displayed)
-        if (!next) return
-        const nextEl = resolveRow(next)
-        if (!nextEl) return
-        if (isKeeperAnchorRowHidden(nextEl, container)) return
-        anchor = next
-        el = nextEl
-        reconciledFold = { siblingId, correctedOffset: corrected }
+      // A hidden/collapsed row is never measurable stable geometry: hold
+      // nothing (fail-closed). Same-route answer-tab switches are owned by
+      // the tab-switch intent above — never by a body-anchor transfer to a
+      // sibling row. A later genuine scroll or stable commit owns the new
+      // snapshot; the departure freeze captures the converged tab-stable
+      // geometry.
+      try {
+        if (isKeeperAnchorRowHidden(el, container)) return
+      } catch {
+        return
       }
       // Rebind the row observation to the live anchor element (React may
       // replace rows across reconciliations; same id must bind the new node).
@@ -1342,97 +1339,9 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           compensatingRef.current = { expected: container.scrollTop }
         } catch {}
       }
-      // Validated fold sync: queue a single layout-quiet check for THIS
-      // reconciliation only. The rAF re-proves target real-box identity +
-      // offset, layout-basis quiet, and currency before the legal stable
-      // programmatic adopt + snapshot write. Coalesced: a newer
-      // reconciliation replaces the pending payload and its frame; ordinary
-      // holds never arm.
-      if (!reconciledFold) {
-        // Ordinary hold notifies the pending quiet validation: a layout or
-        // window-generation change while pending re-arms the single pending
-        // quiet check so a stale snapshot never survives. Quiet
-        // continuations leave the scheduled frame alone.
-        const pendingOrd = foldPendingRef.current
-        if (pendingOrd) {
-          let curGen = NaN
-          try {
-            curGen = vp.controller.windowGeneration
-          } catch {
-            curGen = NaN
-          }
-          const basisNow = readFoldLayoutBasis(container, pendingOrd.siblingId, curGen)
-          if (!basisNow) {
-            foldPendingRef.current = null
-            cancelFoldCommitLocked()
-          } else {
-            const prevBasis: FoldLayoutBasis = {
-              rowH: pendingOrd.rowH,
-              rowTop: pendingOrd.rowTop,
-              containerH: pendingOrd.containerH,
-              containerTop: pendingOrd.containerTop,
-              scrollHeight: pendingOrd.scrollHeight,
-              viewportHeight: pendingOrd.viewportHeight,
-              windowGeneration: pendingOrd.windowGeneration
-            }
-            if (!isSameFoldLayoutBasis(prevBasis, basisNow)) {
-              foldPendingRef.current = {
-                ...pendingOrd,
-                rowH: basisNow.rowH,
-                rowTop: basisNow.rowTop,
-                containerH: basisNow.containerH,
-                containerTop: basisNow.containerTop,
-                scrollHeight: basisNow.scrollHeight,
-                viewportHeight: basisNow.viewportHeight,
-                windowGeneration: basisNow.windowGeneration
-              }
-              try {
-                scheduleFoldValidation()
-              } catch {
-                foldPendingRef.current = null
-              }
-            }
-          }
-        }
-        return
-      }
-      const pendingDisplayed: RouteRef = { ...displayed }
-      const pendingEpoch = vp.controller.currentEpoch
-      const pendingSiblingId = reconciledFold.siblingId
-      const pendingCorrected = reconciledFold.correctedOffset
-      // Queue-time geometry must be real positive finite; invalid geometry
-      // drops (never queues, never writes).
-      let queueGen = NaN
-      try {
-        queueGen = vp.controller.windowGeneration
-      } catch {
-        queueGen = NaN
-      }
-      const queueBasis = readFoldLayoutBasis(container, pendingSiblingId, queueGen)
-      if (!queueBasis) {
-        foldPendingRef.current = null
-        cancelFoldCommitLocked()
-        return
-      }
-      foldPendingRef.current = {
-        displayed: pendingDisplayed,
-        epoch: pendingEpoch,
-        siblingId: pendingSiblingId,
-        correctedOffset: pendingCorrected,
-        rowH: queueBasis.rowH,
-        rowTop: queueBasis.rowTop,
-        containerH: queueBasis.containerH,
-        containerTop: queueBasis.containerTop,
-        scrollHeight: queueBasis.scrollHeight,
-        viewportHeight: queueBasis.viewportHeight,
-        windowGeneration: queueBasis.windowGeneration
-      }
-      try {
-        scheduleFoldValidation()
-      } catch {
-        foldPendingRef.current = null
-        foldRafRef.current = null
-      }
+      // Ordinary body hold converges here: no snapshot write, no pending
+      // queue. A hidden row above already returned fail-closed; the
+      // tab-switch intent above owns switch geometry.
     }
     holdRef.current = hold
     // Observer creation precedes the first rebind/hold (no TDZ swallow):

@@ -16,6 +16,8 @@ import { Fragment, memo, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
+import { captureAnswerTabSwitchIntent, useOptionalRouteViewport } from './routeViewportContext'
+
 interface MessageGroupModelListProps {
   messages: Message[]
   selectMessageId: string
@@ -37,6 +39,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
   const dispatch = useAppDispatch()
   const { t } = useTranslation()
   const { foldDisplayMode } = useSettings()
+  const viewport = useOptionalRouteViewport()
   const isCompact = foldDisplayMode === 'compact'
 
   const isMessageProcessing = useCallback((message: Message) => {
@@ -63,7 +66,19 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
       const isProcessing = isMessageProcessing(message)
       // BRANCH-12: the whole selector is inert when the group is
       // non-owned/incomplete — clicks never reach selection.
-      const handleSelect = disabled ? undefined : () => setSelectedMessage(message)
+      // SWITCHING contract: capture the clicked tab's viewport offset
+      // synchronously BEFORE selection/layout change so the keeper holds
+      // the tab stationary (pointer stays over the tab). Fail-closed when
+      // the owner refuses; selection still flows.
+      const handleSelect = disabled
+        ? undefined
+        : () => {
+            try {
+              const controller = viewport?.controller
+              if (controller) captureAnswerTabSwitchIntent(controller, message.id)
+            } catch {}
+            setSelectedMessage(message)
+          }
 
       if (isCompact) {
         return (
@@ -96,7 +111,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
         </SegmentedItem>
       )
     },
-    [disabled, isCompact, isMessageProcessing, selectMessageId, setSelectedMessage]
+    [disabled, isCompact, isMessageProcessing, selectMessageId, setSelectedMessage, viewport]
   )
 
   return (

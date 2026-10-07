@@ -327,7 +327,7 @@ describe('MessageGroup', () => {
     expect(lastCallPropsAfterToggle?.[0]).toMatchObject({ resetToken: true })
   })
 
-  it('selects a message via ONE atomic answer-group command and retains the reading viewport (no forced scroll)', () => {
+  it('selects a message via ONE atomic answer-group command with tab-switch hold (no forced body scroll)', () => {
     const messages = [
       { ...createMessage('msg-1', 0, 'fold'), foldSelected: true },
       { ...createMessage('msg-2', 1, 'fold'), foldSelected: false }
@@ -348,15 +348,15 @@ describe('MessageGroup', () => {
     expect(mocks.selectAnswerMessage).toHaveBeenCalledWith({ topicId: 'topic-1', messageId: 'msg-2' })
     expect(mocks.editMessage).not.toHaveBeenCalled()
 
-    // Viewport: selecting an answer tab must not force-scroll to
-    // answer/start/bottom — the current reading viewport is retained,
-    // including variants with differing heights (fold switches visibility,
-    // heights differ, no scroll is issued).
+    // Viewport SWITCHING: selecting an answer tab must not force-scroll
+    // to answer/start/bottom — the clicked tab is held stationary by the
+    // route-local tab intent (see MessageGroupModelList), including
+    // variants with differing heights (no scrollIntoView is issued).
     expect(mocks.setTimeoutTimer).not.toHaveBeenCalled()
     expect(mocks.scrollIntoView).not.toHaveBeenCalled()
   })
 
-  it('retains viewport when switching to a different-height answer variant (no scroll to start/bottom)', () => {
+  it('holds the clicked tab when switching to a different-height answer variant (no scroll to start/bottom)', () => {
     // Differing heights: msg-1 short, msg-2 tall (fold shows only selected).
     // The selection must still issue no scroll.
     const shortMsg = { ...createMessage('msg-1', 0, 'fold'), foldSelected: true } as unknown as Message & {

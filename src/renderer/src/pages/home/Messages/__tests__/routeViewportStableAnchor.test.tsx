@@ -736,7 +736,7 @@ describe('fold hidden answer reconciliation (same-group transfer, offset preserv
     return { container, ref: { current: container }, oldRow: oldRow, newRow: newRow }
   }
 
-  it('hidden held answer transfers to the visible same-group sibling; the hidden row is never measured', () => {
+  it('hidden held answer never transfers: without a tab intent the keeper holds nothing', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'old-short', -60)
     rects.set('old-short', { top: -60, height: 120 })
@@ -747,8 +747,9 @@ describe('fold hidden answer reconciliation (same-group transfer, offset preserv
     const keeper = renderKeeper(controller, ref, 0, vi.fn())
     expect(container.scrollTop).toBe(0)
 
-    // Answer-tab switch: the held short answer collapses (display:none) and
-    // the tall sibling becomes visible at a shifted position (+300).
+    // Answer-tab switch WITHOUT a captured tab intent: the held short answer
+    // collapses (display:none). SWITCHING owns geometry via the clicked tab,
+    // never via a body-anchor sibling transfer — the keeper holds nothing.
     const oldRectSpy = vi.spyOn(oldRow, 'getBoundingClientRect')
     act(() => {
       oldRow.style.display = 'none'
@@ -756,23 +757,15 @@ describe('fold hidden answer reconciliation (same-group transfer, offset preserv
       rects.set('new-tall', { top: 240, height: 900 })
       keeper.rerender(1)
     })
-    // The keeper held the transferred visible sibling at the intended offset.
-    expect(container.scrollTop).toBe(300)
+    expect(container.scrollTop).toBe(0)
     expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
       kind: 'message',
-      messageId: 'new-tall',
+      messageId: 'old-short',
       offset: -60
     })
     // The hidden replaced row was never measured as stable geometry.
     expect(oldRectSpy).not.toHaveBeenCalled()
     oldRectSpy.mockRestore()
-
-    // Settled geometry holds without further drift.
-    act(() => {
-      rects.set('new-tall', { top: -60, height: 900 })
-      keeper.rerender(2)
-    })
-    expect(container.scrollTop).toBe(300)
     keeper.unmount()
   })
 

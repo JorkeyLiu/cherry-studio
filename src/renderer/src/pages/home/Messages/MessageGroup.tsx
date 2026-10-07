@@ -17,6 +17,7 @@ import MessageItem from './Message'
 import MessageGroupMenuBar from './MessageGroupMenuBar'
 import { deriveStableGroupId } from './messageRenderLayers'
 import { areProjectedMessagesEqual, areTopicsViewportEqual } from './messageViewportProjection'
+import { useOptionalRouteViewport } from './routeViewportContext'
 
 const logger = loggerService.withContext('MessageGroup')
 interface Props {
@@ -39,6 +40,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   const { selectAnswer, selectUseful } = useMessageActionController()
   const { isMultiSelectMode } = useChatContext(topic)
   const dispatch = useAppDispatch()
+  const tabViewport = useOptionalRouteViewport()
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
@@ -82,13 +84,54 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       // S3.4: explicit target IDs resolved at event time to the latest
       // complete answer group. No captured messages array is used so a
       // projection update that expands the group is observed.
-      // Viewport: selecting a multi-model answer tab retains the current
-      // reading viewport (no forced scroll to answer/start/bottom), including
-      // variants with differing heights. Authority selection still flows
-      // through selectAnswer; permission guards above are unchanged.
-      void selectAnswer({ topicId: topic.id, messageId: message.id })
+      // Viewport SWITCHING: the clicked tab's geometry is captured
+      // synchronously in the tab strip (see MessageGroupModelList) BEFORE
+      // this dispatch; the keeper holds that tab stationary across the async
+      // DB-first selection + height swap (no body-anchor jump, no bottom
+      // jump). Authority selection still flows through selectAnswer; guards
+      // unchanged. Failure clears ONLY the gesture it belongs to: a stale
+      // rejection must never clear a newer click's hold.
+      const controller = tabViewport?.controller ?? null
+      let gestureEpoch: number | undefined
+      let gestureId: number | undefined
+      try {
+        const live = controller?.activeAnswerTabIntent ?? null
+        if (live && live.tabMessageId === message.id) {
+          gestureEpoch = live.epoch
+          gestureId = live.gestureId
+        }
+      } catch {
+        gestureEpoch = undefined
+        gestureId = undefined
+      }
+      const clearOwnGestureOnly = (): void => {
+        try {
+          if (!controller || gestureEpoch === undefined) return
+          const live = controller.activeAnswerTabIntent
+          if (
+            live &&
+            live.epoch === gestureEpoch &&
+            live.tabMessageId === message.id &&
+            (gestureId === undefined || live.gestureId === gestureId)
+          ) {
+            controller.clearAnswerTabSwitch(gestureEpoch, message.id, gestureId)
+          }
+        } catch {}
+      }
+      try {
+        const pending = selectAnswer({ topicId: topic.id, messageId: message.id }) as unknown
+        if (pending && typeof (pending as { catch?: unknown }).catch === 'function') {
+          void (pending as Promise<unknown>).catch(() => {
+            // A failed/cancelled selection must not retain its own stale tab
+            // hold — but must never clear a newer gesture.
+            clearOwnGestureOnly()
+          })
+        }
+      } catch {
+        clearOwnGestureOnly()
+      }
     },
-    [groupMutable, selectAnswer, topic.id]
+    [groupMutable, selectAnswer, tabViewport, topic.id]
   )
   // NOTE: registerMessageElement logic is kept for future use (currently not used for navigation)
   useEffect(() => {

@@ -17,13 +17,7 @@ import { act, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { runSendBottomIntent, type SendBottomIntentDeps } from '../Messages'
-import {
-  findVisibleFoldSiblingId,
-  resolveRealMessageBox,
-  RouteViewportContext,
-  type RouteViewportContextValue,
-  useStableVisualAnchor
-} from '../routeViewportContext'
+import { RouteViewportContext, type RouteViewportContextValue, useStableVisualAnchor } from '../routeViewportContext'
 import { normalizeFoldAnchorOffset, RouteViewportController } from '../routeViewportController'
 
 vi.mock('@renderer/services/scrollSnapshotCache', () => ({
@@ -328,562 +322,262 @@ describe('controller reconcile with corrected offset', () => {
   })
 })
 
-const flushFoldCommit = async (): Promise<void> => {
-  // The keeper queues its layout-quiet validation on a single rAF after the
-  // reconciling hold. Flushing one frame runs that validation (stable
-  // geometry writes, unsettled/invalidated drops). Double-frame to survive a
-  // fallback synchronous schedule without double-committing.
+const flushTabFrame = async (): Promise<void> => {
   await new Promise<void>((resolve) => {
     try {
-      requestAnimationFrame(() => {
-        try {
-          requestAnimationFrame(() => resolve())
-        } catch {
-          resolve()
-        }
-      })
+      requestAnimationFrame(() => resolve())
     } catch {
       resolve()
     }
   })
-  // Let the queued validation's synchronous adopt+write land before assertions.
   await Promise.resolve()
 }
 
-describe('mounted keeper tall→short (A2 shrink)', () => {
-  it('keeps the SAME group, normalizes to the nearest visible offset, then syncs the stable snapshot after layout quiet', async () => {
+describe('answer-tab switch intent (SWITCHING, not reading restoration)', () => {
+  it('begins only when stable/clean/unowned without live user gesture', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('tall', { top: -2235.2, height: 2549.5 })
-    rects.set('short', { top: -2235.2, height: 159.6 })
-    rects.set('outside', { top: 500, height: 120 })
-    rects.set('tab-short', { top: 550, height: 22 })
-    const { container, ref, tallWrapper, shortWrapper, shortBox, tabForShort } = buildFoldGroup()
-    // Pre: tall selected-visible, short hidden.
-    shortWrapper.style.display = 'none'
-    tallWrapper.style.display = 'inline-block'
-    // Real box resolution never returns the tab rectangle.
-    expect(resolveRealMessageBox(container, 'short')).toBe(shortBox)
-    expect(resolveRealMessageBox(container, 'short')).not.toBe(tabForShort)
-    const keeper = renderKeeper(controller, ref, 0, vi.fn())
-    expect(container.scrollTop).toBe(0)
-
-    // Answer-tab switch tall→short: tall collapses, short becomes visible but
-    // sits entirely above the viewport at the stale tall coordinate.
-    const tallBox = container.querySelector('[id="message-tall"][data-message-id="tall"]') as HTMLElement
-    act(() => {
-      tallWrapper.style.display = 'none'
-      shortWrapper.style.display = 'inline-block'
-      rects.set('short', { top: -2235.3, height: 159.6 })
-      rects.set('tab-short', { top: 550, height: 22 })
-      keeper.rerender(1)
+    driveStableMessage(controller, 'm1', -100)
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    expect(controller.activeAnswerTabIntent).toEqual({
+      topicId: 't1',
+      route: null,
+      epoch: controller.currentEpoch,
+      tabMessageId: 'short',
+      tabOffset: 200,
+      gestureId: 1
     })
-    // Same-group transfer with normalized offset (-159.6+12), not the stale -2235.2.
-    const anchor = controller.getAnchorFor({ topicId: 't1', route: null })
-    expect(anchor).toEqual({ kind: 'message', messageId: 'short', offset: expect.closeTo(-147.6, 4) })
-    // Minimal local adjustment only: delta = -2235.3 - (-147.6).
-    expect(container.scrollTop).toBeCloseTo(-2087.7, 0)
-    // Never the global bottom / unrelated message.
-    expect(anchor?.kind === 'message' ? (anchor as { messageId: string }).messageId : null).not.toBe('outside')
-    expect(container.scrollTop).not.toBe(0)
-    // No synchronous write: the stable sync waits for layout-quiet validation.
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    expect(findVisibleFoldSiblingId(tallBox, container)).toBe('short')
-    // Layout-quiet validation (stable short real-box height + viewport):
-    // the committed stable snapshot now carries the reconciled short identity.
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    const stored = store.get('scroll:topic-t1::main') as
-      | {
-          messageId: string
-          intraRowOffset: number
-          scrollTop: number
-          isAtBottom: boolean
-        }
-      | undefined
-    expect(stored?.messageId).toBe('short')
-    expect(stored?.intraRowOffset).toBeCloseTo(-147.6, 4)
-    expect(stored?.isAtBottom).toBe(false)
-    expect(typeof stored?.scrollTop).toBe('number')
-    expect(stored?.scrollTop).toBeCloseTo(-2087.7, 0)
-    keeper.unmount()
   })
 
-  it('preserves the exact feasible offset short→tall, then syncs the stable snapshot after layout quiet', async () => {
+  it('stale failure must not clear a newer gesture (gesture identity guard)', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'short', -60)
-    rects.set('short', { top: -60, height: 159.6 })
+    driveStableMessage(controller, 'm1', -100)
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    const first = controller.activeAnswerTabIntent
+    expect(first?.gestureId).toBe(1)
+    // Newer click overwrites with a fresh gesture on the same epoch.
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'tall', 210)).toBe(true)
+    const second = controller.activeAnswerTabIntent
+    expect(second?.gestureId).toBe(2)
+    expect(second?.tabMessageId).toBe('tall')
+    // Stale completion for the first gesture refuses.
+    expect(controller.clearAnswerTabSwitch(first!.epoch, first!.tabMessageId, first!.gestureId)).toBe(false)
+    expect(controller.activeAnswerTabIntent?.tabMessageId).toBe('tall')
+    expect(controller.activeAnswerTabIntent?.gestureId).toBe(2)
+    // Current gesture clears.
+    expect(controller.clearAnswerTabSwitch(second!.epoch, second!.tabMessageId, second!.gestureId)).toBe(true)
+    expect(controller.activeAnswerTabIntent).toBeNull()
+  })
+
+  it('refuses while owned, dirty, user-live, wrong route, or non-adoptable phase', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    // Owned: an open transition refuses.
+    const { epoch } = controller.request({
+      kind: 'top',
+      topicId: 't1',
+      targetRoute: null,
+      saved: null,
+      snapshotInvalid: false
+    })
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(false)
+    expect(controller.activeAnswerTabIntent).toBeNull()
+    controller.appliedWindow(epoch)
+    controller.firstPositioned(epoch, 'placed')
+    controller.revealed(epoch)
+    const out = controller.commitStable(epoch, {
+      messageId: 'm1',
+      intraRowOffset: -100,
+      scrollTop: -400,
+      isAtBottom: false
+    })
+    expect(out.committed).toBe(true)
+    // Wrong route refuses.
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: 'branch-a' }, 'short', 200)).toBe(false)
+    // Live user gesture refuses.
+    controller.declareUserIntent()
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(false)
+    controller.clearUserIntent()
+    // Non-finite geometry refuses.
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', Number.NaN)).toBe(false)
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, '', 200)).toBe(false)
+  })
+
+  it('clears on route transition, detach, user intent, takeover, and send-bottom', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm1', -100)
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    controller.declareUserIntent()
+    expect(controller.activeAnswerTabIntent).toBeNull()
+    controller.clearUserIntent()
+
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    controller.request({ kind: 'top', topicId: 't1', targetRoute: null, saved: null, snapshotInvalid: false })
+    expect(controller.activeAnswerTabIntent).toBeNull()
+
+    const c2 = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(c2, 'm1', -100)
+    expect(c2.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    c2.detach()
+    expect(c2.activeAnswerTabIntent).toBeNull()
+
+    const c3 = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(c3, 'm1', -100)
+    expect(c3.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    expect(c3.beginSendBottom({ topicId: 't1', route: null })).toBe(true)
+    expect(c3.activeAnswerTabIntent).toBeNull()
+
+    const c4 = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(c4, 'm1', -100)
+    expect(c4.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    c4.declareUserIntent()
+    const token = c4.activeInteractionToken
+    const taken = c4.userTakeover(
+      { messageId: 'm1', intraRowOffset: -100, scrollTop: -400, isAtBottom: false },
+      undefined,
+      token ?? undefined
+    )
+    expect(taken.taken).toBe(true)
+    expect(c4.activeAnswerTabIntent).toBeNull()
+  })
+
+  it('capture helper measures the clicked tab offset and arms the intent', async () => {
+    const mod = await import('../routeViewportContext')
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'tall', -60)
+    rects.set('tab-short', { top: 200, height: 22 })
+    containerRect.top = 0
+    containerRect.height = 600
+    const built = buildFoldGroup()
+    const ok = mod.captureAnswerTabSwitchIntent(controller, 'short', built.container)
+    expect(ok).toBe(true)
+    expect(controller.activeAnswerTabIntent?.tabMessageId).toBe('short')
+    expect(controller.activeAnswerTabIntent?.tabOffset).toBeCloseTo(200, 5)
+    expect(mod.captureAnswerTabSwitchIntent(controller, 'missing-id', built.container)).toBe(false)
+    built.container.remove()
+  })
+
+  it('keeper holds the clicked tab stationary and never transfers the body anchor', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'tall', -60)
     rects.set('tall', { top: -60, height: 900 })
+    rects.set('short', { top: -60, height: 159.6 })
     rects.set('outside', { top: 500, height: 120 })
-    rects.set('tab-short', { top: 550, height: 22 })
-    const { container, ref, tallWrapper, shortWrapper } = buildFoldGroup()
-    tallWrapper.style.display = 'none'
-    shortWrapper.style.display = 'inline-block'
+    rects.set('tab-short', { top: 200, height: 22 })
+    containerRect.top = 0
+    const { container, ref } = buildFoldGroup()
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
     const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+    // Height swap moves the tab +60 below its captured offset.
     act(() => {
-      shortWrapper.style.display = 'none'
-      tallWrapper.style.display = 'inline-block'
-      rects.set('tall', { top: 240, height: 900 })
+      rects.set('tab-short', { top: 260, height: 22 })
       keeper.rerender(1)
     })
-    // Feasible -60 survives exactly (±12): delta 300.
+    // Tab hold compensates exactly; body anchor identity is untouched and no
+    // snapshot is written by the hold.
+    expect(container.scrollTop).toBe(60)
     expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
       kind: 'message',
       messageId: 'tall',
       offset: -60
     })
-    expect(container.scrollTop).toBe(300)
     expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    keeper.unmount()
+  })
+
+  it('pending survives an unrelated layout while the target is still hidden (async IPC gap)', async () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'tall', -60)
+    rects.set('tab-short', { top: 200, height: 22 })
+    rects.set('short', { top: 0, height: 159.6 })
+    containerRect.top = 0
+    const { ref, shortWrapper } = buildFoldGroup()
+    // Target not yet selected: short answer still hidden (DB-first IPC pending).
+    shortWrapper.style.display = 'none'
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    // Unrelated layout/observer fires before the IPC response while the tab
+    // itself sits quiet at its captured offset: the early-settle candidate
+    // must NOT clear the pending interaction.
+    act(() => {
+      containerRect.height = 620
+      keeper.rerender(1)
+    })
     await act(async () => {
-      await flushFoldCommit()
+      await flushTabFrame()
+    })
+    expect(controller.activeAnswerTabIntent?.tabMessageId).toBe('short')
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    keeper.unmount()
+  })
+
+  it('settles only after the target is visible and hands off to the post-switch geometry', async () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'tall', -60)
+    rects.set('tab-short', { top: 200, height: 22 })
+    rects.set('short', { top: 40, height: 159.6 })
+    containerRect.top = 0
+    const { container, ref, shortWrapper, tallWrapper } = buildFoldGroup()
+    shortWrapper.style.display = 'none'
+    tallWrapper.style.display = 'inline-block'
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    act(() => {
+      rects.set('tab-short', { top: 260, height: 22 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(60)
+    expect(controller.activeAnswerTabIntent).not.toBeNull()
+    // Selection commits: short becomes visible, tall collapses. Model the
+    // converged frame: tab back at its captured offset, short real box at 40.
+    act(() => {
+      tallWrapper.style.display = 'none'
+      shortWrapper.style.display = 'inline-block'
+      rects.set('short', { top: 40, height: 159.6 })
+      rects.set('tab-short', { top: 200, height: 22 })
+      keeper.rerender(2)
+    })
+    await act(async () => {
+      await flushTabFrame()
+      await flushTabFrame()
+    })
+    expect(controller.activeAnswerTabIntent).toBeNull()
+    // Handoff rebases to the CURRENT post-switch visible geometry (short at
+    // its measured 40, never the old tall -60 and never intermediate).
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'short',
+      offset: 40
     })
     const stored = store.get('scroll:topic-t1::main') as
-      | {
-          messageId: string
-          intraRowOffset: number
-          scrollTop: number
-          isAtBottom: boolean
-        }
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
       | undefined
-    expect(stored?.messageId).toBe('tall')
-    expect(stored?.intraRowOffset).toBe(-60)
+    expect(stored?.messageId).toBe('short')
+    expect(stored?.intraRowOffset).toBe(40)
     expect(stored?.isAtBottom).toBe(false)
-    expect(stored?.scrollTop).toBe(300)
-    keeper.unmount()
-  })
-})
-
-describe('fold stable sync invalidation (never overwrites newer viewports)', () => {
-  it('drops the queued commit on route change', async () => {
-    const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('short', { top: -2235.3, height: 159.6 })
-    const { ref, tallWrapper, shortWrapper } = buildFoldGroup()
-    shortWrapper.style.display = 'none'
-    tallWrapper.style.display = 'inline-block'
-    const keeper = renderKeeper(controller, ref, 0, vi.fn())
-    act(() => {
-      tallWrapper.style.display = 'none'
-      shortWrapper.style.display = 'inline-block'
-      keeper.rerender(1)
-    })
-    expect(controller.getAnchorFor({ topicId: 't1', route: null })?.kind).toBe('message')
-    // Newer route reconciliation before the queued frame validates.
-    act(() => {
-      controller.syncDisplayed({ topicId: 't1', route: 'other' })
-    })
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+    expect(typeof stored?.scrollTop).toBe('number')
     keeper.unmount()
   })
 
-  it('drops the queued commit on epoch supersession', async () => {
+  it('a hidden body anchor never compensates while the tab intent is armed', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('short', { top: -2235.3, height: 159.6 })
-    const { ref, tallWrapper, shortWrapper } = buildFoldGroup()
-    shortWrapper.style.display = 'none'
-    tallWrapper.style.display = 'inline-block'
-    const keeper = renderKeeper(controller, ref, 0, vi.fn())
-    act(() => {
-      tallWrapper.style.display = 'none'
-      shortWrapper.style.display = 'inline-block'
-      keeper.rerender(1)
-    })
-    act(() => {
-      controller.request({ kind: 'top', topicId: 't1', targetRoute: null, saved: null })
-    })
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    keeper.unmount()
-  })
-
-  it('drops the queued commit on detach', async () => {
-    const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('short', { top: -2235.3, height: 159.6 })
-    const { ref, tallWrapper, shortWrapper } = buildFoldGroup()
-    shortWrapper.style.display = 'none'
-    tallWrapper.style.display = 'inline-block'
-    const keeper = renderKeeper(controller, ref, 0, vi.fn())
-    act(() => {
-      tallWrapper.style.display = 'none'
-      shortWrapper.style.display = 'inline-block'
-      keeper.rerender(1)
-    })
-    act(() => {
-      controller.detach()
-    })
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    keeper.unmount()
-  })
-
-  it('drops the queued commit on a newer genuine user takeover', async () => {
-    const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('short', { top: -2235.3, height: 159.6 })
+    rects.set('tab-short', { top: 200, height: 22 })
+    containerRect.top = 0
     const { container, ref, tallWrapper, shortWrapper } = buildFoldGroup()
-    shortWrapper.style.display = 'none'
-    tallWrapper.style.display = 'inline-block'
+    tallWrapper.style.display = 'none'
+    shortWrapper.style.display = 'inline-block'
+    expect(controller.beginAnswerTabSwitch({ topicId: 't1', route: null }, 'short', 200)).toBe(true)
     const keeper = renderKeeper(controller, ref, 0, vi.fn())
     act(() => {
-      tallWrapper.style.display = 'none'
-      shortWrapper.style.display = 'inline-block'
+      rects.set('tab-short', { top: 230, height: 22 })
       keeper.rerender(1)
     })
-    // A genuine wheel + takeover adopts a different reading row before validation.
-    act(() => {
-      container.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true }))
-    })
-    const token = controller.activeInteractionToken
-    expect(token).not.toBeNull()
-    const out = controller.userTakeover(
-      { messageId: 'outside', intraRowOffset: -10, scrollTop: 500, isAtBottom: false },
-      undefined,
-      token ?? undefined
-    )
-    expect(out.taken).toBe(true)
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    const stored = store.get('scroll:topic-t1::main') as { messageId: string } | undefined
-    // Never overwrites the newer user viewport with the stale reconciliation.
-    expect(stored?.messageId).not.toBe('short')
-    keeper.unmount()
-  })
-})
-
-describe('fold layout-quiet basis stability (no intermediate commit)', () => {
-  const flushSingleFoldFrame = async (): Promise<void> => {
-    await new Promise<void>((resolve) => {
-      try {
-        requestAnimationFrame(() => resolve())
-      } catch {
-        resolve()
-      }
-    })
-    await Promise.resolve()
-  }
-
-  const queueTallToShort = (): {
-    controller: RouteViewportController
-    keeper: { rerender: (v: number) => void; unmount: () => void }
-    container: HTMLDivElement
-    ref: { current: HTMLDivElement | null }
-  } => {
-    const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('tall', { top: -2235.2, height: 2549.5 })
-    rects.set('short', { top: -2235.2, height: 159.6 })
-    rects.set('outside', { top: 500, height: 120 })
-    rects.set('tab-short', { top: 550, height: 22 })
-    const built = buildFoldGroup()
-    built.shortWrapper.style.display = 'none'
-    built.tallWrapper.style.display = 'inline-block'
-    const keeper = renderKeeper(controller, built.ref, 0, vi.fn())
-    act(() => {
-      built.tallWrapper.style.display = 'none'
-      built.shortWrapper.style.display = 'inline-block'
-      rects.set('short', { top: -2235.3, height: 159.6 })
-      keeper.rerender(1)
-    })
-    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
-      kind: 'message',
-      messageId: 'short',
-      offset: expect.closeTo(-147.6, 4)
-    })
-    return { controller, keeper, container: built.container, ref: built.ref }
-  }
-
-  it('feasible replacement growth between queue and frame defers commit until truly stable (original offset preserved)', async () => {
-    const { keeper, container } = queueTallToShort()
-    // Layout settles taller before the queued frame runs: -147.6 stays
-    // feasible for h=300, so the old self-check would commit intermediate
-    // geometry. The basis check must defer instead.
-    rects.set('short', { top: -2235.3, height: 300 })
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    // Truly stable on the next quiet frame: commits the ORIGINAL corrected
-    // offset (never re-normalized away).
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    const stored = store.get('scroll:topic-t1::main') as
-      | {
-          messageId: string
-          intraRowOffset: number
-          isAtBottom: boolean
-        }
-      | undefined
-    expect(stored?.messageId).toBe('short')
-    expect(stored?.intraRowOffset).toBeCloseTo(-147.6, 4)
-    expect(stored?.isAtBottom).toBe(false)
-    expect(container.scrollTop).not.toBe(0)
-    keeper.unmount()
-  })
-
-  it('ordinary hold with a layout shift while pending resets the quiet check (no stale commit)', async () => {
-    const { keeper } = queueTallToShort()
-    // Ordinary layout change notified through a hold before the frame resets
-    // the quiet basis; a further shift before the frame must still defer, so
-    // the stale queue basis never commits.
-    act(() => {
-      rects.set('short', { top: -2230.3, height: 159.6 })
-      keeper.rerender(2)
-    })
-    rects.set('short', { top: -2225.3, height: 159.6 })
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    // Settles quiet on the following frame: the legitimate same-route stable
-    // correction is not lost forever.
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    const stored = store.get('scroll:topic-t1::main') as { messageId: string } | undefined
-    expect(stored?.messageId).toBe('short')
-    keeper.unmount()
-  })
-
-  it('viewport-height change while pending defers commit until quiet', async () => {
-    const { keeper, container } = queueTallToShort()
-    Object.defineProperty(container, 'clientHeight', { value: 800, writable: true, configurable: true })
-    containerRect.height = 800
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    const stored = store.get('scroll:topic-t1::main') as { messageId: string } | undefined
-    expect(stored?.messageId).toBe('short')
-    keeper.unmount()
-  })
-
-  it('window-generation bump while pending re-arms (no stale commit on the first frame)', async () => {
-    const { controller, keeper } = queueTallToShort()
-    expect(controller.noteSameRouteWindowUpdate({ topicId: 't1', route: null }, 'oldest::newest::28')).toBe(true)
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    const stored = store.get('scroll:topic-t1::main') as { messageId: string } | undefined
-    expect(stored?.messageId).toBe('short')
-    keeper.unmount()
-  })
-
-  it('more than five successive valid basis shifts coalesce until quiet, then commit the same-group snapshot', async () => {
-    const { keeper, container } = queueTallToShort()
-    for (let i = 0; i < 6; i++) {
-      rects.set('short', { top: -2235.3 + (i + 1) * 5, height: 159.6 })
-      await act(async () => {
-        await flushSingleFoldFrame()
-      })
-      expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    }
-    await act(async () => {
-      await flushSingleFoldFrame()
-    })
-    const stored = store.get('scroll:topic-t1::main') as
-      | {
-          messageId: string
-          intraRowOffset: number
-          isAtBottom: boolean
-        }
-      | undefined
-    expect(stored?.messageId).toBe('short')
-    expect(stored?.intraRowOffset).toBeCloseTo(-147.6, 4)
-    expect(stored?.isAtBottom).toBe(false)
-    expect(container.scrollTop).not.toBe(0)
-    keeper.unmount()
-  })
-
-  it('zero/non-finite dimensions while pending drop (never write)', async () => {
-    const { keeper } = queueTallToShort()
-    rects.set('short', { top: -2235.3, height: 0 })
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    keeper.unmount()
-  })
-
-  it('non-finite row geometry while pending drops (never write)', async () => {
-    const { keeper } = queueTallToShort()
-    rects.set('short', { top: NaN, height: Number.NaN })
-    await act(async () => {
-      await flushFoldCommit()
-    })
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    keeper.unmount()
-  })
-})
-
-describe('fold reconciliation scheduler lifecycle (single bounded frame, no permanent polling)', () => {
-  let rafQueue: FrameRequestCallback[]
-  let rafSpy: ReturnType<typeof vi.fn>
-  let cafSpy: ReturnType<typeof vi.fn>
-  const installManualRaf = (): void => {
-    rafQueue = []
-    rafSpy = vi.fn((cb: FrameRequestCallback): number => {
-      rafQueue.push(cb)
-      return rafQueue.length
-    })
-    cafSpy = vi.fn((_id: number): void => {
-      rafQueue.length = 0
-    })
-    vi.stubGlobal('requestAnimationFrame', rafSpy)
-    vi.stubGlobal('cancelAnimationFrame', cafSpy)
-  }
-  const runQueuedFrame = async (): Promise<void> => {
-    const cb = rafQueue.shift()
-    expect(cb).toBeDefined()
-    await act(async () => {
-      ;(cb as FrameRequestCallback)(0)
-      await Promise.resolve()
-    })
-  }
-  const queueTallToShortManual = (): {
-    controller: RouteViewportController
-    keeper: { rerender: (v: number) => void; unmount: () => void }
-    container: HTMLDivElement
-  } => {
-    const controller = new RouteViewportController({ topicId: 't1', route: null })
-    driveStableMessage(controller, 'tall', -2235.2)
-    rects.set('tall', { top: -2235.2, height: 2549.5 })
-    rects.set('short', { top: -2235.2, height: 159.6 })
-    rects.set('outside', { top: 500, height: 120 })
-    rects.set('tab-short', { top: 550, height: 22 })
-    const built = buildFoldGroup()
-    built.shortWrapper.style.display = 'none'
-    built.tallWrapper.style.display = 'inline-block'
-    const keeper = renderKeeper(controller, built.ref, 0, vi.fn())
-    expect(rafSpy).not.toHaveBeenCalled()
-    act(() => {
-      built.tallWrapper.style.display = 'none'
-      built.shortWrapper.style.display = 'inline-block'
-      rects.set('short', { top: -2235.3, height: 159.6 })
-      keeper.rerender(1)
-    })
-    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
-      kind: 'message',
-      messageId: 'short',
-      offset: expect.closeTo(-147.6, 4)
-    })
-    return { controller, keeper, container: built.container }
-  }
-
-  it('fold success after quiet leaves zero queued frames over extra frames', async () => {
-    installManualRaf()
-    const { keeper, container } = queueTallToShortManual()
-    // Exactly one bounded frame queued for the reconciliation (no polling).
-    expect(rafSpy).toHaveBeenCalledTimes(1)
-    expect(rafQueue.length).toBe(1)
-    await runQueuedFrame()
-    const stored = store.get('scroll:topic-t1::main') as
-      | { messageId: string; intraRowOffset: number; isAtBottom: boolean }
-      | undefined
-    expect(stored?.messageId).toBe('short')
-    expect(stored?.intraRowOffset).toBeCloseTo(-147.6, 4)
-    // Quiet consumed: no re-arm, no queued frame remains.
-    expect(rafQueue.length).toBe(0)
-    expect(rafSpy).toHaveBeenCalledTimes(1)
-    // Extra ordinary holds over further frames schedule nothing new.
-    act(() => {
-      rects.set('short', { top: -147.6, height: 159.6 })
-      keeper.rerender(2)
-    })
-    act(() => {
-      container.dispatchEvent(new Event('scroll'))
-    })
-    expect(rafSpy).toHaveBeenCalledTimes(1)
-    expect(rafQueue.length).toBe(0)
-    expect(container.scrollTop).not.toBe(0)
-    keeper.unmount()
-  })
-
-  it('epoch supersession before the frame drops without re-arm', async () => {
-    installManualRaf()
-    const { controller, keeper } = queueTallToShortManual()
-    expect(rafQueue.length).toBe(1)
-    // Newer transition supersedes the queued reconciliation before validation.
-    act(() => {
-      controller.request({ kind: 'top', topicId: 't1', targetRoute: null, saved: null })
-    })
-    await runQueuedFrame()
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    expect(rafQueue.length).toBe(0)
-    expect(rafSpy).toHaveBeenCalledTimes(1)
-    keeper.unmount()
-  })
-
-  it('detach before the frame drops without re-arm', async () => {
-    installManualRaf()
-    const { controller, keeper } = queueTallToShortManual()
-    expect(rafQueue.length).toBe(1)
-    act(() => {
-      controller.detach()
-    })
-    await runQueuedFrame()
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    expect(rafQueue.length).toBe(0)
-    expect(rafSpy).toHaveBeenCalledTimes(1)
-    keeper.unmount()
-  })
-
-  it('unmount cancels the queued frame (zero pending scheduler)', async () => {
-    installManualRaf()
-    const { keeper } = queueTallToShortManual()
-    expect(rafQueue.length).toBe(1)
-    keeper.unmount()
-    expect(cafSpy).toHaveBeenCalled()
-    expect(rafQueue.length).toBe(0)
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-  })
-
-  it('layout shifts re-arm for more than six frames only while pending, then cancellation stops all frames', async () => {
-    installManualRaf()
-    const { controller, keeper } = queueTallToShortManual()
-    expect(rafSpy).toHaveBeenCalledTimes(1)
-    // Six successive legitimate basis shifts: each frame re-arms exactly one
-    // more quiet check, never commits intermediate geometry.
-    for (let i = 0; i < 6; i++) {
-      rects.set('short', { top: -2235.3 + (i + 1) * 5, height: 159.6 })
-      await runQueuedFrame()
-      expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-      expect(rafQueue.length).toBe(1)
-    }
-    expect(rafSpy).toHaveBeenCalledTimes(7)
-    // True cancellation stops the chain: detach drops on the next frame with
-    // no re-arm, and later layout shifts schedule nothing.
-    act(() => {
-      controller.detach()
-    })
-    await runQueuedFrame()
-    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
-    expect(rafQueue.length).toBe(0)
-    const callsAfterCancel = rafSpy.mock.calls.length
-    act(() => {
-      rects.set('short', { top: -2200.3, height: 159.6 })
-      keeper.rerender(9)
-    })
-    expect(rafSpy.mock.calls.length).toBe(callsAfterCancel)
-    expect(rafQueue.length).toBe(0)
+    // Only the tab delta (+30) is compensated; no body-anchor transfer occurs.
+    expect(container.scrollTop).toBe(30)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })?.kind).toBe('message')
+    const anchor = controller.getAnchorFor({ topicId: 't1', route: null })
+    expect(anchor && anchor.kind === 'message' ? anchor.messageId : null).toBe('tall')
     keeper.unmount()
   })
 })
