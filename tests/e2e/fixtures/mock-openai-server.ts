@@ -159,11 +159,68 @@ export function findChatRequestsAfter(afterSequence: number): MockRequestEntry[]
     )
 }
 
+/**
+ * Limited explicit multimodal acceptance for the chat-completions mock.
+ *
+ * The mock is NOT unconditionally permissive: array `content` is accepted
+ * only when every part matches one of the legal wire shapes the repository's
+ * pinned adapters actually emit (text / image_url / input_audio / file(pdf) /
+ * video_url). `input_audio` is allowlisted per-part format
+ * (`wav`/`mp3`/`ogg`/`flac`/`aac` — the patched compatible audio formats);
+ * unknown formats keep the deterministic 400 below. This lets the audio/video
+ * E2E prove real product requests without weakening the mock into an echo-all.
+ */
+const LEGAL_INPUT_AUDIO_FORMATS = new Set(['wav', 'mp3', 'ogg', 'flac', 'aac'])
+
+function isLegalMultimodalPart(part: unknown): boolean {
+  if (typeof part !== 'object' || part === null) return false
+  const p = part as Record<string, unknown>
+  switch (p.type) {
+    case 'text':
+      return typeof p.text === 'string'
+    case 'image_url':
+      return typeof (p.image_url as Record<string, unknown> | undefined)?.url === 'string'
+    case 'input_audio': {
+      const audio = p.input_audio as Record<string, unknown> | undefined
+      return (
+        typeof audio?.data === 'string' &&
+        typeof audio?.format === 'string' &&
+        LEGAL_INPUT_AUDIO_FORMATS.has(audio.format as string)
+      )
+    }
+    case 'file': {
+      const file = p.file as Record<string, unknown> | undefined
+      return typeof file?.file_data === 'string'
+    }
+    case 'video_url':
+      return typeof (p.video_url as Record<string, unknown> | undefined)?.url === 'string'
+    default:
+      return false
+  }
+}
+
+function isLegalUserContent(content: unknown): boolean {
+  if (typeof content === 'string') return true
+  return Array.isArray(content) && content.length > 0 && content.every(isLegalMultimodalPart)
+}
+
+/** Echoable text of a user content value (string or legal multimodal array). */
+function extractUserText(content: unknown): string | null {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return null
+  const texts = (content as Array<Record<string, unknown>>)
+    .filter((p) => p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text as string)
+  return texts.length > 0 ? texts.join('\n') : null
+}
+
 function buildChatCompletion(body: Record<string, unknown>) {
-  const messages = body.messages as Array<{ role: string; content: string }> | undefined
-  // Use the LAST user message (the current turn), not the first (historical context)
+  const messages = body.messages as Array<{ role: string; content: unknown }> | undefined
+  // Use the LAST user message (the current turn), not the first (historical context).
+  // Text is extracted from string content or from the text parts of a legal
+  // multimodal array (video_url parts carry no echoable text).
   const userMsg = messages?.filter((m) => m.role === 'user').pop()
-  const content = userMsg?.content || 'hello'
+  const content = extractUserText(userMsg?.content) || 'hello'
   const model = (body.model as string) || 'mock-model'
 
   const reply = `[Mock ${model}] You said: "${String(content).slice(0, 100)}"`
@@ -192,10 +249,10 @@ function buildChatCompletion(body: Record<string, unknown>) {
 }
 
 function buildChatCompletionChunks(body: Record<string, unknown>) {
-  const messages = body.messages as Array<{ role: string; content: string }> | undefined
+  const messages = body.messages as Array<{ role: string; content: unknown }> | undefined
   // Use the LAST user message (the current turn), not the first (historical context)
   const userMsg = messages?.filter((m) => m.role === 'user').pop()
-  const content = userMsg?.content || 'hello'
+  const content = extractUserText(userMsg?.content) || 'hello'
   const model = (body.model as string) || 'mock-model'
   const reply = `[Mock ${model}] You said: "${String(content).slice(0, 100)}"`
   const id = `chatcmpl-mock-${Date.now()}`
@@ -581,14 +638,14 @@ function createMockServer(): Promise<MockServerPort> {
           }
 
           const hasUserMessage = messages.some(
-            (m: Record<string, unknown>) => m.role === 'user' && typeof m.content === 'string'
+            (m: Record<string, unknown>) => m.role === 'user' && isLegalUserContent(m.content)
           )
           if (!hasUserMessage) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(
               JSON.stringify({
                 error: {
-                  message: 'At least one user message with content is required',
+                  message: 'At least one user message with string or legal multimodal content is required',
                   type: 'invalid_request_error'
                 }
               })
@@ -599,10 +656,12 @@ function createMockServer(): Promise<MockServerPort> {
           if (parsed.stream) {
             // LOCK-004: opt-in slow/long streaming mode for the
             // streaming-responsiveness spec (interaction window mid-stream).
-            const lastUserContent = messages
-              .filter((m: Record<string, unknown>) => m.role === 'user' && typeof m.content === 'string')
-              .map((m: Record<string, unknown>) => m.content as string)
-              .at(-1)
+            const lastUserContent = extractUserText(
+              messages
+                .filter((m: Record<string, unknown>) => m.role === 'user')
+                .map((m: Record<string, unknown>) => m.content)
+                .at(-1)
+            )
             const slowStream = typeof lastUserContent === 'string' && lastUserContent.includes(SLOW_STREAM_MARKER)
             const model = (parsed.model as string) || 'mock-model'
 

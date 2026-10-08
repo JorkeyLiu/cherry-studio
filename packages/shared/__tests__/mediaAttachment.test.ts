@@ -63,6 +63,8 @@ describe('external media extension allow-set (F1)', () => {
     expect(isSupportedMediaAttachmentExt('.mp4')).toBe(true)
     expect(isSupportedMediaAttachmentExt('.mkv')).toBe(true)
     expect(isSupportedMediaAttachmentExt('.flac')).toBe(true)
+    expect(isSupportedMediaAttachmentExt('.webm')).toBe(true)
+    expect(isSupportedMediaAttachmentExt('.WEBM')).toBe(true)
   })
 
   it('rejects non-media extensions', () => {

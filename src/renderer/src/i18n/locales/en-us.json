@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "Media player: {{name}}",
-      "media_unsupported_format": "The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
-      "open_with_default_app": "Open with default app",
+      "media_unsupported_format": "The {{format}} format can't be played in the app, but it can still be sent",
       "pasted_image": "Pasted Image",
       "pasted_text": "Pasted Text",
       "remove_attachment": "Remove attachment",

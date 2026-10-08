@@ -3,7 +3,6 @@ import FileManager from '@renderer/services/FileManager'
 import type { FileMetadata } from '@renderer/types'
 import { formatFileSize } from '@renderer/utils'
 import { getMediaKind, isInAppPlayable } from '@renderer/utils/mediaAttachment'
-import { Button } from 'antd'
 import type { FC, ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
@@ -18,10 +17,6 @@ interface MediaAttachmentPreviewProps {
   src: string | null
   /** Leading icon; callers pass the house `getFileIcon(file.ext)` result. */
   icon?: ReactNode
-  /** Secure "open with default app" action (narrow IPC, never whole-card). */
-  onOpenWithDefaultApp: () => void
-  /** True when no usable open identity exists — the action stays disabled. */
-  defaultAppDisabled?: boolean
 }
 
 /**
@@ -29,23 +24,16 @@ interface MediaAttachmentPreviewProps {
  *
  * Main preview is a native HTML5 `<audio>` / `<video>` element (controls,
  * `preload="metadata"`, never autoplay). Formats the browser cannot decode
- * — or attachments without a usable source — render the generic media card
- * with the explicit secondary "open with default app" action instead of
- * jumping out on card click. Shared by the pre-send `AttachmentPreview` and
- * the sent `MessageAttachments`.
+ * — or attachments without a usable source — render the generic media card.
+ * There is no system-default-app action: unsupported files stay sendable with
+ * an in-app-only fallback notice. Shared by the pre-send `AttachmentPreview`
+ * and the sent `MessageAttachments`.
  */
-const MediaAttachmentPreview: FC<MediaAttachmentPreviewProps> = ({
-  file,
-  src,
-  icon,
-  onOpenWithDefaultApp,
-  defaultAppDisabled = false
-}) => {
+const MediaAttachmentPreview: FC<MediaAttachmentPreviewProps> = ({ file, src, icon }) => {
   const { t } = useTranslation()
   const kind = getMediaKind(file)
   const playable = isInAppPlayable(file) && src !== null
   const fullName = FileManager.formatFileName(file)
-  const openLabel = t('message.attachments.open_with_default_app')
   const playerLabel = t('message.attachments.media_player_label', { name: fullName })
 
   return (
@@ -74,16 +62,6 @@ const MediaAttachmentPreview: FC<MediaAttachmentPreviewProps> = ({
           {t('message.attachments.media_unsupported_format', { format: file.ext || file.type || '' })}
         </MediaFallback>
       )}
-      <Button
-        data-testid="media-open-default"
-        size="small"
-        type="default"
-        onClick={onOpenWithDefaultApp}
-        disabled={defaultAppDisabled}
-        title={openLabel}
-        aria-label={openLabel}>
-        {openLabel}
-      </Button>
     </MediaContainer>
   )
 }

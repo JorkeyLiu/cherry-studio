@@ -353,8 +353,12 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
     }
 
     // 处理音频/视频：endpoint/adapter matrix only (never model metadata).
-    // OpenAI Chat/compatible: WAV/MP3 audio only; Gemini: audio + video;
-    // Responses + Anthropic: no audio/video; other chat: video unsupported.
+    // Official OpenAI Chat: WAV/MP3 audio only; generic OpenAI-compatible:
+    // WAV/MP3 + OGG/FLAC/AAC audio (input_audio, upstream adjudicates) +
+    // video (mp4/mov/webm as video_url, upstream adjudicates); Gemini: audio
+    // + video; Responses + Anthropic: no audio/video; official OpenAI Chat:
+    // audio only, no video. Other chat: video unsupported. No transcode,
+    // no URL-audio promotion, no metadata admission gating.
     if (file.type === FILE_TYPE.AUDIO || file.type === FILE_TYPE.VIDEO) {
       const provider = getProviderByModel(model)
       if (!provider) {
@@ -369,9 +373,9 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
         const mime = resolveAudioMime(ext, aiSdkId)
         if (!mime) {
           throw fail(
-            aiSdkId === 'openai-chat' || aiSdkId === 'openai-compatible'
+            aiSdkId === 'openai-chat'
               ? `audio format "${file.ext}" cannot be encoded on this endpoint (only WAV/MP3)`
-              : `audio format "${file.ext}" cannot be encoded on the ${aiSdkId} endpoint`
+              : `audio format "${file.ext}" cannot be reliably encoded on the ${aiSdkId} endpoint`
           )
         }
         try {
@@ -382,8 +386,13 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
         }
       }
 
-      // VIDEO
-      if (aiSdkId !== 'google') {
+      // VIDEO: Gemini and generic OpenAI-compatible encode natively
+      // (mp4/mov/webm via resolveVideoMime + base64File, same trusted MIME
+      // as audio). The compatible wire carries the raw video content part as
+      // video_url; support is adjudicated upstream (MM-3/MM-4/MM-11: never
+      // metadata-gated, never inferred from the model id). Official OpenAI
+      // Chat / Responses / Anthropic / unknown adapters keep existing reject.
+      if (aiSdkId !== 'google' && aiSdkId !== 'openai-compatible') {
         throw fail(
           aiSdkId === 'openai' || aiSdkId === 'anthropic'
             ? `video is not supported on the ${aiSdkId} endpoint`

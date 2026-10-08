@@ -81,6 +81,8 @@ describe('file', () => {
       expect(getFileType('.mov')).toBe(FILE_TYPE.VIDEO)
       expect(getFileType('.mkv')).toBe(FILE_TYPE.VIDEO)
       expect(getFileType('.flv')).toBe(FILE_TYPE.VIDEO)
+      expect(getFileType('.webm')).toBe(FILE_TYPE.VIDEO)
+      expect(getFileType('.WEBM')).toBe(FILE_TYPE.VIDEO)
     })
 
     it('should return AUDIO for audio extensions', () => {

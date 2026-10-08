@@ -9,9 +9,8 @@ vi.mock('react-i18next', () => ({
 }))
 
 const mockPreview = vi.fn()
-const mockOpenWithDefaultApp = vi.fn()
 vi.mock('@renderer/hooks/useAttachment', () => ({
-  useAttachment: () => ({ preview: mockPreview, openWithDefaultApp: mockOpenWithDefaultApp })
+  useAttachment: () => ({ preview: mockPreview })
 }))
 
 vi.mock('@renderer/services/FileManager', () => ({
@@ -52,12 +51,9 @@ vi.mock('@renderer/components/ConfirmDialog', () => ({
 // player semantics (covered by MediaAttachmentPreview.test.tsx).
 vi.mock('@renderer/components/MediaAttachmentPreview', () => ({
   __esModule: true,
-  default: ({ file, src, onOpenWithDefaultApp, defaultAppDisabled }: any) => (
-    <div data-testid="draft-media-preview" data-src={src ?? ''} data-disabled={defaultAppDisabled}>
+  default: ({ file, src }: any) => (
+    <div data-testid="draft-media-preview" data-src={src ?? ''}>
       <span>{file.origin_name}</span>
-      <button data-testid="draft-media-open" onClick={onOpenWithDefaultApp}>
-        open
-      </button>
     </div>
   )
 }))
@@ -96,29 +92,25 @@ describe('AttachmentPreview media drafts', () => {
 
     const preview = screen.getByTestId('draft-media-preview')
     expect(preview).toHaveAttribute('data-src', 'file:///draft/song.mp3')
-    expect(preview).toHaveAttribute('data-disabled', 'false')
     expect(screen.queryByTestId('custom-tag')).not.toBeInTheDocument()
   })
 
-  it('opens pre-send audio through the narrow registered-external request', () => {
-    render(<AttachmentPreview files={[audioFile]} setFiles={vi.fn()} />)
+  it('offers no default-app action for pre-send audio and never reaches open IPC', () => {
+    const { container } = render(<AttachmentPreview files={[audioFile]} setFiles={vi.fn()} />)
 
-    fireEvent.click(screen.getByTestId('draft-media-open'))
-    expect(mockOpenWithDefaultApp).toHaveBeenCalledTimes(1)
-    expect(mockOpenWithDefaultApp).toHaveBeenCalledWith({ kind: 'external', filePath: '/draft/song.mp3' })
+    expect(screen.queryByTestId('media-open-default')).not.toBeInTheDocument()
+    expect(container.innerHTML).not.toContain('open_with_default_app')
+    expect(container.innerHTML).not.toContain('openMediaAttachment')
     expect(mockPreview).not.toHaveBeenCalled()
   })
 
-  it('disables the default-app action and never reaches IPC when the draft path is missing', () => {
+  it('renders pre-send audio without a file:// URL when the draft path is missing', () => {
     const missing = { ...audioFile, path: '' }
     render(<AttachmentPreview files={[missing]} setFiles={vi.fn()} />)
 
     const preview = screen.getByTestId('draft-media-preview')
     expect(preview).toHaveAttribute('data-src', '')
-    expect(preview).toHaveAttribute('data-disabled', 'true')
-
-    fireEvent.click(screen.getByTestId('draft-media-open'))
-    expect(mockOpenWithDefaultApp).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('media-open-default')).not.toBeInTheDocument()
   })
 
   it('keeps non-media drafts on the existing tag path', () => {

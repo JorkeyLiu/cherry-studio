@@ -96,7 +96,7 @@ describe('Unit B media matrix', () => {
     }
   })
 
-  it('audio matrix: chat/compatible WAV-MP3 only, Gemini audio, Responses-Anthropic none', () => {
+  it('audio matrix: official WAV-MP3 only, compatible +ogg/flac/aac, Gemini audio, Responses-Anthropic none', () => {
     const wav = (type: Provider['type'], host = 'https://example.com') => {
       const p = makeProvider(type)
       p.apiHost = host
@@ -111,20 +111,28 @@ describe('Unit B media matrix', () => {
     vi.mocked(getProviderByModel).mockReturnValue(wav('openai', 'https://api.openai.com/v1'))
     expect(supportsAudioInput(makeModel(), '.mp3')).toBe(true)
     expect(supportsAudioInput(makeModel(), '.ogg')).toBe(false)
+    expect(supportsAudioInput(makeModel(), '.flac')).toBe(false)
+    expect(supportsAudioInput(makeModel(), '.aac')).toBe(false)
 
     vi.mocked(getProviderByModel).mockReturnValue(wav('openai', 'https://proxy.example.com/v1'))
     expect(supportsAudioInput(makeModel(), '.wav')).toBe(true)
+    expect(supportsAudioInput(makeModel(), '.mp3')).toBe(true)
+    expect(supportsAudioInput(makeModel(), '.ogg')).toBe(true)
+    expect(supportsAudioInput(makeModel(), '.flac')).toBe(true)
+    expect(supportsAudioInput(makeModel(), '.aac')).toBe(true)
+    expect(supportsAudioInput(makeModel(), '.m4a')).toBe(false)
+    expect(supportsAudioInput(makeModel(), '.opus')).toBe(false)
 
     vi.mocked(getProviderByModel).mockReturnValue(wav('gemini'))
     expect(supportsAudioInput(makeModel(), '.wav')).toBe(true)
   })
 
-  it('video matrix: only Gemini encodes video', () => {
+  it('video matrix: Gemini + generic compatible encode video, official/Responses/Anthropic do not', () => {
     for (const [type, host, expected] of [
       ['openai-response', 'https://example.com', false],
       ['anthropic', 'https://example.com', false],
       ['openai', 'https://api.openai.com/v1', false],
-      ['openai', 'https://proxy.example.com/v1', false],
+      ['openai', 'https://proxy.example.com/v1', true],
       ['gemini', 'https://example.com', true]
     ] as const) {
       const p = makeProvider(type)
@@ -169,7 +177,7 @@ describe('Unit B media matrix', () => {
     expect(part).toMatchObject({ type: 'file', mediaType: 'audio/wav', filename: 'note.wav' })
   })
 
-  it('OGG audio on OpenAI Chat fails explicitly (only WAV-MP3)', async () => {
+  it('OGG audio on official OpenAI Chat fails explicitly (only WAV-MP3)', async () => {
     const p = makeProvider('openai')
     p.apiHost = 'https://api.openai.com/v1'
     vi.mocked(getProviderByModel).mockReturnValue(p)
@@ -178,11 +186,99 @@ describe('Unit B media matrix', () => {
     await expect(convertFileBlockToFilePart(block, makeModel())).rejects.toThrow(/note\.ogg.*only WAV\/MP3/)
   })
 
+  it('compatible audio encodes ogg/flac/aac with reliable MIME regardless of model id (never metadata-gated)', async () => {
+    const p = makeProvider('openai')
+    p.apiHost = 'https://proxy.example.com/v1'
+    vi.mocked(getProviderByModel).mockReturnValue(p)
+    for (const [fileName, ext, mime] of [
+      ['note.wav', '.wav', 'audio/wav'],
+      ['note.mp3', '.mp3', 'audio/mpeg'],
+      ['note.ogg', '.ogg', 'audio/ogg'],
+      ['note.flac', '.flac', 'audio/flac'],
+      ['note.aac', '.aac', 'audio/aac']
+    ] as const) {
+      for (const modelId of ['plain-chat-model', 'my-renamed-unknown-1']) {
+        const block = makeFileBlock({ origin_name: fileName, ext, type: FILE_TYPE.AUDIO })
+        const part = await convertFileBlockToFilePart(block, makeModel({ id: modelId, name: modelId }))
+        expect(part).toMatchObject({ type: 'file', mediaType: mime, filename: fileName })
+        expect(supportsAudioInput(makeModel({ id: modelId, name: modelId }), ext)).toBe(true)
+      }
+    }
+  })
+
+  it('compatible audio rejects unknown/m4a explicitly without the official WAV-MP3 wording', async () => {
+    const p = makeProvider('openai')
+    p.apiHost = 'https://proxy.example.com/v1'
+    vi.mocked(getProviderByModel).mockReturnValue(p)
+    for (const [fileName, ext] of [
+      ['note.m4a', '.m4a'],
+      ['note.opus', '.opus'],
+      ['note.bin', '.bin']
+    ] as const) {
+      const block = makeFileBlock({ origin_name: fileName, ext, type: FILE_TYPE.AUDIO })
+      await expect(convertFileBlockToFilePart(block, makeModel())).rejects.toThrow(/cannot be reliably encoded/)
+      expect(supportsAudioInput(makeModel(), ext)).toBe(false)
+    }
+    expect(resolveAudioMime('.ogg', 'openai-compatible')).toBe('audio/ogg')
+    expect(resolveAudioMime('.flac', 'openai-compatible')).toBe('audio/flac')
+    expect(resolveAudioMime('.aac', 'openai-compatible')).toBe('audio/aac')
+    expect(resolveAudioMime('.m4a', 'openai-compatible')).toBeUndefined()
+    expect(resolveAudioMime('.ogg', 'openai-chat')).toBeUndefined()
+    expect(resolveAudioMime('.ogg', 'openai')).toBeUndefined()
+    expect(resolveAudioMime('.ogg', 'anthropic')).toBeUndefined()
+  })
+
   it('video on Anthropic fails explicitly', async () => {
     vi.mocked(getProviderByModel).mockReturnValue(makeProvider('anthropic'))
     const block = makeFileBlock({ origin_name: 'clip.mp4', ext: '.mp4', type: FILE_TYPE.VIDEO })
 
     await expect(convertFileBlockToFilePart(block, makeModel())).rejects.toThrow(/clip\.mp4.*not supported/)
+  })
+
+  it('video on official OpenAI Chat fails explicitly (unchanged)', async () => {
+    const p = makeProvider('openai')
+    p.apiHost = 'https://api.openai.com/v1'
+    vi.mocked(getProviderByModel).mockReturnValue(p)
+    const block = makeFileBlock({ origin_name: 'clip.mp4', ext: '.mp4', type: FILE_TYPE.VIDEO })
+
+    await expect(convertFileBlockToFilePart(block, makeModel())).rejects.toThrow(/clip\.mp4.*cannot be encoded/)
+  })
+
+  it('video on generic OpenAI-compatible encodes as FilePart regardless of model id (never metadata-gated)', async () => {
+    const p = makeProvider('openai')
+    p.apiHost = 'https://proxy.example.com/v1'
+    vi.mocked(getProviderByModel).mockReturnValue(p)
+    // Model ids (canonical or unknown) never gate encodability (MM-3/MM-4).
+    for (const modelId of ['plain-chat-model', 'my-renamed-unknown-1', 'qwen3-vl-8b', 'OPENAI-COMPAT-MODEL']) {
+      const block = makeFileBlock({ origin_name: 'clip.mp4', ext: '.mp4', type: FILE_TYPE.VIDEO })
+      const part = await convertFileBlockToFilePart(block, makeModel({ id: modelId, name: modelId }))
+      expect(part).toMatchObject({ type: 'file', mediaType: 'video/mp4', filename: 'clip.mp4' })
+      expect(supportsVideoInput(makeModel({ id: modelId, name: modelId }), '.mp4')).toBe(true)
+    }
+  })
+
+  it('compatible video keeps known-ext MIME rules, rejects unknown ext explicitly', async () => {
+    const p = makeProvider('openai')
+    p.apiHost = 'https://proxy.example.com/v1'
+    vi.mocked(getProviderByModel).mockReturnValue(p)
+    for (const [fileName, ext, mime] of [
+      ['clip.mp4', '.mp4', 'video/mp4'],
+      ['clip.MP4', '.MP4', 'video/mp4'],
+      ['clip.mov', '.mov', 'video/quicktime'],
+      ['clip.webm', '.webm', 'video/webm']
+    ] as const) {
+      const block = makeFileBlock({ origin_name: fileName, ext, type: FILE_TYPE.VIDEO })
+      const part = await convertFileBlockToFilePart(block, makeModel())
+      expect(part).toMatchObject({ type: 'file', mediaType: mime, filename: fileName })
+    }
+    for (const [fileName, ext] of [
+      ['clip.avi', '.avi'],
+      ['clip.mkv', '.mkv']
+    ] as const) {
+      const block = makeFileBlock({ origin_name: fileName, ext, type: FILE_TYPE.VIDEO })
+      await expect(convertFileBlockToFilePart(block, makeModel())).rejects.toThrow(/cannot be reliably encoded/)
+      expect(supportsVideoInput(makeModel(), ext)).toBe(false)
+    }
   })
 
   it('image read failure aborts with filename/type/reason (never silent null)', async () => {

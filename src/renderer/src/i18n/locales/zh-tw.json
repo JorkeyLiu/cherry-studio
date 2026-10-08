@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "媒體播放器：{{name}}",
-      "media_unsupported_format": "{{format}} 格式無法在應用內播放，但仍可傳送並使用預設應用程式開啟",
-      "open_with_default_app": "使用預設應用程式開啟",
+      "media_unsupported_format": "{{format}} 格式無法在應用內播放，但仍可傳送",
       "pasted_image": "剪貼簿圖片",
       "pasted_text": "剪貼簿檔案",
       "remove_attachment": "移除附件",

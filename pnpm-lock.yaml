@@ -40,7 +40,7 @@ patchedDependencies:
     hash: 3dbdd2fbbe5a44bc23a04b1195329dd8d78043447e925342ad5ed53c8c3b96ec
     path: patches/@ai-sdk__google@3.0.64.patch
   '@ai-sdk/openai-compatible@2.0.37':
-    hash: 50ffd57b3f7d2de99f0315f0b3bca05cde1dc3d9f760d4f1be4143d8c6f260c7
+    hash: 309e10e3c5c6da52ec4ab76fc2da8bb79ead0ec8655945c2780f35ee5cc0e267
     path: patches/@ai-sdk__openai-compatible@2.0.37.patch
   '@ai-sdk/openai@3.0.53':
     hash: 83a4d486601eff47ad8b5e22024878be2ced05b5b86e09884199a3f47fd53530
@@ -176,7 +176,7 @@ importers:
         version: 3.0.53(patch_hash=83a4d486601eff47ad8b5e22024878be2ced05b5b86e09884199a3f47fd53530)(zod@4.3.4)
       '@ai-sdk/openai-compatible':
         specifier: ^2.0.37
-        version: 2.0.37(patch_hash=50ffd57b3f7d2de99f0315f0b3bca05cde1dc3d9f760d4f1be4143d8c6f260c7)(zod@4.3.4)
+        version: 2.0.37(patch_hash=309e10e3c5c6da52ec4ab76fc2da8bb79ead0ec8655945c2780f35ee5cc0e267)(zod@4.3.4)
       '@ai-sdk/provider':
         specifier: ^3.0.8
         version: 3.0.8
@@ -1245,7 +1245,7 @@ importers:
         version: 3.0.53(patch_hash=83a4d486601eff47ad8b5e22024878be2ced05b5b86e09884199a3f47fd53530)(zod@4.3.4)
       '@ai-sdk/openai-compatible':
         specifier: ^2.0.37
-        version: 2.0.37(patch_hash=50ffd57b3f7d2de99f0315f0b3bca05cde1dc3d9f760d4f1be4143d8c6f260c7)(zod@4.3.4)
+        version: 2.0.37(patch_hash=309e10e3c5c6da52ec4ab76fc2da8bb79ead0ec8655945c2780f35ee5cc0e267)(zod@4.3.4)
       '@ai-sdk/provider':
         specifier: ^3.0.8
         version: 3.0.8
@@ -12628,7 +12628,7 @@ snapshots:
       '@ai-sdk/provider-utils': 4.0.23(zod@4.3.4)
       zod: 4.3.4
 
-  '@ai-sdk/openai-compatible@2.0.37(patch_hash=50ffd57b3f7d2de99f0315f0b3bca05cde1dc3d9f760d4f1be4143d8c6f260c7)(zod@4.3.4)':
+  '@ai-sdk/openai-compatible@2.0.37(patch_hash=309e10e3c5c6da52ec4ab76fc2da8bb79ead0ec8655945c2780f35ee5cc0e267)(zod@4.3.4)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
       '@ai-sdk/provider-utils': 4.0.23(zod@4.3.4)

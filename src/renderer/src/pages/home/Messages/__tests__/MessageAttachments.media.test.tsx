@@ -1,7 +1,7 @@
 import type { FileMetadata } from '@renderer/types'
 import type { FileMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@ant-design/icons', () => ({
@@ -19,9 +19,8 @@ vi.mock('react-i18next', () => ({
 }))
 
 const mockPreview = vi.fn()
-const mockOpenWithDefaultApp = vi.fn()
 vi.mock('@renderer/hooks/useAttachment', () => ({
-  useAttachment: () => ({ preview: mockPreview, openWithDefaultApp: mockOpenWithDefaultApp })
+  useAttachment: () => ({ preview: mockPreview })
 }))
 
 vi.mock('@renderer/services/FileManager', () => ({
@@ -96,8 +95,8 @@ describe('MessageAttachments media preview', () => {
     vi.restoreAllMocks()
   })
 
-  it('previews sent audio in-app with controls, no autoplay, and a narrow stored open request', () => {
-    render(<MessageAttachments block={createFileBlock(audioFile)} />)
+  it('previews sent audio in-app with controls, no autoplay, and no default-app action', () => {
+    const { container } = render(<MessageAttachments block={createFileBlock(audioFile)} />)
 
     const audio = screen.getByTestId('media-audio')
     expect(audio).toHaveAttribute('controls')
@@ -105,14 +104,12 @@ describe('MessageAttachments media preview', () => {
     expect(audio).not.toHaveAttribute('autoplay')
     expect(audio.getAttribute('src')).toBe('file:///mock/files/audio-1.mp3')
     expect(screen.queryByTestId('upload')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByTestId('media-open-default'))
-    expect(mockOpenWithDefaultApp).toHaveBeenCalledTimes(1)
-    expect(mockOpenWithDefaultApp).toHaveBeenCalledWith({ kind: 'stored', storedFileName: 'audio-1.mp3' })
+    expect(screen.queryByTestId('media-open-default')).not.toBeInTheDocument()
+    expect(container.innerHTML).not.toContain('open_with_default_app')
     expect(mockPreview).not.toHaveBeenCalled()
   })
 
-  it('previews sent video in-app without autoplay', () => {
+  it('previews sent video in-app without autoplay and without a default-app action', () => {
     render(<MessageAttachments block={createFileBlock(videoFile)} />)
 
     const video = screen.getByTestId('media-video')
@@ -120,18 +117,20 @@ describe('MessageAttachments media preview', () => {
     expect(video).toHaveAttribute('preload', 'metadata')
     expect(video).not.toHaveAttribute('autoplay')
     expect(video.getAttribute('src')).toBe('file:///mock/files/video-1.mp4')
+    expect(screen.queryByTestId('media-open-default')).not.toBeInTheDocument()
   })
 
-  it('renders the generic card for unplayable formats without blocking the default-app action', () => {
+  it('renders the generic in-app-only card for unplayable formats without a system open', () => {
     const mkv = { ...videoFile, id: 'video-2', origin_name: 'movie.mkv', name: 'movie.mkv', ext: '.mkv' }
     const { container } = render(<MessageAttachments block={createFileBlock(mkv)} />)
 
     expect(screen.queryByTestId('media-video')).not.toBeInTheDocument()
-    expect(screen.getByTestId('media-fallback')).toBeInTheDocument()
+    const fallback = screen.getByTestId('media-fallback')
+    expect(fallback).toBeInTheDocument()
+    expect(fallback.textContent).not.toMatch(/default app|默认应用|預設應用/)
     expect(container.innerHTML).toContain('movie.mkv')
-
-    fireEvent.click(screen.getByTestId('media-open-default'))
-    expect(mockOpenWithDefaultApp).toHaveBeenCalledWith({ kind: 'stored', storedFileName: 'video-2.mkv' })
+    expect(screen.queryByTestId('media-open-default')).not.toBeInTheDocument()
+    expect(mockPreview).not.toHaveBeenCalled()
   })
 
   it('encodes source paths with spaces and # instead of naive file:// concatenation', () => {
@@ -150,7 +149,6 @@ describe('MessageAttachments media preview', () => {
     expect(screen.queryByTestId('media-attachment')).not.toBeInTheDocument()
     expect(container.innerHTML).not.toContain('file://')
     expect(FileManager.getSafePath).not.toHaveBeenCalled()
-    expect(mockOpenWithDefaultApp).not.toHaveBeenCalled()
     expect(mockPreview).not.toHaveBeenCalled()
   })
 
