@@ -34,7 +34,7 @@ overrides:
 
 patchedDependencies:
   '@ai-sdk/anthropic':
-    hash: 9e459da7b108668e23131b383077b3c254fe1cc93a51768da3615f4489299af9
+    hash: f61c08c51db478b5aceaea790d2909fc512961a3a2e76eff37328357bd80dc16
     path: patches/@ai-sdk__anthropic.patch
   '@ai-sdk/google@3.0.64':
     hash: 3dbdd2fbbe5a44bc23a04b1195329dd8d78043447e925342ad5ed53c8c3b96ec
@@ -167,7 +167,7 @@ importers:
         version: 7.6.9(zod@4.3.4)
       '@ai-sdk/anthropic':
         specifier: ^3.0.71
-        version: 3.0.71(patch_hash=9e459da7b108668e23131b383077b3c254fe1cc93a51768da3615f4489299af9)(zod@4.3.4)
+        version: 3.0.71(patch_hash=f61c08c51db478b5aceaea790d2909fc512961a3a2e76eff37328357bd80dc16)(zod@4.3.4)
       '@ai-sdk/google':
         specifier: ^3.0.64
         version: 3.0.64(patch_hash=3dbdd2fbbe5a44bc23a04b1195329dd8d78043447e925342ad5ed53c8c3b96ec)(zod@4.3.4)
@@ -1236,7 +1236,7 @@ importers:
     dependencies:
       '@ai-sdk/anthropic':
         specifier: ^3.0.71
-        version: 3.0.71(patch_hash=9e459da7b108668e23131b383077b3c254fe1cc93a51768da3615f4489299af9)(zod@4.3.4)
+        version: 3.0.71(patch_hash=f61c08c51db478b5aceaea790d2909fc512961a3a2e76eff37328357bd80dc16)(zod@4.3.4)
       '@ai-sdk/google':
         specifier: ^3.0.64
         version: 3.0.64(patch_hash=3dbdd2fbbe5a44bc23a04b1195329dd8d78043447e925342ad5ed53c8c3b96ec)(zod@4.3.4)
@@ -12609,7 +12609,7 @@ snapshots:
     transitivePeerDependencies:
       - babel-plugin-macros
 
-  '@ai-sdk/anthropic@3.0.71(patch_hash=9e459da7b108668e23131b383077b3c254fe1cc93a51768da3615f4489299af9)(zod@4.3.4)':
+  '@ai-sdk/anthropic@3.0.71(patch_hash=f61c08c51db478b5aceaea790d2909fc512961a3a2e76eff37328357bd80dc16)(zod@4.3.4)':
     dependencies:
       '@ai-sdk/provider': 3.0.8
       '@ai-sdk/provider-utils': 4.0.23(zod@4.3.4)

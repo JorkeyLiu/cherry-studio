@@ -549,392 +549,46 @@ describe('reasoning utils', () => {
     })
   })
 
-  describe('getAnthropicReasoningParams', () => {
-    it('should return empty for non-reasoning model', async () => {
-      const { isReasoningModel } = await import('@renderer/config/models')
+  describe('getAnthropicReasoningParams (identity-independent generic matrix)', () => {
+    const makeAssistant = (reasoning_effort?: any): Assistant =>
+      ({ id: 'test', name: 'Test', settings: { reasoning_effort } }) as Assistant
 
-      vi.mocked(isReasoningModel).mockReturnValue(false)
-
-      const model: Model = {
-        id: 'claude-3-5-sonnet',
-        name: 'Claude 3.5 Sonnet',
-        provider: 'anthropic'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {}
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({})
+    it('should return empty when reasoning effort is unset or default', () => {
+      expect(getAnthropicReasoningParams(makeAssistant(undefined))).toEqual({})
+      expect(getAnthropicReasoningParams(makeAssistant('default'))).toEqual({})
+      expect(getAnthropicReasoningParams({ id: 'test', name: 'Test', settings: {} } as Assistant)).toEqual({})
     })
 
-    it('should return disabled thinking when reasoning effort is none', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-
-      const model: Model = {
-        id: 'claude-3-7-sonnet',
-        name: 'Claude 3.7 Sonnet',
-        provider: 'anthropic'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'none'
-        }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: {
-          type: 'disabled'
-        }
-      })
-    })
-
-    it('should return enabled thinking with budget for Claude models', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'claude-3-7-sonnet',
-        name: 'Claude 3.7 Sonnet',
-        provider: 'anthropic'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'medium',
-          maxTokens: 4096
-        }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: {
-          type: 'enabled',
-          budgetTokens: 4096
-        }
+    it('should return disabled thinking when reasoning effort is none', () => {
+      expect(getAnthropicReasoningParams(makeAssistant('none'))).toEqual({
+        thinking: { type: 'disabled' }
       })
     })
 
     it.each([
-      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' }
+      { effort: 'low', expected: { thinking: { type: 'adaptive' }, effort: 'low' } },
+      { effort: 'medium', expected: { thinking: { type: 'adaptive' }, effort: 'medium' } },
+      { effort: 'high', expected: { thinking: { type: 'adaptive' }, effort: 'high' } },
+      { effort: 'xhigh', expected: { thinking: { type: 'adaptive' }, effort: 'xhigh' } }
     ])(
-      'should use adaptive thinking with native xhigh effort and summarized display for $name',
-      async ({ id, name }) => {
-        const { isReasoningModel, isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-
-        vi.mocked(isReasoningModel).mockReturnValue(true)
-        vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-
-        const model: Model = {
-          id,
-          name,
-          provider: 'anthropic'
-        } as Model
-
-        const assistant: Assistant = {
-          id: 'test',
-          name: 'Test',
-          settings: { reasoning_effort: 'xhigh' }
-        } as Assistant
-
-        const result = getAnthropicReasoningParams(assistant, model)
-        expect(result).toEqual({
-          thinking: { type: 'adaptive', display: 'summarized' },
-          effort: 'xhigh'
-        })
+      'should encode $effort as native adaptive effort (no max mapping, no display, no budget)',
+      ({ effort, expected }) => {
+        const result: any = getAnthropicReasoningParams(makeAssistant(effort))
+        expect(result).toEqual(expected)
+        expect(result).not.toHaveProperty('sendReasoning')
+        expect(result.thinking).not.toHaveProperty('budgetTokens')
+        expect(result.thinking).not.toHaveProperty('display')
       }
     )
 
-    it('should use adaptive thinking for future Claude Opus 4 minor versions by default', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'claude-opus-4-10',
-        name: 'Claude Opus 4.10',
-        provider: 'anthropic'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'low' }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: { type: 'adaptive', display: 'summarized' },
-        effort: 'low'
+    it('should encode auto as adaptive without effort', () => {
+      expect(getAnthropicReasoningParams(makeAssistant('auto'))).toEqual({
+        thinking: { type: 'adaptive' }
       })
     })
 
-    it('should use adaptive thinking with summarized display even without explicit effort for Claude Opus 4.7', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-
-      const model: Model = {
-        id: 'claude-opus-4-7',
-        name: 'Claude Opus 4.7',
-        provider: 'anthropic'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'auto' }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: { type: 'adaptive', display: 'summarized' }
-      })
-    })
-
-    it('should use fallback budgetTokens when findTokenLimit returns undefined for Claude model', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, findTokenLimit } = await import(
-        '@renderer/config/models'
-      )
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'claude-unknown-model',
-        name: 'Claude Unknown',
-        provider: 'anthropic'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'high',
-          maxTokens: 8192
-        }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: {
-          type: 'enabled',
-          budgetTokens: expect.any(Number)
-        }
-      })
-      // budgetTokens must be present and >= 1024 (the minimum enforced by computeBudgetTokens)
-      const thinking = result.thinking as { type: 'enabled'; budgetTokens?: number }
-      expect(thinking.budgetTokens).toBeGreaterThanOrEqual(1024)
-    })
-
-    it('should use fallback budgetTokens for non-Claude model on Anthropic endpoint when token limit is unknown', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, findTokenLimit } = await import(
-        '@renderer/config/models'
-      )
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'kimi-reasoning-model',
-        name: 'Kimi Reasoning',
-        provider: 'custom-provider'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: {
-          reasoning_effort: 'medium',
-          maxTokens: 4096
-        }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      // Non-Claude models on Anthropic endpoint should also get fallback budgetTokens
-      expect(result).toEqual({
-        thinking: {
-          type: 'enabled',
-          budgetTokens: expect.any(Number)
-        },
-        sendReasoning: true
-      })
-      const thinking = result.thinking as { type: 'enabled'; budgetTokens?: number }
-      expect(thinking.budgetTokens).toBeGreaterThanOrEqual(1024)
-    })
-
-    it('should produce different fallback budgetTokens for different effort levels', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, findTokenLimit } = await import(
-        '@renderer/config/models'
-      )
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'claude-unknown-model',
-        name: 'Claude Unknown',
-        provider: 'anthropic'
-      } as Model
-
-      const lowAssistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'low', maxTokens: 4096 }
-      } as Assistant
-
-      const highAssistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'high', maxTokens: 4096 }
-      } as Assistant
-
-      const lowResult = getAnthropicReasoningParams(lowAssistant, model)
-      const highResult = getAnthropicReasoningParams(highAssistant, model)
-
-      // Higher effort should produce higher or equal budgetTokens
-      const lowThinking = lowResult.thinking as { type: 'enabled'; budgetTokens?: number }
-      const highThinking = highResult.thinking as { type: 'enabled'; budgetTokens?: number }
-      expect(highThinking.budgetTokens).toBeGreaterThanOrEqual(lowThinking.budgetTokens!)
-    })
-
-    it('should map DeepSeek V4+ xhigh effort to max on the Claude endpoint', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, isDeepSeekV4PlusModel, findTokenLimit } =
-        await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(isDeepSeekV4PlusModel).mockReturnValue(true)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'deepseek-v4-pro',
-        name: 'DeepSeek V4 Pro',
-        provider: 'deepseek'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'xhigh', maxTokens: 4096 }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: { type: 'enabled', budgetTokens: expect.any(Number) },
-        sendReasoning: true,
-        effort: 'max'
-      })
-    })
-
-    it('should map DeepSeek V4+ high effort to high on the Claude endpoint', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, isDeepSeekV4PlusModel, findTokenLimit } =
-        await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(isDeepSeekV4PlusModel).mockReturnValue(true)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'deepseek-v4',
-        name: 'DeepSeek V4',
-        provider: 'deepseek'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'high', maxTokens: 4096 }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: { type: 'enabled', budgetTokens: expect.any(Number) },
-        sendReasoning: true,
-        effort: 'high'
-      })
-    })
-
-    it('should not add effort for DeepSeek V4+ when effort is outside the documented set', async () => {
-      // Guard against silent downgrade: if MODEL_SUPPORTED_REASONING_EFFORT.deepseek_v4 ever gains
-      // new levels (low/medium/auto), the explicit effortMap must be extended — otherwise effort
-      // is omitted here rather than being silently mapped to 'high'.
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, isDeepSeekV4PlusModel, findTokenLimit } =
-        await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(isDeepSeekV4PlusModel).mockReturnValue(true)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'deepseek-v4',
-        name: 'DeepSeek V4',
-        provider: 'deepseek'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'medium', maxTokens: 4096 }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: { type: 'enabled', budgetTokens: expect.any(Number) },
-        sendReasoning: true
-      })
-      expect(result).not.toHaveProperty('effort')
-    })
-
-    it('should not add effort for non-DeepSeek models on the Claude endpoint', async () => {
-      const { isReasoningModel, isSupportedThinkingTokenClaudeModel, isDeepSeekV4PlusModel, findTokenLimit } =
-        await import('@renderer/config/models')
-
-      vi.mocked(isReasoningModel).mockReturnValue(true)
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      vi.mocked(isDeepSeekV4PlusModel).mockReturnValue(false)
-      vi.mocked(findTokenLimit).mockReturnValue(undefined)
-
-      const model: Model = {
-        id: 'kimi-k2-reasoning',
-        name: 'Kimi K2 Reasoning',
-        provider: 'custom-provider'
-      } as Model
-
-      const assistant: Assistant = {
-        id: 'test',
-        name: 'Test',
-        settings: { reasoning_effort: 'xhigh', maxTokens: 4096 }
-      } as Assistant
-
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result).toEqual({
-        thinking: { type: 'enabled', budgetTokens: expect.any(Number) },
-        sendReasoning: true
-      })
-      expect(result).not.toHaveProperty('effort')
+    it('should throw for minimal instead of guessing low', () => {
+      expect(() => getAnthropicReasoningParams(makeAssistant('minimal'))).toThrow(/no minimal level/)
     })
   })
 
@@ -1627,17 +1281,10 @@ describe('reasoning utils', () => {
       expect(getOpenAIReasoningParams(assistant, model)).toEqual({ reasoningEffort: 'high' })
     })
 
-    it('Anthropic lane encodes an explicit level for non-Claude models via the generic shape', async () => {
-      const { isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(false)
-      const { getAssistantSettings } = await import('@renderer/services/AssistantService')
-      vi.mocked(getAssistantSettings).mockReturnValue({ maxTokens: 8192 } as any)
-
-      const model = { id: 'custom-chat-model', name: 'Custom', provider: 'anthropic' } as Model
+    it('Anthropic lane encodes an explicit level via the generic adaptive shape', async () => {
       const assistant = { id: 't', name: 'T', settings: { reasoning_effort: 'high' } } as Assistant
-      const result = getAnthropicReasoningParams(assistant, model)
-      expect(result.thinking).toEqual({ type: 'enabled', budgetTokens: expect.any(Number) })
-      expect(result.sendReasoning).toBe(true)
+      const result = getAnthropicReasoningParams(assistant)
+      expect(result).toEqual({ thinking: { type: 'adaptive' }, effort: 'high' })
     })
   })
 
@@ -1717,10 +1364,7 @@ describe('reasoning utils', () => {
     })
 
     it('Anthropic lane minimal throws instead of omitting effort', async () => {
-      const { isSupportedThinkingTokenClaudeModel } = await import('@renderer/config/models')
-      vi.mocked(isSupportedThinkingTokenClaudeModel).mockReturnValue(true)
-      const model = { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', provider: 'anthropic' } as Model
-      expect(() => getAnthropicReasoningParams(makeAssistant('minimal'), model)).toThrow(/no minimal level/)
+      expect(() => getAnthropicReasoningParams(makeAssistant('minimal'))).toThrow(/no minimal level/)
     })
 
     it('Gemini hosted Gemma lane only encodes minimal/high', async () => {

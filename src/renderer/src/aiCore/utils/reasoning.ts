@@ -5,18 +5,14 @@ import type OpenAI from '@cherrystudio/openai'
 import {
   findTokenLimit,
   GEMINI_FLASH_MODEL_REGEX,
-  isClaude46SeriesModel,
-  isDeepSeekV4PlusModel,
   isGemini3ThinkingTokenModel,
   isHostedGemma4ThinkingModel,
   isOpenAIDeepResearchModel,
   isOpenAIModel,
-  isSupportAdaptiveThinkingClaudeModel,
-  isSupportedReasoningEffortOpenAIModel,
-  isSupportedThinkingTokenClaudeModel
+  isSupportedReasoningEffortOpenAIModel
 } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
-import { getAssistantSettings, getProviderByModel } from '@renderer/services/AssistantService'
+import { getProviderByModel } from '@renderer/services/AssistantService'
 import type { Assistant, Model, ReasoningEffortOption } from '@renderer/types'
 import { EFFORT_RATIO } from '@renderer/types'
 import type { OpenAIReasoningEffort, OpenAIReasoningSummary } from '@renderer/types/aiCoreTypes'
@@ -225,39 +221,31 @@ export function getThinkingBudget(
 // findTokenLimit() cannot determine the model's actual limit. This ensures
 // { type: 'enabled' } always carries a valid budget, which is required by
 // the Claude Agent SDK and the Anthropic Messages API.
-function getFallbackBudgetTokens(reasoningEffort: string | undefined): number {
+// Exported for the generic thinking-format plugin, which reuses the same
+// candidate when converting an adaptive request back to enabled.
+export function getFallbackBudgetTokens(reasoningEffort: string | undefined): number {
   const effortRatio = EFFORT_RATIO[reasoningEffort ?? 'high'] ?? EFFORT_RATIO.high
   return computeBudgetTokens(FALLBACK_TOKEN_LIMIT, effortRatio)
 }
 
 /**
  * Get Anthropic reasoning parameters.
- * Extracted from AnthropicAPIClient logic.
  *
- * Unit B: no model-capability veto. `default` means no override, `none`
- * disables, and any concrete user level is encoded with the lane's
- * protocol shapes (Claude families keep their native shapes; other models on
- * the Claude-compatible endpoint use the generic enabled shape).
+ * Identity-independent: the Anthropic protocol shape depends ONLY on the
+ * user's reasoning_effort, never on a model name/brand/family/version.
+ * The new default is adaptive thinking; the legacy enabled+budget shape is
+ * only produced by the format-negotiation fallback after a precise
+ * adaptive rejection (see anthropicThinkingFormatPlugin).
  *
- * Returns different parameter shapes depending on the model:
- * - **Claude Opus 4.7+**: `{ thinking: { type: 'adaptive', display: 'summarized' }, effort?: 'low' | 'medium' | 'high' | 'xhigh' }`
- *   Uses the new adaptive thinking API with effort-based control.
- * - **Claude 4.6**: `{ thinking: { type: 'adaptive' }, effort: 'low' | 'medium' | 'high' | 'max' }`
- *   Uses the new adaptive thinking API with effort-based control.
- * - **Other Claude models** (4.0, 4.1, 4.5, etc.): `{ thinking: { type: 'enabled', budgetTokens: number } }`
- *   Uses the classic thinking API with explicit token budget.
- * - **Non-Anthropic models served via the Claude-compatible endpoint** (Kimi, MiniMax,
- *   DeepSeek V4+, etc.): `{ thinking: { type: 'enabled', budgetTokens: number }, sendReasoning: true, effort? }`
- *   `sendReasoning: true` ensures reasoning output is streamed back to the UI.
- *   `effort` is only added for DeepSeek V4+ (`high` | `xhigh` → `high` | `max`).
+ * - default/undefined -> {} (no override)
+ * - none -> { thinking: { type: 'disabled' } }
+ * - low/medium/high/xhigh -> { thinking: { type: 'adaptive' }, effort: <native> }
+ * - auto -> { thinking: { type: 'adaptive' } } (no effort)
+ * - minimal has no Anthropic value: throw explicitly rather than guessing low.
  */
-export function getAnthropicReasoningParams(
-  assistant: Assistant,
-  model: Model
-): {
+export function getAnthropicReasoningParams(assistant: Assistant): {
   thinking?: AnthropicProviderOptions['thinking']
   effort?: AnthropicProviderOptions['effort']
-  sendReasoning?: AnthropicProviderOptions['sendReasoning']
 } {
   const reasoningEffort = assistant?.settings?.reasoning_effort
 
@@ -273,92 +261,26 @@ export function getAnthropicReasoningParams(
     }
   }
 
-  // Claude reasoning parameters
-  if (isSupportedThinkingTokenClaudeModel(model)) {
-    // `minimal` is not a native Claude effort level and cannot be encoded
-    // here: throw instead of silently falling back to API defaults.
-    // `auto` is the lane's explicit on-shape (adaptive without effort).
-    if (reasoningEffort === 'minimal') {
-      throw reasoningNotEncodable(model, reasoningEffort, 'Claude adaptive thinking has no minimal level')
-    }
-    // Claude Opus 4.7+: adaptive thinking + native 'xhigh' effort.
-    // Also requires thinking.display: 'summarized' — API defaults to 'omitted'
-    // (no reasoning text in response), which would break Cherry's thinking UI.
-    if (isSupportAdaptiveThinkingClaudeModel(model)) {
-      const effort47Map = {
-        default: undefined,
-        auto: undefined,
-        minimal: undefined,
-        low: 'low',
-        medium: 'medium',
-        high: 'high',
-        xhigh: 'xhigh'
-      } as const satisfies Record<Exclude<ReasoningEffortOption, 'none'>, AnthropicProviderOptions['effort']>
-      const effort = effort47Map[reasoningEffort]
-      const thinking = { type: 'adaptive', display: 'summarized' } as const
-      return effort ? { thinking, effort } : { thinking }
-    }
-
-    // Claude 4.6 uses adaptive thinking + effort parameters.
-    // `xhigh` displays as Max and maps to max (protocol-required mapping).
-    if (isClaude46SeriesModel(model)) {
-      // Claude 4.6 supports: low, medium, high, max
-      // (xhigh displays as Max and maps to max).
-      const effortMap = {
-        default: undefined,
-        auto: undefined,
-        minimal: undefined,
-        low: 'low',
-        medium: 'medium',
-        high: 'high',
-        xhigh: 'max'
-      } as const satisfies Record<Exclude<ReasoningEffortOption, 'none'>, AnthropicProviderOptions['effort']>
-      const effort = effortMap[reasoningEffort]
-      return effort ? { thinking: { type: 'adaptive' }, effort } : { thinking: { type: 'adaptive' } }
-    }
-
-    // Other Claude models continue using enabled + budgetTokens
-    const { maxTokens } = getAssistantSettings(assistant)
-    const budgetTokens = getThinkingBudget(maxTokens, reasoningEffort, model.id)
-
-    return {
-      thinking: {
-        type: 'enabled',
-        budgetTokens: budgetTokens ?? getFallbackBudgetTokens(reasoningEffort)
-      }
-    }
-  } else {
-    // 其他使用claude端點的模型，比如Kimi,Minimax等等
-    const { maxTokens } = getAssistantSettings(assistant)
-    const budgetTokens = getThinkingBudget(maxTokens, reasoningEffort, model.id)
-    const params: Partial<ReturnType<typeof getAnthropicReasoningParams>> = {
-      thinking: {
-        type: 'enabled',
-        budgetTokens: budgetTokens ?? getFallbackBudgetTokens(reasoningEffort)
-      },
-      sendReasoning: true
-    }
-    // https://api-docs.deepseek.com/guides/thinking_mode
-    // DeepSeek V4+ exposes only 'high' and 'xhigh' as user-facing effort levels
-    // (see MODEL_SUPPORTED_REASONING_EFFORT.deepseek_v4); default/none are already
-    // short-circuited earlier in this function. The explicit map avoids silently
-    // downgrading future levels (low/medium/auto) to 'high' — unmapped values are
-    // simply omitted so callers fall back to API defaults instead.
-    if (isDeepSeekV4PlusModel(model)) {
-      const deepSeekV4EffortMap = {
-        high: 'high',
-        xhigh: 'max'
-      } as const
-      const effort = deepSeekV4EffortMap[reasoningEffort as keyof typeof deepSeekV4EffortMap]
-      if (effort) {
-        params.effort = effort
-      }
-    }
-    // Always include budgetTokens to prevent Claude Agent SDK from converting
-    // { type: 'enabled' } into '--thinking adaptive', which non-Anthropic
-    // upstream providers do not support (they only accept 'enabled'/'disabled').
-    return params
+  if (reasoningEffort === 'minimal') {
+    throw new Error(
+      `Reasoning effort "minimal" cannot be encoded for Anthropic: Anthropic adaptive thinking has no minimal level`
+    )
   }
+
+  if (reasoningEffort === 'auto') {
+    return { thinking: { type: 'adaptive' } }
+  }
+
+  if (
+    reasoningEffort === 'low' ||
+    reasoningEffort === 'medium' ||
+    reasoningEffort === 'high' ||
+    reasoningEffort === 'xhigh'
+  ) {
+    return { thinking: { type: 'adaptive' }, effort: reasoningEffort }
+  }
+
+  return {}
 }
 
 type GoogleThinkingLevel = NonNullable<GoogleGenerativeAIProviderOptions['thinkingConfig']>['thinkingLevel']

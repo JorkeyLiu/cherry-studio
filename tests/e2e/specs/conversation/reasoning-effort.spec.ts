@@ -21,10 +21,13 @@
  * LOCK-001: disposable profile. LOCK-002: mock endpoint only, no live APIs.
  */
 import {
+  clearMockAnthropicThinkingBehaviors,
   clearRequestLog,
   expect,
+  findAnthropicRequestsAfter,
   findProductRequestAfter,
   getRequestSequence,
+  setMockAnthropicThinkingBehavior,
   test
 } from '../../fixtures/electron.fixture'
 import { REASONING_LEAK_MARKER } from '../../fixtures/mock-openai-server'
@@ -43,6 +46,161 @@ const MODEL_D_ID = 'deepseek-v4'
 const MODEL_D_KEY = `mock-openai:${MODEL_D_ID}`
 const REASONING_TEXT_D_NONE = 'E2E deepseek v4 none wire verification'
 const REASONING_TEXT_D_LEAK = `E2E deepseek leak ${REASONING_LEAK_MARKER}`
+
+// Anthropic adaptive-first default (explicit thinking starts adaptive+effort).
+// Opaque IDs carry no vendor substring: modern (adaptive-only) succeeds first
+// try adaptive direct; legacy (enabled-only) rejects that first adaptive with
+// the bare 400 `adaptive thinking is not supported on this model`, retries
+// once enabled+budget, then persists per connection+model. Same endpoint
+// proves model-scope separation. Default sends no override, none sends
+// disabled — each exactly 1, never retried, never overridden by the cache.
+const ANTHROPIC_PROVIDER_ID = 'mock-anthropic'
+const LEARN_MODEL_ID = 'mock-thinking-route'
+const LEARN_MODEL_KEY = `${ANTHROPIC_PROVIDER_ID}:${LEARN_MODEL_ID}`
+const LEGACY_MODEL_ID = 'mock-thinking-legacy'
+const LEGACY_MODEL_KEY = `${ANTHROPIC_PROVIDER_ID}:${LEGACY_MODEL_ID}`
+const REASONING_TEXT_LEARN_T1 = 'E2E adaptive-first modern high __TURN_MODERN_HIGH__ verification'
+const REASONING_TEXT_LEARN_T2_LOW = 'E2E adaptive-first legacy low __TURN_LEGACY_LOW__ verification'
+const REASONING_TEXT_LEARN_DEFAULT = 'E2E adaptive-first legacy default __TURN_DEFAULT__ verification'
+const REASONING_TEXT_LEARN_NONE = 'E2E adaptive-first legacy none __TURN_NONE__ verification'
+const REASONING_TEXT_LEGACY = 'E2E adaptive-first legacy high __TURN_LEGACY_HIGH__ verification'
+const REASONING_TEXT_LEARN_RELOAD = 'E2E adaptive-first legacy reload low __TURN_RELOAD__ verification'
+const REASONING_TEXT_MODERN_AGAIN = 'E2E adaptive-first modern again high __TURN_MODERN_AGAIN__ verification'
+
+async function seedMockAnthropicThinking(page: import('@playwright/test').Page, mockPort: number): Promise<void> {
+  const apiHost = `http://127.0.0.1:${mockPort}/v1/`
+  await page.evaluate(
+    ({
+      providerId,
+      apiHost,
+      learnId,
+      legacyId
+    }: {
+      providerId: string
+      apiHost: string
+      learnId: string
+      legacyId: string
+    }) => {
+      const store = (window as any).store
+      const state = store.getState()
+      const existing = state.llm.providers.find((p: any) => p.id === providerId)
+      const models = [
+        { id: learnId, provider: providerId, name: learnId, group: 'e2e', description: 'E2E generic learn route' },
+        { id: legacyId, provider: providerId, name: legacyId, group: 'e2e', description: 'E2E generic legacy route' }
+      ]
+      if (existing) {
+        store.dispatch({
+          type: 'llm/updateProvider',
+          payload: { id: providerId, apiKey: 'test-key', apiHost, enabled: true, models }
+        })
+      } else {
+        store.dispatch({
+          type: 'llm/addProvider',
+          payload: {
+            id: providerId,
+            type: 'anthropic',
+            name: 'Mock Anthropic',
+            apiKey: 'test-key',
+            apiHost,
+            models,
+            enabled: true,
+            isSystem: false
+          }
+        })
+      }
+      const assistant = store.getState().assistants.assistants[0]
+      if (!assistant) throw new Error('no assistant')
+      store.dispatch({
+        type: 'assistants/setModel',
+        payload: {
+          assistantId: assistant.id,
+          model: { id: learnId, provider: providerId, name: learnId, group: 'e2e' }
+        }
+      })
+      store.dispatch({
+        type: 'assistants/updateAssistantSettings',
+        payload: {
+          assistantId: assistant.id,
+          settings: {
+            reasoning_effort: 'default',
+            reasoning_effort_by_model: {},
+            reasoning_effort_show_all_by_model: {}
+          }
+        }
+      })
+    },
+    { providerId: ANTHROPIC_PROVIDER_ID, apiHost, learnId: LEARN_MODEL_ID, legacyId: LEGACY_MODEL_ID }
+  )
+  await page.waitForFunction(
+    ({ modelId, providerId }) => {
+      const s = (window as any).store?.getState()
+      const assistant = s?.assistants?.assistants?.[0]
+      return (
+        assistant?.model?.id === modelId &&
+        assistant?.model?.provider === providerId &&
+        (assistant?.settings?.reasoning_effort ?? 'default') === 'default' &&
+        Object.keys(assistant?.settings?.reasoning_effort_by_model ?? {}).length === 0
+      )
+    },
+    { modelId: LEARN_MODEL_ID, providerId: ANTHROPIC_PROVIDER_ID },
+    { timeout: 15000 }
+  )
+}
+
+async function setAnthropicModel(page: import('@playwright/test').Page, modelId: string): Promise<void> {
+  await page.evaluate(
+    ({ mid, providerId }: { mid: string; providerId: string }) => {
+      const store = (window as any).store
+      const assistant = store.getState().assistants.assistants[0]
+      store.dispatch({
+        type: 'assistants/setModel',
+        payload: {
+          assistantId: assistant.id,
+          model: { id: mid, provider: providerId, name: mid, group: 'e2e' }
+        }
+      })
+    },
+    { mid: modelId, providerId: ANTHROPIC_PROVIDER_ID }
+  )
+  await page.waitForFunction(
+    (mid: string) => {
+      const s = (window as any).store?.getState()
+      return s?.assistants?.assistants?.[0]?.model?.id === mid
+    },
+    modelId,
+    { timeout: 15000 }
+  )
+}
+
+/** Recursively detect any budget-token key (snake/camel) anywhere in the wire body. */
+function wireHasBudgetTokens(parsed: unknown): boolean {
+  const seen = new Set<unknown>()
+  const visit = (value: unknown): boolean => {
+    if (value === null || typeof value !== 'object') return false
+    if (seen.has(value)) return false
+    seen.add(value)
+    if (Array.isArray(value)) return value.some(visit)
+    return Object.entries(value as Record<string, unknown>).some(([key, v]) => {
+      if (key === 'budget_tokens' || key === 'budgetTokens') return true
+      return visit(v)
+    })
+  }
+  return visit(parsed)
+}
+
+function lastAnthropicUserText(parsed: any): string | null {
+  const messages = parsed?.messages
+  if (!Array.isArray(messages)) return null
+  const users = messages.filter((m: any) => m?.role === 'user')
+  const last = users.at(-1)
+  if (!last) return null
+  if (typeof last.content === 'string') return last.content
+  if (Array.isArray(last.content)) {
+    const texts = (last.content as any[]).filter((p) => p?.type === 'text' && typeof p.text === 'string')
+    return texts.length > 0 ? texts.map((p) => p.text).join('\n') : null
+  }
+  return null
+}
 
 async function seedReasoningModels(page: import('@playwright/test').Page): Promise<void> {
   await page.evaluate(
@@ -565,7 +723,7 @@ test.describe('Reasoning effort flow', () => {
       await expect(page.getByTestId('thinking-option-xhigh')).toBeHidden({ timeout: 5000 })
       const showAllSwitch = page.getByTestId('thinking-show-all-switch')
       await expect(showAllSwitch).toBeVisible({ timeout: 10000 })
-      await expect(page.getByRole('switch').first()).toBeVisible({ timeout: 10000 })
+      await expect(showAllSwitch).toHaveAttribute('aria-pressed', 'false')
       await showAllSwitch.click()
       await page.waitForFunction(
         ({ key }) => {
@@ -579,6 +737,7 @@ test.describe('Reasoning effort flow', () => {
       const after = await getAssistantState(page)
       expect(after.showAllByModel[MODEL_A_KEY]).toBe(true)
       expect(after.effort).toBe(beforeEffort)
+      await expect(showAllSwitch).toHaveAttribute('aria-pressed', 'true')
       await expect(page.getByTestId('thinking-popover')).toBeVisible({ timeout: 10000 })
       for (const opt of ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'] as const) {
         await expect(page.getByTestId(`thinking-option-${opt}`)).toBeVisible({ timeout: 10000 })
@@ -603,6 +762,7 @@ test.describe('Reasoning effort flow', () => {
       expect(stateB.showAllByModel[MODEL_A_KEY]).toBe(true)
       await openThinkingPopover(page)
       await expect(page.getByTestId('thinking-show-all-switch')).toBeVisible()
+      await expect(page.getByTestId('thinking-show-all-switch')).toHaveAttribute('aria-pressed', 'false')
       await expect(page.getByTestId('thinking-option-xhigh')).toBeHidden({ timeout: 5000 })
       await page.getByTestId('thinking-show-all-switch').click()
       await page.waitForFunction(
@@ -618,12 +778,14 @@ test.describe('Reasoning effort flow', () => {
       expect(afterB.showAllByModel[MODEL_C_KEY]).toBe(true)
       expect(afterB.showAllByModel[MODEL_A_KEY]).toBe(true)
       expect(afterB.effort).toBe('default')
+      await expect(page.getByTestId('thinking-show-all-switch')).toHaveAttribute('aria-pressed', 'true')
       await expect(page.getByTestId('thinking-popover')).toBeVisible()
       await closeThinkingPopover(page)
     })
 
     await test.step('toggle C back to false keeps A true', async () => {
       await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-show-all-switch')).toHaveAttribute('aria-pressed', 'true')
       await page.getByTestId('thinking-show-all-switch').click()
       await page.waitForFunction(
         ({ key }) => {
@@ -637,6 +799,7 @@ test.describe('Reasoning effort flow', () => {
       const after = await getAssistantState(page)
       expect(after.showAllByModel[MODEL_C_KEY]).toBe(false)
       expect(after.showAllByModel[MODEL_A_KEY]).toBe(true)
+      await expect(page.getByTestId('thinking-show-all-switch')).toHaveAttribute('aria-pressed', 'false')
       await closeThinkingPopover(page)
     })
 
@@ -691,6 +854,7 @@ test.describe('Reasoning effort flow', () => {
       await openThinkingPopover(page)
       await expect(page.getByTestId('thinking-option-xhigh')).toBeVisible({ timeout: 10000 })
       await expect(page.getByTestId('thinking-show-all-switch')).toBeVisible()
+      await expect(page.getByTestId('thinking-show-all-switch')).toHaveAttribute('aria-pressed', 'true')
       const showAllChecked = await page.evaluate(
         ({ key }) => {
           const s = (window as any).store.getState()
@@ -714,6 +878,7 @@ test.describe('Reasoning effort flow', () => {
       expect(stateB2.effort).toBe('low')
       expect(stateB2.showAllByModel[MODEL_C_KEY]).toBe(false)
       await openThinkingPopover(page)
+      await expect(page.getByTestId('thinking-show-all-switch')).toHaveAttribute('aria-pressed', 'false')
       await expect(page.getByTestId('thinking-option-xhigh')).toBeHidden({ timeout: 5000 })
       await closeThinkingPopover(page)
       await setModel(page, MODEL_A_ID)
@@ -992,6 +1157,299 @@ test.describe('Reasoning effort flow', () => {
         return blocks.filter((b: any) => b.type === 'thinking' && b.status === 'streaming').length
       })
       expect(stillStreaming).toBe(0)
+    })
+  })
+
+  test('Anthropic adaptive-first default — modern direct adaptive, legacy falls back to enabled then persists', async ({
+    mainWindow,
+    mockPort
+  }) => {
+    const page = mainWindow
+
+    async function assistantCount(topicId: string): Promise<number> {
+      return page.evaluate((tid: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[tid] || []
+        let count = 0
+        for (const id of msgIds) {
+          if (s.messages.entities[id]?.role === 'assistant') count++
+        }
+        return count
+      }, topicId)
+    }
+
+    async function selectEffort(option: 'high' | 'low' | 'default' | 'none'): Promise<void> {
+      await openThinkingPopover(page)
+      const opt = page.getByTestId(`thinking-option-${option}`)
+      await expect(opt).toBeVisible({ timeout: 10000 })
+      await opt.click()
+      await page.waitForFunction(
+        (expected: string) => {
+          const s = (window as any).store?.getState()
+          return s?.assistants?.assistants?.[0]?.settings?.reasoning_effort === expected
+        },
+        option,
+        { timeout: 15000 }
+      )
+      await expect(page.getByTestId('thinking-popover')).toBeHidden({ timeout: 10000 })
+    }
+
+    await test.step('seed modern + legacy on the same mock-anthropic endpoint', async () => {
+      clearMockAnthropicThinkingBehaviors()
+      await seedMockAnthropicThinking(page, mockPort)
+      // Test-owned mock capability: modern accepts adaptive, legacy accepts enabled only.
+      // No model-name heuristics in the mock — exact raw strings configured by this test.
+      // Default is `both` (permissive); OpenAI chat-completions behavior is untouched.
+      setMockAnthropicThinkingBehavior(LEARN_MODEL_ID, 'adaptive-only')
+      setMockAnthropicThinkingBehavior(LEGACY_MODEL_ID, 'enabled-only')
+      const state = await getAssistantState(page)
+      expect(state.modelId).toBe(LEARN_MODEL_ID)
+      expect(state.effort).toBe('default')
+      expect(Object.keys(state.effortByModel).length).toBe(0)
+    })
+
+    await test.step('select high via real Thinking Popover', async () => {
+      await selectEffort('high')
+      const state = await getAssistantState(page)
+      expect(state.effort).toBe('high')
+      expect(state.effortByModel[LEARN_MODEL_KEY]).toBe('high')
+    })
+
+    await test.step('modern high: 1 adaptive+effort direct, no budget, 1 assistant message', async () => {
+      clearRequestLog()
+      const before = getRequestSequence()
+      const state = await getAssistantState(page)
+      const prevCount = await assistantCount(state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_LEARN_T1)
+      await waitForAssistantResponseComplete(page, state.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(1)
+      const only = requests[0]
+      expect(only.method).toBe('POST')
+      expect(only.url).toBe('/v1/messages')
+      const parsed = only.parsed as any
+      // Same endpoint + raw model + turn text.
+      expect(parsed?.model).toBe(LEARN_MODEL_ID)
+      expect(lastAnthropicUserText(parsed)).toBe(REASONING_TEXT_LEARN_T1)
+      // NEW default: explicit strength starts adaptive+effort natively.
+      expect(parsed?.thinking?.type).toBe('adaptive')
+      expect(parsed?.output_config?.effort).toBe('high')
+      expect(wireHasBudgetTokens(parsed)).toBe(false)
+      expect(parsed?.thinking?.budget_tokens).toBeUndefined()
+      expect(parsed?.thinking?.budgetTokens).toBeUndefined()
+      // No OpenAI-protocol request for this Anthropic turn.
+      expect(findProductRequestAfter(before)).toBeNull()
+      // Single attempt must yield exactly one visible assistant message (history preserved).
+      const afterCount = await assistantCount(state.topicId)
+      expect(afterCount - prevCount).toBe(1)
+    })
+
+    let legacyHighBudgetTokens = -1
+
+    await test.step('legacy high falls back: adaptive 400 → enabled+budget retry (2 requests, 1 assistant message)', async () => {
+      await setAnthropicModel(page, LEGACY_MODEL_ID)
+      await page.waitForFunction(
+        ({ learnKey }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return (
+            a?.settings?.reasoning_effort === 'default' && a?.settings?.reasoning_effort_by_model?.[learnKey] === 'high'
+          )
+        },
+        { learnKey: LEARN_MODEL_KEY },
+        { timeout: 15000 }
+      )
+      const legacyDefault = await getAssistantState(page)
+      expect(legacyDefault.modelId).toBe(LEGACY_MODEL_ID)
+      expect(legacyDefault.effort).toBe('default')
+      await selectEffort('high')
+      clearRequestLog()
+      const before = getRequestSequence()
+      const state = await getAssistantState(page)
+      expect(state.effortByModel[LEGACY_MODEL_KEY]).toBe('high')
+      expect(state.effortByModel[LEARN_MODEL_KEY]).toBe('high')
+      const prevCount = await assistantCount(state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_LEGACY)
+      await waitForAssistantResponseComplete(page, state.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(2)
+      const [first, second] = requests
+      expect(first.method).toBe('POST')
+      expect(first.url).toBe('/v1/messages')
+      expect(second.method).toBe('POST')
+      expect(second.url).toBe('/v1/messages')
+      const firstParsed = first.parsed as any
+      const secondParsed = second.parsed as any
+      // Same model / same turn / same messages on both legs; only the thinking body format changes.
+      // (Scope headers enter the hashed scope key only; the mock logs method/url/body.)
+      expect(firstParsed?.model).toBe(LEGACY_MODEL_ID)
+      expect(secondParsed?.model).toBe(LEGACY_MODEL_ID)
+      expect(lastAnthropicUserText(firstParsed)).toBe(REASONING_TEXT_LEGACY)
+      expect(lastAnthropicUserText(secondParsed)).toBe(REASONING_TEXT_LEGACY)
+      expect(JSON.stringify(firstParsed?.messages)).toBe(JSON.stringify(secondParsed?.messages))
+      // First leg is the NEW adaptive-first default with native effort.
+      expect(firstParsed?.thinking?.type).toBe('adaptive')
+      expect(firstParsed?.output_config?.effort).toBe('high')
+      expect(wireHasBudgetTokens(firstParsed)).toBe(false)
+      // Retry is enabled with an explicit numeric budget, no adaptive effort.
+      expect(secondParsed?.thinking?.type).toBe('enabled')
+      expect(typeof secondParsed?.thinking?.budget_tokens).toBe('number')
+      expect(secondParsed?.thinking?.budget_tokens).toBeGreaterThanOrEqual(1024)
+      expect(secondParsed?.output_config).toBeUndefined()
+      expect(wireHasBudgetTokens(secondParsed)).toBe(true)
+      legacyHighBudgetTokens = secondParsed?.thinking?.budget_tokens as number
+      // No OpenAI-protocol request for this Anthropic turn; no duplicate assistant message.
+      expect(findProductRequestAfter(before)).toBeNull()
+      const afterCount = await assistantCount(state.topicId)
+      expect(afterCount - prevCount).toBe(1)
+    })
+
+    await test.step('legacy low goes direct enabled with a different budget (strength not cached)', async () => {
+      await selectEffort('low')
+      clearRequestLog()
+      const before = getRequestSequence()
+      const state = await getAssistantState(page)
+      expect(state.effortByModel[LEGACY_MODEL_KEY]).toBe('low')
+      const prevCount = await assistantCount(state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_LEARN_T2_LOW)
+      await waitForAssistantResponseComplete(page, state.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(1)
+      const parsed = requests[0].parsed as any
+      expect(requests[0].method).toBe('POST')
+      expect(requests[0].url).toBe('/v1/messages')
+      expect(parsed?.model).toBe(LEGACY_MODEL_ID)
+      expect(lastAnthropicUserText(parsed)).toBe(REASONING_TEXT_LEARN_T2_LOW)
+      expect(parsed?.thinking?.type).toBe('enabled')
+      expect(typeof parsed?.thinking?.budget_tokens).toBe('number')
+      expect(parsed?.thinking?.budget_tokens).toBeGreaterThanOrEqual(1024)
+      expect(parsed?.output_config).toBeUndefined()
+      expect(wireHasBudgetTokens(parsed)).toBe(true)
+      // Learned format persists but strength is re-read per request: low budget differs from high.
+      expect(parsed?.thinking?.budget_tokens).not.toBe(legacyHighBudgetTokens)
+      expect(findProductRequestAfter(before)).toBeNull()
+      const afterCount = await assistantCount(state.topicId)
+      expect(afterCount - prevCount).toBe(1)
+    })
+
+    await test.step('learned enabled persists across renderer reload: next legacy send is 1 enabled request', async () => {
+      await page.reload()
+      await waitForAppReady(page)
+      await page.waitForFunction(
+        ({ mid, providerId }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return a?.model?.id === mid && a?.model?.provider === providerId
+        },
+        { mid: LEGACY_MODEL_ID, providerId: ANTHROPIC_PROVIDER_ID },
+        { timeout: 60000 }
+      )
+      const rehydrated = await getAssistantState(page)
+      expect(rehydrated.modelId).toBe(LEGACY_MODEL_ID)
+      expect(rehydrated.effort).toBe('low')
+      expect(rehydrated.effortByModel[LEGACY_MODEL_KEY]).toBe('low')
+      // Mock behavior map lives in the test process and survives renderer reload.
+      clearRequestLog()
+      const before = getRequestSequence()
+      const prevCount = await assistantCount(rehydrated.topicId)
+      await uiSendMessage(page, REASONING_TEXT_LEARN_RELOAD)
+      await waitForAssistantResponseComplete(page, rehydrated.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(1)
+      const parsed = requests[0].parsed as any
+      expect(parsed?.model).toBe(LEGACY_MODEL_ID)
+      expect(lastAnthropicUserText(parsed)).toBe(REASONING_TEXT_LEARN_RELOAD)
+      expect(parsed?.thinking?.type).toBe('enabled')
+      expect(typeof parsed?.thinking?.budget_tokens).toBe('number')
+      expect(parsed?.thinking?.budget_tokens).toBeGreaterThanOrEqual(1024)
+      expect(parsed?.output_config).toBeUndefined()
+      expect(findProductRequestAfter(before)).toBeNull()
+      const afterCount = await assistantCount(rehydrated.topicId)
+      expect(afterCount - prevCount).toBe(1)
+    })
+
+    await test.step('legacy default sends no thinking override in a single request (cache never overrides off)', async () => {
+      await selectEffort('default')
+      clearRequestLog()
+      const before = getRequestSequence()
+      const state = await getAssistantState(page)
+      const prevCount = await assistantCount(state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_LEARN_DEFAULT)
+      await waitForAssistantResponseComplete(page, state.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(1)
+      const parsed = requests[0].parsed as any
+      expect(parsed?.model).toBe(LEGACY_MODEL_ID)
+      expect(lastAnthropicUserText(parsed)).toBe(REASONING_TEXT_LEARN_DEFAULT)
+      expect(parsed?.thinking).toBeUndefined()
+      expect(parsed?.output_config).toBeUndefined()
+      expect(wireHasBudgetTokens(parsed)).toBe(false)
+      expect(findProductRequestAfter(before)).toBeNull()
+      const afterCount = await assistantCount(state.topicId)
+      expect(afterCount - prevCount).toBe(1)
+    })
+
+    await test.step('legacy none stays exact disabled in a single request (server permits disabled, never negotiates)', async () => {
+      await selectEffort('none')
+      const stored = await getAssistantState(page)
+      expect(stored.effortByModel[LEGACY_MODEL_KEY]).toBe('none')
+      clearRequestLog()
+      const before = getRequestSequence()
+      const prevCount = await assistantCount(stored.topicId)
+      await uiSendMessage(page, REASONING_TEXT_LEARN_NONE)
+      await waitForAssistantResponseComplete(page, stored.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(1)
+      const parsed = requests[0].parsed as any
+      expect(parsed?.model).toBe(LEGACY_MODEL_ID)
+      expect(lastAnthropicUserText(parsed)).toBe(REASONING_TEXT_LEARN_NONE)
+      expect(parsed?.thinking).toEqual({ type: 'disabled' })
+      expect(parsed?.output_config).toBeUndefined()
+      expect(wireHasBudgetTokens(parsed)).toBe(false)
+      expect(findProductRequestAfter(before)).toBeNull()
+      const afterCount = await assistantCount(stored.topicId)
+      expect(afterCount - prevCount).toBe(1)
+    })
+
+    await test.step('modern again stays adaptive direct on the same endpoint (model-scope separation)', async () => {
+      await setAnthropicModel(page, LEARN_MODEL_ID)
+      await page.waitForFunction(
+        ({ learnKey, legacyKey }) => {
+          const s = (window as any).store?.getState()
+          const a = s?.assistants?.assistants?.[0]
+          return (
+            a?.model?.id === learnKey.split(':')[1] &&
+            a?.settings?.reasoning_effort === 'high' &&
+            a?.settings?.reasoning_effort_by_model?.[legacyKey] === 'none'
+          )
+        },
+        { learnKey: LEARN_MODEL_KEY, legacyKey: LEGACY_MODEL_KEY },
+        { timeout: 15000 }
+      )
+      const state = await getAssistantState(page)
+      expect(state.modelId).toBe(LEARN_MODEL_ID)
+      expect(state.effort).toBe('high')
+      expect(state.effortByModel[LEARN_MODEL_KEY]).toBe('high')
+      expect(state.effortByModel[LEGACY_MODEL_KEY]).toBe('none')
+      clearRequestLog()
+      const before = getRequestSequence()
+      const prevCount = await assistantCount(state.topicId)
+      await uiSendMessage(page, REASONING_TEXT_MODERN_AGAIN)
+      await waitForAssistantResponseComplete(page, state.topicId, prevCount)
+      const requests = findAnthropicRequestsAfter(before)
+      expect(requests.length).toBe(1)
+      const parsed = requests[0].parsed as any
+      expect(requests[0].method).toBe('POST')
+      expect(requests[0].url).toBe('/v1/messages')
+      expect(parsed?.model).toBe(LEARN_MODEL_ID)
+      expect(lastAnthropicUserText(parsed)).toBe(REASONING_TEXT_MODERN_AGAIN)
+      expect(parsed?.thinking?.type).toBe('adaptive')
+      expect(parsed?.output_config?.effort).toBe('high')
+      expect(wireHasBudgetTokens(parsed)).toBe(false)
+      expect(findProductRequestAfter(before)).toBeNull()
+      const afterCount = await assistantCount(state.topicId)
+      expect(afterCount - prevCount).toBe(1)
+      clearMockAnthropicThinkingBehaviors()
     })
   })
 })

@@ -13,6 +13,7 @@ This is the canonical, always-on repository contract for AI coding assistants wo
 
 - **Keep it clear**: Write code that is easy to read, maintain, and explain.
 - **Match the house style**: Reuse existing patterns, naming, and conventions.
+- **Model low-maintenance principle**: Adapt shared mechanisms, not individual model identities. Prefer fundamental, unified adaptation that is maximally decoupled from model brand/family/name/version and supports an open-ended set of models; a newly introduced model must not, merely because it is new, require a new application mapping or code release.
 - **Search smart**: Prefer `ast-grep` for semantic queries; fall back to `rg`/`grep` when needed.
 - **Log centrally**: Route all logging through `loggerService` with the right context — no `console.log`.
 - **Research via subagent**: Lean on subagent research for external docs, APIs, news, and references.
