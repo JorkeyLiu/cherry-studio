@@ -43,6 +43,7 @@
 import type { Page } from '@playwright/test'
 import { expect, test } from '../../fixtures/electron.fixture'
 import { SidebarPage } from '../../pages/sidebar.page'
+import { pageWaitSettled, pageWheelAndSettle } from '../../utils/viewport-scroll-sync'
 import { waitForAppReady, waitForChatReady, waitForSettingsLoad } from '../../utils/wait-helpers'
 import { activateTopic, prepareAssistant, seedSourceTopic, uuidLike } from '../../utils/branch-route-setup'
 
@@ -323,35 +324,19 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         return { id: picked.id, offset: picked.top - c.top }
       })
 
+    // Shared state-driven stabilization (viewport-scroll-sync): real user
+    // wheel kept; success needs observed scroll or a deterministic boundary
+    // no-op plus a stable anchor/phase run — never a fixed 220ms sleep or a
+    // blind two-frame pass. Snapshot agreement stays enforced by the explicit
+    // waitSnapMatchesLive gates below (unchanged contract).
+    const mainKeys = [`scroll:topic-${topicId}::main`, `scroll:topic-${topicId}`]
     const settledOrThrow = async (): Promise<Anchor> => {
-      let prev: Anchor | null = null
-      let stable = 0
-      const start = Date.now()
-      let cur: Anchor | null = null
-      while (Date.now() - start < 10000) {
-        cur = await readAnchor()
-        if (cur && prev && cur.id === prev.id && Math.abs(cur.offset - prev.offset) <= 2) {
-          stable += 1
-          if (stable >= 2) return cur
-        } else stable = 0
-        prev = cur
-        await page.waitForTimeout(140)
-      }
-      throw new Error(`viewport failed to settle within 10s (last=${cur ? `${cur.id}@${cur.offset}` : 'null'})`)
-    }
-
-    const focusMessages = async (): Promise<void> => {
-      const box = await page.locator('#messages').first().boundingBox()
-      if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+      const r = await pageWaitSettled(page, mainKeys)
+      return { id: r.id, offset: r.offset }
     }
 
     const wheel = async (dy: number): Promise<void> => {
-      await focusMessages()
-      await page.mouse.wheel(0, dy)
-      await page.evaluate(
-        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-      )
-      await page.waitForTimeout(220)
+      await pageWheelAndSettle(page, mainKeys, dy)
     }
 
     const readScrollState = (): Promise<{
@@ -1317,23 +1302,10 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
         const picked = crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
         return { id: picked.id, offset: picked.top - c.top }
       })
+    const fbKeys = [`scroll:topic-${topicId}::main`, `scroll:topic-${topicId}`]
     const fbSettledOrThrow = async (): Promise<{ id: string; offset: number }> => {
-      let prev: { id: string; offset: number } | null = null
-      let stable = 0
-      const start = Date.now()
-      let cur: { id: string; offset: number } | null = null
-      while (Date.now() - start < 10000) {
-        cur = await fbReadAnchor()
-        if (cur && prev && cur.id === prev.id && Math.abs(cur.offset - prev.offset) <= 2) {
-          stable += 1
-          if (stable >= 2) return cur
-        } else stable = 0
-        prev = cur
-        await page.waitForTimeout(140)
-      }
-      throw new Error(
-        `fallback viewport failed to settle within 10s (last=${cur ? `${cur.id}@${cur.offset}` : 'null'})`
-      )
+      const r = await pageWaitSettled(page, fbKeys)
+      return { id: r.id, offset: r.offset }
     }
     const fbReadSnap = async (): Promise<string> =>
       page.evaluate((tid: string) => {
@@ -1553,20 +1525,8 @@ test.describe('Page viewport resume — Settings roundtrip keeps every visible f
       if (await fbIsBottom()) return false
       return true
     }
-    const fbFocus = async (): Promise<void> => {
-      const box = await page.locator('#messages').first().boundingBox()
-      if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    }
-    const fbWheel = async (dy: number): Promise<{ beforeSt: number; afterSt: number }> => {
-      const before = (await fbReadScroll()).scrollTop
-      await fbFocus()
-      await page.mouse.wheel(0, dy)
-      await page.evaluate(
-        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-      )
-      await page.waitForTimeout(220)
-      const after = (await fbReadScroll()).scrollTop
-      return { beforeSt: before, afterSt: after }
+    const fbWheel = async (dy: number): Promise<void> => {
+      await pageWheelAndSettle(page, fbKeys, dy)
     }
     const fbWheelToMiddle = async (): Promise<{ id: string; offset: number }> => {
       const startSt = (await fbReadScroll()).scrollTop
