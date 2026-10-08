@@ -1,6 +1,7 @@
 /**
  * Post-close readonly SQLite verification through the Electron binary
- * (ABI-safe better-sqlite3 loading).
+ * (shared better-sqlite3 Node-API prebuild — the same immutable binary Node
+ * uses, no ABI switch).
  *
  * LOCK-QDB-1: Every entry point returns a discriminated typed outcome — never
  * null. Failures carry a fixed code from the QUERY_FAILURE_CODES allowlist and

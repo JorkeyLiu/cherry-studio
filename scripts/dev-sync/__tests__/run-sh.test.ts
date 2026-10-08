@@ -248,7 +248,7 @@ describe('dev:sync run.sh launcher', () => {
     expect(result.status).toBe(0)
     expect(String(result.stdout ?? '')).toBe('')
     // Safe selection fact only: versions, never private full paths.
-    expect(String(result.stderr ?? '')).toContain(`command-local Node v${pin} (ABI ${REQUIRED_ABI})`)
+    expect(String(result.stderr ?? '')).toContain(`command-local Node v${pin} (ABI ${REQUIRED_ABI} informational)`)
     expect(String(result.stderr ?? '')).toContain('v22.23.1')
     expect(String(result.stderr ?? '')).not.toContain(home)
 

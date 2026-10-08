@@ -237,4 +237,51 @@ export const shouldContinueRetainedViewport = (input: RetainedContinuationInput)
   if (input.canonicalAnchor) return input.wantOffsetFinite
   return input.isAtBottom
 }
+
+/**
+ * Bootstrap restore identity-commit gate (pure, no DOM sampling).
+ *
+ * The bootstrap `restore` completion preserves ONE immutable requested
+ * target (message id + finite desired intra-row offset) captured from the
+ * plan before the async navigate. The explicit identity commit
+ * (`commitDisplayedStableWithAnchor`) may run ONLY when every condition
+ * holds:
+ * - a requested id + finite desired offset exists (otherwise the
+ *   capture/default fallback owns the completion);
+ * - the committed projection still covers the requested target AND its DOM
+ *   row is resident + visible (fold-hidden/missing rows never commit);
+ * - the current route/epoch/ownership still matches (stale completions never
+ *   commit under a newer session);
+ * - the requested row's actual geometry already verified aligned within the
+ *   shared 1px production epsilon (`alignRetainedViewportOnce.aligned`).
+ *
+ * A failed/clamped/missing geometry returns false so the caller takes the
+ * existing fail-visible path preserving the prior lawful snapshot — never a
+ * fabricated identity commit, never a crossing-first capture.
+ */
+export interface BootstrapRestoreAnchorGate {
+  requestedId: string | null
+  wantOffset: number | null
+  projectionCovers: boolean
+  domResident: boolean
+  rowVisible: boolean
+  topicMatch: boolean
+  routeMatch: boolean
+  epochCurrent: boolean
+  mounted: boolean
+  aligned: boolean
+}
+
+export const isBootstrapRestoreAnchorCommittable = (gate: BootstrapRestoreAnchorGate): boolean => {
+  if (!gate.requestedId) return false
+  if (gate.wantOffset === null || !Number.isFinite(gate.wantOffset)) return false
+  if (!gate.projectionCovers) return false
+  if (!gate.domResident) return false
+  if (!gate.rowVisible) return false
+  if (!gate.topicMatch) return false
+  if (!gate.routeMatch) return false
+  if (!gate.epochCurrent) return false
+  if (!gate.mounted) return false
+  return gate.aligned === true
+}
 export type { RouteViewportSnapshot }

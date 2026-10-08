@@ -52,7 +52,9 @@ vi.mock('@renderer/context/MessageEditingContext', () => ({
 }))
 
 vi.mock('@renderer/hooks/useAssistant', () => ({
-  useAssistant: () => ({ updateAssistantSettings: vi.fn() })
+  useAssistant: () => ({ updateAssistantSettings: vi.fn() }),
+  useAssistantSettingsUpdater: () => vi.fn(),
+  withEmptyTopics: (config: Record<string, unknown>) => ({ ...config, topics: [] })
 }))
 
 vi.mock('@renderer/hooks/useMessageOperations', () => ({

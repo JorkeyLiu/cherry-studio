@@ -215,6 +215,103 @@ export interface ApplyAppendAcknowledgmentPayload {
 }
 
 /**
+ * One validated per-stub entry of a plural append-acknowledgment commit.
+ * Each entry carries the exact per-ack guard results of the singular path
+ * (ack echo already validated thunk-side); the reducer installs every entry
+ * through the same shared row + capability mutator sequentially in ONE
+ * commit. Malformed entries are skipped without discarding valid siblings.
+ */
+export interface AppendAcknowledgmentEntry {
+  /** Loaded new row to upsert (local stub or canonical Main wire). */
+  message: Message
+  /** Main-confirmed new owned IDs for this entry. */
+  createdMessageIds: string[]
+  /** Main-authoritative mutability delta for this entry. */
+  mutableMessageIds: string[]
+}
+
+/**
+ * Payload for applying several Main-issued append creation acknowledgments
+ * in ONE atomic commit (multi-model stub batch).
+ *
+ * Same per-row/capability semantics as the singular path, applied entry by
+ * entry in order within a single reducer action (single store notification):
+ * rows append at the end when absent (stable-ID keyed, idempotent,
+ * duplicate rows never appended twice), the capability delta of each entry
+ * is trimmed to created ∩ resident IDs and unioned same-route only, and a
+ * route mismatch against the stored resident route fails the WHOLE batch
+ * closed (no row and no capability change — never a transient half-published
+ * capability).
+ */
+export interface ApplyAppendAcknowledgmentsPayload {
+  topicId: string
+  /** Captured addressed route key (null = main). Must match every ack route. */
+  route: string | null
+  /** Validated per-stub entries in Main write order. */
+  entries: AppendAcknowledgmentEntry[]
+}
+
+/**
+ * Shared pure per-ack row + capability mutator. Installs ONE validated entry
+ * into the draft: upserts the row (appended at the end when absent —
+ * ordinary sends always append), then unions the same-route capability delta
+ * trimmed to created ∩ resident IDs. Malformed entries (missing/empty id)
+ * are skipped without touching state. Route matching is the caller's
+ * responsibility (checked once per commit, singular or plural).
+ *
+ * Returns true when the entry was installed, false when skipped.
+ */
+const installSingleAppendEntry = (
+  state: MessagesState,
+  topicId: string,
+  route: string | null,
+  message: Message,
+  createdMessageIds: string[],
+  mutableMessageIds: string[]
+): boolean => {
+  if (!message || typeof message.id !== 'string' || message.id.length === 0) return false
+  // Upsert the canonical entity first (ID-keyed; re-application idempotent).
+  // @ts-ignore ts-2589 false positive
+  messagesAdapter.upsertOne(state, message)
+  const oldIds = state.messageIdsByTopic[topicId] ?? []
+  if (!oldIds.includes(message.id)) {
+    state.messageIdsByTopic[topicId] = [...oldIds, message.id]
+  }
+  if (!(topicId in state.loadingByTopic)) {
+    state.loadingByTopic[topicId] = false
+  }
+  if (!(topicId in state.fulfilledByTopic)) {
+    state.fulfilledByTopic[topicId] = false
+  }
+  // Same-route capability delta, trimmed to created ∩ resident IDs.
+  const nextSet = new Set(state.messageIdsByTopic[topicId])
+  const createdSet = new Set(
+    (Array.isArray(createdMessageIds) ? createdMessageIds : []).filter((id) => typeof id === 'string' && id.length > 0)
+  )
+  const incoming = [
+    ...new Set(
+      (Array.isArray(mutableMessageIds) ? mutableMessageIds : []).filter(
+        (id) => typeof id === 'string' && id.length > 0
+      )
+    )
+  ]
+    .filter((id) => createdSet.has(id))
+    .filter((id) => nextSet.has(id))
+  const hasStoredRoute = Object.prototype.hasOwnProperty.call(state.mutableRouteByTopic, topicId)
+  const storedHasCapability = Object.prototype.hasOwnProperty.call(state.mutableMessageIdsByTopic, topicId)
+  if (!hasStoredRoute && !storedHasCapability) {
+    state.mutableRouteByTopic[topicId] = route
+    state.mutableMessageIdsByTopic[topicId] = incoming
+    return true
+  }
+  const residentAck = new Set((state.mutableMessageIdsByTopic[topicId] ?? []).filter((id) => nextSet.has(id)))
+  for (const id of incoming) residentAck.add(id)
+  state.mutableRouteByTopic[topicId] = route
+  state.mutableMessageIdsByTopic[topicId] = [...residentAck]
+  return true
+}
+
+/**
  * Answer-group authority reorder projection commit (ids-only).
  *
  * Permutes ONLY the existing loaded slots for a topic that belong to the
@@ -538,45 +635,30 @@ export const messagesSlice = createSlice({
       // route for another route must never authorize this publication.
       const hasStoredRoute = Object.prototype.hasOwnProperty.call(state.mutableRouteByTopic, topicId)
       if (hasStoredRoute && (state.mutableRouteByTopic[topicId] ?? null) !== route) return
-      // Upsert the canonical entity first (ID-keyed; re-application idempotent).
-      // @ts-ignore ts-2589 false positive
-      messagesAdapter.upsertOne(state, message)
-      const oldIds = state.messageIdsByTopic[topicId] ?? []
-      if (!oldIds.includes(message.id)) {
-        state.messageIdsByTopic[topicId] = [...oldIds, message.id]
+      installSingleAppendEntry(state, topicId, route, message, createdMessageIds, mutableMessageIds)
+    },
+    /**
+     * Apply several Main-issued append creation acknowledgments atomically.
+     *
+     * ONE commit installs every entry's row plus the unioned same-route
+     * capability — the loaded projection never holds a subset row without its
+     * capability and never emits one notification per stub. Route mismatch
+     * against the stored resident route fails the whole batch closed with
+     * zero change. Malformed entries are skipped without discarding valid
+     * siblings; duplicate rows are never appended twice; replay is
+     * idempotent.
+     */
+    applyAppendAcknowledgments(state, action: PayloadAction<ApplyAppendAcknowledgmentsPayload>) {
+      const { topicId, route, entries } = action.payload
+      if (!Array.isArray(entries) || entries.length === 0) return
+      // Fail-closed on stale/route-mismatched resident capability: a stored
+      // route for another route must never authorize this publication.
+      const hasStoredRoute = Object.prototype.hasOwnProperty.call(state.mutableRouteByTopic, topicId)
+      if (hasStoredRoute && (state.mutableRouteByTopic[topicId] ?? null) !== route) return
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue
+        installSingleAppendEntry(state, topicId, route, entry.message, entry.createdMessageIds, entry.mutableMessageIds)
       }
-      if (!(topicId in state.loadingByTopic)) {
-        state.loadingByTopic[topicId] = false
-      }
-      if (!(topicId in state.fulfilledByTopic)) {
-        state.fulfilledByTopic[topicId] = false
-      }
-      // Same-route capability delta, trimmed to created ∩ resident IDs.
-      const nextSet = new Set(state.messageIdsByTopic[topicId])
-      const createdSet = new Set(
-        (Array.isArray(createdMessageIds) ? createdMessageIds : []).filter(
-          (id) => typeof id === 'string' && id.length > 0
-        )
-      )
-      const incoming = [
-        ...new Set(
-          (Array.isArray(mutableMessageIds) ? mutableMessageIds : []).filter(
-            (id) => typeof id === 'string' && id.length > 0
-          )
-        )
-      ]
-        .filter((id) => createdSet.has(id))
-        .filter((id) => nextSet.has(id))
-      const storedHasCapability = Object.prototype.hasOwnProperty.call(state.mutableMessageIdsByTopic, topicId)
-      if (!hasStoredRoute && !storedHasCapability) {
-        state.mutableRouteByTopic[topicId] = route
-        state.mutableMessageIdsByTopic[topicId] = incoming
-        return
-      }
-      const residentAck = new Set((state.mutableMessageIdsByTopic[topicId] ?? []).filter((id) => nextSet.has(id)))
-      for (const id of incoming) residentAck.add(id)
-      state.mutableRouteByTopic[topicId] = route
-      state.mutableMessageIdsByTopic[topicId] = [...residentAck]
     },
     updateMessage(
       state,

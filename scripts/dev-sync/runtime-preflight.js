@@ -9,8 +9,9 @@
  * only conservative CommonJS syntax so it still parses on unsupported
  * Node majors (e.g. Node 22) it is meant to reject.
  *
- * The public entrypoint reads ONLY the real `process.version` and
- * `process.versions.modules`: there is no environment-variable bypass.
+ * The public entrypoint reads ONLY the real `process.version` (gate) and
+ * `process.versions.modules` (informational diagnostic): there is no
+ * environment-variable bypass.
  * Focused regression tests inject simulated runtimes without a production
  * hook — pure unit tests over the exported validators plus real child
  * processes running this entrypoint under a test-only `-r` preload fixture
@@ -18,9 +19,13 @@
  * `process.versions.modules` before the entrypoint runs.
  *
  * Pin source: `.nvmrc` (fallback `.node-version`); a missing or invalid pin
- * fails closed instead of silently falling back. Expected ABI 137 matches
- * the existing native Node lane contract
- * (`scripts/native-abi/constants.ts` NODE_ABI for Node 24).
+ * fails closed instead of silently falling back. The version gate is
+ * same-major and >= pin (Node 24 line). The observed ABI value is
+ * informational only: under the integrated Node-API runtime
+ * (`scripts/native-runtime/constants.ts` NODE_ABI is informational and never
+ * gates) the shared better-sqlite3 binary loads under any ABI — only a real
+ * runtime SQL probe proves binding health, and that probe belongs to the
+ * canonical `pnpm native:run` launcher, not to this version gate.
  *
  * Exit: 0 = supported (silent, the canonical lane runs next);
  * 1 = unsupported (diagnostic on stderr, fail-closed before the lane).
@@ -29,7 +34,7 @@
 var fs = require('node:fs')
 var path = require('node:path')
 
-/* Keep in sync with scripts/native-abi/constants.ts NODE_ABI (Node 24 lane). */
+/* Informational only (see scripts/native-runtime/constants.ts NODE_ABI): never gates isSupportedVersion. */
 var REQUIRED_ABI = '137'
 
 function parseSemver(raw) {
@@ -72,8 +77,10 @@ function readRequiredVersion(repoRoot) {
 
 /**
  * Fail-closed support decision over injected observations (no I/O).
- * Supported only when: same major as required, version >= required,
- * and module ABI equals the Node 24 lane ABI.
+ * Supported only when: same major as required and version >= required.
+ * The observed ABI (`observations.abi` / `observations.requiredAbi`) is
+ * accepted for compatibility but never gates: under the Node-API runtime
+ * the shared binary is ABI-agnostic, so version support alone decides.
  */
 function isSupportedVersion(observations) {
   var current = parseSemver(observations.version)
@@ -81,7 +88,6 @@ function isSupportedVersion(observations) {
   if (!current || !required) return false
   if (current.major !== required.major) return false
   if (compareSemver(current, required) < 0) return false
-  if (String(observations.abi) !== String(observations.requiredAbi)) return false
   return true
 }
 
@@ -102,11 +108,11 @@ function formatDiagnostic(currentVersion, currentAbi, requiredVersion) {
       currentVersion +
       ' (ABI ' +
       currentAbi +
-      '). Required Node ' +
+      ' informational; shared Node-API binary, ABI never gates). Required Node ' +
       requiredVersion +
-      ' (ABI ' +
+      ' line (same major, >= pin; expected Node 24 ABI ' +
       REQUIRED_ABI +
-      ', Node 24 lane).',
+      ' informational).',
     '[dev-sync] refusing to start before the Electron lane, installs, ports, or children (fail-closed).'
   ].concat(fixGuidanceLines(requiredVersion))
   return lines.join('\n') + '\n'

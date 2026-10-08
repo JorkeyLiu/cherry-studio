@@ -7,8 +7,9 @@
  *
  * Fail-fast diagnostics:
  *   - Asserts ChatDb IPC availability before any test step
- *   - Verifies better-sqlite3 ABI matches Electron before launch
- *   - Post-shutdown SQLite verification via Electron binary (ABI 145)
+ *   - Verifies the shared better-sqlite3 Node-API binary loads under Electron
+ *     before launch (read-only `:memory:` probe, no rebuild)
+ *   - Post-shutdown SQLite verification via the Electron binary
  *
  * Ownership-safe temp root (per-test):
  *   - Every fixture run creates ONE unique atomic canonical temp root via
@@ -153,7 +154,8 @@ function fixtureQueryDependencies(): QueryChatDbDependencies {
 }
 
 /**
- * Query SQLite via the Electron binary (ABI compatible).
+ * Query SQLite via the Electron binary (loads the same shared Node-API
+ * prebuilt binary as Node — no ABI switch).
  *
  * LOCK-QDB-1/5: returns a discriminated typed outcome — never null. On
  * success `rows` is a strict array; malformed/missing/non-array rows fail

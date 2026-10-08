@@ -24,6 +24,7 @@ const { mocks } = vi.hoisted(() => ({
     fetchMessagesWindow: vi.fn(),
     addMessage: vi.fn((p: unknown) => ({ type: 'newMessages/addMessage', payload: p })),
     applyAppendAck: vi.fn((p: unknown) => ({ type: 'newMessages/applyAppendAcknowledgment', payload: p })),
+    applyAppendAcks: vi.fn((p: unknown) => ({ type: 'newMessages/applyAppendAcknowledgments', payload: p })),
     messagesReceived: vi.fn((p: unknown) => ({ type: 'newMessages/messagesReceived', payload: p })),
     upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'upsertManyBlocks', payload: p })),
     updateTopicUpdatedAt: vi.fn((p: unknown) => ({ type: 'updateTopicUpdatedAt', payload: p })),
@@ -170,6 +171,7 @@ vi.mock('@renderer/store/newMessage', () => ({
   newMessagesActions: {
     addMessage: mocks.addMessage,
     applyAppendAcknowledgment: mocks.applyAppendAck,
+    applyAppendAcknowledgments: mocks.applyAppendAcks,
     messagesReceived: mocks.messagesReceived,
     setTopicLoading: mocks.setTopicLoading,
     setTopicFulfilled: mocks.setTopicFulfilled
@@ -351,8 +353,10 @@ describe('sendMessage append acknowledgment publication', () => {
       expect(mocks.appendMessage).toHaveBeenCalledTimes(3)
       expect(appendRoutes()).toEqual([null, null, null])
 
-      // Late publication into the unrelated route is rejected.
+      // Late publication into the unrelated route is rejected (singular user
+      // publish and plural stub batch both fail closed).
       expect(mocks.applyAppendAck).not.toHaveBeenCalled()
+      expect(mocks.applyAppendAcks).not.toHaveBeenCalled()
       expect(mocks.addMessage).not.toHaveBeenCalled()
 
       // Owned execution is not cancelled: both model tasks are still queued.
@@ -377,11 +381,12 @@ describe('sendMessage append acknowledgment publication', () => {
 
     expect(mocks.appendMessage).toHaveBeenCalledTimes(2)
     expect(mocks.applyAppendAck).not.toHaveBeenCalled()
+    expect(mocks.applyAppendAcks).not.toHaveBeenCalled()
     expect(mocks.addMessage).not.toHaveBeenCalled()
     expect(mocks.queueAdd).toHaveBeenCalledTimes(1)
   })
 
-  it('multi-model stubs publish one atomic commit each under the captured route', { timeout: 60_000 }, async () => {
+  it('multi-model stubs publish one plural commit under the captured route', { timeout: 60_000 }, async () => {
     const mentionA = { id: 'mention-a', provider: 'p', name: 'A', group: 'g' }
     const mentionB = { id: 'mention-b', provider: 'p', name: 'B', group: 'g' }
     const { sendMessage } = await import('../messageThunk')
@@ -392,12 +397,25 @@ describe('sendMessage append acknowledgment publication', () => {
 
     expect(mocks.appendMessage).toHaveBeenCalledTimes(3)
     expect(appendRoutes()).toEqual([null, null, null])
-    expect(mocks.applyAppendAck).toHaveBeenCalledTimes(3)
-    const publishedIds = mocks.applyAppendAck.mock.calls.map((c) => (c[0] as { message: { id: string } }).message.id)
-    expect(publishedIds).toEqual(['user-1', 'asst-t-1-1', 'asst-t-1-2'])
-    for (const call of mocks.applyAppendAck.mock.calls) {
-      expect((call[0] as { route: unknown }).route).toBeNull()
+    // The user row still publishes via the singular path (unchanged).
+    expect(mocks.applyAppendAck).toHaveBeenCalledTimes(1)
+    expect(mocks.applyAppendAck.mock.calls[0][0]).toEqual({
+      topicId: 't-1',
+      route: null,
+      message: expect.objectContaining({ id: 'user-1' }),
+      createdMessageIds: ['user-1'],
+      mutableMessageIds: ['user-1']
+    })
+    // Both stubs publish in exactly ONE plural commit (not one per stub).
+    expect(mocks.applyAppendAcks).toHaveBeenCalledTimes(1)
+    const batch = mocks.applyAppendAcks.mock.calls[0][0] as {
+      topicId: string
+      route: null
+      entries: Array<{ message: { id: string } }>
     }
+    expect(batch.topicId).toBe('t-1')
+    expect(batch.route).toBeNull()
+    expect(batch.entries.map((e) => e.message.id)).toEqual(['asst-t-1-1', 'asst-t-1-2'])
     expect(mocks.queueAdd).toHaveBeenCalledTimes(2)
   })
 

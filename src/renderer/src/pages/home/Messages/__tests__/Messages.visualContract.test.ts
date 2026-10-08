@@ -5,8 +5,8 @@
  * (2) divider switch restores the same divider row offset (not nearest msg),
  * (3) top selector freezes outgoing + restores with precise offset through
  *     the single controller (no module-global saver/ownership),
- * (5) persistent stable anchoring via scoped observers (no rAF polling) plus
- *     pure frame-step primitives, (6) anchor namespaces.
+ * (5) persistent stable anchoring via scoped observers plus pure frame
+ *     steps (bounded tab-switch quiet frame only), (6) anchor namespaces.
  */
 import * as fs from 'node:fs'
 
@@ -180,13 +180,142 @@ describe('visual position contracts', () => {
     expect(context).not.toMatch(/globalThis.*emitter|EventEmitter/)
   })
 
-  it('(5) persistent stable anchoring via scoped observers (no rAF polling) plus pure frame steps', () => {
+  it('(5) persistent stable anchoring via scoped observers plus pure frame steps (bounded tab-switch quiet frame only)', () => {
     const context = contextSrc()
     expect(context).toMatch(/useStableVisualAnchor/)
     expect(context).toMatch(/ResizeObserver/)
     expect(context).toMatch(/MutationObserver/)
-    expect(context).not.toMatch(/requestAnimationFrame/)
+    // No interval/timeout polling anywhere in the keeper adapter.
     expect(context).not.toMatch(/setInterval/)
+    expect(context).not.toMatch(/setTimeout/)
+    // Obsolete body-anchor fold-switch semantics are gone: no fold
+    // reconciliation scheduler/pending payload, no layout-basis gate, no
+    // sibling-remap queue in the keeper path.
+    expect(context).not.toMatch(/foldPendingRef/)
+    expect(context).not.toMatch(/foldRafRef/)
+    expect(context).not.toMatch(/scheduleFoldValidation/)
+    expect(context).not.toMatch(/cancelFoldCommitLocked/)
+    expect(context).not.toMatch(/runFoldValidation/)
+    expect(context).not.toMatch(/reconciledFold/)
+    expect(context).not.toMatch(/isSameFoldLayoutBasis/)
+    expect(context).not.toMatch(/pendingSiblingId/)
+    // Bounded tab-switch quiet validation (single coalesced frame, never
+    // permanent polling): exactly one scheduling site
+    // (`scheduleTabValidation` with its `requestAnimationFrame` tokens) plus
+    // its cancellation mate (`cancelTabValidationLocked` with
+    // `cancelAnimationFrame`). The clicked tab holds its captured offset
+    // through the async target selection, then settles into the current
+    // visible anchor/snapshot; generic persistent route/body anchoring
+    // remains underneath.
+    expect(context).toMatch(/tabRafRef/)
+    expect(context).toMatch(/scheduleTabValidation/)
+    expect(context).toMatch(/cancelTabValidationLocked/)
+    expect(context).toMatch(/runTabValidation/)
+    const schedulerIdx = context.indexOf('const scheduleTabValidation')
+    expect(schedulerIdx).toBeGreaterThan(-1)
+    const cancelIdx = context.indexOf('const cancelTabValidationLocked')
+    expect(cancelIdx).toBeGreaterThan(-1)
+    // Exactly one definition per frame primitive (no second polling loop).
+    expect((context.match(/const scheduleTabValidation/g) ?? []).length).toBe(1)
+    expect((context.match(/const runTabValidation/g) ?? []).length).toBe(1)
+    expect((context.match(/const cancelTabValidationLocked/g) ?? []).length).toBe(1)
+    // The scheduling call references `requestAnimationFrame` twice at one
+    // site (the `typeof` guard plus the sole schedule call); both tokens must
+    // sit inside the scheduler body and nowhere else in the file.
+    const rafIdxs: number[] = []
+    let rafFrom = 0
+    while (true) {
+      const at = context.indexOf('requestAnimationFrame', rafFrom)
+      if (at < 0) break
+      rafIdxs.push(at)
+      rafFrom = at + 1
+    }
+    expect(rafIdxs.length).toBe(2)
+    for (const at of rafIdxs) {
+      expect(at).toBeGreaterThan(schedulerIdx)
+      expect(at).toBeLessThan(schedulerIdx + 1200)
+    }
+    // The cancellation references `cancelAnimationFrame` twice at one site
+    // (the `typeof` guard plus the sole cancel call); both tokens must sit
+    // inside the canceller body and nowhere else in the file.
+    const cafIdxs: number[] = []
+    let cafFrom = 0
+    while (true) {
+      const at = context.indexOf('cancelAnimationFrame', cafFrom)
+      if (at < 0) break
+      cafIdxs.push(at)
+      cafFrom = at + 1
+    }
+    expect(cafIdxs.length).toBe(2)
+    for (const at of cafIdxs) {
+      expect(at).toBeGreaterThan(cancelIdx)
+      expect(at).toBeLessThan(cancelIdx + 600)
+    }
+    expect(context.slice(schedulerIdx, schedulerIdx + 1200)).toMatch(/requestAnimationFrame/)
+    expect(context.slice(cancelIdx, cancelIdx + 600)).toMatch(/cancelAnimationFrame/)
+    // Scheduler coalesces: re-arm cancels the pending frame first.
+    expect(context.slice(schedulerIdx, schedulerIdx + 1200)).toMatch(/cancelTabValidationLocked/)
+    // Tab interaction contract: click captures the tab offset synchronously,
+    // the keeper holds it across the async selection, validation settles
+    // into the post-switch visible geometry.
+    expect(context).toMatch(/captureAnswerTabSwitchIntent/)
+    expect(context).toMatch(/beginAnswerTabSwitch/)
+    expect(context).toMatch(/activeAnswerTabIntent/)
+    expect(context).toMatch(/clearAnswerTabSwitch/)
+    expect(context).toMatch(/resolveAnswerTabElement/)
+    expect(context).toMatch(/resolveRealMessageBox/)
+    expect(context).toMatch(/isKeeperAnchorRowHidden/)
+    expect(context).toMatch(/isCaptureContainerHidden/)
+    const controller = controllerSrc()
+    expect(controller).toMatch(/beginAnswerTabSwitch/)
+    expect(controller).toMatch(/activeAnswerTabIntent/)
+    expect(controller).toMatch(/clearAnswerTabSwitch/)
+    expect(controller).toMatch(/gestureId/)
+    // Validation consumes before handoff (no re-entrant double commit):
+    // the pending frame clears first, then the measured target geometry is
+    // adopted + persisted. Currency/tab/owned/user/provenance/hidden/
+    // invalid-geometry paths drop or re-arm without committing.
+    const validationIdx = context.indexOf('const runTabValidation')
+    expect(validationIdx).toBeGreaterThan(-1)
+    const validationEnd = context.indexOf('const scheduleTabValidation', validationIdx)
+    const validationSlice = context.slice(
+      validationIdx,
+      validationEnd > validationIdx ? validationEnd : validationIdx + 9500
+    )
+    expect(validationSlice).toMatch(/tabRafRef\.current = null/)
+    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    expect(validationSlice.indexOf('tabRafRef.current = null')).toBeLessThan(
+      validationSlice.indexOf('adoptProgrammaticViewport')
+    )
+    expect(validationSlice).toMatch(/activeAnswerTabIntent/)
+    expect(validationSlice).toMatch(/clearAnswerTabSwitch/)
+    expect(validationSlice).toMatch(/currentEpoch !== intent\.epoch/)
+    expect(validationSlice).toMatch(/programmaticOwned/)
+    expect(validationSlice).toMatch(/hasActiveUserInteraction/)
+    expect(validationSlice).toMatch(/isDomProvenanceClean/)
+    expect(validationSlice).toMatch(/resolveAnswerTabElement/)
+    expect(validationSlice).toMatch(/resolveRealMessageBox/)
+    expect(validationSlice).toMatch(/isKeeperAnchorRowHidden/)
+    // Stable handoff uses the measured post-switch target geometry (never
+    // the old hidden body anchor, never intermediate geometry).
+    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    expect(validationSlice).toMatch(/writeRouteSnapshot/)
+    // Hold prefers the pending tab intent over the body anchor: a hidden
+    // body row holds nothing (fail-closed, no sibling transfer); ordinary
+    // body holds converge with no snapshot write of their own.
+    const holdIdx = context.indexOf('const hold = (reason: string)')
+    expect(holdIdx).toBeGreaterThan(-1)
+    const holdEnd = context.indexOf('holdRef.current = hold', holdIdx)
+    expect(holdEnd).toBeGreaterThan(holdIdx)
+    const holdSlice = context.slice(holdIdx, holdEnd)
+    expect(holdSlice).toMatch(/activeAnswerTabIntent/)
+    expect(holdSlice).toMatch(/clearAnswerTabSwitch/)
+    expect(holdSlice).toMatch(/resolveAnswerTabElement/)
+    expect(holdSlice).toMatch(/scheduleTabValidation/)
+    expect(holdSlice).toMatch(/isKeeperAnchorRowHidden/)
+    expect(holdSlice).not.toMatch(/findVisibleFoldSiblingId/)
+    expect(holdSlice).not.toMatch(/adoptProgrammaticViewport/)
+    expect(holdSlice).not.toMatch(/writeRouteSnapshot/)
     // User input declares intent first (wheel/touch/pointer/key, inputs
     // excluded by the shared key guard). Pending-only, never terminates.
     expect(context).toMatch(/declareUserIntent/)

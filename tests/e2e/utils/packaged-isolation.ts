@@ -24,6 +24,7 @@
 import type { ElectronApplication, Page } from '@playwright/test'
 import { _electron as electron } from '@playwright/test'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -349,4 +350,142 @@ export function isForbiddenProfilePath(profilePath: string, appDataRoot = macApp
     actualCherryStudioProfilePath(appDataRoot),
     defaultCherryChatProfilePath(appDataRoot)
   ].some((forbidden) => canonicalPathsEqual(profilePath, forbidden))
+}
+
+// ---------------------------------------------------------------------------
+// Mach-O signing-normalized payload provenance (better-sqlite3 prebuilds)
+// ---------------------------------------------------------------------------
+//
+// The packaged app re-signs the bundled darwin-arm64.node at package time
+// (adhoc re-sign; same Mach-O UUID), so the packaged bytes are NOT
+// full-byte-identical to the locked repo prebuilt: LC_CODE_SIGNATURE datasize
+// grows and __LINKEDIT vmsize/filesize grow with it (file-length delta ==
+// signature delta; 5 header bytes differ). A raw full-file SHA256 assert is
+// therefore incorrect as a provenance check.
+//
+// A tmp-copy + `codesign --remove-signature` normalization was tried and
+// REJECTED: after signature removal both copies truncate to the same length
+// but hashes still differ because `codesign` leaves the original __LINKEDIT
+// vmsize pad behind (147456 vs 180224). So this helper normalizes in memory
+// (no temp copies, no mutation of either binary, no codesign spawn) with a
+// minimal generic Mach-O load-command parser: it locates __LINKEDIT
+// vmsize/filesize and LC_CODE_SIGNATURE datasize dynamically (no hardcoded
+// file offsets), zeroes exactly those signing-size fields, and hashes the
+// pre-signature prefix [0, dataoff). Equality proves code/data payload
+// continuity (genuine before/after, not UUID alone) without claiming the
+// files are full-byte-identical.
+
+/** Signing-normalized provenance of one Mach-O prebuilt file (read-only). */
+export interface MachOUndignedProvenance {
+  /** Lowercase hex Mach-O UUID (LC_UUID), identical across a re-sign. */
+  uuid: string
+  /** LC_CODE_SIGNATURE dataoff (signature blob offset; same across re-sign). */
+  dataOff: number
+  /** LC_CODE_SIGNATURE datasize (differs across re-sign). */
+  dataSize: number
+  /** Total file size in bytes. */
+  fileSize: number
+  /** Raw full-file SHA256 (differs across re-sign). */
+  rawHash: string
+  /** SHA256 of the signing-normalized pre-signature prefix (equal = same payload). */
+  normalizedHash: string
+}
+
+const MH_MAGIC_64 = 0xfeedfacf
+const LC_SEGMENT_64 = 0x19
+const LC_UUID = 0x1b
+const LC_CODE_SIGNATURE = 0x1d
+
+/**
+ * Hash the signing-normalized pre-signature payload of a Mach-O thin
+ * (arm64) image already in memory. Load-command field offsets are discovered
+ * by parsing (never hardcoded); only the struct field widths (8/8/4) are
+ * fixed by the Mach-O format. Throws on non-64-bit Mach-O, missing LC_UUID,
+ * missing __LINKEDIT, or missing LC_CODE_SIGNATURE.
+ */
+export function hashMachOUnsignedPayload(bytes: Buffer): {
+  uuid: string
+  dataOff: number
+  dataSize: number
+  normalizedHash: string
+} {
+  if (bytes.length < 32) throw new Error('packaged-isolation: file too small for mach_header_64')
+  const magic = bytes.readUInt32LE(0)
+  if (magic !== MH_MAGIC_64) {
+    throw new Error(`packaged-isolation: not a 64-bit Mach-O image (magic=${magic.toString(16)})`)
+  }
+  const ncmds = bytes.readUInt32LE(16)
+  if (ncmds <= 0 || ncmds > 256) throw new Error(`packaged-isolation: implausible ncmds=${ncmds}`)
+  let off = 32
+  let uuid: string | null = null
+  let linkeditVmsizeOff: number | null = null
+  let linkeditFilesizeOff: number | null = null
+  let codeSigDataOff: number | null = null
+  let codeSigDataSize: number | null = null
+  let codeSigDataSizeFieldOff: number | null = null
+  for (let i = 0; i < ncmds; i++) {
+    if (off + 8 > bytes.length) throw new Error('packaged-isolation: load command runs past EOF')
+    const cmd = bytes.readUInt32LE(off)
+    const cmdsize = bytes.readUInt32LE(off + 4)
+    if (cmdsize < 8 || off + cmdsize > bytes.length) {
+      throw new Error(`packaged-isolation: corrupt load command ${i} (cmd=${cmd.toString(16)} size=${cmdsize})`)
+    }
+    if (cmd === LC_SEGMENT_64 && cmdsize >= 72) {
+      const segname = bytes
+        .subarray(off + 8, off + 24)
+        .toString('utf8')
+        .replace(/\0.*$/, '')
+      if (segname === '__LINKEDIT') {
+        linkeditVmsizeOff = off + 32
+        linkeditFilesizeOff = off + 48
+      }
+    } else if (cmd === LC_UUID && cmdsize >= 24) {
+      uuid = bytes.subarray(off + 8, off + 24).toString('hex')
+    } else if (cmd === LC_CODE_SIGNATURE && cmdsize >= 16) {
+      codeSigDataOff = bytes.readUInt32LE(off + 8)
+      codeSigDataSize = bytes.readUInt32LE(off + 12)
+      codeSigDataSizeFieldOff = off + 12
+    }
+    off += cmdsize
+  }
+  if (uuid === null) throw new Error('packaged-isolation: LC_UUID not found')
+  if (linkeditVmsizeOff === null || linkeditFilesizeOff === null) {
+    throw new Error('packaged-isolation: __LINKEDIT segment not found')
+  }
+  if (codeSigDataOff === null || codeSigDataSize === null || codeSigDataSizeFieldOff === null) {
+    throw new Error('packaged-isolation: LC_CODE_SIGNATURE not found')
+  }
+  if (codeSigDataOff <= 0 || codeSigDataOff > bytes.length) {
+    throw new Error(`packaged-isolation: signature dataoff out of range (${codeSigDataOff})`)
+  }
+  if (codeSigDataOff + codeSigDataSize !== bytes.length) {
+    throw new Error(
+      `packaged-isolation: signature blob is not the exact trailing range (dataoff=${codeSigDataOff} datasize=${codeSigDataSize} filesize=${bytes.length})`
+    )
+  }
+  for (const fieldOff of [linkeditVmsizeOff, linkeditFilesizeOff, codeSigDataSizeFieldOff]) {
+    if (fieldOff + 4 > codeSigDataOff)
+      throw new Error('packaged-isolation: signing field lies inside the signature blob')
+  }
+  const prefix = Buffer.from(bytes.subarray(0, codeSigDataOff))
+  prefix.fill(0, linkeditVmsizeOff, linkeditVmsizeOff + 8)
+  prefix.fill(0, linkeditFilesizeOff, linkeditFilesizeOff + 8)
+  prefix.fill(0, codeSigDataSizeFieldOff, codeSigDataSizeFieldOff + 4)
+  return {
+    uuid,
+    dataOff: codeSigDataOff,
+    dataSize: codeSigDataSize,
+    normalizedHash: createHash('sha256').update(prefix).digest('hex')
+  }
+}
+
+/**
+ * Read-only provenance snapshot of a Mach-O prebuilt file. Never writes,
+ * copies, or re-signs anything; both input files stay byte-identical.
+ */
+export function provenanceOfMachOPrebuilt(filePath: string): MachOUndignedProvenance {
+  const bytes = fs.readFileSync(filePath)
+  const rawHash = createHash('sha256').update(bytes).digest('hex')
+  const { uuid, dataOff, dataSize, normalizedHash } = hashMachOUnsignedPayload(bytes)
+  return { uuid, dataOff, dataSize, fileSize: bytes.length, rawHash, normalizedHash }
 }

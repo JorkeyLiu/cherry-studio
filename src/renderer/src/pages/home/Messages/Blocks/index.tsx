@@ -372,7 +372,9 @@ const MessageBlockRenderer: React.FC<Props> = ({ blocks, message, snapshotBlocks
         )
       })}
       {isProcessing && (
-        <AnimatedBlockWrapper key="message-loading-placeholder" enableAnimation={true}>
+        // Waiting dots show immediately with the assistant header: skip the outer fade/slide entry.
+        // BeatLoader keeps its own loop; real content blocks keep their entry animation.
+        <AnimatedBlockWrapper key="message-loading-placeholder" enableAnimation={false}>
           <PlaceholderBlock
             block={{
               id: `loading-${message.id}`,

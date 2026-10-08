@@ -76,10 +76,15 @@ asarUnpack:
   - "**/*.{metal,exp,lib}"
   - "node_modules/@img/sharp-*/**"
   - "node_modules/@paymoapp/electron-shutdown-handler/build/Release/**"
+  # The shared better-sqlite3 Node-API prebuild must load from the filesystem,
+  # not from inside the asar archive. The default loader picks the prebuild
+  # for the current platform (mac arm64 first).
+  - "node_modules/better-sqlite3/prebuilds/**"
 
-# The native ABI lane rebuilds better-sqlite3 before packaging. Letting
-# electron-builder rebuild every native dependency again re-enters the Windows
-# long-path/MSBuild failure mode and can overwrite the verified ABI.
+# better-sqlite3 ships immutable Node-API prebuilds shared by Node and
+# Electron — nothing rebuilds it before packaging. Letting electron-builder
+# rebuild native dependencies again re-enters the Windows long-path/MSBuild
+# failure mode and must stay disabled.
 npmRebuild: false
 
 win:

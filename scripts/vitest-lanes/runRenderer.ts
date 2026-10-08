@@ -2,12 +2,12 @@
  * Renderer lane runner entry point.
  *
  * Local mode runs the exact renderer test set as deterministic parallel
- * explicit-file shards (N normal + 1 dedicated Shiki) under the one outer
- * Node ABI lease; CI mode runs the single full renderer project invocation.
- * Every Vitest child executes as argv with no shell via the pnpm native-run
- * lane wrapper so it inherits the outer same-lane lease as a nested run. No
+ * explicit-file shards (N normal + 1 dedicated Shiki) sharing the one
+ * immutable native binary; CI mode runs the single full renderer project
+ * invocation. Every Vitest child executes as argv with no shell via the pnpm
+ * native-run wrapper so it probes the shared runtime before spawn. No
  * Electron-as-Node manipulation; Windows pnpm-shim handling reuses the
- * native-abi executor semantics (explicit argv, never a shell string).
+ * native-runtime executor semantics (explicit argv, never a shell string).
  *
  * Diagnostics are concise console lines (mode, shard and file counts,
  * per-shard durations, final status). The application logger is never used
@@ -16,7 +16,7 @@
 
 import os from 'node:os'
 
-import { createProcessExecutorSeams, executeProcess, type ProcessOutcome } from '../native-abi/executor'
+import { createProcessExecutorSeams, executeProcess, type ProcessOutcome } from '../native-runtime/executor'
 import {
   buildChildArgv,
   CHILD_COMMAND,
@@ -133,7 +133,7 @@ export async function runRendererWithSeams(seams: RendererRunSeams): Promise<num
   return 0
 }
 
-/** Real wiring: enumeration + CPU + env + native-abi executor (no shell). */
+/** Real wiring: enumeration + CPU + env + native-runtime executor (no shell). */
 export function createRealSeams(extraArgs: string[]): RendererRunSeams {
   const processSeams = createProcessExecutorSeams()
   return {

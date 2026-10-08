@@ -83,14 +83,16 @@ describe('dev:sync runtime preflight validators (pure unit)', () => {
     expect(preflight.compareSemver(atLeast, atLeast)).toBe(0)
   })
 
-  it('gates on same-major, >= pin, and exact Node 24 lane ABI', () => {
+  it('gates on same-major and >= pin; the observed ABI never gates (Node-API shared binary)', () => {
     const required = { requiredVersion: '24.11.1', requiredAbi: '137' }
     expect(preflight.isSupportedVersion({ version: 'v24.11.1', abi: '137', ...required })).toBe(true)
     expect(preflight.isSupportedVersion({ version: 'v24.12.0', abi: '137', ...required })).toBe(true)
     expect(preflight.isSupportedVersion({ version: 'v22.23.1', abi: '127', ...required })).toBe(false)
     expect(preflight.isSupportedVersion({ version: 'v24.10.0', abi: '137', ...required })).toBe(false)
     expect(preflight.isSupportedVersion({ version: 'v25.0.0', abi: '137', ...required })).toBe(false)
-    expect(preflight.isSupportedVersion({ version: 'v24.11.1', abi: '127', ...required })).toBe(false)
+    // ABI informational only: a supported version passes regardless of ABI.
+    expect(preflight.isSupportedVersion({ version: 'v24.11.1', abi: '127', ...required })).toBe(true)
+    expect(preflight.isSupportedVersion({ version: 'v24.12.0', abi: '999', ...required })).toBe(true)
     expect(preflight.isSupportedVersion({ version: 'garbage', abi: '137', ...required })).toBe(false)
   })
 
@@ -145,14 +147,16 @@ describe('dev:sync runtime preflight entrypoint (real subprocess)', () => {
     expect(result.stderr).toContain('24.11.1')
   })
 
-  it('rejects other majors and ABI mismatches on the supported line', () => {
+  it('rejects other majors on the supported line', () => {
     const otherMajor = runEntryWithFakeRuntime('v25.0.0', '137')
     expect(otherMajor.status).toBe(1)
     expect(otherMajor.stderr).toContain('v25.0.0')
+  })
 
+  it('treats ABI mismatches on a supported version as informational (passes)', () => {
     const abiMismatch = runEntryWithFakeRuntime('v24.11.1', '127')
-    expect(abiMismatch.status).toBe(1)
-    expect(abiMismatch.stderr).toContain('ABI 127')
+    expect(abiMismatch.status).toBe(0)
+    expect(abiMismatch.stderr).toBe('')
   })
 
   it('fails early: a rejected preflight never runs the chained next step', () => {

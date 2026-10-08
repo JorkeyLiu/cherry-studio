@@ -8,9 +8,11 @@
 #
 #   1. read the pin from `.nvmrc` (fallback `.node-version`) — read, never sourced;
 #   2. prefer the installed exact pin under `${NVM_DIR:-$HOME/.nvm}/versions/node/v<pin>/bin`
-#      (validated as exactly the pin with ABI 137, so placeholders and wrong
-#      binaries are rejected);
-#   3. otherwise keep a supported current host Node (same major, >= pin, ABI 137);
+#      (validated as exactly the pin version, so placeholders and wrong
+#      binaries are rejected; observed ABI is informational only — the shared
+#      Node-API binary loads under any ABI, see
+#      scripts/native-runtime/constants.ts);
+#   3. otherwise keep a supported current host Node (same major, >= pin; ABI never gates);
 #   4. otherwise fail closed before the lane/installs/ports/children, with
 #      install guidance.
 #
@@ -29,6 +31,8 @@
 
 set -u
 
+# Informational only (see scripts/native-runtime/constants.ts NODE_ABI):
+# reported in diagnostics, never a support gate under the Node-API runtime.
 REQUIRED_ABI='137'
 
 # --- repo root from this script's location (never sourced, never $CWD) ---
@@ -105,14 +109,13 @@ version_gte() {
 
 is_supported() {
   # $1 = current version (leading v already stripped), $2 = current ABI
+  # (informational: accepted for compatibility, never gates under Node-API).
   [ -n "${1:-}" ] || return 1
-  [ -n "${2:-}" ] || return 1
   split_version "$1" || return 1
   _current_major="$_v_major"
   split_version "$PIN" || return 1
   [ "$_current_major" = "$_v_major" ] || return 1
   version_gte "$1" "$PIN" || return 1
-  [ "$2" = "$REQUIRED_ABI" ] || return 1
   return 0
 }
 
@@ -154,7 +157,7 @@ candidate_note=''
 if [ -x "$candidate_node" ]; then
   cand_version=$(probe_version "$candidate_node")
   cand_abi=$(probe_abi "$candidate_node")
-  if [ "$cand_version" = "$PIN" ] && [ "$cand_abi" = "$REQUIRED_ABI" ]; then
+  if [ "$cand_version" = "$PIN" ]; then
     selected_node="$candidate_node"
     selected_mode='pin'
   else
@@ -191,13 +194,13 @@ if [ "$selected_mode" = 'pin' ]; then
     "$candidate_bin:"*) ;;
     *) PATH="$candidate_bin:$PATH"; export PATH ;;
   esac
-  if [ "${host_version:-}" != "$PIN" ] || [ "${host_abi:-}" != "$REQUIRED_ABI" ]; then
+  if [ "${host_version:-}" != "$PIN" ]; then
     if [ -n "${host_version:-}" ]; then
-      _was="v$host_version ABI ${host_abi:-unknown}"
+      _was="v$host_version ABI ${host_abi:-unknown} (ABI informational)"
     else
       _was='no host node'
     fi
-    printf '[dev-sync] command-local Node v%s (ABI %s) selected for this command (host was %s); no shell/dotfile change.\n' "$PIN" "$REQUIRED_ABI" "$_was" >&2
+    printf '[dev-sync] command-local Node v%s (ABI %s informational) selected for this command (host was %s); no shell/dotfile change.\n' "$PIN" "$REQUIRED_ABI" "$_was" >&2
   fi
 fi
 

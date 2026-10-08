@@ -66,7 +66,7 @@ never from working-tree files, which may include uncommitted or throwaway artifa
 2. **`pnpm build` — mandatory fresh build.** E2E launches the built Electron app
    (`electron .` against `electron-vite` output). A stale or absent build makes tests
    validate old code — never run E2E against a build you did not just produce.
-   `pnpm build` (Electron-lane, self-ensures the ABI 145 binding) runs
+   `pnpm build` (Electron runtime) runs
    `generate:openapi` + `typecheck` + `electron-vite build`.
 3. **`pnpm build:unpack` — for the packaged-isolation spec only.** The Phase C spec
    (`specs/identity/packaged-isolation.spec.ts`) launches the REAL packaged app
@@ -75,35 +75,33 @@ never from working-tree files, which may include uncommitted or throwaway artifa
    `npm run build && electron-builder --dir`) so the packaged artifact carries the
    per-build Build ID / CFBundleVersion identity.
 
-### Native ABI prerequisites (better-sqlite3)
+### Native runtime prerequisites (better-sqlite3 Node-API)
 
-The repository has a **single native module** (`better-sqlite3`) that is compiled for
-**either** Node24 (ABI 137) **or** Electron 41.2.1 (ABI 145) — never both at once.
-The E2E suite launches the real Electron app, so it requires the **Electron ABI 145**
-binding. Verification is runtime SQL only (`.forge-meta` markers and file names are
-never trusted as proof).
+The repository has a **single native module** (`better-sqlite3` 13.0.3) as a Node-API
+prebuilt: the same packaged file loads under both Node 24.11.1
+and Electron 41.2.1. There is no ABI switching, rebuilding, restoration, or
+checkout lock — Node and Electron commands may run in parallel. Verification is
+runtime SQL only (`.forge-meta` markers and filenames are never trusted as
+proof).
 
-**`pnpm test:e2e` is an Electron-lane public command: it self-ensures the Electron
-binding** — it checks the binding read-only and rebuilds only when the real runtime
-SQL probe proves the current binding is not ABI 145 — before Playwright launches.
-**No manual `native:check:electron` / `native:rebuild:electron` prefix is needed.**
-Node-lane commands (`pnpm test`, …) self-ensure ABI 137 and restore the local
-Electron ABI 145 default afterwards, so the E2E binding is the usual local state.
+**`pnpm test:e2e` is an Electron-runtime public command**: the shared prebuilt
+loads as-is before Playwright launches. **No manual `native:check:electron`
+prefix is needed and there is nothing to rebuild.**
 
-- `pnpm native:check:electron` / `pnpm native:check:node` — **read-only diagnostics**
-  (real `Database(':memory:')` + `select 1 as ok` + close under the target runtime).
-  Use them to inspect the current binding; they never modify it.
-- `pnpm native:rebuild:node` / `pnpm native:rebuild:electron` — **explicit repair /
-  debug only**. The public commands manage the lane themselves; reach for a rebuild
-  only to force a fresh build or investigate a broken binding.
-- Node and Electron commands are **serialized**: concurrent opposite-lane runs fail
-  deterministically with a clear conflict message instead of silently switching the
-  binding. Do not run Node-lane and Electron-lane commands at the same time.
+- `pnpm native:check:electron` / `pnpm native:check:node` — **pure read-only
+  diagnostics** (real `Database(':memory:')` + `select 1 as ok` + close under
+  the target runtime). Use them to inspect the current runtime state; they
+  never modify it.
+- `native:rebuild:*` is removed — never try to rebuild a binding or force a
+  fresh build of the native module.
+- Node and Electron commands **may run in parallel**. Independently isolate
+  real shared resources (DB files, profiles, output dirs) — parallel runs must
+  never share them.
 
 ### Running (canonical commands via package scripts)
 
 ```bash
-# Full E2E suite (self-ensures the Electron ABI 145 binding)
+# Full E2E suite (Electron runtime — shared prebuilt loads as-is)
 pnpm test:e2e
 
 # A single spec file (path is forwarded to Playwright)
@@ -115,7 +113,7 @@ pnpm test:e2e -- -g "should launch"
 # A directory (e.g. conversation specs)
 pnpm test:e2e tests/e2e/specs/conversation
 
-# HTML report from the last run (read-only, no app launch — no lane work needed)
+# HTML report from the last run (read-only, no app launch — no runtime work needed)
 pnpm playwright show-report
 ```
 
@@ -128,8 +126,8 @@ pnpm test:e2e -- --ui         # Playwright UI mode
 ```
 
 `pnpm test:e2e` is the only supported Playwright entry point for E2E runs: it is an
-**Electron-lane** command that self-ensures the ABI 145 binding before Playwright
-launches. Direct `pnpm playwright test` invocations bypass that lane management and
+**Electron-runtime** command that loads the shared prebuilt before Playwright
+launches. Direct `pnpm playwright test` invocations bypass that runtime wiring and
 are not the supported path — use `pnpm test:e2e` with a path / filter argument
 instead (see the canonical commands above).
 
@@ -185,7 +183,7 @@ import {
   getChatDbPath,            // runtime chat.db path (derived from runtime appDataPath)
   getRuntimeAppDataPath,    // appDataPath captured from the running app
   getUserDataDir,           // the disposable profile dir passed via --user-data-dir
-  queryChatDbViaElectron,   // read-only SQLite query via the Electron binary (ABI-safe)
+  queryChatDbViaElectron,   // read-only SQLite query via the Electron binary (shared prebuilt)
   getRequestLog,            // all mock server requests
   clearRequestLog,          // clear log (sequence counter stays monotonic)
   findProductRequest,       // first POST chat/completions request
@@ -373,7 +371,7 @@ const chatDbPath = getChatDbPath()          // <runtime appDataPath>/Data/chat.d
 expect(chatDbPath).not.toBeNull()
 expect(fs.existsSync(chatDbPath!)).toBe(true)
 
-// 3. Query read-only via the Electron binary (ABI-safe native module).
+// 3. Query read-only via the Electron binary (shared Node-API prebuilt).
 //    queryChatDbViaElectron takes a SQL string; escape substituted values as the
 //    committed specs do (no unescaped string concatenation, no positional indexing).
 const topicId = 'captured-topic-id'        // exact ID captured from the UI/Redux

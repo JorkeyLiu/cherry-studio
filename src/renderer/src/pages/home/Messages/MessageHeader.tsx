@@ -4,12 +4,13 @@ import { HStack } from '@renderer/components/Layout'
 import UserPopup from '@renderer/components/Popups/UserPopup'
 import { APP_NAME, AppLogo, isLocalAi } from '@renderer/config/env'
 import { useTheme } from '@renderer/context/ThemeProvider'
+import type { MessageAssistantConfig } from '@renderer/hooks/useAssistant'
 import useAvatar from '@renderer/hooks/useAvatar'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageStyle, useSettings } from '@renderer/hooks/useSettings'
 import { getMessageModelId } from '@renderer/services/MessagesService'
 import { getModelName } from '@renderer/services/ModelService'
-import type { Assistant, Model, Topic } from '@renderer/types'
+import type { Model, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { firstLetter, isEmoji, removeLeadingEmoji } from '@renderer/utils'
 import { Avatar, Checkbox, Tooltip } from 'antd'
@@ -24,7 +25,10 @@ import MessageTokens from './MessageTokens'
 
 interface Props {
   message: Message
-  assistant: Assistant
+  // Presentation configuration only (no topics subscription); reads just the
+  // assistant name for the avatar fallback. Tolerates undefined so a missing
+  // assistant degrades to the model/user name instead of throwing.
+  assistant: MessageAssistantConfig | undefined
   model?: Model
   topic: Topic
   isGroupContextMessage?: boolean
@@ -65,8 +69,10 @@ const MessageHeader: FC<Props> = memo(({ assistant, model, message, topic, isGro
   const isUserMessage = message.role === 'user'
   const isUserBubbleMessage = isBubbleStyle && isUserMessage && !isMultiSelectMode
 
-  const avatarName = useMemo(() => firstLetter(assistant?.name).toUpperCase(), [assistant?.name])
   const username = useMemo(() => removeLeadingEmoji(getUserName()), [getUserName])
+  // Missing-assistant fallback reuses the displayed name (model name/message
+  // model id/user name) so the avatar initial stays consistent with the header.
+  const avatarName = useMemo(() => firstLetter(assistant?.name || username).toUpperCase(), [assistant?.name, username])
   const displayModelName = model?.name?.trim()
   const modelTitle = displayModelName ?? model?.id?.trim() ?? username
 

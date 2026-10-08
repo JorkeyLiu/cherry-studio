@@ -25,6 +25,7 @@
  */
 import { expect, test } from '../../fixtures/electron.fixture'
 import { SidebarPage } from '../../pages/sidebar.page'
+import { pageWaitSettled, pageWheelAndSettle } from '../../utils/viewport-scroll-sync'
 import { waitForAppReady, waitForChatReady, waitForSettingsLoad } from '../../utils/wait-helpers'
 import {
   activateTopic,
@@ -126,23 +127,6 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
         { timeout: 30000 }
       )
     }
-    const readAnchor = (): Promise<{ id: string; offset: number } | null> =>
-      page.evaluate(() => {
-        const container = document.querySelector('#messages') as HTMLElement | null
-        if (!container) return null
-        const c = container.getBoundingClientRect()
-        const rows = Array.from(document.querySelectorAll('#messages [data-message-id]')) as HTMLElement[]
-        const cands: { id: string; top: number; bottom: number }[] = []
-        for (const row of rows) {
-          const r = row.getBoundingClientRect()
-          const id = row.getAttribute('data-message-id')
-          if (id) cands.push({ id, top: r.top, bottom: r.bottom })
-        }
-        if (cands.length === 0) return null
-        const crossing = cands.find((x) => x.top <= c.top && x.bottom > c.top) ?? null
-        const picked = crossing ?? cands.filter((x) => x.top >= c.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
-        return { id: picked.id, offset: picked.top - c.top }
-      })
     const readSnapId = async (bid: string | null): Promise<string> =>
       page.evaluate((key: string) => {
         try {
@@ -166,35 +150,18 @@ test.describe('Implicit route session — Settings roundtrip + ordinary cycles +
         { timeout: 30000 }
       )
     }
-    const focusMessages = async (): Promise<void> => {
-      const box = await page.locator('#messages').first().boundingBox()
-      if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    }
+    // Shared state-driven stabilization (viewport-scroll-sync): real user
+    // wheel kept; success needs observed scroll or a deterministic boundary
+    // no-op plus a stable anchor/phase run — never a fixed 220ms sleep or a
+    // blind two-frame pass. Snapshot agreement stays enforced by the explicit
+    // waitSnapMatchesLive gates below (unchanged contract); these helpers take
+    // no scroll keys because they never gate on the snapshot.
     const wheel = async (dy: number): Promise<void> => {
-      await focusMessages()
-      await page.mouse.wheel(0, dy)
-      await page.evaluate(
-        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-      )
-      await page.waitForTimeout(220)
+      await pageWheelAndSettle(page, [], dy)
     }
     const settled = async (): Promise<{ id: string; offset: number }> => {
-      let prev: { id: string; offset: number } | null = null
-      let stable = 0
-      const start = Date.now()
-      let cur: { id: string; offset: number } | null = null
-      while (Date.now() - start < 10000) {
-        cur = await readAnchor()
-        if (cur && prev && cur.id === prev.id && Math.abs(cur.offset - prev.offset) <= 2) {
-          stable += 1
-          if (stable >= 2) return cur
-        } else stable = 0
-        prev = cur
-        await page.waitForTimeout(140)
-      }
-      // Robust failure: a settle timeout must fail loudly so an unsettled
-      // viewport can never pass as a stable restore.
-      throw new Error(`viewport failed to settle within 10s (last=${cur ? `${cur.id}@${cur.offset}` : 'null'})`)
+      const r = await pageWaitSettled(page, [])
+      return { id: r.id, offset: r.offset }
     }
     const wheelSeekExclusive = async (allowed: string[]): Promise<{ id: string; offset: number } | null> => {
       for (let i = 0; i < 4; i++) await wheel(-560)

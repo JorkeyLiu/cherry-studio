@@ -3,21 +3,21 @@ import Scrollbar from '@renderer/components/Scrollbar'
 import { MessageEditingProvider } from '@renderer/context/MessageEditingContext'
 import { useChatContext } from '@renderer/hooks/useChatContext'
 import { useMessageActionController } from '@renderer/hooks/useMessageActionController'
-import { useTimer } from '@renderer/hooks/useTimer'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { isLoadedAnswerGroupMutable, resolveLoadedAnswerGroup } from '@renderer/store/routeAnswerGroup'
 import { reorderMessageGroupThunk } from '@renderer/store/thunk/messageGroupReorder'
 import type { Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { classNames } from '@renderer/utils'
-import { scrollIntoView } from '@renderer/utils/dom'
 import type { ComponentProps } from 'react'
-import { memo, useCallback, useEffect, useMemo } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
 import styled from 'styled-components'
 
 import MessageItem from './Message'
 import MessageGroupMenuBar from './MessageGroupMenuBar'
 import { deriveStableGroupId } from './messageRenderLayers'
+import { areProjectedMessagesEqual, areTopicsViewportEqual } from './messageViewportProjection'
+import { useOptionalRouteViewport } from './routeViewportContext'
 
 const logger = loggerService.withContext('MessageGroup')
 interface Props {
@@ -39,8 +39,8 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   // Hooks
   const { selectAnswer, selectUseful } = useMessageActionController()
   const { isMultiSelectMode } = useChatContext(topic)
-  const { setTimeoutTimer } = useTimer()
   const dispatch = useAppDispatch()
+  const tabViewport = useOptionalRouteViewport()
 
   const isGrouped = messageLength > 1 && messages.every((m) => m.role === 'assistant')
 
@@ -84,22 +84,54 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       // S3.4: explicit target IDs resolved at event time to the latest
       // complete answer group. No captured messages array is used so a
       // projection update that expands the group is observed.
-      void selectAnswer({ topicId: topic.id, messageId: message.id })
-
-      // LOCK-105/PERF-100: the 200ms setTimeoutTimer smooth-scroll contract
-      // is preserved exactly — do not optimize, remove, or retime it.
-      setTimeoutTimer(
-        'setSelectedMessage',
-        () => {
-          const messageElement = document.getElementById(`message-${message.id}`)
-          if (messageElement) {
-            scrollIntoView(messageElement, { behavior: 'smooth', block: 'start', container: 'nearest' })
+      // Viewport SWITCHING: the clicked tab's geometry is captured
+      // synchronously in the tab strip (see MessageGroupModelList) BEFORE
+      // this dispatch; the keeper holds that tab stationary across the async
+      // DB-first selection + height swap (no body-anchor jump, no bottom
+      // jump). Authority selection still flows through selectAnswer; guards
+      // unchanged. Failure clears ONLY the gesture it belongs to: a stale
+      // rejection must never clear a newer click's hold.
+      const controller = tabViewport?.controller ?? null
+      let gestureEpoch: number | undefined
+      let gestureId: number | undefined
+      try {
+        const live = controller?.activeAnswerTabIntent ?? null
+        if (live && live.tabMessageId === message.id) {
+          gestureEpoch = live.epoch
+          gestureId = live.gestureId
+        }
+      } catch {
+        gestureEpoch = undefined
+        gestureId = undefined
+      }
+      const clearOwnGestureOnly = (): void => {
+        try {
+          if (!controller || gestureEpoch === undefined) return
+          const live = controller.activeAnswerTabIntent
+          if (
+            live &&
+            live.epoch === gestureEpoch &&
+            live.tabMessageId === message.id &&
+            (gestureId === undefined || live.gestureId === gestureId)
+          ) {
+            controller.clearAnswerTabSwitch(gestureEpoch, message.id, gestureId)
           }
-        },
-        200
-      )
+        } catch {}
+      }
+      try {
+        const pending = selectAnswer({ topicId: topic.id, messageId: message.id }) as unknown
+        if (pending && typeof (pending as { catch?: unknown }).catch === 'function') {
+          void (pending as Promise<unknown>).catch(() => {
+            // A failed/cancelled selection must not retain its own stale tab
+            // hold — but must never clear a newer gesture.
+            clearOwnGestureOnly()
+          })
+        }
+      } catch {
+        clearOwnGestureOnly()
+      }
     },
-    [groupMutable, selectAnswer, topic.id, setTimeoutTimer]
+    [groupMutable, selectAnswer, tabViewport, topic.id]
   )
   // NOTE: registerMessageElement logic is kept for future use (currently not used for navigation)
   useEffect(() => {
@@ -113,9 +145,16 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
   // BRANCH-12: group-level atomic useful toggle. One Main transaction sets
   // the single useful member (or clears when already useful); the old
   // per-message forEach(editMessage) partial-write path is removed.
+  // History isolation: the member lookup resolves at event time through a
+  // live ref (S3.4 pattern, mirroring setSelectedMessage above), so this
+  // callback keeps a stable identity across parent rebuilds that reuse the
+  // same canonical entities — unchanged sibling MessageItems below stay
+  // referentially equal and skip re-render.
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
   const onUpdateUseful = useCallback(
     (msgId: string) => {
-      const message = messages.find((msg) => msg.id === msgId)
+      const message = messagesRef.current.find((msg) => msg.id === msgId)
       if (!message) {
         logger.error("the message to update doesn't exist in this group")
         return
@@ -125,7 +164,7 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         logger.error('[onUpdateUseful] Failed to toggle useful:', e as Error)
       })
     },
-    [groupMutable, messages, selectUseful, topic.id]
+    [groupMutable, selectUseful, topic.id]
   )
 
   const handleReorderMessages = useCallback(
@@ -282,4 +321,31 @@ const MessageWrapper = styled.div`
   }
 `
 
-export default memo(MessageGroup)
+/**
+ * History-isolation comparator for the send/append hot path.
+ *
+ * An unchanged history group skips re-render when: same member count, every
+ * member render-equal (canonical entity identity, or a field-identical entity
+ * with only a proven render-neutral non-zero index displacement), and a
+ * viewport-equal topic (pure `updatedAt` send bumps ignored, every other
+ * topic field compared). Callbacks are reference-compared: they are stable
+ * across sends (`registerMessageElement` has `[]` deps; `onGroupClick` is the
+ * stable non-edit-mode handler), while a genuine selection change yields a
+ * new handler and correctly invalidates. Edit mode, capability (internal
+ * selector subscription), and context-driven updates bypass this boundary by
+ * design and never go stale.
+ */
+export const areMessageGroupPropsEqual = (prev: Props, next: Props): boolean => {
+  if (prev === next) return true
+  if ((prev.isEditMode ?? false) !== (next.isEditMode ?? false)) return false
+  if (prev.registerMessageElement !== next.registerMessageElement) return false
+  if (prev.onGroupClick !== next.onGroupClick) return false
+  if (!areTopicsViewportEqual(prev.topic, next.topic)) return false
+  if (prev.messages.length !== next.messages.length) return false
+  for (let i = 0; i < prev.messages.length; i += 1) {
+    if (!areProjectedMessagesEqual(prev.messages[i], next.messages[i])) return false
+  }
+  return true
+}
+
+export default memo(MessageGroup, areMessageGroupPropsEqual)

@@ -199,6 +199,12 @@ test.describe('Sync user-entrypoint persistent relay', () => {
       expect((await runSyncViaApi(pageA)).threw).toBeNull()
       expect((await runSyncViaApi(pageB)).threw).toBeNull()
       await pollForConvergence(pageB, topic, msg, blk, base)
+      // Baseline readiness: B's locally captured ops drain via background
+      // automation shortly after the manual sync (diagnosed: runB returns
+      // pending=2/cursor=6 with no error, then both reach pending=0/cursor=12
+      // within ~2s without resend). Poll before asserting the drained baseline.
+      await pollForPendingDrained(pageA)
+      await pollForPendingDrained(pageB)
 
       const baseline = await authedPull(endpoint, 0, observer)
       expect(baseline.status).toBe(200)

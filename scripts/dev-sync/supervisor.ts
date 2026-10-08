@@ -1,10 +1,13 @@
 /**
- * Supervisor for `pnpm dev:sync` (runs once under the canonical Electron lane).
+ * Supervisor for `pnpm dev:sync` (runs once under the canonical Electron runtime).
  *
  * The outer package script (`pnpm native:run electron -- tsx
- * scripts/dev-sync/cli.ts`) holds the checkout lane exactly once for the whole
- * dev session; every child below is spawned directly (no nested `native:run`,
- * no `ELECTRON_RUN_AS_NODE`) and reuses that lane:
+ * scripts/dev-sync/cli.ts`) proves the shared Node-API binding with a
+ * readonly SQL probe and then spawns this supervisor; there is no checkout
+ * lane, no lock, no switch, and no rebuild to hold (concurrent Node +
+ * Electron use is safe — see `scripts/native-runtime/`). Every child below
+ * is spawned directly (no nested `native:run`, no `ELECTRON_RUN_AS_NODE`)
+ * and reuses that proven runtime:
  *
  * 1. fixture layout + marker + durable active-pair pointer (one-time adoption
  *    of the latest complete existing pair, then fixed; valid pointers are
@@ -23,9 +26,9 @@
  *    on disk untouched and their content is never read;
  * 4. relay runtime mirror + conditional `--prod --frozen-lockfile` install +
  *    an isolated better-sqlite3 probe from the relay runtime's own binding
- *    (ABI-independence proof without touching the root binding), then the
- *    relay child against the REUSED durable DB (address + device-code pairing
- *    only — no shared token exists);
+ *    copy (shared-binary isolation proof without touching the root
+ *    binding), then the relay child against the REUSED durable DB (address
+ *    + device-code pairing only — no shared token exists);
  * 5. ONE canonical `electron-vite dev` child for profile A (owns the single
  *    shared renderer dev server; canonical `electron.vite.config.ts`, no
  *    ad-hoc Vite config), renderer URL discovered from its stdout;

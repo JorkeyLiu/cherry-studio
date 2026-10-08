@@ -38,8 +38,6 @@ out
 mcp_server
 stats.html
 .eslintcache
-.native-abi-lock
-.native-abi-lock.tmp.*
 resources/binaries/
 
 # ENV

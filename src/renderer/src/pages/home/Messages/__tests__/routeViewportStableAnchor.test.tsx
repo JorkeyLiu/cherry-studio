@@ -570,6 +570,68 @@ describe('keeper event model (generation / scroll / rebind / gates)', () => {
   })
 })
 
+describe('keeper scheduler quiescence (no pending ⇒ zero frame work)', () => {
+  let rafQueue: FrameRequestCallback[]
+  let rafSpy: ReturnType<typeof vi.fn>
+  let cafSpy: ReturnType<typeof vi.fn>
+  const installManualRaf = (): void => {
+    rafQueue = []
+    rafSpy = vi.fn((cb: FrameRequestCallback): number => {
+      rafQueue.push(cb)
+      return rafQueue.length
+    })
+    cafSpy = vi.fn((_id: number): void => {
+      rafQueue.length = 0
+    })
+    vi.stubGlobal('requestAnimationFrame', rafSpy)
+    vi.stubGlobal('cancelAnimationFrame', cafSpy)
+  }
+
+  it('ordinary holds schedule zero frames across observer/scroll/generation signals', () => {
+    installManualRaf()
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(rafSpy).not.toHaveBeenCalled()
+    expect(rafQueue.length).toBe(0)
+    // Ordinary layout shift (no hidden fold): synchronous hold only.
+    act(() => {
+      rects.set('m2', { top: 160, height: 40 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(220)
+    expect(rafSpy).not.toHaveBeenCalled()
+    expect(rafQueue.length).toBe(0)
+    // No-intent scroll echo plus observer fires plus same-route generation
+    // bump: still purely synchronous, zero frame work.
+    act(() => {
+      container.dispatchEvent(new Event('scroll'))
+    })
+    for (const ro of FakeResizeObserver.instances) {
+      try {
+        ;(ro as unknown as { fire: () => void }).fire()
+      } catch {}
+    }
+    for (const mo of FakeMutationObserver.instances) {
+      try {
+        ;(mo as unknown as { fire: () => void }).fire()
+      } catch {}
+    }
+    expect(controller.noteSameRouteWindowUpdate({ topicId: 't1', route: null }, 'a::b::28')).toBe(true)
+    act(() => {
+      keeper.rerender(2)
+    })
+    expect(rafSpy).not.toHaveBeenCalled()
+    expect(cafSpy).not.toHaveBeenCalled()
+    expect(rafQueue.length).toBe(0)
+    keeper.unmount()
+  })
+})
+
 describe('user input takes over the anchor', () => {
   it('wheel declares pending-only; the atomic takeover adopts the real scroll result', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })
@@ -641,6 +703,265 @@ describe('user input takes over the anchor', () => {
     expect(controller.userIntentPending).toBe(true)
     expect(controller.noteInteractionScrollEnd()).toBe(true)
     expect(controller.userIntentPending).toBe(false)
+    keeper.unmount()
+  })
+})
+
+describe('keyboard native paging lifecycle (no keyup idle close)', () => {
+  const keyDown = (target: HTMLElement, key: string): void => {
+    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  }
+  const keyUp = (target: HTMLElement, key: string): void => {
+    target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
+  }
+  // Native PageUp/PageDown paging is asynchronous: the browser scroll lands
+  // AFTER keyup (keydown t4176 -> keyup t4327 -> first smooth scroll t4328 in
+  // the E2E chronology). The keyup idle fallback therefore closed the session
+  // with scrolls==0 before the real scroll could adopt. Keyboard declarations
+  // stay pending for the forthcoming native `scrollend` (same lifecycle as
+  // wheel); pointer/touch idle fallback is unchanged.
+  it('keydown declares, keyup leaves pending, delayed scroll adopts, scrollend closes', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      keyDown(container, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(true)
+
+    // The native scroll has not landed yet: keyup must NOT close the session.
+    act(() => {
+      keyUp(container, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(true)
+    expect(controller.activeInteractionScrollCount).toBe(0)
+
+    // Delayed native paging lands inside the still-live session: the atomic
+    // takeover (Messages path) adopts the measured viewport as the new stable
+    // anchor. The keeper alone writes nothing; only the takeover return
+    // authorizes a snapshot write.
+    act(() => {
+      Object.defineProperty(container, 'scrollTop', { value: 500, writable: true, configurable: true })
+      rects.set('m1', { top: -900, height: 400 })
+      rects.set('m2', { top: -500, height: 40 })
+      rects.set('m3', { top: -10, height: 400 })
+      container.dispatchEvent(new Event('scroll'))
+    })
+    const token = controller.activeInteractionToken
+    expect(token).not.toBeNull()
+    const out = controller.userTakeover(
+      { messageId: 'm3', intraRowOffset: -10, scrollTop: 500, isAtBottom: false },
+      undefined,
+      token ?? undefined
+    )
+    expect(out.taken).toBe(true)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm3',
+      offset: -10
+    })
+    expect(controller.userIntentPending).toBe(true)
+
+    // Native `scrollend` closes the adopted session (same as wheel).
+    act(() => {
+      container.dispatchEvent(new Event('scrollend'))
+    })
+    expect(controller.userIntentPending).toBe(false)
+    keeper.unmount()
+  })
+
+  // Pending-only keyboard at a no-op boundary (e.g. PageUp at the oldest edge
+  // where the browser scrolls nothing) commits no geometry: the declaration
+  // stays pending like the existing wheel-at-boundary case, and the next
+  // pointer end / request / invalidate cancels it. Never invent completion.
+  it('pending-only keyboard commits nothing; next pointer end cancels it', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const takeoverSpy = vi.spyOn(controller, 'userTakeover')
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      keyDown(container, 'PageUp')
+    })
+    expect(controller.userIntentPending).toBe(true)
+    act(() => {
+      keyUp(container, 'PageUp')
+    })
+    expect(controller.userIntentPending).toBe(true)
+    // No scroll landed, no takeover ran, no geometry committed.
+    expect(takeoverSpy).not.toHaveBeenCalled()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    expect(store.get('scroll:topic-t1::main')).toBeUndefined()
+
+    // The existing pointer idle fallback still cancels a pending-only session.
+    act(() => {
+      container.dispatchEvent(new Event('pointerup'))
+    })
+    expect(controller.userIntentPending).toBe(false)
+    takeoverSpy.mockRestore()
+    keeper.unmount()
+  })
+
+  it('keyboard in an editable field declares nothing (no hijack)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    const input = document.createElement('input')
+    container.append(input)
+
+    act(() => {
+      keyDown(input, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(false)
+    act(() => {
+      keyUp(input, 'PageDown')
+    })
+    expect(controller.userIntentPending).toBe(false)
+    keeper.unmount()
+  })
+})
+
+describe('fold hidden answer reconciliation (same-group transfer, offset preserved)', () => {
+  const buildFoldSurface = (): {
+    container: HTMLDivElement
+    ref: { current: HTMLDivElement | null }
+    oldRow: HTMLDivElement
+    newRow: HTMLDivElement
+  } => {
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { value: 4000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const group = document.createElement('div')
+    group.id = 'message-group-ask-1'
+    const oldRow = document.createElement('div')
+    oldRow.id = 'message-old-short'
+    oldRow.setAttribute('data-message-id', 'old-short')
+    mockRect(oldRow, 'old-short')
+    const newRow = document.createElement('div')
+    newRow.id = 'message-new-tall'
+    newRow.setAttribute('data-message-id', 'new-tall')
+    mockRect(newRow, 'new-tall')
+    group.append(oldRow, newRow)
+    container.append(group)
+    document.body.append(container)
+    return { container, ref: { current: container }, oldRow: oldRow, newRow: newRow }
+  }
+
+  it('hidden held answer never transfers: without a tab intent the keeper holds nothing', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'old-short', -60)
+    rects.set('old-short', { top: -60, height: 120 })
+    rects.set('new-tall', { top: -60, height: 120 })
+    const { container, ref, oldRow, newRow } = buildFoldSurface()
+    // The tall variant starts hidden (fold shows only the selected short answer).
+    newRow.style.display = 'none'
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+
+    // Answer-tab switch WITHOUT a captured tab intent: the held short answer
+    // collapses (display:none). SWITCHING owns geometry via the clicked tab,
+    // never via a body-anchor sibling transfer — the keeper holds nothing.
+    const oldRectSpy = vi.spyOn(oldRow, 'getBoundingClientRect')
+    act(() => {
+      oldRow.style.display = 'none'
+      newRow.style.display = 'inline-block'
+      rects.set('new-tall', { top: 240, height: 900 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'old-short',
+      offset: -60
+    })
+    // The hidden replaced row was never measured as stable geometry.
+    expect(oldRectSpy).not.toHaveBeenCalled()
+    oldRectSpy.mockRestore()
+    keeper.unmount()
+  })
+
+  it('a different held visible message is preserved normally (no transfer)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'reader', -40)
+    rects.set('reader', { top: -40, height: 60 })
+    rects.set('old-short', { top: 400, height: 120 })
+    rects.set('new-tall', { top: 400, height: 900 })
+    const { container, ref, oldRow, newRow } = buildFoldSurface()
+    const reader = document.createElement('div')
+    reader.id = 'message-reader'
+    reader.setAttribute('data-message-id', 'reader')
+    mockRect(reader, 'reader')
+    container.prepend(reader)
+    oldRow.style.display = 'none'
+    newRow.style.display = 'inline-block'
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    // Layout shifts the held reader row while the fold group sits elsewhere.
+    act(() => {
+      rects.set('reader', { top: 110, height: 60 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(150)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'reader',
+      offset: -40
+    })
+    keeper.unmount()
+  })
+
+  it('hidden held answer with no visible sibling holds nothing (no hidden compensation)', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'lonely', -60)
+    rects.set('lonely', { top: -60, height: 80 })
+    const container = document.createElement('div')
+    container.id = 'messages'
+    mockRect(container, 'container')
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'scrollHeight', { value: 4000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 600, writable: true, configurable: true })
+    const group = document.createElement('div')
+    group.id = 'message-group-ask-9'
+    const lonely = document.createElement('div')
+    lonely.id = 'message-lonely'
+    lonely.setAttribute('data-message-id', 'lonely')
+    mockRect(lonely, 'lonely')
+    group.append(lonely)
+    container.append(group)
+    document.body.append(container)
+    const ref = { current: container }
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      lonely.style.display = 'none'
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(0)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'lonely',
+      offset: -60
+    })
     keeper.unmount()
   })
 })

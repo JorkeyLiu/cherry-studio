@@ -1,16 +1,18 @@
 /**
  * Isolated relay runtime for `pnpm dev:sync`.
  *
- * The repository root better-sqlite3 binding serves exactly one ABI lane at a
- * time (Node 137 vs Electron 145), so the dev relay cannot run from the root
- * install while `electron-vite dev` holds the Electron lane. Instead each run
- * mirrors ONLY the relay sources plus the shared sync contracts plus the
- * existing `deploy/sync-relay` install manifest/lock into
- * `local/dev-sync/relay-runtime` (same relative layout the Docker image
- * uses) and installs its independent dependency cache there
- * (`--prod --frozen-lockfile`, only when new or mismatched). The relay then
- * runs under plain pinned Node with its OWN binding: no root ABI switch, no
- * rebuild, no lock bypass.
+ * The repository root better-sqlite3 13.0.3 binding is a shared Node-API
+ * binary that loads under both Node 24 and Electron 41 with no lane, no
+ * switch, no rebuild, and no lock (concurrent Node + Electron use is safe;
+ * see `scripts/native-runtime/constants.ts`). The dev relay still runs from
+ * its own isolated runtime: each run mirrors ONLY the relay sources plus
+ * the shared sync contracts plus the existing `deploy/sync-relay` install
+ * manifest/lock into `local/dev-sync/relay-runtime` (same relative layout
+ * the Docker image uses) and installs its independent dependency cache
+ * there (`--prod --frozen-lockfile`, only when new or mismatched), because
+ * the relay ships a different manifest/lock than the repository root. The
+ * relay then runs under plain pinned Node with its OWN binding copy: no
+ * root switch, no rebuild, and no native lane/lock concept.
  *
  * Each command re-mirrors newer sources; the per-session relay DB under
  * `sessions/<session-id>/relay-data` is never rewritten by the mirror step.

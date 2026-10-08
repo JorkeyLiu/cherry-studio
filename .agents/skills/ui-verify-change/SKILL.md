@@ -73,7 +73,7 @@ captures screenshots/text artifacts, and cleans up exactly what it owns.
 - **Prerequisite**: a fresh production build — `pnpm build` immediately before
   the run (the harness launches `electron .` against the built output, exactly
   like E2E).
-- **Command shape** (Electron-lane; self-ensures ABI 145 — no manual
+- **Command shape** (Electron runtime — no rebuild, no lock wait, no manual
   `native:check:electron` prefix needed):
   - `pnpm ui:observe --help` — usage, exit 0, no app launch
   - `pnpm ui:observe --list` — built-in scenarios, exit 0, no app launch
@@ -160,8 +160,8 @@ Before writing anything:
 
 - Component tier: `pnpm test:renderer` or a scoped `pnpm vitest run <file>`.
 - E2E tier: `pnpm build`, then
-  `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts` (Electron-lane command; it
-  self-ensures the ABI 145 binding — no manual `native:check:electron` prefix
+  `pnpm test:e2e tests/e2e/specs/<spec>.spec.ts` (Electron runtime — the shared
+  Node-API prebuilt loads as-is, no manual `native:check:electron` prefix
   is needed), or `pnpm test:e2e` for the full suite.
 - Diagnostics: `pnpm build`, then `pnpm ui:observe app-ready` (baseline) or a
   scenario file (see the observation harness section above). Record the run

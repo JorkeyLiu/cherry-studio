@@ -10,7 +10,7 @@ reliably, prove trustworthy success, retry only when a cause actually changed,
 and report results honestly. It is the execution companion to the gate policy
 stated in the root `AGENTS.md`: the root guide says *which* gates are required
 and *what counts as success*; this skill covers *how* to run them, including
-ABI lane mechanics, budgets, logging, retry, evidence reuse, cleanup, and
+native runtime mechanics, budgets, logging, retry, evidence reuse, cleanup, and
 failure classification.
 
 ## When to use
@@ -33,7 +33,7 @@ failure classification.
   repository declares.
 - `package.json` scripts define exactly what each gate runs (for example,
   `pnpm build:check` is lint + openapi:check + full test; `pnpm test` runs all
-  Vitest suites under the Node ABI lane).
+  Vitest suites under Node).
 - Focused suites supplement, but never replace, the aggregate gates.
 - **Non-duplication (LOCK-VG-001):** `pnpm build:check` already runs lint +
   openapi:check + full test for the exact worktree state. Do **not** run
@@ -45,8 +45,8 @@ failure classification.
   renderer-only local feedback, **never a completion gate, never a substitute
   for `pnpm build:check`, and never CI proof**. It is strict renderer-only:
   any Main/preload/shared/package/config/scripts/unknown path must fail closed
-  with instruction to run `pnpm build:check`; no partial green result. It enters
-  the canonical Node ABI lane via `pnpm native:run node -- ...` and includes
+  with instruction to run `pnpm build:check`; no partial green result. It runs
+  via `pnpm native:run node -- ...` and includes
   untracked renderer files; docs-only/no-renderer-change sets exit 0 as a
   no-op without claiming validation proof. CI's path-filter matrix and full
   jobs remain unchanged.
@@ -54,57 +54,41 @@ failure classification.
 ## Establish the environment first
 
 - Establish the pinned toolchain (Node 24.11.1, pnpm 10.27.0) using the root
-  `AGENTS.md` bootstrap rules before any pnpm command. A shadowing Node
-  installation silently produces an incompatible native binding.
+  `AGENTS.md` bootstrap rules before any pnpm command. Pins protect
+  reproducibility and the support baseline, not a per-V8 compiled binding.
 
-## ABI lanes: canonical commands, not manual switching
+## Native runtime: shared prebuilt, no switching
 
-ABI state is a package-command runtime lane contract (root `AGENTS.md`): every
-canonical `node`/`electron` lane command self-ensures its own lane, so gate
-execution never sequences manual ABI steps:
+better-sqlite3 13.0.3 uses a Node-API prebuilt: the same packaged file
+loads under both Node 24.11.1 and Electron 41.2.1. There is no ABI switching,
+rebuilding, restoration, or checkout lock — `node`-runtime gates (`pnpm test`,
+`test:*`, `pnpm build:check`) and `electron`-runtime gates (`pnpm build`,
+`pnpm test:e2e`, `pnpm ui:observe`) may run in parallel. Runtime machinery lives
+in `scripts/native-runtime/`; canonical commands are wired through it in
+`package.json`:
 
 - Run the gate's canonical public command directly (`pnpm test`,
-  `pnpm test:e2e`, `pnpm build:check`, …). Each lane command probes the
-  better-sqlite3 binding read-only first and rebuilds only when that probe
-  fails — no `native:check:*` / `native:rebuild:*` prelude is ever required to
-  reach a lane state.
-- The lane wrapper owns all lane mechanics for the duration of the run: the
-  checkout-scoped lock, lane ensure, lease propagation to child processes, the
-  local Electron ABI 145 restoration after a Node lane, deterministic exit
-  codes, and signal cleanup. Gate execution never manages any of it.
-- Local outer `node` lanes restore the Electron ABI 145 default afterwards, so
-  the next dev/build/E2E command needs no manual switching; CI runs skip the
-  restoration step.
-- A local `node`-lane gate can therefore include up to two native rebuild phases
-  depending on the starting ABI: one when the lane ensure probes the binding and
-  finds it in the Electron ABI, and one when the post-command Electron ABI 145
-  restore rebuilds back. Both phases belong to the canonical command — never
-  budget, sequence, or work around them as separate steps, and never promise a
-  fixed rebuild duration.
-- The post-command Electron ABI restore is part of the command, not a trailer:
-  the original exit status is trustworthy only after the restore and lock
-  release finish. Tests may have already printed PASS while the wrapper is still
-  restoring the binding; that does not make the run complete — do not kill it
-  solely because PASS lines appeared.
-- SIGINT/SIGTERM during the wrapper's restoration/release cleanup may be
-  deferred until that cleanup completes; SIGKILL remains the residual kill.
-  Treat an interrupted run as unverified, never as success.
-- A lane command started while the opposite lane holds the checkout lock fails
-  fast with a conflict diagnostic. Treat it as a serialization conflict: wait
-  for the other lane to finish or run its command — never work around the lock.
+  `pnpm test:e2e`, `pnpm build:check`, …). Public `pnpm native:run
+  <node|electron> -- <cmd...>` is a lightweight launcher — readonly SQL runtime
+  probe plus sanitized spawn, NOT a lane manager. Probes never recompile,
+  switch, or share locked mutable state; package platform/NAPI compatibility is
+  still required. No `native:check:*` / rebuild sequencing is ever needed;
+  `native:rebuild:*` is removed — never try to rebuild or wait on locks.
 - Internal `*:run` helpers (`test:run`, `dev:run`, `build:run`, …) are
-  implementation details, not entrypoints. Always invoke the canonical public
-  command.
+  implementation helpers, still not normal user entrypoints. Always invoke the
+  canonical public command.
 - `pnpm native:check:node` / `pnpm native:check:electron` are pure read-only
-  diagnostics. Use them to inspect or prove the current binding state when
-  classifying an ABI-related failure; never as a required step before a gate.
-- A lane that cannot be ensured (check fails, rebuild fails, or post-rebuild
-  verification fails) exits nonzero with the cause in its failure lines. When
-  the child command itself exited 0 but the wrapper exits nonzero, the lane's
-  Electron restoration or lock release failed — the wrapper prints
-  `restore:`/`release:` diagnostic lines. Report such a result as a
-  restoration/release failure; do not mask it, and treat the environment as
-  requiring repair before a rerun.
+  diagnostics (`Database(':memory:')` + `select 1 as ok` + close under the
+  target runtime). Use them to inspect the current runtime state when
+  classifying a native-related failure; never as a required step before a gate.
+  Only a real runtime SQL probe proves success; `.forge-meta` markers and
+  filenames are never trusted.
+- `ELECTRON_RUN_AS_NODE=1` must never be exported in a shell or globally, nor
+  used to launch Electron. Only controlled Electron probe children (and the
+  existing controlled E2E relay children) may set it.
+- Parallelism is allowed: no dev/test runtime exclusivity. Independently
+  isolate real shared resources (DB files, profiles, output dirs) — parallel
+  runs must never share them.
 
 ## Evidence identity and freshness
 
@@ -112,8 +96,8 @@ execution never sequences manual ABI steps:
   gate input surface is what a gate's commands actually consume: source files,
   test files, config files read by the gate commands, the dependency/lockfile
   state, package scripts, generated contracts (for example the OpenAPI spec),
-  i18n locale inputs, and API spec definitions — plus the runtime/ABI state and
-  the exact command invoked. Documentation, skill, and other markdown files are
+  i18n locale inputs, and API spec definitions — plus the Node/Electron runtime
+  and the exact command invoked. Documentation, skill, and other markdown files are
   outside that surface: they are not inputs to oxlint/eslint, typecheck, i18n,
   openapi, format, or test, so editing them cannot change what those gates
   validate.
@@ -155,8 +139,7 @@ execution never sequences manual ABI steps:
 - Increase a budget using trustworthy observed history — your own successful
   runs of the same gate on this machine, or recorded run times from the
   repository — never an undefined "documented bound" or a guess.
-- The full-test budget covers the whole command, including the local lane ensure
-  and post-command Electron ABI restore overhead, so calibrate it from
+- The full-test budget covers the whole command, so calibrate it from
   trustworthy observed history of the full run — never hardcode an unsupported
   new number.
 - This budget table lives here, not in the root `AGENTS.md`; keep the root
@@ -197,8 +180,8 @@ A rerun is allowed only after an observed cause changed:
   failure) left no trustworthy result — rerun the gate against the same
   evidence state.
 - The environment was corrected — pinned toolchain restored, or the native
-  binding repaired with the explicit `native:rebuild:*` tooling after a real
-  probe/rebuild/restoration failure — rerun once after the correction.
+  runtime diagnosed via the readonly `native:check:*` probes after a real
+  SQL probe failure — rerun once after the correction.
 - A documented or observed transient external failure occurred (network,
   registry, service outage) — rerun once after it clears.
 - The test suite's own retry policy applies — follow the suite's policy.
@@ -244,7 +227,7 @@ Classify each failing gate:
   expected to pass; the caller decides next steps.
 - **known-baseline** — the gate fails the same way on the clean baseline state;
   not introduced by the current work.
-- **environmental** — toolchain, ABI, network, or machine state issue; rerun
+- **environmental** — toolchain, native runtime, network, or machine state issue; rerun
   once after the environment is corrected per the retry matrix.
 - **unrelated** — the failure is outside the scope of the current work and not
   caused by it.
@@ -254,8 +237,7 @@ implementation rights; report the classification and let the caller decide.
 
 ## Reporting
 
-Report, per gate: lane/runtime state (the ABI lane the gate ran under and
-whether a local Electron restoration applied), command count, the exact command
+Report, per gate: runtime state (the Node/Electron runtime the gate ran under), command count, the exact command
 with status and duration, the subchecks run, the failure classification (if
 any), evidence freshness (the code surface and worktree state the result
 applies to; when full-gate evidence is reused for a documentation/skill-only
@@ -265,7 +247,7 @@ verdict (pass / fail / unverified).
 
 ## Repository anchors
 
-- Root `AGENTS.md` — mandatory gates, pinned toolchain, native ABI lane
+- Root `AGENTS.md` — mandatory gates, pinned toolchain, native Node-API runtime
   contract, success standard.
 - `package.json` — exact composition of each gate.
 - `tests/e2e/README.md` — E2E standards (fresh build, shared fixture, unique

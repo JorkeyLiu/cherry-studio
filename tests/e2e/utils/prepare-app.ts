@@ -223,7 +223,7 @@ export async function assertChatDbReady(page: Page): Promise<void> {
     }
   })
   if (!probeResult.ok) {
-    throw new Error(`ChatDb IPC probe failed (possible ABI mismatch): ${probeResult.error}`)
+    throw new Error(`ChatDb IPC probe failed (shared native binary did not load): ${probeResult.error}`)
   }
 }
 

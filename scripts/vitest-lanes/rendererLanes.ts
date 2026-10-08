@@ -162,9 +162,9 @@ export function planRendererRun(options: {
 }
 
 /**
- * Canonical same-lane child argv for one invocation. Every child executes as
+ * Canonical same-runtime child argv for one invocation. Every child executes as
  * argv with no shell through `pnpm native:run node -- vitest ...` so it
- * inherits the outer Node-lane lease as a nested run. `extraArgs` (e.g.
+ * probes the shared native runtime before spawn. `extraArgs` (e.g.
  * `--update`) are forwarded before the explicit file list; the CI full
  * invocation carries no files.
  */

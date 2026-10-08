@@ -465,6 +465,65 @@ export const saveFinalMessageAndBlocksAtomically = async (
 // and updated during streaming via updateMessageAndBlocks
 
 /**
+ * Per-ack Main echo validation shared by the singular and plural publish
+ * paths (identical guards, no dispatch). Validates the ack identity echo
+ * (topic/message/branch) and trims the capability delta to created ∩
+ * mutable. Route currency (generation + active route) is checked separately
+ * at publish time so a mid-flight route switch filters the whole batch.
+ * Returns the validated entry or null when the ack must not publish (other
+ * entries are unaffected).
+ */
+const toValidAppendEntry = (
+  topicId: string,
+  message: Message,
+  ack: AppendMessageResponse | null | undefined,
+  capturedRoute: string | null
+): { message: Message; createdMessageIds: string[]; mutableMessageIds: string[] } | null => {
+  try {
+    if (!ack || typeof ack !== 'object') return null
+    if (ack.topicId !== topicId) return null
+    if (ack.messageId !== message.id) return null
+    if ((ack.branchId ?? null) !== capturedRoute) return null
+    const created = Array.isArray(ack.createdMessageIds) ? ack.createdMessageIds : []
+    const mutable = Array.isArray(ack.mutableMessageIds) ? ack.mutableMessageIds : []
+    const createdSet = new Set(created.filter((id) => typeof id === 'string' && id.length > 0))
+    const delta = [...new Set(mutable.filter((id) => typeof id === 'string' && id.length > 0))].filter((id) =>
+      createdSet.has(id)
+    )
+    return { message, createdMessageIds: [...createdSet], mutableMessageIds: delta }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Route-currency gate shared by singular and plural publication: the
+ * captured operation route must still be current (generation + active route).
+ * Late publication after a route switch — including away-and-back — never
+ * injects rows or capability into the unrelated currently displayed route.
+ */
+const isAppendRouteCurrencyValid = (
+  getState: () => RootState,
+  topicId: string,
+  capturedRoute: string | null,
+  capturedGeneration: number
+): boolean => {
+  try {
+    let generationNow = 0
+    try {
+      generationNow = selectRouteGeneration(getState(), topicId)
+    } catch {
+      generationNow = 0
+    }
+    if (generationNow !== capturedGeneration) return false
+    if (activeRouteOf(getState, topicId) !== capturedRoute) return false
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Publish one Main-issued append creation acknowledgment as an atomic
  * loaded-projection + capability commit.
  *
@@ -486,31 +545,49 @@ const publishAppendAck = (
   capturedGeneration: number
 ): boolean => {
   try {
-    if (!ack || typeof ack !== 'object') return false
-    if (ack.topicId !== topicId) return false
-    if (ack.messageId !== message.id) return false
-    if ((ack.branchId ?? null) !== capturedRoute) return false
-    const created = Array.isArray(ack.createdMessageIds) ? ack.createdMessageIds : []
-    const mutable = Array.isArray(ack.mutableMessageIds) ? ack.mutableMessageIds : []
-    const createdSet = new Set(created.filter((id) => typeof id === 'string' && id.length > 0))
-    const delta = [...new Set(mutable.filter((id) => typeof id === 'string' && id.length > 0))].filter((id) =>
-      createdSet.has(id)
-    )
-    let generationNow = 0
-    try {
-      generationNow = selectRouteGeneration(getState(), topicId)
-    } catch {
-      generationNow = 0
-    }
-    if (generationNow !== capturedGeneration) return false
-    if (activeRouteOf(getState, topicId) !== capturedRoute) return false
+    const entry = toValidAppendEntry(topicId, message, ack, capturedRoute)
+    if (!entry) return false
+    if (!isAppendRouteCurrencyValid(getState, topicId, capturedRoute, capturedGeneration)) return false
     dispatch(
       newMessagesActions.applyAppendAcknowledgment({
         topicId,
         route: capturedRoute,
-        message,
-        createdMessageIds: [...createdSet],
-        mutableMessageIds: delta
+        message: entry.message,
+        createdMessageIds: entry.createdMessageIds,
+        mutableMessageIds: entry.mutableMessageIds
+      })
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Publish several already-validated append entries as ONE atomic
+ * row + capability commit (multi-model stub batch). Route currency is
+ * checked once for the whole batch: a mid-flight route switch (including
+ * away-and-back) fails the whole batch closed. Empty batches dispatch
+ * nothing. Per-entry echo validity was established at collection time; an
+ * entry that failed its echo guard was never collected, so valid siblings
+ * are unaffected by invalid ones.
+ */
+const publishConfirmedAppendAcks = (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  confirmed: Array<{ message: Message; createdMessageIds: string[]; mutableMessageIds: string[] }>,
+  capturedRoute: string | null,
+  capturedGeneration: number
+): boolean => {
+  try {
+    if (!Array.isArray(confirmed) || confirmed.length === 0) return false
+    if (!isAppendRouteCurrencyValid(getState, topicId, capturedRoute, capturedGeneration)) return false
+    dispatch(
+      newMessagesActions.applyAppendAcknowledgments({
+        topicId,
+        route: capturedRoute,
+        entries: confirmed
       })
     )
     return true
@@ -551,9 +628,20 @@ const dispatchMultiModelResponses = async (
   }
 
   // LOCK-005: Persist all stubs via appendMessage BEFORE Redux publication
-  // and queueing. Each Main acknowledgment is published atomically
-  // (row + capability) under the captured send route; failures and stale
-  // routes publish nothing. The queue never re-resolves the route.
+  // and queueing. Main writes stay strictly serial in stub order — every stub
+  // is really persisted (ack) before anything publishes; Promise.all is never
+  // used so write/route resolution order and pinned ownership never change
+  // and no optimistic renderer authority is claimed. All confirmed
+  // acknowledgments then publish in ONE atomic plural projection commit
+  // (single store notification instead of one per stub); per-ack echo guards
+  // still filter individually so one invalid ack never discards valid
+  // siblings. A mid-flight route switch filters the whole batch (fail-closed)
+  // while owned writes keep the pinned route. The queue never re-resolves
+  // the route. On a mid-loop save throw, the already-confirmed successes
+  // publish once (currency-filtered), the failure propagates on the original
+  // send failure path, the failed/unwritten stubs publish nothing, and no
+  // fetch is queued (same as the previous per-stub loop, except for the
+  // publish timing).
   const stubRoute = sendRoute === undefined ? activeRouteOf(getState, topicId) : sendRoute
   const stubGeneration =
     sendGeneration === undefined
@@ -565,10 +653,18 @@ const dispatchMultiModelResponses = async (
           }
         })()
       : sendGeneration
-  for (const stub of assistantMessageStubs) {
-    const stubAck = await saveMessageAndBlocksToDB(topicId, stub, [], -1, sendContext, stubRoute)
-    publishAppendAck(dispatch, getState, topicId, stub, stubAck, stubRoute, stubGeneration)
+  const confirmed: Array<{ message: Message; createdMessageIds: string[]; mutableMessageIds: string[] }> = []
+  try {
+    for (const stub of assistantMessageStubs) {
+      const stubAck = await saveMessageAndBlocksToDB(topicId, stub, [], -1, sendContext, stubRoute)
+      const entry = toValidAppendEntry(topicId, stub, stubAck, stubRoute)
+      if (entry) confirmed.push(entry)
+    }
+  } catch (error) {
+    publishConfirmedAppendAcks(dispatch, getState, topicId, confirmed, stubRoute, stubGeneration)
+    throw error
   }
+  publishConfirmedAppendAcks(dispatch, getState, topicId, confirmed, stubRoute, stubGeneration)
 
   const queue = getTopicQueue(topicId)
   for (const task of tasksToQueue) {
