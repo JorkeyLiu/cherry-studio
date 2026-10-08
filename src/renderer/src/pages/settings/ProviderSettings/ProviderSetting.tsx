@@ -9,10 +9,8 @@ import { isRerankModel } from '@renderer/config/models'
 import { useTheme } from '@renderer/context/ThemeProvider'
 import { useAllProviders, useProvider, useProviders } from '@renderer/hooks/useProvider'
 import { useTimer } from '@renderer/hooks/useTimer'
-import AnthropicSettings from '@renderer/pages/settings/ProviderSettings/AnthropicSettings'
 import { ModelList } from '@renderer/pages/settings/ProviderSettings/ModelList'
 import { checkApi } from '@renderer/services/ApiService'
-import { isProviderSupportAuth } from '@renderer/services/ProviderService'
 import type { ApiKeyConnectivity } from '@renderer/types/healthCheck'
 import { HealthStatus } from '@renderer/types/healthCheck'
 import { formatApiHost, formatApiKeys, getFancyProviderName, validateApiHost } from '@renderer/utils'
@@ -23,7 +21,7 @@ import {
   isOpenAICompatibleProvider,
   isOpenAIProvider
 } from '@renderer/utils/provider'
-import { Button, Divider, Flex, Input, Select, Space, Switch, Tooltip } from 'antd'
+import { Button, Divider, Flex, Input, Space, Switch, Tooltip } from 'antd'
 import { debounce, isEmpty } from 'lodash'
 import { Bolt, Check, Settings2, TriangleAlert } from 'lucide-react'
 import type { FC } from 'react'
@@ -308,8 +306,6 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
       ? t('settings.provider.anthropic_api_host_tooltip')
       : t('settings.provider.api_host_tooltip')
 
-  const isAnthropicOAuth = () => provider.type === 'anthropic' && provider.authType === 'oauth'
-
   return (
     <SettingContainer theme={theme} style={{ background: 'var(--color-background)' }}>
       <SettingTitle>
@@ -336,148 +332,122 @@ const ProviderSetting: FC<Props> = ({ providerId }) => {
         />
       </SettingTitle>
       <Divider style={{ width: '100%', margin: '10px 0' }} />
-      {provider.type === 'anthropic' && (
+      <>
         <>
-          <SettingSubtitle style={{ marginTop: 5 }}>{t('settings.provider.anthropic.auth_method')}</SettingSubtitle>
-          <Select
-            style={{ width: '40%', marginTop: 5, marginBottom: 10 }}
-            value={provider.authType || 'apiKey'}
-            onChange={(value) => updateProvider({ authType: value })}
-            options={[
-              { value: 'apiKey', label: t('settings.provider.anthropic.apikey') },
-              { value: 'oauth', label: t('settings.provider.anthropic.oauth') }
-            ]}
-          />
-          {provider.authType === 'oauth' && <AnthropicSettings />}
-        </>
-      )}
-      {!isAnthropicOAuth() && (
-        <>
-          <>
-            <SettingSubtitle
-              style={{
-                marginTop: 5,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between'
-              }}>
-              <span>{t('settings.provider.api_key.label')}</span>
-              <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
-                <Button
-                  type="text"
-                  onClick={openApiKeyList}
-                  icon={<Settings2 size={16} />}
-                  aria-label={t('settings.provider.api.key.list.open')}
-                />
-              </Tooltip>
-            </SettingSubtitle>
-            <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-              <Input.Password
-                value={localApiKey}
-                placeholder={t('settings.provider.api_key.label')}
-                onChange={(e) => setLocalApiKey(e.target.value)}
-                spellCheck={false}
-                disabled={provider.apiOptions?.requiresApiKey === false}
-                autoFocus={
-                  provider.enabled &&
-                  provider.apiKey === '' &&
-                  !isProviderSupportAuth(provider) &&
-                  provider.apiOptions?.requiresApiKey !== false
-                }
-                suffix={renderStatusIndicator()}
-              />
+          <SettingSubtitle
+            style={{
+              marginTop: 5,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between'
+            }}>
+            <span>{t('settings.provider.api_key.label')}</span>
+            <Tooltip title={t('settings.provider.api.key.list.open')} mouseEnterDelay={0.5}>
               <Button
-                type={isApiKeyConnectable ? 'primary' : 'default'}
-                ghost={isApiKeyConnectable}
-                onClick={onCheckApi}
-                disabled={!apiHost || apiKeyConnectivity.checking}>
-                {apiKeyConnectivity.checking ? (
-                  <LoadingIcon />
-                ) : apiKeyConnectivity.status === 'success' ? (
-                  <Check size={16} className="lucide-custom" />
-                ) : (
-                  t('settings.provider.check')
-                )}
-              </Button>
-            </Space.Compact>
-            <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
-              <HStack>
-                <></>
-              </HStack>
-              <SettingHelpText>{t('settings.provider.api_key.tip')}</SettingHelpText>
-            </SettingHelpTextRow>
-          </>
-          <>
-            <SettingSubtitle style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div className="flex items-center gap-1">
-                <Tooltip title={hostSelectorTooltip} mouseEnterDelay={0.3}>
-                  <div>
-                    <Selector
-                      size={14}
-                      value={activeHostField}
-                      onChange={(value) => setActiveHostField(value)}
-                      options={hostSelectorOptions}
-                      style={{ paddingLeft: 1, fontWeight: 'bold' }}
-                      placement="bottomLeft"
-                    />
-                  </div>
-                </Tooltip>
-                <HelpTooltip title={t('settings.provider.api.url.tip')}></HelpTooltip>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Button
-                  type="text"
-                  onClick={() => CustomHeaderPopup.show({ provider })}
-                  icon={<Settings2 size={16} />}
-                />
-              </div>
-            </SettingSubtitle>
-            {activeHostField === 'apiHost' && (
-              <>
-                <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-                  <Input
-                    value={apiHost}
-                    placeholder={t('settings.provider.api_host')}
-                    onChange={(e) => setApiHost(e.target.value)}
-                    onBlur={onUpdateApiHost}
-                  />
-                </Space.Compact>
-                <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
-                  <SettingHelpText
-                    style={{
-                      marginLeft: 6,
-                      marginRight: '1em',
-                      whiteSpace: 'break-spaces',
-                      wordBreak: 'break-all'
-                    }}>
-                    {t('settings.provider.api_host_preview', { url: hostPreview() })}
-                  </SettingHelpText>
-                </SettingHelpTextRow>
-              </>
-            )}
-
-            {activeHostField === 'anthropicApiHost' && canConfigureAnthropicHost && (
-              <>
-                <Space.Compact style={{ width: '100%', marginTop: 5 }}>
-                  <Input
-                    value={anthropicApiHost ?? ''}
-                    placeholder={t('settings.provider.anthropic_api_host')}
-                    onChange={(e) => setAnthropicHost(e.target.value)}
-                    onBlur={onUpdateAnthropicHost}
-                  />
-                </Space.Compact>
-                <SettingHelpTextRow style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
-                  <SettingHelpText style={{ marginLeft: 6, whiteSpace: 'break-spaces', wordBreak: 'break-all' }}>
-                    {t('settings.provider.anthropic_api_host_preview', {
-                      url: anthropicHostPreview || '—'
-                    })}
-                  </SettingHelpText>
-                </SettingHelpTextRow>
-              </>
-            )}
-          </>
+                type="text"
+                onClick={openApiKeyList}
+                icon={<Settings2 size={16} />}
+                aria-label={t('settings.provider.api.key.list.open')}
+              />
+            </Tooltip>
+          </SettingSubtitle>
+          <Space.Compact style={{ width: '100%', marginTop: 5 }}>
+            <Input.Password
+              value={localApiKey}
+              placeholder={t('settings.provider.api_key.label')}
+              onChange={(e) => setLocalApiKey(e.target.value)}
+              spellCheck={false}
+              disabled={provider.apiOptions?.requiresApiKey === false}
+              autoFocus={provider.enabled && provider.apiKey === '' && provider.apiOptions?.requiresApiKey !== false}
+              suffix={renderStatusIndicator()}
+            />
+            <Button
+              type={isApiKeyConnectable ? 'primary' : 'default'}
+              ghost={isApiKeyConnectable}
+              onClick={onCheckApi}
+              disabled={!apiHost || apiKeyConnectivity.checking}>
+              {apiKeyConnectivity.checking ? (
+                <LoadingIcon />
+              ) : apiKeyConnectivity.status === 'success' ? (
+                <Check size={16} className="lucide-custom" />
+              ) : (
+                t('settings.provider.check')
+              )}
+            </Button>
+          </Space.Compact>
+          <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
+            <HStack>
+              <></>
+            </HStack>
+            <SettingHelpText>{t('settings.provider.api_key.tip')}</SettingHelpText>
+          </SettingHelpTextRow>
         </>
-      )}
+        <>
+          <SettingSubtitle style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div className="flex items-center gap-1">
+              <Tooltip title={hostSelectorTooltip} mouseEnterDelay={0.3}>
+                <div>
+                  <Selector
+                    size={14}
+                    value={activeHostField}
+                    onChange={(value) => setActiveHostField(value)}
+                    options={hostSelectorOptions}
+                    style={{ paddingLeft: 1, fontWeight: 'bold' }}
+                    placement="bottomLeft"
+                  />
+                </div>
+              </Tooltip>
+              <HelpTooltip title={t('settings.provider.api.url.tip')}></HelpTooltip>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <Button type="text" onClick={() => CustomHeaderPopup.show({ provider })} icon={<Settings2 size={16} />} />
+            </div>
+          </SettingSubtitle>
+          {activeHostField === 'apiHost' && (
+            <>
+              <Space.Compact style={{ width: '100%', marginTop: 5 }}>
+                <Input
+                  value={apiHost}
+                  placeholder={t('settings.provider.api_host')}
+                  onChange={(e) => setApiHost(e.target.value)}
+                  onBlur={onUpdateApiHost}
+                />
+              </Space.Compact>
+              <SettingHelpTextRow style={{ justifyContent: 'space-between' }}>
+                <SettingHelpText
+                  style={{
+                    marginLeft: 6,
+                    marginRight: '1em',
+                    whiteSpace: 'break-spaces',
+                    wordBreak: 'break-all'
+                  }}>
+                  {t('settings.provider.api_host_preview', { url: hostPreview() })}
+                </SettingHelpText>
+              </SettingHelpTextRow>
+            </>
+          )}
+
+          {activeHostField === 'anthropicApiHost' && canConfigureAnthropicHost && (
+            <>
+              <Space.Compact style={{ width: '100%', marginTop: 5 }}>
+                <Input
+                  value={anthropicApiHost ?? ''}
+                  placeholder={t('settings.provider.anthropic_api_host')}
+                  onChange={(e) => setAnthropicHost(e.target.value)}
+                  onBlur={onUpdateAnthropicHost}
+                />
+              </Space.Compact>
+              <SettingHelpTextRow style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
+                <SettingHelpText style={{ marginLeft: 6, whiteSpace: 'break-spaces', wordBreak: 'break-all' }}>
+                  {t('settings.provider.anthropic_api_host_preview', {
+                    url: anthropicHostPreview || '—'
+                  })}
+                </SettingHelpText>
+              </SettingHelpTextRow>
+            </>
+          )}
+        </>
+      </>
       <ModelList providerId={provider.id} />
     </SettingContainer>
   )

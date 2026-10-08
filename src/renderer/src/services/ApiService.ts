@@ -851,9 +851,8 @@ export async function fetchGenerate({
 
 export function hasApiKey(provider: Provider | undefined) {
   if (!provider) return false
-  // Explicit per-connection option, not brand ids/types. OAuth remains a
-  // no-key path where applicable. Unset requiresApiKey defaults to true.
-  if (provider.authType === 'oauth') return true
+  // Explicit per-connection option, not brand ids/types.
+  // Unset requiresApiKey defaults to true.
   if (provider.apiOptions?.requiresApiKey === false) return true
   return !isEmpty(provider.apiKey)
 }
@@ -931,9 +930,9 @@ export async function fetchModels(provider: Provider): Promise<Model[]> {
 }
 
 export function checkApiProvider(provider: Provider): void {
-  // Explicit per-connection option, not brand ids/types. OAuth remains a
-  // no-key path where applicable. Unset requiresApiKey defaults to true.
-  const needsApiKey = provider.authType !== 'oauth' && provider.apiOptions?.requiresApiKey !== false
+  // Explicit per-connection option, not brand ids/types.
+  // Unset requiresApiKey defaults to true.
+  const needsApiKey = provider.apiOptions?.requiresApiKey !== false
 
   if (needsApiKey) {
     if (!provider.apiKey) {

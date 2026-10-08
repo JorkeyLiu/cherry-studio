@@ -1,9 +1,9 @@
 /**
- * Preload API retired provider surface (slice 3).
+ * Preload API retired provider surface.
  *
  * Module contract test (no UI rendering): the window.api surface exposes no
- * VertexAI/Copilot namespaces, while the Anthropic OAuth namespace remains
- * with its full method set.
+ * VertexAI/Copilot namespaces and no Anthropic OAuth namespace. Every
+ * connection authenticates with its configured API key and host.
  */
 import { describe, expect, it, vi } from 'vitest'
 
@@ -37,18 +37,7 @@ describe('preload retired provider surface', () => {
     expect(getApi().copilot).toBeUndefined()
   })
 
-  it('retains the Anthropic OAuth namespace with its full method set', () => {
-    const oauth = getApi().anthropic_oauth
-    expect(oauth).toBeDefined()
-    for (const method of [
-      'startOAuthFlow',
-      'completeOAuthWithCode',
-      'cancelOAuthFlow',
-      'getAccessToken',
-      'hasCredentials',
-      'clearCredentials'
-    ]) {
-      expect(typeof oauth?.[method]).toBe('function')
-    }
+  it('exposes no Anthropic OAuth namespace', () => {
+    expect(getApi().anthropic_oauth).toBeUndefined()
   })
 })

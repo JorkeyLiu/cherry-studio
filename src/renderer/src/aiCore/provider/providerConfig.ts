@@ -67,11 +67,6 @@ export function formatProviderApiHost(provider: Provider): Provider {
 
 // === SDK Config Building ===
 
-type ConfigBuilderEntry = {
-  match: (provider: Provider, aiSdkProviderId: AppProviderId) => boolean
-  build: (ctx: BuilderContext) => ProviderConfig | Promise<ProviderConfig>
-}
-
 export function providerToAiSdkConfig(
   actualProvider: Provider,
   model: Model
@@ -85,17 +80,6 @@ export function providerToAiSdkConfig(
     baseConfig: { baseURL, apiKey: actualProvider.apiKey },
     endpoint,
     aiSdkProviderId
-  }
-
-  const builders: ConfigBuilderEntry[] = [
-    // Anthropic OAuth is retained because Anthropic is an approved protocol.
-    // Matched by protocol/type + oauth mode, never by brand/provider.id.
-    { match: (p) => p.type === 'anthropic' && p.authType === 'oauth', build: buildAnthropicConfig }
-  ]
-
-  const builder = builders.find((b) => b.match(actualProvider, aiSdkProviderId))
-  if (builder) {
-    return builder.build(ctx)
   }
 
   // SDK-supported provider → generic config; otherwise → openai-compatible fallback.
@@ -142,24 +126,6 @@ function buildCommonOptions(ctx: BuilderContext) {
     options.headers['X-Api-Key'] = ctx.baseConfig.apiKey
   }
   return options
-}
-
-async function buildAnthropicConfig(ctx: BuilderContext): Promise<ProviderConfig<'anthropic'>> {
-  const oauthToken: string = await window.api.anthropic_oauth.getAccessToken()
-
-  return {
-    providerId: 'anthropic',
-    endpoint: ctx.endpoint,
-    providerSettings: {
-      baseURL: 'https://api.anthropic.com/v1',
-      apiKey: '',
-      headers: {
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-        Authorization: `Bearer ${oauthToken}`
-      }
-    }
-  }
 }
 
 function buildOpenAICompatibleConfig(ctx: BuilderContext): ProviderConfig<'openai-compatible'> {

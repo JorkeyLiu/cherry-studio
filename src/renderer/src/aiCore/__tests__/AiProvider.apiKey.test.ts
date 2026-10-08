@@ -54,7 +54,6 @@ const makeProvider = (overrides: Partial<Provider> = {}): Provider =>
     id: 'my-claude-relay',
     name: 'My Claude Relay',
     type: 'anthropic',
-    authType: 'oauth',
     apiKey: 'relay-key',
     apiHost: 'https://relay.example.com',
     models: [],
@@ -75,7 +74,7 @@ const setupExecutor = () => {
   return streamText
 }
 
-describe('AiProvider Anthropic OAuth protocol gating', () => {
+describe('AiProvider Anthropic standard API key behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockAdaptProvider.mockImplementation(({ provider }) => provider)
@@ -86,7 +85,7 @@ describe('AiProvider Anthropic OAuth protocol gating', () => {
     } as never)
   })
 
-  it('injects the Claude Code system message for a custom-id Anthropic OAuth provider', async () => {
+  it('preserves the caller system message untouched for an anthropic-protocol connection', async () => {
     const provider = makeProvider()
     const model = makeModel(provider.id)
     const streamText = setupExecutor()
@@ -100,32 +99,13 @@ describe('AiProvider Anthropic OAuth protocol gating', () => {
 
     expect(result.getText()).toBe('hello')
     const sentParams = streamText.mock.calls[0][0]
-    // OAuth path clears the plain system prompt and prefixes Claude Code messages.
-    expect(sentParams.system).toBeUndefined()
-    expect(sentParams.messages.length).toBeGreaterThan(1)
-    expect(sentParams.messages[0]).toMatchObject({ role: 'system' })
-    expect(sentParams.messages[sentParams.messages.length - 1]).toEqual({ role: 'user', content: 'hi' })
+    // No injected system message: the ordinary system prompt passes through.
+    expect(sentParams.system).toBe('orig-system')
+    expect(sentParams.messages).toEqual([{ role: 'user', content: 'hi' }])
   })
 
-  it('keeps the official-id OAuth behavior (regression)', async () => {
-    const provider = makeProvider({ id: 'anthropic', name: 'Anthropic', isSystem: true })
-    const model = makeModel(provider.id)
-    const streamText = setupExecutor()
-
-    const ai = new AiProvider(model, provider)
-    await ai.completions(
-      model.id,
-      { messages: [{ role: 'user', content: 'hi' }], system: 'orig-system' } as never,
-      { assistant: { id: 'a' }, callType: 'test' } as never
-    )
-
-    const sentParams = streamText.mock.calls[0][0]
-    expect(sentParams.system).toBeUndefined()
-    expect(sentParams.messages.length).toBeGreaterThan(1)
-  })
-
-  it('does not inject the Claude Code message for a custom-id Anthropic provider without oauth mode', async () => {
-    const provider = makeProvider({ authType: undefined })
+  it('preserves the caller system message for a legacy oauth-marked connection', async () => {
+    const provider = makeProvider({ authType: 'oauth' } as never)
     const model = makeModel(provider.id)
     const streamText = setupExecutor()
 

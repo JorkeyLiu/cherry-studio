@@ -8,7 +8,6 @@ import type { StartSpanParams } from '@renderer/trace/types/ModelSpanEntity'
 import type { Assistant, EditImageParams, GenerateImageParams, Model, Provider } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { getLowerBaseModelName } from '@renderer/utils'
-import { buildClaudeCodeSystemModelMessage } from '@shared/anthropic'
 import { elapsedMs } from '@shared/diagnostics/sendTiming'
 
 import AiSdkToChunkAdapter from './chunk/AiSdkToChunkAdapter'
@@ -19,20 +18,6 @@ import type { AppProviderSettingsMap, CompletionsResult, ProviderConfig } from '
 import type { AiSdkMiddlewareConfig } from './types/middlewareConfig'
 
 const logger = loggerService.withContext('AiProvider')
-
-/**
- * Non-sensitive category for provider cold-path timing diagnostics
- * (LOCK-002: never logs apiKey, token values, or custom provider settings).
- */
-function classifyProviderConfigCategory(provider: Provider): string {
-  // Protocol-gated: any entry speaking the Anthropic protocol in oauth mode
-  // (official or custom id) is Anthropic OAuth. No provider brand id
-  // participates; every other connection is 'other'.
-  if (provider.type === 'anthropic' && provider.authType === 'oauth') {
-    return 'anthropic-oauth'
-  }
-  return 'other'
-}
 
 export type AiProviderConfig = AiSdkMiddlewareConfig & {
   assistant: Assistant
@@ -119,18 +104,17 @@ export default class AiProvider {
     // Config is now set in constructor, ApiService handles key rotation before passing provider
     if (!this.config) {
       // If config wasn't set in constructor (when provider only), generate it now.
-      // LOCK-001/003: bounded cold-path timing for provider config building
-      // (includes Copilot token retrieval / Anthropic OAuth for those types).
+      // LOCK-001/003: bounded cold-path timing for provider config building.
       const tConfig = performance.now()
       try {
         this.config = await Promise.resolve(providerToAiSdkConfig(this.actualProvider, this.model))
         logColdPathDiagnostic('renderer.provider.configBuild', elapsedMs(tConfig), {
-          category: classifyProviderConfigCategory(this.actualProvider),
+          category: 'other',
           ok: true
         })
       } catch (error) {
         logColdPathDiagnostic('renderer.provider.configBuild', elapsedMs(tConfig), {
-          category: classifyProviderConfigCategory(this.actualProvider),
+          category: 'other',
           ok: false
         })
         throw error
@@ -139,24 +123,6 @@ export default class AiProvider {
     logger.debug('Using provider config for completions', this.config)
 
     // 注意：模型对象将由 createExecutor 内部处理，不再需要预先创建
-
-    // Protocol-gated like providerToAiSdkConfig: custom-id Anthropic entries
-    // in oauth mode take the same Claude Code system-message path.
-    if (this.actualProvider.type === 'anthropic' && this.actualProvider.authType === 'oauth') {
-      // 类型守卫：确保 system 是 string、Array 或 undefined
-      const system = params.system
-      let systemParam: string | Array<any> | undefined
-      if (typeof system === 'string' || Array.isArray(system) || system === undefined) {
-        systemParam = system
-      } else {
-        // SystemModelMessage 类型，转换为 string
-        systemParam = undefined
-      }
-
-      const claudeCodeSystemMessage = buildClaudeCodeSystemModelMessage(systemParam)
-      params.system = undefined // 清除原有system，避免重复
-      params.messages = [...claudeCodeSystemMessage, ...(params.messages || [])]
-    }
 
     if (middlewareConfig.topicId && getEnableDeveloperMode()) {
       // TypeScript类型窄化：确保topicId是string类型
@@ -284,13 +250,13 @@ export default class AiProvider {
         plugins
       )
       logColdPathDiagnostic('renderer.provider.executorCreate', elapsedMs(tExecutor), {
-        category: classifyProviderConfigCategory(this.actualProvider),
+        category: 'other',
         providerId: providerConfig.providerId,
         ok: true
       })
     } catch (error) {
       logColdPathDiagnostic('renderer.provider.executorCreate', elapsedMs(tExecutor), {
-        category: classifyProviderConfigCategory(this.actualProvider),
+        category: 'other',
         providerId: providerConfig.providerId,
         ok: false
       })

@@ -604,14 +604,6 @@ const api = {
       ready: (): Promise<CatalogRecoveryReadyResult> => ipcRenderer.invoke(IpcChannel.CherryImport_CatalogReady)
     }
   },
-  anthropic_oauth: {
-    startOAuthFlow: () => ipcRenderer.invoke(IpcChannel.Anthropic_StartOAuthFlow),
-    completeOAuthWithCode: (code: string) => ipcRenderer.invoke(IpcChannel.Anthropic_CompleteOAuthWithCode, code),
-    cancelOAuthFlow: () => ipcRenderer.invoke(IpcChannel.Anthropic_CancelOAuthFlow),
-    getAccessToken: () => ipcRenderer.invoke(IpcChannel.Anthropic_GetAccessToken),
-    hasCredentials: () => ipcRenderer.invoke(IpcChannel.Anthropic_HasCredentials),
-    clearCredentials: () => ipcRenderer.invoke(IpcChannel.Anthropic_ClearCredentials)
-  },
   ocr: {
     ocr: (file: SupportedOcrFile, provider: OcrProvider): Promise<OcrResult> =>
       ipcRenderer.invoke(IpcChannel.OCR_ocr, file, provider),

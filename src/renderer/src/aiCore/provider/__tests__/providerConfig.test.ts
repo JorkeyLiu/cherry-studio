@@ -57,16 +57,9 @@ const createWindowKeyv = () => {
   }
 }
 
-const setupWindowMock = (options?: { withAnthropicOAuth?: boolean }) => {
-  const api: { anthropic_oauth?: { getAccessToken: ReturnType<typeof vi.fn> } } = {}
-  if (options?.withAnthropicOAuth) {
-    api.anthropic_oauth = {
-      getAccessToken: vi.fn().mockResolvedValue('mock-oauth-token')
-    }
-  }
-
+const setupWindowMock = () => {
   Object.defineProperty(globalThis, 'window', {
-    value: { ...globalThis.window, keyv: createWindowKeyv(), api },
+    value: { ...globalThis.window, keyv: createWindowKeyv(), api: {} },
     writable: true,
     configurable: true
   })
@@ -261,23 +254,48 @@ describe('adaptProvider', () => {
 
 describe('providerToAiSdkConfig (slice 3: protocol-based, no brand builders)', () => {
   beforeEach(() => {
-    setupWindowMock({ withAnthropicOAuth: true })
+    setupWindowMock()
     setupStoreMock()
     vi.clearAllMocks()
   })
 
-  describe('Anthropic OAuth builder (approved, type-based)', () => {
-    it('uses OAuth token for anthropic type with oauth mode', async () => {
+  describe('Anthropic protocol (standard API key, configured host)', () => {
+    it('uses the configured host and stored key with no bearer token or fixed official baseURL', async () => {
       const provider = makeProvider({
         id: 'my-anthropic',
         type: 'anthropic',
-        apiHost: 'https://api.anthropic.com',
-        authType: 'oauth'
+        apiHost: 'https://relay.example.com/v1',
+        apiKey: 'sk-relay-key'
       })
 
       const config = await providerToAiSdkConfig(provider, makeModel('claude-sonnet-4-5', provider.id))
 
       expect(config.providerId).toBe('anthropic')
+      const settings = config.providerSettings as {
+        baseURL?: string
+        apiKey?: string
+        headers?: Record<string, string>
+      }
+      expect(settings.baseURL).toBe('https://relay.example.com/v1')
+      expect(settings.apiKey).toBe('sk-relay-key')
+      expect(settings.headers?.Authorization).toBeUndefined()
+    })
+
+    it('treats a legacy oauth-marked connection as an ordinary API connection', async () => {
+      const provider = makeProvider({
+        id: 'legacy-oauth-marked',
+        type: 'anthropic',
+        apiHost: 'https://relay.example.com/v1',
+        apiKey: 'sk-stored-key',
+        authType: 'oauth'
+      } as never)
+
+      const config = await providerToAiSdkConfig(provider, makeModel('claude-sonnet-4-5', provider.id))
+
+      expect(config.providerId).toBe('anthropic')
+      const settings = config.providerSettings as { baseURL?: string; apiKey?: string }
+      expect(settings.baseURL).toBe('https://relay.example.com/v1')
+      expect(settings.apiKey).toBe('sk-stored-key')
     })
   })
 
