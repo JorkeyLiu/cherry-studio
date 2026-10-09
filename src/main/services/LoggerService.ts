@@ -10,6 +10,7 @@ import DailyRotateFile from 'winston-daily-rotate-file'
 import { isMainThread } from 'worker_threads'
 
 import { isDev } from '../constant'
+import { ensureStdPipeGuards, guardStdPipeWrite } from '../utils/stdPipeGuard'
 
 const ANSICOLORS = {
   RED: '\x1b[31m',
@@ -79,7 +80,9 @@ class LoggerService {
       ) {
         this.envLevel = process.env.CSLOGGER_MAIN_LEVEL as LogLevel
 
-        console.log(colorText(`[LoggerService] env CSLOGGER_MAIN_LEVEL loaded: ${this.envLevel}`, 'BLUE'))
+        guardStdPipeWrite('stdout', () => {
+          console.log(colorText(`[LoggerService] env CSLOGGER_MAIN_LEVEL loaded: ${this.envLevel}`, 'BLUE'))
+        })
       }
 
       // load env show module if exists
@@ -90,9 +93,14 @@ class LoggerService {
         if (showModules.length > 0) {
           this.envShowModules = showModules
 
-          console.log(
-            colorText(`[LoggerService] env CSLOGGER_MAIN_SHOW_MODULES loaded: ${this.envShowModules.join(' ')}`, 'BLUE')
-          )
+          guardStdPipeWrite('stdout', () => {
+            console.log(
+              colorText(
+                `[LoggerService] env CSLOGGER_MAIN_SHOW_MODULES loaded: ${this.envShowModules.join(' ')}`,
+                'BLUE'
+              )
+            )
+          })
         }
       }
     }
@@ -136,9 +144,18 @@ class LoggerService {
       transports
     })
 
-    // Handle transport events
+    // Broken dev-stdout/stderr pipe (EPIPE on Ctrl-C shutdown) must never
+    // become an uncaught exception: install the once-per-process async guards
+    // and wrap every synchronous console sink below. File transports stay
+    // outside the guard so durable logging always continues.
+    ensureStdPipeGuards()
+
+    // Handle transport events (console echo guarded: a broken stderr pipe
+    // swallows only the echo, never the transport error itself).
     this.logger.on('error', (error) => {
-      console.error('LoggerService fatal error:', error)
+      guardStdPipeWrite('stderr', () => {
+        console.error('LoggerService fatal error:', error)
+      })
     })
 
     //register ipc handler, for renderer process to log to main process
@@ -215,36 +232,51 @@ class LoggerService {
         moduleString = ` [${colorText(source.window || '', 'UNDERLINE')}::${colorText(source.module || '', 'UNDERLINE')}] `
       }
 
+      // Synchronous console sinks: swallow only the expected broken-pipe
+      // EPIPE (and stop that sink); unrelated errors propagate as Node would.
+      // The Winston file transports below always run.
       switch (level) {
         case LEVEL.ERROR:
-          console.error(
-            `${datetimeColored} ${colorText(colorText('<ERROR>', 'RED'), 'BOLD')}${moduleString}${message}`,
-            ...meta
-          )
+          guardStdPipeWrite('stderr', () => {
+            console.error(
+              `${datetimeColored} ${colorText(colorText('<ERROR>', 'RED'), 'BOLD')}${moduleString}${message}`,
+              ...meta
+            )
+          })
           break
         case LEVEL.WARN:
-          console.warn(
-            `${datetimeColored} ${colorText(colorText('<WARN>', 'YELLOW'), 'BOLD')}${moduleString}${message}`,
-            ...meta
-          )
+          guardStdPipeWrite('stderr', () => {
+            console.warn(
+              `${datetimeColored} ${colorText(colorText('<WARN>', 'YELLOW'), 'BOLD')}${moduleString}${message}`,
+              ...meta
+            )
+          })
           break
         case LEVEL.INFO:
-          console.info(
-            `${datetimeColored} ${colorText(colorText('<INFO>', 'GREEN'), 'BOLD')}${moduleString}${message}`,
-            ...meta
-          )
+          guardStdPipeWrite('stdout', () => {
+            console.info(
+              `${datetimeColored} ${colorText(colorText('<INFO>', 'GREEN'), 'BOLD')}${moduleString}${message}`,
+              ...meta
+            )
+          })
           break
         case LEVEL.DEBUG:
-          console.debug(
-            `${datetimeColored} ${colorText(colorText('<DEBUG>', 'BLUE'), 'BOLD')}${moduleString}${message}`,
-            ...meta
-          )
+          guardStdPipeWrite('stdout', () => {
+            console.debug(
+              `${datetimeColored} ${colorText(colorText('<DEBUG>', 'BLUE'), 'BOLD')}${moduleString}${message}`,
+              ...meta
+            )
+          })
           break
         case LEVEL.VERBOSE:
-          console.log(`${datetimeColored} ${colorText('<VERBOSE>', 'BOLD')}${moduleString}${message}`, ...meta)
+          guardStdPipeWrite('stdout', () => {
+            console.log(`${datetimeColored} ${colorText('<VERBOSE>', 'BOLD')}${moduleString}${message}`, ...meta)
+          })
           break
         case LEVEL.SILLY:
-          console.log(`${datetimeColored} ${colorText('<SILLY>', 'BOLD')}${moduleString}${message}`, ...meta)
+          guardStdPipeWrite('stdout', () => {
+            console.log(`${datetimeColored} ${colorText('<SILLY>', 'BOLD')}${moduleString}${message}`, ...meta)
+          })
           break
       }
     }

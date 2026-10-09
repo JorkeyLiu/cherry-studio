@@ -67,6 +67,7 @@ import {
   DEV_SYNC_SETTINGS_SEED_A_FILE,
   DEV_SYNC_SETTINGS_SEED_B_FILE
 } from './constants'
+import { ensureSupervisorStdoutGuard, writeSupervisorStdout } from './outputGuard'
 import {
   acquireSupervisorLock,
   createSessionId,
@@ -100,13 +101,17 @@ export interface SupervisorResult {
 }
 
 function logLine(text: string): void {
-  process.stdout.write(`${text}\n`)
+  // Guarded: a broken supervisor stdout pipe (EPIPE during Ctrl-C shutdown)
+  // is swallowed and stops the sink; unrelated errors still throw.
+  ensureSupervisorStdoutGuard()
+  writeSupervisorStdout(`${text}\n`)
 }
 
 function logPrefixed(prefix: string, chunk: Buffer | string): void {
+  ensureSupervisorStdoutGuard()
   const text = chunk.toString()
   for (const line of text.split('\n')) {
-    if (line.length > 0) process.stdout.write(`${prefix} ${line}\n`)
+    if (line.length > 0) writeSupervisorStdout(`${prefix} ${line}\n`)
   }
 }
 
