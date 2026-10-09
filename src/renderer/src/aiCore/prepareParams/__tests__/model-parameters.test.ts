@@ -421,7 +421,7 @@ describe('modelParameters', () => {
     })
   })
 
-  describe('getMaxTokens', () => {
+  describe('getMaxTokens (Anthropic adaptive: no budget default)', () => {
     it('returns undefined when maxTokens is not enabled', () => {
       const assistant = createAssistant({ enableMaxTokens: false, maxTokens: 128000 })
       const model = createModel({ id: 'claude-opus-4-6', provider: 'anthropic', group: 'claude' })
@@ -429,36 +429,43 @@ describe('modelParameters', () => {
       expect(getMaxTokens(assistant, model)).toBeUndefined()
     })
 
-    it('returns user-configured maxTokens for Claude 4.6 without subtraction', () => {
-      const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 128000 })
-      const model = createModel({ id: 'claude-opus-4-6', provider: 'anthropic', group: 'claude' })
-
-      expect(getMaxTokens(assistant, model)).toBe(128000)
-    })
-
-    it('returns user-configured maxTokens for Claude Sonnet 4.6 without subtraction', () => {
-      const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 64000 })
-      const model = createModel({ id: 'claude-sonnet-4-6', provider: 'anthropic', group: 'claude' })
-
-      expect(getMaxTokens(assistant, model)).toBe(64000)
-    })
-
     it.each([
-      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' }
-    ])('returns user-configured maxTokens for $name without subtraction', ({ id }) => {
+      { id: 'claude-opus-4-6' },
+      { id: 'claude-sonnet-4-6' },
+      { id: 'claude-opus-4-7' },
+      { id: 'claude-opus-4-8' }
+    ])('returns user-configured maxTokens for $id without subtraction (anthropic)', ({ id }) => {
       const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 128000 })
       const model = createModel({ id, provider: 'anthropic', group: 'claude' })
 
       expect(getMaxTokens(assistant, model)).toBe(128000)
     })
 
-    it('subtracts thinking budget for non-4.6 Claude models with anthropic provider', () => {
+    it.each([{ id: 'claude-sonnet-4' }, { id: 'claude-3-7-sonnet-20250219' }])(
+      'returns user-configured maxTokens for old Claude $id without subtraction (anthropic adaptive, no budget)',
+      ({ id }) => {
+        const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 16384 })
+        const model = createModel({ id, provider: 'anthropic', group: 'claude' })
+
+        expect(getMaxTokens(assistant, model)).toBe(16384)
+      }
+    )
+
+    it.each([{ id: 'router-opaque-9f3' }, { id: 'kimi-reasoning-model' }])(
+      'returns user-configured maxTokens for arbitrary non-Claude $id without subtraction (anthropic)',
+      ({ id }) => {
+        const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 16384 })
+        const model = createModel({ id, provider: 'anthropic', group: 'custom' })
+
+        expect(getMaxTokens(assistant, model)).toBe(16384)
+      }
+    )
+
+    it('preserves retired Bedrock math for legacy Claude models', () => {
       const assistant = createAssistant({ enableMaxTokens: true, maxTokens: 16384 })
-      const model = createModel({ id: 'claude-sonnet-4', provider: 'anthropic', group: 'claude' })
+      const model = createModel({ id: 'claude-sonnet-4', provider: 'aws-bedrock', group: 'claude' })
 
       const result = getMaxTokens(assistant, model)
-      // Non-4.6 Claude thinking models should have budget subtracted
       expect(result).toBeDefined()
       expect(result!).toBeLessThan(16384)
     })

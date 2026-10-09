@@ -67,7 +67,7 @@ import {
   Bug,
   Check,
   CirclePause,
-  Copy,
+  CopyPlus,
   Languages,
   Menu,
   MessageSquarePlus,
@@ -400,7 +400,7 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
 
   const onNewBranch = useCallback(async () => {
     // NEW_BRANCH contract is ID-based; the listener reports success/failure toasts
-    // only after the async branch operation completes. Legacy Copy Topic
+    // only after the async branch operation completes. Legacy Clone Topic
     // (clone-prefix) semantics are unchanged.
     await emitNewBranch(message.id)
   }, [message.id])
@@ -532,17 +532,62 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     return findMainTextBlocks(message).length > 0 || isAssistantInterruptedThinkingOnlyMessage(message) // 使用 MCP Server 后会有大于一段 MatinTextBlock
   }, [message])
 
+  // BRANCH-12 group capability for assistant answer members: every loaded
+  // assistant member must be owned, otherwise group-mutating actions
+  // (mention-model append, useful toggle) hide fail-closed. Reading the
+  // loaded user root never blocks. Non-assistant messages and assistants
+  // without a group key are unaffected. Computed before the More menu so the
+  // overflow `useful` entry reuses the exact toolbar display conditions.
+  const isGroupMutableForMenu = useSelector((state: RootState) => {
+    try {
+      if (message.role !== 'assistant' || typeof message.askId !== 'string' || message.askId.length === 0) return true
+      const group = resolveLoadedAnswerGroup(state, topic.id, message.id)
+      if (!group) return false
+      return isLoadedAnswerGroupMutable(state, topic.id, group)
+    } catch {
+      return false
+    }
+  })
+
+  const onUseful = useCallback(() => {
+    // BRANCH-12: non-owned group useful toggles are inert (the menu entry
+    // hides; this is defense-in-depth for keyboard/programmatic callers).
+    if (!isGroupMutableForMenu) return
+    onUpdateUseful?.(message.id)
+  }, [isGroupMutableForMenu, message.id, onUpdateUseful])
+
   const dropdownItems = useMemo(() => {
-    // More menu (overflow): Copy Topic stays; Translate and Save to Notes
+    // More menu (overflow): Clone Topic stays; Translate and Save to Notes
     // moved here from visible buttons; Edit/Insert moved OUT to visible
-    // toolbar renderers (`assistant-edit`/`assistant-insert`).
+    // toolbar renderers (`assistant-edit`/`assistant-insert`). The grouped
+    // assistant `useful` toggle also lives here (directly after Clone Topic),
+    // never as a visible toolbar button.
+    const showUsefulMenuItem = isAssistantMessage && (isGrouped ?? false) && isGroupMutableForMenu
     const items: MenuProps['items'] = [
       {
         label: <span data-testid="message-copy-topic-btn">{t('chat.message.copy_topic.label')}</span>,
         key: 'copy-topic',
-        icon: <Copy size={15} />,
+        icon: <CopyPlus size={15} />,
         onClick: onNewBranch
       },
+      ...(showUsefulMenuItem
+        ? [
+            {
+              label: (
+                <span data-testid="msg-useful-menu-btn" data-selected={message.useful ? 'true' : 'false'}>
+                  {t('chat.message.useful.label')}
+                </span>
+              ),
+              key: 'useful',
+              icon: message.useful ? (
+                <ThumbsUp size={15} fill="var(--color-primary)" strokeWidth={0} />
+              ) : (
+                <ThumbsUp size={15} />
+              ),
+              onClick: onUseful
+            }
+          ]
+        : []),
       // Overflow stop: translate lives in the More menu, so while a
       // translation is streaming the entry itself becomes the stop action —
       // the only in-menu way to abort. Idle state keeps the language submenu.
@@ -726,12 +771,16 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
     exportMenuOptions.siyuan,
     exportMenuOptions.yuque,
     handleTranslate,
+    isAssistantMessage,
+    isGrouped,
+    isGroupMutableForMenu,
     isTranslating,
     mainTextContent,
     message,
     messageContainerRef,
     notesPath,
     onNewBranch,
+    onUseful,
     t,
     topic.name,
     translateLanguages
@@ -791,29 +840,6 @@ const MessageMenubarInner: FC<Omit<Props, 'assistant'> & { assistant: MessageAss
   const canInsert = isAssistantMessage && !isBranchMetadataMissing && (isMutableForMenu || isForkAnchor)
   trueBranchGateRef.current = canTrueBranch
   insertGateRef.current = canInsert
-  // BRANCH-12 group capability for assistant answer members: every loaded
-  // assistant member must be owned, otherwise
-  // group-mutating buttons (mention-model append, useful) hide fail-closed.
-  // Reading the loaded user root never blocks. Non-assistant messages and
-  // assistants without a group key are unaffected.
-  const isGroupMutableForMenu = useSelector((state: RootState) => {
-    try {
-      if (message.role !== 'assistant' || typeof message.askId !== 'string' || message.askId.length === 0) return true
-      const group = resolveLoadedAnswerGroup(state, topic.id, message.id)
-      if (!group) return false
-      return isLoadedAnswerGroupMutable(state, topic.id, group)
-    } catch {
-      return false
-    }
-  })
-
-  const onUseful = useCallback(() => {
-    // BRANCH-12: non-owned group useful toggles are inert (the button hides,
-    // this is defense-in-depth for keyboard/programmatic callers).
-    if (!isGroupMutableForMenu) return
-    onUpdateUseful?.(message.id)
-  }, [isGroupMutableForMenu, message.id, onUpdateUseful])
-
   const buttonContext: MessageMenubarButtonContext = {
     assistant,
     blockEntities,
@@ -1212,31 +1238,12 @@ const buttonRenderers: Record<MessageMenubarButtonId, MessageMenubarButtonRender
       </Dropdown>
     )
   },
-  useful: ({ isAssistantMessage, isGrouped, isGroupMutable, onUseful, softHoverBg, message, t }) => {
-    if (!isAssistantMessage || !isGrouped) {
-      return null
-    }
-    // BRANCH-12: the useful toggle clears/sets the whole group
-    // atomically — hide when any loaded assistant member is non-owned.
-    if (!isGroupMutable) {
-      return null
-    }
-
-    return (
-      <Tooltip title={t('chat.message.useful.label')} mouseEnterDelay={0.8}>
-        <ActionButton
-          className="message-action-button"
-          data-testid="msg-useful-btn"
-          onClick={onUseful}
-          $softHoverBg={softHoverBg}>
-          {message.useful ? (
-            <ThumbsUp size={17.5} fill="var(--color-primary)" strokeWidth={0} />
-          ) : (
-            <ThumbsUp size={15} />
-          )}
-        </ActionButton>
-      </Tooltip>
-    )
+  useful: () => {
+    // The grouped-assistant `useful` toggle lives in the More menu
+    // (dropdownItems `useful` entry, directly after Clone Topic). The visible
+    // toolbar never renders it. This stub stays so the stable button id keeps
+    // a registered renderer; the registry no longer lists it as visible.
+    return null
   },
   notes: ({ isAssistantMessage, softHoverBg, message, notesPath, t }) => {
     if (!isAssistantMessage) {

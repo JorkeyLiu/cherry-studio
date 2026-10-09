@@ -109,14 +109,20 @@ export function getMaxTokens(assistant: Assistant, model: Model): number | undef
     // Unconfigured model/provider: fail explicitly before any provider/API access.
     return undefined
   }
-  // Claude 4.6 / Opus 4.7+ use adaptive thinking and do not send budgetTokens, so the
-  // AI SDK does not add budget back to maxOutputTokens. Skip the subtraction to avoid
-  // incorrectly reducing max_tokens.
+  // Anthropic protocol always returns the configured limit unchanged: the new
+  // default is adaptive thinking with no budget, so the SDK adds nothing back
+  // and no subtraction is needed. Explicit custom enabled opt-out still wins
+  // in providerOptions; this function never reinterprets that intent.
+  if (provider.type === 'anthropic') {
+    return maxTokens
+  }
+  // Retired AWS Bedrock path: keep prior math to avoid unrelated protocol
+  // scope. Model heuristic stays ONLY within this legacy branch.
   if (
+    ['aws-bedrock'].includes(provider.type) &&
     isSupportedThinkingTokenClaudeModel(model) &&
     !isClaude46SeriesModel(model) &&
-    !isSupportAdaptiveThinkingClaudeModel(model) &&
-    ['anthropic', 'aws-bedrock'].includes(provider.type)
+    !isSupportAdaptiveThinkingClaudeModel(model)
   ) {
     const { reasoning_effort: reasoningEffort } = assistantSettings
     const budget = getThinkingBudget(maxTokens, reasoningEffort, model.id)

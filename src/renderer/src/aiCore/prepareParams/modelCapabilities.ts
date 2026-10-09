@@ -70,17 +70,38 @@ export function supportsImageInput(model: Model): boolean {
 /**
  * Single source of truth for audio/video encodability.
  *
- * - OpenAI Chat (`openai-chat`) / generic compatible (`openai-compatible`):
- *   strictly `.wav`/`.mp3` only. `.mp3` already resolves to `audio/mpeg`;
- *   `.mpeg`/`.mpga` extensions are never admitted even though they share the
- *   same MIME.
+ * - Official OpenAI Chat (`openai-chat`): strictly `.wav`/`.mp3` only.
+ *   `.mp3` already resolves to `audio/mpeg`; `.mpeg`/`.mpga` extensions are
+ *   never admitted even though they share the same MIME.
+ * - Generic compatible (`openai-compatible`): `.wav`/`.mp3` plus `.ogg`/
+ *   `.flac`/`.aac` with reliable MIME mappings. The maintained SDK patch maps
+ *   them to `input_audio { data, format: 'ogg' | 'flac' | 'aac' }` per the
+ *   Chat Completions audio shape; support is adjudicated upstream
+ *   (MM-3/MM-4/MM-11: enrichment-only, lazy send, upstream-final; never
+ *   metadata-gated, no transcode, no connection change).
  * - Gemini (`google`): only extensions with a reliable MIME mapping that the
  *   SDK can encode (wav/mp3/ogg/flac/aac audio, mp4/mov/webm video).
+ * - Generic compatible (`openai-compatible`): video (mp4/mov/webm) is encoded
+ *   as `video_url` and left for upstream to adjudicate (same governance).
  * - Responses (`openai`) and Anthropic (`anthropic`): no audio/video.
+ * - Official OpenAI Chat (`openai-chat`): no video (unchanged).
+ *
+ * Authority: Chat Completions `input_audio` shape + common formats
+ * (wav/mp3/aiff/aac/ogg/flac/m4a/pcm16/pcm24) per
+ * https://openrouter.ai/docs/guides/overview/multimodal/audio.md
+ * (verified 2026-10-08); official OpenAI stays wav/mp3-only.
  */
 export const OPENAI_AUDIO_MIME_BY_EXT: Record<string, string> = {
   '.wav': 'audio/wav',
   '.mp3': 'audio/mpeg'
+}
+
+export const COMPATIBLE_AUDIO_MIME_BY_EXT: Record<string, string> = {
+  '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.flac': 'audio/flac',
+  '.aac': 'audio/aac'
 }
 
 export const GEMINI_AUDIO_MIME_BY_EXT: Record<string, string> = {
@@ -110,7 +131,10 @@ export function resolveAudioMime(ext?: string, aiSdkId?: string): string | undef
   if (aiSdkId === 'google') {
     return GEMINI_AUDIO_MIME_BY_EXT[normalized]
   }
-  if (aiSdkId === 'openai-chat' || aiSdkId === 'openai-compatible') {
+  if (aiSdkId === 'openai-compatible') {
+    return COMPATIBLE_AUDIO_MIME_BY_EXT[normalized]
+  }
+  if (aiSdkId === 'openai-chat') {
     return OPENAI_AUDIO_MIME_BY_EXT[normalized]
   }
   if (aiSdkId === undefined) {
@@ -134,7 +158,9 @@ export function supportsAudioInput(model: Model, ext?: string): boolean {
 
 export function supportsVideoInput(model: Model, ext?: string): boolean {
   const aiSdkId = audioVideoAdapter(model)
-  if (aiSdkId !== 'google') return false
+  // Gemini and generic OpenAI-compatible encode video (mp4/mov/webm only);
+  // official OpenAI Chat / Responses / Anthropic encode no video.
+  if (aiSdkId !== 'google' && aiSdkId !== 'openai-compatible') return false
   // Same mapping as the encoder: only mp4/mov/webm are reliably encodable.
   return resolveVideoMime(ext) !== undefined
 }

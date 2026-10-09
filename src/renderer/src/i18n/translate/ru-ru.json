@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "[to be translated]:Insert Messages",
@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "[to be translated]:Media player: {{name}}",
-      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
-      "open_with_default_app": "[to be translated]:Open with default app",
+      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but it can still be sent",
       "pasted_image": "Вырезанное изображение",
       "pasted_text": "Вырезанный текст",
       "remove_attachment": "[to be translated]:Remove attachment",
@@ -5261,28 +5260,6 @@
         "type_anthropic": "[to be translated]:Anthropic",
         "type_gemini": "[to be translated]:Gemini",
         "type_openai_compatible": "[to be translated]:OpenAI Compatible"
-      },
-      "anthropic": {
-        "apikey": "API-ключ",
-        "auth_failed": "Ошибка аутентификации Anthropic",
-        "auth_method": "Способ аутентификации",
-        "auth_success": "Аутентификация Anthropic OAuth успешна",
-        "authenticated": "Подтверждено",
-        "authenticating": "Выполняется аутентификация",
-        "cancel": "Отмена",
-        "code_error": "Неверный код авторизации, попробуйте еще раз",
-        "code_placeholder": "Пожалуйста, введите код авторизации, отображаемый в браузере",
-        "code_required": "Код авторизации не может быть пустым",
-        "description": "OAuth аутентификация",
-        "description_detail": "Чтобы использовать этот способ аутентификации, вам необходимо подписаться на Claude Pro или более высокую версию.",
-        "enter_auth_code": "Код авторизации",
-        "logout": "Выйти",
-        "logout_failed": "Ошибка выхода, попробуйте еще раз",
-        "logout_success": "Успешно вышли из Anthropic",
-        "oauth": "веб OAuth",
-        "oauth_disabled_warning": "Anthropic временно приостановила использование Claude через OAuth. Этот метод аутентификации в настоящее время недоступен. Пожалуйста, используйте ключ API на данный момент.",
-        "start_auth": "Начать авторизацию",
-        "submit_code": "Завершить вход"
       },
       "anthropic_api_host": "Адрес API Anthropic",
       "anthropic_api_host_preview": "Предпросмотр Anthropic: {{url}}",

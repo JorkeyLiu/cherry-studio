@@ -294,15 +294,15 @@ function buildOpenAIProviderOptions(
  */
 function buildAnthropicProviderOptions(
   assistant: Assistant,
-  model: Model,
+  _model: Model,
   capabilities: Pick<ProviderCapabilities, 'enableReasoning' | 'enableWebSearch' | 'enableGenerateImage'>
 ): Record<string, AnthropicProviderOptions> {
   const { enableReasoning } = capabilities
   let providerOptions: AnthropicProviderOptions = {}
 
-  // Anthropic 推理参数
+  // Anthropic 推理参数 (identity-independent: effort only, no model lookup)
   if (enableReasoning) {
-    const reasoningParams = getAnthropicReasoningParams(assistant, model)
+    const reasoningParams = getAnthropicReasoningParams(assistant)
     providerOptions = {
       ...providerOptions,
       ...reasoningParams

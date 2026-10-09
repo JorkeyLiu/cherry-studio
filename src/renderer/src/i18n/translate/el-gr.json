@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "[to be translated]:Insert Messages",
@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "[to be translated]:Media player: {{name}}",
-      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
-      "open_with_default_app": "[to be translated]:Open with default app",
+      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but it can still be sent",
       "pasted_image": "Εικόνα στο πινάκιδα",
       "pasted_text": "Κείμενο στο πινάκιδα",
       "remove_attachment": "[to be translated]:Remove attachment",
@@ -5261,28 +5260,6 @@
         "type_anthropic": "[to be translated]:Anthropic",
         "type_gemini": "[to be translated]:Gemini",
         "type_openai_compatible": "[to be translated]:OpenAI Compatible"
-      },
-      "anthropic": {
-        "apikey": "Κλειδί API",
-        "auth_failed": "Αποτυχία πιστοποίησης ταυτότητας Anthropic",
-        "auth_method": "Τρόπος πιστοποίησης",
-        "auth_success": "Η πιστοποίηση OAuth της Anthropic ήταν επιτυχής",
-        "authenticated": "Επαληθευμένο",
-        "authenticating": "Επαλήθευση σε εξέλιξη",
-        "cancel": "Ακύρωση",
-        "code_error": "Μη έγκυρος κωδικός εξουσιοδότησης, δοκιμάστε ξανά",
-        "code_placeholder": "Παρακαλώ εισαγάγετε τον κωδικό εξουσιοδότησης που εμφανίζεται στον περιηγητή σας",
-        "code_required": "Ο κωδικός εξουσιοδότησης δεν μπορεί να είναι κενός",
-        "description": "Πιστοποίηση OAuth",
-        "description_detail": "Για να χρησιμοποιήσετε αυτόν τον τρόπο επαλήθευσης, πρέπει να είστε συνδρομητής Claude Pro ή έκδοσης μεγαλύτερης από αυτήν",
-        "enter_auth_code": "κωδικός εξουσιοδότησης",
-        "logout": "Αποσύνδεση λογαριασμού",
-        "logout_failed": "Η αποσύνδεση απέτυχε, δοκιμάστε ξανά.",
-        "logout_success": "Επιτυχής αποσύνδεση από το Anthropic",
-        "oauth": "ιστοσελίδα OAuth",
-        "oauth_disabled_warning": "Η Anthropic ανέστειλε προσωρινά τη χρήση του Claude μέσω OAuth. Αυτή η μέθοδος ελέγχου ταυτότητας είναι προς το παρόν μη διαθέσιμη. Παρακαλούμε χρησιμοποιήστε ένα κλειδί API προς το παρόν.",
-        "start_auth": "Έναρξη εξουσιοδότησης",
-        "submit_code": "Ολοκληρώστε την σύνδεση"
       },
       "anthropic_api_host": "Διεύθυνση API Anthropic",
       "anthropic_api_host_preview": "Προεπισκόπηση Anthropic: {{url}}",

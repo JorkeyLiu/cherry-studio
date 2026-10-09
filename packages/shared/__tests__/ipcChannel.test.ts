@@ -1,8 +1,9 @@
 /**
- * IpcChannel retired provider surface (slice 3).
+ * IpcChannel retired provider surface.
  *
- * Contract: no Copilot or VertexAI IPC channels exist on either side of the
- * Main/preload boundary, while the Anthropic OAuth channels remain.
+ * Contract: no Copilot, VertexAI, or Anthropic OAuth IPC channels exist on
+ * either side of the Main/preload boundary. Every connection authenticates
+ * with its configured API key and host.
  */
 import { describe, expect, it } from 'vitest'
 
@@ -21,12 +22,14 @@ describe('IpcChannel retired provider surface', () => {
     expect((IpcChannel as Record<string, unknown>).VertexAI_GetAuthHeaders).toBeUndefined()
   })
 
-  it('retains the Anthropic OAuth channels', () => {
-    expect(IpcChannel.Anthropic_StartOAuthFlow).toBe('anthropic:start-oauth-flow')
-    expect(IpcChannel.Anthropic_CompleteOAuthWithCode).toBe('anthropic:complete-oauth-with-code')
-    expect(IpcChannel.Anthropic_CancelOAuthFlow).toBe('anthropic:cancel-oauth-flow')
-    expect(IpcChannel.Anthropic_GetAccessToken).toBe('anthropic:get-access-token')
-    expect(IpcChannel.Anthropic_HasCredentials).toBe('anthropic:has-credentials')
-    expect(IpcChannel.Anthropic_ClearCredentials).toBe('anthropic:clear-credentials')
+  it('exposes no Anthropic OAuth channels', () => {
+    const values = Object.values(IpcChannel) as string[]
+    expect(values.filter((v) => v.startsWith('anthropic:'))).toEqual([])
+    expect((IpcChannel as Record<string, unknown>).Anthropic_StartOAuthFlow).toBeUndefined()
+    expect((IpcChannel as Record<string, unknown>).Anthropic_CompleteOAuthWithCode).toBeUndefined()
+    expect((IpcChannel as Record<string, unknown>).Anthropic_CancelOAuthFlow).toBeUndefined()
+    expect((IpcChannel as Record<string, unknown>).Anthropic_GetAccessToken).toBeUndefined()
+    expect((IpcChannel as Record<string, unknown>).Anthropic_HasCredentials).toBeUndefined()
+    expect((IpcChannel as Record<string, unknown>).Anthropic_ClearCredentials).toBeUndefined()
   })
 })

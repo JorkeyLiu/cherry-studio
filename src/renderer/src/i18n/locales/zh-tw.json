@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "插入訊息",
@@ -1177,7 +1177,7 @@
         "label": "[to be translated]:Create Branch"
       },
       "useful": {
-        "label": "設為上下文",
+        "label": "選入上下文",
         "tip": "在這組訊息中，該訊息將被選擇加入上下文"
       }
     },
@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "媒體播放器：{{name}}",
-      "media_unsupported_format": "{{format}} 格式無法在應用內播放，但仍可傳送並使用預設應用程式開啟",
-      "open_with_default_app": "使用預設應用程式開啟",
+      "media_unsupported_format": "{{format}} 格式無法在應用內播放，但仍可傳送",
       "pasted_image": "剪貼簿圖片",
       "pasted_text": "剪貼簿檔案",
       "remove_attachment": "移除附件",
@@ -5261,28 +5260,6 @@
         "type_anthropic": "[to be translated]:Anthropic",
         "type_gemini": "[to be translated]:Gemini",
         "type_openai_compatible": "[to be translated]:OpenAI Compatible"
-      },
-      "anthropic": {
-        "apikey": "API 金鑰",
-        "auth_failed": "Anthropic 身份驗證失敗",
-        "auth_method": "認證方式",
-        "auth_success": "Anthropic OAuth 認證成功",
-        "authenticated": "已認證",
-        "authenticating": "正在認證",
-        "cancel": "取消",
-        "code_error": "無效的授權碼，請重試",
-        "code_placeholder": "請輸入瀏覽器中顯示的授權碼",
-        "code_required": "授權碼不能為空",
-        "description": "OAuth 身份認證",
-        "description_detail": "您需要訂閱 Claude Pro 或更高版本才能使用此認證方式",
-        "enter_auth_code": "授權碼",
-        "logout": "登出",
-        "logout_failed": "登出失敗，請重試",
-        "logout_success": "成功登出 Anthropic",
-        "oauth": "網頁 OAuth",
-        "oauth_disabled_warning": "Anthropic 已暫時中止透過 OAuth 使用 Claude。此驗證方式目前無法使用。請暫時使用 API 金鑰。",
-        "start_auth": "開始授權",
-        "submit_code": "完成登入"
       },
       "anthropic_api_host": "Anthropic API 主機位址",
       "anthropic_api_host_preview": "Anthropic 預覽：{{url}}",

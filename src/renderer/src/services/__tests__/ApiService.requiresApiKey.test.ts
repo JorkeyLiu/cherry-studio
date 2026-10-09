@@ -94,8 +94,11 @@ describe('hasApiKey honors the explicit per-connection option', () => {
     expect(hasApiKey(baseProvider({ apiKey: 'sk-live', apiOptions: { requiresApiKey: true } }))).toBe(true)
   })
 
-  it('treats OAuth as no-key where applicable regardless of stored key', () => {
-    expect(hasApiKey(baseProvider({ apiKey: '', authType: 'oauth', type: 'anthropic' }))).toBe(true)
+  it('treats a legacy oauth-marked connection as an ordinary API connection: missing key is rejected', () => {
+    // Historical `authType: 'oauth'` is inert. Stored key/host/models/id are
+    // preserved, but there is no missing-key bypass and no OAuth token read.
+    expect(hasApiKey(baseProvider({ apiKey: '', authType: 'oauth', type: 'anthropic' }))).toBe(false)
+    expect(hasApiKey(baseProvider({ apiKey: 'sk-live', authType: 'oauth', type: 'anthropic' }))).toBe(true)
   })
 
   it('uses the explicit option, not brand ids/types', () => {
@@ -120,8 +123,8 @@ describe('checkApiProvider honors the explicit per-connection option', () => {
     expect(() => checkApiProvider(baseProvider({ apiKey: '', apiOptions: { requiresApiKey: true } }))).toThrow()
   })
 
-  it('passes for OAuth without a stored key', () => {
-    expect(() => checkApiProvider(baseProvider({ apiKey: '', authType: 'oauth', type: 'anthropic' }))).not.toThrow()
+  it('rejects a legacy oauth-marked connection without a stored key', () => {
+    expect(() => checkApiProvider(baseProvider({ apiKey: '', authType: 'oauth', type: 'anthropic' }))).toThrow()
   })
 
   it('still requires host and models even when no key is required', () => {

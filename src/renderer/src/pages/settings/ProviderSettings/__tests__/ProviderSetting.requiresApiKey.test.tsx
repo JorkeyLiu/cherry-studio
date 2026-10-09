@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const updateProviderMock = vi.fn()
-const showAnthropicMarker = 'anthropic-settings-stub'
 
 vi.mock('@renderer/aiCore/provider/providerConfig', () => ({
   adaptProvider: ({ provider }: any) => provider
@@ -26,14 +25,10 @@ vi.mock('@renderer/components/TooltipIcons', () => ({
 vi.mock('@renderer/config/models', () => ({ isRerankModel: () => false }))
 vi.mock('@renderer/context/ThemeProvider', () => ({ useTheme: () => ({ theme: 'light' }) }))
 vi.mock('@renderer/hooks/useTimer', () => ({ useTimer: () => ({ setTimeoutTimer: vi.fn() }) }))
-vi.mock('@renderer/pages/settings/ProviderSettings/AnthropicSettings', () => ({
-  default: () => <div data-testid={showAnthropicMarker} />
-}))
 vi.mock('@renderer/pages/settings/ProviderSettings/ModelList', () => ({
   ModelList: () => <div />
 }))
 vi.mock('@renderer/services/ApiService', () => ({ checkApi: vi.fn() }))
-vi.mock('@renderer/services/ProviderService', () => ({ isProviderSupportAuth: () => false }))
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<any>()
   return { ...actual, useTranslation: () => ({ t: (k: string) => k, i18n: { t: (k: string) => k } }) }
@@ -49,14 +44,13 @@ vi.mock('@renderer/hooks/useProvider', () => ({
     const id = providerState.current
     const base: any = {
       id,
-      type: id === 'anthropic-oauth' ? 'anthropic' : id === 'gemini-conn' ? 'gemini' : 'openai',
+      type: id === 'anthropic-conn' ? 'anthropic' : id === 'gemini-conn' ? 'gemini' : 'openai',
       name: id,
       apiKey: id === 'stored-key-conn' ? 'sk-stored-keep' : '',
       apiHost: 'https://api.example.com',
       models: [],
       enabled: true,
-      apiOptions: {},
-      authType: id === 'anthropic-oauth' ? 'oauth' : 'apiKey'
+      apiOptions: {}
     }
     if (id === 'no-key-conn') {
       base.apiOptions = { requiresApiKey: false }
@@ -141,14 +135,17 @@ describe('ProviderSetting requiresApiKey control — removed from API Key sectio
     expect(screen.getByPlaceholderText('settings.provider.api_key.label')).toBeInTheDocument()
   })
 
-  it('preserves OAuth special handling: API key row hidden when anthropic oauth (and Require switch absent there)', async () => {
-    providerState.current = 'anthropic-oauth'
-    render(<ProviderSetting providerId="anthropic-oauth" />)
-    expect(await screen.findByTestId(showAnthropicMarker)).toBeInTheDocument()
-    expect(screen.queryByPlaceholderText('settings.provider.api_key.label')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('settings.provider.require_api_key.label')).not.toBeInTheDocument()
-    expect(screen.queryByText('settings.provider.require_api_key.tip')).not.toBeInTheDocument()
-    expect(screen.queryByText('settings.provider.check')).not.toBeInTheDocument()
+  it('renders the standard API key/host/check UI for an anthropic-protocol connection with no auth selector or OAuth pane', async () => {
+    providerState.current = 'anthropic-conn'
+    render(<ProviderSetting providerId="anthropic-conn" />)
+    // Standard API key row is present and enabled (requiresApiKey unset defaults to true)
+    const input = screen.getByPlaceholderText('settings.provider.api_key.label') as HTMLInputElement
+    expect(input.disabled).toBe(false)
+    expect(screen.getByText('settings.provider.check')).toBeInTheDocument()
+    // No auth-method selector and no OAuth UI remain
+    expect(screen.queryByText('settings.provider.anthropic.auth_method')).not.toBeInTheDocument()
+    expect(screen.queryByText('settings.provider.anthropic.oauth')).not.toBeInTheDocument()
+    expect(screen.queryByText('settings.provider.anthropic.apikey')).not.toBeInTheDocument()
   })
 })
 
@@ -194,13 +191,5 @@ describe('ApiOptionsSettings requiresApiKey row — relocated control', () => {
     providerState.current = 'gemini-conn'
     render(<ApiOptionsSettings providerId="gemini-conn" />)
     expect(await screen.findByLabelText('settings.provider.require_api_key.label')).toBeInTheDocument()
-  })
-})
-
-describe('Anthropic OAuth settings', () => {
-  it('still renders when authType is oauth', async () => {
-    providerState.current = 'anthropic-oauth'
-    render(<ProviderSetting providerId="anthropic-oauth" />)
-    expect(await screen.findByTestId(showAnthropicMarker)).toBeInTheDocument()
   })
 })

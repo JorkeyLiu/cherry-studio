@@ -114,8 +114,6 @@ export {
  * Protocol-neutral per-connection API-key requirement.
  * Returns `true` unless the connection explicitly opts out via
  * `apiOptions.requiresApiKey === false`. Unset defaults to requiring a key.
- * OAuth (`authType === 'oauth'`) is handled by callers as a no-key path
- * where applicable; this helper reports only the explicit option.
  */
 export function isApiKeyRequired(provider: Provider): boolean {
   return provider.apiOptions?.requiresApiKey !== false

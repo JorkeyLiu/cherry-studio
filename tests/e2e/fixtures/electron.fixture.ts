@@ -57,12 +57,17 @@ import {
   type VerifyChatDbOutcome
 } from '../utils/query-chat-db-electron'
 import {
+  clearMockAnthropicThinkingBehaviors,
   clearRequestLog,
   createMockServer,
+  findAnthropicRequestAfter,
+  findAnthropicRequestsAfter,
   findProductRequest,
   findProductRequestAfter,
+  getMockAnthropicThinkingBehavior,
   getRequestLog,
   getRequestSequence,
+  setMockAnthropicThinkingBehavior,
   stopMockServer
 } from './mock-openai-server'
 
@@ -324,7 +329,18 @@ export const test = base.extend<ElectronFixtures>({
 })
 
 export { expect } from '@playwright/test'
-export { getRequestLog, clearRequestLog, findProductRequest, findProductRequestAfter, getRequestSequence }
+export {
+  getRequestLog,
+  clearRequestLog,
+  findProductRequest,
+  findProductRequestAfter,
+  findAnthropicRequestAfter,
+  findAnthropicRequestsAfter,
+  getRequestSequence,
+  setMockAnthropicThinkingBehavior,
+  clearMockAnthropicThinkingBehaviors,
+  getMockAnthropicThinkingBehavior
+}
 // NOTE: getRuntimeAppDataPath/getUserDataDir are already exported at their
 // declarations above — a redundant `export { ... }` list here would be a
 // TS2323/TS2484 double-export under strict typechecking.

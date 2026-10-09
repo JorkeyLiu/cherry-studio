@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "[to be translated]:Insert Messages",
@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "[to be translated]:Media player: {{name}}",
-      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
-      "open_with_default_app": "[to be translated]:Open with default app",
+      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but it can still be sent",
       "pasted_image": "クリップボード画像",
       "pasted_text": "クリップボードファイル",
       "remove_attachment": "[to be translated]:Remove attachment",
@@ -5261,28 +5260,6 @@
         "type_anthropic": "[to be translated]:Anthropic",
         "type_gemini": "[to be translated]:Gemini",
         "type_openai_compatible": "[to be translated]:OpenAI Compatible"
-      },
-      "anthropic": {
-        "apikey": "API キー",
-        "auth_failed": "Anthropic 身份验证に失敗しました",
-        "auth_method": "認証方法",
-        "auth_success": "Anthropic OAuth 認証が成功しました",
-        "authenticated": "認証済み",
-        "authenticating": "認証中です",
-        "cancel": "取消",
-        "code_error": "無効な認証コードです。もう一度お試しください",
-        "code_placeholder": "ブラウザに表示されている認証コードを入力してください",
-        "code_required": "認証コードは空にできません",
-        "description": "OAuth 認証",
-        "description_detail": "Claude Pro 以上にサブスクライブする必要があります。この認証方法を使用するには。",
-        "enter_auth_code": "認証コード",
-        "logout": "ログアウト",
-        "logout_failed": "ログアウトに失敗しました。もう一度お試しください",
-        "logout_success": "Anthropic からログアウトしました",
-        "oauth": "WebページOAuth",
-        "oauth_disabled_warning": "Anthropicは、OAuth経由でのClaudeの利用を一時的に停止しました。この認証方法は現在ご利用いただけません。今のところはAPIキーをご利用ください。",
-        "start_auth": "開始承認",
-        "submit_code": "ログインを完了する"
       },
       "anthropic_api_host": "Anthropic APIアドレス",
       "anthropic_api_host_preview": "Anthropic プレビュー：{{url}}",

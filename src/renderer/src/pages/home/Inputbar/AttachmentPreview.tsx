@@ -20,7 +20,7 @@ import { useAttachment } from '@renderer/hooks/useAttachment'
 import FileManager from '@renderer/services/FileManager'
 import type { FileMetadata } from '@renderer/types'
 import { formatFileSize } from '@renderer/utils'
-import { buildMediaOpenRequest, getMediaKind, toMediaFileUrl } from '@renderer/utils/mediaAttachment'
+import { getMediaKind, toMediaFileUrl } from '@renderer/utils/mediaAttachment'
 import { Button, Flex, Image, Tooltip } from 'antd'
 import { isEmpty } from 'lodash'
 import type { FC, MouseEvent } from 'react'
@@ -141,32 +141,19 @@ export const FileNameRender: FC<{ file: FileMetadata }> = ({ file }) => {
 }
 
 /**
- * Pre-send audio/video draft row. The main preview is the in-app HTML5
- * player inside `MediaAttachmentPreview`; opening with the system default
- * app is an explicit secondary action through the narrow media IPC. The
- * whole card never jumps out, and a missing source never builds a `file://`
- * URL or reaches IPC.
+ * Pre-send audio/video draft row. The preview is the in-app HTML5 player
+ * inside `MediaAttachmentPreview`. There is no system-default-app action;
+ * the whole card never jumps out, and a missing source never builds a
+ * `file://` URL or reaches IPC.
  */
 const MediaDraftItem: FC<{ file: FileMetadata; onRemove: () => void }> = ({ file, onRemove }) => {
   const { t } = useTranslation()
-  const { openWithDefaultApp } = useAttachment()
   const src = toMediaFileUrl(FileManager.getSafePath(file))
-  const request = buildMediaOpenRequest(file, 'external')
   const removeLabel = t('message.attachments.remove_attachment')
 
   return (
     <MediaDraftContainer data-testid="draft-media-item">
-      <MediaAttachmentPreview
-        file={file}
-        src={src}
-        icon={getFileIcon(file.ext)}
-        onOpenWithDefaultApp={() => {
-          if (request) {
-            void openWithDefaultApp(request)
-          }
-        }}
-        defaultAppDisabled={!request}
-      />
+      <MediaAttachmentPreview file={file} src={src} icon={getFileIcon(file.ext)} />
       <MediaRemoveButton type="text" size="small" onClick={onRemove} title={removeLabel} aria-label={removeLabel}>
         <CloseOutlined />
       </MediaRemoveButton>

@@ -1,6 +1,47 @@
 diff --git a/dist/index.js b/dist/index.js
 --- a/dist/index.js
 +++ b/dist/index.js
+@@ -101,11 +101,17 @@
+ function getAudioFormat(mediaType) {
+   switch (mediaType) {
+     case "audio/wav":
+       return "wav";
+     case "audio/mp3":
+     case "audio/mpeg":
+       return "mp3";
++    case "audio/ogg":
++      return "ogg";
++    case "audio/flac":
++      return "flac";
++    case "audio/aac":
++      return "aac";
+     default:
+       return null;
+   }
+ }
+@@ -141,13 +147,22 @@
+                 if (part.mediaType.startsWith("image/")) {
+                   const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
+                   return {
+                     type: "image_url",
+                     image_url: {
+                       url: part.data instanceof URL ? part.data.toString() : `data:${mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
+                     },
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: part.data instanceof URL ? part.data.toString() : `data:${part.mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("audio/")) {
+                   if (part.data instanceof URL) {
+                     throw new import_provider.UnsupportedFunctionalityError({
 @@ -571,6 +571,17 @@
          type: "reasoning",
          text: reasoning
@@ -96,6 +137,47 @@ diff --git a/dist/index.js b/dist/index.js
 diff --git a/dist/index.mjs b/dist/index.mjs
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
+@@ -86,11 +86,17 @@
+ function getAudioFormat(mediaType) {
+   switch (mediaType) {
+     case "audio/wav":
+       return "wav";
+     case "audio/mp3":
+     case "audio/mpeg":
+       return "mp3";
++    case "audio/ogg":
++      return "ogg";
++    case "audio/flac":
++      return "flac";
++    case "audio/aac":
++      return "aac";
+     default:
+       return null;
+   }
+ }
+@@ -126,13 +132,22 @@
+                 if (part.mediaType.startsWith("image/")) {
+                   const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
+                   return {
+                     type: "image_url",
+                     image_url: {
+                       url: part.data instanceof URL ? part.data.toString() : `data:${mediaType};base64,${convertToBase64(part.data)}`
+                     },
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: part.data instanceof URL ? part.data.toString() : `data:${part.mediaType};base64,${convertToBase64(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("audio/")) {
+                   if (part.data instanceof URL) {
+                     throw new UnsupportedFunctionalityError({
 @@ -558,6 +558,17 @@
          type: "reasoning",
          text: reasoning

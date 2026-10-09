@@ -1,12 +1,12 @@
 import type { Provider } from '@types'
 import { describe, expect, it, vi } from 'vitest'
 
-const mockAnthropicInstance = { _baseURL: '' }
+const mockAnthropicInstance = { _opts: {} as Record<string, any> }
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
     constructor(opts: any) {
-      mockAnthropicInstance._baseURL = opts.baseURL
+      mockAnthropicInstance._opts = opts
     }
   }
 }))
@@ -42,13 +42,13 @@ describe('getSdkClient', () => {
     it('strips /v1 from apiHost for anthropic provider type', () => {
       const provider = makeProvider({ type: 'anthropic', apiHost: 'https://api.example.com/v1' })
       getSdkClient(provider)
-      expect(mockAnthropicInstance._baseURL).toBe('https://api.example.com')
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://api.example.com')
     })
 
     it('strips /v1 from apiHost for non-anthropic provider type using apiHost fallback', () => {
       const provider = makeProvider({ type: 'openai' as any, apiHost: 'https://gateway.example.com/v1' })
       getSdkClient(provider)
-      expect(mockAnthropicInstance._baseURL).toBe('https://gateway.example.com')
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://gateway.example.com')
     })
 
     it('strips /v1 from anthropicApiHost for non-anthropic provider type', () => {
@@ -58,25 +58,65 @@ describe('getSdkClient', () => {
         anthropicApiHost: 'https://anthropic.example.com/v1'
       })
       getSdkClient(provider)
-      expect(mockAnthropicInstance._baseURL).toBe('https://anthropic.example.com')
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://anthropic.example.com')
     })
 
     it('handles apiHost without trailing version', () => {
       const provider = makeProvider({ type: 'anthropic', apiHost: 'https://api.anthropic.com' })
       getSdkClient(provider)
-      expect(mockAnthropicInstance._baseURL).toBe('https://api.anthropic.com')
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://api.anthropic.com')
     })
 
     it('strips /v2beta from apiHost', () => {
       const provider = makeProvider({ type: 'anthropic', apiHost: 'https://api.example.com/v2beta' })
       getSdkClient(provider)
-      expect(mockAnthropicInstance._baseURL).toBe('https://api.example.com')
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://api.example.com')
     })
 
     it('preserves path segments before trailing version', () => {
       const provider = makeProvider({ type: 'anthropic', apiHost: 'https://gateway.example.com/api/anthropic/v1' })
       getSdkClient(provider)
-      expect(mockAnthropicInstance._baseURL).toBe('https://gateway.example.com/api/anthropic')
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://gateway.example.com/api/anthropic')
+    })
+  })
+
+  describe('standard API-key authentication against the configured host', () => {
+    it('sends the stored key with the configured host and no bearer token or fixed official baseURL', () => {
+      const provider = makeProvider({
+        type: 'anthropic',
+        apiHost: 'https://relay.example.com/v1',
+        apiKey: 'sk-relay-key'
+      })
+      getSdkClient(provider)
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://relay.example.com')
+      expect(mockAnthropicInstance._opts.apiKey).toBe('sk-relay-key')
+      expect(mockAnthropicInstance._opts.authToken).toBe('sk-relay-key')
+      expect(mockAnthropicInstance._opts.defaultHeaders?.Authorization).toBeUndefined()
+    })
+
+    it('treats a legacy oauth-marked connection as an ordinary API connection', () => {
+      const provider = makeProvider({
+        type: 'anthropic',
+        apiHost: 'https://relay.example.com/v1',
+        apiKey: 'sk-stored-key',
+        authType: 'oauth'
+      } as never)
+      getSdkClient(provider)
+      expect(mockAnthropicInstance._opts.baseURL).toBe('https://relay.example.com')
+      expect(mockAnthropicInstance._opts.apiKey).toBe('sk-stored-key')
+    })
+
+    it('merges caller extra headers and provider extra_headers without CLI identity headers', () => {
+      const provider = makeProvider({
+        type: 'anthropic',
+        apiHost: 'https://relay.example.com',
+        apiKey: 'sk-relay-key',
+        extra_headers: { 'x-custom': 'custom-value' }
+      } as never)
+      getSdkClient(provider, { 'x-caller': 'caller-value' })
+      expect(mockAnthropicInstance._opts.defaultHeaders?.['x-custom']).toBe('custom-value')
+      expect(mockAnthropicInstance._opts.defaultHeaders?.['x-app']).toBeUndefined()
+      expect(mockAnthropicInstance._opts.defaultHeaders?.['user-agent']).toBeUndefined()
     })
   })
 })

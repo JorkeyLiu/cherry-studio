@@ -5,7 +5,6 @@ import path from 'node:path'
 import type { TokenUsageData } from '@cherrystudio/analytics-client'
 import { loggerService } from '@logger'
 import { isLinux, isMac, isPortable, isWin } from '@main/constant'
-import anthropicService from '@main/services/AnthropicService'
 import { getIpCountry } from '@main/utils/ipService'
 import {
   autoDiscoverGitBash,
@@ -945,16 +944,6 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   })
   // API Server
   apiServerService.registerIpcHandlers()
-
-  // Anthropic OAuth
-  ipcMain.handle(IpcChannel.Anthropic_StartOAuthFlow, () => anthropicService.startOAuthFlow())
-  ipcMain.handle(IpcChannel.Anthropic_CompleteOAuthWithCode, (_, code: string) =>
-    anthropicService.completeOAuthWithCode(code)
-  )
-  ipcMain.handle(IpcChannel.Anthropic_CancelOAuthFlow, () => anthropicService.cancelOAuthFlow())
-  ipcMain.handle(IpcChannel.Anthropic_GetAccessToken, () => anthropicService.getValidAccessToken())
-  ipcMain.handle(IpcChannel.Anthropic_HasCredentials, () => anthropicService.hasCredentials())
-  ipcMain.handle(IpcChannel.Anthropic_ClearCredentials, () => anthropicService.clearCredentials())
 
   // ExternalApps
   ipcMain.handle(IpcChannel.ExternalApps_DetectInstalled, () => externalAppsService.detectInstalledApps())

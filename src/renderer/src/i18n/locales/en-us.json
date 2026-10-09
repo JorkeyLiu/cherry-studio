@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "Topic copied",
-        "label": "Copy Topic"
+        "created": "Topic cloned",
+        "label": "Clone Topic"
       },
       "insert": {
         "label": "Insert Messages",
@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "Media player: {{name}}",
-      "media_unsupported_format": "The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
-      "open_with_default_app": "Open with default app",
+      "media_unsupported_format": "The {{format}} format can't be played in the app, but it can still be sent",
       "pasted_image": "Pasted Image",
       "pasted_text": "Pasted Text",
       "remove_attachment": "Remove attachment",
@@ -5261,28 +5260,6 @@
         "type_anthropic": "Anthropic",
         "type_gemini": "Gemini",
         "type_openai_compatible": "OpenAI Compatible"
-      },
-      "anthropic": {
-        "apikey": "API key",
-        "auth_failed": "Anthropic authentication failed",
-        "auth_method": "Authentication method",
-        "auth_success": "Anthropic OAuth authentication successful",
-        "authenticated": "Verified",
-        "authenticating": "Authenticating",
-        "cancel": "Cancel",
-        "code_error": "Invalid authorization code, please try again",
-        "code_placeholder": "Please enter the authorization code displayed in your browser",
-        "code_required": "Authorization code cannot be empty",
-        "description": "OAuth authentication",
-        "description_detail": "You need to subscribe to Claude Pro or a higher version to use this authentication method",
-        "enter_auth_code": "Authorization code",
-        "logout": "Log out",
-        "logout_failed": "Logout failed, please try again",
-        "logout_success": "Successfully logged out of Anthropic",
-        "oauth": "Web OAuth",
-        "oauth_disabled_warning": "Anthropic has temporarily suspended the use of Claude via OAuth. This authentication method is currently unavailable. Please use an API key for now.",
-        "start_auth": "Start authorization",
-        "submit_code": "Complete login"
       },
       "anthropic_api_host": "Anthropic API Host",
       "anthropic_api_host_preview": "Anthropic preview: {{url}}",

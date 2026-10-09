@@ -10,7 +10,12 @@
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
 import { render, screen } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const { dropdownCapture } = vi.hoisted(() => ({
+  dropdownCapture: { items: [] as any[] }
+}))
 
 const { mocks, fakeState } = vi.hoisted(() => ({
   mocks: {
@@ -202,6 +207,21 @@ vi.mock('./messageBranch', () => ({
 
 vi.mock('./MessageTokens', () => ({ default: () => null }))
 
+// Capture the More-menu Dropdown items (repo pattern: prove overflow entries
+// and drive their callbacks without depending on antd overlay internals).
+// Popconfirm/Tooltip render children inline.
+vi.mock('antd', () => ({
+  Dropdown: (props: {
+    children?: ReactNode
+    menu?: { items?: Array<{ key?: string; label?: unknown; onClick?: () => void }> }
+  }) => {
+    dropdownCapture.items = props.menu?.items ?? []
+    return <>{props.children}</>
+  },
+  Popconfirm: (props: { children?: ReactNode }) => <>{props.children}</>,
+  Tooltip: (props: { children?: ReactNode }) => <>{props.children}</>
+}))
+
 const { AnchorGroupProvider } = await import('../anchorGroupContext')
 const { default: MessageMenubar } = await import('../MessageMenubar')
 
@@ -357,7 +377,7 @@ describe('MessageMenubar capability gating (real component)', () => {
     unmount()
   })
 
-  it('owned answer group shows mention-model and useful', () => {
+  it('owned answer group shows mention-model toolbar button and useful More-menu entry (never toolbar)', () => {
     const entities: Record<string, Message> = {
       u1: makeUserMessage('u1'),
       a1: makeAssistantMessage('a1', 'u1'),
@@ -372,11 +392,17 @@ describe('MessageMenubar capability gating (real component)', () => {
     })
     const { unmount } = renderMenubar(entities.a1, { isAssistantMessage: true, isGrouped: true })
     expect(screen.queryByTestId('assistant-mention-model')).not.toBeNull()
-    expect(screen.queryByTestId('msg-useful-btn')).not.toBeNull()
+    // Useful lives in the More menu, never as a visible toolbar button.
+    expect(screen.queryByTestId('msg-useful-btn')).toBeNull()
+    const usefulItem = dropdownCapture.items.find((item) => item?.key === 'useful')
+    expect(usefulItem).toBeDefined()
+    expect((usefulItem?.label as { props?: { 'data-testid'?: string } })?.props?.['data-testid']).toBe(
+      'msg-useful-menu-btn'
+    )
     unmount()
   })
 
-  it('non-owned answer group hides mention-model and useful', () => {
+  it('non-owned answer group hides mention-model and useful menu entry', () => {
     const entities: Record<string, Message> = {
       u1: makeUserMessage('u1'),
       a1: makeAssistantMessage('a1', 'u1'),
@@ -393,10 +419,11 @@ describe('MessageMenubar capability gating (real component)', () => {
     const { unmount } = renderMenubar(entities.a1, { isAssistantMessage: true, isGrouped: true })
     expect(screen.queryByTestId('assistant-mention-model')).toBeNull()
     expect(screen.queryByTestId('msg-useful-btn')).toBeNull()
+    expect(dropdownCapture.items.find((item) => item?.key === 'useful')).toBeUndefined()
     unmount()
   })
 
-  it('unknown group capability hides mention-model and useful (fail-closed)', () => {
+  it('unknown group capability hides mention-model and useful menu entry (fail-closed)', () => {
     const entities: Record<string, Message> = {
       u1: makeUserMessage('u1'),
       a1: makeAssistantMessage('a1', 'u1')
@@ -411,6 +438,7 @@ describe('MessageMenubar capability gating (real component)', () => {
     const { unmount } = renderMenubar(entities.a1, { isAssistantMessage: true, isGrouped: true })
     expect(screen.queryByTestId('assistant-mention-model')).toBeNull()
     expect(screen.queryByTestId('msg-useful-btn')).toBeNull()
+    expect(dropdownCapture.items.find((item) => item?.key === 'useful')).toBeUndefined()
     unmount()
   })
 

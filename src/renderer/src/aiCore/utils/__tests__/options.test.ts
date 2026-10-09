@@ -87,7 +87,8 @@ vi.mock('@renderer/services/AssistantService', () => ({
 vi.mock('../reasoning', () => ({
   getOpenAIReasoningParams: vi.fn(() => ({ reasoningEffort: 'medium' })),
   getAnthropicReasoningParams: vi.fn(() => ({
-    thinking: { type: 'enabled', budgetTokens: 5000 }
+    thinking: { type: 'adaptive' },
+    effort: 'medium'
   })),
   getGeminiReasoningParams: vi.fn(() => ({
     thinkingConfig: { include_thoughts: true }
@@ -270,9 +271,9 @@ describe('options utils', () => {
 
         expect(result.providerOptions.anthropic).toHaveProperty('thinking')
         expect(result.providerOptions.anthropic.thinking).toEqual({
-          type: 'enabled',
-          budgetTokens: 5000
+          type: 'adaptive'
         })
+        expect(result.providerOptions.anthropic.effort).toBe('medium')
       })
     })
 

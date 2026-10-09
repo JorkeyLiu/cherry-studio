@@ -14,6 +14,7 @@ import { isSupportEnableThinkingProvider } from '@renderer/utils/provider'
 import type { AiSdkMiddlewareConfig } from '../types/middlewareConfig'
 import { getReasoningTagName } from '../utils/reasoning'
 import { createAnthropicCachePlugin } from './anthropicCachePlugin'
+import { createAnthropicThinkingFormatPlugin } from './anthropicThinkingFormatPlugin'
 import { createDeepseekDsmlParserPlugin } from './deepseekDsmlParserPlugin'
 import { createPdfCompatibilityPlugin } from './pdfCompatibilityPlugin'
 import { createQwenThinkingPlugin } from './qwenThinkingPlugin'
@@ -72,6 +73,16 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
   if (providerType === 'openai' || providerType === 'openai-response') {
     const tagName = getReasoningTagName(model.id.toLowerCase())
     plugins.push(createReasoningExtractionPlugin({ tagName }))
+  }
+
+  // === Anthropic thinking-format learning (generic, model-name orthogonal) ===
+  // HTTP400-driven enabled<->adaptive negotiation with a profile-local
+  // learned-format record. Registered before simulateStreaming (outer after
+  // reversal) so both generate and stream execution are protected and the
+  // inner Anthropic caching middleware sees converted options. Pdf
+  // compatibility stays outer.
+  if (provider.type === 'anthropic') {
+    plugins.push(createAnthropicThinkingFormatPlugin({ provider, model, assistant: config.assistant }))
   }
 
   // 0.2 Simulate streaming for non-streaming requests (must be AFTER reasoning extraction in array)

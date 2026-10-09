@@ -74,9 +74,7 @@ export const ApiKeyList: FC<ApiKeyListProps> = ({ provider, updateProvider, show
 
   const shouldAutoFocus = () => {
     if (provider.apiKey) return false
-    // OAuth connections (Anthropic) use the OAuth flow, not API keys.
-    const isOAuth = 'authType' in provider && (provider as { authType?: string }).authType === 'oauth'
-    return isLlmProvider(provider) && provider.enabled && !isOAuth
+    return isLlmProvider(provider) && provider.enabled
   }
 
   // 合并真实 keys 和临时新项

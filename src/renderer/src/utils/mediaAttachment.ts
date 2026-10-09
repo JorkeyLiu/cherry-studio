@@ -1,14 +1,13 @@
 import type { FileMetadata } from '@renderer/types'
 import { FILE_TYPE } from '@renderer/types'
 import { audioExts, videoExts } from '@shared/config/constant'
-import type { MediaAttachmentOpenRequest } from '@shared/mediaAttachment'
 
 export type MediaKind = 'audio' | 'video' | 'other'
 
 /**
  * Browser-decodable subset for the in-app HTML5 preview. Formats outside
  * these sets (e.g. `.avi`, `.wmv`, `.flv`, `.mkv`) are still sendable
- * attachments but render the generic media card with the default-app action.
+ * attachments but render the generic in-app-only media card.
  */
 export const PLAYABLE_AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.opus', '.webm'] as const
 
@@ -60,29 +59,4 @@ export function toMediaFileUrl(fsPath: string | null | undefined): string | null
     .map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ':'))
     .join('/')
   return `file://${encoded}`
-}
-
-/**
- * Builds the narrow secure open request for "open with default app".
- *
- * - `stored` (sent attachments): addressed by `id + ext` only — the renderer
- *   never supplies a final resolved path on this branch.
- * - `external` (pre-upload drafts): addressed by the original path; Main only
- *   honors paths it previously registered via selectFile/getFile.
- *
- * Returns `null` when the file carries no usable identity for the scope, in
- * which case the caller must not offer (or must disable) the action and must
- * not reach IPC.
- */
-export function buildMediaOpenRequest(
-  file: Pick<FileMetadata, 'id' | 'ext' | 'path'>,
-  scope: 'stored' | 'external'
-): MediaAttachmentOpenRequest | null {
-  if (scope === 'stored') {
-    if (typeof file.id !== 'string' || file.id.length === 0) return null
-    if (typeof file.ext !== 'string' || file.ext.length === 0) return null
-    return { kind: 'stored', storedFileName: `${file.id}${file.ext}` }
-  }
-  if (typeof file.path !== 'string' || file.path.length === 0) return null
-  return { kind: 'external', filePath: file.path }
 }

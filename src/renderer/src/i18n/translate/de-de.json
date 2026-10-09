@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "[to be translated]:Insert Messages",
@@ -2313,8 +2313,7 @@
     },
     "attachments": {
       "media_player_label": "[to be translated]:Media player: {{name}}",
-      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but the file can still be sent and opened with the default app",
-      "open_with_default_app": "[to be translated]:Open with default app",
+      "media_unsupported_format": "[to be translated]:The {{format}} format can't be played in the app, but it can still be sent",
       "pasted_image": "Bild aus Zwischenablage",
       "pasted_text": "Datei aus Zwischenablage",
       "remove_attachment": "[to be translated]:Remove attachment",
@@ -5261,28 +5260,6 @@
         "type_anthropic": "[to be translated]:Anthropic",
         "type_gemini": "[to be translated]:Gemini",
         "type_openai_compatible": "[to be translated]:OpenAI Compatible"
-      },
-      "anthropic": {
-        "apikey": "API-Schlüssel",
-        "auth_failed": "Anthropic-Authentifizierung fehlgeschlagen",
-        "auth_method": "Authentifizierungsmethode",
-        "auth_success": "Anthropic OAuth-Authentifizierung erfolgreich",
-        "authenticated": "Authentifiziert",
-        "authenticating": "Authentifizierung läuft",
-        "cancel": "Abbrechen",
-        "code_error": "Ungültiger Autorisierungscode, bitte erneut versuchen",
-        "code_placeholder": "Bitte Autorisierungscode im Browser eingeben",
-        "code_required": "Autorisierungscode darf nicht leer sein",
-        "description": "OAuth-Authentifizierung",
-        "description_detail": "Sie müssen Claude Pro oder eine höhere Version abonnieren, um diese Authentifizierungsmethode zu verwenden",
-        "enter_auth_code": "Autorisierungscode",
-        "logout": "Abmelden",
-        "logout_failed": "Abmeldung fehlgeschlagen, bitte erneut versuchen",
-        "logout_success": "Erfolgreich abgemeldet von Anthropic",
-        "oauth": "Web OAuth",
-        "oauth_disabled_warning": "Anthropic hat die Nutzung von Claude über OAuth vorübergehend eingestellt. Diese Authentifizierungsmethode ist derzeit nicht verfügbar. Bitte verwenden Sie vorerst einen API-Schlüssel.",
-        "start_auth": "Autorisierung starten",
-        "submit_code": "Anmeldung abschließen"
       },
       "anthropic_api_host": "Anthropic API-Adresse",
       "anthropic_api_host_preview": "Anthropic-Vorschau: {{url}}",

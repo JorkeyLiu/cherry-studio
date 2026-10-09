@@ -159,11 +159,102 @@ export function findChatRequestsAfter(afterSequence: number): MockRequestEntry[]
     )
 }
 
+/**
+ * Returns the first product-originated Anthropic Messages request
+ * (POST /v1/messages or POST /messages) with sequence >= afterSequence.
+ * Used by the Anthropic thinking wire spec (provider.type=anthropic).
+ */
+export function findAnthropicRequestAfter(afterSequence: number): MockRequestEntry | null {
+  return (
+    requestLog
+      .getEntries()
+      .find(
+        (entry) =>
+          entry.method === 'POST' &&
+          (entry.url === '/v1/messages' || entry.url === '/messages') &&
+          entry.sequence >= afterSequence
+      ) ?? null
+  )
+}
+
+/**
+ * Returns Anthropic Messages requests (POST /v1/messages or POST /messages)
+ * with sequence >= afterSequence. Used to prove an Anthropic-lane turn sent
+ * no OpenAI chat/completions request (and vice versa).
+ */
+export function findAnthropicRequestsAfter(afterSequence: number): MockRequestEntry[] {
+  return requestLog
+    .getEntries()
+    .filter(
+      (entry) =>
+        entry.method === 'POST' &&
+        (entry.url === '/v1/messages' || entry.url === '/messages') &&
+        entry.sequence >= afterSequence
+    )
+}
+
+/**
+ * Limited explicit multimodal acceptance for the chat-completions mock.
+ *
+ * The mock is NOT unconditionally permissive: array `content` is accepted
+ * only when every part matches one of the legal wire shapes the repository's
+ * pinned adapters actually emit (text / image_url / input_audio / file(pdf) /
+ * video_url). `input_audio` is allowlisted per-part format
+ * (`wav`/`mp3`/`ogg`/`flac`/`aac` — the patched compatible audio formats);
+ * unknown formats keep the deterministic 400 below. This lets the audio/video
+ * E2E prove real product requests without weakening the mock into an echo-all.
+ */
+const LEGAL_INPUT_AUDIO_FORMATS = new Set(['wav', 'mp3', 'ogg', 'flac', 'aac'])
+
+function isLegalMultimodalPart(part: unknown): boolean {
+  if (typeof part !== 'object' || part === null) return false
+  const p = part as Record<string, unknown>
+  switch (p.type) {
+    case 'text':
+      return typeof p.text === 'string'
+    case 'image_url':
+      return typeof (p.image_url as Record<string, unknown> | undefined)?.url === 'string'
+    case 'input_audio': {
+      const audio = p.input_audio as Record<string, unknown> | undefined
+      return (
+        typeof audio?.data === 'string' &&
+        typeof audio?.format === 'string' &&
+        LEGAL_INPUT_AUDIO_FORMATS.has(audio.format as string)
+      )
+    }
+    case 'file': {
+      const file = p.file as Record<string, unknown> | undefined
+      return typeof file?.file_data === 'string'
+    }
+    case 'video_url':
+      return typeof (p.video_url as Record<string, unknown> | undefined)?.url === 'string'
+    default:
+      return false
+  }
+}
+
+function isLegalUserContent(content: unknown): boolean {
+  if (typeof content === 'string') return true
+  return Array.isArray(content) && content.length > 0 && content.every(isLegalMultimodalPart)
+}
+
+/** Echoable text of a user content value (string or legal multimodal array). */
+function extractUserText(content: unknown): string | null {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return null
+  const texts = (content as Array<Record<string, unknown>>)
+    .filter((p) => p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text as string)
+  return texts.length > 0 ? texts.join('\n') : null
+}
+
 function buildChatCompletion(body: Record<string, unknown>) {
-  const messages = body.messages as Array<{ role: string; content: string }> | undefined
-  // Use the LAST user message (the current turn), not the first (historical context)
+  const messages = body.messages as Array<{ role: string; content: unknown }> | undefined
+  // Use the LAST user message (the current turn), not the first (historical context).
+  // Text is extracted from string content or from the text parts of a legal
+  // multimodal array (video_url parts carry no echoable text).
   const userMsg = messages?.filter((m) => m.role === 'user').pop()
-  const content = userMsg?.content || 'hello'
+  const content = extractUserText(userMsg?.content) || 'hello'
   const model = (body.model as string) || 'mock-model'
 
   const reply = `[Mock ${model}] You said: "${String(content).slice(0, 100)}"`
@@ -192,10 +283,10 @@ function buildChatCompletion(body: Record<string, unknown>) {
 }
 
 function buildChatCompletionChunks(body: Record<string, unknown>) {
-  const messages = body.messages as Array<{ role: string; content: string }> | undefined
+  const messages = body.messages as Array<{ role: string; content: unknown }> | undefined
   // Use the LAST user message (the current turn), not the first (historical context)
   const userMsg = messages?.filter((m) => m.role === 'user').pop()
-  const content = userMsg?.content || 'hello'
+  const content = extractUserText(userMsg?.content) || 'hello'
   const model = (body.model as string) || 'mock-model'
   const reply = `[Mock ${model}] You said: "${String(content).slice(0, 100)}"`
   const id = `chatcmpl-mock-${Date.now()}`
@@ -529,7 +620,133 @@ function buildResponsesNonStreamingBody(model: string): Record<string, unknown> 
   }
 }
 
+/**
+ * Anthropic Messages mock (provider.type=anthropic E2E).
+ *
+ * Deterministic, OpenAI behavior untouched: only handles POST /v1/messages
+ * (or POST /messages). Request validation mirrors the chat-completions lane
+ * (model string + messages array with at least one user turn); the reply
+ * echoes the last user text as `[Mock <model>] You said: "<text>"`.
+ * Both streaming (Anthropic SSE events) and non-streaming JSON are served
+ * so the pinned @ai-sdk/anthropic parser completes without live APIs.
+ */
+
+function extractAnthropicUserText(messages: unknown): string | null {
+  if (!Array.isArray(messages)) return null
+  const users = (messages as Array<Record<string, unknown>>).filter((m) => m?.role === 'user')
+  const last = users.at(-1)
+  if (!last) return null
+  const content = last.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const texts = (content as Array<Record<string, unknown>>)
+      .filter((p) => p?.type === 'text' && typeof p.text === 'string')
+      .map((p) => p.text as string)
+    return texts.length > 0 ? texts.join('\n') : null
+  }
+  return null
+}
+
+/**
+ * Deterministic opt-in Anthropic thinking-format acceptance for the generic
+ * learning E2E (no production-like model-name heuristics).
+ *
+ * Test-owned controls only: the spec explicitly configures the exact raw
+ * model string under test to `adaptive-only` (reject `thinking.type`
+ * `enabled` with the contract 400) or `enabled-only` (reject `adaptive`),
+ * or leaves it unset (`both` = existing permissive behavior, byte-identical
+ * for all other paths). OpenAI chat-completions behavior is untouched.
+ */
+export type MockAnthropicThinkingMode = 'adaptive-only' | 'enabled-only' | 'both'
+
+/** Contract rejection when `enabled` is sent to an adaptive-only model. */
+export const ANTHROPIC_ENABLED_NOT_SUPPORTED_MESSAGE =
+  '"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
+
+/** Bare standard rejection when `adaptive` is sent to an enabled-only model. */
+export const ANTHROPIC_ADAPTIVE_NOT_SUPPORTED_MESSAGE = 'adaptive thinking is not supported on this model'
+
+const anthropicThinkingBehaviors = new Map<string, MockAnthropicThinkingMode>()
+
+export function setMockAnthropicThinkingBehavior(modelId: string, mode: MockAnthropicThinkingMode): void {
+  anthropicThinkingBehaviors.set(modelId, mode)
+}
+
+export function clearMockAnthropicThinkingBehaviors(): void {
+  anthropicThinkingBehaviors.clear()
+}
+
+export function getMockAnthropicThinkingBehavior(modelId: string): MockAnthropicThinkingMode {
+  return anthropicThinkingBehaviors.get(modelId) ?? 'both'
+}
+
+function hasAnthropicUserMessage(messages: unknown): boolean {
+  if (!Array.isArray(messages) || messages.length === 0) return false
+  return (messages as Array<Record<string, unknown>>).some((m) => {
+    if (m?.role !== 'user') return false
+    if (typeof m.content === 'string') return true
+    if (Array.isArray(m.content)) {
+      return (m.content as Array<Record<string, unknown>>).some((p) => p?.type === 'text' && typeof p.text === 'string')
+    }
+    return false
+  })
+}
+
+function buildAnthropicNonStreamingBody(model: string, reply: string): Record<string, unknown> {
+  return {
+    id: `msg-mock-${Date.now()}`,
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'text', text: reply }],
+    model,
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 10, output_tokens: 20 }
+  }
+}
+
+function writeAnthropicStream(res: import('http').ServerResponse, model: string, reply: string): void {
+  const messageId = `msg-mock-${Date.now()}`
+  const send = (event: string, data: Record<string, unknown>): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  send('message_start', {
+    type: 'message_start',
+    message: {
+      id: messageId,
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      model,
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 1 }
+    }
+  })
+  send('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+  // Word-granularity text deltas concatenate back to the exact reply.
+  const words = reply.split(' ')
+  for (let i = 0; i < words.length; i++) {
+    const token = i === words.length - 1 ? words[i] : `${words[i]} `
+    send('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: token }
+    })
+  }
+  send('content_block_stop', { type: 'content_block_stop', index: 0 })
+  send('message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: { output_tokens: 20 }
+  })
+  send('message_stop', { type: 'message_stop' })
+}
+
 function createMockServer(): Promise<MockServerPort> {
+  // Per-test isolation: each new server starts with permissive (`both`)
+  // behavior so no thinking-format config leaks across specs.
+  anthropicThinkingBehaviors.clear()
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       let body = ''
@@ -581,14 +798,14 @@ function createMockServer(): Promise<MockServerPort> {
           }
 
           const hasUserMessage = messages.some(
-            (m: Record<string, unknown>) => m.role === 'user' && typeof m.content === 'string'
+            (m: Record<string, unknown>) => m.role === 'user' && isLegalUserContent(m.content)
           )
           if (!hasUserMessage) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(
               JSON.stringify({
                 error: {
-                  message: 'At least one user message with content is required',
+                  message: 'At least one user message with string or legal multimodal content is required',
                   type: 'invalid_request_error'
                 }
               })
@@ -599,10 +816,12 @@ function createMockServer(): Promise<MockServerPort> {
           if (parsed.stream) {
             // LOCK-004: opt-in slow/long streaming mode for the
             // streaming-responsiveness spec (interaction window mid-stream).
-            const lastUserContent = messages
-              .filter((m: Record<string, unknown>) => m.role === 'user' && typeof m.content === 'string')
-              .map((m: Record<string, unknown>) => m.content as string)
-              .at(-1)
+            const lastUserContent = extractUserText(
+              messages
+                .filter((m: Record<string, unknown>) => m.role === 'user')
+                .map((m: Record<string, unknown>) => m.content)
+                .at(-1)
+            )
             const slowStream = typeof lastUserContent === 'string' && lastUserContent.includes(SLOW_STREAM_MARKER)
             const model = (parsed.model as string) || 'mock-model'
 
@@ -673,6 +892,76 @@ function createMockServer(): Promise<MockServerPort> {
             // Non-streaming JSON response
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(buildChatCompletion(parsed)))
+          }
+          return
+        }
+
+        // Anthropic Messages API — real wire for provider.type=anthropic
+        // (pinned @ai-sdk/anthropic language model, POST {baseURL}/messages).
+        if (url === '/v1/messages' || url === '/messages') {
+          if (!parsed) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: { message: 'Invalid JSON', type: 'invalid_request_error' } }))
+            return
+          }
+          const anthropicModel = parsed.model
+          const anthropicMessages = parsed.messages
+          if (typeof anthropicModel !== 'string' || anthropicModel.length === 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                error: { message: 'model string is required', type: 'invalid_request_error' }
+              })
+            )
+            return
+          }
+          if (!Array.isArray(anthropicMessages) || !hasAnthropicUserMessage(anthropicMessages)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                error: {
+                  message: 'messages array with at least one user text turn is required',
+                  type: 'invalid_request_error'
+                }
+              })
+            )
+            return
+          }
+          const thinkingMode = anthropicThinkingBehaviors.get(anthropicModel) ?? 'both'
+          const thinkingType = (parsed as Record<string, unknown>)?.thinking as { type?: unknown } | undefined
+          if (thinkingMode === 'adaptive-only' && thinkingType?.type === 'enabled') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                type: 'error',
+                error: { type: 'invalid_request_error', message: ANTHROPIC_ENABLED_NOT_SUPPORTED_MESSAGE }
+              })
+            )
+            return
+          }
+          if (thinkingMode === 'enabled-only' && thinkingType?.type === 'adaptive') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                type: 'error',
+                error: { type: 'invalid_request_error', message: ANTHROPIC_ADAPTIVE_NOT_SUPPORTED_MESSAGE }
+              })
+            )
+            return
+          }
+          const userText = extractAnthropicUserText(anthropicMessages) || 'hello'
+          const reply = `[Mock ${anthropicModel}] You said: "${String(userText).slice(0, 100)}"`
+          if (parsed.stream) {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              Connection: 'keep-alive'
+            })
+            writeAnthropicStream(res, anthropicModel, reply)
+            res.end()
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(buildAnthropicNonStreamingBody(anthropicModel, reply)))
           }
           return
         }

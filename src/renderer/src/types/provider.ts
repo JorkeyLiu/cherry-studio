@@ -135,7 +135,9 @@ export type Provider = {
   /** @deprecated */
   isNotSupportServiceTier?: boolean
 
-  authType?: 'apiKey' | 'oauth'
+  // Historical persisted objects may still carry an `authType` field
+  // (`'apiKey' | 'oauth'`); it is inert and never read at runtime. Every
+  // connection authenticates with its configured API key and host.
   isVertex?: boolean
   notes?: string
   extra_headers?: Record<string, string>
