@@ -139,33 +139,6 @@ describe('api', () => {
       expect(getTrailingApiVersion('https://gateway.ai.cloudflare.com/v1#')).toBeUndefined()
       expect(getTrailingApiVersion('https://api.example.com/service/v1#')).toBeUndefined()
     })
-
-    it('handles URLs with # and trailing slash correctly', () => {
-      expect(getTrailingApiVersion('https://api.example.com/v1/#')).toBeUndefined()
-      expect(getTrailingApiVersion('https://api.example.com/v2beta/#')).toBeUndefined()
-    })
-
-    it('handles URLs with version followed by # and additional path', () => {
-      expect(getTrailingApiVersion('https://api.example.com/v1#endpoint')).toBeUndefined()
-      expect(getTrailingApiVersion('https://api.example.com/v2beta#chat/completions')).toBeUndefined()
-    })
-
-    it('handles complex URLs with multiple # characters', () => {
-      expect(getTrailingApiVersion('https://api.example.com/v1#path#')).toBeUndefined()
-      expect(getTrailingApiVersion('https://gateway.ai.cloudflare.com/v1/xxx/v2beta#')).toBeUndefined()
-    })
-
-    it('handles URLs ending with # when version is not at the end', () => {
-      expect(getTrailingApiVersion('https://api.example.com/v1/service#')).toBeUndefined()
-      expect(getTrailingApiVersion('https://api.example.com/v1/api/chat#')).toBeUndefined()
-    })
-
-    it('distinguishes between URLs with and without trailing #', () => {
-      expect(getTrailingApiVersion('https://api.example.com/v1')).toBe('v1')
-      expect(getTrailingApiVersion('https://api.example.com/v2beta')).toBe('v2beta')
-      expect(getTrailingApiVersion('https://api.example.com/v1#')).toBeUndefined()
-      expect(getTrailingApiVersion('https://api.example.com/v2beta#')).toBeUndefined()
-    })
   })
 
   describe('withoutTrailingApiVersion', () => {

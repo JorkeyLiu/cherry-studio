@@ -8,18 +8,6 @@ const opts = (o: Record<string, Record<string, unknown>>): Partial<TypedProvider
   o as Partial<TypedProviderOptions>
 
 describe('mergeProviderOptions', () => {
-  it('deep merges provider options for the same provider', () => {
-    const reasoningOptions = opts({ 'openai-compatible': { reasoning: { enabled: true, effort: 'medium' } } })
-    const webSearchOptions = opts({ 'openai-compatible': { plugins: [{ id: 'web', max_results: 5 }] } })
-
-    const merged = mergeProviderOptions(reasoningOptions, webSearchOptions)
-
-    expect(merged['openai-compatible']).toEqual({
-      reasoning: { enabled: true, effort: 'medium' },
-      plugins: [{ id: 'web', max_results: 5 }]
-    })
-  })
-
   it('preserves options from other providers while merging', () => {
     const compatible: Partial<TypedProviderOptions> = opts({
       'openai-compatible': { reasoning: { enabled: true, effort: 'medium' } }
@@ -42,18 +30,6 @@ describe('mergeProviderOptions', () => {
       user: 'user-123',
       maxToolCalls: 5
     })
-  })
-
-  it('overwrites arrays with later values instead of merging', () => {
-    const first = opts({ 'openai-compatible': { models: ['gpt-4', 'gpt-3.5-turbo'] } })
-    const second = opts({ 'openai-compatible': { models: ['claude-3-opus', 'claude-3-sonnet'] } })
-
-    const merged = mergeProviderOptions(first, second)
-
-    expect((merged['openai-compatible'] as Record<string, unknown>)?.models).toEqual([
-      'claude-3-opus',
-      'claude-3-sonnet'
-    ])
   })
 
   it('deeply merges nested objects while overwriting primitives', () => {

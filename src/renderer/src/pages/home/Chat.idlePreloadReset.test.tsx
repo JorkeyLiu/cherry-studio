@@ -83,11 +83,6 @@ vi.mock('@renderer/services/EventService', () => ({
   EventEmitter: { emit: vi.fn(), on: vi.fn(() => vi.fn()) }
 }))
 
-vi.mock('@renderer/services/phaseTimingDiagnostics', () => ({
-  currentPhaseCorrelation: () => null,
-  recordPhaseDurationForCorrelation: vi.fn()
-}))
-
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => vi.fn(),
   useAppSelector: () => []

@@ -174,7 +174,6 @@ describe('initAutoSync — demand activation (S7.9)', () => {
     vi.doMock('./i18n', () => ({ initialI18nReady: Promise.resolve() }))
     vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
     vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
-    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/scrollSnapshotCache', () => ({
       initScrollSnapshotCache: mockInitScrollSnapshotCache,
       scheduleScrollSnapshotStartupSweep: vi.fn()

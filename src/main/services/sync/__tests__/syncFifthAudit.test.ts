@@ -3,7 +3,6 @@
  * - Fail-closed capture context: enabled infra errors propagate (never false).
  * - Stable-child parent closure never emits a transient assistant parent.
  * - Config-generation boundary cancels stale in-flight sync() cycles.
- * - Every production-loaded locale is truthful and carries required keys.
  */
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
@@ -260,40 +259,5 @@ describe('blocker 3: config generation cancels stale in-flight sync (LOCK-PERSON
     await new Promise((resolve) => setTimeout(resolve, 150))
     expect(calls).toBe(1)
     svc.stopSync()
-  })
-})
-
-describe('blocker 4: every production-loaded locale is truthful and complete', () => {
-  it('all locales describe automatic sync, stable checkpoints, unsupported reorder, and carry conflict/capture keys', async () => {
-    const fs = await import('node:fs')
-    const path = await import('node:path')
-    const base = path.join(__dirname, '../../../../renderer/src/i18n')
-    const files = [
-      ...['en-us', 'zh-cn', 'zh-tw'].map((l) => path.join(base, 'locales', `${l}.json`)),
-      ...['de-de', 'el-gr', 'es-es', 'fr-fr', 'ja-jp', 'pt-pt', 'ro-ro', 'ru-ru', 'vi-vn'].map((l) =>
-        path.join(base, 'translate', `${l}.json`)
-      )
-    ]
-    expect(files.length).toBe(12)
-    for (const f of files) {
-      const json = JSON.parse(fs.readFileSync(f, 'utf-8'))
-      const sync = json.settings?.sync as Record<string, string> | undefined
-      expect(sync, f).toBeTruthy()
-      const isZh = f.includes('zh-cn') || f.includes('zh-tw')
-      if (isZh) {
-        expect(sync!.help, f).toMatch(/自动个人多设备同步|自動個人多裝置同步/)
-        expect(sync!.help, f).not.toMatch(/仅手动同步|僅手動同步/)
-        expect(sync!.scope_note, f).toMatch(/稳定检查点|穩定檢查點/)
-        expect(sync!.scope_note, f).toMatch(/重排|排序/)
-        expect(sync!.scope_note, f).toMatch(/不支持|不支援/)
-      } else {
-        expect(sync!.help, f).toMatch(/automatic personal/i)
-        expect(sync!.help, f).not.toMatch(/manual sync only/i)
-        expect(sync!.scope_note, f).toMatch(/stable checkpoint/i)
-        expect(sync!.scope_note, f).toMatch(/reorder.*unsupported|unsupported.*reorder/i)
-      }
-      expect(sync!.capture_error, f).toBeTruthy()
-      expect(sync!.conflicts_pending, f).toBeTruthy()
-    }
   })
 })

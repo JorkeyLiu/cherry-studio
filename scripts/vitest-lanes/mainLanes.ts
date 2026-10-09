@@ -21,8 +21,8 @@ import { fileURLToPath } from 'node:url'
  *             legacy fork-pinned promotion files. Runs in the forks pool capped
  *             at 1 worker so the native binding is never loaded in a thread
  *             pool worker (LOCK-ABI-2).
- * - `heavy`:  exactly the three heavyweight suites (two 10k-message SQLite
- *             integration benchmarks and recoveryV2's 236,196-combination
+ * - `heavy`:  exactly the three heavyweight suites (two bounded multi-page
+ *             SQLite integration suites and recoveryV2's 236,196-combination
  *             exhaustive sweep). Runs in a single bounded-memory fork process
  *             (LOCK-MEM-4).
  *
@@ -33,13 +33,12 @@ import { fileURLToPath } from 'node:url'
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 export const MAIN_TEST_GLOB = 'src/main/**/*.{test,spec}.{ts,tsx}'
-export const MAIN_BENCH_GLOB = 'src/main/**/*.bench.{ts,tsx}'
 
 /** Heavy lane — must contain exactly these three files. */
 export const HEAVY_FILES: readonly string[] = [
   'src/main/services/chatDbImport/promotion/__tests__/recoveryV2.test.ts',
-  'src/main/services/chatDbImport/__tests__/importBenchmark.integration.test.ts',
-  'src/main/services/chatDbImport/verification/__tests__/verificationBenchmark.integration.test.ts'
+  'src/main/services/chatDbImport/__tests__/boundedMultiPageImport.integration.test.ts',
+  'src/main/services/chatDbImport/verification/__tests__/boundedStreamingVerification.integration.test.ts'
 ]
 
 /**
@@ -69,24 +68,12 @@ export interface MainLanes {
   heavy: string[]
 }
 
-export interface MainBenchLanes {
-  core: string[]
-  native: string[]
-  heavy: string[]
-}
-
 function readFile(relativePath: string): string {
   return readFileSync(join(REPO_ROOT, relativePath), 'utf8')
 }
 
 export function enumerateMainTestFiles(): string[] {
   return globSync(MAIN_TEST_GLOB, { cwd: REPO_ROOT })
-    .map((file) => file.split(sep).join('/'))
-    .sort()
-}
-
-export function enumerateMainBenchFiles(): string[] {
-  return globSync(MAIN_BENCH_GLOB, { cwd: REPO_ROOT })
     .map((file) => file.split(sep).join('/'))
     .sort()
 }
@@ -121,30 +108,6 @@ export function classifyMainTestFiles(): MainLanes {
       continue
     }
     if (
-      LEGACY_FORK_PINNED_FILES.includes(relativePath) ||
-      directlyImportsBetterSqlite3(relativePath) ||
-      unmocksRealNodeModules(relativePath)
-    ) {
-      native.push(relativePath)
-    } else {
-      core.push(relativePath)
-    }
-  }
-
-  return { core, native, heavy }
-}
-
-/** Classify main bench files with the same native/heavy predicate. */
-export function classifyMainBenchFiles(): MainBenchLanes {
-  const heavySet = new Set(HEAVY_FILES)
-  const heavy: string[] = []
-  const native: string[] = []
-  const core: string[] = []
-
-  for (const relativePath of enumerateMainBenchFiles()) {
-    if (heavySet.has(relativePath)) {
-      heavy.push(relativePath)
-    } else if (
       LEGACY_FORK_PINNED_FILES.includes(relativePath) ||
       directlyImportsBetterSqlite3(relativePath) ||
       unmocksRealNodeModules(relativePath)

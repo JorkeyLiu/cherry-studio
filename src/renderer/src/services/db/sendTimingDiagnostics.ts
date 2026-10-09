@@ -19,7 +19,6 @@
  */
 
 import { loggerService } from '@logger'
-import { currentPhaseCorrelation } from '@renderer/services/phaseTimingDiagnostics'
 import type { AppendDiagnostics } from '@shared/chatDb'
 import {
   formatDuration,
@@ -50,7 +49,7 @@ export interface SendDiagnosticsContext {
 
 /** Create a fresh send correlation context (called once per ordinary send). */
 export function createSendDiagnosticsContext(): SendDiagnosticsContext {
-  return { correlationId: currentPhaseCorrelation()?.correlationId ?? newCorrelationId(), nextOrdinal: 1 }
+  return { correlationId: newCorrelationId(), nextOrdinal: 1 }
 }
 
 /**

@@ -18,9 +18,6 @@ describe('provider api utils', () => {
     it('removes trailing slash and appends /api for basic hosts', () => {
       expect(formatOllamaApiHost('https://api.ollama.com/')).toBe('https://api.ollama.com/api')
       expect(formatOllamaApiHost('http://localhost:11434/')).toBe('http://localhost:11434/api')
-    })
-
-    it('appends /api when no suffix is present', () => {
       expect(formatOllamaApiHost('https://api.ollama.com')).toBe('https://api.ollama.com/api')
       expect(formatOllamaApiHost('http://localhost:11434')).toBe('http://localhost:11434/api')
     })

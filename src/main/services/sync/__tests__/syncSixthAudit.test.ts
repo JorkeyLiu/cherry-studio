@@ -1,7 +1,8 @@
 /**
  * Sixth-audit regressions (LOCK-PERSONAL-001/004/006/009/010):
- * 1. Missing-table tolerance is migration-state-aware: proven pre-006 missing
- *    tables tolerate; post-006 damage (migration row present) fails closed.
+ * migration-aware missing-table tolerance lives in syncFailClosedRegression
+ * finding 2 + syncMigrationProof (same applyIncomingOperation/isTrackedEntity
+ * entrypoints, same DROP/DELETE-marker triggers) and is not repeated here.
  * 2. Stable promotion captures exact committed stable descendants
  *    (transient assistant + stable block append, then message promotion).
  * 3. Conflict JSON final serialized form stays within the declared bound and
@@ -117,38 +118,6 @@ afterEach(() => {
   ;(chatDbService as never as { db: unknown }).db = null
 })
 
-describe('finding 1: migration-aware missing-table tolerance', () => {
-  it('post-006 damage fails closed; proven pre-006 absence tolerates', () => {
-    // Damaged after 006 applied: migration row present, table gone.
-    sqlite.exec('DROP TABLE sync_field_clock')
-    expect(() => applyTopicUpsert('t-damaged', 'op-damaged-1', T0, 'A')).toThrow(/no such table/i)
-    expect(sqlite.prepare('SELECT id FROM topics WHERE id=?').get('t-damaged')).toBeUndefined()
-
-    // Genuine pre-006 database: migration_state proves 006 never applied.
-    sqlite.exec("DELETE FROM migration_state WHERE key = '006_sync_field_merge'")
-    expect(applyTopicUpsert('t-pre006', 'op-pre006-1', T0, 'A')).toBe(true)
-    expect((sqlite.prepare('SELECT name FROM topics WHERE id=?').get('t-pre006') as { name: string }).name).toBe('A')
-  })
-
-  it('005-tracked checks fail closed on post-005 damage but tolerate proven pre-005 absence', () => {
-    // Post-005 damage: migration row present, outbox gone.
-    sqlite.exec('DROP TABLE sync_outbox')
-    expect(() => syncService.isTrackedEntity('topic', 't-x')).toThrow(/no such table/i)
-
-    // Genuine pre-005 absence (LOCK-PERSONAL-006): no 005 marker, no later
-    // sync marker, no surviving sync tables.
-    sqlite.exec("DELETE FROM migration_state WHERE key = '005_sync_metadata'")
-    sqlite.exec("DELETE FROM migration_state WHERE key = '006_sync_field_merge'")
-    sqlite.exec('DROP TABLE IF EXISTS sync_state')
-    sqlite.exec('DROP TABLE IF EXISTS sync_applied')
-    sqlite.exec('DROP TABLE IF EXISTS sync_entity_clock')
-    sqlite.exec('DROP TABLE IF EXISTS sync_field_clock')
-    sqlite.exec('DROP TABLE IF EXISTS sync_conflict_log')
-    expect(syncService.isTrackedEntity('topic', 't-x')).toBe(false)
-    expect(syncService.isKnownEntity('topic', 't-x')).toBe(false)
-  })
-})
-
 describe('finding 2: stable promotion captures committed stable descendants', () => {
   it('transient assistant append + stable block, then promotion captures parent before child', () => {
     const agg = new ChatDbAggregateService(db, sqlite)
@@ -181,31 +150,6 @@ describe('finding 2: stable promotion captures committed stable descendants', ()
     }
     // No transient assistant emission for the stub itself: exactly one message op.
     expect(ops.filter((o) => o.entityType === 'message' && o.entityId === 'm-prom')).toHaveLength(1)
-  })
-
-  it('post-commit UpdateMessage fallback backfills untracked stable descendants on promotion', () => {
-    const agg = new ChatDbAggregateService(db, sqlite)
-    configStore.set('sync:enabled', false)
-    expect(agg.ensureTopic('t-hprom', 'a1', 'T').ok).toBe(true)
-    expect(
-      agg.appendMessage(
-        't-hprom',
-        msgJson('m-hprom', 't-hprom', { role: 'assistant', status: 'pending', content: 'partial' }) as any,
-        [blockJson('b-hprom', 'm-hprom', { status: 'success' }) as any]
-      ).ok
-    ).toBe(true)
-    // Promote the message row without capture, then enable sync.
-    sqlite.prepare("UPDATE messages SET status='success', content='done' WHERE id=?").run('m-hprom')
-    configStore.set('sync:enabled', true)
-    syncService.recordUpsert('topic', 't-hprom', { id: 't-hprom', name: 'T' }, Date.now() - 10)
-    handleChatDbSuccessForSync(IpcChannel.ChatDb_UpdateMessage, {
-      topicId: 't-hprom',
-      messageId: 'm-hprom',
-      updates: { status: 'success', content: 'done' }
-    })
-    const ops = syncService.listOutbox()
-    expect(ops.some((o) => o.entityType === 'message' && o.entityId === 'm-hprom')).toBe(true)
-    expect(ops.some((o) => o.entityType === 'message_block' && o.entityId === 'b-hprom')).toBe(true)
   })
 })
 

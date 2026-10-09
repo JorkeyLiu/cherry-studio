@@ -70,7 +70,6 @@ describe('init.ts — assistant-config store-dependent bootstrap (focused)', () 
     vi.doMock('./i18n', () => ({ initialI18nReady: Promise.resolve() }))
     vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
     vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
-    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/scrollSnapshotCache', () => ({ scheduleScrollSnapshotStartupSweep: vi.fn() }))
     vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: mockSubscribeStoreSync } }))
     vi.doMock('./services/topicDeletionSubscription', () => ({

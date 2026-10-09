@@ -20,7 +20,6 @@ import { getAssistantSettings } from '@renderer/services/AssistantService'
 import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
-import { currentPhaseCorrelation, recordPhaseDurationForCorrelation } from '@renderer/services/phaseTimingDiagnostics'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
 import { setTopicListWidth } from '@renderer/store/settings'
@@ -121,11 +120,6 @@ const Chat: FC<Props> = (props) => {
   // useLoadedTopicReferencedBlocks subscribes only to active-topic referenced blocks
   // (selectMessageBlocksByIds + shallowEqual), so unrelated block commits do
   // not invalidate this projection.
-  //
-  // PERF_PHASE_ATTR: the active correlation path selects the single honest stage
-  // for the one shared computation — echo.sharedContextInfo on the echo path and
-  // topic.contextInfo on topic-switch paths. No second computeContextInfo call is
-  // ever made for diagnostics; outside measurement mode this wraps nothing.
   // Bounded loaded projection: resident topic only; the `?? []` fallback is
   // memoized so the shared-projection memo keeps a stable identity while the
   // topic is non-resident (`undefined` stays at the API boundary).
@@ -153,8 +147,6 @@ const Chat: FC<Props> = (props) => {
   // Use closure blocks for memo invalidation when closure active; otherwise use viewport blocks
   const activeBlocksForContext = freshClosure ? closureBlocks : topicBlocks
   const sharedContextInfo = useMemo(() => {
-    const active = currentPhaseCorrelation()
-    const startedAt = active ? performance.now() : 0
     // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; otherwise bounded fallback
     const result = resolveSharedContextInfo(
       topicMessages,
@@ -163,14 +155,6 @@ const Chat: FC<Props> = (props) => {
       freshClosure as any,
       activeBranchId
     )
-    if (active && topicMessages.length > 0) {
-      recordPhaseDurationForCorrelation(
-        active.correlationId,
-        active.path,
-        active.path === 'echo' ? 'echo.sharedContextInfo' : 'topic.contextInfo',
-        performance.now() - startedAt
-      )
-    }
     return result
   }, [freshClosure, topicMessages, activeBlocksForContext, assistant, props.activeTopic.id, activeBranchId])
 

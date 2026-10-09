@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   getImportProjectionReadinessState,
@@ -11,8 +11,6 @@ import ImportProjectionGate from '../ImportProjectionGate'
 describe('ImportProjectionGate with startupStage — preserves gate readiness/order', () => {
   beforeEach(() => {
     resetImportProjectionReadiness()
-    vi.stubGlobal('__STARTUP_STAGE_ATTR__', 'false')
-    delete (globalThis as any).process?.env?.STARTUP_STAGE_ATTR
   })
 
   it('remains gated while pending (loading) and reveals ordinary tree only on ready', async () => {

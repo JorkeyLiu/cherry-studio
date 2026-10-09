@@ -52,59 +52,6 @@ function resolveBuildIdentity(): { buildId: string; macBuildVersion: string } {
 
 const buildIdentity = resolveBuildIdentity()
 
-// PERF-STREAM-ATTR-001 (LOCK-STREAM-ATTR-001): the streaming persistence
-// measurement switch is a BUILD-time define (`__PERF_STREAM_ATTR__`) inlined
-// into BOTH the main bundle (below) and the renderer bundle. Default builds
-// inline 'false' (inert); a measurement build sets PERF_STREAM_ATTR=1 at build
-// time. Running the app/E2E with PERF_STREAM_ATTR=1 keeps the runtime env
-// consistent with this build input (it is the explicit build input/canonical
-// command and the unbundled/fallback path reads it), but for the built bundles
-// the inlined define is authoritative — runtime env does NOT enable an
-// already-built Main bundle.
-function resolveStreamAttrDefine(): string {
-  const value = process.env.PERF_STREAM_ATTR
-  if (value === undefined || value.trim().length === 0) return 'false'
-  const normalized = value.trim().toLowerCase()
-  if (normalized === '1' || normalized === 'true') return 'true'
-  throw new Error(
-    `PERF_STREAM_ATTR must be '1'/'true' to enable or unset/empty to skip ` +
-      `(got '${value}'). Enable only for the documented measurement build.`
-  )
-}
-const streamAttrDefine = resolveStreamAttrDefine()
-
-// PERF-PHASE-001: phase attribution is a separate build-time switch. Plain
-// builds inline `false`; malformed non-empty values fail loudly at config load.
-function resolvePhaseAttrDefine(): string {
-  const value = process.env.PERF_PHASE_ATTR
-  if (value === undefined || value.trim().length === 0) return 'false'
-  const normalized = value.trim().toLowerCase()
-  if (normalized === '1' || normalized === 'true') return 'true'
-  throw new Error(
-    `PERF_PHASE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
-      'Enable only for the documented measurement build.'
-  )
-}
-const phaseAttrDefine = resolvePhaseAttrDefine()
-
-// S7.13 startup stage instrumentation (LOCK-001..003): independent default-off
-// fail-closed synthetic-disposable-profile-only harness. Plain builds inline
-// 'false' (inert); instrumentation build sets STARTUP_STAGE_ATTR=1 at build
-// time. Malformed non-empty throws (fail-closed) for explicit builds; ordinary
-// builds remain false. Renderer and Main defines are derived from the SAME env
-// so they stay coherent.
-function resolveStartupStageDefine(): string {
-  const value = process.env.STARTUP_STAGE_ATTR
-  if (value === undefined || value.trim().length === 0) return 'false'
-  const normalized = value.trim().toLowerCase()
-  if (normalized === '1' || normalized === 'true') return 'true'
-  throw new Error(
-    `STARTUP_STAGE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
-      'Enable only for the documented instrumentation build.'
-  )
-}
-const startupStageDefine = resolveStartupStageDefine()
-
 export default defineConfig({
   main: {
     plugins: [
@@ -129,13 +76,7 @@ export default defineConfig({
       // VERSION-004: Build ID / numeric build version are separate fields from
       // the product version (`app.getVersion()` stays package.json 0.1.0).
       __BUILD_ID__: JSON.stringify(buildIdentity.buildId),
-      __BUILD_VERSION__: JSON.stringify(buildIdentity.macBuildVersion),
-      // PERF-STREAM-ATTR-001: inlined Main-process measurement switch, derived
-      // from the SAME build env as the renderer switch so the two processes
-      // are guaranteed consistent in a measurement build (LOCK-STREAM-ATTR-001).
-      __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine),
-      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine),
-      __STARTUP_STAGE_ATTR__: JSON.stringify(startupStageDefine)
+      __BUILD_VERSION__: JSON.stringify(buildIdentity.macBuildVersion)
     },
     build: {
       rollupOptions: {
@@ -194,12 +135,6 @@ export default defineConfig({
       ...(isDev ? [CodeInspectorPlugin({ bundler: 'vite' })] : []), // 只在开发环境下启用 CodeInspectorPlugin
       ...visualizerPlugin('renderer')
     ],
-    define: {
-      // PERF-STREAM-ATTR-001: inlined measurement switch (see above).
-      __PERF_STREAM_ATTR__: JSON.stringify(streamAttrDefine),
-      __PERF_PHASE_ATTR__: JSON.stringify(phaseAttrDefine),
-      __STARTUP_STAGE_ATTR__: JSON.stringify(startupStageDefine)
-    },
     resolve: {
       alias: {
         '@renderer': resolve('src/renderer/src'),

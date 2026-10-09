@@ -1,8 +1,10 @@
 /**
  * Focused regressions for automatic-sync config-read fail-closed handling
- * (LOCK-PERSONAL-001/006/009). Narrow scope: requestAutoSync failure,
- * reconciliation failure, and setConfig prior-read failure. No other sync
- * semantics change, no final-validation claim.
+ * (LOCK-PERSONAL-001/006/009). Narrow scope: requestAutoSync failure and
+ * reconciliation failure. setConfig prior/post read-failure semantics live in
+ * syncSetConfigDurable (same setConfig entrypoint, same throwing-getConfig
+ * trigger, plus durable-error + subscriber-stop postconditions) and are not
+ * repeated here. No other sync semantics change, no final-validation claim.
  */
 import Database from 'better-sqlite3'
 import { type BetterSQLite3Database, drizzle } from 'drizzle-orm/better-sqlite3'
@@ -187,35 +189,5 @@ describe('reconciliation config-read failure is visible and invalidates stale wo
     const durable = `${lastCaptureErrorValue() ?? ''} ${lastErrorValue() ?? ''}`
     expect(durable.toLowerCase()).toMatch(/reconcile|reconcile-config-boom/)
     svc.stopSync()
-  })
-})
-
-describe('setConfig prior config-read failure never uses a fabricated snapshot', () => {
-  it('rethrows original, bumps generation, and applies no update', () => {
-    const genBefore = syncService.getConfigGeneration()
-    const endpointBefore = configStore.get('sync:endpoint')
-    const enabledBefore = configStore.get('sync:enabled')
-    const getSpy = vi.spyOn(syncService, 'getConfig').mockImplementation(() => {
-      throw new Error('prior-config-boom')
-    })
-    expect(() => syncService.setConfig({ enabled: false })).toThrow(/prior-config-boom/)
-    expect(syncService.getConfigGeneration()).toBe(genBefore + 1)
-    // No update applied while the previous snapshot was unknowable.
-    expect(configStore.get('sync:endpoint')).toBe(endpointBefore)
-    expect(configStore.get('sync:enabled')).toBe(enabledBefore)
-    getSpy.mockRestore()
-  })
-
-  it('post-write read failure invalidates conservatively instead of comparing against a guess', () => {
-    const genBefore = syncService.getConfigGeneration()
-    let calls = 0
-    const getSpy = vi.spyOn(syncService, 'getConfig').mockImplementation(() => {
-      calls += 1
-      if (calls === 1) return { endpoint: 'http://127.0.0.1:9999', enabled: true }
-      throw new Error('post-config-boom')
-    })
-    expect(() => syncService.setConfig({ enabled: false })).toThrow(/post-config-boom/)
-    expect(syncService.getConfigGeneration()).toBe(genBefore + 1)
-    getSpy.mockRestore()
   })
 })

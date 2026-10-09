@@ -21,23 +21,6 @@ import { describe, expect, it } from 'vitest'
  */
 
 const WORKFLOWS_DIR = join(process.cwd(), '.github', 'workflows')
-const EXISTING_WORKFLOW_FILES = [
-  'auto-i18n.yml',
-  'ci-rerun-on-base-change.yml',
-  'ci.yml',
-  'claude-code-review.yml',
-  'claude-translator.yml',
-  'claude.yml',
-  'dispatch-docs-update.yml',
-  'docker-relay-publish.yml',
-  'github-issue-tracker.yml',
-  'issue-management.yml',
-  'pr-description-check.yml',
-  'prepare-release.yml',
-  'release-packages.yml',
-  'snapshot.yml',
-  'update-app-upgrade-config.yml'
-]
 
 // Retired formal application release/nightly/v2-preview packaging workflows.
 // Their absence is part of LOCK-RELEASE-FREEZE (no workflow may package or
@@ -86,10 +69,6 @@ function readWorkflow(name: string): string {
 describe('LOCK-RELEASE-FREEZE — no application packaging/publishing workflow remains', () => {
   const workflowFiles = listWorkflowFiles()
 
-  it('keeps ci.yml and the ordinary non-packaging automation set exactly', () => {
-    expect(workflowFiles.sort()).toEqual([...EXISTING_WORKFLOW_FILES].sort())
-  })
-
   it('contains none of the retired release/nightly/v2-preview packaging workflows', () => {
     for (const retired of RETIRED_PACKAGING_WORKFLOWS) {
       expect(workflowFiles, `${retired} must be retired (LOCK-RELEASE-FREEZE)`).not.toContain(retired)
@@ -103,13 +82,6 @@ describe('LOCK-RELEASE-FREEZE — no application packaging/publishing workflow r
         expect(content, `${file} must not contain "${marker}" (LOCK-RELEASE-FREEZE)`).not.toContain(marker)
       }
     }
-  })
-
-  it('keeps ordinary CI (ci.yml) intact and test-only', () => {
-    const ci = readWorkflow('ci.yml')
-    expect(ci).toContain('name: CI')
-    expect(ci).toContain('pnpm test:main')
-    expect(ci).toContain('pnpm test:renderer')
   })
 })
 

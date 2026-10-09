@@ -24,17 +24,11 @@ import type { AuthorityUserSnapshot } from '@renderer/services/ConversationServi
 import { dbService } from '@renderer/services/db'
 import { createSendDiagnosticsContext, type SendDiagnosticsContext } from '@renderer/services/db/sendTimingDiagnostics'
 import { ChatDbResultError } from '@renderer/services/db/SqliteMessageDataSource'
-import {
-  createStreamWriteDiagnosticsContext,
-  isStreamAttrRendererMeasureEnabled,
-  recordStreamAttrRendererRecord
-} from '@renderer/services/db/streamTimingDiagnostics'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
 import { BlockManager } from '@renderer/services/messageStreaming/BlockManager'
 import { createCallbacks } from '@renderer/services/messageStreaming/callbacks'
 import { createAssistantExecutionState } from '@renderer/services/messageStreaming/executionState'
 import { WriteBarrier } from '@renderer/services/messageStreaming/writeBarrier'
-import { currentPhaseCorrelation, recordPhaseDuration } from '@renderer/services/phaseTimingDiagnostics'
 import { buildBlockOverlay } from '@renderer/services/requestBlockOverlay'
 import {
   recordResidentReadDiscard,
@@ -43,12 +37,6 @@ import {
   recordStagedLatency
 } from '@renderer/services/residentReadDiagnostics'
 import { endSpan } from '@renderer/services/SpanManagerService'
-import {
-  canRecordFirstDataNow,
-  consumeFirstDataWindow,
-  hasOrdinaryTreeReady,
-  instrumentFirstDataWindow
-} from '@renderer/services/startupStageDiagnostics'
 import { createStreamProcessor, type StreamProcessorCallbacks } from '@renderer/services/StreamProcessingService'
 import {
   captureDeletionGeneration,
@@ -86,7 +74,6 @@ import type {
   SemanticResendResponse,
   StreamWriteDiagnostics
 } from '@shared/chatDb'
-import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { defaultAppHeaders } from '@shared/utils'
 import type { TextStreamPart } from 'ai'
 import { t } from 'i18next'
@@ -228,15 +215,6 @@ const blockUpdateRafs = new LRUCache<string, number>({
   }
 })
 
-/**
- * PERF-STREAM-ATTR-001 (LOCK-STREAM-ATTR-001/003): per-block arrival timestamps
- * consumed by the throttled flush to measure renderer-side scheduling delay
- * (content arrival → DB write flush). Writes are measurement-only records —
- * the map is populated/touched ONLY when the renderer collector is enabled,
- * so default bundles never allocate or mutate it.
- */
-const blockThrottleArrivals = new Map<string, number>()
-
 /** Per-call execution context for a throttled block write (F1/F2). */
 export interface ThrottledBlockWriteContext {
   /** Immutable execution attempt; absent for ordinary writes (carrier omitted). */
@@ -291,30 +269,10 @@ const getBlockThrottler = (id: string) => {
 
       blockUpdateRafs.set(id, rafId)
 
-      // PERF-STREAM-ATTR-001 (LOCK-STREAM-ATTR-001/003/005): measurement-only
-      // schedule-delay record + per-flush correlation context threaded to the
-      // DB write so renderer schedule/serialize/IPC records pair with the
-      // Main-side records of the same call. Inert when the switch is off.
-      let streamDiag: StreamWriteDiagnostics | undefined
-      if (isStreamAttrRendererMeasureEnabled()) {
-        streamDiag = createStreamWriteDiagnosticsContext()
-        const arrival = blockThrottleArrivals.get(id)
-        if (arrival !== undefined) {
-          recordStreamAttrRendererRecord({
-            channel: 'chatdb:update-single-block',
-            stage: 'renderer.schedule',
-            correlationId: streamDiag.correlationId,
-            ordinal: streamDiag.ordinal,
-            durationMs: elapsedMs(arrival),
-            ok: true
-          })
-        }
-        blockThrottleArrivals.delete(id)
-      }
       // F1/F2: the DB write carries the calling execution's attempt, and the
       // produced promise is tracked on the calling execution's barrier when
       // present (flush-triggered trailing writes are therefore awaitable).
-      const write = updateSingleBlock(id, blockUpdate, streamDiag, ctx?.resendAttemptId)
+      const write = updateSingleBlock(id, blockUpdate, undefined, ctx?.resendAttemptId)
       if (ctx?.barrier) {
         await ctx.barrier.track(write)
       } else {
@@ -332,9 +290,6 @@ const getBlockThrottler = (id: string) => {
  * 更新单个消息块。
  */
 export const throttledBlockUpdate = (id: string, blockUpdate: any, ctx?: ThrottledBlockWriteContext) => {
-  if (isStreamAttrRendererMeasureEnabled()) {
-    blockThrottleArrivals.set(id, performance.now())
-  }
   const throttler = getBlockThrottler(id)
   // store.dispatch(updateOneBlock({ id, changes: blockUpdate }))
   throttler(blockUpdate, ctx)
@@ -367,8 +322,6 @@ export const cancelThrottledBlockUpdate = (id: string) => {
     throttler.cancel()
     blockUpdateThrottlers.delete(id)
   }
-
-  blockThrottleArrivals.delete(id)
 }
 
 // 新增: 通用的、非节流的函数，用于保存消息和块的更新到数据库
@@ -1024,8 +977,6 @@ export const sendMessage =
         sendContext,
         sendRoute
       )
-      const phase = currentPhaseCorrelation()
-      const dispatchStartedAt = performance.now()
       const userPublished = publishAppendAck(
         dispatch,
         getState,
@@ -1035,7 +986,6 @@ export const sendMessage =
         sendRoute,
         sendGeneration
       )
-      if (phase) recordPhaseDuration('echo.userDispatch', dispatchStartedAt, phase.path)
       // Associated block projection rides the successful row/capability
       // publication only: a rejected/stale ack emits no orphan blocks.
       if (userPublished && userMessageBlocks.length > 0) {
@@ -3002,35 +2952,7 @@ function scheduleTopicAnchorEstablishment(
 export const loadTopicMessagesThunk =
   (topicId: string, forceReload: boolean = false) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
-    // S7.14-E1 independent eligibility: capture state BEFORE own setCurrentTopicId dispatch.
-    // Do not prove eligibility via post-dispatch currentTopicId equality (self-assignment).
-    // Use topic existence + pre-dispatch active-topic equality (observable before mutation); fail closed otherwise.
-    const stateBefore = getState()
-    const trimmedBefore = typeof topicId === 'string' ? topicId.trim() : ''
-    let topicExistsBefore = false
-    if (trimmedBefore.length > 0) {
-      try {
-        const assistants = (stateBefore as any).assistants?.assistants
-        if (Array.isArray(assistants)) {
-          topicExistsBefore = assistants.some(
-            (a: any) => Array.isArray(a.topics) && a.topics.some((t: any) => t.id === trimmedBefore)
-          )
-        }
-      } catch {}
-    }
-    const rawCurrentBefore = (stateBefore as any).messages?.currentTopicId
-    const currentBeforeTrimmed = typeof rawCurrentBefore === 'string' ? rawCurrentBefore.trim() : ''
-    const activeBefore =
-      trimmedBefore.length > 0 && currentBeforeTrimmed.length > 0 && currentBeforeTrimmed === trimmedBefore
-    const windowOpenBefore = hasOrdinaryTreeReady() && canRecordFirstDataNow()
-    const eligibleBefore = windowOpenBefore && trimmedBefore.length > 0 && topicExistsBefore && activeBefore
-    // First startup candidate includes cache-hit/no-topic/unavailable: consume window fail-closed
-    // so later History/navigation/force loads cannot emit. Eligible candidates defer to settlement.
-    if (windowOpenBefore && !eligibleBefore) {
-      consumeFirstDataWindow()
-    }
-
-    const state = stateBefore
+    const state = getState()
 
     dispatch(newMessagesActions.setCurrentTopicId(topicId))
 
@@ -3052,10 +2974,6 @@ export const loadTopicMessagesThunk =
           // Legacy: only non-empty cached topics are hits; empty falls through to fetch
           if (cachedIds.length > 0) {
             recordResidentReadHit()
-            // S7.14-E1: cache-hit startup candidate closes one-shot window without attribution
-            if (eligibleBefore) {
-              consumeFirstDataWindow()
-            }
             // Supersede any older in-flight same-topic staged load before completing cache-hit activation
             const requestSeq = ++loadTopicMessagesRequestSeq
             latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -3075,10 +2993,6 @@ export const loadTopicMessagesThunk =
             !!residentEntry && residentEntry.residentTopic && residentEntry.chatData && residentEntry.segments
           if (isResidentHit) {
             recordResidentReadHit()
-            // S7.14-E1: cache-hit startup candidate closes one-shot window without attribution
-            if (eligibleBefore) {
-              consumeFirstDataWindow()
-            }
             // Supersede any older in-flight same-topic staged load before completing cache-hit activation
             const requestSeq = ++loadTopicMessagesRequestSeq
             latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)
@@ -3154,34 +3068,6 @@ export const loadTopicMessagesThunk =
       const windowPromise: Promise<FetchMessagesWindowResponse> = runTopicWindowRead(topicId, request.kind, () =>
         dbService.fetchMessagesWindow(request)
       )
-      // S7.14-E1: renderer.firstData — first eligible active-topic startup window
-      // settlement after ordinaryTreeReady, elapsed interval, one-shot numeric-only,
-      // default-off fail-closed. Eligibility proven via topic existence + pre-dispatch
-      // active-topic equality before own setCurrentTopicId dispatch (independent of
-      // self-assignment); settlement-time applicability predicate mirrors the thunk's
-      // established stale validation (superseded same-topic sequence, deletion
-      // generation, applicability generation, current-topic) so a request the thunk
-      // discards is never recorded. Does not change message loading semantics;
-      // fail-closed when cannot prove.
-      try {
-        if (eligibleBefore) {
-          instrumentFirstDataWindow(windowPromise as unknown as Promise<unknown>, () => {
-            try {
-              const cur = getState().messages.currentTopicId
-              const curTrim = typeof cur === 'string' ? cur.trim() : ''
-              if (curTrim.length === 0 || curTrim !== trimmedBefore) return false
-              if (latestLoadTopicMessagesRequestByTopic.get(topicId) !== requestSeq) return false
-              if (isDeletionStale(topicId, deletionGenAtStart)) return false
-              const currentGeneration = ((getState() as any).residentRegistry?.entries?.[topicId]
-                ?.applicabilityGeneration ?? 0) as number
-              if (currentGeneration !== generation) return false
-              return true
-            } catch {
-              return false
-            }
-          })
-        }
-      } catch {}
       const segmentsPromise: Promise<any[]> = (
         dbService.listSegments ? dbService.listSegments(topicId) : Promise.resolve([])
       ) as Promise<any[]>

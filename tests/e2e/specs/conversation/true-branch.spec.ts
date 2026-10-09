@@ -136,8 +136,7 @@ async function isVisibleInMessagesViewport(page: any, messageId: string): Promis
  *   disposable profile's own storage (never live user data). The wire poll
  *   stays as a diagnostic observation; the close-completion contract is
  *   that window close finishes only after the ack settled.
- * - Post-relaunch: `renderer.persistRehydrate` via the existing
- *   `__startupStageRead` seam (fallback: wire `_persist.rehydrated === true`)
+ * - Post-relaunch: wire `_persist.rehydrated === true`
  *   plus rehydrated `activeBranchIdByTopic` + catalog, all before clicking.
  *
  * Persisted contract under test (pinned, not redefined here):
@@ -177,22 +176,6 @@ async function waitPersistWireFlushed(page: any, topicId: string, branch1Id: str
 async function waitPersistRehydrated(page: any): Promise<void> {
   await page.waitForFunction(
     (key: string) => {
-      try {
-        const read = (globalThis as any).__startupStageRead
-        if (typeof read === 'function') {
-          const st = read()
-          if (
-            st &&
-            st.enabled === true &&
-            Array.isArray(st.records) &&
-            st.records.some((r: any) => r.stage === 'renderer.persistRehydrate')
-          ) {
-            return true
-          }
-        }
-      } catch {
-        // Fall through to the wire fallback below.
-      }
       try {
         const wire = localStorage.getItem(key)
         if (!wire) return false

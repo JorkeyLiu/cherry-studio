@@ -324,12 +324,6 @@ vi.mock('@renderer/services/MessagesService', () => ({
   clearPendingNavigate: mocks.clearPendingNavigate
 }))
 
-vi.mock('@renderer/services/phaseTimingDiagnostics', () => ({
-  currentPhaseCorrelation: vi.fn(() => null),
-  recordPhaseDurationForCorrelation: vi.fn(),
-  recordPhaseEndpoint: vi.fn()
-}))
-
 vi.mock('@renderer/store', () => ({
   default: {
     getState: vi.fn(() => ({ messages: { messageIdsByTopic: {}, entities: {} }, editMode: { enabled: false } })),

@@ -10,20 +10,12 @@ import { describe, expect, it } from 'vitest'
 import { IpcChannel } from '../IpcChannel'
 
 describe('IpcChannel retired provider surface', () => {
-  it('exposes no Copilot channels', () => {
+  it('exposes no retired Copilot, VertexAI, or Anthropic OAuth channels', () => {
     const values = Object.values(IpcChannel) as string[]
     expect(values.filter((v) => v.startsWith('copilot:'))).toEqual([])
     expect((IpcChannel as Record<string, unknown>).Copilot_GetToken).toBeUndefined()
-  })
-
-  it('exposes no VertexAI channels', () => {
-    const values = Object.values(IpcChannel) as string[]
     expect(values.filter((v) => v.startsWith('vertexai:'))).toEqual([])
     expect((IpcChannel as Record<string, unknown>).VertexAI_GetAuthHeaders).toBeUndefined()
-  })
-
-  it('exposes no Anthropic OAuth channels', () => {
-    const values = Object.values(IpcChannel) as string[]
     expect(values.filter((v) => v.startsWith('anthropic:'))).toEqual([])
     expect((IpcChannel as Record<string, unknown>).Anthropic_StartOAuthFlow).toBeUndefined()
     expect((IpcChannel as Record<string, unknown>).Anthropic_CompleteOAuthWithCode).toBeUndefined()

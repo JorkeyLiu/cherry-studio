@@ -2,7 +2,7 @@ import { resolve } from 'path'
 import { defineConfig } from 'vitest/config'
 
 import electronViteConfig from './electron.vite.config'
-import { classifyMainBenchFiles, classifyMainTestFiles } from './scripts/vitest-lanes/mainLanes'
+import { classifyMainTestFiles } from './scripts/vitest-lanes/mainLanes'
 
 const mainConfig = (electronViteConfig as any).main
 const rendererConfig = (electronViteConfig as any).renderer
@@ -13,7 +13,6 @@ const rendererConfig = (electronViteConfig as any).renderer
 // the better-sqlite3 binding and the memory-heavy exhaustive/benchmark suites
 // never run in a thread-pool worker. See scripts/vitest-lanes/mainLanes.ts.
 const mainLanes = classifyMainTestFiles()
-const mainBenchLanes = classifyMainBenchFiles()
 
 export default defineConfig({
   // Compile-time build constants (VERSION-003/004) are injected by
@@ -24,40 +23,7 @@ export default defineConfig({
   // through the same `define` convention — runtime semantics are unchanged.
   define: {
     __BUILD_ID__: JSON.stringify('test-build-id'),
-    __BUILD_VERSION__: JSON.stringify('0'),
-    // PERF-STREAM-ATTR-001: renderer measurement switch, test-injectable via
-    // the same env the measurement build/run uses (default inert).
-    __PERF_STREAM_ATTR__: JSON.stringify(
-      process.env.PERF_STREAM_ATTR === '1' || process.env.PERF_STREAM_ATTR === 'true' ? 'true' : 'false'
-    ),
-    // PERF-PHASE-001: strict contract — unset/empty=false, '1'/'true'=true,
-    // other nonempty=throw (matches Electron/shared resolvePhaseAttrGate).
-    __PERF_PHASE_ATTR__: JSON.stringify(
-      (() => {
-        const value = process.env.PERF_PHASE_ATTR
-        if (value === undefined || value.trim().length === 0) return 'false'
-        const normalized = value.trim().toLowerCase()
-        if (normalized === '1' || normalized === 'true') return 'true'
-        throw new Error(
-          `PERF_PHASE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
-            'Enable only through the documented measurement build/run.'
-        )
-      })()
-    ),
-    // S7.13 startup stage instrumentation — independent default-off harness
-    // (LOCK-001..003). Coherent with electron.vite.config.ts define.
-    __STARTUP_STAGE_ATTR__: JSON.stringify(
-      (() => {
-        const value = process.env.STARTUP_STAGE_ATTR
-        if (value === undefined || value.trim().length === 0) return 'false'
-        const normalized = value.trim().toLowerCase()
-        if (normalized === '1' || normalized === 'true') return 'true'
-        throw new Error(
-          `STARTUP_STAGE_ATTR must be '1'/'true' to enable or unset/empty to skip (got '${value}'). ` +
-            'Enable only for the documented instrumentation build.'
-        )
-      })()
-    )
+    __BUILD_VERSION__: JSON.stringify('0')
   },
   test: {
     projects: [
@@ -78,9 +44,6 @@ export default defineConfig({
             threads: {
               maxThreads: 2
             }
-          },
-          benchmark: {
-            include: mainBenchLanes.core
           }
         }
       },
@@ -103,9 +66,6 @@ export default defineConfig({
             forks: {
               maxForks: 1
             }
-          },
-          benchmark: {
-            include: mainBenchLanes.native
           }
         }
       },
@@ -127,9 +87,6 @@ export default defineConfig({
             forks: {
               maxForks: 1
             }
-          },
-          benchmark: {
-            include: mainBenchLanes.heavy
           }
         }
       },
@@ -145,9 +102,6 @@ export default defineConfig({
           environment: 'jsdom',
           setupFiles: ['@vitest/web-worker', 'tests/renderer.setup.ts'],
           include: ['src/renderer/**/*.{test,spec}.{ts,tsx}', 'src/renderer/**/__tests__/**/*.{test,spec}.{ts,tsx}'],
-          benchmark: {
-            include: ['src/renderer/**/*.bench.{ts,tsx}', 'src/renderer/**/__tests__/**/*.bench.{ts,tsx}']
-          },
           // Renderer-only fork isolation (LOCK-STAB): the Shiki exact-HTML
           // contract is pinned to a single bounded fork process so its exact
           // HTML toBe() assertions are isolated from thread-pool contention.
@@ -162,10 +116,7 @@ export default defineConfig({
         test: {
           name: 'scripts',
           environment: 'node',
-          include: ['scripts/**/*.{test,spec}.{ts,tsx}', 'scripts/**/__tests__/**/*.{test,spec}.{ts,tsx}'],
-          benchmark: {
-            include: ['scripts/**/*.bench.{ts,tsx}', 'scripts/**/__tests__/**/*.bench.{ts,tsx}']
-          }
+          include: ['scripts/**/*.{test,spec}.{ts,tsx}', 'scripts/**/__tests__/**/*.{test,spec}.{ts,tsx}']
         }
       },
       // aiCore 包单元测试配置
@@ -177,10 +128,7 @@ export default defineConfig({
           include: [
             'packages/aiCore/**/*.{test,spec}.{ts,tsx}',
             'packages/aiCore/**/__tests__/**/*.{test,spec}.{ts,tsx}'
-          ],
-          benchmark: {
-            include: ['packages/aiCore/**/*.bench.{ts,tsx}', 'packages/aiCore/**/__tests__/**/*.bench.{ts,tsx}']
-          }
+          ]
         }
       },
       // shared 包单元测试配置
@@ -197,10 +145,7 @@ export default defineConfig({
           include: [
             'packages/shared/**/*.{test,spec}.{ts,tsx}',
             'packages/shared/**/__tests__/**/*.{test,spec}.{ts,tsx}'
-          ],
-          benchmark: {
-            include: ['packages/shared/**/*.bench.{ts,tsx}', 'packages/shared/**/__tests__/**/*.bench.{ts,tsx}']
-          }
+          ]
         }
       },
       // E2E utility tests (non-Electron, non-Playwright unit tests)

@@ -82,11 +82,6 @@ import {
   captureResidentGeneration,
   shouldDiscardPaginationForResident
 } from '@renderer/services/paginationResidentGuard'
-import {
-  currentPhaseCorrelation,
-  recordPhaseDurationForCorrelation,
-  recordPhaseEndpoint
-} from '@renderer/services/phaseTimingDiagnostics'
 import { handleScrollSnapshotCleared } from '@renderer/services/scrollSnapshotCache'
 import {
   captureDeletionGeneration,
@@ -562,17 +557,7 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   }
   const groupedMessages = useMemo(() => {
     const cache = projectionCacheRef.current as ReturnType<typeof createViewportProjectionCache>
-    const active = currentPhaseCorrelation()
-    const startedAt = active ? performance.now() : 0
     const result = cache.project(displayMessages, displayGroups, viewportRouteKey)
-    if (active && displayMessages.length > 0) {
-      recordPhaseDurationForCorrelation(
-        active.correlationId,
-        active.path,
-        active.path === 'echo' ? 'echo.visibleGroupModel' : 'topic.visibleGroupModel',
-        performance.now() - startedAt
-      )
-    }
     return result
   }, [displayGroups, displayMessages, viewportRouteKey])
 
@@ -863,8 +848,6 @@ const Messages = ({
   const { displayCount, createTopicBranchByAnchor, createBranch } = useMessageOperations(topic)
   const { selectAnswer } = useMessageActionController()
   const { setTimeoutTimer, clearTimeoutTimer } = useTimer()
-  const phaseAtRender = currentPhaseCorrelation()
-  const phaseRenderStartedAt = phaseAtRender ? performance.now() : 0
 
   const { isMultiSelectMode, handleSelectMessage } = useChatContext(topic)
 
@@ -934,14 +917,6 @@ const Messages = ({
   // S6.1: per-topic last window cache for coverage checks (fail-closed, generation-owned)
   const windowCacheRef = useRef<Map<string, FetchMessagesWindowResponse>>(new Map())
   const viewportCommitWaiterRef = useRef(createViewportCommitWaiter<typeof viewportState>())
-  /** PERF-101: per-correlation one-shot guard for topic.messagesMount.
-   *  The useLayoutEffect dependency array includes phaseAtRender (a new
-   *  object reference on every render when phase is active) and
-   *  phaseRenderStartedAt (performance.now() on every render), causing
-   *  the effect to fire more than once per topic window application.
-   *  This ref tracks the last correlationId for which messagesMount was
-   *  recorded; duplicate records for the same correlation are skipped. */
-  const messagesMountCorrelationRef = useRef<string | undefined>(undefined)
   useLayoutEffect(() => {
     viewportStateRef.current = viewportState
     viewportCommitWaiterRef.current.notify(viewportState)
@@ -1947,21 +1922,6 @@ const Messages = ({
     messagesRef.current = messages
   }, [messages])
 
-  useLayoutEffect(() => {
-    if (phaseAtRender?.path === 'topic-cache-miss' || phaseAtRender?.path === 'topic-cache-hit') {
-      // PERF-101 one-shot guard: only record once per correlation.
-      if (messagesMountCorrelationRef.current !== phaseAtRender.correlationId) {
-        messagesMountCorrelationRef.current = phaseAtRender.correlationId
-        recordPhaseDurationForCorrelation(
-          phaseAtRender.correlationId,
-          phaseAtRender.path,
-          'topic.messagesMount',
-          performance.now() - phaseRenderStartedAt
-        )
-      }
-    }
-  }, [phaseAtRender, phaseRenderStartedAt])
-
   useEffect(() => {
     const viewportCommitWaiter = viewportCommitWaiterRef.current
 
@@ -2017,22 +1977,12 @@ const Messages = ({
     try {
       // Scenario 1: First load — authoritative completeness retained from validated latest response
       if (!viewportStateRef.current.window?.displayMessages.length) {
-        const active = currentPhaseCorrelation()
-        const startedAt = active ? performance.now() : 0
         const completeness = getLatestWindowCompleteness(topic.id)
         const authoritative =
           completeness !== undefined
             ? { hasMoreBefore: completeness.hasMoreBefore, hasMoreAfter: completeness.hasMoreAfter }
             : undefined
         applyMessageWindow(createLatestMessageWindow(messages, displayCount, authoritative))
-        if (active) {
-          recordPhaseDurationForCorrelation(
-            active.correlationId,
-            active.path,
-            active.path === 'echo' ? 'echo.windowCreate' : 'topic.windowApply',
-            performance.now() - startedAt
-          )
-        }
         return
       }
 
@@ -2042,17 +1992,7 @@ const Messages = ({
       const currentWindow = viewportStateRef.current.window
       if (!currentWindow) return
       const currentDisplayMessages = currentWindow.displayMessages
-      const active = currentPhaseCorrelation()
-      const startedAt = active ? performance.now() : 0
       const reconciledWindow = reconcileMessageWindow(messages, previousMessagesRef.current, currentWindow)
-      if (active) {
-        recordPhaseDurationForCorrelation(
-          active.correlationId,
-          active.path,
-          active.path === 'echo' ? 'echo.windowReconcile' : 'topic.windowReconcile',
-          performance.now() - startedAt
-        )
-      }
       const newDisplayMessages = reconciledWindow.displayMessages
 
       if (
@@ -2067,12 +2007,6 @@ const Messages = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, displayCount])
-
-  useEffect(() => {
-    if (displayMessages.length === 0) return
-    const active = currentPhaseCorrelation()
-    if (active) recordPhaseEndpoint(active.path === 'echo' ? 'echo.domEndpoint' : 'topic.domEndpoint')
-  }, [displayMessages])
 
   /**
    * Check the DOM status of a message element.
@@ -3937,12 +3871,6 @@ const Messages = ({
     requestAnimationFrame(() => {
       onComponentUpdate?.()
     })
-    // LOCK-2A-007: the domEndpoint record is written exclusively by the
-    // displayMessages effect above — this component-update effect does NOT
-    // write a domEndpoint record. The two effects serve different purposes:
-    // displayMessages is the real non-empty visible subtree boundary used
-    // by the E2E endpoint; onComponentUpdate is a general component update
-    // signal that may fire independently.
   }, [onComponentUpdate])
 
   // Divider restore search driver (binding invariant, single owner).

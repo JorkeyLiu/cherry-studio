@@ -49,19 +49,8 @@ export function launchElectronApp(options: LaunchElectronOptions): Promise<Elect
     tmpEnv.TEMP = options.ownedTmpRoot
   }
 
-  // C-02 opt-in precise memory: any non-empty C02_HEAP_CALIBRATION enables
-  // precise memory (supports "1","true","all","matrix", comma-lists, short names).
-  // Normal `pnpm test:e2e` (unset/empty) never adds the flag, preserving
-  // default app behavior. The flag makes Chromium performance.memory granular;
-  // without it values are bucketed and heapDelta=0 must be treated as
-  // inconclusive, not amplification 0. When the fixture cannot add the flag,
-  // the spec detects bucketed precision via argv.
-  const c02Raw = (process.env.C02_HEAP_CALIBRATION ?? '').trim().toLowerCase()
-  const c02PreciseEnabled = c02Raw.length > 0
-  const preciseArgs = c02PreciseEnabled ? ['--enable-precise-memory-info', '--js-flags=--expose-gc'] : []
-
   return electron.launch({
-    args: ['.', `--user-data-dir=${options.userDataDir}`, '--no-sandbox', '--disable-gpu', ...preciseArgs],
+    args: ['.', `--user-data-dir=${options.userDataDir}`, '--no-sandbox', '--disable-gpu'],
     env: { ...process.env, NODE_ENV: 'development', ELECTRON_RUN_AS_NODE: '', ...tmpEnv, ...options.extraEnv },
     timeout: 120000
   })

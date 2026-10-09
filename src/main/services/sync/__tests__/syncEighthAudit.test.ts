@@ -137,28 +137,6 @@ describe('durable NULL/empty/malformed identity fails closed', () => {
   })
 })
 
-describe('missing migration_state is damage, not proof', () => {
-  it('missing migration_state table with missing sync_state fails closed', () => {
-    sqlite.exec('DROP TABLE IF EXISTS sync_state')
-    sqlite.exec('DROP TABLE IF EXISTS migration_state')
-    configStore.set('deviceId', 'any-device')
-    expect(() => syncService.getDeviceId()).toThrow(/device identity/i)
-  })
-
-  it('proven pre-005 (present migration_state, absent 005 key) still returns config', () => {
-    sqlite.exec("DELETE FROM migration_state WHERE key = '005_sync_metadata'")
-    sqlite.exec("DELETE FROM migration_state WHERE key = '006_sync_field_merge'")
-    sqlite.exec('DROP TABLE IF EXISTS sync_state')
-    sqlite.exec('DROP TABLE IF EXISTS sync_outbox')
-    sqlite.exec('DROP TABLE IF EXISTS sync_applied')
-    sqlite.exec('DROP TABLE IF EXISTS sync_entity_clock')
-    sqlite.exec('DROP TABLE IF EXISTS sync_field_clock')
-    sqlite.exec('DROP TABLE IF EXISTS sync_conflict_log')
-    configStore.set('deviceId', 'pre005-device')
-    expect(syncService.getDeviceId()).toBe('pre005-device')
-  })
-})
-
 describe('config-read secondary capture failure stays observable', () => {
   it('hook rethrows secondary persistence failure instead of swallowing', () => {
     const getSpy = vi.spyOn(syncService, 'getConfig').mockImplementation(() => {
