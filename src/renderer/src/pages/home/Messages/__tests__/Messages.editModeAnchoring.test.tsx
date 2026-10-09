@@ -155,11 +155,6 @@ vi.mock('@renderer/services/MessagesService', () => ({
   getPendingNavigate: vi.fn(() => null),
   clearPendingNavigate: vi.fn(() => true)
 }))
-vi.mock('@renderer/services/phaseTimingDiagnostics', () => ({
-  currentPhaseCorrelation: vi.fn(() => null),
-  recordPhaseDurationForCorrelation: vi.fn(),
-  recordPhaseEndpoint: vi.fn()
-}))
 vi.mock('@renderer/store/messageBlock', () => ({
   default: (state: any = { entities: {} }) => state,
   messageBlocksSelectors: { selectById: vi.fn() },

@@ -44,7 +44,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { registerChatDbNormalize, runMigrations } from '../migration'
 import { SearchRepository } from '../repository/SearchRepository'
 import * as schema from '../schema'
-import { generateCorpus, hybridSearchAll, likeSearch, QUERY_FIXTURES } from './searchBenchHarness'
+import { generateCorpus, hybridSearchAll, likeSearch, QUERY_FIXTURES } from './searchTestCorpus'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -713,10 +713,6 @@ describe('SearchRepository — FTS5 Search', () => {
 // gate: the hybrid FTS+LIKE path must return the exact same block IDs in the
 // exact same order as the normalized-LIKE full-scan semantic baseline, across
 // ALL cursor pages, for every representative query fixture.
-//
-// The heavy 10k timing evidence (LOCK-5129 p50/p95) lives in search.bench.ts
-// and runs only under `vitest bench` — it reuses this same harness so bench
-// execution is never the sole carrier of semantic coverage.
 // ===========================================================================
 
 describe('SearchRepository — LIKE baseline parity (small deterministic corpus)', () => {

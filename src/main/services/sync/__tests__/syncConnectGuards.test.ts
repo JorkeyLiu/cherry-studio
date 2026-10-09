@@ -6,7 +6,10 @@
  * 5) Device code + secret persist as one atomic logical unit with rollback;
  *    half state fails closed and the secret never travels on the error object.
  * 6) Legacy reset critical cleanup never swallows then marks complete;
- *    failures leave the marker unset for retry with an explicit error.
+ *    failures leave the marker unset for retry with an explicit error
+ *    (covered in syncProductionLifecycle pairing-reset suite with the
+ *    additional lastError surface; same getServiceStatus entrypoint and
+ *    same single-failure config-persist trigger — not repeated here).
  * 7) SSE/relay disconnect promptly marks observed service state disconnected
  *    without import cycles; a successful authenticated round-trip restores it.
  */
@@ -169,52 +172,6 @@ describe('connect async-boundary guards', () => {
     expect(configStore.get('sync:deviceCode')).toBe('WXYZ5678')
     expect(configStore.get('sync:deviceAuth')).toBe(retrySecret)
     expect(syncService.getAutoCredentials()).toMatchObject({ deviceCode: 'WXYZ5678', deviceSecret: retrySecret })
-  })
-
-  it('legacy reset failure leaves the marker unset for retry', async () => {
-    // Force a fresh legacy path: no marker, no registration.
-    configStore.delete('sync:deviceCode')
-    configStore.delete('sync:deviceAuth')
-    // Sabotage the cursor cleanup once via a closed DB proxy is complex;
-    // instead sabotage config persistence to prove fail-closed + retry.
-    const { configManager } = await import('@main/services/ConfigManager')
-    const origSet = configManager.set
-    let failOnce = true
-    vi.spyOn(configManager, 'set').mockImplementation(((k: string, v: unknown) => {
-      if (failOnce && (k === 'sync:deviceAuth' || k === 'sync:deviceCode')) {
-        failOnce = false
-        throw new Error('injected reset persist failure')
-      }
-      return (origSet as (kk: string, vv: unknown) => void)(k, v)
-    }) as never)
-    const firstErr = (() => {
-      try {
-        syncService.getServiceStatus()
-        return null
-      } catch (e) {
-        return e as Error
-      }
-    })()
-    // Fail closed: the reset failure throws (never disguised as an ordinary
-    // unregistered/disconnected state) and stays observable via lastError.
-    expect(firstErr).not.toBeNull()
-    expect(String(firstErr?.message)).toMatch(/reset failed|pairing reset/i)
-    const markerRow = db
-      .select()
-      .from(schema.syncState)
-      .where((await import('drizzle-orm')).eq(schema.syncState.key, 'sync:pairingGeneration'))
-      .get()
-    // First attempt failed before the marker: retry must succeed explicitly.
-    expect(markerRow?.value ?? null).not.toBe('cc-1')
-    vi.restoreAllMocks()
-    const status = syncService.getServiceStatus()
-    expect(['unregistered', 'disconnected']).toContain(status.state)
-    const markerRow2 = db
-      .select()
-      .from(schema.syncState)
-      .where((await import('drizzle-orm')).eq(schema.syncState.key, 'sync:pairingGeneration'))
-      .get()
-    expect(markerRow2?.value).toBe('cc-1')
   })
 
   it('relay disconnect marks disconnected; successful round-trip restores', async () => {

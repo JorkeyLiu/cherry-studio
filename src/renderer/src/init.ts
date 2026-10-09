@@ -16,11 +16,6 @@ import type { RootState } from './store'
 // imported behind `initialI18nReady`. `index.html` loads this script before
 // `entryPoint.tsx`; both entries gate independently on the same promise.
 
-// S7.13 startup stage bootstrap anchor — capture perf now before any init work.
-// The actual mark is emitted after synchronous bootstrap completes. Fail-closed
-// harness ensures ordinary build stays inert with zero overhead beyond a perf.now().
-const bootstrapStartPerfMs = performance.now()
-
 loggerService.initWindowSource('mainWindow')
 
 const bootstrapLogger = loggerService.withContext('Bootstrap')
@@ -190,13 +185,3 @@ initStoreSync()
 initWebTrace()
 initModelMetadata()
 void bootstrapStoreDependent()
-
-// S7.13: renderer.bootstrap — synchronous bootstrap completion, idempotent once.
-// Fail-closed diagnostic only; uses dynamic import to avoid cycle.
-void import('./services/startupStageDiagnostics')
-  .then(({ markStartupStage }) => {
-    try {
-      markStartupStage('renderer.bootstrap', bootstrapStartPerfMs)
-    } catch {}
-  })
-  .catch(() => {})

@@ -26,11 +26,6 @@ vi.mock('@renderer/services/db/sendTimingDiagnostics', () => ({
   createSendDiagnosticsContext: vi.fn(() => ({ correlationId: 'c', ordinal: 1 })),
   elapsedMs: vi.fn(() => 0)
 }))
-vi.mock('@renderer/services/db/streamTimingDiagnostics', () => ({
-  createStreamWriteDiagnosticsContext: vi.fn(() => ({ correlationId: 'c', ordinal: 1 })),
-  isStreamAttrRendererMeasureEnabled: vi.fn(() => false),
-  recordStreamAttrRendererRecord: vi.fn()
-}))
 vi.mock('@renderer/services/anchorService', () => ({
   ensureTopicAnchorEstablished: vi.fn(),
   anchorKeyForRoute: (t: string, b?: string | null) => (typeof b === 'string' && b.length > 0 ? `${t}:${b}` : t),
@@ -95,10 +90,6 @@ vi.mock('@renderer/services/StreamProcessingService', () => ({
   createStreamProcessor: vi.fn(() => vi.fn())
 }))
 vi.mock('@renderer/services/SpanManagerService', () => ({ endSpan: vi.fn() }))
-vi.mock('@renderer/services/phaseTimingDiagnostics', () => ({
-  currentPhaseCorrelation: vi.fn(() => null),
-  recordPhaseDuration: vi.fn()
-}))
 vi.mock('@renderer/utils/abortController', () => ({ addAbortController: vi.fn() }))
 vi.mock('@renderer/utils/messageUtils/create', () => ({
   createAssistantMessage: vi.fn(),

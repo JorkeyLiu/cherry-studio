@@ -20,7 +20,6 @@ import { appIdentity } from '@shared/config/identity'
 
 import { registerIpc } from './ipc'
 import { analyticsService } from './services/AnalyticsService'
-import { markStartupStageSync, withStartupStage } from './services/startupStageDiagnostics'
 import { apiServerService } from './services/ApiServerService'
 import { saveDataHandshake } from './services/SaveDataHandshake'
 import { appMenuService } from './services/AppMenuService'
@@ -161,7 +160,7 @@ if (!app.requestSingleInstanceLock()) {
 
     let restoreSucceeded = true
     try {
-      await withStartupStage('main.restore', () => BackupManager.handleStartupRestore())
+      await BackupManager.handleStartupRestore()
     } catch (error) {
       restoreSucceeded = false
       logger.error(
@@ -175,7 +174,7 @@ if (!app.requestSingleInstanceLock()) {
     // Must run AFTER handleStartupRestore (which may leave .restore dirs for retry)
     // and BEFORE chatDbService.init().
     try {
-      await withStartupStage('main.cleanupExtractions', () => BackupManager.cleanupOrphanedExtractions())
+      await BackupManager.cleanupOrphanedExtractions()
     } catch {
       // Non-fatal — orphan cleanup is best-effort
     }
@@ -196,7 +195,7 @@ if (!app.requestSingleInstanceLock()) {
     // startup path below is skipped.
     let catalogRecoveryTerminal = false
     try {
-      const gateResult = await withStartupStage('main.promotionGate', () => runStartupRecoveryGate(false))
+      const gateResult = await runStartupRecoveryGate(false)
       if (gateResult.repairRequired) {
         promotionGateRepairRequired = true
         logger.warn(
@@ -224,34 +223,32 @@ if (!app.requestSingleInstanceLock()) {
         try {
           const { runCatalogStartupRecovery } = await import('./services/chatDbImport/catalogStartupRecovery')
           const { BrowserWindow } = await import('electron')
-          const recoveryResult = await withStartupStage('main.catalogRecovery', () =>
-            runCatalogStartupRecovery({
-              dataRoot: DATA_PATH,
-              createWindow: () =>
-                new BrowserWindow({
-                  width: 480,
-                  height: 300,
-                  // LOCK-CAT-8: the recovery window stays hidden — the renderer
-                  // only needs to run the catalog handoff in the background; it
-                  // is shown only when the bounded terminal repair surface is
-                  // raised (LOCK-F2).
-                  show: false,
-                  autoHideMenuBar: true,
-                  backgroundColor: '#181818',
-                  webPreferences: {
-                    preload: join(__dirname, '../preload/index.js'),
-                    // Mirror the main window webPreferences (house style):
-                    // sandbox/webSecurity follow the existing window bootstrap
-                    // patterns; webviewTag stays disabled on the minimal surface.
-                    sandbox: false,
-                    webSecurity: false,
-                    webviewTag: false,
-                    contextIsolation: true
-                  }
-                }),
-              liveDb: chatDbService
-            })
-          )
+          const recoveryResult = await runCatalogStartupRecovery({
+            dataRoot: DATA_PATH,
+            createWindow: () =>
+              new BrowserWindow({
+                width: 480,
+                height: 300,
+                // LOCK-CAT-8: the recovery window stays hidden — the renderer
+                // only needs to run the catalog handoff in the background; it
+                // is shown only when the bounded terminal repair surface is
+                // raised (LOCK-F2).
+                show: false,
+                autoHideMenuBar: true,
+                backgroundColor: '#181818',
+                webPreferences: {
+                  preload: join(__dirname, '../preload/index.js'),
+                  // Mirror the main window webPreferences (house style):
+                  // sandbox/webSecurity follow the existing window bootstrap
+                  // patterns; webviewTag stays disabled on the minimal surface.
+                  sandbox: false,
+                  webSecurity: false,
+                  webviewTag: false,
+                  contextIsolation: true
+                }
+              }),
+            liveDb: chatDbService
+          })
           if (!recoveryResult.ok) {
             // LOCK-F2: terminal recovery failure — fail closed (LOCK-4431):
             // chatDb init is blocked and, when the bounded repair surface is
@@ -306,7 +303,7 @@ if (!app.requestSingleInstanceLock()) {
     // If restore failed or repair is required, skip init entirely.
     if (restoreSucceeded && !promotionGateRepairRequired) {
       try {
-        await withStartupStage('main.chatDbInit', () => chatDbService.init())
+        await chatDbService.init()
       } catch (error) {
         logger.error('ChatDbService initialisation failed (app continues, chat DB unavailable):', error as Error)
       }
@@ -345,11 +342,9 @@ if (!app.requestSingleInstanceLock()) {
         error as Error
       )
     }
-    await withStartupStage('main.orphanRecovery', () => recoverOrphanedImportArtifacts(journalObservation))
+    await recoverOrphanedImportArtifacts(journalObservation)
 
-    const cwStart = performance.now()
     const mainWindow = windowService.createMainWindow()
-    markStartupStageSync('main.createWindow', cwStart)
 
     new TrayService()
 
@@ -378,7 +373,7 @@ if (!app.requestSingleInstanceLock()) {
 
     registerShortcuts(mainWindow)
 
-    await withStartupStage('main.registerIpc', () => registerIpc(mainWindow, app))
+    await registerIpc(mainWindow, app)
 
     // Sync realtime closure (Main-owned): start automation after chatDb init
     // and IPC registration so saved enabled endpoint config resumes SSE +

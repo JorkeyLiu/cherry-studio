@@ -4,14 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
-import {
-  classifyMainBenchFiles,
-  classifyMainTestFiles,
-  enumerateMainBenchFiles,
-  enumerateMainTestFiles,
-  HEAVY_FILES,
-  LEGACY_FORK_PINNED_FILES
-} from '../mainLanes'
+import { classifyMainTestFiles, enumerateMainTestFiles, HEAVY_FILES, LEGACY_FORK_PINNED_FILES } from '../mainLanes'
 
 /**
  * Static/config tests for the resource-safe Vitest lane scheduling
@@ -19,9 +12,8 @@ import {
  *
  * These tests resolve the lane manifests against the repository at test time
  * (never against machine-local state), so they stay correct as the main suite
- * grows. They also pin the package.json script chain (test and bench), the
- * root safety caps, and the bench-lane resolution so the bounded lane sequence
- * and the benchmark commands cannot silently regress.
+ * grows. They also pin the package.json test script chain, the
+ * root safety caps so the bounded lane sequence cannot silently regress.
  */
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
@@ -89,12 +81,6 @@ describe('main lane manifests (LOCK-TEST-001..003)', () => {
     // "native binding never loaded in a thread-pool worker" (LOCK-ABI-2), not
     // "every real-filesystem test is native".
   })
-
-  it('main bench files are classified by the same native/heavy predicate', () => {
-    const bench = classifyMainBenchFiles()
-    const allLaneFiles = [...bench.core, ...bench.native, ...bench.heavy]
-    expect(new Set(allLaneFiles).size).toBe(allLaneFiles.length)
-  })
 })
 
 describe('package.json lane scripts (LOCK-TEST-001, 004)', () => {
@@ -147,91 +133,6 @@ describe('package.json lane scripts (LOCK-TEST-001, 004)', () => {
     const ciYml = readRepoFile('.github/workflows/ci.yml')
     expect(ciYml.match(/pnpm test:e2e-utils/g)).toHaveLength(1)
     expect(scripts['test:run'].match(/pnpm test:e2e-utils/g)).toHaveLength(1)
-  })
-})
-
-describe('package.json main bench scripts (bench lane audit)', () => {
-  const pkg = JSON.parse(readRepoFile('package.json')) as { scripts: Record<string, string> }
-  const { scripts } = pkg
-  const bench = classifyMainBenchFiles()
-
-  // vitest.config.ts maps project `main` / `main-native` / `main-heavy` onto
-  // the core / native / heavy bench lane manifests respectively.
-  const benchByProject: Record<string, string[]> = {
-    main: bench.core,
-    'main-native': bench.native,
-    'main-heavy': bench.heavy
-  }
-
-  function projectsOf(script: string): string[] {
-    const projects = [...script.matchAll(/--project\s+(\S+)/g)].map((match) => match[1])
-    expect(projects.length, 'bench script must select at least one project').toBeGreaterThan(0)
-    return projects
-  }
-
-  function benchFilesOf(script: string): string[] {
-    const files = new Set<string>()
-    for (const project of projectsOf(script)) {
-      for (const file of benchByProject[project] ?? []) files.add(file)
-    }
-    return [...files].sort()
-  }
-
-  it('removed always-failing empty focused bench scripts stay removed', () => {
-    // bench:main:core and bench:main:heavy always exited 1 because those lanes
-    // contain zero bench files (vitest: "No bench files found, exiting with
-    // code 1" when no file matches across the selected projects).
-    expect(scripts['bench:main:core']).toBeUndefined()
-    expect(scripts['bench:main:heavy']).toBeUndefined()
-  })
-
-  it('aggregate and native bench commands each resolve the main bench files exactly once', () => {
-    const allBench = enumerateMainBenchFiles().sort()
-    expect(allBench).toEqual([
-      'src/main/services/chatDb/__tests__/b0105Calibration.bench.ts',
-      'src/main/services/chatDb/__tests__/logicalPayload.bench.ts',
-      'src/main/services/chatDb/__tests__/m4FtsDuplication.bench.ts',
-      'src/main/services/chatDb/__tests__/m5FileDualState.bench.ts',
-      'src/main/services/chatDb/__tests__/m6SyncMetadataGap.bench.ts',
-      'src/main/services/chatDb/__tests__/m8L3ArchiveHealth.bench.ts',
-      'src/main/services/chatDb/__tests__/pinnedWorkingSet.bench.ts',
-      'src/main/services/chatDb/__tests__/search.bench.ts',
-      'src/main/services/chatDb/__tests__/searchStage.bench.ts',
-      'src/main/services/chatDb/__tests__/searchStagePlan.bench.ts',
-      'src/main/services/chatDb/__tests__/sortOrderShift.bench.ts',
-      'src/main/services/chatDb/__tests__/sqlite-runtime.perf.bench.ts',
-      'src/main/services/chatDb/__tests__/streamPersistDifferential.bench.ts'
-    ])
-    for (const scriptName of ['bench:main', 'bench:main:native']) {
-      expect(scripts[scriptName]).toBeDefined()
-      expect(benchFilesOf(scripts[scriptName]), scriptName).toEqual(allBench)
-    }
-  })
-
-  it('every focused bench:main:* script targets a non-empty bench lane', () => {
-    // Guards against a focused bench script silently targeting an empty lane,
-    // which would make `pnpm bench:main:<lane>` always exit 1 again.
-    for (const [name, script] of Object.entries(scripts)) {
-      if (!name.startsWith('bench:main:')) continue
-      for (const project of projectsOf(script)) {
-        expect(
-          (benchByProject[project] ?? []).length,
-          `${name} targets an empty bench lane: ${project}`
-        ).toBeGreaterThan(0)
-      }
-    }
-  })
-
-  it('declares the canonical M6 synthetic benchmark command on the node native lane', () => {
-    expect(scripts['bench:m6-sync-gap']).toBe(
-      'M6_SYNC_GAP_BENCH=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/m6SyncMetadataGap.bench.ts'
-    )
-  })
-
-  it('declares the canonical B0105 synthetic calibration command on the node native lane', () => {
-    expect(scripts['bench:b0105-calibration']).toBe(
-      'B0105_CALIBRATION=1 pnpm native:run node -- vitest bench --run --project main-native src/main/services/chatDb/__tests__/b0105Calibration.bench.ts'
-    )
   })
 })
 

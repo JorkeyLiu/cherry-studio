@@ -1,15 +1,7 @@
-import * as path from 'path'
 import { Node, Project } from 'ts-morph'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  HardcodedStringDetector,
-  hasCJK,
-  hasEnglishUIText,
-  isInCodeContext,
-  isNonUIString,
-  shouldSkipNode
-} from '../check-hardcoded-strings'
+import { hasCJK, hasEnglishUIText, isInCodeContext, isNonUIString, shouldSkipNode } from '../check-hardcoded-strings'
 
 function createTestProject() {
   return new Project({
@@ -45,14 +37,8 @@ function findTemplateLiteral(project: Project, code: string): Node | undefined {
 vi.mock('fs')
 
 describe('check-hardcoded-strings', () => {
-  const mockSrcDir = '/mock/src/renderer/src'
-
   beforeEach(() => {
     vi.resetAllMocks()
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
   })
 
   describe('hasCJK', () => {
@@ -128,97 +114,6 @@ describe('check-hardcoded-strings', () => {
       expect(isNonUIString('https://example.com')).toBe(false)
       expect(isNonUIString('#fff')).toBe(false)
       expect(isNonUIString('snake_case_id')).toBe(false)
-    })
-  })
-
-  describe('File filtering', () => {
-    const IGNORED_DIRS = ['__tests__', 'node_modules', 'i18n', 'locales', 'types', 'assets']
-    const IGNORED_FILES = ['*.test.ts', '*.test.tsx', '*.d.ts']
-
-    const mockShouldSkipFile = (filePath: string): boolean => {
-      const relativePath = filePath.replace(mockSrcDir + '/', '')
-
-      if (IGNORED_DIRS.some((dir) => relativePath.includes(dir))) {
-        return true
-      }
-
-      const fileName = path.basename(filePath)
-      if (
-        IGNORED_FILES.some((pattern) => {
-          const regex = new RegExp(pattern.replace('*', '.*'))
-          return regex.test(fileName)
-        })
-      ) {
-        return true
-      }
-
-      return false
-    }
-
-    it('should skip test files', () => {
-      expect(mockShouldSkipFile(`${mockSrcDir}/components/Button.test.tsx`)).toBe(true)
-      expect(mockShouldSkipFile(`${mockSrcDir}/utils/helper.test.ts`)).toBe(true)
-    })
-
-    it('should skip type definition files', () => {
-      expect(mockShouldSkipFile(`${mockSrcDir}/types/index.d.ts`)).toBe(true)
-    })
-
-    it('should skip i18n/locales directories', () => {
-      expect(mockShouldSkipFile(`${mockSrcDir}/i18n/locales/en-us.json`)).toBe(true)
-      expect(mockShouldSkipFile(`${mockSrcDir}/locales/zh-cn.json`)).toBe(true)
-    })
-
-    it('should skip __tests__ directories', () => {
-      expect(mockShouldSkipFile(`${mockSrcDir}/components/__tests__/Button.test.tsx`)).toBe(true)
-    })
-
-    it('should NOT skip regular component files', () => {
-      expect(mockShouldSkipFile(`${mockSrcDir}/components/Button.tsx`)).toBe(false)
-      expect(mockShouldSkipFile(`${mockSrcDir}/pages/Home.tsx`)).toBe(false)
-    })
-
-    it('should NOT skip regular TypeScript files', () => {
-      expect(mockShouldSkipFile(`${mockSrcDir}/utils/helper.ts`)).toBe(false)
-    })
-  })
-
-  describe('HardcodedStringDetector', () => {
-    // These are integration tests that would require actual files
-    // For unit testing, we test the exported utility functions instead
-
-    it('should be instantiable', () => {
-      const detector = new HardcodedStringDetector()
-      expect(detector).toBeDefined()
-    })
-  })
-
-  describe('Legacy pattern compatibility (regex patterns for reference)', () => {
-    // Keep legacy pattern tests for backward compatibility reference
-    const CHINESE_PATTERNS = [
-      { regex: />([^<]*[\u4e00-\u9fff][^<]*)</g, name: 'JSX text content' },
-      {
-        regex: /(?:placeholder|title|label|message|description|tooltip)=["']([^"']*[\u4e00-\u9fff][^"']*)["']/g,
-        name: 'attribute'
-      }
-    ]
-
-    it('should detect Chinese characters in JSX text content (regex)', () => {
-      const testLine = '<span>测试文本</span>'
-      const matches = testLine.match(CHINESE_PATTERNS[0].regex)
-      expect(matches).not.toBeNull()
-    })
-
-    it('should detect Chinese characters in placeholder attribute (regex)', () => {
-      const testLine = 'placeholder="请输入内容"'
-      const matches = testLine.match(CHINESE_PATTERNS[1].regex)
-      expect(matches).not.toBeNull()
-    })
-
-    it('should detect Chinese characters in title attribute (regex)', () => {
-      const testLine = 'title="提示信息"'
-      const matches = testLine.match(CHINESE_PATTERNS[1].regex)
-      expect(matches).not.toBeNull()
     })
   })
 

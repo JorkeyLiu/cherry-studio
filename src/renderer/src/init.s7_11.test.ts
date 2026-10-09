@@ -300,7 +300,6 @@ describe('init.ts — async-barrier bootstrap failure isolation (behavioral)', (
     vi.doMock('./i18n', () => ({ initialI18nReady: readinessPromise }))
     vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
     vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
-    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncImpl } }))
     if (opts.topicLoadShouldReject) {
       vi.doMock('./services/topicDeletionSubscription', () => {
@@ -389,7 +388,6 @@ describe('init.ts — async-barrier bootstrap failure isolation (behavioral)', (
     vi.doMock('./i18n', () => ({ initialI18nReady: readinessPromise }))
     vi.doMock('./services/exactProviderResolver', () => ({ setExactProviderResolver: vi.fn() }))
     vi.doMock('./services/modelMetadata', () => ({ initModelMetadataRegistry: vi.fn() }))
-    vi.doMock('./services/startupStageDiagnostics', () => ({ markStartupStage: vi.fn() }))
     vi.doMock('./services/StoreSyncService', () => ({ default: { subscribe: storeSyncMock } }))
     vi.doMock('./services/topicDeletionSubscription', () => ({
       subscribeTopicDeletionEvents: topicMock

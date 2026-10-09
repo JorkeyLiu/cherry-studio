@@ -74,7 +74,6 @@ import { and, eq } from 'drizzle-orm'
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import { logMainDiagnostic } from '../diagnostics'
-import { isPhaseAttrMainEnabled, recordMainPhaseDuration } from '../phaseTimingDiagnostics'
 import { spanCacheService } from '../SpanCacheService'
 import {
   clearResendAttemptsForTopicInTx,
@@ -90,7 +89,6 @@ import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
 import { SearchRepository } from './repository/SearchRepository'
 import * as schema from './schema'
-import { isStreamAttrMeasureEnabled, recordStreamAttrRecord } from './streamingMeasure'
 import { computeTrashRetentionDecision, parseStrictCanonicalIsoMs } from './trashRetention'
 import {
   blocksToWire,
@@ -3508,7 +3506,6 @@ export class ChatDbAggregateService {
     const correlationId = diagnostics?.correlationId
     const ordinal = diagnostics?.ordinal
     const isDiagnosedAppend = typeof correlationId === 'string' && correlationId.length > 0
-    const phasePath = isPhaseAttrMainEnabled() ? ('echo' as const) : undefined
     const t0 = performance.now()
     let convertDurationMs = 0
     let txDurationMs = 0
@@ -3876,9 +3873,6 @@ export class ChatDbAggregateService {
             ok: outcomeOk,
             blockCount: blocksJson.length
           })
-        }
-        if (phasePath && correlationId && ordinal === 1) {
-          recordMainPhaseDuration(correlationId, phasePath, 'echo.mainAppend', elapsedMs(t0))
         }
       }
     }, `appendMessage(${topicId}, ${messageJson.id})`)
@@ -4858,49 +4852,10 @@ export class ChatDbAggregateService {
     diagnostics?: StreamWriteDiagnostics,
     options?: { resendAttemptId?: string }
   ): ChatDbResult<null> {
-    const isMeasured = isStreamAttrMeasureEnabled() && typeof diagnostics?.correlationId === 'string'
-    const t0 = performance.now()
-    let convertDurationMs = 0
-    let txDurationMs = 0
-    let outcomeOk = false
-    let blockCount = 0
-    let existingBlocks = 0
-    let newBlocks = 0
-    let changedBlocks = 0
-    let unchangedBlocks = 0
-
+    void diagnostics
     const result = wrapResult(() => {
-      const tConvert = performance.now()
       const blockDataList = blocksJson.map(wireToBlock)
-      blockCount = blockDataList.length
 
-      // LOCK-STREAM-ATTR-001/003: measurement-only changed-vs-unchanged batch
-      // classification. Reads the current row content for each incoming block
-      // OUTSIDE the timed transaction window, so the tx timing stays clean.
-      // Zero semantic effect; records are closed-field and content-free.
-      if (isMeasured && blockDataList.length > 0) {
-        const priorRepo = this.repos().blocks
-        for (const block of blockDataList) {
-          const prior = priorRepo.getById(block.id)
-          if (!prior.found) {
-            newBlocks += 1
-          } else {
-            existingBlocks += 1
-            if (prior.data.content === block.content) {
-              unchangedBlocks += 1
-            } else {
-              changedBlocks += 1
-            }
-          }
-        }
-      }
-
-      const tTx = performance.now()
-      // LOCK-STREAM-ATTR-005: record main.convert BEFORE entering the
-      // transaction window so it excludes transaction time (the convert is
-      // wire->domain mapping done above); main.tx and existing semantics are
-      // preserved.
-      convertDurationMs = elapsedMs(tConvert)
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens.
       this.assertResendAttemptPreTx(this.blockParentIdsPreTx(blocksJson), resendAttemptId)
@@ -5123,46 +5078,9 @@ export class ChatDbAggregateService {
       }
       if (syncNotify) syncService.notifyEnqueued()
       this.recordUnsupportedBlocksAfterCommit('updateBlocks', unsupportedBlockIds)
-      txDurationMs = elapsedMs(tTx)
-      outcomeOk = true
       return null
     }, `updateBlocks(${blocksJson.length} blocks)`)
 
-    // LOCK-STREAM-ATTR-001/005: bounded measurement records fire on success
-    // AND failure without swallowing or replacing the original result.
-    if (isMeasured) {
-      recordStreamAttrRecord({
-        channel: 'chatdb:update-blocks',
-        stage: 'main.aggregate',
-        correlationId: diagnostics.correlationId,
-        ordinal: diagnostics.ordinal,
-        durationMs: elapsedMs(t0),
-        ok: outcomeOk,
-        blockCount,
-        existingBlocks,
-        newBlocks,
-        changedBlocks,
-        unchangedBlocks
-      })
-      recordStreamAttrRecord({
-        channel: 'chatdb:update-blocks',
-        stage: 'main.convert',
-        correlationId: diagnostics.correlationId,
-        ordinal: diagnostics.ordinal,
-        durationMs: convertDurationMs,
-        ok: outcomeOk,
-        blockCount
-      })
-      recordStreamAttrRecord({
-        channel: 'chatdb:update-blocks',
-        stage: 'main.tx',
-        correlationId: diagnostics.correlationId,
-        ordinal: diagnostics.ordinal,
-        durationMs: txDurationMs,
-        ok: outcomeOk,
-        blockCount
-      })
-    }
     return result
   }
 
@@ -5185,28 +5103,14 @@ export class ChatDbAggregateService {
     diagnostics?: StreamWriteDiagnostics,
     options?: { resendAttemptId?: string }
   ): ChatDbResult<null> {
-    const isMeasured = isStreamAttrMeasureEnabled() && typeof diagnostics?.correlationId === 'string'
-    const t0 = performance.now()
-    let convertDurationMs = 0
-    let txDurationMs = 0
-    let outcomeOk = false
-    let contentLength: number | undefined
-    let contentChanged: boolean | undefined
-
+    void diagnostics
     const result = wrapResult(() => {
-      const tConvert = performance.now()
       const patch = wireToBlockPatch(updatesJson)
       // Strip identity fields (defense in depth)
       delete patch.id
       delete patch.messageId
       delete patch.sortOrder
 
-      const tTx = performance.now()
-      // LOCK-STREAM-ATTR-005: record main.convert BEFORE entering the
-      // transaction window so it excludes transaction time (the convert is
-      // wire->domain patch mapping done above); main.tx and existing semantics
-      // are preserved.
-      convertDurationMs = elapsedMs(tConvert)
       const resendAttemptId = this.resendAttemptOf(options)
       // Stale-attempt fail-closed before any SQLite write transaction opens
       // (best-effort parent resolution; authoritative check is in-tx).
@@ -5240,16 +5144,6 @@ export class ChatDbAggregateService {
           // Merge overflow
           if (patch.overflow) {
             merged.overflow = { ...existing.data.overflow, ...patch.overflow }
-          }
-
-          // LOCK-STREAM-ATTR-001/003: measurement-only changed-content vs
-          // unchanged-content classification. Values are already in hand (the
-          // current row and the merged patch) — zero extra reads, zero semantic
-          // effect. Only content-touching updates classify; absent content in
-          // the patch leaves the count unset.
-          if (isMeasured && Object.prototype.hasOwnProperty.call(patch, 'content')) {
-            contentChanged = existing.data.content !== merged.content
-            contentLength = typeof merged.content === 'string' ? merged.content.length : 0
           }
 
           // Apply the update
@@ -5406,41 +5300,9 @@ export class ChatDbAggregateService {
       }
       if (syncNotify) syncService.notifyEnqueued()
       this.recordUnsupportedBlocksAfterCommit('updateSingleBlock', unsupportedBlockIds)
-      txDurationMs = elapsedMs(tTx)
-      outcomeOk = true
       return null
     }, `updateSingleBlock(${blockId})`)
 
-    // LOCK-STREAM-ATTR-001/005: bounded measurement records fire on success
-    // AND failure without swallowing or replacing the original result.
-    if (isMeasured) {
-      recordStreamAttrRecord({
-        channel: 'chatdb:update-single-block',
-        stage: 'main.aggregate',
-        correlationId: diagnostics.correlationId,
-        ordinal: diagnostics.ordinal,
-        durationMs: elapsedMs(t0),
-        ok: outcomeOk,
-        contentLength,
-        changed: contentChanged
-      })
-      recordStreamAttrRecord({
-        channel: 'chatdb:update-single-block',
-        stage: 'main.convert',
-        correlationId: diagnostics.correlationId,
-        ordinal: diagnostics.ordinal,
-        durationMs: convertDurationMs,
-        ok: outcomeOk
-      })
-      recordStreamAttrRecord({
-        channel: 'chatdb:update-single-block',
-        stage: 'main.tx',
-        correlationId: diagnostics.correlationId,
-        ordinal: diagnostics.ordinal,
-        durationMs: txDurationMs,
-        ok: outcomeOk
-      })
-    }
     return result
   }
 
