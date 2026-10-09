@@ -279,7 +279,7 @@ describe('promotion-time membership mint — message', () => {
 })
 
 describe('promotion-time membership mint — blocks', () => {
-  it('promotion parent mints but pre-existing stable untracked siblings stay entity-only/unversioned (no rescan backfill); single per-parent frame decision', () => {
+  it('parent transient→stable promotion versions pre-existing deferred success siblings with membership and completes the frame (promotion-scoped supplement)', () => {
     const T0 = 7_400_000_000_000
     vi.spyOn(Date, 'now').mockReturnValue(T0)
     expect(agg.ensureTopic('t-prom-b', 'assistant-1', 'T').ok).toBe(true)
@@ -290,10 +290,11 @@ describe('promotion-time membership mint — blocks', () => {
         []
       ).ok
     ).toBe(true)
-    // Two stable-supported siblings committed while the parent is transient:
-    // they are untracked before the promotion tx and join the same stable
-    // checkpoint as entity-only evidence only — never versioned with the
-    // rescan op clock.
+    // Two stable-supported siblings committed while the parent is transient
+    // (ordinary capture deferral): they are untracked before the promotion tx
+    // and join the same stable checkpoint with their own same-tx upsert clock
+    // (promotion-scoped supplement, insert-if-absent only). Generic ordinary
+    // stable→stable rescans stay entity-only (see non-promotion test below).
     sqlite
       .prepare(
         `INSERT INTO message_blocks (id, message_id, type, content, status, created_at, updated_at, sort_order) VALUES (?,?,?,?,?,?,?,?)`
@@ -318,29 +319,34 @@ describe('promotion-time membership mint — blocks', () => {
     expect(memMsg.parentId).toBe('t-prom-b')
     expect(memMsg.operationId).toBe(outboxFor('m-pb')!.id)
 
-    // Pre-existing stable siblings: entity evidence captured but no membership.
+    // Deferred success siblings: full entity evidence AND membership, each
+    // versioned with its own same-tx upsert clock (existing clocks never
+    // rewritten; operationId matches its own outbox row).
     for (const bid of ['b-pb-1', 'b-pb-2']) {
       expect(outboxFor(bid)).not.toBeNull()
-      expect(membershipOf('message_block', bid)).toBeNull()
+      const mem = membershipOf('message_block', bid)!
+      expect(mem).not.toBeNull()
+      expect(mem.parentId).toBe('m-pb')
+      expect(mem.operationId).toBe(outboxFor(bid)!.id)
     }
 
-    // Single per-parent frame decision: the messageBlock frame cannot complete
-    // without trustworthy sibling membership, so it stays invalidated (0 op)
-    // while the user mutation succeeds. At most one attempt per parent.
+    // Single per-parent frame decision now completes: trustworthy sibling
+    // membership exists, so exactly one winning frame with both children.
+    // At most one attempt per parent.
     const ops = frameOpsFor('m-pb')
-    expect(ops.length - frameBefore).toBeLessThanOrEqual(1)
-    expect(blockFrameOf('m-pb')).toBeNull()
+    expect(ops.length - frameBefore).toBe(1)
+    expect(blockFrameOf('m-pb')!.orderedChildIds).toEqual(['b-pb-1', 'b-pb-2'])
 
     // Topic frame still mints: the single promoted message has membership.
     expect(topicFrameOf('t-prom-b')!.orderedChildIds).toEqual(['m-pb'])
 
-    // Baseline for this isolated case is truthfully partial (unversioned siblings).
+    // Baseline for this isolated case now has no unversioned membership.
     const cand = captureLocalSyncBaselineCandidate(db as never) as {
       completeness: { state: string; reasons: string[] }
       manifest: { unversionedMembershipCount: number }
     }
-    expect(cand.manifest.unversionedMembershipCount).toBeGreaterThan(0)
-    expect(cand.completeness.reasons).toContain('unversioned-membership')
+    expect(cand.manifest.unversionedMembershipCount).toBe(0)
+    expect(cand.completeness.reasons ?? []).not.toContain('unversioned-membership')
   })
 
   it('normal atomic final via updateMessageAndBlocks carrying all blocks mints every requested block and completes both frames', () => {

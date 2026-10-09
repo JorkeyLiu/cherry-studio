@@ -791,7 +791,7 @@ describe('audit F1/F2: single per-parent frame decision', () => {
     return r ?? null
   }
 
-  it('F2: pre-existing untracked block promotion stays entity-only — 0 frame op, frame null, truthful partial', () => {
+  it('F2: parent transient→stable promotion versions a deferred success sibling — 1 frame op, complete frame and membership', () => {
     vi.spyOn(Date, 'now').mockReturnValue(6_100_000_000_000)
     agg.ensureTopic('t-f2', 'assistant-1', 'T')
     agg.appendMessage(
@@ -813,18 +813,21 @@ describe('audit F1/F2: single per-parent frame decision', () => {
     expect(membershipOf('t-f2-b9')).toBeNull()
     const before = blockFrameOps(db, 't-f2-m1').length
     vi.spyOn(Date, 'now').mockReturnValue(6_100_000_000_001)
-    // Governance (009/SYNC-DATA-035): promotion rescan is entity-only, never
-    // membership backfill. The pre-existing block stays unversioned, so the
-    // single per-parent try-refresh must invalidate with 0 op while the user
-    // mutation still succeeds.
+    // Promotion-scoped supplement (parent transient→stable): the deferred
+    // ordinary success sibling is versioned with its own same-tx upsert clock
+    // (insert-if-absent only), so the single per-parent try-refresh completes
+    // with exactly 1 frame op while the user mutation succeeds. Generic
+    // ordinary stable→stable rescans stay entity-only (see supplement tests).
     const promote = agg.updateMessage('t-f2', 't-f2-m1', { status: 'success' } as never)
     expect(promote.ok).toBe(true)
-    expect(membershipOf('t-f2-b9')).toBeNull()
-    expect(blockFrameOps(db, 't-f2-m1').length).toBe(before)
-    expect(blockFrameOf(sqlite, 't-f2-m1')).toBeNull()
+    const memAfter = membershipOf('t-f2-b9')!
+    expect(memAfter).not.toBeNull()
+    expect(blockFrameOps(db, 't-f2-m1').length).toBe(before + 1)
+    expect(blockFrameOf(sqlite, 't-f2-m1')!.orderedChildIds).toEqual(['t-f2-b9'])
     const outbox = db.select().from(schema.syncOutbox).all()
     const entOp = outbox.find((r) => r.entityType === 'message_block' && r.entityId === 't-f2-b9')
     expect(entOp).toBeTruthy()
+    expect((entOp as { id: string }).id).toBe(memAfter.operationId)
     const cand = captureLocalSyncBaselineCandidate(db as never) as {
       completeness: { state: string; reasons: string[] }
       manifest: {
@@ -833,13 +836,9 @@ describe('audit F1/F2: single per-parent frame decision', () => {
         incompleteOrderFrameCount: number
       }
     }
-    // Truthful partial: unversioned membership plus missing frame for the
-    // promotion parent; never synthesized complete.
-    expect(cand.completeness.state).not.toBe('complete')
-    expect(cand.manifest.unversionedMembershipCount).toBeGreaterThan(0)
-    expect(cand.manifest.missingOrderFrameCount).toBeGreaterThan(0)
-    expect(cand.completeness.reasons).toContain('unversioned-membership')
-    expect(cand.completeness.reasons).toContain('missing-order-frame')
+    // Complete for this parent: versioned membership plus winning frame.
+    expect(cand.manifest.unversionedMembershipCount).toBe(0)
+    expect(cand.completeness.reasons).not.toContain('unversioned-membership')
   })
 
   it('F2-reachable: promotion with all block membership trustworthy mints exactly one complete frame', () => {

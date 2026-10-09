@@ -44,6 +44,32 @@ function openInMemory(): Database.Database {
   return s
 }
 
+function membershipOf(
+  childType: string,
+  childId: string
+): { parentId: string; timestamp: number; operationId: string } | null {
+  const r = sqlite
+    .prepare(
+      `SELECT parent_id as parentId, timestamp, operation_id as operationId FROM sync_membership_clock WHERE child_entity_type=? AND child_entity_id=?`
+    )
+    .get(childType, childId) as { parentId: string; timestamp: number; operationId: string } | undefined
+  return r ?? null
+}
+
+function blockFrameOf(messageId: string): { orderedChildIds: string[]; timestamp: number; operationId: string } | null {
+  const r = sqlite
+    .prepare(
+      `SELECT ordered_child_ids_json AS json, timestamp, operation_id AS operationId FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id=?`
+    )
+    .get(messageId) as { json: string; timestamp: number; operationId: string } | undefined
+  if (!r) return null
+  return { orderedChildIds: JSON.parse(r.json) as string[], timestamp: r.timestamp, operationId: r.operationId }
+}
+
+function frameOpsFor(entityId: string) {
+  return syncService.listOutbox().filter((r) => (r as { op?: string }).op === 'order_frame' && r.entityId === entityId)
+}
+
 function msgJson(id: string, topicId: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id,
@@ -145,7 +171,7 @@ describe('blocker 1: enabled capture-context failures fail closed (never false)'
 })
 
 describe('blocker 2: parent closure never emits a transient assistant parent (LOCK-PERSONAL-004)', () => {
-  it('aggregate stable-block capture under a transient parent rolls back with a durable deferral error', () => {
+  it('aggregate stable-block write under a transient parent commits locally with no outbox and no capture failure (capture deferral)', () => {
     const agg = new ChatDbAggregateService(db, sqlite)
     expect(agg.ensureTopic('t-pc', 'a1', 'T').ok).toBe(true)
     // Transient assistant stub commits locally but captures nothing.
@@ -157,20 +183,148 @@ describe('blocker 2: parent closure never emits a transient assistant parent (LO
     expect(stub.ok).toBe(true)
     const outboxAfterStub = syncService.listOutbox()
     expect(outboxAfterStub.some((o) => o.entityId === 'm-pc')).toBe(false)
-    // A stable block for the still-transient parent must not emit the parent.
+    // A stable block for the still-transient parent must not emit the parent:
+    // authoritative local mutation commits, no sync op/frame, no durable error.
     const res = agg.updateMessageAndBlocks('t-pc', { id: 'm-pc' } as any, [
       blockJson('b-pc', 'm-pc', { status: 'success' }) as any
     ])
-    expect(res.ok).toBe(false)
+    expect(res.ok).toBe(true)
     const ops = syncService.listOutbox()
     expect(ops.some((o) => o.entityId === 'm-pc')).toBe(false)
     expect(ops.some((o) => o.entityId === 'b-pc')).toBe(false)
-    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-pc')).toBeUndefined()
+    expect(membershipOf('message_block', 'b-pc')).toBeNull()
+    expect(blockFrameOf('m-pc')).toBeNull()
+    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-pc')).toBeDefined()
     const cap = db.select().from(schema.syncState).where(eq(schema.syncState.key, 'lastCaptureError')).get()
-    expect(cap?.value).toMatch(/transient|defer/i)
+    expect(cap?.value ?? null).toBeNull()
+    // Missing message via updateMessageAndBlocks is Dexie-compatible no-op
+    // (existing semantics: ok true, no block write, no sync intent) — not a
+    // closure throw. Assert absence explicitly rather than claiming a throw.
+    const bad = agg.updateMessageAndBlocks('t-pc', { id: 'm-missing-parent' } as any, [
+      blockJson('b-bad', 'm-missing-parent', { status: 'success' }) as any
+    ])
+    expect(bad.ok).toBe(true)
+    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-bad')).toBeUndefined()
+    expect(syncService.listOutbox().some((o) => o.entityId === 'b-bad')).toBe(false)
+    expect(syncService.listOutbox().some((o) => o.entityId === 'm-missing-parent')).toBe(false)
+    expect(blockFrameOf('m-missing-parent')).toBeNull()
   })
 
-  it('post-commit hook defers a stable block under a transient parent without emitting it', async () => {
+  it('standalone updateMessage parent promotion captures the deferred identical block with membership and winning frame', () => {
+    const agg = new ChatDbAggregateService(db, sqlite)
+    expect(agg.ensureTopic('t-standalone', 'a1', 'T').ok).toBe(true)
+    expect(
+      agg.appendMessage(
+        't-standalone',
+        msgJson('m-standalone', 't-standalone', { role: 'assistant', status: 'pending', content: 'partial' }) as any,
+        []
+      ).ok
+    ).toBe(true)
+    // Deferred stable block persists locally with no sync intent.
+    const deferred = agg.updateBlocks([blockJson('b-standalone', 'm-standalone', { status: 'success' }) as any])
+    expect(deferred.ok).toBe(true)
+    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-standalone')).toBeDefined()
+    expect(syncService.listOutbox().some((o) => o.entityId === 'b-standalone')).toBe(false)
+    expect(membershipOf('message_block', 'b-standalone')).toBeNull()
+    expect(
+      db.select().from(schema.syncState).where(eq(schema.syncState.key, 'lastCaptureError')).get()?.value ?? null
+    ).toBeNull()
+    // Standalone parent promotion (no requested blocks): same-tx full closure.
+    const promote = agg.updateMessage('t-standalone', 'm-standalone', { status: 'success', content: 'final' } as any)
+    expect(promote.ok).toBe(true)
+    expect(syncService.listOutbox().some((o) => o.entityId === 'm-standalone')).toBe(true)
+    expect(syncService.listOutbox().some((o) => o.entityId === 'b-standalone')).toBe(true)
+    const blockMembership = membershipOf('message_block', 'b-standalone')
+    expect(blockMembership?.parentId).toBe('m-standalone')
+    const frame = blockFrameOf('m-standalone')
+    expect(frame?.orderedChildIds).toEqual(['b-standalone'])
+    expect(frameOpsFor('m-standalone').length).toBe(1)
+    // Idempotence: repeating the stable checkpoint emits no duplicate block
+    // entity/frame capture and never rewrites membership (at most a message
+    // patch for the repeat write itself; block/frame counts stay fixed).
+    const blockOpsBefore = syncService
+      .listOutbox()
+      .filter((o) => o.entityId === 'b-standalone' && (o as { op?: string }).op !== 'order_frame').length
+    const frameOpsBefore = frameOpsFor('m-standalone').length
+    const memBefore = membershipOf('message_block', 'b-standalone')
+    const repeat = agg.updateMessage('t-standalone', 'm-standalone', { content: 'final' } as any)
+    expect(repeat.ok).toBe(true)
+    expect(
+      syncService
+        .listOutbox()
+        .filter((o) => o.entityId === 'b-standalone' && (o as { op?: string }).op !== 'order_frame').length
+    ).toBe(blockOpsBefore)
+    expect(frameOpsFor('m-standalone').length).toBe(frameOpsBefore)
+    expect(membershipOf('message_block', 'b-standalone')).toEqual(memBefore)
+    expect(blockFrameOf('m-standalone')?.orderedChildIds).toEqual(['b-standalone'])
+  })
+
+  it('atomic updateMessageAndBlocks parent promotion with identical block content captures membership and winning frame', () => {
+    const agg = new ChatDbAggregateService(db, sqlite)
+    expect(agg.ensureTopic('t-atomic', 'a1', 'T').ok).toBe(true)
+    expect(
+      agg.appendMessage(
+        't-atomic',
+        msgJson('m-atomic', 't-atomic', { role: 'assistant', status: 'pending', content: 'partial' }) as any,
+        []
+      ).ok
+    ).toBe(true)
+    const deferred = agg.updateBlocks([blockJson('b-atomic', 'm-atomic', { status: 'success' }) as any])
+    expect(deferred.ok).toBe(true)
+    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-atomic')).toBeDefined()
+    expect(syncService.listOutbox().some((o) => o.entityId === 'b-atomic')).toBe(false)
+    expect(membershipOf('message_block', 'b-atomic')).toBeNull()
+    // Atomic parent promotion with IDENTICAL block content (null diff): the
+    // deferred row must still emit its full closure + membership + frame in
+    // the same tx (single block upsert, no duplicate, no transient wire).
+    // Reuse the same block object for promote+repeat so timestamps are truly
+    // identical (blockJson generates fresh timestamps per call).
+    const atomicBlock = blockJson('b-atomic', 'm-atomic', { status: 'success' }) as any
+    const promote = agg.updateMessageAndBlocks(
+      't-atomic',
+      { id: 'm-atomic', status: 'success', content: 'final' } as any,
+      [atomicBlock]
+    )
+    expect(promote.ok).toBe(true)
+    expect(syncService.listOutbox().some((o) => o.entityId === 'm-atomic')).toBe(true)
+    const blockOps = syncService
+      .listOutbox()
+      .filter((o) => o.entityId === 'b-atomic' && (o as { op?: string }).op !== 'order_frame')
+    expect(blockOps.length).toBe(1)
+    expect(membershipOf('message_block', 'b-atomic')?.parentId).toBe('m-atomic')
+    expect(blockFrameOf('m-atomic')?.orderedChildIds).toEqual(['b-atomic'])
+    expect(frameOpsFor('m-atomic').length).toBe(1)
+    // Idempotence: repeating the identical atomic checkpoint adds no duplicate
+    // block entity/frame capture and never rewrites membership.
+    const blockOpsBefore = syncService
+      .listOutbox()
+      .filter((o) => o.entityId === 'b-atomic' && (o as { op?: string }).op !== 'order_frame').length
+    const atomicFrameBefore = frameOpsFor('m-atomic').length
+    const atomicMemBefore = membershipOf('message_block', 'b-atomic')
+    const repeat = agg.updateMessageAndBlocks('t-atomic', { id: 'm-atomic', content: 'final' } as any, [atomicBlock])
+    expect(repeat.ok).toBe(true)
+    expect(
+      syncService.listOutbox().filter((o) => o.entityId === 'b-atomic' && (o as { op?: string }).op !== 'order_frame')
+        .length
+    ).toBe(blockOpsBefore)
+    expect(frameOpsFor('m-atomic').length).toBe(atomicFrameBefore)
+    expect(membershipOf('message_block', 'b-atomic')).toEqual(atomicMemBefore)
+  })
+
+  it('genuine missing-parent block write stays fail-closed with rollback and no sync intent', () => {
+    const agg = new ChatDbAggregateService(db, sqlite)
+    expect(agg.ensureTopic('t-missing', 'a1', 'T').ok).toBe(true)
+    // updateBlocks against a genuinely missing parent cannot commit the child:
+    // FK rollback, absent row, no outbox, no membership, no frame.
+    const bad = agg.updateBlocks([blockJson('b-missing', 'm-does-not-exist', { status: 'success' }) as any])
+    expect(bad.ok).toBe(false)
+    expect(sqlite.prepare('SELECT id FROM message_blocks WHERE id=?').get('b-missing')).toBeUndefined()
+    expect(syncService.listOutbox().some((o) => o.entityId === 'b-missing')).toBe(false)
+    expect(membershipOf('message_block', 'b-missing')).toBeNull()
+    expect(blockFrameOf('m-does-not-exist')).toBeNull()
+  })
+
+  it('post-commit hook defers a stable block under a transient parent without emitting it and without a capture failure', async () => {
     const { IpcChannel } = await import('@shared/IpcChannel')
     const agg = new ChatDbAggregateService(db, sqlite)
     // Build rows with capture disabled so no intent exists for either entity.
@@ -192,7 +346,7 @@ describe('blocker 2: parent closure never emits a transient assistant parent (LO
     expect(ops.length).toBe(before)
     expect(ops.some((o) => o.entityType === 'message' && o.entityId === 'm-hk')).toBe(false)
     const cap = db.select().from(schema.syncState).where(eq(schema.syncState.key, 'lastCaptureError')).get()
-    expect(cap?.value).toMatch(/parent closure unavailable|transient/i)
+    expect(cap?.value ?? null).toBeNull()
   })
 })
 

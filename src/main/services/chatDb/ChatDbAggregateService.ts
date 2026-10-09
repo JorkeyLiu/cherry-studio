@@ -537,12 +537,39 @@ export class ChatDbAggregateService {
     )
   }
 
+  /**
+   * Ordinary transient-parent capture deferral: a stable block referencing a
+   * still-transient parent (pending/streaming/processing/searching) commits
+   * locally with no sync op/frame until the parent promotes; the promotion
+   * rescan captures the persisted closure. Callers for ordinary block writes
+   * check this BEFORE closure so the expected deferral never throws (no
+   * storage error, no durable capture failure). Missing/invalid parents still
+   * throw fail-closed via the closure below.
+   */
+  private isTransientParentDeferInTx(repos: ChatDbRepositories, messageId: string): boolean {
+    const mrow = repos.messages.getById(messageId)
+    if (!mrow.found) return false
+    return !isStableMessageStatus(mrow.data.status)
+  }
+
   private ensureMessageClosureInTx(tx: SyncTxExecutor, messageId: string, childTs: number, deviceId: string): void {
     const repos = createRepositories(tx as unknown as BetterSQLite3Database<typeof schema>)
     const mrow = repos.messages.getById(messageId)
     if (!mrow.found) throw new Error(`sync closure: message ${messageId} missing in transaction`)
     const topicId = mrow.data.topicId
     if (!topicId) throw new Error(`sync closure: message ${messageId} has no topic`)
+    // Ordinary deferral is decided by callers via isTransientParentDeferInTx
+    // BEFORE any closure write so no partial parent op leaks. A direct call
+    // that reaches here with a transient parent is a caller bug: fail closed
+    // (missing/invalid parents behave the same) to preserve the stable gate.
+    // Stable-checkpoint gate (LOCK-PERSONAL-004): a transient assistant
+    // parent (streaming/pending/processing/searching) must never be emitted
+    // through child closure.
+    const full = repos.messages.getById(messageId)
+    if (!full.found) throw new Error(`sync closure: message ${messageId} missing in transaction`)
+    if (!isStableMessageStatus(full.data.status)) {
+      throw new Error(`sync closure: parent message ${messageId} transient (${String(full.data.status)}), defer`)
+    }
     this.ensureTopicClosureInTx(tx, topicId, childTs, deviceId)
     const ownerBranch =
       typeof mrow.data.branchId === 'string' && mrow.data.branchId.length > 0 ? mrow.data.branchId : null
@@ -550,17 +577,6 @@ export class ChatDbAggregateService {
       this.ensureBranchClosureInTx(tx, ownerBranch, childTs, deviceId)
     }
     if (syncService.isTrackedEntityInTx(tx, 'message', messageId)) return
-    // Stable-checkpoint gate (LOCK-PERSONAL-004): a transient assistant
-    // parent (streaming/pending/processing/searching) must never be emitted
-    // through child closure. Fail closed — the enclosing mutation rolls back
-    // with a durable capture failure and is deferred until the parent reaches
-    // a stable checkpoint; the transient row itself is never synced and the
-    // child emits nothing (no cursor poisoning: no outbox row is written).
-    const full = repos.messages.getById(messageId)
-    if (!full.found) throw new Error(`sync closure: message ${messageId} missing in transaction`)
-    if (!isStableMessageStatus(full.data.status)) {
-      throw new Error(`sync closure: parent message ${messageId} transient (${String(full.data.status)}), defer`)
-    }
     // Closure emits a snapshot for field-clock sync only; it must never
     // fabricate a parent-membership clock for a pre-existing untracked parent.
     // Membership is minted only by a true first creation in the SAME current
@@ -4280,11 +4296,12 @@ export class ChatDbAggregateService {
               notify = true
               // Promotion rescan: stable blocks committed with the transient
               // stub (appendMessage skips all intent while transient) join this
-              // stable checkpoint parent-first as entity-only evidence (no
-              // membership backfill — pre-existing stable siblings stay
-              // unversioned/partial). Explicitly requested blocks mint via
-              // their own same-tx upsert clock in updateMessageAndBlocks.
-              // Fail closed on error.
+              // stable checkpoint parent-first. Promotion-scoped supplement:
+              // this tx IS the parent transient→stable promotion, so ordinary
+              // success + supported siblings missing membership are versioned
+              // with their own same-tx upsert clock (insert-if-absent only;
+              // existing clocks never rewritten). Ordinary stable→stable
+              // rescans stay entity-only (flag false below). Fail closed.
               // Unsupported structured/attachment descendants skip without a
               // partial shell (durable outcome recorded after commit).
               if (
@@ -4295,7 +4312,8 @@ export class ChatDbAggregateService {
                   ctx.ts,
                   ctx.deviceId,
                   new Set<string>(),
-                  unsupportedBlockIds
+                  unsupportedBlockIds,
+                  isPromotion
                 )
               ) {
                 notify = true
@@ -4316,7 +4334,9 @@ export class ChatDbAggregateService {
               // tracked/outbox state, even when the parent is already tracked.
               // A prior partial backfill (fallback child failure) can never be
               // silently abandoned — the next stable promotion retries the
-              // remainder. Fail closed on infrastructure error.
+              // remainder. Only an actual parent transient→stable promotion
+              // (isPromotion) versions missing ordinary success membership;
+              // generic ordinary rescans stay entity-only. Fail closed.
               if (
                 this.captureUntrackedStableBlocksInTx(
                   stx,
@@ -4325,7 +4345,8 @@ export class ChatDbAggregateService {
                   ctx.ts,
                   ctx.deviceId,
                   new Set<string>(),
-                  unsupportedBlockIds
+                  unsupportedBlockIds,
+                  isPromotion
                 )
               ) {
                 notify = true
@@ -4579,6 +4600,11 @@ export class ChatDbAggregateService {
               const messageTracked = syncService.isTrackedEntityInTx(stx, 'message', messageId)
               const preMessageStable = isStableMessageStatus(existing.data.status)
               const isPromotion = !messageTracked && !preMessageStable
+              // Parent-promotion supplement gate for requested deferred blocks
+              // below: the parent itself makes its transient→stable transition
+              // in this tx with stable post-state. Computed BEFORE the parent
+              // upsert (tracking flips after) so the block loop can reuse it.
+              const parentPromotionForRequested = isPromotion && isStableMessageStatus(mrow.data.status)
               const msgPayload = isPromotion
                 ? this.syncMessagePayloadFull(mrow.data)
                 : this.diffMessagePayload(existing.data, mrow.data)
@@ -4604,19 +4630,21 @@ export class ChatDbAggregateService {
                 // Promotion rescan + deterministic rescan (LOCK-PERSONAL-004):
                 // committed stable descendants created with the transient stub
                 // (outside this request's block list) join the stable
-                // checkpoint parent-first as entity-only evidence, except
-                // inside a promotion-scoped supplement: when this same tx
-                // carries an ordinary transient→success supported block
-                // promotion, ordinary success + supported siblings missing
-                // membership are versioned with their own same-tx upsert
-                // clock (existing clocks never rewritten). Only explicitly
-                // requested blocks (true-create or promotion with pre-state
-                // evidence, each via its own same-tx upsert clock below)
-                // otherwise mint membership. Every stable message capture
-                // rescans all stable descendants against tracked/outbox
-                // state, even when the parent is already tracked, so a prior
-                // partial rescan is retried instead of silently abandoned.
-                // Fail closed on error.
+                // checkpoint parent-first. Promotion-scoped supplement when
+                // this same tx carries an ordinary transient→success supported
+                // block promotion OR the parent itself makes its transient→
+                // stable transition (parentPromotion below): ordinary success +
+                // supported siblings missing membership are versioned with
+                // their own same-tx upsert clock (existing clocks never
+                // rewritten). Generic ordinary rescans stay entity-only.
+                // Only explicitly requested blocks (true-create or promotion
+                // with pre-state evidence, each via its own same-tx upsert
+                // clock below, plus the parent-promotion requested supplement
+                // in the block loop) otherwise mint membership. Every stable
+                // message capture rescans all stable descendants against
+                // tracked/outbox state, even when the parent is already
+                // tracked, so a prior partial rescan is retried instead of
+                // silently abandoned. Fail closed on error.
                 if (isStableMessageStatus(mrow.data.status)) {
                   const requestedIds = new Set(blockDataList.map((b) => b.id))
                   let ordinaryBlockPromotionInTx = false
@@ -4630,6 +4658,12 @@ export class ChatDbAggregateService {
                     ordinaryBlockPromotionInTx = true
                     break
                   }
+                  // Parent promotion (never-tracked transient→stable in this
+                  // tx with stable post-state) extends the same supplement to
+                  // non-requested deferred siblings; requested deferred blocks
+                  // are supplemented in the block loop below (single op, no
+                  // double capture).
+                  const parentPromotionForRescan = isPromotion
                   if (
                     this.captureUntrackedStableBlocksInTx(
                       stx,
@@ -4639,7 +4673,7 @@ export class ChatDbAggregateService {
                       syncCtx.deviceId,
                       requestedIds,
                       unsupportedBlockIds,
-                      ordinaryBlockPromotionInTx
+                      ordinaryBlockPromotionInTx || parentPromotionForRescan
                     )
                   ) {
                     syncNotify = true
@@ -4656,19 +4690,43 @@ export class ChatDbAggregateService {
                   unsupportedBlockIds.push(block.id)
                   continue
                 }
+                // Ordinary transient-parent capture deferral: when the post-state
+                // parent is still transient, the stable block commits locally
+                // with no sync op/frame; the later stable promotion rescan
+                // captures the persisted closure. Missing parents still fail
+                // closed via the closure below.
+                if (this.isTransientParentDeferInTx(repos, brow.data.messageId)) continue
                 // Field patch via pre/post diff; a true insert (pre == null) or
                 // a transient→stable promotion of a never-tracked row mints
                 // its first membership from this same-tx stable upsert clock
                 // (same-parent reuse, different-parent fail-closed).
+                // Parent-promotion requested supplement: when the parent itself
+                // promotes transient→stable in this tx, an already-stable
+                // requested success + supported block missing membership (the
+                // deferred identical-content no-diff case, or the changed-
+                // content diff-only case) emits its full persisted closure +
+                // membership in the same tx (single op, no double capture).
+                // Non-success terminals keep entity-only/skip behavior.
                 const pre = preBlockRows.get(block.id) ?? null
                 const blockTracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
                 const preBlockStable = pre ? isStableBlockStatus(pre.status) : true
                 const isTrueCreate = !pre
-                const isPromotion = !isTrueCreate && !blockTracked && !preBlockStable
-                const patchPayload =
-                  isTrueCreate || isPromotion
-                    ? this.syncBlockPayloadFull(brow.data)
-                    : this.diffBlockPayload(pre, brow.data)
+                const isBlockPromotion = !isTrueCreate && !blockTracked && !preBlockStable
+                const parentPromotionSupplement =
+                  parentPromotionForRequested &&
+                  !isTrueCreate &&
+                  !isBlockPromotion &&
+                  brow.data.status === 'success' &&
+                  !syncService.getMembershipClockInTx(stx, 'message_block', block.id)
+                let patchPayload: Record<string, unknown> | null
+                if (parentPromotionSupplement) {
+                  patchPayload = this.syncBlockPayloadFull(brow.data)
+                } else {
+                  patchPayload =
+                    isTrueCreate || isBlockPromotion
+                      ? this.syncBlockPayloadFull(brow.data)
+                      : this.diffBlockPayload(pre, brow.data)
+                }
                 if (!patchPayload) continue
                 this.ensureBlockParentClosureInTx(stx, block.id, syncCtx.ts, syncCtx.deviceId)
                 const blkOpId = syncService.enqueueUpsertInTx(
@@ -4688,7 +4746,7 @@ export class ChatDbAggregateService {
                     syncCtx.ts,
                     blkOpId
                   )
-                } else if (isPromotion) {
+                } else if (isBlockPromotion || parentPromotionSupplement) {
                   this.mintPromotionMembershipInTx(
                     stx,
                     'message_block',
@@ -5222,6 +5280,11 @@ export class ChatDbAggregateService {
               // back); a covered parent stays local-only. Placed before the
               // parent closure so no covered intent can leak via closure.
               if (this.checkResendAttemptInTx(stx, post.data.messageId, resendAttemptId)) continue
+              // Ordinary transient-parent capture deferral: stable blocks under
+              // a still-transient parent commit locally with no sync op/frame
+              // until the parent promotes (promotion rescan captures the
+              // persisted closure). Missing parents still fail closed below.
+              if (this.isTransientParentDeferInTx(repos, post.data.messageId)) continue
               const pre = preRows.get(block.id) ?? null
               const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', block.id)
               const preStable = pre ? isStableBlockStatus(pre.status) : true
@@ -5497,6 +5560,8 @@ export class ChatDbAggregateService {
               if (isStableBlockStatus(post.data.status)) {
                 if (this.isUnsupportedBlock(post.data)) {
                   unsupportedBlockIds.push(blockId)
+                } else if (this.isTransientParentDeferInTx(repos, post.data.messageId)) {
+                  // Ordinary transient-parent deferral: commit locally, no sync op.
                 } else {
                   this.ensureBlockParentClosureInTx(stx, blockId, syncCtx.ts, syncCtx.deviceId)
                   const tracked = syncService.isTrackedEntityInTx(stx, 'message_block', blockId)
@@ -5720,6 +5785,8 @@ export class ChatDbAggregateService {
               // Resend intent (SYNC-DATA-055): stale attempt throws (rolls
               // back); a covered parent stays local-only (before closure).
               if (this.checkResendAttemptInTx(stx, brow.data.messageId, resendAttemptId)) continue
+              // Ordinary transient-parent capture deferral: commit locally, no sync op.
+              if (this.isTransientParentDeferInTx(repos, brow.data.messageId)) continue
               this.ensureBlockParentClosureInTx(stx, bid, childTs, syncCtx.deviceId)
               const opId = syncService.enqueueUpsertInTx(
                 stx,

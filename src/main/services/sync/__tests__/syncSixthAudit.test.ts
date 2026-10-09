@@ -79,6 +79,32 @@ function blockJson(id: string, messageId: string, extra: Record<string, unknown>
   } as Record<string, unknown>
 }
 
+function membershipOf(
+  childType: string,
+  childId: string
+): { parentId: string; timestamp: number; operationId: string } | null {
+  const r = sqlite
+    .prepare(
+      `SELECT parent_id as parentId, timestamp, operation_id as operationId FROM sync_membership_clock WHERE child_entity_type=? AND child_entity_id=?`
+    )
+    .get(childType, childId) as { parentId: string; timestamp: number; operationId: string } | undefined
+  return r ?? null
+}
+
+function blockFrameOf(messageId: string): { orderedChildIds: string[]; timestamp: number; operationId: string } | null {
+  const r = sqlite
+    .prepare(
+      `SELECT ordered_child_ids_json AS json, timestamp, operation_id AS operationId FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id=?`
+    )
+    .get(messageId) as { json: string; timestamp: number; operationId: string } | undefined
+  if (!r) return null
+  return { orderedChildIds: JSON.parse(r.json) as string[], timestamp: r.timestamp, operationId: r.operationId }
+}
+
+function frameOpsFor(entityId: string) {
+  return syncService.listOutbox().filter((r) => (r as { op?: string }).op === 'order_frame' && r.entityId === entityId)
+}
+
 function stateValue(key: string): string | null {
   return db.select().from(schema.syncState).where(eq(schema.syncState.key, key)).get()?.value ?? null
 }
@@ -137,19 +163,57 @@ describe('finding 2: stable promotion captures committed stable descendants', ()
     const promoted = agg.updateMessage('t-prom', 'm-prom', { status: 'success', content: 'done' } as any)
     expect(promoted.ok).toBe(true)
     const ops = syncService.listOutbox()
-    const msgOp = ops.find((o) => o.entityType === 'message' && o.entityId === 'm-prom')
-    const blkOp = ops.find((o) => o.entityType === 'message_block' && o.entityId === 'b-prom')
+    const msgOp = ops.find(
+      (o) => o.entityType === 'message' && o.entityId === 'm-prom' && (o as { op?: string }).op !== 'order_frame'
+    )
+    const blkOp = ops.find(
+      (o) => o.entityType === 'message_block' && o.entityId === 'b-prom' && (o as { op?: string }).op !== 'order_frame'
+    )
     expect(msgOp).toBeTruthy()
     expect(blkOp).toBeTruthy()
-    // Parent-before-child ordering for relay seq.
+    // Parent-before-child ordering for relay seq (entity clocks only).
     expect(msgOp!.timestamp).toBeLessThanOrEqual(blkOp!.timestamp)
-    // No transient rows emitted: every outbox payload status is stable.
-    for (const o of ops) {
+    // No transient rows emitted: every entity outbox payload status is stable
+    // (order_frame payloads carry no status and are excluded here).
+    for (const o of ops.filter((x) => (x as { op?: string }).op !== 'order_frame')) {
       const st = o.payload?.status
       if (st !== undefined) expect(['success', 'error', 'paused']).toContain(st)
     }
-    // No transient assistant emission for the stub itself: exactly one message op.
-    expect(ops.filter((o) => o.entityType === 'message' && o.entityId === 'm-prom')).toHaveLength(1)
+    // Exact-once parent entity op: the (entityType,message,m-prom) key carries
+    // two legitimate ops with distinct op types — one entity upsert plus one
+    // messageBlock order_frame (SYNC-CC-024 legal pair entityType message /
+    // kind messageBlock, entityId === parentId). The frame shares the parent
+    // key by contract, so the entity count must exclude order_frame.
+    // Duplicate cause evidence (promotion tx): msgOp.op === 'upsert' (parent
+    // promotion same-tx stable upsert, ChatDbAggregateService.updateMessage)
+    // vs frame op === 'order_frame' (single per-parent
+    // tryRefreshMessageBlockFrameAndEnqueueInTx after the rescan). Distinct
+    // ids, distinct clocks, membership points at the entity op only.
+    const msgEntityOps = ops.filter(
+      (o) => o.entityType === 'message' && o.entityId === 'm-prom' && (o as { op?: string }).op !== 'order_frame'
+    )
+    expect(msgEntityOps).toHaveLength(1)
+    expect(msgEntityOps[0].op).toBe('upsert')
+    // Each child captured at most once (entity only).
+    const blkEntityOps = ops.filter(
+      (o) => o.entityType === 'message_block' && o.entityId === 'b-prom' && (o as { op?: string }).op !== 'order_frame'
+    )
+    expect(blkEntityOps).toHaveLength(1)
+    // Membership clocks point at the appropriate entity ops (never the frame).
+    const msgMem = membershipOf('message', 'm-prom')
+    expect(msgMem?.parentId).toBe('t-prom')
+    expect(msgMem?.operationId).toBe(msgEntityOps[0].id)
+    expect(msgMem?.timestamp).toBe(msgEntityOps[0].timestamp)
+    const blkMem = membershipOf('message_block', 'b-prom')
+    expect(blkMem?.parentId).toBe('m-prom')
+    expect(blkMem?.operationId).toBe(blkEntityOps[0].id)
+    expect(blkMem?.timestamp).toBe(blkEntityOps[0].timestamp)
+    // Order frame winning + complete: exactly one messageBlock frame op for
+    // the parent, ordered children complete, frame clock at/after the child.
+    expect(frameOpsFor('m-prom')).toHaveLength(1)
+    expect(blockFrameOf('m-prom')?.orderedChildIds).toEqual(['b-prom'])
+    expect(blockFrameOf('m-prom')?.operationId).toBe(frameOpsFor('m-prom')[0].id)
+    expect(frameOpsFor('m-prom')[0].timestamp).toBeGreaterThanOrEqual(blkEntityOps[0].timestamp)
   })
 })
 

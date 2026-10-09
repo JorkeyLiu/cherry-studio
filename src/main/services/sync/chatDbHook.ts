@@ -465,6 +465,25 @@ function ensureBlockParentClosure(blockId: string, childTs: number): boolean {
   return ensureMessageClosure(messageId, childTs)
 }
 
+/**
+ * Ordinary transient-parent capture deferral for the post-commit fallback:
+ * a stable block referencing a still-transient parent is an expected deferral
+ * (commit already succeeded; promotion captures later), NOT a durable capture
+ * failure. Returns true only when the parent row provably exists and is
+ * transient; missing/infra cases return false so callers keep the existing
+ * fail-closed durable failure. Infrastructure read throws propagate to the
+ * caller (durable failure), never a silent skip.
+ */
+function isTransientParentDeferForBlock(blockId: string): boolean {
+  const brow = getBlockRow(blockId)
+  if (!brow) return false
+  const messageId = typeof brow.messageId === 'string' ? brow.messageId : null
+  if (!messageId) return false
+  const mrow = getMessageRow(messageId)
+  if (!mrow) return false
+  return !isStableMessageRow(mrow)
+}
+
 function ensureMessageParentClosure(messageId: string, childTs: number): boolean {
   const mrow = getMessageRow(messageId)
   if (!mrow) return false
@@ -867,6 +886,11 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
             recordUnsupportedBlock(channel, bid)
             continue
           }
+          // Ordinary transient-parent deferral: expected skip, no durable failure.
+          if (isTransientParentDeferForBlock(bid)) {
+            logger.info(`[handleChatDbSuccessForSync] block ${bid} transient parent, defer (no capture failure)`)
+            continue
+          }
           if (!ensureBlockParentClosure(bid, ts)) {
             syncService.recordCaptureFailure(
               channel,
@@ -925,6 +949,13 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
             recordUnsupportedBlock(channel, bid)
             continue
           }
+          // Ordinary transient-parent deferral: expected skip, no durable failure.
+          if (isTransientParentDeferForBlock(bid)) {
+            logger.info(
+              `[handleChatDbSuccessForSync] UpdateBlocks block ${bid} transient parent, defer (no capture failure)`
+            )
+            continue
+          }
           if (!ensureBlockParentClosure(bid, ts)) {
             syncService.recordCaptureFailure(channel, new Error(`updateBlocks parent closure unavailable for ${bid}`))
             continue
@@ -964,6 +995,13 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
         }
         if (brow && isUnsupportedBlockRow(brow)) {
           recordUnsupportedBlock(channel, bid)
+          return
+        }
+        // Ordinary transient-parent deferral: expected skip, no durable failure.
+        if (isTransientParentDeferForBlock(bid)) {
+          logger.info(
+            `[handleChatDbSuccessForSync] UpdateSingleBlock ${bid} transient parent, defer (no capture failure)`
+          )
           return
         }
         if (!ensureBlockParentClosure(bid, ts)) {
@@ -1011,6 +1049,13 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
             continue
           }
           const childTs = ts + i
+          // Ordinary transient-parent deferral: expected skip, no durable failure.
+          if (isTransientParentDeferForBlock(bid)) {
+            logger.info(
+              `[handleChatDbSuccessForSync] bulkAddBlocks ${bid} transient parent, defer (no capture failure)`
+            )
+            continue
+          }
           if (!ensureBlockParentClosure(bid, childTs)) {
             syncService.recordCaptureFailure(channel, new Error(`bulkAddBlocks parent closure unavailable for ${bid}`))
             continue
