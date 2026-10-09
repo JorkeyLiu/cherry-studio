@@ -24,6 +24,8 @@ import { IpcChannel } from '@shared/IpcChannel'
 import type { WebDavConfig } from '@types'
 import type { S3Config } from '@types'
 import archiver from 'archiver'
+import Database from 'better-sqlite3'
+import { drizzle } from 'drizzle-orm/better-sqlite3'
 import { app } from 'electron'
 import * as fs from 'fs-extra'
 import StreamZip from 'node-stream-zip'
@@ -35,6 +37,8 @@ import { isPathInside, resolveAndValidatePath } from '../utils/file'
 import { chatDbService } from './chatDb'
 import { createL3ArchiveMetadata, type L3ArchiveMetadata, validateL3ArchiveMetadata } from './chatDb/l3ArchiveMetadata'
 import { getSharedMaintenanceCoordinator, withMaintenanceLease } from './chatDb/maintenanceCoordination'
+import { runMigrations } from './chatDb/migration'
+import * as chatDbSchema from './chatDb/schema'
 import { FILES_ROLLBACK_SNAPSHOT_OLD_DIRNAME } from './chatDbImport/promotion/filesSnapshot'
 import {
   FILES_CATALOG_SNAPSHOT_FILENAME,
@@ -2030,14 +2034,136 @@ class BackupManager {
   }
 
   /**
-   * Stage an empty Data directory; handleStartupRestore swaps it in on next launch.
+   * Stage a factory-reset Data directory; handleStartupRestore swaps it in on next launch.
    * Avoids races with libsql / MemoryService / KnowledgeService recreating files
    * before relaunch.
+   *
+   * Bounded production reset: publishes Data.restore containing a valid
+   * newly-created fully migrated EMPTY chat.db (regular migrations schema/FTS,
+   * zero rows). handleStartupRestore's missing-chat.db fail-closed gate,
+   * marker-before-swap, and live-Data-untouched-until-relaunch semantics are
+   * unchanged — the staged file satisfies the startup precondition instead of
+   * tripping it. The fresh file is built and readonly-validated in a
+   * uniquely-owned SIBLING preparation directory on the same filesystem
+   * without touching the global singleton/live DB; publication is a single
+   * atomic rename (no ensureDir/copy window that could leave an
+   * empty/partial Data.restore on copy failure or interrupt). Build failure
+   * cleans only the owned preparation, propagates, and leaves any prior
+   * stage untouched; an explicit reset discards a previous pending stage
+   * only after the fresh build validates (user-confirmed reset semantics).
+   * Publication-rename failure ensures no invalid stage is left behind,
+   * cleans the owned preparation, preserves live Data, and propagates.
    */
   public async resetData() {
+    return withMaintenanceLease(getSharedMaintenanceCoordinator(), 'restore', 'backup-manager-reset', () =>
+      BackupManager.doResetData()
+    )
+  }
+
+  private static async doResetData(): Promise<void> {
     const dataRestorePath = getDataPath() + '.restore'
-    await fs.remove(dataRestorePath).catch(() => {})
-    await fs.ensureDir(dataRestorePath)
+    // Uniquely-owned sibling preparation directory on the SAME filesystem as
+    // Data.restore, so publication below is a single atomic rename. Handles
+    // are closed before publish (build + readonly gate), so the rename moves
+    // a complete validated stage — never an empty/partial one.
+    const preparedDir = await fs.mkdtemp(path.join(path.dirname(dataRestorePath), 'Data.restore.build-'))
+    try {
+      const preparedDbPath = path.join(preparedDir, 'chat.db')
+      await BackupManager.buildFreshEmptyChatDb(preparedDbPath)
+      // Existing readonly gate supports a zero-row fully migrated DB. The
+      // gate opens the file (recreating empty coordination sidecars), so
+      // sweep them again before the atomic publish: the stage must contain
+      // exactly chat.db.
+      const failure = validateReadonlyChatDb(preparedDbPath, 2)
+      if (failure !== null) {
+        throw new Error(
+          `[resetData] Fresh reset chat.db failed readonly validation at gate '${failure.gate}'. ` +
+            'Aborting reset — prior stage untouched.'
+        )
+      }
+      await BackupManager.removeDbSidecars(preparedDbPath)
+      // Only after a valid build: discard the previous pending stage
+      // (user-confirmed reset semantics). Removal failure propagates (never
+      // swallowed) so a failed stage replacement cannot look like success.
+      await fs.remove(dataRestorePath)
+      try {
+        await BackupManager.renamePreparedDir(preparedDir, dataRestorePath)
+      } catch (error) {
+        // Publication failed after the old stage was removed: ensure no
+        // invalid stage is left behind (absence is fail-safe — next boot
+        // keeps live Data), then propagate with live Data preserved.
+        await fs.remove(dataRestorePath).catch((cleanupError) => {
+          logger.warn('[resetData] Failed to ensure absent Data.restore after publication failure', {
+            error: cleanupError
+          })
+        })
+        throw error
+      }
+      logger.info('[resetData] Staged fresh empty chat.db for reset; live Data untouched until relaunch')
+    } finally {
+      // Cleans the owned preparation on every failure path; a no-op after a
+      // successful rename (source no longer exists).
+      await fs.remove(preparedDir).catch((cleanupError) => {
+        logger.warn('[resetData] Failed to clean reset preparation directory', { preparedDir, error: cleanupError })
+      })
+    }
+  }
+
+  /**
+   * Create a valid fully migrated EMPTY chat.db at targetPath without touching
+   * the global singleton/live DB. Uses the established better-sqlite3 +
+   * drizzle + runMigrations primitives with the production pragma set; the
+   * handle is always closed and no WAL/SHM/journal sidecars are left beside
+   * the staged file.
+   */
+  private static async buildFreshEmptyChatDb(targetPath: string): Promise<void> {
+    const sqlite = new Database(targetPath)
+    try {
+      sqlite.pragma('journal_mode = WAL')
+      sqlite.pragma('foreign_keys = ON')
+      sqlite.pragma('synchronous = NORMAL')
+      sqlite.pragma('busy_timeout = 5000')
+      runMigrations(drizzle(sqlite, { schema: chatDbSchema }), sqlite)
+      try {
+        sqlite.pragma('wal_checkpoint(TRUNCATE)')
+      } catch (error) {
+        logger.warn('[resetData] WAL checkpoint before staging failed (non-fatal)', { error })
+      }
+    } finally {
+      try {
+        sqlite.close()
+      } catch (error) {
+        logger.warn('[resetData] Failed to close fresh reset chat.db handle', { error })
+      }
+    }
+    await BackupManager.removeDbSidecars(targetPath)
+  }
+
+  /**
+   * Atomic same-filesystem publication of the validated preparation
+   * directory. Thin seam over fs.rename so the publication-failure path is
+   * directly injectable in regression tests.
+   */
+  private static async renamePreparedDir(preparedDir: string, dataRestorePath: string): Promise<void> {
+    await fs.rename(preparedDir, dataRestorePath)
+  }
+
+  /**
+   * Remove WAL/SHM/journal sidecars beside a chat.db file. The staged file
+   * itself is fully checkpointed before every call site, and no writer is
+   * open, so the sidecars carry no frames — removing them hands a clean
+   * single-file stage to the atomic publish (coordinates are recreated on
+   * next open, including by the readonly validation gate itself).
+   */
+  private static async removeDbSidecars(targetPath: string): Promise<void> {
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      await fs.remove(targetPath + suffix).catch((cleanupError) => {
+        logger.warn('[resetData] Failed to clean reset chat.db sidecar', {
+          path: targetPath + suffix,
+          error: cleanupError
+        })
+      })
+    }
   }
 
   // ---------------------------------------------------------------------------

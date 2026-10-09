@@ -3,6 +3,7 @@ import '@renderer/pages/home/Inputbar/tools'
 import { getAllTools, getToolsForScope } from '@renderer/pages/home/Inputbar/types'
 import type { Assistant, Model } from '@renderer/types'
 import { TopicType } from '@renderer/types'
+import { asConfiguredServingModel } from '@renderer/utils/effectiveModel'
 import { describe, expect, it } from 'vitest'
 
 const assistant = { id: 'assistant-1' } as unknown as Assistant
@@ -51,5 +52,41 @@ describe('Inputbar tool registry', () => {
     const keys = chatTools.map((tool) => tool.key)
     expect(keys).not.toContain('slash_commands')
     expect(keys).not.toContain('resource_panel')
+  })
+
+  it('malformed persisted selection resolves to unconfigured so the Chat/Inputbar tool pipeline does not crash', () => {
+    // Realistic persisted shapes: optional model objects copied without id validation.
+    const malformedPersisted: unknown[] = [
+      {},
+      { id: undefined, provider: 'openai' },
+      { id: '', provider: 'openai' },
+      { id: 'm1', provider: '' },
+      { id: 123, provider: 'openai' }
+    ]
+    for (const persisted of malformedPersisted) {
+      // Same resolver the effective-model pipeline uses: pick-then-normalize.
+      const model = asConfiguredServingModel(persisted)
+      expect(model).toBeUndefined()
+      expect(() => getToolsForScope(TopicType.Chat, { assistant, model })).not.toThrow()
+      const keys = getToolsForScope(TopicType.Chat, { assistant, model }).map((tool) => tool.key)
+      expect(keys).not.toContain('thinking')
+    }
+  })
+
+  it('valid serving selections keep reasoning/vision tool behavior unchanged', () => {
+    const reasoningModel = { id: 'o3-mini', name: 'o3 Mini', provider: 'openai' } as Model
+    expect(asConfiguredServingModel(reasoningModel)).toBe(reasoningModel)
+    const withReasoning = getToolsForScope(TopicType.Chat, {
+      assistant,
+      model: asConfiguredServingModel(reasoningModel)
+    }).map((tool) => tool.key)
+    expect(withReasoning).toContain('thinking')
+
+    // Arbitrary valid IDs with missing display/group metadata stay accepted (no metadata gating).
+    const minimal = { id: 'custom-valid-id', provider: 'custom-conn' } as unknown as Model
+    expect(asConfiguredServingModel(minimal)).toBe(minimal)
+    expect(() =>
+      getToolsForScope(TopicType.Chat, { assistant, model: asConfiguredServingModel(minimal) })
+    ).not.toThrow()
   })
 })

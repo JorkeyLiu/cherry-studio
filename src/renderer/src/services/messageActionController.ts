@@ -4,6 +4,7 @@ import store from '@renderer/store'
 import { mergeRequestAssistantSnapshot } from '@renderer/store/thunk/messageThunk'
 import type { Assistant, Model } from '@renderer/types'
 import type { Message } from '@renderer/types/newMessage'
+import { asConfiguredServingModel } from '@renderer/utils/effectiveModel'
 
 const logger = loggerService.withContext('MessageActionController')
 
@@ -74,8 +75,13 @@ export function findAssistantById(state: RootState, assistantId: string): Assist
  * event-time resend/regenerate never diverges from what the UI sends.
  */
 export function resolveEffectiveModel(state: RootState, fresh: Assistant, explicitModel?: Model): Model | undefined {
-  if (explicitModel) return explicitModel
-  return fresh.model ?? fresh.defaultModel ?? state.llm?.defaultModel
+  // Present-but-malformed explicit choice stays unconfigured: never fall
+  // through to assistant/global defaults past it.
+  if (explicitModel !== undefined && explicitModel !== null) {
+    return asConfiguredServingModel(explicitModel)
+  }
+  const picked = fresh?.model ?? fresh?.defaultModel ?? state.llm?.defaultModel
+  return asConfiguredServingModel(picked)
 }
 
 export function resolveAssistantSnapshot(params: {
@@ -94,12 +100,19 @@ export function resolveAssistantSnapshot(params: {
   // applies; regenerate passes the per-message model only when its modelId is
   // truthy (see resolveAssistantSnapshotForMessage). The snapshot always
   // carries the resolved effective model when one exists; when all slots are
-  // empty the snapshot stays model-less and the thunk fails closed.
+  // empty or the picked choice is malformed the snapshot stays explicitly
+  // model-less and the thunk fails closed.
   const effectiveModel = resolveEffectiveModel(state, fresh, explicitModel)
-  const origAssistant: Assistant = effectiveModel ? { ...fresh, model: effectiveModel } : fresh
-  const merged = mergeRequestAssistantSnapshot(origAssistant, fresh, params.topicId)
-  const snapshot: Assistant = effectiveModel ? { ...merged, model: effectiveModel } : merged
-  return { fresh, snapshot, explicitModel }
+  if (effectiveModel) {
+    const origAssistant: Assistant = { ...fresh, model: effectiveModel }
+    const merged = mergeRequestAssistantSnapshot(origAssistant, fresh, params.topicId)
+    const snapshot: Assistant = { ...merged, model: effectiveModel }
+    return { fresh, snapshot, explicitModel }
+  }
+  const unconfiguredOrig: Assistant = { ...fresh, model: undefined }
+  const unconfiguredMerged = mergeRequestAssistantSnapshot(unconfiguredOrig, fresh, params.topicId)
+  const unconfiguredSnapshot: Assistant = { ...unconfiguredMerged, model: undefined }
+  return { fresh, snapshot: unconfiguredSnapshot, explicitModel }
 }
 
 export function resolveAssistantSnapshotForMessage(message: Message, topicId: string): ResolvedAssistant | null {

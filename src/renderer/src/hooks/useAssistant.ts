@@ -30,6 +30,7 @@ import { activeBranchReset } from '@renderer/store/topicBranch'
 import type { Assistant, AssistantSettings, Model, Topic } from '@renderer/types'
 import { getModelReasoningEffortKey } from '@renderer/types'
 import { uuid } from '@renderer/utils'
+import { asConfiguredServingModel } from '@renderer/utils/effectiveModel'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -102,7 +103,10 @@ export function useAssistant(id: string) {
   const dispatch = useAppDispatch()
   const { defaultModel } = useDefaultModel()
 
-  const model = useMemo(() => assistant?.model ?? assistant?.defaultModel ?? defaultModel, [assistant, defaultModel])
+  const model = useMemo(
+    () => asConfiguredServingModel(assistant?.model ?? assistant?.defaultModel ?? defaultModel),
+    [assistant, defaultModel]
+  )
 
   const normalizedTopics = useMemo(
     () => (Array.isArray(assistant?.topics) ? assistant.topics : []),
@@ -279,7 +283,7 @@ function selectMessageAssistantConfig(state: RootState, id: string): MessageAssi
 
 function selectMessageAssistantModel(state: RootState, id: string): Model | undefined {
   const found = state.assistants.assistants.find((assistant) => assistant.id === id)
-  return found?.model ?? found?.defaultModel ?? state.llm.defaultModel
+  return asConfiguredServingModel(found?.model ?? found?.defaultModel ?? state.llm?.defaultModel)
 }
 
 /**
@@ -360,8 +364,11 @@ export function useAssistantDefaults() {
 }
 
 export function useDefaultModel() {
-  const { defaultModel, quickModel, translateModel } = useAppSelector((state) => state.llm)
+  const { defaultModel: rawDefaultModel, quickModel, translateModel } = useAppSelector((state) => state.llm)
   const dispatch = useAppDispatch()
+  // Projection normalization only: a malformed persisted global default
+  // reads as unconfigured; the persisted slot itself is never rewritten here.
+  const defaultModel = useMemo(() => asConfiguredServingModel(rawDefaultModel), [rawDefaultModel])
 
   return {
     defaultModel,

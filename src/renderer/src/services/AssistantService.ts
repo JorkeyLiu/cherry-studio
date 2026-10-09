@@ -17,6 +17,7 @@ import type {
   TranslateAssistant,
   TranslateLanguage
 } from '@renderer/types'
+import { asConfiguredServingModel } from '@renderer/utils/effectiveModel'
 import { v4 as uuid } from 'uuid'
 
 import { createEphemeralAssistant, DEFAULT_ASSISTANT_SETTINGS, getDefaultTopic } from './assistantDefaults'
@@ -112,7 +113,9 @@ export function getDefaultProvider() {
 }
 
 export function getDefaultModel() {
-  return store.getState().llm.defaultModel
+  // Projection normalization only: malformed persisted global default reads
+  // as unconfigured; never rewritten here.
+  return asConfiguredServingModel(store.getState().llm.defaultModel)
 }
 
 export function getQuickModel() {

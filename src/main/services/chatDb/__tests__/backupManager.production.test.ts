@@ -129,9 +129,10 @@ import {
   ROLLBACK_SNAPSHOT_STAGING_FILENAME
 } from '../../chatDbImport/promotion/journal'
 import { PROMOTION_JOURNAL_STAGING_FILENAME } from '../../chatDbImport/promotion/journalStore'
+import { validateReadonlyChatDb } from '../../chatDbImport/promotion/readonlyDbValidation'
 import { BetterSqlite3BackupAdapter, ChatDbBackup } from '../backup'
 import { getSharedMaintenanceCoordinator, isMaintenanceBusyError } from '../maintenanceCoordination'
-import { runMigrations } from '../migration'
+import { MIGRATIONS, runMigrations } from '../migration'
 import * as schema from '../schema'
 
 // ---------------------------------------------------------------------------
@@ -1667,6 +1668,180 @@ describe('BackupManager Production-Path Integration', () => {
 
       // Cleanup
       realFs.rmSync(collisionPath, { force: true })
+    })
+  })
+
+  // =========================================================================
+  // 7. resetData — bounded production reset (Data.restore with fresh chat.db)
+  //    resetData stages Data.restore containing a valid newly-created fully
+  //    migrated EMPTY chat.db; handleStartupRestore consumes it on next
+  //    launch. Live Data is untouched until relaunch; build failure publishes
+  //    nothing and leaves any prior stage alone.
+  // =========================================================================
+
+  describe('resetData — bounded production reset', () => {
+    it('stages a valid fully migrated empty chat.db and retains live Data before restart', async () => {
+      const bm = new BackupManager()
+      const dataDir = realPath.join(tempDir, 'Data')
+      const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
+      expect(realFs.existsSync(dataRestoreDir)).toBe(false)
+
+      await bm.resetData()
+
+      // Staged Data.restore contains exactly the fresh chat.db (no marker yet —
+      // the marker is created inside Data.restore by handleStartupRestore).
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db'))).toBe(true)
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db.restore'))).toBe(false)
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db-wal'))).toBe(false)
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db-shm'))).toBe(false)
+
+      // Fresh staged DB passes the shared readonly gate (zero rows are valid).
+      expect(validateReadonlyChatDb(realPath.join(dataRestoreDir, 'chat.db'), 2)).toBeNull()
+
+      // Fresh staged DB is fully migrated and empty.
+      const staged = new Database(realPath.join(dataRestoreDir, 'chat.db'), { readonly: true })
+      try {
+        expect(staged.pragma('integrity_check', { simple: true })).toBe('ok')
+        const applied = (staged.prepare('SELECT key FROM migration_state').all() as Array<{ key: string }>).map(
+          (r) => r.key
+        )
+        expect(applied.length).toBe(MIGRATIONS.length)
+        const topics = staged.prepare('SELECT id FROM topics').all()
+        expect(topics.length).toBe(0)
+      } finally {
+        staged.close()
+      }
+
+      // Live Data is untouched: sentinel topic still present, no marker.
+      const live = sqlite.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
+      expect(live).toBeDefined()
+      expect(live.name).toBe('Production Backup Test')
+      expect(realFs.existsSync(realPath.join(dataDir, 'chat.db.restore'))).toBe(false)
+    })
+
+    it('staged reset is consumed on startup into a fresh empty authoritative DB', async () => {
+      const bm = new BackupManager()
+      const dataDir = realPath.join(tempDir, 'Data')
+      const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
+
+      await bm.resetData()
+
+      // Live handle stays open across the swap (house pattern — POSIX rename
+      // over an open handle dangles it; assertions below use fresh handles).
+      await BackupManager.handleStartupRestore()
+
+      expect(realFs.existsSync(dataRestoreDir)).toBe(false)
+      const liveDbPath = realPath.join(dataDir, 'chat.db')
+      expect(realFs.existsSync(liveDbPath)).toBe(true)
+      // Marker-before-swap preserved: marker created inside the stage.
+      expect(realFs.existsSync(realPath.join(dataDir, 'chat.db.restore'))).toBe(true)
+
+      // Fresh authoritative DB: valid, fully migrated, old sentinel gone.
+      expect(validateReadonlyChatDb(liveDbPath, 2)).toBeNull()
+      const fresh = new Database(liveDbPath, { readonly: true })
+      try {
+        expect(fresh.pragma('integrity_check', { simple: true })).toBe('ok')
+        expect(fresh.prepare('SELECT * FROM topics WHERE id = ?').get('t1')).toBeUndefined()
+        expect((fresh.prepare('SELECT COUNT(*) AS n FROM topics').get() as { n: number }).n).toBe(0)
+      } finally {
+        fresh.close()
+      }
+      // Re-running migrations over the promoted DB is a no-op (fully migrated).
+      const reopen = openTestDb(liveDbPath)
+      try {
+        expect(runMigrations(drizzle(reopen, { schema }), reopen)).toBe(0)
+      } finally {
+        reopen.close()
+      }
+    })
+
+    it('build failure publishes nothing, retains any prior stage and live Data, and releases the lease', async () => {
+      const coordinator = getSharedMaintenanceCoordinator()
+      const bm = new BackupManager()
+      const dataDir = realPath.join(tempDir, 'Data')
+      const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
+
+      const listBuildLeftovers = (): string[] =>
+        realFs.existsSync(tempDir)
+          ? realFs.readdirSync(tempDir).filter((name) => name.startsWith('Data.restore.build-'))
+          : []
+
+      // Case 1: no prior stage — build failure must not publish a missing-chat.db stage.
+      const buildFreshEmptyChatDb = vi.spyOn(
+        BackupManager as unknown as { buildFreshEmptyChatDb: (targetPath: string) => Promise<void> },
+        'buildFreshEmptyChatDb'
+      )
+      buildFreshEmptyChatDb.mockRejectedValueOnce(new Error('simulated migration failure'))
+      await expect(bm.resetData()).rejects.toThrow('simulated migration failure')
+      expect(realFs.existsSync(dataRestoreDir)).toBe(false)
+      expect(listBuildLeftovers()).toEqual([])
+      expect(coordinator.currentHolder()).toBeNull()
+      buildFreshEmptyChatDb.mockRestore()
+
+      // Case 2: prior pending stage — build failure leaves it alone.
+      realFs.mkdirSync(dataRestoreDir, { recursive: true })
+      realFs.writeFileSync(realPath.join(dataRestoreDir, 'notes.txt'), 'prior pending stage')
+      const buildFreshEmptyChatDb2 = vi.spyOn(
+        BackupManager as unknown as { buildFreshEmptyChatDb: (targetPath: string) => Promise<void> },
+        'buildFreshEmptyChatDb'
+      )
+      buildFreshEmptyChatDb2.mockRejectedValueOnce(new Error('simulated migration failure'))
+      await expect(bm.resetData()).rejects.toThrow('simulated migration failure')
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'notes.txt'))).toBe(true)
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db'))).toBe(false)
+      expect(listBuildLeftovers()).toEqual([])
+      expect(coordinator.currentHolder()).toBeNull()
+      buildFreshEmptyChatDb2.mockRestore()
+
+      // Live Data retained throughout.
+      const live = sqlite.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
+      expect(live.name).toBe('Production Backup Test')
+      expect(realFs.existsSync(realPath.join(dataDir, 'chat.db'))).toBe(true)
+
+      // Lease released: a retry after the failure succeeds.
+      realFs.rmSync(dataRestoreDir, { recursive: true, force: true })
+      await bm.resetData()
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db'))).toBe(true)
+      expect(coordinator.currentHolder()).toBeNull()
+    })
+
+    it('publication rename failure leaves no invalid stage, cleans preparation, and preserves live Data', async () => {
+      const coordinator = getSharedMaintenanceCoordinator()
+      const bm = new BackupManager()
+      const dataDir = realPath.join(tempDir, 'Data')
+      const dataRestoreDir = realPath.join(tempDir, 'Data.restore')
+
+      // Prior pending stage with a sentinel (discarded only after valid build).
+      realFs.mkdirSync(dataRestoreDir, { recursive: true })
+      realFs.writeFileSync(realPath.join(dataRestoreDir, 'notes.txt'), 'prior pending stage')
+
+      const rename = vi.spyOn(
+        BackupManager as unknown as {
+          renamePreparedDir: (preparedDir: string, dataRestorePath: string) => Promise<void>
+        },
+        'renamePreparedDir'
+      )
+      rename.mockRejectedValueOnce(new Error('simulated rename failure'))
+      await expect(bm.resetData()).rejects.toThrow('simulated rename failure')
+      rename.mockRestore()
+
+      // No invalid stage left behind: Data.restore is absent (old stage was
+      // removed only after the fresh build validated; absence is fail-safe —
+      // next boot keeps live Data instead of failing closed).
+      expect(realFs.existsSync(dataRestoreDir)).toBe(false)
+      // Owned sibling preparation is cleaned — no build leftovers.
+      expect(realFs.readdirSync(tempDir).filter((name) => name.startsWith('Data.restore.build-'))).toEqual([])
+      // Live Data preserved and lease released.
+      const live = sqlite.prepare('SELECT * FROM topics WHERE id = ?').get('t1') as Record<string, unknown>
+      expect(live.name).toBe('Production Backup Test')
+      expect(realFs.existsSync(realPath.join(dataDir, 'chat.db'))).toBe(true)
+      expect(coordinator.currentHolder()).toBeNull()
+
+      // A retry after the publication failure succeeds with a valid stage.
+      await bm.resetData()
+      expect(realFs.existsSync(realPath.join(dataRestoreDir, 'chat.db'))).toBe(true)
+      expect(validateReadonlyChatDb(realPath.join(dataRestoreDir, 'chat.db'), 2)).toBeNull()
+      expect(coordinator.currentHolder()).toBeNull()
     })
   })
 })
