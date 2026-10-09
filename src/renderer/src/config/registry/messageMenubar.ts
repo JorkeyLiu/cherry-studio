@@ -34,7 +34,10 @@ export const DEFAULT_MESSAGE_MENUBAR_SCOPE: MessageMenubarScope = TopicType.Chat
 
 // Translate and Save to Notes live in the More menu (overflow), not as
 // visible buttons; their button renderers stay reusable for scopes that
-// still list them. Exact assistant visible order around branch management:
+// still list them. The grouped-assistant `useful` toggle also lives in the
+// More menu (dropdown `useful` entry, never a visible button): its `useful`
+// renderer stub stays registered but is unlisted here. Exact assistant
+// visible order around branch management:
 // Branch → Insert Message → Edit → Delete.
 export const DEFAULT_MESSAGE_MENUBAR_BUTTON_IDS: MessageMenubarButtonId[] = [
   'user-regenerate',
@@ -42,7 +45,6 @@ export const DEFAULT_MESSAGE_MENUBAR_BUTTON_IDS: MessageMenubarButtonId[] = [
   'copy',
   'assistant-regenerate',
   'assistant-mention-model',
-  'useful',
   'context-anchor',
   'true-branch',
   'assistant-insert',

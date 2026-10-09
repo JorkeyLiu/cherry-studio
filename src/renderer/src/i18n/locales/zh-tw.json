@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "插入訊息",
@@ -1177,7 +1177,7 @@
         "label": "[to be translated]:Create Branch"
       },
       "useful": {
-        "label": "設為上下文",
+        "label": "選入上下文",
         "tip": "在這組訊息中，該訊息將被選擇加入上下文"
       }
     },

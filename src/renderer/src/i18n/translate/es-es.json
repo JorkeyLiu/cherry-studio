@@ -1151,8 +1151,8 @@
     },
     "message": {
       "copy_topic": {
-        "created": "[to be translated]:Topic copied",
-        "label": "[to be translated]:Copy Topic"
+        "created": "[to be translated]:Topic cloned",
+        "label": "[to be translated]:Clone Topic"
       },
       "insert": {
         "label": "[to be translated]:Insert Messages",
