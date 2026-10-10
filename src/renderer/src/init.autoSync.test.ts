@@ -182,6 +182,9 @@ describe('initAutoSync — demand activation (S7.9)', () => {
     vi.doMock('./services/topicDeletionSubscription', () => ({
       subscribeTopicDeletionEvents: mockSubscribeTopicDeletion
     }))
+    vi.doMock('./services/chatProjectionSubscription', () => ({
+      subscribeChatProjectionEvents: vi.fn()
+    }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: mockWebTraceInit } }))
     vi.doMock('@kangfenmao/keyv-storage', () => ({
       default: class {

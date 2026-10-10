@@ -329,6 +329,15 @@ const FILE_BLOCK_TYPES = new Set(['file', 'image', 'video'])
  * and returns a FileReferenceData snapshot. For non-file blocks,
  * returns an empty array (no references).
  *
+ * Display-name capture (real production defect fix): the renderer's
+ * `FileMetadata` splits the stored disk basename (`name = uuid + ext`,
+ * device-local `path`) from the portable display basename
+ * (`origin_name = basename(original)`). `fileName`/`filePath` columns keep
+ * the disk basename for byte reads only; the display basename is preserved
+ * into `overflow` (`originalName` + `origin_name`, same portable value) for
+ * the sync capture path. No schema/wire change; paths stay device-local and
+ * are never projected to portable metadata.
+ *
  * Does NOT create canonical files — only block-linked reference snapshots.
  *
  * @param block   The block domain DTO.
@@ -346,6 +355,9 @@ export function projectFileReferences(block: MessageBlockData): FileReferenceDat
     return []
   }
 
+  const display = fileMeta.displayName
+  const overflow: Record<string, unknown> = display !== null ? { originalName: display, origin_name: display } : {}
+
   return [
     {
       id: `fr-${block.id}-${fileMeta.fileId}`,
@@ -355,7 +367,7 @@ export function projectFileReferences(block: MessageBlockData): FileReferenceDat
       filePath: fileMeta.filePath ?? null,
       fileType: fileMeta.fileType ?? null,
       count: 1,
-      overflow: {}
+      overflow
     }
   ]
 }
@@ -365,12 +377,46 @@ interface FileMetadata {
   fileName: string | null
   filePath: string | null
   fileType: string | null
+  /** Portable display basename (`origin_name`), never a path; null when absent/illegal. */
+  displayName: string | null
+}
+
+/**
+ * Portable display-basename guard: basename only, never a path. Illegal
+ * upstream values fail safe to null (no private-path leak, no invented name).
+ */
+function isPortableDisplayName(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  if (value.length === 0 || value.length > 255) return false
+  if (value.includes('/') || value.includes('\\')) return false
+  if (value === '.' || value === '..') return false
+  if (value.trim().length === 0) return false
+  return true
+}
+
+function pickDisplayName(candidates: ReadonlyArray<unknown>): string | null {
+  for (const candidate of candidates) {
+    if (isPortableDisplayName(candidate)) return candidate
+  }
+  return null
+}
+
+function readStringField(source: Record<string, unknown>, keys: ReadonlyArray<string>): string | null {
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'string') return value
+  }
+  return null
 }
 
 /**
  * Extract file metadata from a block.
  * Checks overflow.file (Renderer FileMetadata object), overflow fields,
  * and content parsing.
+ *
+ * `fileName` is always the disk basename (`name = uuid + ext` for real
+ * uploads) for byte reads. `displayName` is the portable `origin_name`
+ * only; the stored basename is never reused as display (no confusion).
  */
 function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
   // Check overflow for file metadata object (Renderer stores FileMetadata in overflow.file)
@@ -381,9 +427,10 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
     if (typeof fileId === 'string' && fileId.length > 0) {
       return {
         fileId,
-        fileName: (file.name as string) ?? (file.fileName as string) ?? null,
-        filePath: (file.path as string) ?? (file.filePath as string) ?? null,
-        fileType: (file.type as string) ?? (file.fileType as string) ?? null
+        fileName: readStringField(file, ['name', 'fileName']),
+        filePath: readStringField(file, ['path', 'filePath']),
+        fileType: readStringField(file, ['type', 'fileType']),
+        displayName: pickDisplayName([file.origin_name, file.originalName])
       }
     }
   }
@@ -391,11 +438,13 @@ function extractFileMetadata(block: MessageBlockData): FileMetadata | null {
   // Check overflow for direct file fields
   const fileId = block.overflow.fileId ?? block.overflow.file_id
   if (typeof fileId === 'string' && fileId.length > 0) {
+    const overflow = block.overflow
     return {
       fileId,
-      fileName: (block.overflow.fileName as string) ?? (block.overflow.file_name as string) ?? null,
-      filePath: (block.overflow.filePath as string) ?? (block.overflow.file_path as string) ?? null,
-      fileType: (block.overflow.fileType as string) ?? (block.overflow.file_type as string) ?? null
+      fileName: readStringField(overflow, ['fileName', 'file_name']),
+      filePath: readStringField(overflow, ['filePath', 'file_path']),
+      fileType: readStringField(overflow, ['fileType', 'file_type']),
+      displayName: pickDisplayName([overflow.origin_name, overflow.originalName])
     }
   }
 

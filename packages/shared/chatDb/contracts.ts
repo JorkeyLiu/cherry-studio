@@ -47,6 +47,7 @@ import type {
   ListBlocksByFileRequest,
   ListBranchesRequest,
   ListFileRefsByFileRequest,
+  ListLiveAssistantTopicsRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   MoveSelectedTurnsToNewBranchRequest,
@@ -1564,6 +1565,94 @@ const ensureAssistantTopicsContract: ChatDbContract = {
           throw new ValidationError(
             `result.value.topics[${i}].id`,
             '[chatdb:ensure-assistant-topics] Duplicate topic id'
+          )
+        }
+        seen.add(id)
+      }
+    }
+  }
+}
+
+const LIST_LIVE_ASSISTANT_TOPICS_VALUE_KEYS = new Set(['assistantId', 'topics'])
+
+const listLiveAssistantTopicsContract: ChatDbContract = {
+  allowedKeys: keySet('assistantId'),
+  validate(value: unknown): void {
+    validateRequest(value, listLiveAssistantTopicsContract.allowedKeys)
+    const req = value as ListLiveAssistantTopicsRequest
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:list-live-assistant-topics')
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:list-live-assistant-topics] Expected object with "assistantId" and "topics"'
+        )
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError(
+          'result.value',
+          '[chatdb:list-live-assistant-topics] Success value must be a plain object'
+        )
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!LIST_LIVE_ASSISTANT_TOPICS_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:list-live-assistant-topics] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      if (typeof v.assistantId !== 'string' || v.assistantId.length === 0) {
+        throw new ValidationError(
+          'result.value.assistantId',
+          '[chatdb:list-live-assistant-topics] Expected non-empty assistantId'
+        )
+      }
+      if (!Array.isArray(v.topics)) {
+        throw new ValidationError('result.value.topics', '[chatdb:list-live-assistant-topics] Expected topics array')
+      }
+      // Empty is a valid authoritative answer (never resurrected here).
+      // Pure collection for the requested assistant: every row must carry a
+      // non-empty assistantId equal to the response assistantId. A malformed
+      // (missing/null/empty/mismatched) row rejects the whole result rather
+      // than cross-linking into another assistant (PROJ-10).
+      const arr = v.topics as unknown[]
+      const expectedAssistantId = v.assistantId
+      const seen = new Set<string>()
+      for (let i = 0; i < arr.length; i++) {
+        const item = arr[i] as Record<string, unknown>
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          throw new ValidationError(
+            `result.value.topics[${i}]`,
+            '[chatdb:list-live-assistant-topics] Expected TopicWire object'
+          )
+        }
+        validateTopicWireValueFields(item, 'chatdb:list-live-assistant-topics')
+        const rowAssistantId = (item as { assistantId?: unknown }).assistantId
+        if (typeof rowAssistantId !== 'string' || rowAssistantId.length === 0) {
+          throw new ValidationError(
+            `result.value.topics[${i}].assistantId`,
+            '[chatdb:list-live-assistant-topics] Expected non-empty assistantId per TopicWire'
+          )
+        }
+        if (rowAssistantId !== expectedAssistantId) {
+          throw new ValidationError(
+            `result.value.topics[${i}].assistantId`,
+            '[chatdb:list-live-assistant-topics] TopicWire assistantId must match the requested assistant'
+          )
+        }
+        const id = item.id as string
+        if (seen.has(id)) {
+          throw new ValidationError(
+            `result.value.topics[${i}].id`,
+            '[chatdb:list-live-assistant-topics] Duplicate topic id'
           )
         }
         seen.add(id)
@@ -4634,6 +4723,7 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:transfer-topic-ownership': transferTopicOwnershipContract,
   'chatdb:reset-assistant-topics': resetAssistantTopicsContract,
   'chatdb:ensure-assistant-topics': ensureAssistantTopicsContract,
+  'chatdb:list-live-assistant-topics': listLiveAssistantTopicsContract,
   // S6.2c-1: branch by stable anchor (additive, keeps old clone path intact)
   'chatdb:branch-messages-to-topic': branchMessagesToTopicContract,
   // Topic-internal branches (local-only, no prefix cloning)

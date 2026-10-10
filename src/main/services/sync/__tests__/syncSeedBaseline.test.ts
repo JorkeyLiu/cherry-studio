@@ -829,8 +829,15 @@ describe('seed receiver first close over real relay', () => {
     expect(outboxCountB()).toBe(0)
   }, 60000)
 
-  it('exclusive unversioned row under a baseline parent fails the whole tx closed', async () => {
-    await pairAndSeedPublish()
+  it('exclusive unversioned row under a baseline parent with keep outbox bootstraps and preserves intents', async () => {
+    // Bounded repair (SYNC-DATA-047 outbox-preserved + SYNC-DATA-058 narrowed
+    // closure): the old whole-database outbox gate failed this mixed state
+    // even though the exclusive is independent and the keep history is valid
+    // pending intent. New code adopts the exclusive, bootstraps cursor=N,
+    // then pushes and converges both directions (convergence + intent IDs
+    // preserved; byte-for-byte pre-push preservation is proven in the
+    // receiver unit mixed test via the syncClient.push seam).
+    const n = await pairAndSeedPublish()
     bindProfile('B', credB)
     ensureKeepOutbox()
     insertLegacyHistory(sqliteB!)
@@ -856,17 +863,21 @@ describe('seed receiver first close over real relay', () => {
       )
     const outboxBefore = outboxCountB()
     expect(outboxBefore).toBeGreaterThan(0)
-    await expect(syncService.sync()).rejects.toThrow()
-    // cursor/outbox unchanged; exclusive row retained; whole-tx rollback proven
-    // by zero installed clocks (no partial merge); no union performed.
-    expect(readCursorB()).toBe(0)
-    expect(outboxCountB()).toBe(outboxBefore)
+    await syncService.sync()
+    expect(readCursorB()).toBeGreaterThanOrEqual(n)
+    expect(outboxCountB()).toBe(0)
+    expect(lastErrorB()).toBeNull()
     expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='seed-extra'`).get()).toBeTruthy()
-    expect(sqliteB!.prepare(`SELECT * FROM sync_entity_clock WHERE entity_id='seed-m1'`).get()).toBeFalsy()
-    // No seed-parent frames from the failed merge (B's own keep frames remain).
-    expect(sqliteB!.prepare(`SELECT * FROM sync_parent_order_frame WHERE parent_id='seed-t1'`).get()).toBeFalsy()
-    expect(sqliteB!.prepare(`SELECT * FROM sync_parent_order_frame WHERE parent_id='seed-m1'`).get()).toBeFalsy()
-    expect(lastErrorB()).toContain('baseline bootstrap failed')
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='b-keep-msg'`).get()).toBeTruthy()
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='seed-m1'`).get()).toBeTruthy()
+    // Seed holder converges on both keep and exclusive histories.
+    bindProfile('A', credA)
+    await syncService.sync()
+    expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='seed-extra'`).get()).toBeTruthy()
+    expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='b-keep-msg'`).get()).toBeTruthy()
+    bindProfile('B', credB)
+    await syncService.sync()
+    expect(outboxCountB()).toBe(0)
   }, 60000)
 
   it('seed failure retains the recovery intent (deferred, still pending)', async () => {

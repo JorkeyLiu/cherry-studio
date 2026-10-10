@@ -2948,9 +2948,19 @@ function scheduleTopicAnchorEstablishment(
  * atomically after stale-topic check. Malformed/mismatched or stale responses
  * fail closed via the existing error path — never masquerading as whole-topic
  * data and never falling back to whole-topic fetch.
+ *
+ * Optional `refresh` reuses the SAME staged joint publication (generation,
+ * segments, route, guards) with an `around` window around a stable anchor so
+ * a hint-driven resident refresh preserves the open window instead of
+ * jumping to latest. Absent = latest bootstrap semantics (unchanged).
  */
+export interface TopicReloadRefreshIntent {
+  anchorMessageId?: string
+  before?: number
+  after?: number
+}
 export const loadTopicMessagesThunk =
-  (topicId: string, forceReload: boolean = false) =>
+  (topicId: string, forceReload: boolean = false, refresh?: TopicReloadRefreshIntent) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
     const state = getState()
 
@@ -3053,12 +3063,29 @@ export const loadTopicMessagesThunk =
       const limit = clampWindowLimit(limitRaw)
       // Topic loads respect the stored route (main after a real topic
       // switch, since the switch resets the active branch to null).
-      const request: FetchMessagesWindowRequest = {
-        kind: 'latest',
-        topicId,
-        branchId: activeRouteOf(getState, topicId),
-        limit
-      }
+      // Hint refresh with a stable anchor reuses the same staged joint path
+      // as an `around` window so the open resident interval survives; no new
+      // persistent owner, same generation/segment/route guards.
+      const refreshAnchor =
+        typeof refresh?.anchorMessageId === 'string' && refresh.anchorMessageId.length > 0
+          ? refresh.anchorMessageId
+          : null
+      const request: FetchMessagesWindowRequest =
+        refreshAnchor !== null
+          ? {
+              kind: 'around',
+              topicId,
+              branchId: activeRouteOf(getState, topicId),
+              anchorMessageId: refreshAnchor,
+              before: Math.min(100, Math.max(1, Math.floor(refresh?.before ?? limit / 2) || 10)),
+              after: Math.min(100, Math.max(1, Math.floor(refresh?.after ?? limit / 2) || 10))
+            }
+          : {
+              kind: 'latest',
+              topicId,
+              branchId: activeRouteOf(getState, topicId),
+              limit
+            }
 
       const requestSeq = ++loadTopicMessagesRequestSeq
       latestLoadTopicMessagesRequestByTopic.set(topicId, requestSeq)

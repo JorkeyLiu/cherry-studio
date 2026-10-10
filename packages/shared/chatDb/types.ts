@@ -1136,6 +1136,27 @@ export interface EnsureAssistantTopicsResponse {
   created: boolean
 }
 
+/**
+ * @see IpcChannel.ChatDb_ListLiveAssistantTopics
+ *
+ * Pure authoritative read-only directory for one assistant: Main reads ALL
+ * LIVE topics (deleted_at IS NULL) for `assistantId` in ONE SQLite read
+ * transaction in (createdAt, id) order. Never mutates, never creates a
+ * default, never captures sync intent. Empty array is a valid authoritative
+ * answer (never resurrected here; callers must not find-or-create).
+ */
+export interface ListLiveAssistantTopicsRequest {
+  assistantId: string
+}
+
+/** @see IpcChannel.ChatDb_ListLiveAssistantTopics */
+export interface ListLiveAssistantTopicsResponse {
+  /** Echo of the request assistant. */
+  assistantId: string
+  /** ALL LIVE topics in (createdAt, id) order. Empty when none live. */
+  topics: TopicWire[]
+}
+
 // ---------------------------------------------------------------------------
 // Branch by stable anchor DTOs (S6.2c-1)
 // ---------------------------------------------------------------------------
@@ -1757,6 +1778,10 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     request: EnsureAssistantTopicsRequest
     response: EnsureAssistantTopicsResponse
   }
+  'chatdb:list-live-assistant-topics': {
+    request: ListLiveAssistantTopicsRequest
+    response: ListLiveAssistantTopicsResponse
+  }
   // S6.2c-1: Main-authoritative branch by stable anchor
   'chatdb:branch-messages-to-topic': {
     request: BranchMessagesToTopicRequest
@@ -1866,6 +1891,28 @@ export interface ChatDbCommands extends ChatDbCommandMap {
 export interface TopicDeletionEvent {
   /** Exact topic IDs hard-deleted inside the authoritative transaction. */
   deletedTopicIds: string[]
+}
+
+/**
+ * Authoritative Main → renderer chat-projection invalidation HINT.
+ *
+ * Post-commit only (snapshot baseline bootstrap + incremental sync apply +
+ * local chat commits). Carries ONLY stable IDs resolved from the committed
+ * authority — never message contents, never optimistic metadata. The event
+ * is never data authority: the renderer must consume the FULL directory via
+ * the read-only `chatdb:list-live-assistant-topics` API (PROJ-10) and merge
+ * by stable ID. Message history is never pulled wholesale; only the
+ * currently selected resident route reloads via the existing windowed read.
+ */
+export interface ChatProjectionInvalidationEvent {
+  /** Affected assistant IDs (stable IDs from committed authority). */
+  assistantIds: string[]
+  /** Affected topic IDs (stable IDs from committed authority). May be empty for coarse refresh. */
+  topicIds: string[]
+  /** Affected branch IDs where the committed write addressed a branch route. Empty for main-only. */
+  branchIds: string[]
+  /** Commit source: snapshot baseline bootstrap vs incremental apply vs local write. */
+  reason: 'sync-baseline' | 'sync-incremental' | 'local-commit'
 }
 
 /** All valid ChatDb command channel strings. */

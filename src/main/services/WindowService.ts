@@ -131,14 +131,59 @@ export class WindowService {
   }
 
   private setupMainWindowMonitor(mainWindow: BrowserWindow) {
-    mainWindow.webContents.on('render-process-gone', (_, details) => {
+    // Captured identity: this closure owns exactly this window/contents.
+    // A later replacement window gets its own listener; this one must never
+    // act on the replacement.
+    const contents = mainWindow.webContents
+    contents.on('render-process-gone', (_, details) => {
+      // Owned teardown (close/destroy/quit) also emits render-process-gone
+      // (e.g. reason 'killed'). Native WebContents calls after destroy throw
+      // `TypeError: Object has been destroyed` synchronously inside
+      // `WebContents.emit`, which surfaces as a Main uncaught dialog. Skip
+      // owned shutdown before touching anything native, and do not record it
+      // as a crash (it must not poison the 60s crash window below).
+      if (mainWindow.isDestroyed()) {
+        return
+      }
+      try {
+        if (contents.isDestroyed()) {
+          return
+        }
+      } catch {
+        return
+      }
+      if (this.mainWindow !== mainWindow) {
+        return
+      }
+      if (app.isQuitting) {
+        return
+      }
+      // Re-verify immediately before recording a crash: the window may have
+      // been torn down between event dispatch and this point. This re-check
+      // must run BEFORE logging/recording, otherwise a racing teardown would
+      // poison the 60s crash window and turn the next genuine first crash
+      // into a rapid-second app.exit(1). Owned teardown never logs nor
+      // records here.
+      if (mainWindow.isDestroyed()) {
+        return
+      }
+      try {
+        if (contents.isDestroyed()) {
+          return
+        }
+      } catch {
+        return
+      }
+      if (this.mainWindow !== mainWindow || app.isQuitting) {
+        return
+      }
       logger.error(`Renderer process crashed with: ${JSON.stringify(details)}`)
       const currentTime = Date.now()
       const lastCrashTime = this.lastRendererProcessCrashTime
       this.lastRendererProcessCrashTime = currentTime
       if (currentTime - lastCrashTime > 60 * 1000) {
         // 如果大于1分钟，则重启渲染进程
-        mainWindow.webContents.reload()
+        contents.reload()
       } else {
         // 如果小于1分钟，则退出应用, 可能是连续crash，需要退出应用
         app.exit(1)
@@ -256,8 +301,25 @@ export class WindowService {
   private setupWebContentsHandlers(mainWindow: BrowserWindow) {
     // Fix for Electron bug where zoom resets during in-page navigation (route changes)
     // This complements the resize-based workaround by catching navigation events
-    mainWindow.webContents.on('did-navigate-in-page', () => {
-      mainWindow.webContents.setZoomFactor(configManager.getZoomFactor())
+    const contents = mainWindow.webContents
+    contents.on('did-navigate-in-page', () => {
+      // Same destroyed-WebContents class as render-process-gone: a navigation
+      // event racing window teardown must not call native methods after
+      // destroy. Live-window zoom behavior is unchanged.
+      if (mainWindow.isDestroyed()) {
+        return
+      }
+      try {
+        if (contents.isDestroyed()) {
+          return
+        }
+      } catch {
+        return
+      }
+      if (this.mainWindow !== mainWindow) {
+        return
+      }
+      contents.setZoomFactor(configManager.getZoomFactor())
     })
 
     mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -612,8 +674,29 @@ export class WindowService {
 
       const mainWindow = this.getMainWindow()
       if (mainWindow && !mainWindow.isDestroyed()) {
+        const contents = mainWindow.webContents
         setTimeout(() => {
-          mainWindow.webContents.send(IpcChannel.App_QuoteToMain, text)
+          // Deferred ownership recheck: the window may have been torn down
+          // during the 100ms gap. Never send on a destroyed/stale target,
+          // and never let the deferred send throw uncaught.
+          try {
+            if (mainWindow.isDestroyed()) {
+              return
+            }
+            try {
+              if (contents.isDestroyed()) {
+                return
+              }
+            } catch {
+              return
+            }
+            if (this.getMainWindow() !== mainWindow) {
+              return
+            }
+            contents.send(IpcChannel.App_QuoteToMain, text)
+          } catch (error) {
+            logger.error('Failed to quote to main window:', error as Error)
+          }
         }, 100)
       }
     } catch (error) {

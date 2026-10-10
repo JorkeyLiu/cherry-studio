@@ -85,6 +85,8 @@ import type {
   ListBranchesResponse,
   ListFileRefsByFileRequest,
   ListFileRefsByFileResponse,
+  ListLiveAssistantTopicsRequest,
+  ListLiveAssistantTopicsResponse,
   ListSegmentsRequest,
   ListSegmentsResponse,
   ListTrashTopicsRequest,
@@ -225,6 +227,9 @@ export interface ChatDbApi {
     replacementTopicId: string
   }): Promise<ChatDbResult<ResetAssistantTopicsResponse>>
   ensureAssistantTopics?(request: EnsureAssistantTopicsRequest): Promise<ChatDbResult<EnsureAssistantTopicsResponse>>
+  listLiveAssistantTopics?(
+    request: ListLiveAssistantTopicsRequest
+  ): Promise<ChatDbResult<ListLiveAssistantTopicsResponse>>
   // Phase 5.1B: compound mutations
   cloneMessagesToTopic(request: CloneMessagesToTopicRequest): Promise<ChatDbResult<CloneMessagesToTopicResponse>>
   resetMessagesForResend(request: ResetMessagesForResendRequest): Promise<ChatDbResult<ResetMessagesForResendResponse>>
@@ -807,6 +812,12 @@ export class SqliteMessageDataSource implements MessageDataSource {
     if (!this.api.ensureAssistantTopics) throw new Error('ensureAssistantTopics is unavailable')
     const request: EnsureAssistantTopicsRequest = cloneForWire({ assistantId, candidateTopicId, candidateName })
     return unwrap(await this.api.ensureAssistantTopics(request))
+  }
+
+  async listLiveAssistantTopics(assistantId: string): Promise<ListLiveAssistantTopicsResponse> {
+    if (!this.api.listLiveAssistantTopics) throw new Error('listLiveAssistantTopics is unavailable')
+    const request: ListLiveAssistantTopicsRequest = cloneForWire({ assistantId })
+    return unwrap(await this.api.listLiveAssistantTopics(request))
   }
 
   // ============ S6.2c-1: Branch by stable anchor (additive) ============

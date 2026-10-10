@@ -75,6 +75,9 @@ describe('init.ts — assistant-config store-dependent bootstrap (focused)', () 
     vi.doMock('./services/topicDeletionSubscription', () => ({
       subscribeTopicDeletionEvents: mockSubscribeTopicDeletion
     }))
+    vi.doMock('./services/chatProjectionSubscription', () => ({
+      subscribeChatProjectionEvents: vi.fn()
+    }))
     vi.doMock('./services/WebTraceService', () => ({ webTraceService: { init: mockWebTraceInit } }))
     vi.doMock('@kangfenmao/keyv-storage', () => ({
       default: class {

@@ -796,6 +796,21 @@ async function finalizeFreshChatBootstrapForBoot(applied: boolean): Promise<void
     // settles only after this sweep + flush complete — never early.
     importReady: () => true
   })
+  // Startup repair for pre-existing nonempty directories (restart with an
+  // old missing topic): snapshot the LOCAL Main complete directory per
+  // nonempty assistant via the read-only API and replace by stable ID.
+  // Skips import-pending/deleted/unloaded scopes; never find-or-creates, so
+  // remotely deleted collections are not resurrected here. Runs after the
+  // empty-assistant ensure above so genuine local init keeps its default.
+  // Scoped boot context (same as the ensure sweep above): the import apply
+  // outcome already settled, so the projection outcome is loaded and known;
+  // the global readiness gate is still pending here by construction.
+  try {
+    const { reconcileNonemptyAssistantDirectoriesAtStartup } = await import('../services/chatProjectionSubscription')
+    await reconcileNonemptyAssistantDirectoriesAtStartup({ importReady: () => true })
+  } catch {
+    // best-effort startup reconcile; never break boot finalization
+  }
   await handleSaveData()
 }
 

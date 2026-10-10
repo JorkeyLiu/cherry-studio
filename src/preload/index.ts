@@ -6,6 +6,7 @@ import type {
   AppendMessageRequest,
   BranchMessagesToTopicRequest,
   BulkAddBlocksRequest,
+  ChatProjectionInvalidationEvent,
   CloneMessagesToTopicRequest,
   CountFileRefsByFileRequest,
   CreateBranchRequest,
@@ -34,6 +35,7 @@ import type {
   ListBlocksByFileRequest,
   ListBranchesRequest,
   ListFileRefsByFileRequest,
+  ListLiveAssistantTopicsRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   MoveSelectedTurnsToNewBranchRequest,
@@ -779,6 +781,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_ResetAssistantTopics, request),
     ensureAssistantTopics: (request: EnsureAssistantTopicsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_EnsureAssistantTopics, request),
+    listLiveAssistantTopics: (request: ListLiveAssistantTopicsRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ListLiveAssistantTopics, request),
     // S6.2c-1: branch by stable anchor (additive, keeps old clone intact)
     branchMessagesToTopic: (request: BranchMessagesToTopicRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_BranchMessagesToTopic, request),
@@ -819,6 +823,17 @@ const api = {
       ipcRenderer.on(IpcChannel.ChatDb_TopicDeleted, listener)
       return () => {
         ipcRenderer.removeListener(IpcChannel.ChatDb_TopicDeleted, listener)
+      }
+    },
+    // Chat-projection invalidation hint — Main → all renderers post-commit
+    // (typed, validated in renderer; hint only, never data authority)
+    onChatProjectionInvalidated: (callback: (event: ChatProjectionInvalidationEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: ChatProjectionInvalidationEvent) => {
+        callback(data)
+      }
+      ipcRenderer.on(IpcChannel.ChatDb_ChatProjectionInvalidated, listener)
+      return () => {
+        ipcRenderer.removeListener(IpcChannel.ChatDb_ChatProjectionInvalidated, listener)
       }
     }
   }

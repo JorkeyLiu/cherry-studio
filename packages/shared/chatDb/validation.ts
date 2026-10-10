@@ -787,3 +787,44 @@ export function validateTopicDeletionEvent(value: unknown): void {
   validateJsonValue(obj, 'event')
   validateStringArray(obj.deletedTopicIds, 'event.deletedTopicIds')
 }
+
+/**
+ * Validate a ChatProjectionInvalidationEvent payload (Main → renderer hint).
+ *
+ * Closed-set: only `assistantIds`, `topicIds`, `branchIds`, `reason`.
+ * The hint carries stable IDs only — never contents. Empty topicIds is
+ * legal for coarse per-assistant refresh; empty assistantIds is rejected
+ * (a hint must name at least one assistant scope).
+ */
+export function validateChatProjectionInvalidationEvent(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError('event', 'ChatProjectionInvalidationEvent must be a plain object')
+  }
+  const obj = value as Record<string, unknown>
+  const allowed = new Set(['assistantIds', 'topicIds', 'branchIds', 'reason'])
+  for (const key of Object.keys(obj)) {
+    if (!allowed.has(key)) {
+      throw new ValidationError(`event.${key}`, `Unknown property '${key}'`)
+    }
+  }
+  for (const field of ['assistantIds', 'topicIds', 'branchIds'] as const) {
+    if (!(field in obj)) {
+      throw new ValidationError(`event.${field}`, `Missing required field "${field}"`)
+    }
+  }
+  if (!('reason' in obj)) {
+    throw new ValidationError('event.reason', 'Missing required field "reason"')
+  }
+  validateJsonValue(obj, 'event')
+  validateStringArray(obj.assistantIds, 'event.assistantIds')
+  validateStringArray(obj.topicIds, 'event.topicIds')
+  validateStringArray(obj.branchIds, 'event.branchIds')
+  const assistants = obj.assistantIds as string[]
+  if (assistants.length === 0) {
+    throw new ValidationError('event.assistantIds', 'assistantIds must not be empty')
+  }
+  const reason = obj.reason
+  if (reason !== 'sync-baseline' && reason !== 'sync-incremental' && reason !== 'local-commit') {
+    throw new ValidationError('event.reason', 'reason must be sync-baseline, sync-incremental, or local-commit')
+  }
+}

@@ -29,6 +29,7 @@ vi.mock('@main/services/ConfigManager', () => ({
   ConfigKeys: {}
 }))
 
+import type { SyncPushRequest } from '@shared/sync'
 import { eq } from 'drizzle-orm'
 
 import { createRelayServer, ensureRelaySchema } from '../../../../../scripts/sync-relay/server'
@@ -794,7 +795,7 @@ describe('receiver union fail-closed matrix', () => {
     }
   }, 60000)
 
-  it('partial clock / existing outbox / frame / applied each fail-closed', async () => {
+  it('partial clock / candidate-own outbox / preserved-parent delete each fail-closed; independent outbox/frame/applied no longer block', async () => {
     await setupPair()
     // Partial clock: exclusive message with entity clock but missing field/membership.
     {
@@ -822,7 +823,7 @@ describe('receiver union fail-closed matrix', () => {
       await expect(syncService.sync()).rejects.toThrow()
       expect(await snapshotB()).toEqual(before)
     }
-    // Existing outbox.
+    // Candidate's own queued mutation still fail-closed (outbox for the exclusive itself).
     {
       const fresh = openChatDb()
       try {
@@ -838,10 +839,10 @@ describe('receiver union fail-closed matrix', () => {
       dbB
         .insert(schema.syncOutbox)
         .values({
-          id: 'outbox-1',
-          entityType: 'topic',
+          id: 'outbox-own-1',
+          entityType: 'message',
           op: 'upsert',
-          entityId: 'seed-t1',
+          entityId: 'o-m1',
           timestamp: 1,
           deviceId: 'd',
           payloadJson: '{}',
@@ -852,7 +853,7 @@ describe('receiver union fail-closed matrix', () => {
       await expect(syncService.sync()).rejects.toThrow()
       expect(await snapshotB()).toEqual(before)
     }
-    // Existing order frame.
+    // Pending delete covering the preserved parent chain still fail-closed.
     {
       const fresh = openChatDb()
       try {
@@ -863,24 +864,30 @@ describe('receiver union fail-closed matrix', () => {
       bindProfile('B', credB)
       await syncService.getPairState()
       insertSharedTopicOnly(sqliteB)
-      insertExclusiveMessage(sqliteB, 'f-m1', 'seed-t1', 'x', 2)
-      insertExclusiveBlock(sqliteB, 'f-b1', 'f-m1', 'x')
+      insertExclusiveMessage(sqliteB, 'o-m2', 'seed-t1', 'x', 2)
+      insertExclusiveBlock(sqliteB, 'o-b2', 'o-m2', 'x')
       dbB
-        .insert(schema.syncParentOrderFrame)
+        .insert(schema.syncOutbox)
         .values({
-          kind: 'topicMessage',
-          parentId: 'seed-t1',
-          frameVersion: 'parent-order-frame-v1',
-          orderedChildIdsJson: JSON.stringify(['f-m1']),
-          timestamp: 1,
-          operationId: '00000000-0000-4000-a000-000000000014'
+          id: 'outbox-del-1',
+          entityType: 'topic',
+          op: 'delete',
+          entityId: 'seed-t1',
+          timestamp: 2,
+          deviceId: 'd',
+          payloadJson: null,
+          createdAt: new Date().toISOString()
         })
         .run()
       const before = await snapshotB()
       await expect(syncService.sync()).rejects.toThrow()
       expect(await snapshotB()).toEqual(before)
     }
-    // Existing applied op.
+    // Independent pending upsert + existing frame + applied no longer block:
+    // shared-parent upsert, existing frame, and applied are preserved while
+    // the independent exclusive adopts. Proven in the dedicated mixed-state
+    // tests below; this case asserts the gate no longer throws for the same
+    // shape (cursor advances, no wipe).
     {
       const fresh = openChatDb()
       try {
@@ -890,14 +897,367 @@ describe('receiver union fail-closed matrix', () => {
       dbB = fresh.db
       bindProfile('B', credB)
       await syncService.getPairState()
-      insertSharedTopicOnly(sqliteB)
-      insertExclusiveMessage(sqliteB, 'a-m1', 'seed-t1', 'x', 2)
-      insertExclusiveBlock(sqliteB, 'a-b1', 'a-m1', 'x')
+      // Valid versioned pending intent via production aggregate (outbox+frames
+      // present) plus independent unversioned exclusive plus applied marker:
+      // the whole-database emptiness gate must not block.
+      const aggOk = new ChatDbAggregateService(dbB, sqliteB)
+      expect(aggOk.ensureTopic('ok-t1', 'a1', 'Ok').ok).toBe(true)
+      expect(
+        aggOk.appendMessage(
+          'ok-t1',
+          {
+            id: 'ok-m1',
+            topicId: 'ok-t1',
+            role: 'user',
+            content: 'x',
+            status: 'success',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-02T00:00:00.000Z'
+          } as never,
+          [
+            {
+              id: 'ok-b1',
+              messageId: 'ok-m1',
+              type: 'main_text',
+              content: 'x',
+              status: 'success',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-02T00:00:00.000Z'
+            } as never
+          ]
+        ).ok
+      ).toBe(true)
+      sqliteB
+        .prepare(
+          `INSERT INTO topics (id, assistant_id, name, created_at, updated_at, deleted_at, extra) VALUES (?,?,?,?,?,?,?)`
+        )
+        .run(
+          'ok-ind-t1',
+          'a1',
+          'OkInd',
+          '2026-01-01T00:00:00.000Z',
+          '2026-01-02T00:00:00.000Z',
+          null,
+          JSON.stringify({ pinned: false, prompt: null, isNameManuallyEdited: false })
+        )
+      insertExclusiveMessage(sqliteB, 'ok-ind-m1', 'ok-ind-t1', 'x', 0)
+      insertExclusiveBlock(sqliteB, 'ok-ind-b1', 'ok-ind-m1', 'x')
       dbB.insert(schema.syncApplied).values({ operationId: 'applied-keep', appliedAt: new Date().toISOString() }).run()
-      const before = await snapshotB()
-      await expect(syncService.sync()).rejects.toThrow()
-      expect(await snapshotB()).toEqual(before)
+      await syncService.sync()
+      expect(readCursor(dbB)).toBeGreaterThan(0)
+      // Independent intent preserved (not cleared, not rewritten): applied
+      // marker survives alongside adoption outbox (drained via push in the
+      // same cycle; full convergence proven in the dedicated mixed tests).
+      expect(
+        (
+          sqliteB.prepare(`SELECT COUNT(*) as n FROM sync_applied WHERE operation_id='applied-keep'`).get() as {
+            n: number
+          }
+        ).n
+      ).toBe(1)
     }
+  }, 60000)
+
+  it('mixed versioned pending plus independent unversioned topic bootstraps, preserves intents, converges', async () => {
+    // Old code fails here: any outbox/frame/applied present throws with
+    // `pending outbox present` even though the unversioned topic is independent
+    // and the versioned history is valid pending intent. New code adopts the
+    // independent subtree, keeps queued intents byte-for-byte, mints adoption
+    // clocks above local+incoming+wall, refreshes frames keeping all children,
+    // then pushes and converges both directions.
+    const n = await setupPair()
+    bindProfile('B', credB)
+    // Valid versioned pending history via production aggregate (outbox+clocks+frames).
+    const aggB = new ChatDbAggregateService(dbB!, sqliteB!)
+    expect(aggB.ensureTopic('ver-t1', 'a1', 'Versioned').ok).toBe(true)
+    expect(
+      aggB.appendMessage(
+        'ver-t1',
+        {
+          id: 'ver-m1',
+          topicId: 'ver-t1',
+          role: 'user',
+          content: 'versioned hello',
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-02T00:00:00.000Z'
+        } as never,
+        [
+          {
+            id: 'ver-b1',
+            messageId: 'ver-m1',
+            type: 'main_text',
+            content: 'versioned hello',
+            status: 'success',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-02T00:00:00.000Z'
+          } as never
+        ]
+      ).ok
+    ).toBe(true)
+    const outboxBefore = dbB!.select().from(schema.syncOutbox).all()
+    expect(outboxBefore.length).toBeGreaterThan(0)
+    // Byte-for-byte snapshot of the queued versioned intent (synthetic ver-*
+    // history only): id/entityType/op/entityId/timestamp/deviceId plus
+    // payloadJson. Compared against the actual pushed ops captured via the
+    // existing syncClient.push seam BEFORE the relay clears them, so adoption
+    // preservation is proven pre-push while convergence is still asserted
+    // after push below.
+    const outboxBeforeSnap = outboxBefore.map((r) => ({ ...r }))
+    const framesBefore = sqliteB!.prepare(`SELECT COUNT(*) as n FROM sync_parent_order_frame`).get() as { n: number }
+    expect(framesBefore.n).toBeGreaterThan(0)
+    const maxBefore = Math.max(
+      ...[
+        ...((sqliteB!.prepare(`SELECT timestamp FROM sync_entity_clock`).all() as Array<{ timestamp: number }>).map(
+          (r) => r.timestamp
+        ) ?? []),
+        ...((sqliteB!.prepare(`SELECT timestamp FROM sync_membership_clock`).all() as Array<{ timestamp: number }>).map(
+          (r) => r.timestamp
+        ) ?? []),
+        ...((
+          sqliteB!.prepare(`SELECT timestamp FROM sync_parent_order_frame`).all() as Array<{ timestamp: number }>
+        ).map((r) => r.timestamp) ?? []),
+        ...(outboxBefore.map((r) => r.timestamp) ?? []),
+        0
+      ]
+    )
+    // Independent eligible unversioned topic subtree (no clocks/frames/outbox).
+    sqliteB!
+      .prepare(
+        `INSERT INTO topics (id, assistant_id, name, created_at, updated_at, deleted_at, extra) VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        'ind-t1',
+        'a1',
+        'Independent',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        null,
+        JSON.stringify({ pinned: false, prompt: null, isNameManuallyEdited: false })
+      )
+    insertExclusiveMessage(sqliteB!, 'ind-m1', 'ind-t1', 'independent hello', 0)
+    insertExclusiveBlock(sqliteB!, 'ind-b1', 'ind-m1', 'independent hello')
+    // Sanity: unversioned has no clocks yet.
+    expect(
+      (sqliteB!.prepare(`SELECT COUNT(*) as n FROM sync_entity_clock WHERE entity_id='ind-m1'`).get() as { n: number })
+        .n
+    ).toBe(0)
+    // Capture the exact pushed ops via the existing syncClient.push seam so the
+    // queued original is proven byte-for-byte BEFORE the relay clears it.
+    const { syncClient: syncClientForPrePush } = await import('../SyncClient')
+    const origPushForPrePush = syncClientForPrePush.push.bind(syncClientForPrePush)
+    const pushedOps: Array<Record<string, unknown>> = []
+    const pushSpy = vi
+      .spyOn(syncClientForPrePush, 'push')
+      .mockImplementation(
+        async (
+          endpoint: string,
+          req: SyncPushRequest,
+          deviceCode: string,
+          deviceSecret: string,
+          externalSignal?: AbortSignal
+        ) => {
+          const ops = req.operations
+          for (const o of ops) pushedOps.push({ ...(o as unknown as Record<string, unknown>) })
+          return origPushForPrePush(endpoint, req, deviceCode, deviceSecret, externalSignal)
+        }
+      )
+    try {
+      await syncService.sync()
+    } finally {
+      pushSpy.mockRestore()
+    }
+    expect(readCursor(dbB!)).toBeGreaterThanOrEqual(n)
+    expect(outboxCount(dbB!)).toBe(0)
+    // Adoption clocks dominate prior max (local+incoming+wall).
+    const indEnt = sqliteB!.prepare(`SELECT timestamp FROM sync_entity_clock WHERE entity_id='ind-m1'`).get() as {
+      timestamp: number
+    }
+    expect(indEnt.timestamp).toBeGreaterThan(maxBefore)
+    const indMem = sqliteB!
+      .prepare(`SELECT timestamp FROM sync_membership_clock WHERE child_entity_id='ind-m1'`)
+      .get() as { timestamp: number }
+    expect(indMem.timestamp).toBeGreaterThan(maxBefore)
+    const indFrame = sqliteB!
+      .prepare(`SELECT timestamp FROM sync_parent_order_frame WHERE kind='topicMessage' AND parent_id='ind-t1'`)
+      .get() as { timestamp: number }
+    expect(indFrame.timestamp).toBeGreaterThan(indEnt.timestamp)
+    // Queued original preserved byte-for-byte pre-push: every synthetic
+    // versioned outbox row (id/entityType/op/entityId/timestamp/deviceId +
+    // payloadJson/clock fields) appears identically in the pushed ops.
+    expect(pushedOps.length).toBeGreaterThan(0)
+    for (const before of outboxBeforeSnap) {
+      const found = pushedOps.find((o) => (o as { id: string }).id === (before as { id: string }).id)
+      expect(found).toBeTruthy()
+      const b = before as {
+        id: string
+        entityType: string
+        op: string
+        entityId: string
+        timestamp: number
+        deviceId: string
+        payloadJson: string | null
+      }
+      const f = found as {
+        id: string
+        entityType: string
+        op: string
+        entityId: string
+        timestamp: number
+        deviceId: string
+        payload?: unknown
+      }
+      expect(f.entityType).toBe(b.entityType)
+      expect(f.op).toBe(b.op)
+      expect(f.entityId).toBe(b.entityId)
+      expect(f.timestamp).toBe(b.timestamp)
+      expect(f.deviceId).toBe(b.deviceId)
+      const beforePayload = b.payloadJson ? (JSON.parse(b.payloadJson) as unknown) : undefined
+      expect(f.payload ?? undefined).toEqual(beforePayload ?? undefined)
+    }
+    // Both histories present on B plus incoming baseline.
+    expect(sqliteB!.prepare(`SELECT id FROM topics WHERE id='ind-t1'`).get()).toBeTruthy()
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='ver-m1'`).get()).toBeTruthy()
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='ind-m1'`).get()).toBeTruthy()
+    expect(sqliteB!.prepare(`SELECT id FROM messages WHERE id='seed-m1'`).get()).toBeTruthy()
+    // Seed holder converges on both versioned and independent histories.
+    bindProfile('A', credA)
+    await syncService.sync()
+    expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='ver-m1'`).get()).toBeTruthy()
+    expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='ver-b1'`).get()).toBeTruthy()
+    expect(sqliteA!.prepare(`SELECT id FROM messages WHERE id='ind-m1'`).get()).toBeTruthy()
+    expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='ind-b1'`).get()).toBeTruthy()
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    await syncService.sync()
+    expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
+  }, 60000)
+
+  it('unversioned block under preserved versioned parent adopts without rewriting parent clocks', async () => {
+    // Old code fails twice here: whole-database outbox/frame gate throws, and
+    // parent closure requires incoming/candidate only. New code allows the
+    // preserved fully-versioned parent, mints child clocks above it, and
+    // refreshes the parent frame keeping all valid children with a winning clock.
+    const n = await setupPair()
+    void n
+    bindProfile('B', credB)
+    const aggB = new ChatDbAggregateService(dbB!, sqliteB!)
+    expect(aggB.ensureTopic('pp-t1', 'a1', 'Preserved').ok).toBe(true)
+    expect(
+      aggB.appendMessage(
+        'pp-t1',
+        {
+          id: 'pp-m1',
+          topicId: 'pp-t1',
+          role: 'user',
+          content: 'preserved parent',
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-02T00:00:00.000Z'
+        } as never,
+        [
+          {
+            id: 'pp-b1',
+            messageId: 'pp-m1',
+            type: 'main_text',
+            content: 'preserved parent',
+            status: 'success',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-02T00:00:00.000Z'
+          } as never
+        ]
+      ).ok
+    ).toBe(true)
+    const parentEntBefore = sqliteB!
+      .prepare(`SELECT timestamp, operation_id FROM sync_entity_clock WHERE entity_id='pp-m1'`)
+      .get() as {
+      timestamp: number
+      operation_id: string
+    }
+    const parentMemBefore = sqliteB!
+      .prepare(`SELECT timestamp, operation_id FROM sync_membership_clock WHERE child_entity_id='pp-m1'`)
+      .get() as { timestamp: number; operation_id: string }
+    const parentFrameBefore = sqliteB!
+      .prepare(
+        `SELECT timestamp, operation_id FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id='pp-m1'`
+      )
+      .get() as { timestamp: number; operation_id: string } | undefined
+    // Eligible unversioned block under the preserved versioned message.
+    insertExclusiveBlock(sqliteB!, 'pp-b2', 'pp-m1', 'adopted sibling')
+    expect(
+      (sqliteB!.prepare(`SELECT COUNT(*) as n FROM sync_entity_clock WHERE entity_id='pp-b2'`).get() as { n: number }).n
+    ).toBe(0)
+    await syncService.sync()
+    expect(readCursor(dbB!)).toBeGreaterThan(0)
+    expect(outboxCount(dbB!)).toBe(0)
+    // Parent clocks byte-for-byte preserved (never invented/replaced).
+    const parentEntAfter = sqliteB!
+      .prepare(`SELECT timestamp, operation_id FROM sync_entity_clock WHERE entity_id='pp-m1'`)
+      .get() as {
+      timestamp: number
+      operation_id: string
+    }
+    expect(parentEntAfter).toEqual(parentEntBefore)
+    const parentMemAfter = sqliteB!
+      .prepare(`SELECT timestamp, operation_id FROM sync_membership_clock WHERE child_entity_id='pp-m1'`)
+      .get() as { timestamp: number; operation_id: string }
+    expect(parentMemAfter).toEqual(parentMemBefore)
+    // Adopted child clocks above all relevant local clocks.
+    const childEnt = sqliteB!.prepare(`SELECT timestamp FROM sync_entity_clock WHERE entity_id='pp-b2'`).get() as {
+      timestamp: number
+    }
+    expect(childEnt.timestamp).toBeGreaterThan(parentEntBefore.timestamp)
+    expect(childEnt.timestamp).toBeGreaterThan(parentMemBefore.timestamp)
+    if (parentFrameBefore) expect(childEnt.timestamp).toBeGreaterThan(parentFrameBefore.timestamp)
+    // Frame refresh keeps all valid children and wins consistently.
+    const frameAfter = sqliteB!
+      .prepare(
+        `SELECT ordered_child_ids_json AS json, timestamp FROM sync_parent_order_frame WHERE kind='messageBlock' AND parent_id='pp-m1'`
+      )
+      .get() as { json: string; timestamp: number }
+    const listed = JSON.parse(frameAfter.json) as string[]
+    expect(listed).toContain('pp-b1')
+    expect(listed).toContain('pp-b2')
+    expect(frameAfter.timestamp).toBeGreaterThan(childEnt.timestamp)
+    const border = (
+      sqliteB!
+        .prepare(`SELECT id FROM message_blocks WHERE message_id='pp-m1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{
+        id: string
+      }>
+    ).map((r) => r.id)
+    expect(listed).toEqual(border)
+    // Converges on the holder with both blocks.
+    bindProfile('A', credA)
+    await syncService.sync()
+    expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='pp-b1'`).get()).toBeTruthy()
+    expect(sqliteA!.prepare(`SELECT id FROM message_blocks WHERE id='pp-b2'`).get()).toBeTruthy()
+    const borderA = (
+      sqliteA!
+        .prepare(`SELECT id FROM message_blocks WHERE message_id='pp-m1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{
+        id: string
+      }>
+    ).map((r) => r.id)
+    bindProfile('B', credB)
+    await syncService.sync()
+    bindProfile('A', credA)
+    await syncService.sync()
+    bindProfile('B', credB)
+    const borderB = (
+      sqliteB!
+        .prepare(`SELECT id FROM message_blocks WHERE message_id='pp-m1' ORDER BY sort_order ASC, id ASC`)
+        .all() as Array<{
+        id: string
+      }>
+    ).map((r) => r.id)
+    expect(borderB).toEqual(borderA)
+    expect(outboxCount(dbA!)).toBe(0)
+    expect(outboxCount(dbB!)).toBe(0)
   }, 60000)
 
   it('unrelated local tombstone/register permit bootstrap adoption with pushback and convergence', async () => {
@@ -1246,6 +1606,259 @@ describe('receiver union fail-closed matrix', () => {
           fresh.sqlite.close()
         } catch {}
       }
+    }
+  }, 60000)
+
+  it('pending-delete dependency closure (anchor + transitive branch ancestry + block parent owner) fails closed zero-write', async () => {
+    await setupPair()
+    bindProfile('A', credA)
+    const { captureLocalSyncBaselineCandidate } = await import('../syncBaseline')
+    const { buildPublishEnvelope } = await import('../syncBaselinePublish')
+    const { mapWireEnvelopeToMergeInput } = await import('../syncBaselineWireApply')
+    const { adoptReceiverExclusiveInTx: adoptTxDel } = await import('../syncReceiverUnion')
+    const candidate = captureLocalSyncBaselineCandidate(dbA!)
+    const channelId = candidate.observedLocalChannelKey as string
+    const watermark = candidate.observedLocalCursor as number
+    const { envelope } = buildPublishEnvelope(candidate, channelId, watermark)
+    const snapDel = (cDb: BetterSQLite3Database<typeof schema>, cSqlite: Database.Database): unknown => ({
+      outbox: cDb.select().from(schema.syncOutbox).all(),
+      entity: cSqlite.prepare(`SELECT * FROM sync_entity_clock`).all(),
+      field: cSqlite.prepare(`SELECT * FROM sync_field_clock`).all(),
+      membership: cSqlite.prepare(`SELECT * FROM sync_membership_clock`).all(),
+      frame: cSqlite.prepare(`SELECT * FROM sync_parent_order_frame`).all(),
+      topics: cSqlite.prepare(`SELECT * FROM topics ORDER BY id`).all(),
+      messages: cSqlite.prepare(`SELECT * FROM messages ORDER BY id`).all(),
+      blocks: cSqlite.prepare(`SELECT * FROM message_blocks ORDER BY id`).all(),
+      branches: (() => {
+        try {
+          return cSqlite.prepare(`SELECT * FROM topic_branches ORDER BY id`).all()
+        } catch {
+          return []
+        }
+      })()
+    })
+    const insertBranchRow = (cSqlite: Database.Database, id: string, parent: string | null, anchor: string): void => {
+      cSqlite
+        .prepare(
+          `INSERT INTO topic_branches (id, topic_id, parent_branch_id, anchor_message_id, name, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`
+        )
+        .run(id, 'seed-t1', parent, anchor, `B ${id}`, '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')
+    }
+    const insertBranchMessage = (cSqlite: Database.Database, id: string, branchId: string): void => {
+      cSqlite
+        .prepare(
+          `INSERT INTO messages (id, topic_id, branch_id, role, content, status, created_at, updated_at, sort_order, extra) VALUES (?,?,?,?,?,?,?,?,?,?)`
+        )
+        .run(
+          id,
+          'seed-t1',
+          branchId,
+          'user',
+          'branch-body',
+          'success',
+          '2026-01-01T00:00:00.000Z',
+          '2026-01-02T00:00:00.000Z',
+          0,
+          null
+        )
+    }
+    const insertOutboxDelete = (
+      cDb: BetterSQLite3Database<typeof schema>,
+      rowId: string,
+      entityType: string,
+      entityId: string
+    ): void => {
+      cDb
+        .insert(schema.syncOutbox)
+        .values({
+          id: rowId,
+          entityType,
+          op: 'delete',
+          entityId,
+          timestamp: 2,
+          deviceId: 'd',
+          payloadJson: null,
+          createdAt: new Date().toISOString()
+        })
+        .run()
+    }
+    const runAdoptWithBranchDomain = (cDb: BetterSQLite3Database<typeof schema>, withBranchSuffix: boolean): void => {
+      cDb.transaction((tx) => {
+        const mapped = mapWireEnvelopeToMergeInput(envelope)
+        if (withBranchSuffix) {
+          mapped.input.orderFrames.push({
+            kind: 'branchSuffix',
+            parentId: 'unrelated-br',
+            frameVersion: 'parent-order-frame-v1',
+            orderedChildIds: [],
+            frameClock: { timestamp: 5, operationId: 'op-unrelated-br' }
+          })
+        }
+        adoptTxDel(tx as never, mapped.input, 'test-device-del-closure')
+      })
+    }
+    // Case 1: block candidate whose parent message is branch-owned; pending
+    // delete on that branch owner must fail the whole tx with zero writes.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'del-anchor-m0', 'seed-t1', 'anchor', 0)
+        insertBranchRow(fresh.sqlite, 'del-b1', null, 'del-anchor-m0')
+        insertBranchMessage(fresh.sqlite, 'del-bm-m1', 'del-b1')
+        insertExclusiveBlock(fresh.sqlite, 'del-bb-b1', 'del-bm-m1', 'x')
+        insertOutboxDelete(fresh.db, 'outbox-del-b1', 'topic_branch', 'del-b1')
+        const before = snapDel(fresh.db, fresh.sqlite)
+        expect(() => runAdoptWithBranchDomain(fresh.db, true)).toThrow()
+        expect(snapDel(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Case 2: branch candidate with pending delete on the transitive
+    // grandparent (not the immediate parent) must fail closed.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'del2-anchor', 'seed-t1', 'anchor', 0)
+        insertBranchRow(fresh.sqlite, 'del2-grand', null, 'del2-anchor')
+        insertBranchRow(fresh.sqlite, 'del2-parent', 'del2-grand', 'del2-anchor')
+        insertBranchRow(fresh.sqlite, 'del2-child', 'del2-parent', 'del2-anchor')
+        insertOutboxDelete(fresh.db, 'outbox-del2-grand', 'topic_branch', 'del2-grand')
+        const before = snapDel(fresh.db, fresh.sqlite)
+        expect(() => runAdoptWithBranchDomain(fresh.db, true)).toThrow()
+        expect(snapDel(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Case 3: branch candidate with pending delete on its referenced anchor
+    // message must fail closed.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'del3-anchor', 'seed-t1', 'anchor', 0)
+        insertBranchRow(fresh.sqlite, 'del3-b1', null, 'del3-anchor')
+        insertOutboxDelete(fresh.db, 'outbox-del3-anchor', 'message', 'del3-anchor')
+        const before = snapDel(fresh.db, fresh.sqlite)
+        expect(() => runAdoptWithBranchDomain(fresh.db, true)).toThrow()
+        expect(snapDel(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+    // Case 4: branch ancestry cycle is malformed and fails closed (bounded,
+    // no infinite walk) even with a pending delete present.
+    {
+      const fresh = openChatDb()
+      try {
+        insertSharedTopicOnly(fresh.sqlite)
+        insertExclusiveMessage(fresh.sqlite, 'del4-anchor', 'seed-t1', 'anchor', 0)
+        fresh.sqlite.exec('PRAGMA foreign_keys=OFF')
+        try {
+          insertBranchRow(fresh.sqlite, 'del4-a', 'del4-b', 'del4-anchor')
+          insertBranchRow(fresh.sqlite, 'del4-b', 'del4-a', 'del4-anchor')
+        } finally {
+          fresh.sqlite.exec('PRAGMA foreign_keys=ON')
+        }
+        insertOutboxDelete(fresh.db, 'outbox-del4-a', 'topic_branch', 'del4-a')
+        const before = snapDel(fresh.db, fresh.sqlite)
+        expect(() => runAdoptWithBranchDomain(fresh.db, true)).toThrow()
+        expect(snapDel(fresh.db, fresh.sqlite)).toEqual(before)
+      } finally {
+        try {
+          fresh.sqlite.close()
+        } catch {}
+      }
+    }
+  }, 60000)
+
+  it('unrelated pending deletes/upserts/frames remain allowed with adoption', async () => {
+    await setupPair()
+    bindProfile('A', credA)
+    const { captureLocalSyncBaselineCandidate } = await import('../syncBaseline')
+    const { buildPublishEnvelope } = await import('../syncBaselinePublish')
+    const { mapWireEnvelopeToMergeInput } = await import('../syncBaselineWireApply')
+    const { mergeValidatedBaselineInTx } = await import('../syncBaselineApply')
+    const { adoptReceiverExclusiveInTx: adoptTxAllow } = await import('../syncReceiverUnion')
+    const candidate = captureLocalSyncBaselineCandidate(dbA!)
+    const channelId = candidate.observedLocalChannelKey as string
+    const watermark = candidate.observedLocalCursor as number
+    const { envelope } = buildPublishEnvelope(candidate, channelId, watermark)
+    const fresh = openChatDb()
+    try {
+      insertSharedTopicOnly(fresh.sqlite)
+      insertExclusiveMessage(fresh.sqlite, 'allow-m1', 'seed-t1', 'x', 2)
+      insertExclusiveBlock(fresh.sqlite, 'allow-b1', 'allow-m1', 'x')
+      // Unrelated versioned pending intent via production aggregate (valid
+      // outbox + clocks + frame for a disjoint topic) plus a ghost pending
+      // delete for a disjoint id with no business row/frame.
+      const { ChatDbAggregateService: AggAllow } = await import('../../chatDb/ChatDbAggregateService')
+      const aggAllow = new AggAllow(fresh.db as never, fresh.sqlite as never)
+      expect(aggAllow.ensureTopic('allow-other-t', 'a1', 'Other').ok).toBe(true)
+      expect(
+        aggAllow.appendMessage(
+          'allow-other-t',
+          {
+            id: 'allow-other-m',
+            topicId: 'allow-other-t',
+            role: 'user',
+            content: 'other',
+            status: 'success',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-02T00:00:00.000Z'
+          } as never,
+          [
+            {
+              id: 'allow-other-b',
+              messageId: 'allow-other-m',
+              type: 'main_text',
+              content: 'other',
+              status: 'success',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-02T00:00:00.000Z'
+            } as never
+          ]
+        ).ok
+      ).toBe(true)
+      fresh.db
+        .insert(schema.syncOutbox)
+        .values({
+          id: 'outbox-unrelated-del',
+          entityType: 'topic',
+          op: 'delete',
+          entityId: 'ghost-topic',
+          timestamp: 2,
+          deviceId: 'd',
+          payloadJson: null,
+          createdAt: new Date().toISOString()
+        })
+        .run()
+      const union = fresh.db.transaction((tx) => {
+        const mapped = mapWireEnvelopeToMergeInput(envelope)
+        const u = adoptTxAllow(tx as never, mapped.input, 'test-device-allow')
+        mergeValidatedBaselineInTx(tx as never, mapped.input)
+        return u
+      })
+      expect(union.adopted).toBeGreaterThan(0)
+      const outbox = fresh.db.select().from(schema.syncOutbox).all()
+      // Unrelated rows preserved plus adoption rows minted.
+      expect(outbox.some((r) => r.id === 'outbox-unrelated-del')).toBe(true)
+      expect(outbox.some((r) => r.entityId === 'allow-other-m')).toBe(true)
+      expect(outbox.some((r) => r.entityId === 'allow-m1')).toBe(true)
+      expect(outbox.some((r) => r.entityId === 'allow-b1')).toBe(true)
+    } finally {
+      try {
+        fresh.sqlite.close()
+      } catch {}
     }
   }, 60000)
 

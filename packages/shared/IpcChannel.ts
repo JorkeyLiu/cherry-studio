@@ -370,6 +370,7 @@ export enum IpcChannel {
   ChatDb_TransferTopicOwnership = 'chatdb:transfer-topic-ownership',
   ChatDb_ResetAssistantTopics = 'chatdb:reset-assistant-topics',
   ChatDb_EnsureAssistantTopics = 'chatdb:ensure-assistant-topics',
+  ChatDb_ListLiveAssistantTopics = 'chatdb:list-live-assistant-topics',
 
   // S6.2c-1 — Main-authoritative branch by stable anchor
   ChatDb_BranchMessagesToTopic = 'chatdb:branch-messages-to-topic',
@@ -419,6 +420,9 @@ export enum IpcChannel {
 
   // Phase 5 authoritative deletion propagation — Main → all renderers
   ChatDb_TopicDeleted = 'chatdb:topic-deleted',
+
+  // Chat projection invalidation hint — Main → all renderers (post-commit only, never data authority)
+  ChatDb_ChatProjectionInvalidated = 'chatdb:chat-projection-invalidated',
 
   // ChatImport — import-only IPC for Phase 4 source-reader pipeline.
   // Independent of the ChatDb_* channels. Prefix: chat-import:*

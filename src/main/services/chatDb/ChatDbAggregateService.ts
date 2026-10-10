@@ -48,6 +48,7 @@ import type {
   InsertMessagesAfterAnchorResponse,
   JsonObject,
   JsonValue,
+  ListLiveAssistantTopicsResponse,
   MessageBlockEntry,
   PurgeExpiredTopicsResponse,
   ReorderAnswerGroupResponse,
@@ -87,6 +88,7 @@ import {
 import { SyncFrameError, syncService, type SyncTxExecutor } from '../sync/SyncService'
 import type { FileReferenceData, MessageBlockData, MessageData, TopicBranchData, TopicData } from './domain/types'
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
+import { hydratePortableMediaFileOverflowInTx } from './mediaReadAssembly'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
 import { SearchRepository } from './repository/SearchRepository'
@@ -1049,6 +1051,11 @@ export class ChatDbAggregateService {
           allBlocks.push(...msgBlocks)
         }
 
+        // Synced v5 receiver repair (read-only): blocks whose overflow.file
+        // is null but trusted file_references + sync_file_asset exist hydrate
+        // a local FileMetadata in memory. No replay, no migration, no leak.
+        hydratePortableMediaFileOverflowInTx(tx, allBlocks)
+
         // Convert to wire format
         const wireMessages = messagesToWire(messageData)
         const wireBlocks = blocksToWire(allBlocks)
@@ -1138,6 +1145,7 @@ export class ChatDbAggregateService {
           const blockDataMap = repos.blocks.listByMessages(ids)
           const allBlocks: MessageBlockData[] = []
           for (const id of ids) allBlocks.push(...(blockDataMap.get(id) ?? []))
+          hydratePortableMediaFileOverflowInTx(tx, allBlocks)
           const wireMessages = messagesToWire(windowMessages)
           const wireBlocks = blocksToWire(allBlocks)
           const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
@@ -1605,6 +1613,7 @@ export class ChatDbAggregateService {
         for (const id of closureIds) {
           allBlocks.push(...(blockMap.get(id) ?? []))
         }
+        hydratePortableMediaFileOverflowInTx(tx, allBlocks)
         const wireMessages = messagesToWire(closureMessages)
         const wireBlocks = blocksToWire(allBlocks)
         const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
@@ -2183,6 +2192,7 @@ export class ChatDbAggregateService {
         for (const id of closureIds) {
           allBlocks.push(...(blockMap.get(id) ?? []))
         }
+        hydratePortableMediaFileOverflowInTx(tx, allBlocks)
         const wireMessages = messagesToWire(closureMessages)
         const wireBlocks = blocksToWire(allBlocks)
         const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
@@ -2245,6 +2255,7 @@ export class ChatDbAggregateService {
         for (const id of messageIds) {
           allBlocks.push(...(blockDataMap.get(id) ?? []))
         }
+        hydratePortableMediaFileOverflowInTx(tx, allBlocks)
         const wireMessages = messagesToWire(allMessages)
         const wireBlocks = blocksToWire(allBlocks)
         const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
@@ -2361,6 +2372,7 @@ export class ChatDbAggregateService {
             for (const id of orderedIds) {
               allBlocks.push(...(blockMap.get(id) ?? []))
             }
+            hydratePortableMediaFileOverflowInTx(tx, allBlocks)
             const wireMessages = messagesToWire(orderedRows)
             const wireBlocks = blocksToWire(allBlocks)
             const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
@@ -2423,6 +2435,7 @@ export class ChatDbAggregateService {
           for (const id of orderedIds) {
             allBlocks.push(...(blockMap.get(id) ?? []))
           }
+          hydratePortableMediaFileOverflowInTx(tx, allBlocks)
           const wireMessages = messagesToWire(orderedRows)
           const wireBlocks = blocksToWire(allBlocks)
           const messagesWithBlocks = reconstructMessageBlockRelations(wireMessages, wireBlocks)
@@ -7200,6 +7213,53 @@ export class ChatDbAggregateService {
     }, `ensureAssistantTopics(${assistantId})`)
   }
 
+  /**
+   * Pure authoritative read-only live-topics directory for one assistant.
+   *
+   * ONE SQLite read transaction: ALL LIVE topics (deleted_at IS NULL) for
+   * `assistantId` in (createdAt, id) order via the existing
+   * `TopicsRepository.listLiveByAssistant`. Never mutates, never creates a
+   * default, never captures sync intent, never notifies. Empty array is a
+   * valid authoritative answer. Renderer consumes the FULL directory
+   * (PROJ-10) and merges by stable ID; find-or-create stays on the separate
+   * `ensureAssistantTopics` path for genuine local init only.
+   */
+  listLiveAssistantTopics(assistantId: string): ChatDbResult<ListLiveAssistantTopicsResponse> {
+    return wrapResult(() => {
+      if (typeof assistantId !== 'string' || assistantId.length === 0) {
+        throw new ChatDbValidationError('assistantId must be a non-empty string')
+      }
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const live = repos.topics.listLiveByAssistant(assistantId)
+        return {
+          assistantId,
+          topics: live.map((t) => topicToWireFull(t) as unknown as TopicWire)
+        }
+      })
+    }, `listLiveAssistantTopics(${assistantId})`)
+  }
+
+  /**
+   * Best-effort owning-assistant lookup for one topic (pure read, null when
+   * absent). Used ONLY to scope post-commit projection hints; never mutates.
+   */
+  getTopicAssistantId(topicId: string): string | null {
+    try {
+      const row = this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        return repos.topics.getById(topicId)
+      })
+      if (row.found) {
+        const aid = (row.data as { assistantId?: unknown }).assistantId
+        return typeof aid === 'string' && aid.length > 0 ? aid : null
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
   // =========================================================================
   // Topic-internal branches — local-only, no prefix cloning (016)
   // =========================================================================
@@ -8031,6 +8091,7 @@ export class ChatDbAggregateService {
           for (const id of messageIds) {
             allBlocks.push(...(blockDataMap.get(id) ?? []))
           }
+          hydratePortableMediaFileOverflowInTx(tx, allBlocks)
           const wireMessages = messagesToWire(resolved)
           const wireBlocks = blocksToWire(allBlocks)
           // Full-sync capture in the same atomic tx: topic closure first

@@ -58,6 +58,7 @@ import type {
   ListBlocksByFileRequest,
   ListBranchesRequest,
   ListFileRefsByFileRequest,
+  ListLiveAssistantTopicsRequest,
   ListSegmentsRequest,
   ListTrashTopicsRequest,
   MoveSelectedTurnsToNewBranchRequest,
@@ -101,6 +102,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 import { logMainDiagnostic } from '../diagnostics'
 import { handleChatDbSuccessForSync, isCapturableSyncChannel } from '../sync/chatDbHook'
 import { ChatDbAggregateService } from './ChatDbAggregateService'
+import { broadcastChatProjectionInvalidation } from './chatProjectionBroadcast'
 import { internalStorageFailure, mapErrorToResult, validateConstructedResult } from './errors'
 import { chatDbService } from './index'
 
@@ -184,6 +186,74 @@ function extractDeletedTopicIds(resultValue: unknown): string[] | undefined {
   const ids = v.deletedTopicIds
   if (!Array.isArray(ids)) return undefined
   return ids as string[]
+}
+
+/**
+ * Local chat-commit channels whose success wakes every live renderer via the
+ * chat-projection hint (reason `local-commit`). Pure reads, deletion-family
+ * channels (covered by the deletion broadcast), and the read-only directory
+ * itself never enter here. Rollback/failure never signals.
+ */
+const CHAT_PROJECTION_LOCAL_CHANNELS: ReadonlySet<string> = new Set([
+  IpcChannel.ChatDb_EnsureTopic,
+  IpcChannel.ChatDb_AppendMessage,
+  IpcChannel.ChatDb_UpdateMessage,
+  IpcChannel.ChatDb_UpdateMessageAndBlocks,
+  IpcChannel.ChatDb_SelectAnswerMessage,
+  IpcChannel.ChatDb_SelectUsefulAnswer,
+  IpcChannel.ChatDb_DeleteMessage,
+  IpcChannel.ChatDb_DeleteMessages,
+  IpcChannel.ChatDb_UpdateTopicMetadata,
+  IpcChannel.ChatDb_SoftDeleteTopic,
+  IpcChannel.ChatDb_RestoreTopic,
+  IpcChannel.ChatDb_TransferTopicOwnership,
+  IpcChannel.ChatDb_ResetAssistantTopics,
+  IpcChannel.ChatDb_EnsureAssistantTopics,
+  IpcChannel.ChatDb_BranchMessagesToTopic,
+  IpcChannel.ChatDb_CreateBranch,
+  IpcChannel.ChatDb_DeleteBranch,
+  IpcChannel.ChatDb_MoveSelectedTurnsToNewBranch,
+  IpcChannel.ChatDb_CloneMessagesToTopic,
+  IpcChannel.ChatDb_ResetMessagesForResend,
+  IpcChannel.ChatDb_ResendUserMessages,
+  IpcChannel.ChatDb_RegenerateAssistantMessage,
+  IpcChannel.ChatDb_DeleteMessagesWithSegments,
+  IpcChannel.ChatDb_DeleteMessagesWithDependents,
+  IpcChannel.ChatDb_PasteMessagesToTopic,
+  IpcChannel.ChatDb_InsertMessagesAfterAnchor,
+  IpcChannel.ChatDb_InsertMessageGroups,
+  IpcChannel.ChatDb_ReorderMessages,
+  IpcChannel.ChatDb_ReorderAnswerGroup,
+  IpcChannel.ChatDb_UpsertSegment,
+  IpcChannel.ChatDb_ReplaceSegmentMembership
+])
+
+function topicIdsFromRequest(request: unknown): string[] {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return []
+  const r = request as Record<string, unknown>
+  const out: string[] = []
+  for (const key of ['topicId', 'sourceTopicId', 'targetTopicId'] as const) {
+    const v = r[key]
+    if (typeof v === 'string' && v.length > 0 && !out.includes(v)) out.push(v)
+  }
+  return out
+}
+
+function assistantIdsFromRequest(request: unknown): string[] {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return []
+  const v = (request as Record<string, unknown>).assistantId
+  return typeof v === 'string' && v.length > 0 ? [v] : []
+}
+
+function branchIdsFromRequest(request: unknown): string[] {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) return []
+  const r = request as Record<string, unknown>
+  const out: string[] = []
+  for (const key of ['branchId', 'parentBranchId', 'sourceBranchId'] as const) {
+    const v = r[key]
+    if (typeof v === 'string' && v.length > 0 && !out.includes(v)) out.push(v)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +378,47 @@ export function registerChatDbIpc(): () => void {
           if (ids && ids.length > 0) {
             const senderId = _event.sender?.id
             broadcastTopicDeletion(ids, senderId)
+          }
+        }
+
+        // Chat-projection hint for local commits — post-commit only, never on
+        // failure/rollback. Hints resolve from the committed request intent
+        // (stable topic/assistant/branch IDs); the renderer consumes the FULL
+        // directory via the read-only API, never this hint as data.
+        if (result.ok === true && CHAT_PROJECTION_LOCAL_CHANNELS.has(channel)) {
+          try {
+            const topicIds = topicIdsFromRequest(request)
+            const assistantIds = assistantIdsFromRequest(request)
+            const branchIds = branchIdsFromRequest(request)
+            // Resolve owning assistants from committed authority when the
+            // request carries only topic IDs (never guessed, best-effort).
+            if (assistantIds.length === 0 && topicIds.length > 0) {
+              try {
+                for (const tid of topicIds) {
+                  const aid = aggregate.getTopicAssistantId(tid)
+                  if (aid && !assistantIds.includes(aid)) assistantIds.push(aid)
+                }
+              } catch {
+                // best-effort; hint still carries topic IDs
+              }
+            }
+            if (assistantIds.length > 0 || topicIds.length > 0) {
+              // Origin exclusion: the committing renderer already observes its
+              // own write via the Redux projection; only other windows need
+              // the hint. Remote/secondary windows keep existing behavior.
+              const senderId = typeof _event.sender?.id === 'number' ? _event.sender.id : undefined
+              broadcastChatProjectionInvalidation(
+                {
+                  assistantIds,
+                  topicIds,
+                  branchIds,
+                  reason: 'local-commit'
+                },
+                senderId === undefined ? undefined : { excludeWebContentsId: senderId }
+              )
+            }
+          } catch {
+            // hint broadcast never breaks the ChatDb result envelope
           }
         }
 
@@ -672,6 +783,10 @@ export function registerChatDbIpc(): () => void {
 
   handleCommand(IpcChannel.ChatDb_EnsureAssistantTopics, (agg, req: EnsureAssistantTopicsRequest) => {
     return agg.ensureAssistantTopics(req.assistantId, req.candidateTopicId, req.candidateName ?? null)
+  })
+
+  handleCommand(IpcChannel.ChatDb_ListLiveAssistantTopics, (agg, req: ListLiveAssistantTopicsRequest) => {
+    return agg.listLiveAssistantTopics(req.assistantId)
   })
 
   logger.info(`Registered ${handlers.length} ChatDb IPC handlers (registration #${registrationId})`)

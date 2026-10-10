@@ -44,7 +44,14 @@ import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { BrowserWindow } from 'electron'
 
 import { chatDbService } from '../chatDb'
+import { broadcastChatProjectionInvalidation } from '../chatDb/chatProjectionBroadcast'
 import * as schema from '../chatDb/schema'
+import {
+  buildRepairedAdoptionPortablePayload,
+  isAdoptionPortableMediaType,
+  isKnownMalformedAdoptionPortableOp,
+  normalizeAdoptionAssetIds
+} from './syncAdoptionShared'
 import { mergeAssistantBaselineSectionInTx, readAssistantBaselineSection } from './syncAssistantBaseline'
 import { bindAssistantConfigMirrorToSqlite } from './syncAssistantConfigStore'
 import type { SyncAttachmentClient } from './syncAttachmentService'
@@ -58,6 +65,7 @@ import type { BaselineFetchResult, BaselinePublishResult } from './SyncClient'
 import { syncClient, validateEndpointUrl } from './SyncClient'
 import { compareClock as compareFrameClock, evaluateEffectiveOrder } from './syncFrameEvaluation'
 import { advanceFrameHighWater, getFrameHighWater } from './syncFrameHighWater'
+import { checkHistoricParentClosureProof, parseHistoricTransientParentDeferError } from './syncHistoricCaptureRepair'
 import { adoptReceiverExclusiveInTx } from './syncReceiverUnion'
 import { clearResendAttemptsInTx, getResendAttemptInTx, parseRemovedBlockIds } from './syncResendAttempt'
 import {
@@ -456,6 +464,43 @@ function stripAssistantMeta(p: Record<string, unknown>): Record<string, unknown>
   return rest
 }
 
+/**
+ * Portable attachment display-name selector (real production defect fix).
+ *
+ * `fileName` (disk basename `uuid + ext`) is NEVER a display candidate: it
+ * selects bytes only. Display comes from trusted ref `extra`
+ * (`originalName`/`origin_name`) first, then the owning block's
+ * `extra.file.origin_name` supplement for pre-fix `extra = NULL` history,
+ * then `undefined` (the transfer service falls back to the stored basename
+ * without leaking paths). Every candidate must be a portable basename
+ * (no `/`/`\`, `1..255`, not `.`/`..`, non-blank); illegal upstream values
+ * fail safe to the next source, never to a path.
+ */
+export function selectAttachmentDisplayName(
+  extra: Record<string, unknown> | null,
+  blockDisplayCandidates: ReadonlyArray<unknown>,
+  storedFileName: string | null
+): string | undefined {
+  const isPortable = (v: unknown): v is string => {
+    if (typeof v !== 'string') return false
+    if (v.length === 0 || v.length > 255) return false
+    if (v.includes('/') || v.includes('\\')) return false
+    if (v === '.' || v === '..') return false
+    if (v.trim().length === 0) return false
+    return true
+  }
+  if (extra) {
+    const primary = extra.originalName ?? extra.origin_name ?? null
+    if (isPortable(primary)) return primary
+    const legacy = extra.name ?? null
+    if (isPortable(legacy) && (typeof storedFileName !== 'string' || legacy !== storedFileName)) return legacy
+  }
+  for (const candidate of blockDisplayCandidates) {
+    if (isPortable(candidate)) return candidate
+  }
+  return undefined
+}
+
 export class SyncService {
   private statusSyncing = false
   /**
@@ -718,6 +763,14 @@ export class SyncService {
       logger.warn(`[drainAttachment] ${safe}`)
     }
     // Helper: derive extension + hints from trusted file_references snapshot (not readdir guess)
+    // Display-name rule (real production defect fix): `file_name` is always
+    // the disk basename (`uuid + ext`) for byte reads; portable `originalName`
+    // comes from the trusted display snapshot (`file_references.extra`
+    // `originalName`/`origin_name`, written by `projectFileReferences` from the
+    // block `file.origin_name`), with a safe supplement from the owning
+    // block's `extra.file.origin_name` for pre-fix `extra = NULL` history. The
+    // stored basename is never reused as display (no confusion); absolute
+    // paths never become `originalName` (fail-safe, no private-path leak).
     const deriveStoredNameAndHints = (
       fileId: string
     ): { storedName: string; hints: { originalName?: string; createdAt?: string } } | null => {
@@ -758,20 +811,43 @@ export class SyncService {
         }
         if (!extension) return null
         const storedName = `${fileId}${extension}`
-        let originalName: string | undefined
-        if (
-          typeof fileName === 'string' &&
-          fileName.length > 0 &&
-          fileName.length <= 255 &&
-          !fileName.includes('/') &&
-          !fileName.includes('\\')
-        )
-          originalName = fileName
-        else if (extra) {
-          const on = (extra as any).originalName ?? (extra as any).origin_name ?? (extra as any).name ?? null
-          if (typeof on === 'string' && on.length > 0 && on.length <= 255 && !on.includes('/') && !on.includes('\\'))
-            originalName = on
-        }
+        // Pre-fix `extra = NULL` history supplement: collect the owning
+        // block's `extra.file.origin_name` candidates (sender block snapshot,
+        // already persisted). No rewrite of immutable assets or manual DB.
+        const blockCandidates: unknown[] = []
+        try {
+          const intentBlockIds = fileIdToIntentBlockIds.get(fileId) ?? []
+          const sortedBlockIds = [...new Set(intentBlockIds)].sort()
+          for (const blockId of sortedBlockIds) {
+            let blk: any = null
+            try {
+              blk = db
+                .select({ extra: schema.messageBlocks.extra })
+                .from(schema.messageBlocks)
+                .where(eq(schema.messageBlocks.id, blockId))
+                .get() as any
+            } catch {
+              blk = null
+            }
+            const rawExtra = blk?.extra
+            if (typeof rawExtra !== 'string' || rawExtra.length === 0) continue
+            let parsed: Record<string, unknown> | null = null
+            try {
+              const p = JSON.parse(rawExtra)
+              if (p && typeof p === 'object' && !Array.isArray(p)) parsed = p as Record<string, unknown>
+            } catch {
+              parsed = null
+            }
+            if (!parsed) continue
+            const fileObj =
+              parsed.file && typeof parsed.file === 'object' && !Array.isArray(parsed.file)
+                ? (parsed.file as Record<string, unknown>)
+                : null
+            if (fileObj) blockCandidates.push(fileObj.origin_name, fileObj.originalName)
+            else blockCandidates.push(parsed.origin_name, parsed.originalName)
+          }
+        } catch {}
+        const originalName = selectAttachmentDisplayName(extra, blockCandidates, fileName)
         let createdAt: string | undefined
         if (extra) {
           const ca = (extra as any).created_at ?? (extra as any).createdAt ?? null
@@ -1112,6 +1188,411 @@ export class SyncService {
         this.notifyEnqueued()
       } catch {}
     }
+  }
+
+  /**
+   * Bounded pre-push canonical repair for the one known pre-V5 adoption
+   * emitter shape (message_block portable upsert lacking assetIds).
+   * Runs BEFORE any network push in the same sync cycle (after the
+   * attachment drain, so the valid successor + refs + jobs exist).
+   *
+   * - Strictly malformed payloads cannot have been relay-accepted
+   *   (strict 400), so in-place canonical hydration is safe.
+   * - Only the exact known shape repairs, using the same-entity valid
+   *   full-state successor + committed file refs + file_asset/current-
+   *   channel-bound completed job, with parent/type/non-asset equality,
+   *   entity/field clock dominance, and well-formed same-parent membership
+   *   <= successor (membership is stable across content updates, so older
+   *   is legitimate; never rewritten here). Preserves invalid op
+   *   id/timestamp/business fields; never touches the valid successor,
+   *   clocks, or other queued ops.
+   * - Retries are idempotent (repaired ops no longer match the shape).
+   * - Unprovable (unsupported/mismatched/missing asset, no successor,
+   *   field divergence, clock not dominating) fails explicitly with all
+   *   queued work preserved — never drop, never false-ack, never reuse
+   *   IDs when an admissible payload could have reached the relay.
+   */
+  private repairMalformedAdoptionPortableOpsBeforePush(): { repaired: string[] } {
+    const db = this.getDb()
+    const sqlite = this.getSqlite()
+    const rows = db.select().from(schema.syncOutbox).all() as Array<{
+      id: string
+      entityType: string
+      op: string
+      entityId: string
+      timestamp: number
+      deviceId: string
+      payloadJson: string | null
+    }>
+    const parsed = rows.map((r) => ({
+      row: r,
+      payload: r.payloadJson ? (JSON.parse(r.payloadJson) as Record<string, unknown>) : undefined
+    }))
+    const malformed = parsed.filter((e) =>
+      isKnownMalformedAdoptionPortableOp({
+        entityType: e.row.entityType,
+        op: e.row.op,
+        entityId: e.row.entityId,
+        payload: e.payload
+      })
+    )
+    if (malformed.length === 0) return { repaired: [] }
+    // Prove strict-400 (never relay-accepted) for each malformed op first.
+    for (const m of malformed) {
+      const err = validateSyncOperationStrict({
+        id: m.row.id,
+        entityType: m.row.entityType,
+        op: m.row.op,
+        entityId: m.row.entityId,
+        timestamp: m.row.timestamp,
+        deviceId: m.row.deviceId,
+        payload: m.payload
+      } as never)
+      if (!err || !/portable media block requires non-empty assetIds/.test(err)) {
+        const msg =
+          `adoption repair refused: op ${m.row.id} not provably strict-400 malformed (${String(err ?? 'valid')}) — preserving all queued work`.slice(
+            0,
+            500
+          )
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+    }
+    const repairedIds: string[] = []
+    const updates: Array<{ id: string; payloadJson: string }> = []
+    for (const m of malformed) {
+      const blockId = m.row.entityId
+      const mPayload = m.payload as Record<string, unknown>
+      // Same-entity valid full-state successors in the current queue.
+      const successors = parsed.filter(
+        (e) =>
+          e.row.entityType === 'message_block' &&
+          e.row.op === 'upsert' &&
+          e.row.entityId === blockId &&
+          e.row.id !== m.row.id &&
+          e.payload &&
+          typeof e.payload === 'object'
+      )
+      const validSuccessors = successors.filter((s) => {
+        if (!isAdoptionPortableMediaType((s.payload as Record<string, unknown>).type)) return false
+        const ids = normalizeAdoptionAssetIds((s.payload as Record<string, unknown>).assetIds ?? [])
+        if (!ids || ids.length === 0) return false
+        const err = validateSyncOperationStrict({
+          id: s.row.id,
+          entityType: s.row.entityType,
+          op: s.row.op,
+          entityId: s.row.entityId,
+          timestamp: s.row.timestamp,
+          deviceId: s.row.deviceId,
+          payload: s.payload
+        } as never)
+        return !err
+      })
+      // Dominance: successor must strictly follow the malformed op so LWW
+      // still selects the valid successor after repair.
+      const dominating = validSuccessors
+        .filter(
+          (s) =>
+            s.row.timestamp > m.row.timestamp ||
+            (s.row.timestamp === m.row.timestamp && s.row.id.localeCompare(m.row.id) > 0)
+        )
+        .sort((a, b) =>
+          a.row.timestamp !== b.row.timestamp ? a.row.timestamp - b.row.timestamp : a.row.id.localeCompare(b.row.id)
+        )
+      if (dominating.length === 0) {
+        const msg =
+          `adoption repair deferred: no dominating valid successor for ${blockId} (op ${m.row.id}) — preserving all queued work`.slice(
+            0,
+            500
+          )
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+      const succ = dominating[0]
+      const sPayload = succ.payload as Record<string, unknown>
+      // Parent/type/non-asset equality (byte-identical business intent).
+      for (const k of ['messageId', 'type', 'content', 'status', 'createdAt', 'updatedAt'] as const) {
+        if (JSON.stringify(mPayload[k] ?? null) !== JSON.stringify(sPayload[k] ?? null)) {
+          const msg =
+            `adoption repair refused: field ${k} divergence for ${blockId} (op ${m.row.id} vs ${succ.row.id}) — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+      }
+      // Committed portable refs must equal the successor's proven refs.
+      let refRows: Array<{ fileId: string }>
+      try {
+        refRows = db
+          .select({ fileId: schema.fileReferences.fileId })
+          .from(schema.fileReferences)
+          .where(eq(schema.fileReferences.blockId, blockId))
+          .all() as Array<{ fileId: string }>
+      } catch {
+        refRows = []
+      }
+      const provenRefs = normalizeAdoptionAssetIds(refRows.map((r) => r.fileId))
+      const succRefs = normalizeAdoptionAssetIds(sPayload.assetIds ?? [])
+      if (!provenRefs || provenRefs.length === 0 || !succRefs || succRefs.length === 0) {
+        const msg =
+          `adoption repair deferred: missing committed refs for ${blockId} (op ${m.row.id}) — preserving all queued work`.slice(
+            0,
+            500
+          )
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+      if (JSON.stringify(provenRefs) !== JSON.stringify(succRefs)) {
+        const msg =
+          `adoption repair refused: committed refs mismatch successor for ${blockId} (op ${m.row.id}) — preserving all queued work`.slice(
+            0,
+            500
+          )
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+      // Each proven ref must have a committed file_asset + completed job
+      // bound to the current channel (uploaded bytes proven for this
+      // channel, no path/file metadata leak into payload). An old completed
+      // upload for another channel is never trusted.
+      let boundChannel: string | null = null
+      try {
+        boundChannel = this.getChannelKey()
+      } catch {
+        boundChannel = null
+      }
+      if (!boundChannel) {
+        const msg =
+          `adoption repair deferred: no bound channel for ${blockId} (op ${m.row.id}) — preserving all queued work`.slice(
+            0,
+            500
+          )
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+      for (const fid of provenRefs) {
+        let asset: unknown
+        try {
+          asset = db.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, fid)).get()
+        } catch {
+          asset = undefined
+        }
+        if (!asset) {
+          const msg =
+            `adoption repair deferred: file_asset missing for ${fid} (block ${blockId}) — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        let job: { state: string; channelId: string } | undefined
+        try {
+          job = db.select().from(schema.syncAttachmentJob).where(eq(schema.syncAttachmentJob.assetId, fid)).get() as
+            | { state: string; channelId: string }
+            | undefined
+        } catch {
+          job = undefined
+        }
+        if (!job || job.state !== 'completed') {
+          const msg =
+            `adoption repair deferred: upload job not completed for ${fid} (block ${blockId}) — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        if (!job.channelId || job.channelId !== boundChannel) {
+          const msg =
+            `adoption repair deferred: upload job not channel-bound for ${fid} (block ${blockId}) — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+      }
+      // Clock dominance: entity + assetIds field + membership must already
+      // reflect the valid successor (repair changes bytes only, never clocks).
+      try {
+        const entityRow = db
+          .select()
+          .from(schema.syncEntityClock)
+          .where(eq(schema.syncEntityClock.entityType, 'message_block'))
+          .all()
+          .find((r) => (r as { entityId: string }).entityId === blockId) as
+          | { timestamp: number; operationId: string }
+          | undefined
+        if (!entityRow || entityRow.operationId !== succ.row.id || entityRow.timestamp !== succ.row.timestamp) {
+          const msg =
+            `adoption repair deferred: entity clock not dominated by successor for ${blockId} — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        const fieldRows = db
+          .select()
+          .from(schema.syncFieldClock)
+          .where(eq(schema.syncFieldClock.entityType, 'message_block'))
+          .all()
+          .filter((r) => (r as { entityId: string }).entityId === blockId) as Array<{
+          field: string
+          timestamp: number
+          operationId: string
+        }>
+        const assetClock = fieldRows.find((f) => f.field === 'assetIds')
+        if (!assetClock || assetClock.operationId !== succ.row.id || assetClock.timestamp !== succ.row.timestamp) {
+          const msg =
+            `adoption repair deferred: assetIds clock not dominated by successor for ${blockId} — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        const mem = this.getMembershipClockInTx(db as never, 'message_block', blockId)
+        if (!mem || mem.parentId !== (mPayload.messageId as string)) {
+          const msg =
+            `adoption repair deferred: membership missing/mismatch for ${blockId} — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        // Membership is stable across content updates, so it is legitimately
+        // older than the valid successor. Prove the retained tuple is
+        // well-formed, binds the same parent, and is <= the successor under
+        // the existing LWW clock compare (newest-wins). Malformed,
+        // incomparable, or future (membership newer than the successor)
+        // fails preserving work. Never rewrites membership/owner here.
+        try {
+          parseSyncOperationIdShape(mem.operationId)
+        } catch {
+          const msg =
+            `adoption repair deferred: membership malformed for ${blockId} — preserving all queued work`.slice(0, 500)
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        if (!Number.isSafeInteger(mem.timestamp) || mem.timestamp < 0) {
+          const msg =
+            `adoption repair deferred: membership malformed for ${blockId} — preserving all queued work`.slice(0, 500)
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        try {
+          parseSyncOperationIdShape(succ.row.id)
+        } catch {
+          const msg =
+            `adoption repair deferred: successor clock incomparable for ${blockId} — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        if (!Number.isSafeInteger(succ.row.timestamp) || succ.row.timestamp < 0) {
+          const msg =
+            `adoption repair deferred: successor clock incomparable for ${blockId} — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+        if (this.compareLww(mem.timestamp, mem.operationId, succ.row.timestamp, succ.row.id) > 0) {
+          const msg =
+            `adoption repair deferred: membership newer than successor for ${blockId} — preserving all queued work`.slice(
+              0,
+              500
+            )
+          try {
+            this.updateLastError(msg)
+          } catch {}
+          throw new Error(msg)
+        }
+      } catch (e) {
+        if (e instanceof Error && /adoption repair deferred/.test(e.message)) throw e
+        const msg = `adoption repair deferred: clock read failed for ${blockId} — preserving all queued work`.slice(
+          0,
+          500
+        )
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+      const repaired = buildRepairedAdoptionPortablePayload(mPayload, provenRefs)
+      const repairedErr = validateSyncOperationStrict({
+        id: m.row.id,
+        entityType: m.row.entityType,
+        op: m.row.op,
+        entityId: m.row.entityId,
+        timestamp: m.row.timestamp,
+        deviceId: m.row.deviceId,
+        payload: repaired
+      } as never)
+      if (repairedErr) {
+        const msg = `adoption repair failed validation for ${blockId}: ${repairedErr}`.slice(0, 500)
+        try {
+          this.updateLastError(msg)
+        } catch {}
+        throw new Error(msg)
+      }
+      updates.push({ id: m.row.id, payloadJson: JSON.stringify(repaired) })
+      repairedIds.push(m.row.id)
+    }
+    if (updates.length === 0) return { repaired: [] }
+    sqlite.exec('BEGIN IMMEDIATE')
+    try {
+      for (const u of updates) {
+        db.update(schema.syncOutbox).set({ payloadJson: u.payloadJson }).where(eq(schema.syncOutbox.id, u.id)).run()
+      }
+      sqlite.exec('COMMIT')
+    } catch (e) {
+      try {
+        sqlite.exec('ROLLBACK')
+      } catch {}
+      throw e
+    }
+    return { repaired: repairedIds }
   }
 
   private async ensureFileAssetDownloaded(
@@ -1500,6 +1981,88 @@ export class SyncService {
       throw new SyncCaptureError(`capture failure persistence failed for ${channel}: ${detail}; original: ${msg}`, {
         cause: persistErr
       })
+    }
+  }
+
+  /**
+   * Narrow historic repair: clears only the exact old
+   * `updateBlocks: sync closure: parent message <id> transient (pending), defer`
+   * failure after a successful sync drained the outbox and the authoritative
+   * closure now proves fully captured. Any other error, any unproven closure,
+   * or any intervening newer failure (different stored string) preserves the
+   * durable error. Best-effort: never throws into the sync success path.
+   * Returns true only when the historic error was repaired.
+   */
+  maybeRepairHistoricTransientParentDeferCapture(): boolean {
+    let observed: string | null = null
+    try {
+      const db = this.getDb()
+      const capRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_CAPTURE_ERROR)).get()
+      observed = (capRow?.value as string | null) ?? null
+      if (observed === null) return false
+      const parentMessageId = parseHistoricTransientParentDeferError(observed)
+      if (!parentMessageId) return false
+      const errRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_ERROR)).get()
+      const lastError = (errRow?.value as string | null) ?? null
+      if (lastError !== null) return false
+      const lastSyncRow = db.select().from(schema.syncState).where(eq(schema.syncState.key, STATE_LAST_SYNC_AT)).get()
+      if (!lastSyncRow?.value) return false
+      const outboxCount = db.select().from(schema.syncOutbox).all().length
+      if (outboxCount !== 0) return false
+      try {
+        if (db.select().from(schema.syncAttachmentCaptureIntent).all().length !== 0) return false
+      } catch {
+        return false
+      }
+      try {
+        const pendingJobs = db
+          .select()
+          .from(schema.syncAttachmentJob)
+          .where(eq(schema.syncAttachmentJob.state, 'pending'))
+          .all().length
+        const failedJobs = db
+          .select()
+          .from(schema.syncAttachmentJob)
+          .where(eq(schema.syncAttachmentJob.state, 'failed'))
+          .all().length
+        if (pendingJobs !== 0 || failedJobs !== 0) return false
+      } catch {
+        return false
+      }
+      const proof = checkHistoricParentClosureProof(db, parentMessageId)
+      if (!proof.eligible) {
+        logger.info(`[historicCaptureRepair] preserve historic defer (${proof.reason})`)
+        return false
+      }
+      let candidate: ReturnType<typeof captureLocalSyncBaselineCandidate>
+      try {
+        candidate = captureLocalSyncBaselineCandidate(db)
+      } catch {
+        return false
+      }
+      if (candidate.pendingOutboxCount !== 0 || candidate.pendingAttachmentCount !== 0) return false
+      const reasons = new Set(candidate.completeness?.reasons ?? [])
+      for (const r of [
+        'unversioned-entity',
+        'unversioned-field',
+        'unversioned-membership',
+        'missing-order-frame',
+        'incomplete-order-frame'
+      ] as const) {
+        if (reasons.has(r)) {
+          logger.info(`[historicCaptureRepair] preserve historic defer (candidate-${r})`)
+          return false
+        }
+      }
+      const sqlite = this.getSqlite()
+      const res = sqlite
+        .prepare('DELETE FROM sync_state WHERE key = ? AND value = ?')
+        .run(STATE_CAPTURE_ERROR, observed) as { changes: number }
+      if (res.changes !== 1) return false
+      logger.info('[historicCaptureRepair] repaired historic transient-parent defer')
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -2972,6 +3535,183 @@ export class SyncService {
         } catch {}
       }
     } catch {}
+  }
+
+  /**
+   * Chat entity scope for projection hints. Only ordinary chat rows wake
+   * renderers; assistant_config has its own projection channel, file assets
+   * never address the topic directory, and unknown types stay silent.
+   */
+  private isChatProjectionEntity(entityType: string): boolean {
+    return (
+      entityType === 'topic' ||
+      entityType === 'message' ||
+      entityType === 'message_block' ||
+      entityType === 'topic_branch'
+    )
+  }
+
+  private readTopicAssistant(topicId: string): string | null {
+    try {
+      const row = this.getDb()
+        .select({ assistantId: schema.topics.assistantId })
+        .from(schema.topics)
+        .where(eq(schema.topics.id, topicId))
+        .get() as { assistantId?: unknown } | undefined
+      const aid = row?.assistantId
+      return typeof aid === 'string' && aid.length > 0 ? aid : null
+    } catch {
+      return null
+    }
+  }
+
+  private readMessageRoute(messageId: string): { topicId: string | null; branchId: string | null } {
+    try {
+      const row = this.getDb()
+        .select({ topicId: schema.messages.topicId, branchId: schema.messages.branchId })
+        .from(schema.messages)
+        .where(eq(schema.messages.id, messageId))
+        .get() as { topicId?: unknown; branchId?: unknown } | undefined
+      return {
+        topicId: typeof row?.topicId === 'string' && row.topicId.length > 0 ? row.topicId : null,
+        branchId: typeof row?.branchId === 'string' && row.branchId.length > 0 ? row.branchId : null
+      }
+    } catch {
+      return { topicId: null, branchId: null }
+    }
+  }
+
+  private readBlockParent(blockId: string): string | null {
+    try {
+      const row = this.getDb()
+        .select({ messageId: schema.messageBlocks.messageId })
+        .from(schema.messageBlocks)
+        .where(eq(schema.messageBlocks.id, blockId))
+        .get() as { messageId?: unknown } | undefined
+      const mid = row?.messageId
+      return typeof mid === 'string' && mid.length > 0 ? mid : null
+    } catch {
+      return null
+    }
+  }
+
+  private readBranchTopic(branchId: string): string | null {
+    try {
+      const row = this.getDb()
+        .select({ topicId: schema.topicBranches.topicId })
+        .from(schema.topicBranches)
+        .where(eq(schema.topicBranches.id, branchId))
+        .get() as { topicId?: unknown } | undefined
+      const tid = row?.topicId
+      return typeof tid === 'string' && tid.length > 0 ? tid : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Post-commit chat-projection hint for one applied sync op.
+   *
+   * Called ONLY after the apply transaction COMMITTED with appliedEntity
+   * true (LWW winners only — losses and rollbacks never signal). Hints
+   * resolve from the committed authority rows with the applied op payload
+   * as fallback; failures never throw and never affect sync status.
+   */
+  private broadcastChatProjectionForAppliedOp(
+    op: SyncOperation,
+    appliedEntity: boolean,
+    preCommitTopicAssistant: string | null,
+    reason: 'sync-baseline' | 'sync-incremental'
+  ): void {
+    try {
+      if (!appliedEntity) return
+      if (!this.isChatProjectionEntity(op.entityType)) return
+      const topicIds: string[] = []
+      const branchIds: string[] = []
+      let assistant: string | null = null
+      const pushTopic = (tid: string | null | undefined): void => {
+        if (typeof tid === 'string' && tid.length > 0 && !topicIds.includes(tid)) topicIds.push(tid)
+      }
+      const pushBranch = (bid: string | null | undefined): void => {
+        if (typeof bid === 'string' && bid.length > 0 && !branchIds.includes(bid)) branchIds.push(bid)
+      }
+      const payload = op.payload ?? {}
+      if (op.entityType === 'topic') {
+        pushTopic(op.entityId)
+        assistant = this.readTopicAssistant(op.entityId)
+        if (!assistant && typeof payload.assistantId === 'string' && payload.assistantId.length > 0) {
+          assistant = payload.assistantId
+        }
+        if (!assistant) assistant = preCommitTopicAssistant
+      } else if (op.entityType === 'message') {
+        const route = this.readMessageRoute(op.entityId)
+        pushTopic(route.topicId)
+        pushBranch(route.branchId)
+        if (!route.topicId && typeof payload.topicId === 'string') pushTopic(payload.topicId)
+        if (!route.branchId && typeof payload.branchId === 'string') pushBranch(payload.branchId)
+        const tid = topicIds[0]
+        if (tid) assistant = this.readTopicAssistant(tid)
+      } else if (op.entityType === 'message_block') {
+        let parentMessage: string | null = this.readBlockParent(op.entityId)
+        if (!parentMessage && typeof payload.messageId === 'string' && payload.messageId.length > 0) {
+          parentMessage = payload.messageId
+        }
+        if (parentMessage) {
+          const route = this.readMessageRoute(parentMessage)
+          pushTopic(route.topicId)
+          pushBranch(route.branchId)
+          const tid = topicIds[0]
+          if (tid) assistant = this.readTopicAssistant(tid)
+        }
+      } else if (op.entityType === 'topic_branch') {
+        pushBranch(op.entityId)
+        const tid = this.readBranchTopic(op.entityId)
+        pushTopic(tid)
+        if (!tid && typeof payload.topicId === 'string') pushTopic(payload.topicId)
+        const topic = topicIds[0]
+        if (topic) assistant = this.readTopicAssistant(topic)
+      }
+      // Compound ops ride the same entity types through the generic path
+      // above (order_frame/message_stable_replace/move_turns_to_branch carry
+      // topic/message/branch entity types), so no separate branch is needed.
+      if (!assistant || topicIds.length === 0) {
+        // Coarse fallback: exactly one assistant scope is required. Without
+        // a resolvable assistant there is no bounded scope — stay silent
+        // rather than waking every renderer for an unscoped hint.
+        return
+      }
+      broadcastChatProjectionInvalidation({ assistantIds: [assistant], topicIds, branchIds, reason })
+    } catch {
+      // hint broadcast never affects sync status
+    }
+  }
+
+  /**
+   * Coarse post-commit hint after a baseline bootstrap merge: every live
+   * assistant scope, no topic IDs (directory-only refresh, never message
+   * history). Resolves scopes from the committed topics table.
+   */
+  private broadcastChatProjectionForBaseline(): void {
+    try {
+      const rows = this.getDb()
+        .select({ assistantId: schema.topics.assistantId })
+        .from(schema.topics)
+        .where(isNull(schema.topics.deletedAt))
+        .all() as Array<{ assistantId?: unknown }>
+      const seen = new Set<string>()
+      for (const r of rows) {
+        if (typeof r?.assistantId === 'string' && r.assistantId.length > 0) seen.add(r.assistantId)
+      }
+      if (seen.size === 0) return
+      broadcastChatProjectionInvalidation({
+        assistantIds: [...seen],
+        topicIds: [],
+        branchIds: [],
+        reason: 'sync-baseline'
+      })
+    } catch {
+      // hint broadcast never affects sync status
+    }
   }
 
   /**
@@ -4685,6 +5425,14 @@ export class SyncService {
       return false
     }
 
+    // Pre-commit hint capture for topic deletes: the row is gone after
+    // commit, so resolve the owning assistant BEFORE the transaction.
+    // Best-effort only; null falls back to silence (never guessed).
+    let preCommitTopicAssistant: string | null = null
+    if (op.op === 'delete' && op.entityType === 'topic') {
+      preCommitTopicAssistant = this.readTopicAssistant(op.entityId)
+    }
+
     sqlite.exec('BEGIN IMMEDIATE')
     let appliedEntity = false
     try {
@@ -4751,6 +5499,12 @@ export class SyncService {
           this.broadcastAssistantProjection([op.entityId])
         } catch {}
       }
+      // Post-commit chat-projection hint (never before commit, never on
+      // LWW loss or rollback). Loss is covered by the next sync cycle's
+      // hint and by startup directory reconcile. Never affects the return.
+      try {
+        this.broadcastChatProjectionForAppliedOp(op, appliedEntity, preCommitTopicAssistant, 'sync-incremental')
+      } catch {}
       return appliedEntity
     } catch (e) {
       try {
@@ -9180,6 +9934,23 @@ export class SyncService {
         } catch {}
       }
 
+      // Bounded pre-push canonical repair for the known pre-V5 adoption
+      // emitter shape (portable block upsert lacking assetIds). After the
+      // drain (successor + refs + jobs exist), before any network push:
+      // proven malformed ops hydrate in place; unprovable defers with all
+      // queued work preserved (no push, no drop, no false-ack).
+      try {
+        this.repairMalformedAdoptionPortableOpsBeforePush()
+      } catch (e) {
+        if (e instanceof SyncShutdownError) throw e
+        if (e instanceof SyncStaleConfigError) throw e
+        const msg = e instanceof Error ? e.message : String(e)
+        this.throwIfShutdown()
+        // lastError already recorded inside the repair; rethrow to block
+        // the push while preserving every queued op.
+        throw e instanceof Error ? e : new Error(msg)
+      }
+
       // Push all outbox chunks — never advance pull cursor on push
       let outboxOps: SyncOperation[]
       try {
@@ -9483,10 +10254,13 @@ export class SyncService {
       if (!pullError && !applyError) {
         this.updateLastSyncAt(new Date().toISOString())
         // Ordinary transport/reconciliation success clears lastError only.
-        // A durable capture failure (lastCaptureError) is never cleared here;
-        // it remains user-visible via getStatus until the next successful
-        // stable capture path (explicit clear API may follow in later work).
+        // The one narrow exception is the proven historic transient-parent
+        // defer below: only that exact old string may clear, and only with
+        // authoritative closure proof plus a same-value transactional delete.
         this.updateLastError(null)
+        try {
+          this.maybeRepairHistoricTransientParentDeferCapture()
+        } catch {}
       }
       // Sync F2: a durable pull/apply/orphan failure must never report
       // success. Status remains inspectable via getStatus (cursor + lastError
@@ -9800,6 +10574,11 @@ export class SyncService {
         this.broadcastAssistantProjection(bootstrapAssistantKeys)
       } catch {}
     }
+    // Post-commit coarse chat hint (directory scopes only, never message
+    // history); loss covered by startup directory reconcile.
+    try {
+      this.broadcastChatProjectionForBaseline()
+    } catch {}
     return watermark
   }
 

@@ -32,7 +32,7 @@
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 
 import * as schema from '../chatDb/schema'
-import { scanAdoptionMaxObserved } from './syncAdoptionShared'
+import { isAdoptionPortableMediaType, normalizeAdoptionAssetIds, scanAdoptionMaxObserved } from './syncAdoptionShared'
 import { captureLocalSyncBaselineCandidate } from './syncBaseline'
 
 export type SeedAdoptionResult =
@@ -251,6 +251,20 @@ export function adoptSeedBaselineOnce(db: SeedAdoptionDb, service: SeedAdoptionS
         }
       }
       if (!needsEntity && !needsField && !needsMembership) continue
+      // V5 media full-state: seed never mints a portable shell. Candidate
+      // payloads already carry validated assetIds (baseline capture excludes
+      // zero-ref media and defers pending attachment); any portable block
+      // lacking proven refs fails this tx (0 writes, grant retained) so the
+      // existing attachment capture pipeline fulfills it first.
+      if (entity.entityType === 'message_block') {
+        const payloadType = entity.payload.type
+        if (isAdoptionPortableMediaType(payloadType)) {
+          const normalized = normalizeAdoptionAssetIds(entity.payload.assetIds ?? [])
+          if (!normalized || normalized.length === 0) {
+            throw new Error(`seed adoption portable media block requires non-empty assetIds for ${entity.entityId}`)
+          }
+        }
+      }
       const opTs = adoptionTs
       if (!isSafeAdoptionTimestamp(opTs) || opTs >= Number.MAX_SAFE_INTEGER) {
         throw new Error('seed adoption timestamp exhausted')

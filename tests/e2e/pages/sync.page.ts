@@ -435,12 +435,21 @@ export async function rawObserverPush(
 }
 
 /** Typed ensureTopic via ChatDb IPC; asserts the success envelope. */
-export async function ensureTopicViaApi(page: Page, topicId: string, name?: string): Promise<void> {
+export async function ensureTopicViaApi(
+  page: Page,
+  topicId: string,
+  name?: string,
+  assistantId?: string
+): Promise<void> {
   const result = await page.evaluate(
-    async ({ topicId, name }: { topicId: string; name?: string }) => {
-      return await (window as any).api.chatDb.ensureTopic({ topicId, name: name ?? null })
+    async ({ topicId, name, assistantId }: { topicId: string; name?: string; assistantId?: string }) => {
+      return await (window as any).api.chatDb.ensureTopic({
+        topicId,
+        ...(typeof assistantId === 'string' && assistantId.length > 0 ? { assistantId } : {}),
+        name: name ?? null
+      })
     },
-    { topicId, name }
+    { topicId, name, assistantId }
   )
   if (!result || result.ok !== true) throw new Error(`ensureTopic failed: ${JSON.stringify((result as any)?.error)}`)
 }

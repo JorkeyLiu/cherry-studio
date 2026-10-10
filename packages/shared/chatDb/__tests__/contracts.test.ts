@@ -66,6 +66,8 @@ describe('chatDbContracts', () => {
     'chatdb:transfer-topic-ownership',
     'chatdb:reset-assistant-topics',
     'chatdb:ensure-assistant-topics',
+    // Read-only live directory for projection reconcile (never find-or-create)
+    'chatdb:list-live-assistant-topics',
     // S6.1: windowed reads
     'chatdb:fetch-messages-window',
     // S6.2b R-05: authoritative answer-group READ
@@ -3976,6 +3978,8 @@ describe('coverage consistency', () => {
     'chatdb:transfer-topic-ownership',
     'chatdb:reset-assistant-topics',
     'chatdb:ensure-assistant-topics',
+    // Read-only live directory for projection reconcile (never find-or-create)
+    'chatdb:list-live-assistant-topics',
     // Phase 5.1B: compound mutations
     'chatdb:clone-messages-to-topic',
     'chatdb:reset-messages-for-resend',

@@ -30,6 +30,8 @@ import {
   buildAdoptionMessagePayload,
   buildAdoptionTopicPayload,
   decodeAdoptionOverflow,
+  isAdoptionPortableMediaType,
+  normalizeAdoptionAssetIds,
   scanAdoptionMaxObserved
 } from './syncAdoptionShared'
 import type { LocalSyncBaselineEntity } from './syncBaseline'
@@ -55,6 +57,79 @@ function isEligibleBlockRow(row: { status: string | null; type: string | null; e
   const overflow = decodeAdoptionOverflow(row.extra)
   if (isUnsupportedBlockForSync({ type: row.type, overflow })) return false
   return true
+}
+
+/**
+ * Validated portable refs for a local block row (trusted fileReferences
+ * snapshot, never paths/blobs). Returns sorted unique ids, [] when none,
+ * or null when any ref is structurally invalid (traversal/empty).
+ */
+function collectPortableRefsInTx(tx: Tx, blockId: string): string[] | null {
+  let rows: Array<{ fileId: string }>
+  try {
+    rows = tx
+      .select({ fileId: schema.fileReferences.fileId })
+      .from(schema.fileReferences)
+      .where(eq(schema.fileReferences.blockId, blockId))
+      .all() as Array<{ fileId: string }>
+  } catch {
+    return []
+  }
+  const ids = rows.map((r) => r.fileId)
+  const normalized = normalizeAdoptionAssetIds(ids.length > 0 ? ids : [])
+  // normalize returns [] for empty input; null only for invalid entries.
+  // Empty input here means zero refs (caller fails closed for portable).
+  if (ids.length === 0) return []
+  return normalized
+}
+
+function getBoundChannelInTx(tx: Tx): string | null {
+  try {
+    const row = tx.select().from(schema.syncState).where(eq(schema.syncState.key, 'sync:channelKey')).get() as
+      | { value: string | null }
+      | undefined
+    const v = row?.value
+    if (typeof v !== 'string' || v.length === 0) return null
+    return v
+  } catch {
+    return null
+  }
+}
+
+function isAssetReadyInTx(tx: Tx, fileId: string, boundChannel: string | null): boolean {
+  if (!boundChannel) return false
+  try {
+    const asset = tx.select().from(schema.syncFileAsset).where(eq(schema.syncFileAsset.id, fileId)).get() as
+      | { id: string }
+      | undefined
+    if (!asset) return false
+  } catch {
+    return false
+  }
+  try {
+    const job = tx.select().from(schema.syncAttachmentJob).where(eq(schema.syncAttachmentJob.assetId, fileId)).get() as
+      | { state: string; channelId: string }
+      | undefined
+    // Current-channel-bound completed upload only; an old completed upload
+    // for another channel (or unbound) is never trusted as ready.
+    return !!job && job.state === 'completed' && job.channelId === boundChannel
+  } catch {
+    return false
+  }
+}
+
+function ensureCaptureIntentsInTx(tx: Tx, blockId: string, fileIds: string[], capturedAt: number): void {
+  if (fileIds.length === 0) return
+  const ts = Number.isSafeInteger(capturedAt) && capturedAt >= 0 ? capturedAt : Date.now()
+  for (const fileId of fileIds) {
+    if (!fileId || fileId.includes('/') || fileId.includes('\\') || fileId.includes('..')) continue
+    try {
+      tx.insert(schema.syncAttachmentCaptureIntent)
+        .values({ blockId, fileId, capturedAt: ts })
+        .onConflictDoNothing()
+        .run()
+    } catch {}
+  }
 }
 
 export interface ReceiverUnionResult {
@@ -673,14 +748,21 @@ export function adoptReceiverExclusiveInTx(
 
   const isFullyVersionedComplete = (t: 'topic' | 'message' | 'message_block' | 'topic_branch', id: string): boolean => {
     if (!hasEntityClock(t, id)) return false
-    const need =
-      t === 'topic'
-        ? TOPIC_FIELDS.length
-        : t === 'message'
-          ? MESSAGE_FIELDS.length
-          : t === 'topic_branch'
-            ? BRANCH_FIELDS.length
-            : BLOCK_FIELDS.length
+    // V5 compat: pre-V5 non-media blocks carry 5 field clocks (no assetIds);
+    // V5 blocks carry 6. Both are complete for non-portable rows; portable
+    // rows require the assetIds clock (6). Valid pending history stays
+    // byte-for-byte (no clock rewrite); only the malformed portable shell
+    // (5 clocks, missing assetIds) is incomplete and recovers via the
+    // explicit pre-push canonical repair, never here.
+    let need: number
+    if (t === 'topic') need = TOPIC_FIELDS.length
+    else if (t === 'message') need = MESSAGE_FIELDS.length
+    else if (t === 'topic_branch') need = BRANCH_FIELDS.length
+    else {
+      const row = blockRowById.get(id) as { type?: unknown } | undefined
+      const portableRow = isAdoptionPortableMediaType(row?.type)
+      need = portableRow ? BLOCK_FIELDS.length : BLOCK_FIELDS.length - 1
+    }
     if (fieldCountFor(t, id) < need) return false
     if ((t === 'message' || t === 'message_block') && !hasMembership(t, id)) return false
     return true
@@ -698,6 +780,16 @@ export function adoptReceiverExclusiveInTx(
     ctx: string
   ): void => {
     for (const k of keys) {
+      if (k === 'assetIds') {
+        // V5 portable identity: absent/null/[] normalize to [] for
+        // non-media tolerance; portable mismatch still fails closed.
+        const lv = normalizeAdoptionAssetIds(local[k] ?? [])
+        const iv = normalizeAdoptionAssetIds(inc[k] ?? [])
+        if (lv === null || iv === null || JSON.stringify(lv) !== JSON.stringify(iv)) {
+          fail(`receiver union same-ID value divergence for ${ctx} field ${k}`)
+        }
+        continue
+      }
       const lv = local[k] ?? null
       const iv = inc[k] ?? null
       if (JSON.stringify(lv) !== JSON.stringify(iv)) {
@@ -744,7 +836,20 @@ export function adoptReceiverExclusiveInTx(
     if (!branchDomain && isBranchOwnedBlock(row.messageId, messageBranchById)) continue
     if (!isFullyUnversioned('message_block', row.id)) continue
     const incomingEntity = incomingEntityByKey.get(`message_block:${row.id}`)!
-    comparePayload(buildAdoptionBlockPayload(row), incomingEntity.payload, BLOCK_COMPARE_KEYS, `block/${row.id}`)
+    // V5 same-ID: portable locals compare with validated refs; missing refs
+    // fail closed (never a shell pass), non-media compares with empty refs.
+    const portableSame = isAdoptionPortableMediaType(row.type)
+    const sameRefs = portableSame ? collectPortableRefsInTx(tx, row.id) : []
+    if (portableSame) {
+      if (sameRefs === null) fail(`receiver union same-ID portable refs invalid for block ${row.id}`)
+      if (sameRefs.length === 0) fail(`receiver union same-ID portable media block missing refs for ${row.id}`)
+    }
+    comparePayload(
+      buildAdoptionBlockPayload({ ...row, assetIds: portableSame ? (sameRefs as string[]) : [] }),
+      incomingEntity.payload,
+      BLOCK_COMPARE_KEYS,
+      `block/${row.id}`
+    )
   }
 
   // Candidate collection: exclusive = local rows not in incoming live/tombstone.
@@ -759,6 +864,10 @@ export function adoptReceiverExclusiveInTx(
     payload: Record<string, unknown>
   }
   const candidates: Candidate[] = []
+  // Portable blocks deferred to the capture pipeline (refs present, bytes
+  // not ready): their parent message frames must not mint in this tx —
+  // drain fulfills the block with full assetIds and refreshes the frame.
+  const deferredMediaParentMessageIds = new Set<string>()
 
   for (const row of topicRows) {
     const id = row.id
@@ -847,7 +956,30 @@ export function adoptReceiverExclusiveInTx(
     if (!messageRowById.has(row.messageId)) {
       fail(`receiver union orphan block ${id} missing message ${row.messageId}`)
     }
-    const payload = buildAdoptionBlockPayload(row)
+    // V5 media full-state: portable blocks never mint a shell. Missing or
+    // invalid refs fail closed (0-write rollback preserves chat+bytes).
+    // Refs present but bytes not yet ready (no file_asset/current-channel
+    // completed job) route to the existing attachment capture pipeline:
+    // ensure durable intents in this tx and defer this block (adopt mixed
+    // non-media now; drain fulfills this block with full ordered
+    // assetIds+frames).
+    const portable = isAdoptionPortableMediaType(row.type)
+    let payload: Record<string, unknown>
+    if (!portable) {
+      payload = buildAdoptionBlockPayload({ ...row, assetIds: [] })
+    } else {
+      const refs = collectPortableRefsInTx(tx, id)
+      if (refs === null) fail(`receiver union portable refs invalid for block ${id}`)
+      if (refs.length === 0) fail(`receiver union portable media block missing refs for ${id}`)
+      const boundChannel = getBoundChannelInTx(tx)
+      const ready = refs.every((fid) => isAssetReadyInTx(tx, fid, boundChannel))
+      if (!ready) {
+        ensureCaptureIntentsInTx(tx, id, refs, wall)
+        deferredMediaParentMessageIds.add(row.messageId)
+        continue
+      }
+      payload = buildAdoptionBlockPayload({ ...row, assetIds: refs })
+    }
     if (isFullyUnversioned('message_block', id)) {
       candidates.push({ entityType: 'message_block', entityId: id, row, payload })
     } else if (isFullyVersionedComplete('message_block', id)) {
@@ -867,8 +999,16 @@ export function adoptReceiverExclusiveInTx(
 
   // Narrowed tombstone/register gate: adoption candidates may proceed only when
   // their entity/parent/descendant impact closure is provably disjoint from all
-  // local + incoming tombstones and stable replacement registers. Outbox/order
-  // frames/applied ops retain the existing any-presence fail-closed gates.
+  // local + incoming tombstones and stable replacement registers.
+  // SYNC-DATA-047: sync_outbox/sync_applied/pre-pair rows are preserved
+  // untouched (outbox never cleared, empty never required). Whole-database
+  // outbox/frame/applied emptiness must not block independent eligible rows:
+  // existing valid versioned pending history (outbox/frames) coexists with
+  // adoption. Only the candidate's own queued mutation (already fail-closed
+  // via fully-unversioned/partial) and a pending delete covering the
+  // candidate's preserved parent chain fail closed below. Existing frames are
+  // kept; post-merge refresh mints the higher winning frame for push.
+  // sync_applied is preserved untouched with no gate (idempotent replay).
   assertCandidateClosureDisjoint(
     candidates,
     topicRowById,
@@ -881,25 +1021,231 @@ export function adoptReceiverExclusiveInTx(
     collectLocalRegisters(tx),
     collectIncomingRegisters(incoming)
   )
+  // Candidate-closure pending-delete gate: a queued delete for a preserved
+  // parent would orphan the adopted child after merge/push. Pending upserts
+  // and order_frames for preserved parents/siblings remain allowed (frame
+  // refresh dominates them via higher clocks; both push with LWW).
+  // Closure covers all actual candidate dependencies: direct topic/message
+  // parents plus transitive branch ancestry and referenced anchor messages
+  // (including a block parent's branch owner). Loops/cycles/malformed ancestry
+  // fail closed with the same bound as branchUnderBranch (32). Supported
+  // pending-delete intents are synthetic outbox `delete` rows in this tx
+  // snapshot; authoritative local deletes already remove/tombstone rows (so a
+  // lone delete op without its row/tombstone is not a production shape), but
+  // the guard stays sound by failing the adoption that would depend on the
+  // deleted ancestor without designing recovery.
   {
-    const outRows = tx.select().from(schema.syncOutbox).all()
-    if (outRows.length > 0) fail(`receiver union pending outbox present ${outRows.length}`)
-  }
-  {
-    try {
-      const frs = tx.select().from(schema.syncParentOrderFrame).all()
-      if (frs.length > 0) fail(`receiver union parent frame present ${frs.length}`)
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e)
-      if (!/no such table/i.test(m)) throw e
+    const outRows = tx.select().from(schema.syncOutbox).all() as Array<{
+      entityType: string
+      op: string
+      entityId: string
+    }>
+    const deleteByKey = new Set<string>()
+    for (const r of outRows) {
+      if (r.op === 'delete' && typeof r.entityType === 'string' && typeof r.entityId === 'string') {
+        deleteByKey.add(`${r.entityType}:${r.entityId}`)
+      }
+    }
+    const hasDelete = (entityType: string, entityId: string): boolean => deleteByKey.has(`${entityType}:${entityId}`)
+    const candBranchParent = new Map<string, string | null>()
+    const candBranchAnchor = new Map<string, string>()
+    const candBranchTopic = new Map<string, string>()
+    const candMsgTopic = new Map<string, string>()
+    const candMsgBranch = new Map<string, string | null>()
+    const candBlockMsg = new Map<string, string>()
+    for (const c of candidates) {
+      if (c.entityType === 'message') {
+        const tid = c.payload.topicId
+        if (typeof tid !== 'string' || !tid) fail(`receiver union parent mismatch for message ${c.entityId}`)
+        candMsgTopic.set(c.entityId, tid)
+        const owner = c.payload.branchId
+        candMsgBranch.set(c.entityId, typeof owner === 'string' && owner.length > 0 ? owner : null)
+      } else if (c.entityType === 'message_block') {
+        const mid = c.payload.messageId
+        if (typeof mid !== 'string' || !mid) fail(`receiver union parent mismatch for block ${c.entityId}`)
+        candBlockMsg.set(c.entityId, mid)
+      } else if (c.entityType === 'topic_branch') {
+        const tid = c.payload.topicId
+        if (typeof tid !== 'string' || !tid) fail(`receiver union parent mismatch for branch ${c.entityId}`)
+        candBranchTopic.set(c.entityId, tid)
+        const pid = c.payload.parentBranchId
+        if (pid !== null && pid !== undefined && (typeof pid !== 'string' || !pid)) {
+          fail(`receiver union parent mismatch for branch ${c.entityId}`)
+        }
+        candBranchParent.set(c.entityId, pid ?? null)
+        const anchor = c.payload.anchorMessageId
+        if (typeof anchor !== 'string' || !anchor) {
+          fail(`receiver union parent mismatch for branch ${c.entityId} anchor`)
+        }
+        candBranchAnchor.set(c.entityId, anchor)
+      }
+    }
+    const resolveBranchParent = (bid: string): string | null | undefined => {
+      if (candBranchParent.has(bid)) return candBranchParent.get(bid) ?? null
+      const local = branchRowById.get(bid) as { parentBranchId?: unknown } | undefined
+      if (local !== undefined) {
+        const p = local.parentBranchId
+        if (p === null || p === undefined) return null
+        if (typeof p === 'string' && p.length > 0) return p
+        fail(`receiver union malformed branch parent for ${bid}`)
+      }
+      const inc = incomingEntityByKey.get(`topic_branch:${bid}`)
+      if (inc !== undefined) {
+        const p = inc.payload.parentBranchId
+        if (p === null || p === undefined) return null
+        if (typeof p === 'string' && p.length > 0) return p
+        fail(`receiver union malformed incoming branch parent for ${bid}`)
+      }
+      return undefined
+    }
+    const resolveBranchAnchor = (bid: string): string | undefined => {
+      if (candBranchAnchor.has(bid)) return candBranchAnchor.get(bid)
+      const local = branchRowById.get(bid) as { anchorMessageId?: unknown } | undefined
+      if (local !== undefined) {
+        const a = local.anchorMessageId
+        if (typeof a === 'string' && a.length > 0) return a
+        fail(`receiver union malformed branch anchor for ${bid}`)
+      }
+      const inc = incomingEntityByKey.get(`topic_branch:${bid}`)
+      if (inc !== undefined) {
+        const a = inc.payload.anchorMessageId
+        if (typeof a === 'string' && a.length > 0) return a
+        fail(`receiver union malformed incoming branch anchor for ${bid}`)
+      }
+      return undefined
+    }
+    const resolveBranchTopic = (bid: string): string | undefined => {
+      if (candBranchTopic.has(bid)) return candBranchTopic.get(bid)
+      const local = branchRowById.get(bid) as { topicId?: unknown } | undefined
+      if (local !== undefined && typeof local.topicId === 'string' && local.topicId.length > 0) return local.topicId
+      const inc = incomingEntityByKey.get(`topic_branch:${bid}`)
+      if (inc !== undefined) {
+        const t = inc.payload.topicId
+        if (typeof t === 'string' && t.length > 0) return t
+      }
+      return undefined
+    }
+    const resolveMessageTopic = (mid: string): string | undefined => {
+      if (candMsgTopic.has(mid)) return candMsgTopic.get(mid)
+      const local = messageRowById.get(mid)
+      if (local !== undefined && typeof local.topicId === 'string' && local.topicId.length > 0) return local.topicId
+      const inc = incomingEntityByKey.get(`message:${mid}`)
+      if (inc !== undefined) {
+        const t = inc.payload.topicId
+        if (typeof t === 'string' && t.length > 0) return t
+      }
+      return undefined
+    }
+    const resolveMessageBranch = (mid: string): string | null | undefined => {
+      if (candMsgBranch.has(mid)) return candMsgBranch.get(mid) ?? null
+      const local = messageRowById.get(mid) as { branchId?: unknown } | undefined
+      if (local !== undefined) {
+        const b = local.branchId
+        if (b === null || b === undefined) return null
+        if (typeof b === 'string' && b.length > 0) return b
+        if (typeof b === 'string') return null
+        fail(`receiver union malformed message branch owner for ${mid}`)
+      }
+      const inc = incomingEntityByKey.get(`message:${mid}`)
+      if (inc !== undefined) {
+        const b = inc.payload.branchId
+        if (b === null || b === undefined) return null
+        if (typeof b === 'string' && b.length > 0) return b
+        if (typeof b === 'string') return null
+        fail(`receiver union malformed incoming message branch owner for ${mid}`)
+      }
+      return undefined
+    }
+    const assertNoDeleteInDependencyClosure = (
+      seedTopics: string[],
+      seedMessages: string[],
+      seedBranches: string[],
+      ctx: string
+    ): void => {
+      const visitedTopics = new Set<string>()
+      const visitedMessages = new Set<string>()
+      const visitedBranches = new Set<string>()
+      const topicQueue: string[] = [...seedTopics]
+      const messageQueue: string[] = [...seedMessages]
+      const branchQueue: string[] = [...seedBranches]
+      let steps = 0
+      while (topicQueue.length > 0 || messageQueue.length > 0 || branchQueue.length > 0) {
+        steps += 1
+        if (steps > 128) fail(`receiver union branch ancestry depth exceeded for ${ctx}`)
+        if (topicQueue.length > 0) {
+          const tid = topicQueue.shift()!
+          if (visitedTopics.has(tid)) continue
+          visitedTopics.add(tid)
+          if (hasDelete('topic', tid)) fail(`receiver union preserved parent topic ${tid} has pending delete`)
+          continue
+        }
+        if (messageQueue.length > 0) {
+          const mid = messageQueue.shift()!
+          if (visitedMessages.has(mid)) continue
+          visitedMessages.add(mid)
+          if (hasDelete('message', mid)) fail(`receiver union preserved parent message ${mid} has pending delete`)
+          const topic = resolveMessageTopic(mid)
+          if (typeof topic !== 'string' || topic.length === 0) {
+            fail(`receiver union cannot prove message parent topic ${mid} disjoint from pending delete for ${ctx}`)
+          }
+          if (!visitedTopics.has(topic)) topicQueue.push(topic)
+          const owner = resolveMessageBranch(mid)
+          if (owner === undefined) {
+            fail(`receiver union cannot prove message branch owner ${mid} disjoint from pending delete for ${ctx}`)
+          }
+          if (owner !== null && !visitedBranches.has(owner)) branchQueue.push(owner)
+          continue
+        }
+        const bid = branchQueue.shift()!
+        if (visitedBranches.has(bid)) fail(`receiver union branch ancestry cycle at ${bid} for ${ctx}`)
+        visitedBranches.add(bid)
+        if (visitedBranches.size > 32) fail(`receiver union branch ancestry depth exceeded for ${ctx}`)
+        if (hasDelete('topic_branch', bid)) {
+          fail(`receiver union preserved parent branch ${bid} has pending delete`)
+        }
+        const topic = resolveBranchTopic(bid)
+        if (typeof topic !== 'string' || topic.length === 0) {
+          fail(`receiver union cannot prove branch parent topic ${bid} disjoint from pending delete for ${ctx}`)
+        }
+        if (!visitedTopics.has(topic)) topicQueue.push(topic)
+        const anchor = resolveBranchAnchor(bid)
+        if (typeof anchor !== 'string' || anchor.length === 0) {
+          fail(`receiver union cannot prove branch anchor ${bid} disjoint from pending delete for ${ctx}`)
+        }
+        if (!visitedMessages.has(anchor)) messageQueue.push(anchor)
+        const parent = resolveBranchParent(bid)
+        if (parent === undefined) {
+          fail(`receiver union cannot prove branch parent ${bid} disjoint from pending delete for ${ctx}`)
+        }
+        if (parent !== null) {
+          if (visitedBranches.has(parent)) fail(`receiver union branch ancestry cycle at ${parent} for ${ctx}`)
+          branchQueue.push(parent)
+        }
+      }
+    }
+    for (const c of candidates) {
+      if (c.entityType === 'topic') {
+        continue
+      } else if (c.entityType === 'message') {
+        const topicId = candMsgTopic.get(c.entityId)!
+        const owner = candMsgBranch.get(c.entityId) ?? null
+        assertNoDeleteInDependencyClosure([topicId], [], owner !== null ? [owner] : [], `message/${c.entityId}`)
+      } else if (c.entityType === 'message_block') {
+        const messageId = candBlockMsg.get(c.entityId)!
+        assertNoDeleteInDependencyClosure([], [messageId], [], `block/${c.entityId}`)
+      } else if (c.entityType === 'topic_branch') {
+        const topicId = candBranchTopic.get(c.entityId)!
+        const parent = candBranchParent.get(c.entityId) ?? null
+        const anchor = candBranchAnchor.get(c.entityId)!
+        assertNoDeleteInDependencyClosure([topicId], [anchor], parent !== null ? [parent] : [], `branch/${c.entityId}`)
+      }
     }
   }
-  {
-    const appliedRows = tx.select().from(schema.syncApplied).all()
-    if (appliedRows.length > 0) fail(`receiver union applied present ${appliedRows.length}`)
-  }
 
-  // Parent closure: for each candidate message/block, parent must be in incoming live or candidate set
+  // Parent closure: for each candidate message/block, parent must be incoming
+  // live, same-batch candidate, or a locally preserved fully-versioned-complete
+  // parent (existing valid versioned history kept byte-for-byte; adoption never
+  // rewrites its clocks, frame refresh keeps all valid children and wins).
   const candidateTopicIds = new Set<string>(candidates.filter((c) => c.entityType === 'topic').map((c) => c.entityId))
   const candidateMessageIds = new Set<string>(
     candidates.filter((c) => c.entityType === 'message').map((c) => c.entityId)
@@ -907,11 +1253,32 @@ export function adoptReceiverExclusiveInTx(
   const candidateBranchIds = new Set<string>(
     candidates.filter((c) => c.entityType === 'topic_branch').map((c) => c.entityId)
   )
+  const isPreservedTopicParent = (topicId: string): boolean => {
+    if (!topicRowById.has(topicId)) return false
+    if (!isFullyVersionedComplete('topic', topicId)) return false
+    const row = topicRowById.get(topicId)!
+    if (
+      (row as { deletedAt?: unknown }).deletedAt !== null &&
+      (row as { deletedAt?: unknown }).deletedAt !== undefined
+    ) {
+      fail(`receiver union preserved parent topic ${topicId} deleted`)
+    }
+    return true
+  }
+  const isPreservedMessageParent = (messageId: string): boolean => {
+    const row = messageRowById.get(messageId)
+    if (!row) return false
+    if (!isFullyVersionedComplete('message', messageId)) return false
+    if (!isEligibleMessageRow(row)) {
+      fail(`receiver union preserved parent message ${messageId} ineligible status ${String(row.status)}`)
+    }
+    return true
+  }
   // For closure, also consider incoming parent ids already in incoming sets (topics/messages). But for message's topicId, check if topicId in incomingTopicIds or candidateTopicIds
   for (const c of candidates) {
     if (c.entityType === 'message') {
       const topicId = c.payload.topicId as string
-      if (!incomingTopicIds.has(topicId) && !candidateTopicIds.has(topicId)) {
+      if (!incomingTopicIds.has(topicId) && !candidateTopicIds.has(topicId) && !isPreservedTopicParent(topicId)) {
         fail(`receiver union parent closure missing topic ${topicId} for message ${c.entityId}`)
       }
       // Branch owner closure (v3): the owning branch must be incoming,
@@ -929,12 +1296,32 @@ export function adoptReceiverExclusiveInTx(
       // If parent is incoming, also ensure incoming parent payload exists (it does)
     } else if (c.entityType === 'message_block') {
       const messageId = c.payload.messageId as string
-      if (!incomingMessageIds.has(messageId) && !candidateMessageIds.has(messageId)) {
+      if (
+        !incomingMessageIds.has(messageId) &&
+        !candidateMessageIds.has(messageId) &&
+        !isPreservedMessageParent(messageId)
+      ) {
         fail(`receiver union parent closure missing message ${messageId} for block ${c.entityId}`)
+      }
+      // Transitive topic closure for preserved parents: the parent message's
+      // topic must itself be incoming, candidate, or preserved-complete, so a
+      // partially versioned topic cannot silently anchor adopted history.
+      if (!incomingMessageIds.has(messageId) && !candidateMessageIds.has(messageId)) {
+        const parentRow = messageRowById.get(messageId)
+        const parentTopicId = parentRow?.topicId
+        if (typeof parentTopicId === 'string' && parentTopicId.length > 0) {
+          if (
+            !incomingTopicIds.has(parentTopicId) &&
+            !candidateTopicIds.has(parentTopicId) &&
+            !isPreservedTopicParent(parentTopicId)
+          ) {
+            fail(`receiver union parent closure missing topic ${parentTopicId} for block ${c.entityId}`)
+          }
+        }
       }
     } else if (c.entityType === 'topic_branch') {
       const topicId = c.payload.topicId as string
-      if (!incomingTopicIds.has(topicId) && !candidateTopicIds.has(topicId)) {
+      if (!incomingTopicIds.has(topicId) && !candidateTopicIds.has(topicId) && !isPreservedTopicParent(topicId)) {
         fail(`receiver union parent closure missing topic ${topicId} for branch ${c.entityId}`)
       }
       // Parent branch closure: nested parents must be incoming, candidate,
@@ -967,8 +1354,47 @@ export function adoptReceiverExclusiveInTx(
   // For shared parents (incoming topics that have exclusive children), we don't need to check completeness of that shared parent's other children; incoming frame will handle.
 
   // Compute maxObserved local via the shared adoption clock-scan boundary
-  // (same tables as seed adoption monotonic computation, single source).
+  // (same tables as seed adoption monotonic computation, single source) plus
+  // preserved pending-intent clocks: outbox timestamps, local tombstone
+  // timestamps, and local register timestamps. Adoption must dominate every
+  // relevant local+incoming+wall clock so the new membership/frame wins
+  // consistently while existing queued intents stay byte-for-byte.
   let maxObserved = scanAdoptionMaxObserved(tx)
+  {
+    const upd = (ts: unknown): void => {
+      if (typeof ts === 'number' && Number.isSafeInteger(ts) && ts >= 0 && ts > maxObserved) maxObserved = ts
+    }
+    try {
+      for (const r of tx.select().from(schema.syncOutbox).all() as Array<{ timestamp: number }>) upd(r.timestamp)
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      if (!/no such table/i.test(m)) throw e
+    }
+    try {
+      for (const r of tx.select().from(schema.syncState).all() as Array<{ key: string; value: string | null }>) {
+        if (typeof r.key !== 'string' || !r.key.startsWith('tombstone:')) continue
+        const raw = typeof r.value === 'string' ? r.value : ''
+        const head = raw.split(':')[0] ?? ''
+        const ts = Number(head)
+        if (raw.length > 0 && (!Number.isSafeInteger(ts) || ts < 0)) {
+          fail(`receiver union malformed local tombstone clock for ${r.key}`)
+        }
+        if (raw.length > 0) upd(ts)
+      }
+    } catch (e) {
+      if (e instanceof SyncBaselineApplyError) throw e
+      const m = e instanceof Error ? e.message : String(e)
+      if (!/no such table/i.test(m)) throw e
+    }
+    try {
+      for (const r of tx.select().from(schema.syncStableReplaceRegister).all() as Array<{ timestamp: number }>) {
+        upd(r.timestamp)
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      if (!/no such table/i.test(m)) throw e
+    }
+  }
   // incoming max already computed
   if (incomingMax > maxObserved) maxObserved = incomingMax
   if (wall > maxObserved) maxObserved = wall
@@ -1078,7 +1504,15 @@ export function adoptReceiverExclusiveInTx(
     exclusiveParentTopicIds.add(c.entityId)
   }
   for (const c of candidates.filter((c) => c.entityType === 'message')) {
+    // Messages with media deferred to capture keep their frame for the drain
+    // fulfillment (which mints membership+frame with full assetIds).
+    if (deferredMediaParentMessageIds.has(c.entityId)) continue
     exclusiveParentMessageIds.add(c.entityId) // message is parent for blocks (even if no blocks, need empty frame)
+  }
+  // Adopted blocks of a deferred parent still need their parent listed only
+  // when the parent frame is minted; deferred parents stay out entirely.
+  for (const mid of [...exclusiveParentMessageIds]) {
+    if (deferredMediaParentMessageIds.has(mid)) exclusiveParentMessageIds.delete(mid)
   }
 
   // Classify pure vs shared

@@ -224,6 +224,21 @@ async function bootstrapStoreDependent(): Promise<void> {
     bootstrapLogger.warn('[Bootstrap] TopicDeletion subscribe failed', e as Error)
   }
 
+  // Chat-projection hint subscription — single owner, before rehydrate
+  // settles, so no post-commit hint applied between rehydration and startup
+  // directory reconcile is missed. Hint-only; directories reconcile from the
+  // read-only Main API, never from the hint payload.
+  try {
+    const { subscribeChatProjectionEvents } = await import('./services/chatProjectionSubscription')
+    try {
+      subscribeChatProjectionEvents()
+    } catch (e) {
+      bootstrapLogger.warn('[Bootstrap] ChatProjection subscribe failed', e as Error)
+    }
+  } catch (e) {
+    bootstrapLogger.warn('[Bootstrap] ChatProjection subscribe failed', e as Error)
+  }
+
   // Assistant-config live subscription — single owner, store-dependent, after
   // i18n + store hydratable import. No duplicate projection fetch here (startup
   // GetProjection + drain live in store persistor rehydrate). Bounded

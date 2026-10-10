@@ -262,6 +262,10 @@ class DbService implements MessageDataSource {
   ensureAssistantTopics(assistantId: string, candidateTopicId: string, candidateName?: string | null) {
     return this.ordinarySource.ensureAssistantTopics(assistantId, candidateTopicId, candidateName)
   }
+  listLiveAssistantTopics(assistantId: string) {
+    if (!this.ordinarySource.listLiveAssistantTopics) throw new Error('listLiveAssistantTopics unavailable')
+    return this.ordinarySource.listLiveAssistantTopics(assistantId)
+  }
   listSegments(topicId: string) {
     return this.ordinarySource.listSegments(topicId)
   }

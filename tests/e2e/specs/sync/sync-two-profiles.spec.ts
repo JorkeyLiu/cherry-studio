@@ -13,7 +13,13 @@
 import type { Page } from '@playwright/test'
 import { createServer as createTcpServer } from 'node:net'
 
-import { expect, test, findProductRequestAfter, getRequestSequence } from '../../fixtures/electron.fixture'
+import {
+  expect,
+  test,
+  findProductRequestAfter,
+  getRequestLog,
+  getRequestSequence
+} from '../../fixtures/electron.fixture'
 import {
   closeSecondSyncProfile,
   launchSecondSyncProfile,
@@ -3061,15 +3067,36 @@ test.describe('Sync streaming promotion convergence', () => {
    * are terminal, and the topic queue drained.
    */
   async function getStreamingActiveContext(page: Page): Promise<{ assistantId: string; topicId: string }> {
+    // Runtime authority: the ACTUAL selected topic (never assistants[0].topics[0],
+    // which miscounts when startup seeds sort existing topics first). Owner is
+    // derived from the store, never hardcoded order.
     return page.evaluate(() => {
       const s = (window as any).store.getState()
-      const assistant = s.assistants.assistants[0]
-      const topic = assistant?.topics?.[0]
-      return {
-        assistantId: assistant?.id || '',
-        topicId: topic?.id || ''
-      }
+      const topicId = typeof s.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : ''
+      if (!topicId) return { assistantId: '', topicId: '' }
+      const owner = (s.assistants?.assistants ?? []).find(
+        (a: any) => Array.isArray(a?.topics) && a.topics.some((t: any) => t?.id === topicId)
+      )
+      return { assistantId: owner?.id ?? '', topicId }
     })
+  }
+
+  /** Before-send route agreement: store currentTopicId + DOM active row must equal expected. */
+  async function assertTextareaRoute(page: Page, expectedTopicId: string): Promise<void> {
+    const check = await page.evaluate((expected: string) => {
+      const s = (window as any).store?.getState()
+      const active = typeof s?.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : null
+      const item = document.querySelector('[data-testid="topic-item"].active')
+      const domActive = item?.getAttribute('data-topic-id') ?? null
+      return {
+        storeMatches: active === expected,
+        domMatches: domActive === null ? null : domActive === expected
+      }
+    }, expectedTopicId)
+    expect(check.storeMatches, 'textarea route must equal expected active topic before send').toBe(true)
+    if (check.domMatches !== null) {
+      expect(check.domMatches, 'DOM active topic must agree with expected').toBe(true)
+    }
   }
 
   async function uiSendStreamingMessage(page: Page, text: string): Promise<void> {
@@ -3110,51 +3137,92 @@ test.describe('Sync streaming promotion convergence', () => {
     previousAssistantCount: number,
     timeout = 90000
   ): Promise<number> {
-    await page.waitForFunction(
-      ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
-        const s = (window as any).store?.getState()
-        if (!s) return false
-        const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
-        let count = 0
-        for (const id of msgIds) {
-          const msg = s.messages.entities?.[id]
-          if (msg?.role === 'assistant') count++
-        }
-        return count > prevCount
-      },
-      { topicId, prevCount: previousAssistantCount },
-      { timeout }
-    )
-    await page.waitForFunction(
-      ({ topicId }: { topicId: string }) => {
-        const s = (window as any).store?.getState()
-        if (!s) return false
-        if (s.messages?.loadingByTopic?.[topicId]) return false
-        const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
-        let latestAssistantId: string | null = null
-        for (let i = msgIds.length - 1; i >= 0; i--) {
-          const msg = s.messages.entities?.[msgIds[i]]
-          if (msg?.role === 'assistant') {
-            latestAssistantId = msgIds[i]
-            break
+    // Bounded timeout-only diagnostic (booleans/counts, never IDs/content).
+    // Never rescues: the timeout still throws after logging the active-route
+    // agreement so helper-vs-interleaving is distinguishable.
+    const logTimeoutDiag = async (stage: string): Promise<void> => {
+      try {
+        const diag = await page.evaluate((expected: string) => {
+          const s = (window as any).store?.getState()
+          const active = typeof s?.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : null
+          const loadingActive = active ? !!s?.messages?.loadingByTopic?.[active] : false
+          const loadingExpected = expected ? !!s?.messages?.loadingByTopic?.[expected] : false
+          const msgIds = expected ? (s?.messages?.messageIdsByTopic?.[expected] ?? []) : []
+          let assistantCount = 0
+          for (const id of msgIds) {
+            if (s?.messages?.entities?.[id]?.role === 'assistant') assistantCount++
           }
-        }
-        if (!latestAssistantId) return false
-        const assistantMsg = s.messages.entities[latestAssistantId]
-        const terminalStatuses = ['success', 'error']
-        if (!terminalStatuses.includes(assistantMsg.status)) return false
-        const blocks = assistantMsg.blocks || []
-        if (blocks.length === 0) return false
-        for (const blockId of blocks) {
-          const block = s.messageBlocks?.entities?.[blockId]
-          if (!block) return false
-          if (block.status !== 'success' && block.status !== 'error') return false
-        }
-        return true
-      },
-      { topicId },
-      { timeout }
-    )
+          return {
+            activeMatchesExpected: active === expected,
+            hasActive: !!active,
+            loadingActive,
+            loadingExpected,
+            msgCount: Array.isArray(msgIds) ? msgIds.length : 0,
+            assistantCount
+          }
+        }, topicId)
+        console.log(
+          `[E2E streaming wait timeout ${stage}] activeMatches=${diag.activeMatchesExpected} hasActive=${diag.hasActive} loadingActive=${diag.loadingActive} loadingExpected=${diag.loadingExpected} msgCount=${diag.msgCount} assistantCount=${diag.assistantCount} prev=${previousAssistantCount}`
+        )
+      } catch {
+        // diagnostic best-effort only
+      }
+    }
+    try {
+      await page.waitForFunction(
+        ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
+          const s = (window as any).store?.getState()
+          if (!s) return false
+          const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+          let count = 0
+          for (const id of msgIds) {
+            const msg = s.messages.entities?.[id]
+            if (msg?.role === 'assistant') count++
+          }
+          return count > prevCount
+        },
+        { topicId, prevCount: previousAssistantCount },
+        { timeout }
+      )
+    } catch (e) {
+      await logTimeoutDiag('count')
+      throw e
+    }
+    try {
+      await page.waitForFunction(
+        ({ topicId }: { topicId: string }) => {
+          const s = (window as any).store?.getState()
+          if (!s) return false
+          if (s.messages?.loadingByTopic?.[topicId]) return false
+          const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+          let latestAssistantId: string | null = null
+          for (let i = msgIds.length - 1; i >= 0; i--) {
+            const msg = s.messages.entities?.[msgIds[i]]
+            if (msg?.role === 'assistant') {
+              latestAssistantId = msgIds[i]
+              break
+            }
+          }
+          if (!latestAssistantId) return false
+          const assistantMsg = s.messages.entities[latestAssistantId]
+          const terminalStatuses = ['success', 'error']
+          if (!terminalStatuses.includes(assistantMsg.status)) return false
+          const blocks = assistantMsg.blocks || []
+          if (blocks.length === 0) return false
+          for (const blockId of blocks) {
+            const block = s.messageBlocks?.entities?.[blockId]
+            if (!block) return false
+            if (block.status !== 'success' && block.status !== 'error') return false
+          }
+          return true
+        },
+        { topicId },
+        { timeout }
+      )
+    } catch (e) {
+      await logTimeoutDiag('terminal')
+      throw e
+    }
     return countTopicAssistants(page, topicId)
   }
 
@@ -3191,6 +3259,8 @@ test.describe('Sync streaming promotion convergence', () => {
       // success + terminal blocks + queue drained).
       const ctx = await getStreamingActiveContext(pageA)
       expect(ctx.topicId.length).toBeGreaterThan(0)
+      expect(ctx.assistantId.length).toBeGreaterThan(0)
+      await assertTextareaRoute(pageA, ctx.topicId)
       const prevAssistantCount = await countTopicAssistants(pageA, ctx.topicId)
       const userText = 'e2e streaming promotion probe hello'
       const seq0 = getRequestSequence()
@@ -3370,6 +3440,8 @@ test.describe('Sync streaming promotion convergence', () => {
       // success + terminal blocks + queue drained).
       const ctx = await getStreamingActiveContext(pageA)
       expect(ctx.topicId.length).toBeGreaterThan(0)
+      expect(ctx.assistantId.length).toBeGreaterThan(0)
+      await assertTextareaRoute(pageA, ctx.topicId)
       const prevAssistantCount = await countTopicAssistants(pageA, ctx.topicId)
       const userText = 'e2e streaming baseline bootstrap probe hello'
       const seq0 = getRequestSequence()
@@ -3535,6 +3607,815 @@ test.describe('Sync streaming promotion convergence', () => {
       expect(statusA.pendingCount).toBe(0)
       expect(statusB.pendingCount).toBe(0)
       expect(statusB.cursor).toBeGreaterThan(statusBAfter.cursor)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+
+  /**
+   * Mixed-state cursor0 receiver bootstrap with preserved pending intents
+   * (bounded receiver-union repair).
+   *
+   * Proves the user's basic sync failure is repaired without wiping data:
+   * B joins after A auto-published a v5 baseline, but B already holds local
+   * stable ordinary-message history before its first sync — a real
+   * streaming-completed turn (versioned pending outbox/frames via the mock
+   * provider) plus an independent history created while capture was disabled
+   * (fixture IPC setup, unversioned). B bootstraps through the production
+   * sync API with nonempty pending, preserves all intents, then sends/pulls
+   * and converges user+assistant/blocks in BOTH directions; a new
+   * post-recovery send also converges, pending drains and cursor>=baseline.
+   * Actual turns use the real UI/native setter+Enter mock-provider path;
+   * fixture IPC is setup-only and never pretends to prove the send lifecycle.
+   */
+  test('mixed pending plus independent history cursor0 receiver bootstraps without wiping', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay()
+      const endpoint = relay.endpoint
+
+      // Channel first, data later on A (same observer pattern as the baseline
+      // bootstrap test above): A publishes a v5 baseline before B ever pairs.
+      await setSyncConfigViaApi(pageA, { endpoint, enabled: true })
+      await connectViaApi(pageA)
+      const observer = await provisionObserverViaRaw(endpoint, pageA)
+      const observerHeaders = { 'x-sync-device-code': observer.code, 'x-sync-device-secret': observer.secret }
+      const rawBaselineGet = async (): Promise<{ status: number; body: any }> => {
+        const res = await fetch(`${endpoint}/sync/baseline`, { headers: observerHeaders })
+        return { status: res.status, body: await res.json().catch(() => ({})) }
+      }
+      expect((await rawBaselineGet()).status).toBe(404)
+      await pollForPendingDrained(pageA, 90000)
+      await relay.waitForQuiescent()
+
+      // Real streaming turn on A (holder history for the baseline).
+      const ctxA = await getStreamingActiveContext(pageA)
+      expect(ctxA.topicId.length).toBeGreaterThan(0)
+      expect(ctxA.assistantId.length).toBeGreaterThan(0)
+      await assertTextareaRoute(pageA, ctxA.topicId)
+      const prevA = await countTopicAssistants(pageA, ctxA.topicId)
+      const userTextA = 'e2e mixed bootstrap holder hello'
+      const seqA0 = getRequestSequence()
+      await uiSendStreamingMessage(pageA, userTextA)
+      await waitForStreamingComplete(pageA, ctxA.topicId, prevA)
+      const targetA = await pageA.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            const ids = Array.isArray(msg?.blocks) ? msg.blocks : []
+            let blockId = ''
+            for (const id of ids) {
+              const blk = s.messageBlocks?.entities?.[id]
+              if (blk?.type === 'main_text' || blk?.type === 'text') {
+                blockId = String(id)
+                break
+              }
+            }
+            return { assistantId: String(msgIds[i]), blockId }
+          }
+        }
+        return { assistantId: '', blockId: '' }
+      }, ctxA.topicId)
+      expect(targetA.assistantId.length).toBeGreaterThan(0)
+      expect(targetA.blockId.length).toBeGreaterThan(0)
+      expect(findProductRequestAfter(seqA0)).not.toBeNull()
+      const localA0 = await fetchMessagesViaApi(pageA, ctxA.topicId)
+      const blkA0 = (localA0.blocks as any[]).find((b: any) => b?.id === targetA.blockId) as any
+      const contentA = String(blkA0.content)
+      expect(contentA).toContain('Mock')
+      expect(contentA).toContain(userTextA)
+
+      // Automation publishes the baseline (never a manual sync PUT).
+      await pollForPendingDrained(pageA, 120000)
+      await relay.waitForQuiescent()
+      let watermark = 0
+      const pubDeadline = Date.now() + 120000
+      while (Date.now() < pubDeadline) {
+        const got = await rawBaselineGet()
+        if (got.status === 200 && typeof got.body?.watermark === 'number' && got.body.watermark > 0) {
+          watermark = got.body.watermark as number
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+      }
+      expect(watermark).toBeGreaterThan(0)
+
+      // Cursor0 receiver B joins only now with no sync yet.
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
+      const cursorB0 = (await getSyncStatusViaApi(pageB)).cursor
+
+      // Independent history while capture disabled (fixture setup only,
+      // unversioned): disable, create via IPC, re-enable. Never used to prove
+      // the send lifecycle — the streaming turns below prove it.
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: false })
+      const indTopicId = `e2e-mixed-ind-topic-${Date.now().toString(36)}`
+      const indMsgId = `e2e-mixed-ind-msg-${Date.now().toString(36)}`
+      const indBlkId = `e2e-mixed-ind-blk-${Date.now().toString(36)}`
+      const indContent = 'e2e mixed independent hello'
+      await ensureTopicViaApi(pageB, indTopicId, indContent)
+      await appendMessageViaApi(pageB, indTopicId, messageJson(indMsgId, indTopicId, indContent), [
+        blockJson(indBlkId, indMsgId, indContent)
+      ])
+      await setSyncConfigViaApi(pageB, { endpoint, enabled: true })
+
+      // Real streaming turn on B BEFORE its first bootstrap sync (versioned
+      // pending outbox/frames + mock-provider proof). Existing tests drain
+      // before sending or bootstrap empty B; this is the missing user case.
+      // Uses the ACTUAL selected topic (never first-topic order) so the count
+      // and wait target the textarea route even when startup seeds sort older
+      // topics first.
+      const ctxB = await getStreamingActiveContext(pageB)
+      expect(ctxB.topicId.length).toBeGreaterThan(0)
+      expect(ctxB.assistantId.length).toBeGreaterThan(0)
+      await assertTextareaRoute(pageB, ctxB.topicId)
+      const prevB = await countTopicAssistants(pageB, ctxB.topicId)
+      const userTextB = 'e2e mixed bootstrap receiver hello'
+      const seqB0 = getRequestSequence()
+      await uiSendStreamingMessage(pageB, userTextB)
+      await waitForStreamingComplete(pageB, ctxB.topicId, prevB)
+      const targetB = await pageB.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            const ids = Array.isArray(msg?.blocks) ? msg.blocks : []
+            let blockId = ''
+            for (const id of ids) {
+              const blk = s.messageBlocks?.entities?.[id]
+              if (blk?.type === 'main_text' || blk?.type === 'text') {
+                blockId = String(id)
+                break
+              }
+            }
+            return { assistantId: String(msgIds[i]), blockId }
+          }
+        }
+        return { assistantId: '', blockId: '' }
+      }, ctxB.topicId)
+      expect(targetB.assistantId.length).toBeGreaterThan(0)
+      expect(targetB.blockId.length).toBeGreaterThan(0)
+      expect(findProductRequestAfter(seqB0)).not.toBeNull()
+      const localB0 = await fetchMessagesViaApi(pageB, ctxB.topicId)
+      const blkB0 = (localB0.blocks as any[]).find((b: any) => b?.id === targetB.blockId) as any
+      const contentB = String(blkB0.content)
+      expect(contentB).toContain('Mock')
+      expect(contentB).toContain(userTextB)
+
+      // Retain nonempty pending before bootstrap (no wipe, no implicit ack).
+      const preB = await getSyncStatusViaApi(pageB)
+      expect(preB.pendingCount).toBeGreaterThan(0)
+      expect(preB.cursor).toBe(cursorB0)
+
+      // Bootstrap through the production API (fetch before push, adopt then
+      // merge then drain/push/pull in the same cycle).
+      const syncB = await runSyncViaApi(pageB)
+      expect(syncB.threw).toBeNull()
+      expect(syncB.status.lastError).toBeNull()
+      const statusBAfter = await getSyncStatusViaApi(pageB)
+      expect(statusBAfter.lastError).toBeNull()
+      expect(statusBAfter.cursor).toBeGreaterThanOrEqual(watermark)
+
+      // Converge user+assistant/blocks in BOTH directions (no silent loss).
+      await pollForStreamingConvergence(pageB, ctxA.topicId, targetA.assistantId, targetA.blockId, contentA)
+      const syncA1 = await runSyncViaApi(pageA)
+      expect(syncA1.threw).toBeNull()
+      expect(syncA1.status.lastError).toBeNull()
+      await pollForStreamingConvergence(pageA, ctxB.topicId, targetB.assistantId, targetB.blockId, contentB)
+      await pollForConvergence(pageA, indTopicId, indMsgId, indBlkId, indContent)
+      const afterA = await fetchMessagesViaApi(pageA, ctxB.topicId)
+      expect((afterA.messages as any[]).some((m: any) => m?.id === targetB.assistantId)).toBe(true)
+      expect((afterA.blocks as any[]).some((b: any) => b?.id === targetB.blockId)).toBe(true)
+      const afterB = await fetchMessagesViaApi(pageB, ctxA.topicId)
+      expect((afterB.messages as any[]).some((m: any) => m?.id === targetA.assistantId)).toBe(true)
+      expect((afterB.blocks as any[]).some((b: any) => b?.id === targetA.blockId)).toBe(true)
+
+      // New post-recovery send also converges (proves the channel still works).
+      // Re-assert the textarea route still equals the original ctxA before send.
+      await assertTextareaRoute(pageA, ctxA.topicId)
+      const prevA2 = await countTopicAssistants(pageA, ctxA.topicId)
+      const userTextN1 = 'e2e mixed bootstrap n+1 hello'
+      const seqN1 = getRequestSequence()
+      await uiSendStreamingMessage(pageA, userTextN1)
+      await waitForStreamingComplete(pageA, ctxA.topicId, prevA2)
+      const targetN1 = await pageA.evaluate((topicId: string) => {
+        const s = (window as any).store.getState()
+        const msgIds = s.messages.messageIdsByTopic[topicId] || []
+        for (let i = msgIds.length - 1; i >= 0; i--) {
+          const msg = s.messages.entities[msgIds[i]]
+          if (msg?.role === 'assistant') {
+            const ids = Array.isArray(msg?.blocks) ? msg.blocks : []
+            let blockId = ''
+            for (const id of ids) {
+              const blk = s.messageBlocks?.entities?.[id]
+              if (blk?.type === 'main_text' || blk?.type === 'text') {
+                blockId = String(id)
+                break
+              }
+            }
+            return { assistantId: String(msgIds[i]), blockId }
+          }
+        }
+        return { assistantId: '', blockId: '' }
+      }, ctxA.topicId)
+      expect(findProductRequestAfter(seqN1)).not.toBeNull()
+      const localN1 = await fetchMessagesViaApi(pageA, ctxA.topicId)
+      const blkN1 = (localN1.blocks as any[]).find((b: any) => b?.id === targetN1.blockId) as any
+      const contentN1 = String(blkN1.content)
+      const syncAN1 = await runSyncViaApi(pageA)
+      expect(syncAN1.threw).toBeNull()
+      const syncBN1 = await runSyncViaApi(pageB)
+      expect(syncBN1.threw).toBeNull()
+      await pollForStreamingConvergence(pageB, ctxA.topicId, targetN1.assistantId, targetN1.blockId, contentN1)
+
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      assertTolerantCaptureHistory(statusA.lastCaptureError, 'mixed-bootstrap-A')
+      assertTolerantCaptureHistory(statusB.lastCaptureError, 'mixed-bootstrap-B')
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
+      expect(statusB.cursor).toBeGreaterThanOrEqual(watermark)
+    } finally {
+      await closeProfileAndRelay(profileB, relay)
+    }
+  })
+})
+
+/**
+ * Sync chat-projection visibility: synced topics render in the ordinary
+ * sidebar and live-update without reselect (NOT run yet — scheduled).
+ *
+ * Proves the product fix (not SQL/IPC counts): the cursor0 receiver's
+ * pre-existing local empty topic stays selected through the baseline
+ * bootstrap; afterwards the ordinary sidebar DOM contains the remote topic
+ * (stable `[data-topic-id]` selector); clicking it through the UI reveals
+ * the user + assistant messages as real `[data-message-id]` DOM with the
+ * stored block text rendered; a subsequent remote UI send while B views the
+ * same topic appears in B's DOM without any route toggle, with the selected
+ * topic unchanged and no integrity error.
+ */
+test.describe('Sync chat projection visibility', () => {
+  test.setTimeout(300000)
+
+  async function getActiveContext(page: Page): Promise<{ assistantId: string; topicId: string }> {
+    // Runtime authority: ACTUAL selected topic + owner, never array[0].
+    return page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const topicId = typeof s.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : ''
+      if (!topicId) return { assistantId: '', topicId: '' }
+      const owner = (s.assistants?.assistants ?? []).find(
+        (a: any) => Array.isArray(a?.topics) && a.topics.some((t: any) => t?.id === topicId)
+      )
+      return { assistantId: owner?.id ?? '', topicId }
+    })
+  }
+
+  async function assertTextareaRoute(page: Page, expectedTopicId: string): Promise<void> {
+    const check = await page.evaluate((expected: string) => {
+      const s = (window as any).store?.getState()
+      const active = typeof s?.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : null
+      const item = document.querySelector('[data-testid="topic-item"].active')
+      const domActive = item?.getAttribute('data-topic-id') ?? null
+      return {
+        storeMatches: active === expected,
+        domMatches: domActive === null ? null : domActive === expected
+      }
+    }, expectedTopicId)
+    expect(check.storeMatches, 'textarea route must equal expected active topic before send').toBe(true)
+    if (check.domMatches !== null) {
+      expect(check.domMatches, 'DOM active topic must agree with expected').toBe(true)
+    }
+  }
+
+  /** Metadata-only selection diagnostic (counts/booleans only, never IDs/content). */
+  async function logLocalSelectionDiag(pageB: Page, expectedTopicId: string, stage: string): Promise<void> {
+    try {
+      const diag = await pageB.evaluate((expected: string) => {
+        const s = (window as any).store?.getState()
+        const current = typeof s?.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : null
+        const item = document.querySelector('[data-testid="topic-item"].active')
+        const domActive = item?.getAttribute('data-topic-id') ?? null
+        const assistants = s?.assistants?.assistants ?? []
+        let reduxHasExpected = false
+        let reduxHasCurrent = false
+        let assistantCount = 0
+        let topicCount = 0
+        for (const a of assistants) {
+          assistantCount++
+          const topics = Array.isArray(a?.topics) ? a.topics : []
+          topicCount += topics.length
+          for (const t of topics) {
+            if (t?.id === expected) reduxHasExpected = true
+            if (current && t?.id === current) reduxHasCurrent = true
+          }
+        }
+        return {
+          storeEq: current === expected,
+          domEq: domActive === expected,
+          domStoreEq: domActive !== null && domActive === current,
+          hasCurrent: !!current,
+          hasDom: !!domActive,
+          reduxExp: reduxHasExpected,
+          reduxCur: reduxHasCurrent,
+          assistants: assistantCount,
+          topics: topicCount
+        }
+      }, expectedTopicId)
+      const mainPresent = await topicExistsViaApi(pageB, expectedTopicId).catch(() => null)
+      console.log(
+        `[E2E visibility diag ${stage}] storeEq=${diag.storeEq} domEq=${diag.domEq} domStoreEq=${diag.domStoreEq} ` +
+          `hasCurrent=${diag.hasCurrent} hasDom=${diag.hasDom} reduxExp=${diag.reduxExp} reduxCur=${diag.reduxCur} ` +
+          `mainExp=${mainPresent} assistants=${diag.assistants} topics=${diag.topics}`
+      )
+    } catch {}
+  }
+
+  /**
+   * Deterministic B-local empty topic in the SAME assistant, explicitly
+   * selected via DOM. Production persistence-first order: Main ensure BEFORE
+   * Redux exposure, then a complete typed Main read includes the local row,
+   * then DOM click with both runtime + DOM asserted.
+   */
+  async function ensureUniqueLocalEmptyTopic(pageB: Page): Promise<{ assistantId: string; topicId: string }> {
+    const ownerId = await pageB.evaluate(() => {
+      const s = (window as any).store.getState()
+      const topicId = typeof s.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : ''
+      const owner = (s.assistants?.assistants ?? []).find(
+        (a: any) => Array.isArray(a?.topics) && a.topics.some((t: any) => t?.id === topicId)
+      )
+      return owner?.id ?? s.assistants?.assistants?.[0]?.id ?? ''
+    })
+    expect(ownerId.length).toBeGreaterThan(0)
+    const topicId = `e2e-visibility-b-local-${Date.now().toString(36)}`
+    // Main persistence first (mirrors production addNewTopic: ensure ownership
+    // before Redux, with the SAME owning assistant so the authoritative
+    // directory read keeps the row — a null-assistant row exists by ID yet is
+    // invisible to the per-assistant directory and is correctly dropped).
+    await ensureTopicViaApi(pageB, topicId, 'B local empty', ownerId)
+    // Complete typed Main reads include the local row before any store
+    // exposure: single-row existence plus per-assistant directory membership.
+    const mainDeadline = Date.now() + 15000
+    for (;;) {
+      const present = await topicExistsViaApi(pageB, topicId)
+      const dirContains = await pageB
+        .evaluate(
+          async ({ expected, owner }: { expected: string; owner: string }) => {
+            try {
+              const res = await (window as any).api?.chatDb?.listLiveAssistantTopics?.({ assistantId: owner })
+              if (res && res.ok === true && Array.isArray((res.value as any)?.topics)) {
+                return (res.value.topics as Array<{ id?: unknown }>).some((r) => r?.id === expected)
+              }
+              return false
+            } catch {
+              return false
+            }
+          },
+          { expected: topicId, owner: ownerId }
+        )
+        .catch(() => false)
+      if (present && dirContains) break
+      if (Date.now() >= mainDeadline) {
+        await logLocalSelectionDiag(pageB, topicId, 'setup-main-missing')
+        throw new Error('setup local topic missing in Main after ensure')
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    // Store fixture setup after the commit (never synthetic pre-commit order).
+    await pageB.evaluate(
+      ({ assistantId, newTopicId }: { assistantId: string; newTopicId: string }) => {
+        const topic = {
+          id: newTopicId,
+          name: 'B local empty',
+          assistantId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }
+        ;(window as any).store.dispatch({ type: 'assistants/addTopic', payload: { assistantId, topic } })
+      },
+      { assistantId: ownerId, newTopicId: topicId }
+    )
+    // Complete typed Redux read includes the local row before DOM selection.
+    try {
+      await pageB.waitForFunction(
+        (expected: string) => {
+          const s = (window as any).store?.getState()
+          const assistants = s?.assistants?.assistants ?? []
+          for (const a of assistants) {
+            if (Array.isArray(a?.topics) && a.topics.some((t: any) => t?.id === expected)) return true
+          }
+          return false
+        },
+        topicId,
+        { timeout: 15000 }
+      )
+    } catch (e) {
+      await logLocalSelectionDiag(pageB, topicId, 'setup-redux-missing')
+      throw e
+    }
+    const item = pageB.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
+    await item.click()
+    try {
+      await pageB.waitForFunction(
+        (expected: string) => (window as any).store?.getState()?.messages?.currentTopicId === expected,
+        topicId,
+        { timeout: 15000 }
+      )
+    } catch (e) {
+      await logLocalSelectionDiag(pageB, topicId, 'setup-select-timeout')
+      throw e
+    }
+    await assertTextareaRoute(pageB, topicId)
+    return { assistantId: ownerId, topicId }
+  }
+
+  async function uiSend(page: Page, text: string): Promise<void> {
+    const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+    await textarea.waitFor({ state: 'visible', timeout: 15000 })
+    await textarea.click()
+    await page.evaluate(
+      ({ selector, text }: { selector: string; text: string }) => {
+        const el = document.querySelector(selector) as HTMLTextAreaElement
+        if (!el) throw new Error('Textarea not found')
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (!nativeSetter) throw new Error('No native textarea setter')
+        nativeSetter.call(el, text)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      { selector: '.inputbar textarea, textarea[placeholder]', text }
+    )
+    await expect(textarea).toHaveValue(text, { timeout: 5000 })
+    await textarea.press('Enter')
+  }
+
+  async function countAssistants(page: Page, topicId: string): Promise<number> {
+    return page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      const msgIds = s.messages.messageIdsByTopic[topicId] || []
+      let count = 0
+      for (const id of msgIds) {
+        if (s.messages.entities[id]?.role === 'assistant') count++
+      }
+      return count
+    }, topicId)
+  }
+
+  async function waitStreaming(page: Page, topicId: string, prev: number, timeout = 90000): Promise<void> {
+    const logTimeoutDiag = async (stage: string): Promise<void> => {
+      try {
+        const diag = await page.evaluate((expected: string) => {
+          const s = (window as any).store?.getState()
+          const active = typeof s?.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : null
+          const loadingActive = active ? !!s?.messages?.loadingByTopic?.[active] : false
+          const loadingExpected = expected ? !!s?.messages?.loadingByTopic?.[expected] : false
+          const msgIds = expected ? (s?.messages?.messageIdsByTopic?.[expected] ?? []) : []
+          let assistantCount = 0
+          for (const id of msgIds) {
+            if (s?.messages?.entities?.[id]?.role === 'assistant') assistantCount++
+          }
+          return {
+            activeMatchesExpected: active === expected,
+            hasActive: !!active,
+            loadingActive,
+            loadingExpected,
+            msgCount: Array.isArray(msgIds) ? msgIds.length : 0,
+            assistantCount
+          }
+        }, topicId)
+        console.log(
+          `[E2E visibility wait timeout ${stage}] activeMatches=${diag.activeMatchesExpected} hasActive=${diag.hasActive} loadingActive=${diag.loadingActive} loadingExpected=${diag.loadingExpected} msgCount=${diag.msgCount} assistantCount=${diag.assistantCount} prev=${prev}`
+        )
+      } catch {}
+    }
+    try {
+      await page.waitForFunction(
+        ({ topicId, prevCount }: { topicId: string; prevCount: number }) => {
+          const s = (window as any).store?.getState()
+          if (!s) return false
+          const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+          let count = 0
+          for (const id of msgIds) {
+            if (s.messages.entities?.[id]?.role === 'assistant') count++
+          }
+          return count > prevCount
+        },
+        { topicId, prevCount: prev },
+        { timeout }
+      )
+    } catch (e) {
+      await logTimeoutDiag('count')
+      throw e
+    }
+    try {
+      await page.waitForFunction(
+        ({ topicId }: { topicId: string }) => {
+          const s = (window as any).store?.getState()
+          if (!s) return false
+          if (s.messages?.loadingByTopic?.[topicId]) return false
+          const msgIds = s.messages?.messageIdsByTopic?.[topicId] || []
+          let latest: string | null = null
+          for (let i = msgIds.length - 1; i >= 0; i--) {
+            if (s.messages.entities?.[msgIds[i]]?.role === 'assistant') {
+              latest = msgIds[i]
+              break
+            }
+          }
+          if (!latest) return false
+          const msg = s.messages.entities[latest]
+          if (msg.status !== 'success' && msg.status !== 'error') return false
+          const blocks = msg.blocks || []
+          if (blocks.length === 0) return false
+          for (const blockId of blocks) {
+            const block = s.messageBlocks?.entities?.[blockId]
+            if (!block || (block.status !== 'success' && block.status !== 'error')) return false
+          }
+          return true
+        },
+        { topicId },
+        { timeout }
+      )
+    } catch (e) {
+      await logTimeoutDiag('terminal')
+      throw e
+    }
+  }
+
+  async function topicMessageIds(page: Page, topicId: string): Promise<string[]> {
+    return page.evaluate((topicId: string) => {
+      const s = (window as any).store.getState()
+      return [...(s.messages.messageIdsByTopic[topicId] || [])]
+    }, topicId)
+  }
+
+  /**
+   * Privacy-safe send-stall diagnostic observer (test-only, no prod logging
+   * change). Emits one `[E2E send-stall diag <stage>]` line with counts and
+   * booleans only — never raw user text, provider keys, paths, or IDs:
+   * - mock: product request count delta + bool stream flag + elapsed ms
+   * - Main: ChatDb role/status counts via fetchMessages (counts only)
+   * - Redux: route match bool + loading bool + role/status counts + gen stage
+   * - console: aggregated by type + error-name only (no message text)
+   * Called on both success and waitStreaming throw paths.
+   */
+  async function logSendStallDiag(
+    page: Page,
+    topicId: string,
+    stage: string,
+    opts: {
+      seqBefore: number
+      seqAfter: number
+      elapsedMs: number
+      consoleByType: Record<string, number>
+      pageErrorNames: Record<string, number>
+    }
+  ): Promise<void> {
+    try {
+      const mockEntries = getRequestLog().filter(
+        (e) => e.method === 'POST' && (e.url === '/v1/chat/completions' || e.url === '/chat/completions')
+      )
+      const after = findProductRequestAfter(opts.seqBefore)
+      const newCount = mockEntries.filter((e) => e.sequence >= opts.seqBefore && e.sequence < opts.seqAfter).length
+      const streamFlag = after ? ((after.parsed as any)?.stream === true ? true : false) : null
+      let mainUser = -1
+      let mainAssistant = -1
+      let mainSuccess = -1
+      let mainOtherStatus = -1
+      try {
+        const { messages } = await fetchMessagesViaApi(page, topicId)
+        mainUser = (messages as any[]).filter((m) => m?.role === 'user').length
+        mainAssistant = (messages as any[]).filter((m) => m?.role === 'assistant').length
+        mainSuccess = (messages as any[]).filter((m) => m?.status === 'success').length
+        mainOtherStatus = (messages as any[]).filter((m) => m?.status !== 'success').length
+      } catch {
+        // Main read failed: keep -1 sentinels, never log raw error text.
+      }
+      let routeMatch = false
+      let loading = false
+      let reduxUser = -1
+      let reduxAssistant = -1
+      try {
+        const redux = await page.evaluate((expected: string) => {
+          const s = (window as any).store?.getState()
+          const active = typeof s?.messages?.currentTopicId === 'string' ? s.messages.currentTopicId : null
+          const msgIds: string[] = Array.isArray(s?.messages?.messageIdsByTopic?.[expected])
+            ? s.messages.messageIdsByTopic[expected]
+            : []
+          let user = 0
+          let assistant = 0
+          for (const id of msgIds) {
+            const role = s?.messages?.entities?.[id]?.role
+            if (role === 'user') user++
+            else if (role === 'assistant') assistant++
+          }
+          return {
+            routeMatch: active === expected,
+            loading: expected ? !!s?.messages?.loadingByTopic?.[expected] : false,
+            total: msgIds.length,
+            user,
+            assistant
+          }
+        }, topicId)
+        routeMatch = redux.routeMatch
+        loading = redux.loading
+        reduxUser = redux.user
+        reduxAssistant = redux.assistant
+        console.log(
+          `[E2E send-stall diag ${stage}] mockNew=${newCount} stream=${streamFlag} elapsedMs=${opts.elapsedMs} ` +
+            `mainUser=${mainUser} mainAssistant=${mainAssistant} mainOk=${mainSuccess} mainOther=${mainOtherStatus} ` +
+            `routeMatch=${routeMatch} loading=${loading} reduxTotal=${redux.total} reduxUser=${reduxUser} reduxAssistant=${reduxAssistant} ` +
+            `console=${JSON.stringify(opts.consoleByType)} pageErrors=${JSON.stringify(opts.pageErrorNames)}`
+        )
+      } catch {
+        console.log(
+          `[E2E send-stall diag ${stage}] mockNew=${newCount} stream=${streamFlag} elapsedMs=${opts.elapsedMs} ` +
+            `mainUser=${mainUser} mainAssistant=${mainAssistant} mainOk=${mainSuccess} mainOther=${mainOtherStatus} ` +
+            `reduxRead=failed console=${JSON.stringify(opts.consoleByType)} pageErrors=${JSON.stringify(opts.pageErrorNames)}`
+        )
+      }
+    } catch {}
+  }
+
+  test('synced topic appears in the sidebar and live-updates the open view without reselect', async ({
+    mainWindow,
+    ownedTmpRoot,
+    mockPort
+  }) => {
+    const pageA = mainWindow
+    let relay: TestRelayHandle | null = null
+    let profileB: SecondSyncProfile | null = null
+    try {
+      relay = await startTestRelay()
+      profileB = await launchSecondSyncProfile(ownedTmpRoot, mockPort)
+      const pageB = profileB.page
+
+      await setSyncConfigViaApi(pageA, { endpoint: relay.endpoint, enabled: true })
+      await setSyncConfigViaApi(pageB, { endpoint: relay.endpoint, enabled: true })
+      await pairProfilesViaApi(pageA, pageB)
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      await relay.waitForQuiescent()
+
+      // Deterministic B-local empty topic BEFORE any sync: same-assistant
+      // production persistence-first setup (Main ensure BEFORE Redux add),
+      // explicitly selected via DOM and asserted. Never weakened:
+      // distinctness below still asserts unique local context, now guaranteed
+      // by construction rather than seed luck.
+      const localBSetup = await ensureUniqueLocalEmptyTopic(pageB)
+
+      // A sends one real streaming turn through the mock provider. The helper
+      // returns the ACTUAL selected topic; assert the textarea route agrees
+      // before send so count/wait target the correct topic.
+      const ctxA = await getActiveContext(pageA)
+      expect(ctxA.topicId.length).toBeGreaterThan(0)
+      expect(ctxA.assistantId.length).toBeGreaterThan(0)
+      await assertTextareaRoute(pageA, ctxA.topicId)
+      const prevA = await countAssistants(pageA, ctxA.topicId)
+      const userText = 'e2e projection visibility probe hello'
+      const seq0 = getRequestSequence()
+      const consoleByType: Record<string, number> = {}
+      const pageErrorNames: Record<string, number> = {}
+      const onConsole = (msg: { type: () => string }): void => {
+        try {
+          const t = msg.type()
+          consoleByType[t] = (consoleByType[t] ?? 0) + 1
+        } catch {}
+      }
+      const onPageError = (err: unknown): void => {
+        try {
+          const name = err instanceof Error ? err.name : typeof err
+          pageErrorNames[String(name).slice(0, 40)] = (pageErrorNames[String(name).slice(0, 40)] ?? 0) + 1
+        } catch {}
+      }
+      pageA.on('console', onConsole)
+      pageA.on('pageerror', onPageError)
+      const tSend0 = Date.now()
+      try {
+        await uiSend(pageA, userText)
+        await waitStreaming(pageA, ctxA.topicId, prevA)
+        await logSendStallDiag(pageA, ctxA.topicId, 'first-turn-ok', {
+          seqBefore: seq0,
+          seqAfter: getRequestSequence(),
+          elapsedMs: Date.now() - tSend0,
+          consoleByType,
+          pageErrorNames
+        })
+      } catch (e) {
+        await logSendStallDiag(pageA, ctxA.topicId, 'first-turn-throw', {
+          seqBefore: seq0,
+          seqAfter: getRequestSequence(),
+          elapsedMs: Date.now() - tSend0,
+          consoleByType,
+          pageErrorNames
+        })
+        throw e
+      } finally {
+        pageA.off('console', onConsole)
+        pageA.off('pageerror', onPageError)
+      }
+      expect(findProductRequestAfter(seq0)).not.toBeNull()
+      // Mock request proves stream:true as before (no wait relax).
+      const productReq0 = findProductRequestAfter(seq0)
+      expect((productReq0!.parsed as any)?.stream).toBe(true)
+      const remoteIds = await topicMessageIds(pageA, ctxA.topicId)
+      expect(remoteIds.length).toBeGreaterThanOrEqual(2)
+
+      // B's pre-existing local empty topic stays selected (no hijack).
+      // Deterministic: the setup topic above, re-read from runtime authority.
+      // Actual DOM active + store equality + Main/Redux presence are logged
+      // metadata-only (no IDs) before the strict assert so a production
+      // autoselect mirror mismatch is diagnosable, never silent.
+      const localB = await getActiveContext(pageB)
+      if (localB.topicId !== localBSetup.topicId) {
+        await logLocalSelectionDiag(pageB, localBSetup.topicId, 'post-stream-mismatch')
+      }
+      expect(localB.topicId).toBe(localBSetup.topicId)
+      expect(localB.topicId.length).toBeGreaterThan(0)
+      expect(localB.topicId).not.toBe(ctxA.topicId)
+
+      // Incremental sync A→relay→B (baseline bootstrap for cursor0 B).
+      const syncA = await runSyncViaApi(pageA)
+      expect(syncA.threw).toBeNull()
+      expect(syncA.status.lastError).toBeNull()
+      const syncB = await runSyncViaApi(pageB)
+      expect(syncB.threw).toBeNull()
+      expect(syncB.status.lastError).toBeNull()
+
+      // Sidebar DOM (not IPC counts) contains the remote topic…
+      const remoteItem = pageB.locator(`[data-testid="topic-item"][data-topic-id="${ctxA.topicId}"]`)
+      await expect(remoteItem).toBeVisible({ timeout: 30000 })
+      // …while B's own empty topic is still the selected one (unaffected
+      // selection through remote import; explicit click below, never toggle).
+      const stillLocal = await getActiveContext(pageB)
+      if (stillLocal.topicId !== localB.topicId) {
+        await logLocalSelectionDiag(pageB, localB.topicId, 'post-import-mismatch')
+      }
+      expect(stillLocal.topicId).toBe(localB.topicId)
+
+      // Select the remote topic through the ordinary UI.
+      await remoteItem.click()
+      for (const mid of remoteIds) {
+        await expect(pageB.locator(`#messages [data-message-id="${mid}"]`).first()).toBeAttached({
+          timeout: 30000
+        })
+      }
+      // Stored block content renders (mock echo of the user text).
+      await expect(pageB.locator('#messages').getByText(userText).first()).toBeVisible({ timeout: 30000 })
+      await expect(pageB.locator('[data-testid="assistant-integrity-error"]')).toHaveCount(0)
+
+      // A sends a second real turn while B views the same topic.
+      // Re-assert A's textarea route still equals ctxA before send.
+      await assertTextareaRoute(pageA, ctxA.topicId)
+      const prevA2 = await countAssistants(pageA, ctxA.topicId)
+      const userText2 = 'e2e projection live update hello'
+      const seq1 = getRequestSequence()
+      await uiSend(pageA, userText2)
+      await waitStreaming(pageA, ctxA.topicId, prevA2)
+      expect(findProductRequestAfter(seq1)).not.toBeNull()
+      const remoteIds2 = await topicMessageIds(pageA, ctxA.topicId)
+      const freshIds = remoteIds2.filter((id) => !remoteIds.includes(id))
+      expect(freshIds.length).toBeGreaterThanOrEqual(2)
+
+      const syncA2 = await runSyncViaApi(pageA)
+      expect(syncA2.threw).toBeNull()
+      const syncB2 = await runSyncViaApi(pageB)
+      expect(syncB2.threw).toBeNull()
+      expect(syncB2.status.lastError).toBeNull()
+
+      // B's open view gains the new messages WITHOUT any route toggle…
+      for (const mid of freshIds) {
+        await expect(pageB.locator(`#messages [data-message-id="${mid}"]`).first()).toBeAttached({
+          timeout: 30000
+        })
+      }
+      await expect(pageB.locator('#messages').getByText(userText2).first()).toBeVisible({ timeout: 30000 })
+      // …the selected topic is unaffected and no integrity error appears.
+      const currentB = await pageB.evaluate(() => (window as any).store.getState().messages?.currentTopicId)
+      expect(currentB).toBe(ctxA.topicId)
+      await expect(pageB.locator('[data-testid="assistant-integrity-error"]')).toHaveCount(0)
+
+      await pollForPendingDrained(pageA, 90000)
+      await pollForPendingDrained(pageB, 90000)
+      const statusA = await getSyncStatusViaApi(pageA)
+      const statusB = await getSyncStatusViaApi(pageB)
+      expect(statusA.lastError).toBeNull()
+      expect(statusB.lastError).toBeNull()
+      expect(statusA.pendingCount).toBe(0)
+      expect(statusB.pendingCount).toBe(0)
     } finally {
       await closeProfileAndRelay(profileB, relay)
     }
