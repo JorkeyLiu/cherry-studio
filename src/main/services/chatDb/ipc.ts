@@ -529,7 +529,15 @@ export function registerChatDbIpc(): () => void {
 
   // 23. update-topic-metadata (Phase 5.1B)
   handleCommand(IpcChannel.ChatDb_UpdateTopicMetadata, (agg, req: UpdateTopicMetadataRequest) => {
-    return agg.updateTopicMetadata(req.topicId, req.name, req.pinned, req.prompt, req.isNameManuallyEdited)
+    return agg.updateTopicMetadata(
+      req.topicId,
+      req.name,
+      req.pinned,
+      req.prompt,
+      req.isNameManuallyEdited,
+      req.expectedName,
+      req.expectedIsNameManuallyEdited
+    )
   })
 
   // 24. soft-delete-topic (Phase 5.1B)

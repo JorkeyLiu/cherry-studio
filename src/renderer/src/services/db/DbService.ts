@@ -237,9 +237,10 @@ class DbService implements MessageDataSource {
     name?: string | null,
     pinned?: boolean | null,
     prompt?: string | null,
-    isNameManuallyEdited?: boolean | null
+    isNameManuallyEdited?: boolean | null,
+    expected?: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
   ) {
-    return this.ordinarySource.updateTopicMetadata(topicId, name, pinned, prompt, isNameManuallyEdited)
+    return this.ordinarySource.updateTopicMetadata(topicId, name, pinned, prompt, isNameManuallyEdited, expected)
   }
   softDeleteTopic(topicId: string, name?: string | null) {
     return this.ordinarySource.softDeleteTopic(topicId, name)

@@ -6073,6 +6073,12 @@ export class ChatDbAggregateService {
    * Identity fields (id, assistantId, createdAt, deletedAt, messages) are
    * NOT mutable through this path.
    *
+   * Optional atomic preimage guards (automatic naming only): when
+   * expectedName / expectedIsNameManuallyEdited are defined, the current
+   * authority values are compared inside the same transaction; on mismatch
+   * the current wire is returned unchanged (graceful no-op, no write, no
+   * sync intent, no updatedAt bump). Missing topic still throws NOT_FOUND.
+   *
    * Returns ERR_NOT_FOUND if topic does not exist.
    */
   updateTopicMetadata(
@@ -6080,7 +6086,9 @@ export class ChatDbAggregateService {
     name?: string | null,
     pinned?: boolean | null,
     prompt?: string | null,
-    isNameManuallyEdited?: boolean | null
+    isNameManuallyEdited?: boolean | null,
+    expectedName?: string | null,
+    expectedIsNameManuallyEdited?: boolean | null
   ): ChatDbResult<JsonObject> {
     return wrapResult(() => {
       const ctx = this.syncCtxForTopic('updateTopicMetadata', topicId)
@@ -6094,6 +6102,24 @@ export class ChatDbAggregateService {
           const existing = repos.topics.getById(topicId)
           if (!existing.found) {
             throw new ChatDbNotFoundError(`Topic ${topicId} does not exist`)
+          }
+
+          // Bounded atomic preimage guard for automatic naming: compare inside
+          // the same transaction; mismatch returns the current wire unchanged.
+          if (expectedName !== undefined) {
+            const currentName = (existing.data as { name?: string | null }).name ?? null
+            const wantName = expectedName ?? null
+            if (currentName !== wantName) {
+              return topicToWireFull(existing.data)
+            }
+          }
+          if (expectedIsNameManuallyEdited !== undefined) {
+            const raw = (existing.data.overflow as Record<string, unknown> | undefined)?.isNameManuallyEdited
+            const currentFlag = typeof raw === 'boolean' ? raw : null
+            const wantFlag = expectedIsNameManuallyEdited ?? null
+            if (currentFlag !== wantFlag) {
+              return topicToWireFull(existing.data)
+            }
           }
 
           // Build patch from allowed fields

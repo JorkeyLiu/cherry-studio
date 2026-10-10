@@ -57,6 +57,26 @@ function diffMetadata(
 }
 
 /**
+ * Bounded shared conditional name-write for automatic naming only.
+ *
+ * Name-only write guarded by the Main-authoritative preimage captured before
+ * the summary await. Main compares the preimage inside the same transaction
+ * and returns the current wire unchanged on mismatch (graceful no-op). Never
+ * writes stale whole-topic flags; never creates metadata. Missing topic
+ * throws ChatDbResultError (NOT_FOUND) so callers treat it as a no-op.
+ *
+ * Returns the authoritative TopicWire so callers can detect a guarded no-op
+ * (returned name !== requested name) and skip the Redux projection update.
+ */
+export async function persistAutomaticTopicName(
+  topicId: string,
+  newName: string,
+  expected: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
+): Promise<{ name?: string | null }> {
+  return sqliteSource.updateTopicMetadata(topicId, newName, undefined, undefined, undefined, expected)
+}
+
+/**
  * Persist a topic metadata update to SQLite.
  *
  * @throws {ChatDbResultError} on structured SQLite failure (e.g. ERR_NOT_FOUND).

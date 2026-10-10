@@ -1181,7 +1181,15 @@ const listBlocksByFileContract: ChatDbContract = {
 // ---------------------------------------------------------------------------
 
 const updateTopicMetadataContract: ChatDbContract = {
-  allowedKeys: keySet('topicId', 'name', 'pinned', 'prompt', 'isNameManuallyEdited'),
+  allowedKeys: keySet(
+    'topicId',
+    'name',
+    'pinned',
+    'prompt',
+    'isNameManuallyEdited',
+    'expectedName',
+    'expectedIsNameManuallyEdited'
+  ),
   validate(value: unknown): void {
     validateRequest(value, updateTopicMetadataContract.allowedKeys)
     const req = value as UpdateTopicMetadataRequest
@@ -1212,6 +1220,20 @@ const updateTopicMetadataContract: ChatDbContract = {
       throw new ValidationError(
         'request.isNameManuallyEdited',
         `Expected boolean|null, got ${typeof req.isNameManuallyEdited}`
+      )
+    }
+    // Optional atomic preimage guards for automatic naming (absent = no guard).
+    if (req.expectedName !== undefined && req.expectedName !== null && typeof req.expectedName !== 'string') {
+      throw new ValidationError('request.expectedName', `Expected string|null, got ${typeof req.expectedName}`)
+    }
+    if (
+      req.expectedIsNameManuallyEdited !== undefined &&
+      req.expectedIsNameManuallyEdited !== null &&
+      typeof req.expectedIsNameManuallyEdited !== 'boolean'
+    ) {
+      throw new ValidationError(
+        'request.expectedIsNameManuallyEdited',
+        `Expected boolean|null, got ${typeof req.expectedIsNameManuallyEdited}`
       )
     }
   },

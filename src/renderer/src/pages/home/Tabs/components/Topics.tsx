@@ -25,6 +25,8 @@ import {
 } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import type { RootState } from '@renderer/store'
+import store from '@renderer/store'
+import { updateTopic as updateTopicAction } from '@renderer/store/assistants'
 import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
@@ -74,6 +76,33 @@ interface Props {
   assistant: Assistant
   activeTopic: Topic
   setActiveTopic: (topic: Topic) => void
+}
+
+// Manual Auto Rename projection guard (bounded same-name collision fix).
+// Main returns the current wire unchanged on preimage mismatch (graceful
+// no-op). A name-only `wire.name === summaryText` check is insufficient: an
+// intervening manual rename to exactly `summaryText` no-ops atomically but
+// still matches by name. The projection must therefore require the
+// authoritative returned flag to equal the requested `false`; any other flag
+// (true/null/undefined) means the automatic write did not win and the Redux
+// projection — including a manual `true` flag — must be left untouched.
+// Returns the projected Topic on authoritative success, otherwise null.
+export function resolveManualAutoRenameProjection(
+  wire: { name?: string | null; isNameManuallyEdited?: boolean | null },
+  summaryText: string,
+  latest: Topic
+): Topic | null {
+  if (wire.name !== summaryText) {
+    return null
+  }
+  if (wire.isNameManuallyEdited !== false) {
+    return null
+  }
+  return {
+    ...latest,
+    name: wire.name ?? summaryText,
+    isNameManuallyEdited: wire.isNameManuallyEdited ?? false
+  } as Topic
 }
 
 // LOCK-002: topics always render on the right; topic time is always shown and
@@ -323,38 +352,76 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         async onClick() {
           // Bounded naming authority: exact count + latest ≤5 + their blocks.
           // Never materializes the whole topic for manual auto-rename.
+          // The authority preimage is captured before the summary await so a
+          // delayed result never overwrites a later manual title/flag; Main
+          // enforces it atomically (graceful no-op on mismatch/missing).
+          const topicIdForRename = topic.id
           let namingContext: {
+            topic: { id: string; name: string | null; isNameManuallyEdited: boolean | null }
             messageCount: number
             latestMessages: Message[]
             blocks: MessageBlock[]
           }
           try {
-            namingContext = await dbService.fetchTopicNamingContext(topic.id)
+            namingContext = await dbService.fetchTopicNamingContext(topicIdForRename)
           } catch (err) {
             logger.error('Failed to load naming context for auto-rename', err as Error)
             return
           }
           if (namingContext.messageCount >= 2) {
-            startTopicRenaming(topic.id)
+            const expectedPreimage = {
+              expectedName: namingContext.topic.name ?? null,
+              expectedIsNameManuallyEdited: namingContext.topic.isNameManuallyEdited ?? null
+            }
+            startTopicRenaming(topicIdForRename)
             try {
               const { text: summaryText, error } = await fetchMessagesSummary({
                 messages: namingContext.latestMessages,
                 blocksById: createSnapshotBlockMap(namingContext.blocks)
               })
               if (summaryText) {
-                const updatedTopic = { ...topic, name: summaryText, isNameManuallyEdited: false }
+                let wire: { name?: string | null; isNameManuallyEdited?: boolean | null }
                 try {
-                  // Phase 5.2B: SQLite persists before Redux (LOCK-528); on
-                  // failure Redux is left unchanged and the toast stays unrenameed.
-                  await updateTopic(updatedTopic)
+                  // Name + clear manual flag only; Main guards the preimage
+                  // atomically. Missing topic throws NOT_FOUND → no-op.
+                  wire = await dbService.updateTopicMetadata(
+                    topicIdForRename,
+                    summaryText,
+                    undefined,
+                    undefined,
+                    false,
+                    expectedPreimage
+                  )
                 } catch (err) {
                   logger.error('Failed to persist auto-renamed topic', err as Error)
+                  return
                 }
+                // Projection only after authoritative success, built from the
+                // latest Redux topic so only the intended fields change.
+                const latest = store
+                  .getState()
+                  .assistants.assistants.flatMap((a) => a.topics)
+                  .find((t) => t.id === topicIdForRename)
+                if (!latest) {
+                  return
+                }
+                // Authoritative flag guard: same-name collision (intervening
+                // manual rename to exactly summaryText) no-ops atomically with
+                // flag true — never clear the projection flag. Null/skip when
+                // the returned flag is not the requested false.
+                const data = resolveManualAutoRenameProjection(wire, summaryText, latest)
+                if (!data) {
+                  return
+                }
+                const ownerAssistantId =
+                  store.getState().assistants.assistants.find((a) => a.topics?.some((t) => t.id === topicIdForRename))
+                    ?.id ?? assistant.id
+                store.dispatch(updateTopicAction({ assistantId: ownerAssistantId, topic: data }))
               } else if (error) {
                 window.toast?.error(`${t('message.error.fetchTopicName')}: ${error}`)
               }
             } finally {
-              finishTopicRenaming(topic.id)
+              finishTopicRenaming(topicIdForRename)
             }
           }
         }

@@ -721,9 +721,20 @@ export class SqliteMessageDataSource implements MessageDataSource {
     name?: string | null,
     pinned?: boolean | null,
     prompt?: string | null,
-    isNameManuallyEdited?: boolean | null
+    isNameManuallyEdited?: boolean | null,
+    expected?: { expectedName?: string | null; expectedIsNameManuallyEdited?: boolean | null }
   ): Promise<TopicWire> {
-    const request: UpdateTopicMetadataRequest = cloneForWire({ topicId, name, pinned, prompt, isNameManuallyEdited })
+    const request: UpdateTopicMetadataRequest = cloneForWire({
+      topicId,
+      name,
+      pinned,
+      prompt,
+      isNameManuallyEdited,
+      ...(expected?.expectedName !== undefined ? { expectedName: expected.expectedName } : {}),
+      ...(expected?.expectedIsNameManuallyEdited !== undefined
+        ? { expectedIsNameManuallyEdited: expected.expectedIsNameManuallyEdited }
+        : {})
+    })
     return unwrap(await this.api.updateTopicMetadata(request))
   }
 

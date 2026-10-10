@@ -823,4 +823,85 @@ test.describe('Topic Auto-Naming (repaired message-read path)', () => {
       console.log('[E2E][topic-naming] Cold post-rename window unchanged (no whole-topic projection load)')
     })
   })
+
+  test('delayed auto-naming never overwrites an intervening manual rename (manual persists)', async ({
+    electronApp,
+    mainWindow
+  }) => {
+    test.setTimeout(300000)
+    const page = mainWindow
+    await waitForAppReady(page)
+    const MANUAL_WINS_NAME = 'E2E manual wins over delayed auto'
+
+    await test.step('A: Provider seed verification', async () => {
+      const seedOk = await page.evaluate(() => {
+        const s = (window as any).store?.getState()
+        return (
+          s?.llm?.providers?.some((p: any) => p.id === 'mock-openai') &&
+          s.llm.defaultModel?.id === 'mock-model' &&
+          s.llm.quickModel?.id === 'mock-model'
+        )
+      })
+      expect(seedOk).toBe(true)
+    })
+
+    let topicId: string
+    await test.step('B: First send settles automatic naming (deterministic mock title)', async () => {
+      const ctx = await getActiveContext(page)
+      topicId = ctx.topicId
+      expect(topicId).not.toBe('')
+      clearRequestLog()
+      await uiSendMessage(page, 'Delayed auto-vs-manual message one')
+      await waitForAssistantResponseComplete(page, topicId, 0)
+      await waitForGeneratedTopicName(page, topicId)
+    })
+
+    await test.step('C: Intervening manual rename to a distinct stable name', async () => {
+      await uiRenameTopicTo(page, topicId, MANUAL_WINS_NAME)
+      await expect.poll(() => getTopicNameFromRedux(page, topicId), { timeout: 15000 }).toBe(MANUAL_WINS_NAME)
+      expect(MANUAL_WINS_NAME).not.toContain(MOCK_TITLE_MARKER)
+    })
+
+    await test.step('D: Second send completes; stale/delayed auto must not overwrite manual', async () => {
+      const beforeCount = await page.evaluate((tid: string) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages?.messageIdsByTopic?.[tid] || []
+        let n = 0
+        for (const id of ids) if (s.messages.entities?.[id]?.role === 'assistant') n++
+        return n
+      }, topicId)
+      const seqBeforeSecond = getRequestSequence()
+      await uiSendMessage(page, 'Delayed auto-vs-manual message two')
+      await waitForAssistantResponseComplete(page, topicId, beforeCount)
+      // The second completion fires autoRename with a manual-guarded preimage:
+      // no fresh summary may be issued (manual flag blocks it). The skip path
+      // has no renamingTopics observable, so allow the fire-and-forget attempt
+      // to settle, then the name must still be the manual one.
+      await page.waitForTimeout(8000)
+      const reduxName = await getTopicNameFromRedux(page, topicId)
+      expect(reduxName).toBe(MANUAL_WINS_NAME)
+      expect(reduxName).not.toContain(MOCK_TITLE_MARKER)
+      expect(findSummaryRequest(seqBeforeSecond)).toBeNull()
+      const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
+      await expect(topicItem).toContainText(MANUAL_WINS_NAME, { timeout: 10000 })
+      await expect(topicItem).not.toContainText(MOCK_TITLE_MARKER)
+    })
+
+    await test.step('E: SQLite persistence of the winning manual name', async () => {
+      const runtimeAppDataPath = getRuntimeAppDataPath()
+      expect(runtimeAppDataPath).not.toBeNull()
+      const chatDbPath = getChatDbPath()
+      expect(chatDbPath).not.toBeNull()
+      await electronApp.close()
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      expect(fs.existsSync(chatDbPath!)).toBe(true)
+      const esc = (value: string) => value.replace(/'/g, "''")
+      const result = queryChatDbViaElectron(chatDbPath!, `SELECT id, name FROM topics WHERE id = '${esc(topicId)}'`)
+      if (!result.ok) throw new Error(`SQLite query failed: ${result.code}`)
+      const rows = result.rows as any[]
+      expect(rows).toHaveLength(1)
+      expect(rows[0].name).toBe(MANUAL_WINS_NAME)
+      expect(rows[0].name).not.toContain(MOCK_TITLE_MARKER)
+    })
+  })
 })

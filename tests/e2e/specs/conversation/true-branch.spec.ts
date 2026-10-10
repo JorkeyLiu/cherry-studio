@@ -3743,3 +3743,167 @@ test.describe('Ordinary send immediate mutability (no-reload)', () => {
     })
   })
 })
+
+test.describe('Branch-route automatic naming preservation (bounded naming)', () => {
+  test.skip(process.platform !== 'darwin', 'requires macOS disposable-profile Electron lane')
+
+  async function uiSendMessageLocal(page: any, text: string): Promise<void> {
+    const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
+    await textarea.waitFor({ state: 'visible', timeout: 15000 })
+    await textarea.click()
+    await page.evaluate(
+      ({ selector, content }: { selector: string; content: string }) => {
+        const el = document.querySelector(selector) as HTMLTextAreaElement | null
+        if (!el) throw new Error('Textarea not found')
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (!nativeSetter) throw new Error('No native textarea setter')
+        nativeSetter.call(el, content)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      { selector: '.inputbar textarea, textarea[placeholder]', content: text }
+    )
+    await expect(textarea).toHaveValue(text, { timeout: 5000 })
+    await textarea.press('Enter')
+  }
+
+  async function waitAssistant(page: any, topicId: string, prev: number): Promise<void> {
+    await page.waitForFunction(
+      ({ tid, p }: { tid: string; p: number }) => {
+        const s = (window as any).store?.getState()
+        if (!s) return false
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let n = 0
+        for (const id of ids) if (s.messages?.entities?.[id]?.role === 'assistant') n += 1
+        return n > p
+      },
+      { tid: topicId, p: prev },
+      { timeout: 60000 }
+    )
+    await page.waitForFunction(
+      ({ tid }: { tid: string }) => {
+        const s = (window as any).store?.getState()
+        if (!s || s.messages?.loadingByTopic?.[tid] === true) return false
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let latest: string | null = null
+        for (let i = ids.length - 1; i >= 0; i--) {
+          if (s.messages?.entities?.[ids[i]]?.role === 'assistant') {
+            latest = ids[i]
+            break
+          }
+        }
+        if (!latest) return false
+        const msg = s.messages.entities[latest]
+        if (msg.status !== 'success' && msg.status !== 'error') return false
+        for (const b of (msg.blocks ?? []) as string[]) {
+          const block = s.messageBlocks?.entities?.[b]
+          if (!block || (block.status !== 'success' && block.status !== 'error')) return false
+        }
+        return true
+      },
+      { tid: topicId },
+      { timeout: 60000 }
+    )
+  }
+
+  test('branch-route send preserves a non-default logical topic title (shared topic, no branch-row rename)', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.setTimeout(240000)
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'BRANCH NAMING PRESERVATION: one logical topic with a non-default title; fork L1 via toolbar; ordinary send on the branch route completes via the mock provider; the shared logical Topic.name stays the manual title (no mock marker, no branch-row rename); post-exit SQLite proves the durable name plus branch-row integrity.'
+    })
+    await waitForAppReady(mainWindow)
+    const page = mainWindow
+    const assistantId = await prepareAssistant(page, TOTAL)
+    const topicId = `brname-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const manualTitle = `Branch Manual Title ${topicId}`
+    const seedIds = await seedSourceTopic(page, {
+      assistantId,
+      topicId,
+      name: manualTitle,
+      total: 4,
+      messageIdForIndex: (i: number) => letterMessageId(topicId, i),
+      contentPrefix: 'brname-'
+    })
+    await activateTopic(page, topicId, 4)
+    const anchorId = seedIds[1]
+
+    await test.step('fork L1 via toolbar (same logical topic)', async () => {
+      await clickToolbarBranch(page, anchorId)
+      await page.waitForFunction(
+        ({ tid, len }: { tid: string; len: number }) => {
+          const s = (window as any).store.getState()
+          const ids = s.messages?.messageIdsByTopic?.[tid]
+          return Array.isArray(ids) && ids.length === len
+        },
+        { tid: topicId, len: 2 },
+        { timeout: 30000 }
+      )
+    })
+    const branches = await listBranches(page, topicId)
+    expect(branches).toHaveLength(1)
+    const branchId = branches[0].id as string
+
+    await test.step('ordinary send on the branch route preserves the logical title', async () => {
+      const prev = await page.evaluate((tid: string) => {
+        const s = (window as any).store.getState()
+        const ids = (s.messages?.messageIdsByTopic?.[tid] ?? []) as string[]
+        let n = 0
+        for (const id of ids) if (s.messages?.entities?.[id]?.role === 'assistant') n += 1
+        return n
+      }, topicId)
+      clearRequestLog()
+      const seq = getRequestSequence()
+      await uiSendMessageLocal(page, 'branch naming preservation probe message')
+      await waitAssistant(page, topicId, prev)
+      const productReq: any = findProductRequestAfter(seq)
+      expect(productReq, 'mock must observe the branch send').not.toBeNull()
+      // Allow the fire-and-forget auto-naming attempt to settle; the
+      // non-default logical title must survive it.
+      await page.waitForTimeout(8000)
+      const reduxName: string = await page.evaluate((tid: string) => {
+        const s = (window as any).store.getState()
+        return s.assistants.assistants.flatMap((a: any) => a.topics).find((t: any) => t.id === tid)?.name ?? ''
+      }, topicId)
+      expect(reduxName).toBe(manualTitle)
+      expect(reduxName).not.toContain('[Mock mock-model] You said:')
+      // Still exactly one sidebar topic; branch catalog holds the single L1.
+      const sidebarIds: string[] = await page.evaluate(() => {
+        const s = (window as any).store.getState()
+        return s.assistants.assistants.flatMap((a: any) => (a.topics ?? []).map((t: any) => t.id))
+      })
+      expect(sidebarIds).toContain(topicId)
+      const afterBranches = await listBranches(page, topicId)
+      expect(afterBranches).toHaveLength(1)
+      expect(afterBranches[0].id).toBe(branchId)
+      const activeRoute: string | null = await page.evaluate(
+        (tid: string) => (window as any).store.getState().topicBranch?.activeBranchIdByTopic?.[tid] ?? null,
+        topicId
+      )
+      expect(activeRoute).toBe(branchId)
+    })
+
+    await test.step('post-exit SQLite: logical name durable, branch row intact, no extra topics', async () => {
+      const chatDbPath = getChatDbPath()
+      expect(chatDbPath).not.toBeNull()
+      await electronApp.close()
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      const esc = (v: string): string => v.replace(/'/g, "''")
+      const tRes = queryChatDbViaElectron(chatDbPath!, `SELECT id, name FROM topics WHERE id = '${esc(topicId)}'`)
+      if (!tRes.ok) throw new Error(`topics query failed: ${tRes.code}`)
+      const tRows = tRes.rows as any[]
+      expect(tRows).toHaveLength(1)
+      expect(tRows[0].name).toBe(manualTitle)
+      const bRes = await queryChatDbViaElectronWithRetry(
+        chatDbPath!,
+        `SELECT id, topic_id FROM topic_branches WHERE topic_id = '${esc(topicId)}'`
+      )
+      if (!bRes.ok) throw new Error(`branches query failed: ${bRes.code}`)
+      expect((bRes.rows as any[]).map((r: any) => r.id)).toEqual([branchId])
+    })
+  })
+})

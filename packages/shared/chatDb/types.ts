@@ -1011,6 +1011,16 @@ export interface UpdateTopicMetadataRequest {
   prompt?: string | null
   /** isNameManuallyEdited (overflow). null clears, absent = no change. */
   isNameManuallyEdited?: boolean | null
+  /**
+   * Optional atomic preimage guard for automatic naming writes only.
+   * Absent = no guard (manual paths). When present, Main compares the current
+   * authority value inside the same transaction and returns the current wire
+   * unchanged (graceful no-op, no sync intent, no updatedAt bump) on mismatch.
+   * Null matches a null/absent authority value; it never creates metadata.
+   */
+  expectedName?: string | null
+  /** Optional atomic preimage guard for the manual-edit flag (same no-op semantics). */
+  expectedIsNameManuallyEdited?: boolean | null
 }
 
 /** @see IpcChannel.ChatDb_UpdateTopicMetadata */

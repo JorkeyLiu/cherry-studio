@@ -887,6 +887,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       getState,
       topicId,
       assistantMsgId,
+      requestRoute: execRoute,
       saveUpdatesToDB: saveUpdatesToDBForExec,
       saveFinalUpdatesAtomically: saveFinalUpdatesAtomicallyForExec,
       assistant,

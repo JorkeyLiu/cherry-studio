@@ -7,7 +7,6 @@ import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
 import { estimateMessagesUsage } from '@renderer/services/TokenService'
-import store from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
 import { updateOneBlock } from '@renderer/store/messageBlock'
 import { selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
@@ -41,6 +40,13 @@ interface BaseCallbacksDependencies {
   getState: any
   topicId: string
   assistantMsgId: string
+  /**
+   * Captured request route pinned by the initiating send/resend/regenerate.
+   * Naming and request-context resolution must use this route even if the
+   * active branch switches during completion; undefined = legacy fallback to
+   * the latest active route at completion time.
+   */
+  requestRoute?: string | null
   executionState?: AssistantExecutionState
   saveUpdatesToDB: any
   /**
@@ -70,6 +76,8 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
     assistant,
     getCurrentThinkingInfo
   } = deps
+  // Captured request route (never re-derived from latest active when pinned).
+  const pinnedRequestRoute: string | null | undefined = deps.requestRoute
   const executionState: AssistantExecutionState = deps.executionState ?? blockManager.executionState
 
   const startTime = Date.now()
@@ -404,7 +412,10 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         const provisionalLoadedMessages = (selectLoadedMessagesForTopic(latestState, topicId) ?? []) as Message[]
         const orderedMsgs = provisionalLoadedMessages
         let contextMsgs = orderedMsgs
-        const execRoute = selectActiveBranchId(latestState, topicId)
+        // Captured request route wins; legacy callers without a pin fall back
+        // to the latest active route at completion time.
+        const execRoute =
+          pinnedRequestRoute !== undefined ? pinnedRequestRoute : selectActiveBranchId(latestState, topicId)
         const execAnchorKey =
           typeof execRoute === 'string' && execRoute.length > 0 ? `${topicId}:${execRoute}` : topicId
         const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[execAnchorKey]?.groupKey ?? null
@@ -581,9 +592,13 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
         // 成功终态命名：仅在最终原子持久化成功且已加载 Redux 终态提交之后
         // 触发（仍在 MESSAGE_COMPLETE 之前）。失败/非 success/持久化失败分支
         // 永不触发；fire-and-forget，保留 catch 日志，不 await，不重复调用。
-        void Promise.resolve(
-          autoRenameTopic(assistant, topicId, selectActiveBranchId(store.getState(), topicId))
-        ).catch((error: unknown) => logger.error('autoRenameTopic failed', error as Error))
+        // The captured request route is used even if the active branch
+        // switched during completion; never re-derive from latest active here.
+        const namingRoute =
+          pinnedRequestRoute !== undefined ? pinnedRequestRoute : selectActiveBranchId(latestState, topicId)
+        void Promise.resolve(autoRenameTopic(assistant, topicId, namingRoute)).catch((error: unknown) =>
+          logger.error('autoRenameTopic failed', error as Error)
+        )
 
         void EventEmitter.emit(EVENT_NAMES.MESSAGE_COMPLETE, { id: assistantMsgId, topicId, status })
         logger.debug('onComplete finished')
