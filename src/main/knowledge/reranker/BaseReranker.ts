@@ -1,4 +1,5 @@
 import { DEFAULT_DOCUMENT_COUNT, DEFAULT_RELEVANT_SCORE } from '@main/utils/knowledge'
+import { resolveOutboundRequestHeaders } from '@shared/aiCore/provider/utils/requestHeaders'
 import type { KnowledgeBaseParams, KnowledgeSearchResult } from '@types'
 
 import type { MultiModalDocument, RerankStrategy } from './strategies/RerankStrategy'
@@ -68,11 +69,39 @@ export default abstract class BaseReranker {
 
     return returenResults
   }
-  public defaultHeaders() {
-    return {
-      Authorization: `Bearer ${this.base.rerankApiClient?.apiKey}`,
+  public defaultHeaders(): Record<string, string> {
+    const rerankClient = this.base.rerankApiClient
+    // Shared cross-runtime policy (topicless here: rerank carries no topic):
+    // provider extra session wins over the automatic identity; the automatic
+    // identity is one request-local opaque value on the Go endpoint only.
+    // `defaultHeaders()` runs per rerank invocation, so the opaque value is
+    // per logical invocation/retry, never a persisted session.
+    const providerExtra = rerankClient?.extra_headers as Record<string, string | undefined> | undefined
+    const resolved = resolveOutboundRequestHeaders({
+      apiHost: rerankClient?.baseURL,
+      providerExtraHeaders: providerExtra
+    })
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${rerankClient?.apiKey}`,
       'Content-Type': 'application/json'
     }
+    if (providerExtra) {
+      for (const [key, value] of Object.entries(providerExtra)) {
+        if (value === undefined) continue
+        // Auth/content are owned by this client (key rotation/Bearer +
+        // JSON body); custom headers never override them.
+        if (key.toLowerCase() === 'authorization' || key.toLowerCase() === 'content-type') continue
+        headers[key] = value
+      }
+    }
+    if (resolved) {
+      for (const [key, value] of Object.entries(resolved)) {
+        if (value !== undefined) {
+          headers[key] = value
+        }
+      }
+    }
+    return headers
   }
   protected formatErrorMessage(url: string, error: any, requestBody: any) {
     const errorDetails = {

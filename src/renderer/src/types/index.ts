@@ -596,6 +596,14 @@ export type ApiClient = {
   apiKey: string
   apiVersion?: string
   baseURL: string
+  /**
+   * Optional provider-level custom headers forwarded from the owning
+   * connection (`Provider.extra_headers`). Absent = no custom headers (no
+   * required migration for existing persisted/IPC payloads). Main resolves
+   * the shared request-header policy against these plus the automatic Go
+   * session identity; auth/default headers are preserved independently.
+   */
+  extra_headers?: Record<string, string>
 }
 
 export type GenerateImageParams = {

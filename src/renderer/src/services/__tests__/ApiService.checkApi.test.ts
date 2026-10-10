@@ -1,5 +1,6 @@
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import type AiProvider from '@renderer/aiCore/AiProvider'
+import { OPENCODE_SESSION_HEADER, resolveOutboundRequestHeaders } from '@renderer/aiCore/prepareParams/header'
 import type * as ConfigModelsModule from '@renderer/config/models'
 import { messageBlocksSlice } from '@renderer/store/messageBlock'
 import type * as UtilsModule from '@renderer/utils'
@@ -79,8 +80,6 @@ vi.mock('@renderer/utils', async (importOriginal) => {
   }
 })
 
-import { OPENCODE_SESSION_HEADER } from '@renderer/aiCore/prepareParams/header'
-
 import { checkApi } from '../ApiService'
 
 const baseProvider = (overrides: Record<string, unknown> = {}) =>
@@ -120,8 +119,8 @@ beforeEach(() => {
   } as any)
 })
 
-describe('checkApi OpenCode Go session header wiring', () => {
-  it('sends the synthetic per-check session header on the Go endpoint', async () => {
+describe('checkApi delegates session identity to the AiProvider boundary (no business-entry injection)', () => {
+  it('sends no session header itself on the Go endpoint; the boundary mints the opaque identity', async () => {
     const provider = baseProvider({
       id: 'opencode-go',
       name: 'OpenCode Go',
@@ -133,12 +132,23 @@ describe('checkApi OpenCode Go session header wiring', () => {
 
     expect(mockCompletions).toHaveBeenCalledTimes(1)
     const params = mockCompletions.mock.calls[0]?.[1] as any
-    // The single check request reuses its own abortId as the synthetic
-    // session id (mocked uuid), stable within this one request.
-    expect(sessionHeaderOf(params)).toBe('check-abort-uuid-1')
+    // Duplicate-removal proof: the business entry no longer fabricates a
+    // per-check header (no abortId reuse here).
+    expect(sessionHeaderOf(params)).toBeUndefined()
+    expect(params?.headers).toBeUndefined()
+
+    // Convergence proof through the real common boundary: the same Go
+    // endpoint with no topic mints one request-local opaque identity.
+    const boundary = resolveOutboundRequestHeaders({
+      apiHost: provider.apiHost,
+      explicitHeaders: params?.headers,
+      providerExtraHeaders: provider.extra_headers,
+      generateId: () => 'opaque-check-1'
+    })
+    expect(boundary?.[OPENCODE_SESSION_HEADER]).toBe('opaque-check-1')
   })
 
-  it('uses the synthetic check id rather than user/provider/model content', async () => {
+  it('topicless identity carries no user/provider/model content', async () => {
     const provider = baseProvider({
       id: 'opencode-go',
       name: 'OpenCode Go',
@@ -149,14 +159,20 @@ describe('checkApi OpenCode Go session header wiring', () => {
     await checkApi(provider, model)
 
     const params = mockCompletions.mock.calls[0]?.[1] as any
-    const value = sessionHeaderOf(params) ?? ''
-    expect(value).toBe('check-abort-uuid-1')
+    expect(sessionHeaderOf(params)).toBeUndefined()
+
+    const boundary = resolveOutboundRequestHeaders({
+      apiHost: provider.apiHost,
+      generateId: () => 'opaque-check-2'
+    })
+    const value = boundary?.[OPENCODE_SESSION_HEADER] ?? ''
+    expect(value).toBe('opaque-check-2')
     expect(value).not.toContain('go-model-id')
     expect(value).not.toContain('Go Model Name')
     expect(value).not.toContain('OpenCode Go')
   })
 
-  it('sends no session header for non-OpenCode hosts', async () => {
+  it('sends no session header for non-OpenCode hosts at either layer', async () => {
     const provider = baseProvider({
       id: 'deepseek',
       name: 'DeepSeek',
@@ -171,5 +187,8 @@ describe('checkApi OpenCode Go session header wiring', () => {
     expect(sessionHeaderOf(params)).toBeUndefined()
     // Non-Go behavior is unchanged: no headers object is fabricated.
     expect(params?.headers?.[OPENCODE_SESSION_HEADER]).toBeUndefined()
+    expect(
+      resolveOutboundRequestHeaders({ apiHost: provider.apiHost, explicitHeaders: params?.headers })
+    ).toBeUndefined()
   })
 })

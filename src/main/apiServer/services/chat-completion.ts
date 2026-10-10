@@ -1,5 +1,6 @@
 import OpenAI from '@cherrystudio/openai'
 import type { ChatCompletionCreateParams, ChatCompletionCreateParamsStreaming } from '@cherrystudio/openai/resources'
+import { resolveOutboundRequestHeaders } from '@shared/aiCore/provider/utils/requestHeaders'
 import type { Provider } from '@types'
 
 import { loggerService } from '../../services/LoggerService'
@@ -71,9 +72,39 @@ export class ChatCompletionService {
     // Matches the main-process convention in OpenClawService.
     const apiKey = provider.apiKey ? provider.apiKey.split(',')[0].trim() : ''
 
+    // Shared cross-runtime header policy (topicless here: the OpenAI chat
+    // completion body carries no trustworthy topic field — `user`, when
+    // present, is an end-user id, never a topic — so this is the topicless
+    // logical-request identity: one opaque value per incoming request on the
+    // Go endpoint only). The client is constructed per incoming request, so
+    // the value is constant for that invocation/retries and never persisted.
+    // Provider custom headers flow via defaultHeaders; bodies, dialect,
+    // endpoint selection, streaming, and error semantics are untouched.
+    const providerExtra = provider.extra_headers as Record<string, string | undefined> | undefined
+    const resolvedSession = resolveOutboundRequestHeaders({
+      apiHost: provider.apiHost,
+      providerExtraHeaders: providerExtra
+    })
+    const defaultHeaders: Record<string, string> = {}
+    if (providerExtra) {
+      for (const [key, value] of Object.entries(providerExtra)) {
+        if (value !== undefined) {
+          defaultHeaders[key] = value
+        }
+      }
+    }
+    if (resolvedSession) {
+      for (const [key, value] of Object.entries(resolvedSession)) {
+        if (value !== undefined) {
+          defaultHeaders[key] = value
+        }
+      }
+    }
+
     const client = new OpenAI({
       baseURL: provider.apiHost,
-      apiKey
+      apiKey,
+      ...(Object.keys(defaultHeaders).length > 0 ? { defaultHeaders } : {})
     })
 
     return {

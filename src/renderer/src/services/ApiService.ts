@@ -3,7 +3,6 @@
  */
 import { loggerService } from '@logger'
 import { buildStreamTextParams } from '@renderer/aiCore/prepareParams'
-import { buildOpencodeCheckSessionHeaders } from '@renderer/aiCore/prepareParams/header'
 import type { AiSdkMiddlewareConfig } from '@renderer/aiCore/types/middlewareConfig'
 import { buildProviderOptions } from '@renderer/aiCore/utils/options'
 import { isDedicatedImageGenerationModel, isEmbeddingModel } from '@renderer/config/models'
@@ -307,9 +306,6 @@ export async function fetchChatCompletion({
     mcpTools: mcpTools,
     allowedTools,
     webSearchProviderId: assistant.webSearchProviderId,
-    // Stable per-conversation identity: topicId becomes `x-opencode-session`
-    // only for the official OpenCode Go endpoint (see isOpenCodeGoEndpoint).
-    topicId,
     requestOptions
   })
 
@@ -975,17 +971,15 @@ export async function checkApi(provider: Provider, model: Model, timeout = 15000
     const abortId = uuid()
     const signal = readyToAbort(abortId)
     let streamError: ResponseError | undefined
-    // One-shot synthetic session identity for the OpenCode Go gateway
-    // (`x-opencode-session`, 400 MissingSessionID when absent). Detection
-    // requests have no real topic/conversation, so the per-check `abortId`
-    // is reused as the random session id — never userId/provider/model.
-    // Strictly gated by `isOpenCodeGoEndpoint`; non-Go hosts send nothing.
-    const checkSessionHeaders = buildOpencodeCheckSessionHeaders(provider.apiHost, abortId)
+    // Connection session identity (`x-opencode-session`) is owned exclusively
+    // by the AiProvider request boundary: this detection request carries no
+    // headers of its own (no topic, no synthetic check id here). On the Go
+    // endpoint the boundary mints one request-local opaque identity for this
+    // invocation; non-Go hosts send nothing.
     const params: StreamTextParams = {
       system: assistant.prompt,
       prompt: 'hi',
-      abortSignal: signal,
-      ...(checkSessionHeaders ? { headers: checkSessionHeaders } : {})
+      abortSignal: signal
     }
     const config: AiProviderConfig = {
       streamOutput: true,

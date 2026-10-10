@@ -30,13 +30,7 @@ import { setupToolsConfig } from '../utils/mcp'
 import { buildProviderOptions } from '../utils/options'
 import { buildProviderBuiltinWebSearchConfig } from '../utils/websearch'
 import { webSearchEndpointError } from './attachmentErrors'
-import {
-  addAnthropicHeaders,
-  buildOpencodeSessionHeader,
-  hasHeader,
-  isOpenCodeGoEndpoint,
-  OPENCODE_SESSION_HEADER
-} from './header'
+import { addAnthropicHeaders } from './header'
 import { filterStandardParams, getMaxTokens, getTemperature, getTopP } from './modelParameters'
 
 const logger = loggerService.withContext('parameterBuilder')
@@ -77,10 +71,6 @@ export async function buildStreamTextParams(
     allowedTools?: string[]
     webSearchProviderId?: string
     webSearchConfig?: CherryWebSearchConfig
-    // Stable per-conversation identity (topicId). The generic request layer
-    // emits `x-opencode-session` only when the request actually targets the
-    // official OpenCode Go endpoint (see isOpenCodeGoEndpoint).
-    topicId?: string
     requestOptions?: {
       signal?: AbortSignal
       timeout?: number
@@ -174,22 +164,10 @@ export async function buildStreamTextParams(
 
   let headers = inputHeaders
 
-  // Stable per-conversation gateway identity, OpenCode Go only
-  // (`x-opencode-session`, 400 MissingSessionID when absent). Endpoint-based:
-  // only requests actually targeting the official Go endpoint
-  // (`https://opencode.ai/zen/go/v1/*`, see isOpenCodeGoEndpoint) carry it —
-  // ordinary Zen (`/zen/v1`), DeepSeek direct, and other OpenAI-compatible
-  // endpoints never do, regardless of model brand. Stability: same topicId
-  // yields the identical value across retries/continuations; blank/missing
-  // topicId sends nothing (translate, check, generate, and listModels must not
-  // fabricate an identity). Only the topic id is used, never
-  // userId/messageId/traceId. An explicit caller header of the same name (any
-  // case) wins over the derived default; header merge order follows the
-  // project combineHeaders style (later wins).
-  const sessionHeader = buildOpencodeSessionHeader(options.topicId)
-  if (sessionHeader && isOpenCodeGoEndpoint(provider.apiHost) && !hasHeader(headers, OPENCODE_SESSION_HEADER)) {
-    headers = combineHeaders(sessionHeader, headers)
-  }
+  // Connection session identity (`x-opencode-session`) is owned exclusively
+  // by the AiProvider request boundary (see resolveOutboundRequestHeaders):
+  // this builder never injects it and only forwards explicit caller headers
+  // plus dialect headers below.
 
   if (isAnthropicModel(model)) {
     const betaHeaders = addAnthropicHeaders(assistant, model)
