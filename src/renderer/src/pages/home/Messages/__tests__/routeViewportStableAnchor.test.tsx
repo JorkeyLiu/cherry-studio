@@ -389,6 +389,155 @@ describe('same-route window 16→28 full event loop (row replacement + 12 rows)'
   })
 })
 
+describe('ordinary pagination commit holds across a live user session (one-shot, generation-scoped)', () => {
+  it('prepaint same-identity hold applies while the gesture is live, then the gate restores', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+    expect(container.scrollTop).toBe(0)
+
+    // Continuous upward gesture still live (wheel bursts across fetch flight).
+    controller.declareUserIntent()
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+
+    // Older prepend commits: 1033px above m2 pushes it from -60 to 973.
+    // Production publishes the precommit identity via adopt (same tick as the
+    // window commit), then the generation notify drives the keeper prepaint.
+    act(() => {
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      expect(
+        controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::28', {
+          messageId: 'm2',
+          offset: -60
+        })
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+    // Held despite the live session: same reading identity, same offset.
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+
+    // One-shot scope: further drift in the SAME live session does not hold
+    // again — the gate is restored, later takeovers stay authoritative.
+    act(() => {
+      rects.set('m2', { top: 1073, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(1033)
+
+    // After the gesture ends, ordinary keeper holding resumes on the live
+    // anchor: with the row settled back under its held offset there is no
+    // further drift (idempotent, no new snapshot fabricated here).
+    act(() => {
+      controller.noteInteractionScrollEnd()
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(3)
+    })
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+
+  it('pre-commit scroll/mutation observers cannot steal the one-shot from the matching layout commit', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    // Continuous upward gesture still live across the fetch flight.
+    controller.declareUserIntent()
+    expect(controller.hasActiveUserInteraction()).toBe(true)
+
+    // Arm the commit-scoped hold WITHOUT driving the keeper layout yet (the
+    // fetch resolved, the DOM has not committed): pre-growth geometry.
+    expect(
+      controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::28', {
+        messageId: 'm2',
+        offset: -60
+      })
+    ).toBe(true)
+
+    // Earlier scroll + resize + mutation callbacks on the pre-growth DOM must
+    // neither consume the one-shot nor move the viewport.
+    act(() => {
+      container.dispatchEvent(new Event('scroll'))
+      for (const ro of FakeResizeObserver.instances) ro.fire()
+      for (const mo of FakeMutationObserver.instances) mo.fire()
+    })
+    expect(container.scrollTop).toBe(0)
+
+    // The matching layout commit still holds: prepend growth above m2 pushes
+    // it from -60 to 973 and the keeper compensates exactly once.
+    act(() => {
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+
+  it('late layout after the commit hold converges without swapping the reading identity', () => {
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(controller, 'm2', -60)
+    rects.set('m1', { top: -460, height: 400 })
+    rects.set('m2', { top: -60, height: 40 })
+    rects.set('m3', { top: -20, height: 400 })
+    const { container, ref } = buildSurface()
+    const keeper = renderKeeper(controller, ref, 0, vi.fn())
+
+    act(() => {
+      rects.set('m1', { top: -460, height: 1433 })
+      rects.set('m2', { top: 973, height: 40 })
+      rects.set('m3', { top: 1013, height: 400 })
+      expect(
+        controller.adoptOrdinaryPaginationWindow({ topicId: 't1', route: null }, 'old::new::28', {
+          messageId: 'm2',
+          offset: -60
+        })
+      ).toBe(true)
+      keeper.rerender(1)
+    })
+    expect(container.scrollTop).toBe(1033)
+    // Late layout settles the row back under the held offset; the keeper
+    // holds nothing further and the identity never swaps to a new oldest row.
+    act(() => {
+      rects.set('m2', { top: -60, height: 40 })
+      keeper.rerender(2)
+    })
+    expect(container.scrollTop).toBe(1033)
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm2',
+      offset: -60
+    })
+    keeper.unmount()
+  })
+})
+
 describe('keeper event model (generation / scroll / rebind / gates)', () => {
   it('first mount binds container + content wrapper + live anchor row', () => {
     const controller = new RouteViewportController({ topicId: 't1', route: null })

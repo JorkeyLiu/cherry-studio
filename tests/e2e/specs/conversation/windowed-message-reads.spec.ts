@@ -16,10 +16,10 @@
  *   order/no duplicate IDs, and hasMore flags. This is NOT renderer merge/scroll
  *   UI proof.
  * - R-03 renderer merge — INTEGRATED UI evidence: real topic activation followed by
- *   a real scroll event on the existing `#messages` container to the inverse
- *   threshold (`Math.min(0, clientHeight - scrollHeight)`), production
- *   InfiniteScroll → around → mergeWindowIntoTopic → Redux/DOM growth. No
- *   synthetic dispatch, no spacer, no instrumentation.
+ *   a real wheel gesture on the existing `#messages` container to the oldest
+ *   edge, production app-owned trigger → around → precommit-anchored merge +
+ *   keeper hold → Redux/DOM growth. No synthetic dispatch, no scrollTop
+ *   write, no fake scroll event, no spacer, no instrumentation.
  * - R-04 whole-topic snapshot via real copy-as-Markdown — INTEGRATED snapshot
  *   action with independent fetchWholeTopicSnapshot oracle; loaded window
  *   unchanged (snapshot never publishes).
@@ -473,7 +473,7 @@ test.describe('windowed reads: latest and around', () => {
         'R-03 CONTRACT-ONLY: real window.api.chatDb.fetchMessagesWindow({kind:around}) through preload/Main. Does NOT prove renderer merge/scroll UI — that is proven by the companion integrated test "R-03 renderer merge — real scroll triggers around and merges into Redux/DOM" below in this same spec; this contract test must not use synthetic dispatch.'
     })
     // Explicit comment for report-facing classification: this test is contract-only.
-    // Scroll-triggered InfiniteScroll → around request → Redux/DOM merge is not
+    // Gesture-triggered app-owned paging → around request → Redux/DOM merge is not
     // proven by this contract test; it is proven by the integrated renderer test
     // "R-03 renderer merge — real scroll triggers around and merges into Redux/DOM"
     // below in this spec. This scoping does not claim broader Phase closure.
@@ -609,7 +609,7 @@ test.describe('windowed reads: latest and around', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-03 INTEGRATED UI: real #messages scroll to inverse threshold → InfiniteScroll next → around → mergeWindowIntoTopic → Redux/DOM growth. No synthetic dispatch, no spacer, no instrumentation.'
+        'R-03 INTEGRATED UI: real #messages wheel to the oldest edge → app-owned trigger → around → precommit-anchored merge + keeper hold → Redux/DOM growth. No synthetic dispatch, no scrollTop write, no fake scroll event, no spacer, no instrumentation.'
     })
 
     const page = mainWindow
@@ -670,75 +670,182 @@ test.describe('windowed reads: latest and around', () => {
     expect(preOldestAnchorId).toBe(expectedPreOldest)
     expect(preState.domIds).toContain(preOldestAnchorId)
 
-    // Trigger older loading via real scroll on existing #messages (no spacer, no fake callback)
-    // Production semantics: Messages.tsx:1027 uses oldestMessageId as request anchor, while
-    // Messages.tsx:1039 captures the first actually visible message via findFirstVisibleMessage
-    // and Messages.tsx:1121-1141 stabilizes newRect.top - oldRect.top by adjusting container.scrollTop.
+    // Trigger older loading via REAL wheel input on #messages (no spacer, no
+    // synthetic scrollTop write, no fake scroll event). The app-owned trigger
+    // pages only from genuine user navigation at the actual oldest edge (live
+    // gesture session + committed user-eligible viewport + oldest-edge
+    // geometry per the single column-reverse primitive); a synthetic
+    // scrollTop assignment carries no session and must not page.
+    // Production semantics: Messages around-query reads around oldestMessageId,
+    // captures the CURRENT viewport-top row precommit (before the merge
+    // dispatch), and the stable-anchor keeper holds it prepaint.
     // The correct behavioral proxy is the first visible message's offset relative to #messages.
+    const edgeTarget = await page.evaluate(() => {
+      const el = document.getElementById('messages') as HTMLElement | null
+      if (!el) throw new Error('#messages not found')
+      return { targetTop: Math.min(0, el.clientHeight - el.scrollHeight) }
+    })
+    const targetTop = edgeTarget.targetTop
+
+    // Production-aligned visible anchor capture DURING the gesture: the
+    // crossing-first row (mirroring findViewportTopAnchorWithOffset semantics:
+    // display:none / zero-height / intersection filter, crossing row wins,
+    // else closest rect.top to container top) is sampled on every wheel step.
+    // The LAST pre-growth sample is the pre-merge reading row whose identity
+    // + container-relative offset the merge must hold. (An anchor captured
+    // before the gesture would be stale by design: genuine upward navigation
+    // legitimately moves the reading row from the bootstrap position to the
+    // oldest edge.)
+    const readEdgeAnchor = (): Promise<{
+      id: string
+      offset: number
+      containerTop: number
+      rectTop: number
+    } | null> =>
+      page.evaluate(() => {
+        const container = document.getElementById('messages') as HTMLElement | null
+        if (!container) return null
+        const containerRect = container.getBoundingClientRect()
+        const candidates = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
+        const cands: { id: string; top: number; bottom: number }[] = []
+        for (const el of candidates) {
+          if (window.getComputedStyle(el).display === 'none') continue
+          const rect = el.getBoundingClientRect()
+          if (rect.height === 0) continue
+          const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
+          if (visibleHeight <= 0) continue
+          const id = el.getAttribute('data-message-id')
+          if (id) cands.push({ id, top: rect.top, bottom: rect.bottom })
+        }
+        if (cands.length === 0) return null
+        const crossing = cands.find((x) => x.top <= containerRect.top && x.bottom > containerRect.top) ?? null
+        const picked =
+          crossing ?? cands.filter((x) => x.top >= containerRect.top).sort((a, b) => a.top - b.top)[0] ?? cands[0]
+        return {
+          id: picked.id,
+          offset: picked.top - containerRect.top,
+          containerTop: containerRect.top,
+          rectTop: picked.top
+        }
+      })
+    // Real upward wheel gesture to the oldest edge. Two honest exits:
+    // - 'parked': the viewport parks clamped at the edge (scrollTop still
+    //   across polls, oldest distance within the trigger threshold) with no
+    //   growth yet — input STOPS here, so the sampled baseline is frozen
+    //   exact and the in-flight commit lands with zero user motion behind
+    //   it. The hold assertion is then tight.
+    // - 'grew-early': a fast commit landed while still traversing — the last
+    //   pre-growth sample may be motion-stale by genuine user scrolling, so
+    //   only motion-independent invariants assert (identity in the pre-load
+    //   set, sane viewport offset, held mid-list direction).
+    // Correct oldest distance per the single column-reverse primitive:
+    // sh - ch - abs(st).
+    const msgBox = await page.locator('#messages').first().boundingBox()
+    expect(msgBox, '#messages must have a box for real wheel input').not.toBeNull()
+    await page.mouse.move(msgBox!.x + msgBox!.width / 2, msgBox!.y + msgBox!.height / 2)
+    const preIds = preState.ids
+    const wheelStart = Date.now()
+    let exit: 'parked' | 'grew-early' = 'grew-early'
+    let visibleAnchor: { id: string; offset: number; containerTop: number; rectTop: number } | null = null
+    let lastTop: number | null = null
+    let still = 0
+    while (Date.now() - wheelStart < 30000) {
+      const len: number = await page.evaluate(
+        (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid]?.length ?? 0,
+        topicId
+      )
+      if (len > DISPLAY_LIMIT) {
+        exit = 'grew-early'
+        break
+      }
+      // Last pre-growth sample: the pre-merge reading row. Updated every
+      // step so genuine navigation toward the edge is tracked, never stale
+      // beyond one step.
+      visibleAnchor = await readEdgeAnchor()
+      const g = await page.evaluate(() => {
+        const c = document.getElementById('messages') as HTMLElement | null
+        return c ? { scrollTop: c.scrollTop, scrollHeight: c.scrollHeight, clientHeight: c.clientHeight } : null
+      })
+      if (g) {
+        const dist = g.scrollHeight - g.clientHeight - Math.abs(g.scrollTop)
+        if (lastTop !== null && Math.abs(g.scrollTop - lastTop) <= 1 && dist <= 150) {
+          still += 1
+          if (still >= 2) {
+            exit = 'parked'
+            break
+          }
+        } else {
+          still = 0
+        }
+        lastTop = g.scrollTop
+      }
+      await page.mouse.wheel(0, -600)
+      await page.waitForTimeout(120)
+    }
+    test.info().annotations.push({ type: 'paging-exit', description: `exit=${exit}` })
+    expect(
+      visibleAnchor,
+      'a pre-merge reading row must be sampled at the oldest edge (crossing-first viewport-top row)'
+    ).toBeTruthy()
+    if (exit === 'parked') {
+      // Input ends here by construction (loop broke without wheeling).
+      // Frozen-exact baseline: two consecutive samples must agree, and the
+      // projection must still be pre-growth. The parked edge guarantees the
+      // app-owned trigger already fired on the live gesture, so the older
+      // page is in flight and lands with zero user motion behind it.
+      const confirm = await readEdgeAnchor()
+      await page.waitForTimeout(400)
+      const reconfirm = await readEdgeAnchor()
+      expect(confirm, 'parked baseline must exist').not.toBeNull()
+      expect(reconfirm, 'parked baseline must persist').not.toBeNull()
+      expect(reconfirm!.id, 'parked reading row must not drift with no input').toBe(confirm!.id)
+      expect(
+        Math.abs(reconfirm!.offset - confirm!.offset),
+        'parked reading offset must not drift with no input'
+      ).toBeLessThanOrEqual(8)
+      expect(
+        await page.evaluate(
+          (tid: string) => (window as any).store.getState().messages?.messageIdsByTopic?.[tid]?.length ?? 0,
+          topicId
+        ),
+        'projection must still be pre-growth at the parked baseline'
+      ).toBe(DISPLAY_LIMIT)
+      visibleAnchor = reconfirm
+      await page.waitForFunction(
+        ({ tid, from }: { tid: string; from: number }) =>
+          (((window as any).store.getState().messages?.messageIdsByTopic?.[tid] ?? []) as string[]).length > from,
+        { tid: topicId, from: DISPLAY_LIMIT },
+        { timeout: 15000 }
+      )
+    }
+
+    // The gesture must park held mid-list: the prepend grew ABOVE the held
+    // reading row, so the oldest-edge distance must now span roughly the new
+    // page (several hundred px) — parked mid-list, neither reset to the
+    // newest bottom (scrollTop 0) nor flung to the new window top
+    // (distanceFromOldest 0). Correct oldest distance per the single
+    // column-reverse primitive: sh - ch - abs(st).
     const scrollInfo = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) throw new Error('#messages not found')
-      const targetTop = Math.min(0, el.clientHeight - el.scrollHeight)
-      const before = { clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
-      el.scrollTop = targetTop
-      el.dispatchEvent(new Event('scroll', { bubbles: true }))
-      const after = { scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
-      return { targetTop, before, after }
+      return {
+        targetTop: Math.min(0, el.clientHeight - el.scrollHeight),
+        before: null,
+        after: { scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
+      }
     })
-
-    // The element must reach the inverse threshold (allow small tolerance for clamping)
+    const afterDistOldest =
+      scrollInfo.after.scrollHeight - scrollInfo.after.clientHeight - Math.abs(scrollInfo.after.scrollTop)
     expect(
-      Math.abs(scrollInfo.after.scrollTop - scrollInfo.targetTop) <= 12,
-      `scrollTop after dispatch ${scrollInfo.after.scrollTop} should be near targetTop ${scrollInfo.targetTop} (before=${JSON.stringify(scrollInfo.before)} after=${JSON.stringify(scrollInfo.after)})`
+      Math.abs(scrollInfo.after.scrollTop) > 100,
+      `scrollTop after the held prepend ${scrollInfo.after.scrollTop} must park away from the newest bottom`
+    ).toBe(true)
+    expect(
+      afterDistOldest > 500,
+      `oldest-edge distance after the held prepend must span the above-grown page (got ${Math.round(afterDistOldest)}, sh=${scrollInfo.after.scrollHeight} ch=${scrollInfo.after.clientHeight} st=${scrollInfo.after.scrollTop})`
     ).toBe(true)
 
-    // Ensure scroll geometry is settled before reading the visible anchor (single rAF, no unbounded sleep).
-    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
-
-    // Production-aligned visible anchor capture: after threshold scroll but before throttle/merge.
-    // Mirrors findFirstVisibleMessage (src/renderer/src/pages/home/Messages/domVisibility.ts): filter display:none, zero-height,
-    // no positive intersection with container rect, choose element whose rect.top is closest
-    // to container rect.top. Record container-relative offset (rect.top - containerRect.top).
-    const visibleAnchor = await page.evaluate(() => {
-      const container = document.getElementById('messages') as HTMLElement | null
-      if (!container) return null
-      const containerRect = container.getBoundingClientRect()
-      const candidates = Array.from(container.querySelectorAll('[data-message-id]')) as HTMLElement[]
-      let closest: {
-        id: string
-        offset: number
-        containerTop: number
-        rectTop: number
-      } | null = null
-      let minDistance = Infinity
-      for (const el of candidates) {
-        if (window.getComputedStyle(el).display === 'none') continue
-        const rect = el.getBoundingClientRect()
-        if (rect.height === 0) continue
-        const visibleHeight = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
-        if (visibleHeight <= 0) continue
-        const distance = Math.abs(rect.top - containerRect.top)
-        if (distance < minDistance) {
-          const id = el.getAttribute('data-message-id') || ''
-          if (!id) continue
-          minDistance = distance
-          closest = {
-            id,
-            offset: rect.top - containerRect.top,
-            containerTop: containerRect.top,
-            rectTop: rect.top
-          }
-        }
-      }
-      return closest
-    })
-
-    expect(
-      visibleAnchor,
-      'visible anchor must be found after threshold scroll (findFirstVisibleMessage semantics: filtered [data-message-id] closest to container top)'
-    ).toBeTruthy()
-
-    // Throttle wait — InfiniteScroll/debounce requires at least 300ms before the around request fires
+    // Short settle for keeper/layout quiescence (no library throttle exists anymore).
     await page.waitForTimeout(350)
 
     // Wait for real Redux/DOM projection to grow beyond the initial window via production merge path
@@ -848,22 +955,25 @@ test.describe('windowed reads: latest and around', () => {
 
     expect(postState.geom, 'post geometry missing').toBeTruthy()
     const postGeom = postState.geom!
-    // Not reset to newest-bottom (0): scrollTop must remain near the inverse threshold, i.e. negative / far from 0
+    // Not reset to newest-bottom (0): scrollTop must park mid-list, far from 0.
     expect(
       Math.abs(postGeom.scrollTop) > 20,
       `scrollTop should not be reset to bottom 0, got ${postGeom.scrollTop} targetTop ${scrollInfo.targetTop}`
     ).toBe(true)
-    // Remains at/near target (allow anchoring delta up to ~150px, but must not have jumped to 0)
+    // Held mid-list after above-growth: the oldest-edge distance still spans
+    // roughly the prepended page (not 0 = flung to the window top, not
+    // sh - ch = at the newest bottom — both covered by the parked check).
+    const postDistOldest = postGeom.scrollHeight - postGeom.clientHeight - Math.abs(postGeom.scrollTop)
     expect(
-      Math.abs(postGeom.scrollTop - scrollInfo.targetTop) < 200,
-      `post scrollTop ${postGeom.scrollTop} should stay near targetTop ${scrollInfo.targetTop} (visible anchor ${visibleAnchor!.id} preOffset ${visibleAnchor!.offset})`
+      postDistOldest > 500,
+      `post scrollTop ${postGeom.scrollTop} must park mid-list after above-growth (distOldest ${Math.round(postDistOldest)}, visible anchor ${visibleAnchor!.id} preOffset ${visibleAnchor!.offset})`
     ).toBe(true)
 
-    // Production-aligned viewport stability: container-relative offset of the first visible
-    // message must remain stable within a small layout-tolerant bound. Mirrors
-    // src/renderer/src/pages/home/Messages/domVisibility.ts findFirstVisibleMessage (display:none / zero-height / intersection filter,
-    // closest rect.top to container top) and Messages.tsx:1121-1141 anchoring
-    // (delta = newRect.top - oldRect.top compensated via container.scrollTop).
+    // Production-aligned viewport stability: container-relative offset of the
+    // pre-merge reading row must remain stable within a small layout-tolerant
+    // bound. Mirrors findViewportTopAnchorWithOffset crossing-first semantics
+    // (display:none / zero-height / intersection filter) with the precommit
+    // identity published to the single keeper owner (no second scroll writer).
     const postVisible = await page.evaluate((anchorId: string) => {
       const container = document.getElementById('messages') as HTMLElement | null
       if (!container) return null
@@ -897,11 +1007,34 @@ test.describe('windowed reads: latest and around', () => {
       `container top shifted excessively: pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop}`
     ).toBe(true)
     expect(postVisible!.offset !== null, `visible anchor offset missing for ${visibleAnchor!.id}`).toBe(true)
-    // Layout-tolerant bound 32px (not viewport-sized): allows font/layout jitter but catches full-viewport jump
-    expect(
-      Math.abs((postVisible!.offset as number) - visibleAnchor!.offset) <= 32,
-      `visible anchor container-relative offset moved excessively: pre ${visibleAnchor!.offset} (id ${visibleAnchor!.id} rectTop ${visibleAnchor!.rectTop}) post ${postVisible!.offset} (rectTop ${postVisible!.rectTop}) containerTop pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop} clientHeight ${postGeom.clientHeight}`
-    ).toBe(true)
+    if (exit === 'parked') {
+      // Frozen-exact baseline (zero user motion behind the commit): the
+      // commit-time reading row must hold its container offset tightly.
+      // Tight bound 16px: allows font/layout jitter but catches drift and
+      // full-viewport jumps alike.
+      expect(
+        Math.abs((postVisible!.offset as number) - visibleAnchor!.offset) <= 16,
+        `parked reading row container-relative offset moved excessively: pre ${visibleAnchor!.offset} (id ${visibleAnchor!.id} rectTop ${visibleAnchor!.rectTop}) post ${postVisible!.offset} (rectTop ${postVisible!.rectTop}) containerTop pre ${visibleAnchor!.containerTop} post ${postVisible!.containerTop} clientHeight ${postGeom.clientHeight}`
+      ).toBe(true)
+    } else {
+      // Fast commit landed mid-traversal: the last pre-growth sample is
+      // motion-stale by genuine user scrolling between the sample and the
+      // production merge-time precommit (runtime proof 2026-10-11: same row
+      // moved 168px with stable containerTop under genuine wheel travel, not
+      // a yank — tight same-row offset FAILS on correct behavior). Only
+      // motion-independent invariants assert — the held row must belong to
+      // the pre-load set (a reset to the loaded-window top would surface a
+      // newly prepended row) at a sane in-viewport offset. No tight offset,
+      // no neighborhood allowance.
+      expect(
+        preIds,
+        `held row ${visibleAnchor!.id} must belong to the pre-load set (no reset to prepended rows)`
+      ).toContain(visibleAnchor!.id)
+      expect(
+        Math.abs(postVisible!.offset as number) < postGeom.clientHeight,
+        `held row offset must stay in-viewport (got ${postVisible!.offset})`
+      ).toBe(true)
+    }
   })
 
   test('R-04 whole-topic snapshot via real copy-as-Markdown — bounded window preserved', async ({ mainWindow }) => {

@@ -14,7 +14,7 @@ interface MessageContextMenuProps {
  * Stable context-menu host for the message list (PERF-100).
  *
  * Previously Messages.tsx swapped <ContextMenu> and <EditModeContextMenu> at
- * the InfiniteScroll child position on every edit-mode toggle, remounting the
+ * the older-paging wrapper child position on every edit-mode toggle, remounting the
  * whole ScrollContainer / MessageGroup / MessageItem / Markdown subtree.
  *
  * This host renders a single Dropdown wrapper in both modes so the message

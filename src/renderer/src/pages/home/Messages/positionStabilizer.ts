@@ -48,3 +48,43 @@ export const shouldCancelStabilizerForKeyDown = (
   if (isEditableTarget(target)) return false
   return true
 }
+
+/**
+ * Clamped-edge older-paging input direction (pure, semantic only).
+ *
+ * At the exact oldest edge no scroll event can fire (clamped), so a genuine
+ * toward-older gesture would never page through the post-scroll path. Only
+ * inputs whose semantic direction is provably TOWARD-OLDER may trigger the
+ * direction-confirmed pre-input request:
+ * - wheel with `deltaY < 0` (native upward scroll; sign only, never magnitude
+ *   thresholds or event counts);
+ * - `PageUp` / `ArrowUp` (native toward-older keys);
+ * - `Home` (native oldest-edge target);
+ * - `Space` with `Shift` (native Shift+Space scrolls up).
+ *
+ * Everything else — downward wheel, `PageDown` / `ArrowDown` / `End`,
+ * non-shift `Space`, pointer/touch/focus — is direction-agnostic or away-bound
+ * and must never fetch: paging for those is decided solely against actual
+ * post-scroll geometry. Native default is always preserved (no
+ * preventDefault, no custom page-scroll arithmetic).
+ */
+export type OlderPagingClampedInput =
+  | { kind: 'wheel'; deltaY: number }
+  | { kind: 'key'; key: string; shiftKey?: boolean }
+  | { kind: 'pointer' }
+  | { kind: 'touch' }
+  | { kind: 'focus' }
+
+export const isTowardOlderClampedInput = (input: OlderPagingClampedInput): boolean => {
+  switch (input.kind) {
+    case 'wheel':
+      return Number.isFinite(input.deltaY) && input.deltaY < 0
+    case 'key': {
+      if (input.key === 'PageUp' || input.key === 'ArrowUp' || input.key === 'Home') return true
+      if (input.key === ' ' || input.key === 'Spacebar') return input.shiftKey === true
+      return false
+    }
+    default:
+      return false
+  }
+}

@@ -58,11 +58,13 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/alignAndCommitDividerSearch/)
     expect(src).toMatch(/endDividerSearchTerminal/)
     // Restore identity + captured offset survive every older-window expansion;
-    // expansion compensation prefers the controller anchor while current.
-    // Route-qualified only: a foreign live anchor must never snapshot.
+    // expansion compensation prefers the restore-owned preferred anchor while
+    // its search session is current (explicit drive carries decision.preferred).
+    // Route-qualified only: the driver builds the preferred snapshot from its
+    // own search state, never from a foreign live anchor.
     // (Behavioral coverage lives in the routeRestoreAnchor smoke + controller
     // provenance unit; no duplicated spelling assertion here.)
-    expect(src).toMatch(/snapshotPreferredAnchor/)
+    expect(src).toMatch(/startOlderWindowLoad\(decision\.preferred\)/)
     expect(src).not.toMatch(/activeRestoreAnchorRef/)
     expect(src).not.toMatch(/snapshotRestoreAnchor\(/)
     // Terminal paths release exactly once with NO divider-position commit:
@@ -80,10 +82,11 @@ describe('visual position contracts', () => {
     const alignSlice = src.slice(alignIdx, alignIdx + 9000)
     expect(alignSlice).toMatch(/commitDisplayedStable/)
     expect(alignSlice).not.toMatch(/runBoundedPositionStabilizer/)
-    // Restore-owned pages are driven explicitly from window state (short
-    // windows at edge=0 may never fire InfiniteScroll); the manual path
-    // cannot race while a search is active.
-    expect(src).toMatch(/Restore-owned search guard/)
+    // Restore-owned pages are driven explicitly from window state (a short
+    // window parked at edge=0 never reaches the app-owned user trigger); the
+    // user trigger explicitly yields while the search session owns the route.
+    expect(src).toMatch(/maybeLoadOlderAtEdge/)
+    expect(src).toMatch(/ownerEpoch === controller\.currentEpoch/)
     expect(src).toMatch(/drivenWindowKey/)
     // No diagnostic probes, no fence/user-input gating, no wheel dependence.
     expect(src).not.toMatch(/TEMP-DIAG/)
@@ -336,11 +339,10 @@ describe('visual position contracts', () => {
     expect(stab).not.toMatch(/isSelfInducedStabilizerScroll/)
     expect(stab).toMatch(/isRestoreTargetValid/)
     expect(stab).toMatch(/shouldCancelStabilizerForKeyDown/)
-    // Ordinary pagination compensates once under its own token; the keeper
-    // holds afterwards.
+    // Ordinary pagination publishes once to the keeper (single owner); the
+    // keeper holds afterwards. No second scroll writer beside it.
     const src = messagesSrc()
-    expect(src).toMatch(/beginScroll\('anchoring'/)
-    expect(src).toMatch(/scroll\/end/)
+    expect(src).toMatch(/adoptOrdinaryPaginationWindow/)
     expect(src).not.toMatch(/maxMs:\s*1500/)
     expect(src).not.toMatch(/quietMs/)
   })

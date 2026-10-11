@@ -44,7 +44,7 @@ describe('decideDividerRestoreSearchStep', () => {
   it('anchor absent + older pages remain + loader idle drives restore-owned pagination (no scroll event consulted)', () => {
     // The input carries no scrollTop/scroll-event/wheel state: the drive is
     // explicit from window/hasMoreOlder/anchor-residency. A short window at
-    // edge=0 that never fires InfiniteScroll still pages.
+    // edge=0 that never reaches the app-owned user trigger still pages.
     const decision = decideDividerRestoreSearchStep(baseInput, preferredDivider)
     expect(decision).toEqual({ action: 'drive-older', preferred: preferredDivider, commitStable: false })
   })

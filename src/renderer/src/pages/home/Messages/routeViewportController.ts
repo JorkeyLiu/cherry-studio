@@ -293,6 +293,20 @@ export class RouteViewportController {
    */
   private windowGenerationSeq = 0
   /**
+   * Commit-scoped keeper hold permission for ordinary same-route pagination.
+   * Armed by `adoptOrdinaryPaginationWindow` with the post-commit window
+   * generation; consumed exactly once by the keeper's generation-layout path
+   * (`consumePaginationHold('generation-layout')`). Scroll/resize/mutate
+   * observers must never consume it: an earlier observer firing on pre-growth
+   * DOM would steal the one-shot and leave the actual commit unheld. Any
+   * newer window update, route change, or prior consume invalidates it
+   * naturally via the generation comparison — never a second truth, never a
+   * token count. Cleared by hand only where the generation is reset without
+   * a bump (`request`, `invalidateAll`, `syncDisplayed`,
+   * `markRenderedUnknown`).
+   */
+  private paginationHoldGeneration: number | null = null
+  /**
    * Bounded route-local answer-tab switch intent (same-route SWITCHING, not
    * reading-position restoration). Captured synchronously in the tab click
    * handler BEFORE selection/layout change: the clicked tab's viewport offset
@@ -531,6 +545,9 @@ export class RouteViewportController {
   syncDisplayed(displayed: RouteRef): void {
     if (this.ownershipHeld) return
     this.clearAnswerTabLocked()
+    // A topic/displayed change is an invalidation for any armed same-route
+    // pagination hold: the armed generation belongs to the previous DOM.
+    this.paginationHoldGeneration = null
     this.displayed = { ...displayed }
     this.rendered = null
     if (this.phase === 'terminal' || this.phase === 'stable') {
@@ -573,6 +590,9 @@ export class RouteViewportController {
 
   /** Failure clear (empty viewport): DOM no longer belongs to any route. */
   markRenderedUnknown(): void {
+    // Rendered-unknown invalidates any armed pagination hold with it: there
+    // is no committed DOM for the matching layout commit anymore.
+    this.paginationHoldGeneration = null
     this.rendered = null
   }
 
@@ -589,6 +609,10 @@ export class RouteViewportController {
   request(req: RouteTransitionRequest): { epoch: number; phase: RouteViewportPhase } {
     // A new route transition supersedes any pending same-route tab hold.
     this.clearAnswerTabLocked()
+    // A new route request supersedes any armed ordinary-pagination hold: the
+    // armed generation belongs to the outgoing DOM, never the incoming
+    // session (the generation is not bumped here, so this clear is explicit).
+    this.paginationHoldGeneration = null
     // A fresh guarded transaction consumes a pending detached reactivation:
     // the renewed connected lifetime owns its restore BEFORE any geometry is
     // admitted as stable. Single owner: this request is the activation.
@@ -889,6 +913,81 @@ export class RouteViewportController {
     // layout phase so it re-resolves the live anchor and holds. The
     // controller itself never touches the DOM.
     this.windowGenerationSeq += 1
+    return true
+  }
+
+  /**
+   * Same-route ordinary pagination commit (older window growth, unowned).
+   *
+   * Publishes the precommit reading anchor (stable identity + offset captured
+   * BEFORE the Redux/window dispatch that grew the DOM) as the live anchor for
+   * the CURRENT displayed route, refreshes the rendered window identity, and
+   * bumps the window generation so the keeper re-resolves + holds prepaint.
+   * Arms a generation-bound one-shot hold (`consumePaginationHold`) so the
+   * commit instant holds even while a genuine user session is live
+   * (continuous upward paging across fetch flight). Later userTakeover
+   * measurements stay authoritative — the keeper always holds the LIVE
+   * anchor, never a stale capture — and any newer window update or route
+   * change invalidates the armed generation naturally. No phase/epoch/
+   * ownership change, no snapshot write (transient growth never creates one),
+   * no token. Fail-closed when owned, dirty, route-mismatched, unknown
+   * rendered, or outside adoptable phases. A null anchor keeps the existing
+   * live anchor (still refreshes the window identity so provenance stays
+   * current). Restore-owned divider search and route transitions never enter
+   * here — they own their own compensation.
+   */
+  adoptOrdinaryPaginationWindow(
+    target: RouteRef,
+    windowId: string,
+    anchor: { messageId: string; offset: number } | null
+  ): boolean {
+    if (this.ownershipHeld) return false
+    const cur = this.rendered
+    if (!cur) return false
+    if (cur.topicId !== target.topicId || cur.routeId !== target.route) return false
+    if (typeof windowId !== 'string' || windowId.length === 0) return false
+    if (this.phase !== 'stable' && this.phase !== 'aligned' && this.phase !== 'idle' && this.phase !== 'terminal') {
+      return false
+    }
+    if (!this.isDomProvenanceClean) return false
+    if (
+      anchor &&
+      typeof anchor.messageId === 'string' &&
+      anchor.messageId.length > 0 &&
+      Number.isFinite(anchor.offset)
+    ) {
+      this.setAnchorLocked({ kind: 'message', messageId: anchor.messageId, offset: anchor.offset }, { ...target })
+      try {
+        const key = routeViewportKey(target.topicId, target.route)
+        if (this.anchor) this.anchorCache.set(key, { ...this.anchor })
+      } catch {
+        // best-effort
+      }
+    }
+    this.rendered = { ...cur, windowId }
+    this.windowGenerationSeq += 1
+    this.paginationHoldGeneration = this.windowGenerationSeq
+    return true
+  }
+
+  /**
+   * One-shot commit-scope hold permission for the keeper: true exactly once
+   * for the generation-layout commit (`'generation-layout'`, the layout-phase
+   * hold on the freshly committed DOM for the armed window generation).
+   * Every other consumer (`'scroll'`, `'resize'`, `'mutate'`, …) returns false
+   * WITHOUT consuming: pre-commit observer callbacks must never steal the
+   * one-shot from the matching layout commit. Any newer window update, route
+   * change, or prior consume returns false fail-closed. Never touches
+   * anchor/phase/ownership.
+   */
+  consumePaginationHold(consumer: string): boolean {
+    if (consumer !== 'generation-layout') return false
+    if (this.paginationHoldGeneration === null) return false
+    if (this.paginationHoldGeneration !== this.windowGenerationSeq) {
+      this.paginationHoldGeneration = null
+      return false
+    }
+    this.paginationHoldGeneration = null
     return true
   }
 
@@ -1579,6 +1678,10 @@ export class RouteViewportController {
   invalidateAll(reason: RouteViewportTerminalReason = 'invalidated'): boolean {
     this.closeInteractionLocked()
     this.clearAnswerTabLocked()
+    // Invalidation (unmount / topic disposal / Activity detach) releases any
+    // armed pagination hold with the session it belonged to. `detach()` runs
+    // through here, so the detached lifetime never inherits a stale arm.
+    this.paginationHoldGeneration = null
     this.activationSession = false
     this.continuationEpoch = null
     if (!this.ownershipHeld) {

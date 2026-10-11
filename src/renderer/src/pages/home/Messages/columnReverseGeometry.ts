@@ -40,3 +40,12 @@ export const isAtBottom = (scrollTop: number, thresholdPx = COLUMN_REVERSE_BOTTO
 /** True when the viewport rests at the oldest/top vicinity. */
 export const isAtOldest = (metrics: ColumnReverseMetrics, thresholdPx = COLUMN_REVERSE_OLDER_THRESHOLD_PX): boolean =>
   distanceFromOldest(metrics) <= thresholdPx
+
+/**
+ * True when the viewport is parked EXACTLY at the clamped oldest edge (no
+ * scroll movement possible). 1px subpixel rounding tolerance only — never a
+ * prefetch vicinity. Used solely for the direction-confirmed clamped-input
+ * path (wheel/key with no scroll event); post-scroll paging keeps the
+ * vicinity primitive above.
+ */
+export const isExactlyAtOldest = (metrics: ColumnReverseMetrics): boolean => distanceFromOldest(metrics) <= 1

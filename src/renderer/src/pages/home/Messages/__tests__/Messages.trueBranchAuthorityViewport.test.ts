@@ -22,7 +22,7 @@ const message = (id: string): Message => ({
  * read whose response carries authority window flags (`hasMoreBefore/After`),
  * then publishes a latest viewport over exactly the display-limit tail. The
  * viewport must preserve those authoritative flags so genuine oldest-edge
- * load-more can fire (InfiniteScroll binds `window.hasMoreOlder`).
+ * load-more can fire (the app-owned trigger binds `window.hasMoreOlder`).
  */
 describe('Messages NEW_TRUE_BRANCH viewport authority preservation', () => {
   it('preserves authority hasMoreBefore=true when resident equals the display limit', () => {

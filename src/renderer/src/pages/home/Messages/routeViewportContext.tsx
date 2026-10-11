@@ -441,13 +441,25 @@ export const isCaptureContainerHidden = (container: HTMLElement | null): boolean
   return false
 }
 
-export const buildContainerCapturer = (containerRef: React.RefObject<HTMLElement | null>): SnapshotCapturer => {
+export const buildContainerCapturer = (
+  containerRef: React.RefObject<HTMLElement | null>,
+  getOrderedRows?: () => readonly HTMLElement[]
+): SnapshotCapturer => {
   return () => {
     const container = containerRef.current
     if (!container) return null
     if (isCaptureContainerHidden(container)) return null
     const scrollTop = container.scrollTop
-    const anchor = findViewportTopAnchorWithOffset(container)
+    let orderedRows: readonly HTMLElement[] | undefined
+    try {
+      orderedRows = getOrderedRows?.()
+    } catch {
+      orderedRows = undefined
+    }
+    const anchor =
+      orderedRows && orderedRows.length > 0
+        ? findViewportTopAnchorWithOffset(container, { orderedRows })
+        : findViewportTopAnchorWithOffset(container)
     return {
       scrollTop,
       messageId: anchor?.messageId ?? null,
@@ -1221,7 +1233,29 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       if (!vp) return
       const phase = vp.controller.currentPhase
       if (phase !== 'stable' && phase !== 'aligned') return
-      if (vp.controller.programmaticOwned || vp.controller.hasActiveUserInteraction()) return
+      if (vp.controller.programmaticOwned) return
+      if (vp.controller.hasActiveUserInteraction()) {
+        // Ordinary-pagination commit scope only, and ONLY on the
+        // generation-layout commit (`reason === 'generation'`, the layout
+        // effect after the matching DOM update): the keeper holds the LIVE
+        // anchor (already refreshed to the precommit reading identity by
+        // adoptOrdinaryPaginationWindow) across the prepend instant even
+        // while the user's session is live. Scroll/resize/mutate callbacks
+        // firing before the layout commit (pre-growth DOM) must never consume
+        // the one-shot — the controller rejects non-generation consumers
+        // without consuming, so an early observer leaves the arm intact for
+        // the matching commit. Later takeovers stay authoritative — the hold
+        // below always measures the live anchor, never a stale capture — and
+        // the permission is generation-bound, so any newer window update
+        // invalidates it naturally.
+        let commitHold = false
+        try {
+          commitHold = vp.controller.consumePaginationHold(reason === 'generation' ? 'generation-layout' : reason)
+        } catch {
+          commitHold = false
+        }
+        if (!commitHold) return
+      }
       if (!vp.controller.isDomProvenanceClean) return
       // SWITCHING contract (explicit tab gesture): a pending tab-switch
       // intent owns same-route geometry. Hold the CLICKED TAB at its
