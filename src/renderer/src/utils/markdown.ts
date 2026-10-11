@@ -160,6 +160,213 @@ const findLatexMatch = (text: string, openDelim: string, closeDelim: string) => 
 }
 
 /**
+ * 将多行 `$$` 块公式吸附在末行公式内容上的闭合 `$$` 拆到独立一行。
+ *
+ * 背景：remark-math 的块级公式要求闭合 `$$` 独立成行（或至少与公式体分行）。
+ * 当上游文本把闭合 `$$` 直接吸附在末行公式之后（如 `\end{aligned}$$`），
+ * remark-math 会把闭合 `$$` 及后续正文都误判为未闭合 math 节点的一部分，
+ * rehype-katex 再把整段（公式 + 后续正文）包进红色 `span.katex-error`，
+ * 表现为公式源码与后续 `**加粗**` 正文一起变红。
+ *
+ * 本函数只做呈现层换行归一化，不改写数学内容、不做补全猜测：
+ * - 只处理“真实配对”的闭合：按顺序配对非转义、非代码内的 `$$`，
+ *   落单（流式未完成/真正未闭合）的 opener 保持原样，绝不主动闭合；
+ * - 只处理多行块：open 与 close 不在同一行，且 open 本身是独立成行的
+ *   展示块 opener（行内仅有 `$$`，至多允许 ≤3 空格缩进、无制表符；
+ *   前缀带正文的行内 `$$` 与四空格/制表符缩进代码一律不动），
+ *   close 吸附且行尾仅有空白；
+ * - 单行 `$$x$$`、已独立成行的 `$$`、行内单个 `$`、美元金额、
+ *   转义 `\$`、围栏/行内代码（含 ```math）一律不动；
+ * - 不校验公式合法性：显式闭合但内容非法（如未知命令）的公式
+ *   仍会报 KaTeX 错误，只是错误被收敛在公式范围内，后续正文不受影响。
+ *
+ * @param text 输入的 Markdown 文本
+ * @returns 换行归一化后的字符串（无命中时原样返回）
+ */
+export function normalizeAttachedBlockMathClose(text: string): string {
+  if (!text || !text.includes('$$')) {
+    return text
+  }
+
+  const lines = text.split('\n')
+
+  // ---- 围栏代码块行标记（含 ```math）：这些行整体跳过 ----
+  const fencedLine = new Array<boolean>(lines.length).fill(false)
+  let fence: { char: string; len: number } | null = null
+  const parseFence = (line: string): { char: string; len: number } | null => {
+    let indent = 0
+    while (indent < line.length && line[indent] === ' ') indent += 1
+    if (indent > 3 || indent >= line.length) return null
+    const ch = line[indent]
+    if (ch !== '`' && ch !== '~') return null
+    let len = 0
+    let p = indent
+    while (p < line.length && line[p] === ch) {
+      len += 1
+      p += 1
+    }
+    if (len < 3) return null
+    if (ch === '`' && line.slice(p).includes('`')) return null
+    return { char: ch, len }
+  }
+  const isClosingFence = (line: string, char: string, len: number): boolean => {
+    let indent = 0
+    while (indent < line.length && line[indent] === ' ') indent += 1
+    if (indent > 3 || indent >= line.length) return false
+    if (line[indent] !== char) return false
+    let n = 0
+    let p = indent
+    while (p < line.length && line[p] === char) {
+      n += 1
+      p += 1
+    }
+    return n >= len && line.slice(p).trim() === ''
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (fence) {
+      fencedLine[i] = true
+      if (isClosingFence(line, fence.char, fence.len)) fence = null
+      continue
+    }
+    const opening = parseFence(line)
+    if (opening) {
+      fencedLine[i] = true
+      fence = opening
+    }
+  }
+
+  // ---- 行内代码区间（等长反引号配对，与 containsMath 同策略） ----
+  const inlineCodeRanges = (line: string): Array<[number, number]> => {
+    const ranges: Array<[number, number]> = []
+    const len = line.length
+    let i = 0
+    while (i < len) {
+      if (line[i] !== '`') {
+        i += 1
+        continue
+      }
+      let j = i
+      while (j < len && line[j] === '`') j += 1
+      const openLen = j - i
+      let found = -1
+      let k = j
+      while (k < len) {
+        if (line[k] !== '`') {
+          k += 1
+          continue
+        }
+        let q = k
+        while (q < len && line[q] === '`') q += 1
+        if (q - k === openLen) {
+          found = k
+          break
+        }
+        k = q
+      }
+      if (found !== -1) {
+        ranges.push([i, found + openLen])
+        i = found + openLen
+      } else {
+        i = j
+      }
+    }
+    return ranges
+  }
+  const inRanges = (ranges: Array<[number, number]>, index: number, width = 2): boolean =>
+    ranges.some(([s, e]) => index >= s && index + width <= e)
+
+  const backslashCountBefore = (line: string, index: number): number => {
+    let count = 0
+    let p = index - 1
+    while (p >= 0 && line[p] === '\\') {
+      count += 1
+      p -= 1
+    }
+    return count
+  }
+
+  interface Delim {
+    line: number
+    col: number
+  }
+  const delims: Delim[] = []
+  for (let li = 0; li < lines.length; li++) {
+    if (fencedLine[li]) continue
+    const line = lines[li]
+    const ranges = inlineCodeRanges(line)
+    let c = 0
+    while (c < line.length - 1) {
+      if (line[c] === '$' && line[c + 1] === '$' && !inRanges(ranges, c)) {
+        if (backslashCountBefore(line, c) % 2 === 0) {
+          delims.push({ line: li, col: c })
+          c += 2
+          continue
+        }
+      }
+      c += 1
+    }
+  }
+
+  // 顺序配对：奇数落单的 opener（流式未完成）保持原样
+  const splits = new Map<number, number[]>()
+  for (let d = 0; d + 1 < delims.length; d += 2) {
+    const open = delims[d]
+    const close = delims[d + 1]
+    if (open.line === close.line) continue
+    const openLine = lines[open.line]
+    const closeLine = lines[close.line]
+    // opener 必须是独立成行的展示块 opener：前缀仅允许空白（≤3 空格、无制表符），
+    // 且 $$ 后行尾仅有空白。前缀带正文（如 mock 回显 `[Mock ...] "$$`）属于行内
+    // 公式语义，四空格/制表符缩进属于缩进代码块，一律不动。
+    const openPrefix = openLine.slice(0, open.col)
+    if (openPrefix.trim() !== '') continue
+    if (openPrefix.includes('\t') || openPrefix.length >= 4) continue
+    if (openLine.slice(open.col + 2).trim() !== '') continue
+    // closer 所在整行是缩进代码块时不动（四空格/制表符开头）。
+    if (closeLine.startsWith('    ') || closeLine.startsWith('\t')) continue
+    // closer 必须吸附在公式内容之后且行尾仅有空白
+    if (closeLine.slice(0, close.col).trim() === '') continue
+    if (closeLine.slice(close.col + 2).trim() !== '') continue
+    // closer 必须是所在行唯一的 $$：行内另有 $$ 时不猜测分隔语义
+    let occurrences = 0
+    {
+      const ranges = inlineCodeRanges(closeLine)
+      let c = 0
+      while (c < closeLine.length - 1) {
+        if (closeLine[c] === '$' && closeLine[c + 1] === '$' && !inRanges(ranges, c)) {
+          if (backslashCountBefore(closeLine, c) % 2 === 0) {
+            occurrences += 1
+            c += 2
+            continue
+          }
+        }
+        c += 1
+      }
+    }
+    if (occurrences !== 1) continue
+    // closer 所在行在 opener 之后还有别的 $$ 时只处理行尾最后一个
+    let cols = splits.get(close.line)
+    if (!cols) {
+      cols = []
+      splits.set(close.line, cols)
+    }
+    cols.push(close.col)
+  }
+
+  if (splits.size === 0) return text
+
+  const next = lines.slice()
+  for (const [li, cols] of splits) {
+    // 同一行多个命中时只拆行尾最后一个，避免猜测中间分隔
+    const col = Math.max(...cols)
+    const line = next[li]
+    next[li] = `${line.slice(0, col)}\n${line.slice(col)}`
+  }
+  return next.join('\n')
+}
+
+/**
  * 转换数学公式格式：
  * - 将 LaTeX 格式的 '\\[' 和 '\\]' 转换为 '$$$$'。
  * - 将 LaTeX 格式的 '\\(' 和 '\\)' 转换为 '$$'。

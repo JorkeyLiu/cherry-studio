@@ -76,7 +76,8 @@ describe('mathLoader mhchem activation (S7.6)', () => {
       removeSvgEmptyLines: (str: string) => str
     }))
     vi.doMock('@renderer/utils/markdown', () => ({
-      processLatexBrackets: (str: string) => str
+      processLatexBrackets: (str: string) => str,
+      normalizeAttachedBlockMathClose: (str: string) => str
     }))
     vi.doMock('react-i18next', () => ({
       useTranslation: () => ({ t: (key: string) => key }),

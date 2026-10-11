@@ -8,6 +8,7 @@ import {
   findCitationInChildren,
   isHtmlCode,
   markdownToPlainText,
+  normalizeAttachedBlockMathClose,
   processLatexBrackets,
   purifyMarkdownImages,
   removeTrailingDoubleSpaces,
@@ -612,6 +613,104 @@ $$
 
         expect(processLatexBrackets(complexInput)).toBe(expectedOutput)
       })
+    })
+  })
+
+  describe('normalizeAttachedBlockMathClose', () => {
+    it('splits an attached multiline close so trailing prose stays normal Markdown', () => {
+      const input = '$$\n\\begin{aligned}\na &= 1 \\\\\nb &= 2\n\\end{aligned}$$\n\nFollow-up with **boldCheck** prose.'
+      const expected =
+        '$$\n\\begin{aligned}\na &= 1 \\\\\nb &= 2\n\\end{aligned}\n$$\n\nFollow-up with **boldCheck** prose.'
+      expect(normalizeAttachedBlockMathClose(input)).toBe(expected)
+    })
+
+    it('is idempotent on already bounded math', () => {
+      const bounded = '$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nFollow-up with **boldCheck** prose.'
+      expect(normalizeAttachedBlockMathClose(bounded)).toBe(bounded)
+      const once = normalizeAttachedBlockMathClose(
+        '$$\n\\begin{aligned}\na &= 1\n\\end{aligned}$$\n\ntrailing **bold**'
+      )
+      expect(normalizeAttachedBlockMathClose(once)).toBe(once)
+    })
+
+    it('leaves single-line $$ math and standalone $$ closes untouched', () => {
+      expect(normalizeAttachedBlockMathClose('Display $$x^2$$ done')).toBe('Display $$x^2$$ done')
+      expect(normalizeAttachedBlockMathClose('$$\nx^2\n$$\n')).toBe('$$\nx^2\n$$\n')
+      expect(normalizeAttachedBlockMathClose('$$\nfoo\n$$\nbar $$x$$ baz')).toBe('$$\nfoo\n$$\nbar $$x$$ baz')
+    })
+
+    it('leaves inline single-$ math, currency and escaped dollars untouched', () => {
+      expect(normalizeAttachedBlockMathClose('Euler $e^{i\\pi}$ and $x$')).toBe('Euler $e^{i\\pi}$ and $x$')
+      expect(normalizeAttachedBlockMathClose('Price is $100 and $20.')).toBe('Price is $100 and $20.')
+      expect(normalizeAttachedBlockMathClose('Escaped \\$$ not math\n\\$100')).toBe('Escaped \\$$ not math\n\\$100')
+    })
+
+    it('does not aggressively close truly unmatched or streaming-incomplete delimiters', () => {
+      const unclosed = '$$\n\\begin{aligned}\na &= 1\n'
+      expect(normalizeAttachedBlockMathClose(unclosed)).toBe(unclosed)
+      expect(normalizeAttachedBlockMathClose('lone $$ opener only')).toBe('lone $$ opener only')
+      expect(normalizeAttachedBlockMathClose('')).toBe('')
+      expect(normalizeAttachedBlockMathClose('no math here')).toBe('no math here')
+    })
+
+    it('splits even malformed-but-explicitly-closed formulas without validating content', () => {
+      const input = '$$\n\\badcommand{oops}\n\\end{aligned}$$\n\ntrailing **ok**'
+      expect(normalizeAttachedBlockMathClose(input)).toBe(
+        '$$\n\\badcommand{oops}\n\\end{aligned}\n$$\n\ntrailing **ok**'
+      )
+    })
+
+    it('handles multiple attached blocks independently', () => {
+      const input = '$$\na\nb$$\n\nmid\n\n$$\nc\nd$$\n\ntail **bold**'
+      expect(normalizeAttachedBlockMathClose(input)).toBe('$$\na\nb\n$$\n\nmid\n\n$$\nc\nd\n$$\n\ntail **bold**')
+    })
+
+    it('keeps trailing spaces after the split close and tolerates indented fences', () => {
+      expect(normalizeAttachedBlockMathClose('$$\nfoo\nbar$$   \n\nt')).toBe('$$\nfoo\nbar\n$$   \n\nt')
+    })
+
+    it('protects fenced code (including ```math), tilde fences and inline code', () => {
+      const fenced = '```\n$$\nfoo\nbar$$\n```\n\ntail **bold**'
+      expect(normalizeAttachedBlockMathClose(fenced)).toBe(fenced)
+      const mathFence = '```math\nx^2\n```\n\ntail **bold**'
+      expect(normalizeAttachedBlockMathClose(mathFence)).toBe(mathFence)
+      const tilde = '~~~\n$$\nfoo\nbar$$\n~~~\n\ntail'
+      expect(normalizeAttachedBlockMathClose(tilde)).toBe(tilde)
+      const inline = 'Use `\\end{aligned}$$` here\n\ntail **bold**'
+      expect(normalizeAttachedBlockMathClose(inline)).toBe(inline)
+      // Escaped close is not a delimiter
+      const escaped = '$$\nfoo\nbar\\$$ \n\ntail'
+      expect(normalizeAttachedBlockMathClose(escaped)).toBe(escaped)
+    })
+
+    it('does not touch mid-line openers or same-line trailing prose guesses', () => {
+      // opener attached to content: out of scope, left as-is
+      const attachedOpen = '$$a\nb$$\n\ntail'
+      expect(normalizeAttachedBlockMathClose(attachedOpen)).toBe(attachedOpen)
+      // close followed by same-line prose: no guessing
+      const sameLine = '$$\nfoo\nbar$$ baz\n\ntail'
+      expect(normalizeAttachedBlockMathClose(sameLine)).toBe(sameLine)
+    })
+
+    it('leaves mock-echo prefixed inline $$ untouched (no attached-close split)', () => {
+      // Exact assistant echo shape: the opener shares its line with the mock
+      // prefix, so it is inline prose — not a standalone display opener.
+      const wrapped = '[Mock mock-model] You said: "$$\n\\begin{aligned}\na&=1\n\\end{aligned}$$\n\nok **b7**"'
+      expect(normalizeAttachedBlockMathClose(wrapped)).toBe(wrapped)
+      // Same-line prefixed opener in ordinary prose stays untouched too.
+      const prefixed = 'Intro $$\nfoo\nbar$$\n\ntail **b**'
+      expect(normalizeAttachedBlockMathClose(prefixed)).toBe(prefixed)
+    })
+
+    it('preserves four-space/tab indented code lines', () => {
+      const indentedOpen = '    $$\n    a\n    b$$\n\ntail **b**'
+      expect(normalizeAttachedBlockMathClose(indentedOpen)).toBe(indentedOpen)
+      const tabOpen = '\t$$\n\ta\n\tb$$\n\ntail **b**'
+      expect(normalizeAttachedBlockMathClose(tabOpen)).toBe(tabOpen)
+      const indentedClose = '$$\nfoo\n    bar$$\n\ntail **b**'
+      expect(normalizeAttachedBlockMathClose(indentedClose)).toBe(indentedClose)
+      // Up to three leading spaces is still a valid display opener.
+      expect(normalizeAttachedBlockMathClose('  $$\nfoo\nbar$$\n\nt')).toBe('  $$\nfoo\nbar\n$$\n\nt')
     })
   })
 
