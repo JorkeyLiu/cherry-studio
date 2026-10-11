@@ -1304,13 +1304,23 @@ export class RouteViewportController {
    *   mismatch: fail-closed, no write, no fake stable (scroll count NOT
    *   incremented — a rejected scroll is not a gesture scroll).
    *
+   * Bottom-follow opt-in (`opts.bottomFollow`, default preserves the row):
+   * genuine user SCROLL landing at the exact physical bottom clears the live
+   * row anchor (keeper pins bottom through growth) while the returned snapshot
+   * stays TRUTHFUL (measured messageId/offset/isAtBottom untouched — never a
+   * synthesized bottom record). The exact gate is `abs(scrollTop) <= 1` (1px
+   * subpixel rounding tolerance, same as the oldest-edge exact gate — never
+   * the 50px snapshot vicinity, so reading near-bottom never jumps). Opt-in
+   * only: the click-to-pause path omits it and keeps the row even at bottom.
+   *
    * Only the returned `{taken:true, routeKey, snapshot}` authorizes a
    * `commitSnapshotForRoute(routeKey, snapshot)` user-source write.
    */
   userTakeover(
     measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
     liveWindowId?: string,
-    interactionToken?: UserInteractionTokenLike
+    interactionToken?: UserInteractionTokenLike,
+    opts?: { bottomFollow?: boolean }
   ):
     | {
         taken: true
@@ -1362,9 +1372,14 @@ export class RouteViewportController {
         intraRowOffset: measured.intraRowOffset,
         isAtBottom: measured.isAtBottom
       }
-      const nextAnchor: RouteVisualAnchor | null = snapshot.messageId
-        ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
-        : null
+      // Genuine scroll landing at the exact physical bottom resumes follow:
+      // live anchor null, snapshot truthful. Re-validated here so a stale
+      // opt-in at a wide offset can never null a reading row.
+      const ownedFollowBottom = opts?.bottomFollow === true && Math.abs(measured.scrollTop) <= 1
+      const nextAnchor: RouteVisualAnchor | null =
+        ownedFollowBottom || !snapshot.messageId
+          ? null
+          : { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
       const oldEpoch = this.epoch
       this.displayed = { ...takeover }
       // Owned takeover provenance: the measured viewport belongs to the
@@ -1418,9 +1433,12 @@ export class RouteViewportController {
       intraRowOffset: measured.intraRowOffset,
       isAtBottom: measured.isAtBottom
     }
-    const nextAnchor: RouteVisualAnchor | null = snapshot.messageId
-      ? { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
-      : null
+    // Same exact-bottom follow rule as the owned path above (see method doc).
+    const stableFollowBottom = opts?.bottomFollow === true && Math.abs(measured.scrollTop) <= 1
+    const nextAnchor: RouteVisualAnchor | null =
+      stableFollowBottom || !snapshot.messageId
+        ? null
+        : { kind: 'message', messageId: snapshot.messageId, offset: snapshot.intraRowOffset ?? 0 }
     // Stable takeover provenance: clean displayed == rendered, so the
     // measured viewport belongs to the displayed route. (Non-bottom null was
     // already refused above: null here is proven bottom only.)

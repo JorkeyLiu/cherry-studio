@@ -116,6 +116,239 @@ async function isVisibleInMessagesViewport(page: any, messageId: string): Promis
 }
 
 /**
+ * Genuine-user divider-toggle reveal (test-side only, no production change).
+ *
+ * The route-stable keeper compensates programmatic scrolls (scrollIntoView /
+ * scrollTop writes carry no interaction token), so only a real
+ * `page.mouse.wheel` over #messages owns the viewport. Before a physical
+ * divider-toggle click at risk of starting offscreen, wheel the toggle into
+ * the #messages viewport and prove settling: visible inside the container
+ * bounds, toggle box stable across 3 consecutive rAF frames (same
+ * stableFrames=3 as tests/e2e/utils/viewport-scroll-sync.ts), and the
+ * toggle-center hit point resolving through elementFromPoint to the toggle
+ * (or a descendant) with no overlay. Wheel direction follows the toggle rect
+ * relative to the container (above -> negative deltaY toward history, below ->
+ * positive) with regress-flip, bounded steps, and scrollTop-progress checks.
+ * No fixed delays, no force/DOM clicks, no keeper changes. Failure attaches a
+ * minimal geometry snapshot (IDs + rects only, never message text) and throws.
+ */
+async function readDividerToggleState(
+  page: any,
+  anchorMsgId: string
+): Promise<{
+  found: boolean
+  testId: string | null
+  toggleRect: { top: number; bottom: number; left: number; right: number } | null
+  containerRect: { top: number; bottom: number; left: number; right: number } | null
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  phase: string
+  visible: boolean
+  hitTestId: string | null
+  hitOk: boolean
+}> {
+  return page.evaluate((anchor: string) => {
+    const toggle = document.querySelector(
+      `[data-testid="branch-fork-toggle-${anchor}"], [data-testid="branch-fork-selected-${anchor}"]`
+    ) as HTMLElement | null
+    const container = document.querySelector('#messages') as HTMLElement | null
+    if (!toggle || !container) {
+      return {
+        found: false,
+        testId: null,
+        toggleRect: null,
+        containerRect: null,
+        scrollTop: -1,
+        scrollHeight: -1,
+        clientHeight: -1,
+        phase: '',
+        visible: false,
+        hitTestId: null,
+        hitOk: false
+      }
+    }
+    const t = toggle.getBoundingClientRect()
+    const c = container.getBoundingClientRect()
+    const cx = t.left + t.width / 2
+    const cy = t.top + t.height / 2
+    const hitInside = cx > c.left && cx < c.right && cy > c.top && cy < c.bottom
+    let hitTestId: string | null = null
+    let hitOk = false
+    try {
+      const hit = document.elementFromPoint(cx, cy) as HTMLElement | null
+      hitTestId = hit?.getAttribute?.('data-testid') ?? (hit ? hit.tagName : null)
+      hitOk = hitInside && !!hit && !!toggle.contains(hit)
+    } catch {
+      hitOk = false
+    }
+    return {
+      found: true,
+      testId: toggle.getAttribute('data-testid'),
+      toggleRect: { top: t.top, bottom: t.bottom, left: t.left, right: t.right },
+      containerRect: { top: c.top, bottom: c.bottom, left: c.left, right: c.right },
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+      phase: container.getAttribute('data-viewport-phase') ?? '',
+      visible: t.bottom > c.top && t.top < c.bottom && t.right > c.left && t.left < c.right,
+      hitTestId,
+      hitOk
+    }
+  }, anchorMsgId)
+}
+
+async function isDividerToggleBoxStable(
+  page: any,
+  anchorMsgId: string,
+  tol = 2
+): Promise<{ stable: boolean; maxDelta: number }> {
+  return page.evaluate(
+    ({ anchor, tolPx }: { anchor: string; tolPx: number }) =>
+      new Promise<{ stable: boolean; maxDelta: number }>((resolve) => {
+        const sel = `[data-testid="branch-fork-toggle-${anchor}"], [data-testid="branch-fork-selected-${anchor}"]`
+        const read = (): { top: number; left: number; bottom: number; right: number } | null => {
+          const el = document.querySelector(sel) as HTMLElement | null
+          if (!el) return null
+          const r = el.getBoundingClientRect()
+          return { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
+        }
+        const frames: Array<{ top: number; left: number; bottom: number; right: number } | null> = []
+        const step = (): void => {
+          frames.push(read())
+          if (frames.length < 3) {
+            requestAnimationFrame(step)
+            return
+          }
+          let maxDelta = 0
+          for (let i = 1; i < frames.length; i++) {
+            const a = frames[i - 1]
+            const b = frames[i]
+            if (!a || !b) {
+              resolve({ stable: false, maxDelta: -1 })
+              return
+            }
+            maxDelta = Math.max(
+              maxDelta,
+              Math.abs(a.top - b.top),
+              Math.abs(a.left - b.left),
+              Math.abs(a.bottom - b.bottom),
+              Math.abs(a.right - b.right)
+            )
+          }
+          resolve({ stable: maxDelta <= tolPx, maxDelta: Math.round(maxDelta * 10) / 10 })
+        }
+        requestAnimationFrame(step)
+      }),
+    { anchor: anchorMsgId, tolPx: tol }
+  )
+}
+
+async function wheelDividerToggleIntoView(page: any, anchorMsgId: string, maxSteps = 24): Promise<void> {
+  const focusMessages = async (): Promise<void> => {
+    const box = await page.locator('#messages').first().boundingBox()
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  }
+  const frameSettle = async (): Promise<void> => {
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        })
+    )
+  }
+  const fail = async (reason: string, extra: Record<string, unknown>): Promise<never> => {
+    try {
+      await test.info().attach('divider-toggle-wheel-failure', {
+        body: JSON.stringify({ anchor: anchorMsgId, reason, ...extra }, null, 2),
+        contentType: 'application/json'
+      })
+    } catch {
+      // Best-effort diagnostic only; never masks the original failure.
+    }
+    throw new Error(`divider toggle ${anchorMsgId} not wheel-reachable: ${reason}`)
+  }
+  await focusMessages()
+  let flip = 1
+  let regress = 0
+  let lastGap: number | null = null
+  let lastScrollTop: number | null = null
+  let still = 0
+  let wheels = 0
+  for (let i = 0; i < maxSteps; i++) {
+    const st = await readDividerToggleState(page, anchorMsgId)
+    if (!st.found || !st.toggleRect || !st.containerRect) {
+      await fail('toggle-not-attached', { wheels, testId: st.testId })
+      throw new Error(`divider toggle ${anchorMsgId} not attached`)
+    }
+    const t = st.toggleRect
+    const c = st.containerRect
+    let gap: number
+    let want: number
+    if (t.bottom <= c.top) {
+      gap = c.top - t.bottom
+      want = -480
+    } else if (t.top >= c.bottom) {
+      gap = t.top - c.bottom
+      want = 480
+    } else {
+      gap = 0
+      const mid = (t.top + t.bottom) / 2
+      const center = (c.top + c.bottom) / 2
+      want = mid < center ? -240 : 240
+    }
+    if (st.visible && st.hitOk) {
+      const boxStable = await isDividerToggleBoxStable(page, anchorMsgId)
+      if (boxStable.stable) {
+        test.info().annotations.push({
+          type: 'divider-toggle-wheel',
+          description: `anchor=${anchorMsgId} wheels=${wheels} maxDelta=${boxStable.maxDelta} testId=${st.testId}`
+        })
+        return
+      }
+    }
+    if (lastGap !== null && gap > lastGap + 2) regress += 1
+    else regress = 0
+    if (regress >= 2) {
+      flip *= -1
+      regress = 0
+    }
+    const dy = want * flip
+    lastGap = gap
+    await focusMessages()
+    await page.mouse.wheel(0, dy)
+    wheels += 1
+    await frameSettle()
+    const after = await readDividerToggleState(page, anchorMsgId)
+    if (lastScrollTop !== null && Math.abs(after.scrollTop - lastScrollTop) <= 2) still += 1
+    else still = 0
+    lastScrollTop = after.scrollTop
+    if (still >= 8) {
+      await fail('no-scroll-progress', {
+        wheels,
+        dy,
+        scrollTop: after.scrollTop,
+        scrollHeight: after.scrollHeight,
+        clientHeight: after.clientHeight,
+        gap
+      })
+    }
+  }
+  const st = await readDividerToggleState(page, anchorMsgId)
+  await fail('max-steps-exhausted', {
+    wheels,
+    maxSteps,
+    testId: st.testId,
+    toggleRect: st.toggleRect,
+    containerRect: st.containerRect,
+    scrollTop: st.scrollTop,
+    phase: st.phase,
+    visible: st.visible,
+    hitTestId: st.hitTestId
+  })
+}
+
+/**
  * Same-profile relaunch race guards (poll-based, never fixed-sleep-gated).
  *
  * Production close path (existing contract): window `close` runs the
@@ -938,6 +1171,10 @@ test.describe('Topic-internal branches end-to-end', () => {
     await test.step('divider switch back to L2', async () => {
       const backMainToggle = page.locator(`[data-testid="branch-fork-toggle-${anchorId}"]`).first()
       await expect(backMainToggle, 'main untaken fork must be visible').toBeVisible({ timeout: 30000 })
+      // Genuine-user reveal: the prior owner-anchor hover can leave this toggle
+      // offscreen, and synthetic scrolls carry no interaction token, so wheel it
+      // into the viewport stable before the physical click.
+      await wheelDividerToggleIntoView(page, anchorId)
       await backMainToggle.click()
       const backMainList = page.locator(`[data-testid="branch-fork-list-${anchorId}"]`).first()
       await expect(backMainList, 'main divider popup must open').toBeVisible({ timeout: 15000 })
@@ -954,6 +1191,8 @@ test.describe('Topic-internal branches end-to-end', () => {
       )
       const backL1Toggle = page.locator(`[data-testid="branch-fork-toggle-${l2AnchorId}"]`).first()
       await expect(backL1Toggle, 'L1 untaken l2Anchor fork must be visible').toBeVisible({ timeout: 30000 })
+      // Same offscreen risk after the route switch: genuine-wheel reveal first.
+      await wheelDividerToggleIntoView(page, l2AnchorId)
       await backL1Toggle.click()
       const backL2List = page.locator(`[data-testid="branch-fork-list-${l2AnchorId}"]`).first()
       await expect(backL2List, 'l2Anchor divider popup must open').toBeVisible({ timeout: 15000 })

@@ -663,6 +663,37 @@ export function getContextClosureDiagnostics(): ContextClosureDiagnostics {
 }
 
 /**
+ * UI acceptance check (root regression correction): does an already-accepted
+ * complete-route projection still belong to the CURRENT topic/route/anchor?
+ *
+ * Structural + identity only — deliberately WITHOUT the strict per-route
+ * generation check. Ordinary streamed text/status updates bump generation
+ * (strict cache freshness) but must NOT clear the accepted UI projection;
+ * only a topic/anchor mismatch or a structurally invalid response fail-closes
+ * the UI. Callers use this to decide retain-vs-clear for display; the strict
+ * `getFreshValidatedClosure` / `isValidFreshClosure` guards below remain the
+ * sole gate for cache reads and request payloads.
+ */
+export function isAcceptedClosureForRoute(
+  response: FetchContextClosureResponse | null | undefined,
+  topicId: string,
+  anchorGroupKey: string | null
+): boolean {
+  if (!response || !anchorGroupKey) return false
+  if (response.closure.topicId !== topicId) return false
+  if (response.closure.anchorGroupKey !== anchorGroupKey) return false
+  // Structural coherence (counts/boundary/first-last/anchor-row present) for
+  // the CURRENT topic/anchor. Route isolation is enforced by the caller via
+  // the hook's route-key identity (closureKeyForRoute + acceptedKeyRef);
+  // closure payloads carry no branch field, so this helper takes no branch
+  // param. Generation intentionally ignored.
+  if (!isValidContextClosureResponse({ topicId, anchorGroupKey, branchId: null }, response as any)) {
+    return false
+  }
+  return true
+}
+
+/**
  * Validate an arbitrary closure response for freshness against stored generation.
  * Viewport fingerprint is legacy and ignored (viewport-independent).
  * Useful for validating hook-provided closure objects that may not be the current cached entry.

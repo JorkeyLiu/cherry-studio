@@ -395,17 +395,57 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/handleStabilizerKeyDown/)
     expect(src).toMatch(/shouldCancelStabilizerForKeyDown/)
     // Single atomic path: capture opens/refreshes the interaction session,
-    // scroll measures then calls userTakeover with the live token; only the
+    // scroll measures then commits via the shared `adoptTakeoverSnapshot`
+    // single-writer (scroll + streaming click-pause share it); only the
     // returned key authorizes the snapshot write. Scrolls with no live
     // session never take over (programmatic / window-reconcile).
     const scrollIdx = src.indexOf('const handleScroll = useCallback')
-    const scrollSlice = src.slice(scrollIdx, scrollIdx + 5200)
+    expect(scrollIdx).toBeGreaterThan(-1)
+    const scrollEnd = src.indexOf("useShortcut('copy_last_message'", scrollIdx)
+    const scrollSlice = src.slice(scrollIdx, scrollEnd > scrollIdx ? scrollEnd : scrollIdx + 5200)
     expect(scrollSlice).toMatch(/activeInteractionToken/)
     expect(scrollSlice).toMatch(/hasActiveUserInteraction|activeInteractionToken/)
-    expect(scrollSlice).toMatch(/controller\.userTakeover\(/)
-    expect(scrollSlice).toMatch(/commitSnapshotForRoute\(out\.routeKey/)
+    // Scroll delegates to the shared helper with the live token + one
+    // measured snapshot (single takeover site lives in the helper, never
+    // duplicated in the scroll body).
+    expect(scrollSlice).toMatch(/adoptTakeoverSnapshot\(/)
+    expect(scrollSlice).toMatch(/liveToken/)
+    expect(scrollSlice).toMatch(/captureSnapshot\(\)/)
+    expect((scrollSlice.match(/captureSnapshot\(\)/g) ?? []).length).toBe(1)
+    expect((scrollSlice.match(/adoptTakeoverSnapshot\(/g) ?? []).length).toBe(1)
+    expect(scrollSlice).not.toMatch(/controller\.userTakeover\(/)
+    expect(scrollSlice).not.toMatch(/commitSnapshotForRoute\(/)
     expect(scrollSlice).not.toMatch(/userCancelledScroll/)
     expect(scrollSlice).not.toMatch(/canHandleUserViewportScroll/)
+    // Shared helper owns the atomic takeover -> commit: live token +
+    // measured snapshot in exactly once, controller outcome route -> commit
+    // of the returned route/snapshot, stale/no-gesture never commits.
+    const adoptIdx = src.indexOf('const adoptTakeoverSnapshot = useCallback')
+    expect(adoptIdx).toBeGreaterThan(-1)
+    const pauseIdx = src.indexOf('const attemptStreamingPause = useCallback', adoptIdx)
+    expect(pauseIdx).toBeGreaterThan(adoptIdx)
+    const adoptSlice = src.slice(adoptIdx, pauseIdx)
+    expect(adoptSlice).toMatch(/liveToken/)
+    expect(adoptSlice).toMatch(/liveWindowId/)
+    expect(adoptSlice).toMatch(/controller\.userTakeover\(/)
+    expect((adoptSlice.match(/controller\.userTakeover\(/g) ?? []).length).toBe(1)
+    expect(adoptSlice).toMatch(/liveToken/)
+    expect(adoptSlice).toMatch(/if\s*\(\s*!out\.taken\s*\)/)
+    expect(adoptSlice).toMatch(/commitSnapshotForRoute\(out\.routeKey/)
+    expect((adoptSlice.match(/commitSnapshotForRoute\(/g) ?? []).length).toBe(1)
+    expect(adoptSlice).toMatch(/out\.snapshot/)
+    // Atomic order: takeover -> taken-gate -> commit of the returned snapshot.
+    expect(adoptSlice.indexOf('controller.userTakeover(')).toBeLessThan(
+      adoptSlice.indexOf('commitSnapshotForRoute(out.routeKey')
+    )
+    expect(adoptSlice.indexOf('!out.taken')).toBeLessThan(adoptSlice.indexOf('commitSnapshotForRoute(out.routeKey'))
+    // Click-pause shares the same single-writer (no divergent semantics).
+    const pauseEnd = src.indexOf('const handleStabilizerUserInput', pauseIdx)
+    expect(pauseEnd).toBeGreaterThan(pauseIdx)
+    const pauseSlice = src.slice(pauseIdx, pauseEnd)
+    expect(pauseSlice).toMatch(/adoptTakeoverSnapshot\(/)
+    expect(pauseSlice).not.toMatch(/controller\.userTakeover\(/)
+    expect(pauseSlice).not.toMatch(/commitSnapshotForRoute\(/)
     // keeper/hook never independently gate+capture+write the same scroll.
     expect(scrollSlice).not.toMatch(/handleScrollPosition\(\)/)
     // Wheel/touch/pointer pre-declare plus keyboard pre-declare; scrollbar
@@ -435,6 +475,40 @@ describe('visual position contracts', () => {
     expect(src).toMatch(/dividerVisualAnchor/)
     expect(src).toMatch(/contextBoundaryMessageId/)
     expect(src).toMatch(/never cross-write|never feeds this|never carries fork-divider or context/i)
+  })
+
+  it('(2e) streaming follow intent: pause keeps the row, genuine scroll at exact bottom resumes', () => {
+    const src = messagesSrc()
+    // Renderer-local exact-bottom gate (never the 50px snapshot vicinity).
+    expect(src).toMatch(/isGenuinePhysicalBottom/)
+    expect(src).toMatch(/Math\.abs\(scrollTop\)\s*<=\s*1/)
+    // Scroll path opts into bottom follow with the exact gate; the pause
+    // path keeps the default row behavior (no opt-in, never a synthesized
+    // bottom record).
+    const scrollIdx = src.indexOf('const handleScroll = useCallback')
+    expect(scrollIdx).toBeGreaterThan(-1)
+    const scrollEnd = src.indexOf("useShortcut('copy_last_message'", scrollIdx)
+    const scrollSlice = src.slice(scrollIdx, scrollEnd > scrollIdx ? scrollEnd : scrollIdx + 6200)
+    expect(scrollSlice).toMatch(/bottomFollow/)
+    expect(scrollSlice).toMatch(/isGenuinePhysicalBottom\(measured\.scrollTop\)/)
+    const adoptIdx = src.indexOf('const adoptTakeoverSnapshot = useCallback')
+    expect(adoptIdx).toBeGreaterThan(-1)
+    const pauseIdx = src.indexOf('const attemptStreamingPause = useCallback', adoptIdx)
+    expect(pauseIdx).toBeGreaterThan(adoptIdx)
+    const adoptSlice = src.slice(adoptIdx, pauseIdx)
+    expect(adoptSlice).toMatch(/bottomFollow/)
+    expect(adoptSlice).toMatch(/opts\?\.bottomFollow/)
+    const pauseEnd = src.indexOf('const handleStabilizerUserInput', pauseIdx)
+    const pauseSlice = src.slice(pauseIdx, pauseEnd > pauseIdx ? pauseEnd : pauseIdx + 4200)
+    expect(pauseSlice).not.toMatch(/bottomFollow/)
+    // Controller owns the opt-in with an exact re-validation (default row).
+    const controller = controllerSrc()
+    expect(controller).toMatch(/bottomFollow/)
+    expect(controller).toMatch(/Math\.abs\(measured\.scrollTop\)\s*<=\s*1/)
+    // No wide-threshold jump, no synthesized record, no new timers/modes.
+    expect(scrollSlice).not.toMatch(/COLUMN_REVERSE_BOTTOM_THRESHOLD_PX/)
+    expect(src).not.toMatch(/isPaused/)
+    expect(src).not.toMatch(/pausedMode/)
   })
 
   it('(7) divider main button and top selector entry disable Antd two-char auto spacing (popup already set)', () => {

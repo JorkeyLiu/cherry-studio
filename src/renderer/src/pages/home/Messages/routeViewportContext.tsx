@@ -401,6 +401,72 @@ export function RouteViewportProvider({
   return <RouteViewportContext value={value}>{children}</RouteViewportContext>
 }
 
+// --- Keeper device-pixel geometry unit (fractional-zoom pause hold) ---------
+//
+// The paused-stream wrapper uses native
+// `height: calc-size(auto, round(up, size, var(--messages-pixel-size, 1px)))`
+// so its TRUE intrinsic height rounds up to the live device-pixel quantum
+// instead of a fixed 1 CSS px (which leaves up to ~0.6px fractional root
+// start at 125% zoom). The keeper synchronizes the var to
+// `1/window.devicePixelRatio` on the existing firstElementChild wrapper via
+// the existing observer/layout path only: no new business state, hooks,
+// observers, lifecycle owners, persisted settings, placeholders, transforms,
+// timers, or global DPR systems. Geometry-only: never touches controller
+// anchor/snapshot/generations, never alters column-reverse/bottom/snapshots.
+
+/** CSS variable carrying the live device-pixel quantum for the messages wrapper. */
+export const MESSAGES_PIXEL_VAR = '--messages-pixel-size' as const
+
+/**
+ * Sanitize an effective DPR into a finite positive CSS quantum string
+ * (`1/dpr` px), or null when the input is unusable. Pure, no DOM work.
+ */
+export const resolveMessagesPixelQuantum = (dpr: unknown): string | null => {
+  if (typeof dpr !== 'number' || !Number.isFinite(dpr) || dpr <= 0) return null
+  const quantum = 1 / dpr
+  if (!Number.isFinite(quantum) || quantum <= 0) return null
+  return `${quantum}px`
+}
+
+/**
+ * Synchronize the live quantum onto the existing content wrapper's inline
+ * style. Write-only on change (prior-property compare) so the existing
+ * ResizeObserver never loops: the var write may resize once, the next
+ * observer fire sees the same value and writes nothing. Never alters
+ * controller anchor/snapshot/generations. Returns true only when a write
+ * landed.
+ */
+export const syncMessagesPixelQuantum = (content: Element | null, dpr?: unknown): boolean => {
+  try {
+    if (!content || !(content instanceof HTMLElement)) return false
+    let ratio: unknown = dpr
+    if (ratio === undefined) {
+      try {
+        ratio = window.devicePixelRatio
+      } catch {
+        return false
+      }
+    }
+    const next = resolveMessagesPixelQuantum(ratio)
+    if (!next) return false
+    let prev = ''
+    try {
+      prev = content.style.getPropertyValue(MESSAGES_PIXEL_VAR)
+    } catch {
+      prev = ''
+    }
+    if (prev === next) return false
+    try {
+      content.style.setProperty(MESSAGES_PIXEL_VAR, next)
+    } catch {
+      return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 // --- Live container snapshot ---------------------------------------------------
 
 /**
@@ -981,6 +1047,15 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       }
     }
     const rebindContent = (): void => {
+      // Geometry-only quantum sync on the live wrapper (existing node, no
+      // anchor/snapshot/generation touch). Write-only on change so the RO
+      // never loops. Runs even when the node identity is unchanged so a DPR
+      // change without DOM replacement still converges via the existing
+      // RO/layout fires; no new matchMedia/window listeners or React state.
+      try {
+        const live = container.firstElementChild
+        if (live instanceof Element) syncMessagesPixelQuantum(live)
+      } catch {}
       let content: Element | null = null
       try {
         const first = container.firstElementChild
@@ -992,6 +1067,10 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       try {
         if (observedContent && ro) ro.unobserve(observedContent)
       } catch {}
+      // The previous wrapper keeps its inline quantum (logically the same
+      // wrapper retains the live coordinate; a detached node discards its
+      // local geometry on unmount, so no leak and no per-teardown removal
+      // that would flash transient layout on the next stream generation).
       observedContent = content
       if (observedContent) {
         try {
@@ -1229,6 +1308,14 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     }
     const hold = (reason: string): void => {
       void reason
+      // Geometry-only quantum sync BEFORE every guard: a DPR change inside
+      // owned/user/unaligned positioning still sets geometry before first
+      // paint/reveal, and readonly layout checks below stay correct. No
+      // anchor/snapshot/generation touch; write-only on change so no RO loop.
+      try {
+        const live = container.firstElementChild
+        if (live instanceof Element) syncMessagesPixelQuantum(live)
+      } catch {}
       const vp = viewportRef.current
       if (!vp) return
       const phase = vp.controller.currentPhase
@@ -1408,6 +1495,11 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       holdRef.current = () => {}
       observedContent = null
       observedRow = null
+      // Intentionally no CSS-var removal: the wrapper logically retains its
+      // live coordinate across effect re-subscriptions (same node, stream
+      // windowGeneration churn), and a detached node's inline geometry dies
+      // with the node. Removing then re-setting every teardown would flash
+      // transient layout/jitter.
       try {
         ro?.disconnect()
       } catch {}

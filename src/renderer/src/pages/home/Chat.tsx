@@ -9,7 +9,7 @@ import { importSettingsPage } from '@renderer/components/routeImporters'
 import { useRouteIdlePreload } from '@renderer/components/useRouteIdlePreload'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useAssistant } from '@renderer/hooks/useAssistant'
-import { useClosureSemanticSignal, useContextClosure } from '@renderer/hooks/useContextClosure'
+import { useContextClosure } from '@renderer/hooks/useContextClosure'
 import { useLoadedTopicMessages, useLoadedTopicReferencedBlocks } from '@renderer/hooks/useMessageOperations'
 import { useSettings } from '@renderer/hooks/useSettings'
 import { useShortcut } from '@renderer/hooks/useShortcuts'
@@ -17,7 +17,7 @@ import { useShowTopics } from '@renderer/hooks/useStore'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { anchorKeyForRoute } from '@renderer/services/anchorService'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { getFreshValidatedClosure } from '@renderer/services/contextClosure'
+import { isAcceptedClosureForRoute } from '@renderer/services/contextClosure'
 import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
@@ -131,23 +131,26 @@ const Chat: FC<Props> = (props) => {
   const activeBranchId = useAppSelector((state) => selectActiveBranchId(state, props.activeTopic.id))
   const anchorRouteKey = anchorKeyForRoute(props.activeTopic.id, activeBranchId)
   const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorRouteKey]?.groupKey ?? null
-  const { closure, loading: closureLoading } = useContextClosure(props.activeTopic.id, anchorGroupKey, activeBranchId)
-  // R-06 viewport independence: the full-route authoritative closure supplies
-  // message lists and full-topic metadata. Freshness is route/anchor/generation
-  // only — the loaded viewport never gates a valid closure. When no fresh
-  // closure is available for a persisted anchor, the shared projection renders
-  // authority-pending (no viewport-derived counts), never a bounded fallback.
-  // Reactive semantic freshness (viewport-independent): same closure object
-  // with advanced generation must still recompute authority-pending. Uses the
-  // same ephemeral route/global token as the hook; unrelated topics/routes
-  // keep this memo stable (no leak), read-only hydrations never bump it.
-  const closureSemanticSignal = useClosureSemanticSignal(props.activeTopic.id, activeBranchId)
+  const { closure: acceptedClosure } = useContextClosure(props.activeTopic.id, anchorGroupKey, activeBranchId)
+  // Root regression correction: UI context is the atomically ACCEPTED
+  // complete-route projection from the hook. For the SAME topic/route/anchor,
+  // ordinary streamed text/status updates (which bump strict cache generation
+  // every chunk) NEVER clear this — the hook retains it while background
+  // revalidation runs and commits the full result in one coherent step.
+  // Identity fail-closed here too: a retained projection for a different
+  // topic/anchor never displays (no previous-route counts/divider). Strict
+  // cache freshness (`getFreshValidatedClosure`) is intentionally NOT
+  // consulted for display; it remains the gate for cache reads/requests only.
+  // Route isolation is enforced by the hook's route-key identity
+  // (closureKeyForRoute); the acceptance helper below checks topic/anchor
+  // structural identity only and takes no branch param.
   const freshClosure = useMemo(() => {
-    void closure // keep hook subscription; actual freshness is gated via centralized helper reading cache
-    void closureLoading // keep pending trigger; a pending branch switch hides stale counts
-    void closureSemanticSignal // semantic freshness transitions on same closure/loading
-    return getFreshValidatedClosure(props.activeTopic.id, anchorGroupKey, undefined, activeBranchId)
-  }, [props.activeTopic.id, anchorGroupKey, activeBranchId, closure, closureLoading, closureSemanticSignal])
+    if (!acceptedClosure) return null
+    if (!isAcceptedClosureForRoute(acceptedClosure, props.activeTopic.id, anchorGroupKey)) {
+      return null
+    }
+    return acceptedClosure
+  }, [acceptedClosure, props.activeTopic.id, anchorGroupKey])
   // Subscribe to closure-referenced blocks when closure is active so filterEmptyMessages invalidation covers closure blocks
   const closureBlockIds = useMemo(
     () => (freshClosure ? freshClosure.messages.flatMap((m: any) => (m.blocks ?? []) as string[]) : []),
@@ -158,6 +161,11 @@ const Chat: FC<Props> = (props) => {
   const activeBlocksForContext = freshClosure ? closureBlocks : topicBlocks
   const sharedContextInfo = useMemo(() => {
     // LOCK-001/003: authoritative closure supplies anchorGroupKey, boundaryMessageId and contextCount {current:selectedTurnCount,max:totalTurnCount} when fresh; persisted-anchor miss renders authority-pending (no viewport counts); only anchorless (empty/uninitialized) uses the bounded fallback
+    // Ordinary preexisting derivation: accepted retain alone solves the blank
+    // flicker. No id-only reference freeze here — same-ID updated blocks or
+    // new Message instances must flow through so the token-estimate input
+    // never references stale history. The scalar estimate updates via content
+    // reads; it is never zeroed per chunk.
     const result = resolveSharedContextInfo(
       topicMessages,
       assistant,

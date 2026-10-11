@@ -192,6 +192,7 @@ import {
 } from './routeViewportContext'
 import { displayedRouteKey, RouteViewportController, type RouteViewportSnapshot } from './routeViewportController'
 import { MessagesContainer, MessagesWrapper, ScrollContainer } from './shared'
+import { hasActiveStreamingReply, shouldPauseStreamingOnPrimaryMouseDown } from './streamingPause'
 import TopicSegmentLine from './TopicSegmentLine'
 import { requestTopicBranches, useBranchTree } from './useBranchTree'
 import { createViewportCommitWaiter } from './viewportCommitWaiter'
@@ -238,6 +239,17 @@ export const shouldHandleSendMessageForTopic = (
   if (!payload || typeof payload.topicId !== 'string' || payload.topicId.length === 0) return true
   return payload.topicId === currentTopicId
 }
+
+/**
+ * Genuine physical bottom for column-reverse follow resume (renderer-local
+ * geometry only): `abs(scrollTop) <= 1`. 1px is subpixel rounding tolerance
+ * (same as the oldest-edge exact gate) — never the 50px snapshot vicinity,
+ * so a user reading near the tail never jumps to follow. Snapshot
+ * `isAtBottom` (50px) semantics are unchanged; this gate only chooses the
+ * live anchor (null = follow) for real user scrolls.
+ */
+export const isGenuinePhysicalBottom = (scrollTop: unknown): boolean =>
+  typeof scrollTop === 'number' && Number.isFinite(scrollTop) && Math.abs(scrollTop) <= 1
 
 /**
  * Explicit send-to-bottom intent (SEND_MESSAGE) dependencies (focused-test
@@ -482,7 +494,7 @@ interface MessagesContentProps {
    */
   onSelectRoute: (branchId: string | null, anchorMessageId: string, info?: DividerSwitchInfo) => void
   /** Genuine user input (touch/pointer) while a stabilizer may be active: declares the session only. */
-  onStabilizerUserInput?: () => void
+  onStabilizerUserInput?: (e?: React.PointerEvent | React.TouchEvent | React.MouseEvent) => void
   /** Direction-confirmed wheel input (upward wheel at the exact oldest edge may page; rest declares only). */
   onStabilizerWheel?: (e: React.WheelEvent) => void
   /** Keyboard scroll pre-cancel (Arrow/PageUp/PageDown/Home/End/Space, inputs excluded). */
@@ -664,7 +676,23 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
         onTouchStart={onStabilizerUserInput}
         onPointerDown={onStabilizerUserInput}
         onKeyDown={onStabilizerKeyDown}>
-        <div style={{ display: 'flex', flexDirection: 'column-reverse' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column-reverse',
+            // Paused-stream fractional-zoom jitter: native TRUE intrinsic
+            // height of the sole firstElementChild content wrapper (content +
+            // margins, rounded up to the live device-pixel quantum). The
+            // keeper synchronizes `--messages-pixel-size` to
+            // `1/window.devicePixelRatio` on this same wrapper (write-only on
+            // change, existing observer/layout path, no new state/listeners);
+            // top-alignment keeps the reversed children off the fractional
+            // root start. Unsupported engines ignore the height declaration
+            // and keep the previous automatic height (no render break).
+            height: 'calc-size(auto, round(up, size, var(--messages-pixel-size, 1px)))',
+            justifyContent: 'flex-end',
+            flexShrink: 0
+          }}>
           {/* App-owned older paging: this wrapper is layout-only (same DOM
           order/structure as before). The oldest edge is evaluated from live
           container geometry + committed viewport state on genuine user
@@ -2389,8 +2417,24 @@ const Messages = ({
 
   // NOTE: 如果设置为平滑滚动会导致滚动条无法跟随生成的新消息保持在底部位置
   const scrollToBottom = useCallback(() => {
+    // Explicit bottom navigation re-enables bottom follow: suspend any
+    // incompatible prior row keeper to the bottom semantic BEFORE the
+    // navigation scroll runs (same suspension as the send-bottom intent),
+    // so keeper layout/mutation holds pin the bottom through the scroll
+    // and subsequent insertion/stream instead of pulling back to the old
+    // reading row. Fail-closed: when the suspension refuses (owned/dirty/
+    // route/epoch drift) the navigation below still runs with its existing
+    // behavior.
+    try {
+      const target = { topicId: topicIdRef.current, route: routeRef.current }
+      if (controller.beginSendBottom(target, { expectedEpoch: controller.currentEpoch })) {
+        notifyViewport()
+      }
+    } catch {
+      // fail-closed: navigation below still runs
+    }
     navigateAndSave({ kind: 'bottom', source: 'imperative' })
-  }, [navigateAndSave])
+  }, [controller, navigateAndSave, notifyViewport])
 
   /**
    * Explicit send intent (SEND_MESSAGE): only the matching topic may
@@ -3833,6 +3877,172 @@ const Messages = ({
     notifyViewport()
   }, [controller, notifyViewport])
 
+  // Shared single-writer user-takeover commit (scroll path + streaming
+  // click-to-pause path). ONLY the returned
+  // `{taken:true, routeKey, snapshot}` authorizes the
+  // `commitSnapshotForRoute` user-source write. Owned takeovers run the same
+  // single session teardown in both callers (plan/search clear, token end).
+  // `opts.bottomFollow` is opt-in ONLY for genuine user SCROLL landing at the
+  // exact physical bottom (handleScroll); the click-pause path omits it and
+  // keeps the row even at bottom. Default preserves the row (existing
+  // behavior elsewhere).
+  const adoptTakeoverSnapshot = useCallback(
+    (
+      measured: { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean },
+      liveToken: { interactionId: number; epoch: number },
+      opts?: { bottomFollow?: boolean }
+    ) => {
+      let liveWindowId: string | undefined
+      try {
+        const w = viewportStateRef.current.window
+        if (w && Array.isArray((w as { displayMessages?: unknown }).displayMessages)) {
+          const ww = w as { oldestMessageId?: unknown; newestMessageId?: unknown; displayMessages: unknown[] }
+          liveWindowId = `${String(ww.oldestMessageId ?? '')}::${String(ww.newestMessageId ?? '')}::${ww.displayMessages.length}`
+        }
+      } catch {
+        liveWindowId = undefined
+      }
+      const out = controller.userTakeover(
+        {
+          messageId: measured.messageId,
+          intraRowOffset: measured.intraRowOffset ?? null,
+          scrollTop: measured.scrollTop,
+          isAtBottom: measured.isAtBottom
+        },
+        liveWindowId,
+        liveToken,
+        opts?.bottomFollow === true ? { bottomFollow: true } : undefined
+      )
+      if (!out.taken) return out
+      try {
+        commitSnapshotForRoute(out.routeKey, {
+          scrollTop: out.snapshot.scrollTop,
+          anchorId: out.snapshot.messageId,
+          messageId: out.snapshot.messageId,
+          intraRowOffset: out.snapshot.intraRowOffset,
+          rawScrollTop: out.snapshot.scrollTop,
+          isAtBottom: out.snapshot.isAtBottom
+        })
+      } catch {
+        // fail-closed: controller state already advanced above
+      }
+      // Takeover invalidated the old epoch: stale async continuations
+      // are inert via epoch mismatch/session check. Clear only the old
+      // session's plan/search/token, never a newer owner's. The user
+      // interaction session itself stays live for momentum/drag scrolls
+      // until `scrollend` (keeper) or the next programmatic request.
+      if (out.reason === 'owned-takeover') {
+        transitionPlanRef.current = null
+        dividerProgressRef.current = null
+        // Owned takeover ends the visible quiet session with it: cancel
+        // its bounded frames and drop only the taken-over pending driver.
+        // The controller already released ownership exactly once above;
+        // the anchoring token ends here exactly once. A newer owned
+        // session (if ever armed) is never touched.
+        try {
+          const h = dividerVisibleRafRef.current
+          dividerVisibleRafRef.current = null
+          if (h !== null) cancelAnimationFrame(h)
+        } catch {}
+        try {
+          const pv = dividerVisibleRef.current
+          if (pv && !(pv.ownerEpoch === controller.currentEpoch && controller.programmaticOwned)) {
+            dividerVisibleRef.current = null
+          }
+        } catch {
+          // fail-closed
+        }
+        endViewportScrollToken()
+      }
+      notifyViewport()
+      return out
+    },
+    [controller, endViewportScrollToken, notifyViewport]
+  )
+
+  // Bounded click-to-pause streaming follow: ANY primary mouse press bubbled
+  // from inside #messages during an active DISPLAYED-route stream adopts
+  // the current viewport as the stable row anchor through the shared
+  // single-writer takeover above — no scroll, no geometry change, no stop of
+  // generation, no change to the press's native control action. The keeper then holds the reading row through stream growth
+  // instead of pinning the bottom. The press session is closed at once (a
+  // no-scroll press never receives a `scrollend`; leaving it live would
+  // suspend keeper compensation). All predicate reads are event-time only
+  // (displayed route + live window + store block status): no new store
+  // subscription. Returns true only when the pause took over.
+  const attemptStreamingPause = useCallback((): boolean => {
+    try {
+      if (controller.programmaticOwned) return false
+    } catch {
+      return false
+    }
+    let displayedTopicId: string
+    let displayedRoute: string | null
+    try {
+      const displayed = controller.displayedRoute
+      displayedTopicId = displayed.topicId
+      displayedRoute = displayed.route
+    } catch {
+      return false
+    }
+    if (displayedTopicId !== topicIdRef.current || displayedRoute !== routeRef.current) return false
+    let displayList: ReadonlyArray<Message> | null = null
+    try {
+      displayList = viewportStateRef.current.window?.displayMessages ?? null
+    } catch {
+      return false
+    }
+    if (!displayList || displayList.length === 0) return false
+    let streaming = false
+    try {
+      const state = store.getState()
+      const entities = (state as unknown as { messageBlocks?: { entities?: Record<string, { status?: unknown }> } })
+        .messageBlocks?.entities
+      streaming = hasActiveStreamingReply(displayList, (blockId: string) => entities?.[blockId]?.status)
+    } catch {
+      return false
+    }
+    if (!streaming) return false
+    let liveToken: { interactionId: number; epoch: number }
+    try {
+      liveToken = controller.declareUserIntent()
+    } catch {
+      return false
+    }
+    let measured: {
+      scrollTop: number
+      messageId?: string | null
+      intraRowOffset?: number | null
+      isAtBottom: boolean
+    } | null = null
+    try {
+      measured = captureSnapshot()
+    } catch {
+      measured = null
+    }
+    // Bottom capture must yield a real row: never fabricate an anchor and
+    // never rewrite isAtBottom — an unmeasurable viewport stays following.
+    // A real row anchor is kept EVEN when measured.isAtBottom is true (the
+    // takeover below preserves row identity then), so only a missing row
+    // refuses here.
+    if (!measured || !measured.messageId) return false
+    const out = adoptTakeoverSnapshot(
+      {
+        messageId: measured.messageId,
+        intraRowOffset: measured.intraRowOffset ?? null,
+        scrollTop: measured.scrollTop,
+        isAtBottom: measured.isAtBottom
+      },
+      liveToken
+    )
+    if (!out.taken) return false
+    try {
+      controller.clearUserIntent()
+    } catch {}
+    notifyViewport()
+    return true
+  }, [adoptTakeoverSnapshot, captureSnapshot, controller, notifyViewport])
+
   // Wheel/touch/pointer input declares intent even before the scroll event
   // fires. Programmatic compensation never emits these, so no self-cancel
   // risk. Scrollbar drag fires pointerDown first, so it is already covered.
@@ -3844,9 +4054,35 @@ const Messages = ({
   // (`maybeLoadOlderAtEdge`). Pointer/touch/focus carry no navigation
   // direction and must never fetch — a mere pointerdown at the oldest edge
   // (focus, selection, away-bound follow-up) is not toward-older input.
-  const handleStabilizerUserInput = useCallback(() => {
-    cancelActiveStabilizerForUser()
-  }, [cancelActiveStabilizerForUser])
+  // Bounded exception: ANY primary mouse press bubbled from inside #messages
+  // during an active displayed-route stream pauses follow via the shared
+  // single-writer takeover (no scroll, no geometry change, no change to the
+  // press's native action — no preventDefault/stopPropagation/inert); every
+  // other press keeps the declare-only behavior below. Containment is
+  // structural (this handler lives on #messages, so topbar/inputbar presses
+  // never reach it). Bubble delivery suffices: no pointerdown stopPropagation
+  // exists in the viewport subtree (only click/contextmenu/drop stoppers),
+  // so ordinary buttons/links still bubble here.
+  const handleStabilizerUserInput = useCallback(
+    (e?: React.PointerEvent | React.TouchEvent | React.MouseEvent) => {
+      try {
+        if (
+          e &&
+          shouldPauseStreamingOnPrimaryMouseDown({
+            button: (e as unknown as { button?: unknown }).button,
+            pointerType: (e as unknown as { pointerType?: unknown }).pointerType
+          }) &&
+          attemptStreamingPause()
+        ) {
+          return
+        }
+      } catch {
+        // fail-closed to declare-only
+      }
+      cancelActiveStabilizerForUser()
+    },
+    [attemptStreamingPause, cancelActiveStabilizerForUser]
+  )
 
   // Clamped-edge toward-older input (no scroll event can fire because the
   // viewport is parked exactly at the edge): a genuine upward wheel
@@ -3959,69 +4195,22 @@ const Messages = ({
         const container = scrollContainerRef.current
         const measured = captureSnapshot()
         if (container && measured) {
-          let liveWindowId: string | undefined
-          try {
-            const w = viewportStateRef.current.window
-            if (w && Array.isArray((w as { displayMessages?: unknown }).displayMessages)) {
-              const ww = w as { oldestMessageId?: unknown; newestMessageId?: unknown; displayMessages: unknown[] }
-              liveWindowId = `${String(ww.oldestMessageId ?? '')}::${String(ww.newestMessageId ?? '')}::${ww.displayMessages.length}`
-            }
-          } catch {
-            liveWindowId = undefined
-          }
-          const out = controller.userTakeover(
+          // Shared single-writer takeover commit (scroll + streaming
+          // click-pause share this operation, never divergent semantics).
+          // Genuine user scroll landing at the exact physical bottom resumes
+          // follow (live anchor null, snapshot truthful); any scroll away
+          // keeps the row. Passive growth scrolls carry no live session and
+          // never reach here (keeper holds instead — no auto-resume).
+          adoptTakeoverSnapshot(
             {
               messageId: measured.messageId ?? null,
               intraRowOffset: measured.intraRowOffset ?? null,
               scrollTop: measured.scrollTop,
               isAtBottom: measured.isAtBottom
             },
-            liveWindowId,
-            liveToken
+            liveToken,
+            { bottomFollow: isGenuinePhysicalBottom(measured.scrollTop) }
           )
-          if (out.taken) {
-            try {
-              commitSnapshotForRoute(out.routeKey, {
-                scrollTop: out.snapshot.scrollTop,
-                anchorId: out.snapshot.messageId,
-                messageId: out.snapshot.messageId,
-                intraRowOffset: out.snapshot.intraRowOffset,
-                rawScrollTop: out.snapshot.scrollTop,
-                isAtBottom: out.snapshot.isAtBottom
-              })
-            } catch {
-              // fail-closed: controller state already advanced above
-            }
-            // Takeover invalidated the old epoch: stale async continuations
-            // are inert via epoch mismatch/session check. Clear only the old
-            // session's plan/search/token, never a newer owner's. The user
-            // interaction session itself stays live for momentum/drag scrolls
-            // until `scrollend` (keeper) or the next programmatic request.
-            if (out.reason === 'owned-takeover') {
-              transitionPlanRef.current = null
-              dividerProgressRef.current = null
-              // Owned takeover ends the visible quiet session with it: cancel
-              // its bounded frames and drop only the taken-over pending driver.
-              // The controller already released ownership exactly once above;
-              // the anchoring token ends here exactly once. A newer owned
-              // session (if ever armed) is never touched.
-              try {
-                const h = dividerVisibleRafRef.current
-                dividerVisibleRafRef.current = null
-                if (h !== null) cancelAnimationFrame(h)
-              } catch {}
-              try {
-                const pv = dividerVisibleRef.current
-                if (pv && !(pv.ownerEpoch === controller.currentEpoch && controller.programmaticOwned)) {
-                  dividerVisibleRef.current = null
-                }
-              } catch {
-                // fail-closed
-              }
-              endViewportScrollToken()
-            }
-            notifyViewport()
-          }
         }
       } else {
         // No live session: never measure for takeover, never commit, never
@@ -4051,15 +4240,14 @@ const Messages = ({
     // touch, focus, and away keys never page pre-input by design.
     maybeLoadOlderAtEdge()
   }, [
+    adoptTakeoverSnapshot,
     captureSnapshot,
     controller,
-    endViewportScrollToken,
     hasMoreNewer,
     isLoadingNewer,
     isLoadingMore,
     loadNewerMessages,
     maybeLoadOlderAtEdge,
-    notifyViewport,
     scrollContainerRef
   ])
 
