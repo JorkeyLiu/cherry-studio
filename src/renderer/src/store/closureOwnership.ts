@@ -22,6 +22,23 @@
 /** Explicit topic ownership for closure invalidation, carried in `action.meta`. */
 export const CLOSURE_TOPIC_IDS_META_KEY = 'closureTopicIds' as const
 
+/**
+ * Explicit read-only hydration marker for closure invalidation, carried in
+ * `action.meta.closureReadOnly`.
+ *
+ * Authoritative Main window reads (latest/around/load-more) publish their
+ * response blocks/messages into Redux as a read-only projection. Those
+ * publications must NOT bump the semantic closure generation: the full-route
+ * authoritative closure is independent of the currently loaded viewport.
+ * Only genuine semantic mutations (append/edit/delete, branch-parent
+ * butterfly, block content writes) invalidate.
+ *
+ * Safe default: absent/false means mutate (invalidate). Only explicitly
+ * marked read-only publications opt out. Unknown actions without the marker
+ * keep today's invalidating behavior.
+ */
+export const CLOSURE_READ_ONLY_META_KEY = 'closureReadOnly' as const
+
 /** Single topic, many topics, or unknown (null/undefined/empty -> global fallback). */
 export type ClosureTopicOwnership = string | readonly string[] | null | undefined
 
@@ -68,4 +85,25 @@ export function getClosureTopicIds(action: unknown): string[] | null {
   if (!Array.isArray(raw)) return null
   const ids = normalizeClosureTopicIds(raw)
   return ids.length > 0 ? ids : null
+}
+
+/**
+ * Attach the explicit read-only hydration marker to an action.
+ * Preserves existing `meta` (including closureTopicIds/fromSync).
+ * Tolerates a missing action the same way `withClosureTopics` does.
+ */
+export function markClosureReadOnly<T>(action: T): T {
+  const base = (action ?? {}) as Record<string, any>
+  return {
+    ...base,
+    meta: { ...base.meta, [CLOSURE_READ_ONLY_META_KEY]: true }
+  } as T
+}
+
+/**
+ * Whether an action is an explicitly marked authoritative read-only
+ * hydration/publication. Absent/invalid marker means mutate (safe default).
+ */
+export function isClosureReadOnly(action: unknown): boolean {
+  return (action as { meta?: Record<string, unknown> } | null | undefined)?.meta?.[CLOSURE_READ_ONLY_META_KEY] === true
 }

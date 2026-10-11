@@ -18,10 +18,12 @@ describe('Messages NEW_TRUE_BRANCH listener (internal branch creation)', () => {
 
   it('true-branch path creates via createBranch with the localized default name and no auto-rename', () => {
     const trueIdx = source.indexOf('EVENT_NAMES.NEW_TRUE_BRANCH')
-    // Handler grew with new-branch-landing provenance rebase (window proof);
-    // window must cover the onSuccess toast without spilling into the next
-    // handler. 4500 matches the visual-contract window for the same handler.
-    const handlerSlice = source.slice(trueIdx, trueIdx + 4500)
+    // Handler grew with new-branch-landing provenance rebase (window proof)
+    // plus authority-flag preservation (routeWindow window flags into the
+    // latest viewport, re-asserted after the bottom navigate which rebuilds
+    // via the generic derived path); window must cover the onSuccess toast.
+    // 7000 matches the visual-contract window for the same handler.
+    const handlerSlice = source.slice(trueIdx, trueIdx + 7000)
     expect(handlerSlice).toMatch(/createBranch/)
     expect(handlerSlice).toMatch(/branchFromAnchorMessage/)
     expect(handlerSlice).toMatch(/chat\.topics\.branch\.default_name/)

@@ -195,20 +195,11 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
     expect(failCode(ignored)).toBe(ERR_VALIDATION)
   })
 
-  it('inherit maps valid source index with clamp; invalid source uses target default', () => {
+  it('inherit maps in-range source index; out-of-range/missing falls back to CURRENT-contextCount default (never clamp)', () => {
     const src = `t-${uid()}`
     const dst = `t-${uid()}`
     seedTurns(agg, src, ['u1', 'u2', 'u3', 'u4'])
-    seedTurns(agg, dst, ['v1', 'v2'])
-    // source u3 is index 2; target has 2 turns -> clamp to last (v2)
-    const clamped = agg.resolveContextClosure({
-      topicId: dst,
-      intent: 'inherit',
-      sourceTopicId: src,
-      sourceAnchorGroupKey: 'u3',
-      contextCount: 99
-    })
-    expect(okValue(clamped).resolvedAnchorGroupKey).toBe('v2')
+    seedTurns(agg, dst, ['v1', 'v2', 'v3'])
     // in-range: source u1 index 0 -> v1
     const inRange = agg.resolveContextClosure({
       topicId: dst,
@@ -218,7 +209,26 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
       contextCount: 99
     })
     expect(okValue(inRange).resolvedAnchorGroupKey).toBe('v1')
-    // invalid source anchor -> target default (contextCount 1 -> v2)
+    // out-of-range: source u4 index 3 beyond 3-turn target. Old clamp would
+    // give v3 (last); new fallback gives CURRENT-contextCount default:
+    // N=2 -> index max(0,3-2)=1 -> v2; null -> first -> v1.
+    const fallbackN2 = agg.resolveContextClosure({
+      topicId: dst,
+      intent: 'inherit',
+      sourceTopicId: src,
+      sourceAnchorGroupKey: 'u4',
+      contextCount: 2
+    })
+    expect(okValue(fallbackN2).resolvedAnchorGroupKey).toBe('v2')
+    const fallbackNull = agg.resolveContextClosure({
+      topicId: dst,
+      intent: 'inherit',
+      sourceTopicId: src,
+      sourceAnchorGroupKey: 'u4',
+      contextCount: null
+    })
+    expect(okValue(fallbackNull).resolvedAnchorGroupKey).toBe('v1')
+    // invalid source anchor -> target default (contextCount 1 -> v3)
     const fallback = agg.resolveContextClosure({
       topicId: dst,
       intent: 'inherit',
@@ -226,7 +236,44 @@ describe('ChatDbAggregateService — resolve-context-closure authority resolver'
       sourceAnchorGroupKey: 'ghost',
       contextCount: 1
     })
-    expect(okValue(fallback).resolvedAnchorGroupKey).toBe('v2')
+    expect(okValue(fallback).resolvedAnchorGroupKey).toBe('v3')
+  })
+
+  it('inherit on a branch route falls back to CURRENT-contextCount default when the source index is outside the branch prefix', () => {
+    const topicId = `t-${uid()}`
+    seedTurns(agg, topicId, ['u1', 'u2', 'u3', 'u4', 'u5'])
+    // Branch fork at u3: effective branch route holds the strict 3-turn
+    // prefix u1..u3; source anchor u5 (index 4) is excluded from it.
+    const branchId = okValue(agg.createBranch(topicId, null, 'u3', 'B-above')).branch.id
+    // Old clamp would give u3 (last); new fallback: N=2 -> u2, null -> u1.
+    const fallbackN2 = agg.resolveContextClosure({
+      topicId,
+      branchId,
+      intent: 'inherit',
+      sourceTopicId: topicId,
+      sourceAnchorGroupKey: 'u5',
+      contextCount: 2
+    })
+    expect(okValue(fallbackN2).resolvedAnchorGroupKey).toBe('u2')
+    const fallbackNull = agg.resolveContextClosure({
+      topicId,
+      branchId,
+      intent: 'inherit',
+      sourceTopicId: topicId,
+      sourceAnchorGroupKey: 'u5',
+      contextCount: null
+    })
+    expect(okValue(fallbackNull).resolvedAnchorGroupKey).toBe('u1')
+    // In-range control on the same branch: source u2 index 1 maps to u2.
+    const inRange = agg.resolveContextClosure({
+      topicId,
+      branchId,
+      intent: 'inherit',
+      sourceTopicId: topicId,
+      sourceAnchorGroupKey: 'u2',
+      contextCount: 2
+    })
+    expect(okValue(inRange).resolvedAnchorGroupKey).toBe('u2')
   })
 
   it('missing source/target topics are NOT_FOUND; existing empty target succeeds null', () => {

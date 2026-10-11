@@ -91,7 +91,7 @@ import {
 } from '@renderer/services/topicDeletionInvalidation'
 import { isValidWindowResponse, isWindowCovering } from '@renderer/services/windowCoverage'
 import store, { useAppDispatch, useAppSelector } from '@renderer/store'
-import { withClosureTopics } from '@renderer/store/closureOwnership'
+import { markClosureReadOnly, withClosureTopics } from '@renderer/store/closureOwnership'
 import { messageBlocksSelectors, updateOneBlock, upsertManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
 import { loadRouteMessagesThunk, updateMessageAndBlocksThunk } from '@renderer/store/thunk/messageThunk'
@@ -2254,8 +2254,9 @@ const Messages = ({
         // into the same-route resident set so no intermediate all-immutable
         // frame is published. No manual `messagesRef` assignment: the
         // transaction below runs only after the projection commit is observable.
+        // Read-only window hydration: must not invalidate the semantic closure.
         if (ensured.blocks.length > 0) {
-          dispatch(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart))
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(ensured.blocks), topicIdAtStart)))
         }
         dispatch(
           newMessagesActions.messagesWindowMerged({
@@ -2602,12 +2603,22 @@ const Messages = ({
             requestTopicBranches(dispatch, topic.id)
             const topicIdAtCreate = topic.id
             const newRoute = created.branchId
-            await dispatch(loadRouteMessagesThunk(topicIdAtCreate, newRoute, { kind: 'latest' }))
+            const routeWindow = (await dispatch(
+              loadRouteMessagesThunk(topicIdAtCreate, newRoute, { kind: 'latest' })
+            )) as unknown as FetchMessagesWindowResponse | void
             if (topicIdRef.current !== topicIdAtCreate || routeRef.current !== newRoute) return true
+            let newRouteAuthoritative: { hasMoreBefore: boolean; hasMoreAfter: boolean } | undefined = undefined
             try {
               const loaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtCreate) ?? []) as Message[]
               if (loaded.length > 0) {
-                const latestWindow = createLatestMessageWindow(loaded, displayCount)
+                const authoritative = routeWindow?.window
+                  ? {
+                      hasMoreBefore: routeWindow.window.hasMoreBefore,
+                      hasMoreAfter: routeWindow.window.hasMoreAfter
+                    }
+                  : undefined
+                newRouteAuthoritative = authoritative
+                const latestWindow = createLatestMessageWindow(loaded, displayCount, authoritative)
                 // New-branch landing (route switch, no fetch-hold session):
                 // provenance-bound rebase with window proof — never a bare
                 // dispatch bypassing rendered. No snapshot write: the fresh
@@ -2646,6 +2657,24 @@ const Messages = ({
             // its deterministic bottom default until genuine user scrolling
             // establishes one.
             if (topicIdRef.current === topicIdAtCreate && routeRef.current === newRoute) {
+              // The explicit bottom navigate above rebuilds its window via the
+              // generic navigation path (derived flags only) and would discard
+              // the authoritative paging flags just published. Re-assert the
+              // latest authority response's hasMoreBefore/After over the same
+              // tail so genuine oldest-edge load-more can fire. Same
+              // displayMessages identity (tail), flags only; stale guards above
+              // already ensure route currency.
+              try {
+                if (newRouteAuthoritative) {
+                  const reloaded = (selectLoadedMessagesForTopic(store.getState(), topicIdAtCreate) ?? []) as Message[]
+                  if (reloaded.length > 0) {
+                    const repaired = createLatestMessageWindow(reloaded, displayCount, newRouteAuthoritative)
+                    viewportDispatch({ type: 'window/apply', window: repaired })
+                  }
+                }
+              } catch {
+                // fail-closed: navigate's window stands; pagination stays derived
+              }
               notifyViewport()
             }
             return true
@@ -3240,6 +3269,7 @@ const Messages = ({
 
             // atomic staged publication: validate first, then merged messages +
             // route capability in ONE Redux commit (no intermediate clear).
+            // Read-only load-more hydration: must not invalidate the semantic closure.
             windowCacheRef.current.set(routeCacheKey, response as unknown as FetchMessagesWindowResponse)
             const blocks = response.blocks as unknown as MessageBlock[]
             const incoming = response.messages as unknown as Message[]
@@ -3247,7 +3277,7 @@ const Messages = ({
             const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
 
             if (blocks.length > 0) {
-              dispatch(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart))
+              dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart)))
             }
             // install merged ordered list + merged capability as single Redux transition
             dispatch(
@@ -3622,8 +3652,9 @@ const Messages = ({
           const existing = messagesRef.current
           const merged = mergeWindowIntoTopic(existing, incoming, anchorId)
 
+          // Read-only load-newer hydration: must not invalidate the semantic closure.
           if (blocks.length > 0) {
-            dispatch(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart))
+            dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks), topicIdAtStart)))
           }
           dispatch(
             newMessagesActions.messagesWindowMerged({
@@ -5104,8 +5135,9 @@ const Messages = ({
       const publishDeferredProjection = (): void => {
         if (deferredPublished) return
         deferredPublished = true
+        // Read-only deferred route-window hydration: must not invalidate the semantic closure.
         if (deferredBlocks.length > 0) {
-          dispatch(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart))
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(deferredBlocks), topicIdAtStart)))
         }
         dispatch(
           newMessagesActions.rebaseRouteMessages({

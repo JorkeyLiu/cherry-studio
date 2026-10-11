@@ -85,6 +85,17 @@ export type ContextInfo = {
   /** Canonical resolved anchor: the start turn's group key, or null for an
    *  empty/undefined window. Sole expression of the effective window start. */
   anchorGroupKey: string | null
+  /**
+   * Authority-pending marker (UI only): true when a persisted route anchor
+   * exists but no fresh authoritative closure is available yet (initial fetch
+   * or pending branch switch). Consumers must NOT substitute viewport-derived
+   * counts/anchor/boundary in this state — use existing optional/loading
+   * rendering (hide TokenCount, no divider) rather than misleading partial
+   * counts. False/undefined means the result is authoritative (closure) or
+   * the legitimate empty/no-anchor fallback. Request paths keep their
+   * explicitly allowed availability fallback separately and never set this.
+   */
+  isAuthoritativePending?: boolean
 }
 
 export function computeContextInfo(
@@ -197,11 +208,21 @@ export function computeContextInfo(
 /**
  * Minimal shared projection boundary used by Chat and order-sensitive tests.
  *
- * Pure selection only: a fresh authoritative closure projects full-topic
- * counts/metadata, otherwise the bounded fallback derives from loaded
- * viewport messages. No timing, no diagnostics, no side effects — Chat wraps
- * this with phase-timing only. Extracted so the TokenCount re-anchor
- * committed-render regression constrains the exact product semantics.
+ * Authority-only UI projection: a fresh authoritative closure projects
+ * full-route counts/metadata (viewport-independent). When no fresh closure
+ * is available but a persisted route anchor exists, returns an
+ * authority-pending result (persisted anchor, no divider, empty lists,
+ * `isAuthoritativePending: true`) — callers must NOT substitute
+ * viewport-derived counts/anchor/boundary in this state. Only when no
+ * persisted anchor exists (empty route / uninitialized legacy) does the
+ * bounded fallback derive from loaded viewport messages. No timing, no
+ * diagnostics, no side effects — Chat wraps this with phase-timing only.
+ * Extracted so the TokenCount re-anchor committed-render regression
+ * constrains the exact product semantics. Actual provider requests never
+ * consume the pending marker or the bounded fallback as authority: they read
+ * the caller-local Main closure directly (ConversationService) and fail
+ * closed on read failure. Only usage-estimate paths (baseCallbacks) retain
+ * their explicitly allowed estimate fallback.
  */
 export function resolveSharedContextInfo(
   topicMessages: Message[],
@@ -210,9 +231,31 @@ export function resolveSharedContextInfo(
   freshClosure: FetchContextClosureResponse | null,
   branchId?: string | null
 ): ContextInfo {
-  return freshClosure
-    ? deriveContextInfoFromClosure(freshClosure)
-    : computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null)
+  if (freshClosure) {
+    return { ...deriveContextInfoFromClosure(freshClosure), isAuthoritativePending: false }
+  }
+  const routeKey = typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
+  const persisted =
+    assistant !== undefined
+      ? (getAssistantSettings(assistant).contextWindowAnchor?.[routeKey] as
+          | { kind: string; groupKey: string }
+          | undefined)
+      : undefined
+  const persistedKey = persisted?.kind === 'active' ? persisted.groupKey : null
+  if (persistedKey) {
+    return {
+      uiMessages: [],
+      tokenEstimationMessages: [],
+      boundaryMessageId: null,
+      contextCount: { current: 0, max: null },
+      anchorGroupKey: persistedKey,
+      isAuthoritativePending: true
+    }
+  }
+  return {
+    ...computeContextInfo(topicMessages, assistant, topicId, undefined, branchId ?? null),
+    isAuthoritativePending: false
+  }
 }
 
 export function deriveContextInfoFromClosure(closure: FetchContextClosureResponse): ContextInfo {
@@ -236,6 +279,7 @@ export function deriveContextInfoFromClosure(closure: FetchContextClosureRespons
     tokenEstimationMessages,
     boundaryMessageId: closure.closure.boundaryMessageId,
     contextCount: { current: closure.closure.selectedTurnCount, max: closure.closure.totalTurnCount },
-    anchorGroupKey: closure.closure.anchorGroupKey
+    anchorGroupKey: closure.closure.anchorGroupKey,
+    isAuthoritativePending: false
   }
 }

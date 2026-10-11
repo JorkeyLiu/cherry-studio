@@ -117,7 +117,7 @@ describe('context per-route isolation (CW-1..CW-8)', () => {
 
     const callbacks = fs.readFileSync('src/renderer/src/services/messageStreaming/callbacks/baseCallbacks.ts', 'utf8')
     expect(callbacks).toMatch(/selectActiveBranchId/)
-    expect(callbacks).toMatch(/getFreshValidatedClosure\(topicId,\s*anchorGroupKey,\s*currentFp,\s*execRoute\)/)
+    expect(callbacks).toMatch(/getFreshValidatedClosure\(topicId,\s*anchorGroupKey,\s*undefined,\s*execRoute\)/)
     expect(callbacks).toMatch(/computeContextInfo\(contextMsgs,\s*assistant,\s*topicId,\s*undefined,\s*execRoute\)/)
 
     const chat = fs.readFileSync('src/renderer/src/pages/home/Chat.tsx', 'utf8')

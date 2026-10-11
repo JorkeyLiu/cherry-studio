@@ -2,7 +2,7 @@ import { loggerService } from '@logger'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import i18n from '@renderer/i18n'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
+import { getFreshValidatedClosure } from '@renderer/services/contextClosure'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { NotificationService } from '@renderer/services/NotificationService'
@@ -407,7 +407,9 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
       }
 
       if (status === 'success') {
-        // Explicit provisional loaded candidate for usage estimate only; final
+        // Explicit provisional loaded candidate for usage estimate only (not
+        // the actual provider request boundary, which lives in
+        // ConversationService via a direct caller-local closure read); final
         // persistence and context closure authority are unchanged.
         const provisionalLoadedMessages = (selectLoadedMessagesForTopic(latestState, topicId) ?? []) as Message[]
         const orderedMsgs = provisionalLoadedMessages
@@ -420,8 +422,10 @@ export const createBaseCallbacks = (deps: BaseCallbacksDependencies) => {
           typeof execRoute === 'string' && execRoute.length > 0 ? `${topicId}:${execRoute}` : topicId
         const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[execAnchorKey]?.groupKey ?? null
         if (anchorGroupKey) {
-          const currentFp = computeClosureFingerprint(orderedMsgs as any)
-          const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp, execRoute)
+          // Viewport-independent authority: a valid closure is used even when
+          // the loaded viewport is partial; fallback to the loaded viewport
+          // (availability) only when no fresh closure can be proven.
+          const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, undefined, execRoute)
           if (fresh) {
             contextMsgs = fresh.messages as any
           }

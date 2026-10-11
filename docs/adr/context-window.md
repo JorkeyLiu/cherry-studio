@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范，实现阶段的目标契约）。本文档是上下文窗口（context window）语义的**唯一权威规范**：定义默认上下文数量（`contextCount`）、稳定 topic 锚点（`contextWindowAnchor`）、上下文窗口、允许的锚点迁移、持久化归属、兼容性修复与测试边界，防止既有语义漂移再次发生。
 > **决策锁**：CW-1 … CW-8（§3 决策表，durable decision IDs）。
-> **最后更新**：2026-09-28
+> **最后更新**：2026-10-11
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite/Dexie 聊天权威与导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，分支路由的变更权限与有效路由算法由 [Topic Branches ADR](./topic-branches.md)（BRANCH-4/11）唯一治理——本文档不改变、不重述这些治理域的边界。
 >
@@ -93,7 +93,7 @@
 | 用户点击**当前已锚定** turn 的锚点控件 | 重锚定到当前默认窗口位置；**绝不**使已初始化非空 topic 无锚点 | 是（CW-4 · 消息锚点控件；§8） |
 | 删除锚点 turn | 确定性转移：落到更旧一侧的前一组；若锚点组为首组则落到新首组；topic 变空则移除锚点 | 是（CW-4 · 确定性删除转移/修复） |
 | 删除非锚点 turn | 锚点相对位置不动 | 否 |
-| 分支创建 | 确定性继承父 topic 锚点（分支继承），不从 `contextCount` 重算 | 是（CW-4 · 分支继承） |
+| 分支创建 | 确定性继承父 topic 锚点（分支继承）：范围内按索引映射，不重算；缺失/无效/超出范围的非空新分支以当前 `contextCount` 在默认窗口位置建立（与 TokenCount 同位），空分支无锚点 | 是（CW-4 · 分支继承） |
 | 兼容性修复（遗留非空 topic 缺锚点） | 恰好一次在默认窗口位置初始化锚点；永不重算有效锚点 | 是（CW-4/CW-5 · 兼容性修复） |
 | topic 清空为空 | 锚点移除（空 topic 无锚点，I-1） | 否（不变量推论） |
 
@@ -137,12 +137,12 @@
 
 **删除非锚点 turn**：锚点相对位置不动（I-6）。
 
-**分支继承（CW-4）**：同-topic 真分支创建时，新分支**确定性继承**父路由的有效锚点；该动作不使用 `contextCount` 重新推导，也不使任何已初始化路由无锚点。确切映射（CW-FIX-1，实现契约）：以父锚点在父有效 group list 中的**索引**映射进新分支 group list——
+**分支继承（CW-4）**：同-topic 真分支创建时，新分支**确定性继承**父路由的有效锚点；确切映射（CW-FIX-1，实现契约）：以父锚点在父有效 group list 中的**索引**映射进新分支 group list（clone 以 fresh UUID/askId 重映射 ID，索引保留）——
 
 - 新分支为空 → 无锚点（空路由无锚点，I-1；I-1 按路由适用）。
-- 父锚点缺失或无效（非 active、父 list 中不存在该 group key）→ 新分支不继承；**非空新分支必须立即获得锚点**（按 §6 默认位置建立），不允许已初始化的非空分支保持无锚点。
-- 索引在分支范围内（`index < branchGroups.length`）→ 锚点 = 新分支 group list 同索引组。
-- 索引超出分支范围（新分支是父 list 的严格前缀）→ **钳制到新分支最后一个可用组**（最近可用前驱），而非放弃继承。
+- 父锚点缺失或无效（非 active、父 list 中不存在该 group key）→ 新分支不继承；**非空新分支必须立即以当前 `contextCount` 在默认窗口位置建立锚点**（§6，与 TokenCount 重锚定同一位置；`null` → 首 turn），不允许已初始化的非空分支保持无锚点。
+- 索引在分支范围内（`index < branchGroups.length`）→ 锚点 = 新分支 group list 同索引组（不使用 `contextCount` 重算）。
+- 索引超出分支范围（新分支是父 list 的严格前缀，例如在 context-start 分隔线上方创建真分支或克隆 topic 使原锚点被排除在外）→ **永不钳制到末尾**；非空新分支以**当前** `contextCount` 在默认窗口位置建立锚点（与 TokenCount 点击同一位置），空分支保持无锚点。
 
 路由隔离：继承源为父路由键（`topicId` 或 `topicId:parentBranchId`），写入目标为新路由键（`topicId:newBranchId`）；源键与目标键互不覆盖。切 route 与窗口化读取（latest/around）永不触发继承与重算。
 

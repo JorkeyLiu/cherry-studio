@@ -56,7 +56,8 @@ vi.mock('@renderer/hooks/useMessageOperations', () => ({
 }))
 
 vi.mock('@renderer/hooks/useContextClosure', () => ({
-  useContextClosure: () => ({ closure: null })
+  useContextClosure: () => ({ closure: null, loading: false }),
+  useClosureSemanticSignal: () => '0:0'
 }))
 
 vi.mock('@renderer/services/AssistantService', () => ({

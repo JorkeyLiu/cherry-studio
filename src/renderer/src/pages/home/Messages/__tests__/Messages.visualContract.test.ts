@@ -24,7 +24,7 @@ describe('visual position contracts', () => {
   it('(1) new true branch explicitly lands at latest/bottom via a windowed latest read', () => {
     const src = messagesSrc()
     const idx = src.indexOf('EVENT_NAMES.NEW_TRUE_BRANCH')
-    const slice = src.slice(idx, idx + 4500)
+    const slice = src.slice(idx, idx + 7000)
     expect(slice).toMatch(/kind:\s*'latest'/)
     expect(slice).toMatch(/createLatestMessageWindow/)
     expect(slice).toMatch(/kind:\s*'bottom'/)

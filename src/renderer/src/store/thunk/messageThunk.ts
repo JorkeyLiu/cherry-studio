@@ -80,7 +80,7 @@ import { t } from 'i18next'
 import { throttle } from 'lodash'
 import { LRUCache } from 'lru-cache'
 
-import { withClosureTopics } from '../closureOwnership'
+import { markClosureReadOnly, withClosureTopics } from '../closureOwnership'
 import type { AppDispatch, RootState } from '../index'
 import { removeManyBlocks, updateOneBlock, upsertManyBlocks, upsertOneBlock } from '../messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '../newMessage'
@@ -2086,7 +2086,9 @@ export const createBranchThunk =
         })
       )
       if (effectiveBlocks.length > 0) {
-        dispatch(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId))
+        // Read-only effective-route projection (branch creation wire): must not
+        // invalidate the semantic closure.
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(effectiveBlocks), topicId)))
       }
       const { branchesReceived } = await import('../topicBranch')
       try {
@@ -2108,11 +2110,12 @@ export const createBranchThunk =
       }
       const newBranchId = result.branch.id
       // Deterministic per-route context-anchor inheritance (ADR §9, CW-4):
-      // parent effective group-list index → new branch group-list with clamp;
-      // invalid/missing source on a non-empty branch falls back to the default
-      // position; empty branches stay anchorless. Anchors are route-isolated
-      // (main `topicId`, branch `topicId:branchId`). Main `inherit` resolver
-      // owns the index mapping; this thunk only persists the non-stale result.
+      // valid source turn index in destination maps (clone IDs remapped);
+      // excluded/missing anchor on a non-empty branch establishes the CURRENT
+      // `contextCount` default position; empty branches stay anchorless.
+      // Anchors are route-isolated (main `topicId`, branch `topicId:branchId`).
+      // Main `inherit` resolver owns the index mapping; this thunk only
+      // persists the non-stale result.
       try {
         const state = getState()
         const owner = state.assistants.assistants.find((a) => a.topics.some((t) => t.id === topicId))
@@ -3188,7 +3191,8 @@ export const loadTopicMessagesThunk =
         const blocks = response!.blocks as unknown as MessageBlock[]
         const messages = response!.messages as unknown as Message[]
         if (blocks.length > 0) {
-          dispatch(withClosureTopics(upsertManyBlocks(blocks as any), topicId))
+          // Read-only window hydration: must not invalidate the semantic closure.
+          dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(blocks as any), topicId)))
         }
         dispatch(newMessagesActions.messagesReceived({ topicId, messages } as any))
       }
@@ -3338,7 +3342,8 @@ export const loadRouteMessagesThunk =
         return response
       }
       if (typedBlocks.length > 0) {
-        dispatch(withClosureTopics(upsertManyBlocks(typedBlocks), topicId))
+        // Read-only route-window hydration: must not invalidate the semantic closure.
+        dispatch(markClosureReadOnly(withClosureTopics(upsertManyBlocks(typedBlocks), topicId)))
       }
       // Atomic conservative rebase with Main-authoritative capability:
       // single commit, no blank, no mixed route. Empty windows publish []

@@ -286,16 +286,19 @@ describe('inheritAnchorForBranch', () => {
     expect(inheritAnchorForBranch(g('u2'), source, branch)).toEqual(g('b2'))
   })
 
-  it('clamps an out-of-range parent position to the branch LAST group (nearest predecessor)', () => {
-    const source = ['u0', 'u1', 'u2', 'u3']
-    const branch = ['b0']
-    expect(inheritAnchorForBranch(g('u2'), source, branch)).toEqual(g('b0'))
+  it('falls back to the CURRENT-contextCount default when the parent position is outside the branch (never clamp to last)', () => {
+    const source = ['u0', 'u1', 'u2', 'u3', 'u4']
+    const branch = ['b0', 'b1', 'b2']
+    // Out-of-range index 4. Old clamp would give b2 (last); new default:
+    // N=2 -> index max(0,3-2)=1 -> b1; null -> first -> b0.
+    expect(inheritAnchorForBranch(g('u4'), source, branch, 2)).toEqual(g('b1'))
+    expect(inheritAnchorForBranch(g('u4'), source, branch, null)).toEqual(g('b0'))
   })
 
-  it('clamps an out-of-range parent position to the branch last group (multi-group prefix)', () => {
-    const source = ['u0', 'u1', 'u2', 'u3', 'u4']
-    const branch = ['b0', 'b1']
-    expect(inheritAnchorForBranch(g('u4'), source, branch)).toEqual(g('b1'))
+  it('returns undefined for out-of-range when contextCount is omitted (caller establishes the default)', () => {
+    const source = ['u0', 'u1', 'u2', 'u3']
+    const branch = ['b0']
+    expect(inheritAnchorForBranch(g('u2'), source, branch)).toBeUndefined()
   })
 
   it('returns undefined when the source anchor is missing', () => {
@@ -318,10 +321,12 @@ describe('inheritAnchorForBranch', () => {
     expect(inheritAnchorForBranch(g('u1'), source, [])).toBeUndefined()
   })
 
-  it('never recomputes from contextCount — pure index transfer', () => {
+  it('never recomputes from contextCount for in-range positions — pure index transfer', () => {
     const source = ['u0', 'u1', 'u2', 'u3', 'u4', 'u5']
     const branch = ['b0', 'b1', 'b2']
     expect(inheritAnchorForBranch(g('u1'), source, branch)).toEqual(g('b1'))
+    expect(inheritAnchorForBranch(g('u1'), source, branch, 2)).toEqual(g('b1'))
+    expect(inheritAnchorForBranch(g('u1'), source, branch, null)).toEqual(g('b1'))
   })
 })
 

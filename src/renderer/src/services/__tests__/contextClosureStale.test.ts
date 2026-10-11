@@ -1,8 +1,10 @@
 import {
+  bumpClosureGeneration,
   clearCachedContextClosure,
   computeClosureFingerprint,
   getCachedClosureFingerprint,
   getCachedContextClosure,
+  getFreshValidatedClosure,
   isValidContextClosureCacheHit,
   isValidContextClosureResponse,
   setCachedContextClosure,
@@ -73,7 +75,7 @@ describe('closure cache stale/in-flight', () => {
     expect(isValidContextClosureResponse(req, res)).toBe(false)
   })
 
-  it('same-length mutation invalidates closure via fingerprint (LOCK-R06-006)', () => {
+  it('viewport fingerprint never invalidates; genuine mutation invalidates via generation', () => {
     const topicId = 't-fp'
     clearCachedContextClosure(topicId)
     // Initial authoritative messages: u1, a1 (status success)
@@ -94,10 +96,16 @@ describe('closure cache stale/in-flight', () => {
     ]
     const fp2 = computeClosureFingerprint(mutatedMsgs as any)
     expect(fp2).not.toBe(fp1)
-    // Cache hit with same anchor but different fingerprint must be rejected (needs refetch)
+    // Viewport fingerprint difference alone must NOT reject: viewport
+    // independence — pure viewport change retains the valid closure.
     const cached = getCachedContextClosure(topicId)!
     const storedFp = getCachedClosureFingerprint(topicId)!
-    expect(isValidContextClosureCacheHit(cached as any, topicId, 'u1', fp2, storedFp)).toBe(false)
+    expect(isValidContextClosureCacheHit(cached as any, topicId, 'u1', fp2, storedFp)).toBe(true)
+    expect(getFreshValidatedClosure(topicId, 'u1', fp2)).not.toBeNull()
+    // A genuine semantic mutation bumps the generation and invalidates.
+    bumpClosureGeneration(topicId)
+    expect(getFreshValidatedClosure(topicId, 'u1', fp2)).toBeNull()
+    expect(getFreshValidatedClosure(topicId, 'u1', fp1)).toBeNull()
     // After clearing (invalidation), hit no longer exists
     clearCachedContextClosure(topicId)
     expect(getCachedContextClosure(topicId)).toBeNull()

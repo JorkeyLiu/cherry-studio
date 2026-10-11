@@ -2,7 +2,7 @@
 
 > **文档状态**：Authoritative（权威规范，描述已实现的 durable 语义）。本文档是 topic-internal true branch 的**唯一权威规范**：定义消息实体唯一性、永久所属、只读引用、owner 完整控制、蝴蝶效应与缺 anchor fail-closed、删除 subtree、anchor 不可变与创建规则、有效路由递归算法、Main 权威与 Renderer fail-closed、复合变更的实际写目标与原子性、上下文窗口关系、同步与导入导出边界。投影完备性（`loaded-projection`、窗口三元区分、稳定 ID 导航、调用者本地读取、请求本地覆盖）仍由 [Projection Completeness and Authority Intents](./projection-completeness-authority.md)（PROJ-1…PROJ-12）治理，本文档不重复其决策表；上下文锚点的有效性/默认/继承/修复仍由 [Context window governance](./context-window.md) 治理，本文档只定义分支与上下文的关系。
 > **决策锁**：BRANCH-1 … BRANCH-12（§3 决策表，durable decision IDs；迁移语义为既有 ID 的 bounded 扩展，不新增 BRANCH 编号，不使用会话 LOCK ID）。
-> **最后更新**：2026-10-03
+> **最后更新**：2026-10-11
 > **Owner**：Personal fork（jorkeyliu）
 > **关联**：`AGENTS.md` 与 `docs/architecture/architecture.md` 链接本文档而非复制其决策表；应用身份由 [Application Identity ADR](./cherry-chat-application-identity.md) 治理，SQLite 聊天权威与 L2 导入由 [SQLite migration governance](../archived/sqlite-migration.md) 治理，同步现状由 [Personal Multi-Device Sync](../work/multi-device-sync.md) 治理、目标由 [Sync Connection & Channel ADR](./sync-connection-channel.md) 与 [Sync Data Convergence ADR](./sync-data-convergence.md) 治理——本文档不改变、不重述这些治理域的边界。
 > **规范目标 vs 实现状态**：本文档 §2/§3/§7A/§8/§9/§11/§12 定义目的特定新命令 `moveSelectedTurnsToNewBranch`（“移至新建分支”）的目标语义；Main/Renderer 实现由并行代码 agent 承担，本文档不声称代码已完成。`jorkey/feat/multi-device-sync` 保持 untouched；已取消的 merge/sync 支持不在本文档定义范围，真分支维持 local-only。
@@ -190,7 +190,7 @@ effective(topic, branch):
 
 - 上下文算法 branch-neutral：只关注当前 route 的 effective message sequence 与稳定 IDs，按整 turn 选取 anchor-to-end，不判定 ownership/permission。
 - 每 route 独立 anchor/state：`routeKey = topicId`（main）与 `topicId:branchId`（分支）严格隔离、互不写入；不同分支可有不同窗口。
-- Branch anchor（fork 消息）与 context-window anchor（起始 turn 的 group key）严格区分：前者定义路由构成，后者定义上下文窗口起点。分支继承映射（父锚点索引 → 新分支）不使用 `contextCount` 重算；`contextCount` 变更永不移动既有锚点。
+- Branch anchor（fork 消息）与 context-window anchor（起始 turn 的 group key）严格区分：前者定义路由构成，后者定义上下文窗口起点。分支继承映射（父锚点索引 → 新分支，范围内按索引，clone 重映射 ID 保留索引）仅在范围内不使用 `contextCount` 重算；缺失/无效/超出范围的非空新分支以当前 `contextCount` 在默认窗口位置建立（与 TokenCount 点击同位，`null` → 首 turn），永不钳制到末尾，空分支无锚点；`contextCount` 变更永不移动既有锚点。
 - Context capability（`context-closure` 等）永不作为 mutation permission；需要分支 capability 的地方链接本文档，不复制决策表。
 - **视口归属**：路由切换时的稳定视口归属、恢复意图/所有权生命周期与揭示守卫由 [Route Viewport Position](./route-viewport-position.md)（VIEWPORT-1…VIEWPORT-12）治理；路由切换永不改变 topic 身份（BRANCH-2/11），视口快照按路由键隔离——本文档不定义视口语义。§7A 新分支沿用既有“分支继承映射 + 路由键隔离”规则，不重定义。
 

@@ -97,7 +97,7 @@ describe('freshness-gated cache helper (LOCK-R06-006)', () => {
     expect(freshAfter).toBeNull()
   })
 
-  it('fail-closed: fingerprint mismatch -> null (same-length visible mutation)', () => {
+  it('viewport independence: fingerprint mismatch retains; generation mismatch rejects', () => {
     const topicId = 't-fp2'
     const anchor = 'u1'
     const msgsA = [
@@ -113,9 +113,14 @@ describe('freshness-gated cache helper (LOCK-R06-006)', () => {
     ]
     const fpB = computeClosureFingerprint(msgsB as any)
     expect(fpB).not.toBe(fpA)
-    expect(getFreshValidatedClosure(topicId, anchor, fpB)).toBeNull()
+    // Pure viewport shape change retains the valid closure.
+    expect(getFreshValidatedClosure(topicId, anchor, fpB)).not.toBeNull()
     // matching still fresh
     expect(getFreshValidatedClosure(topicId, anchor, fpA)).not.toBeNull()
+    // A genuine semantic mutation (generation bump) rejects regardless of fingerprint.
+    bumpClosureGeneration(topicId)
+    expect(getFreshValidatedClosure(topicId, anchor, fpB)).toBeNull()
+    expect(getFreshValidatedClosure(topicId, anchor, fpA)).toBeNull()
   })
 
   it('conservative: viewport fingerprint cannot prove full closure freshness, generation is required', () => {

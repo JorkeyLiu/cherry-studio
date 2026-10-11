@@ -533,22 +533,33 @@ describe('ChatDbAggregateService — resolve-context-closure anchor detail (meta
     }
   })
 
-  it('inherit clamps a source index beyond the target turn count to the target last turn (anchor/closure parity, no full read)', () => {
+  it('inherit beyond the target turn count falls back to the CURRENT-contextCount default (anchor/closure parity, no full read)', () => {
     const targetId = `t-${uid()}`
-    seedTurns(agg, targetId, ['u1', 'u2'])
+    seedTurns(agg, targetId, ['u1', 'u2', 'u3'])
     const sourceId = `t-${uid()}`
     seedTurns(agg, sourceId, ['s1', 's2', 's3', 's4'])
-    // Source s4 is index 3; target has 2 turns so index 3 clamps to last turn u2.
+    // Source s4 is index 3; target has 3 turns so index 3 is outside.
+    // Old clamp would give u3 (last); new fallback: N=2 -> u2, null -> u1.
     const closure = okValue(
       agg.resolveContextClosure({
         topicId: targetId,
         intent: 'inherit',
         sourceTopicId: sourceId,
         sourceAnchorGroupKey: 's4',
-        contextCount: 1
+        contextCount: 2
       })
     ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
     expect(closure.resolvedAnchorGroupKey).toBe('u2')
+    const closureNull = okValue(
+      agg.resolveContextClosure({
+        topicId: targetId,
+        intent: 'inherit',
+        sourceTopicId: sourceId,
+        sourceAnchorGroupKey: 's4',
+        contextCount: null
+      })
+    ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+    expect(closureNull.resolvedAnchorGroupKey).toBe('u1')
     // Stale-current closure baseline before spies (closure needs the full read).
     const closureStale = okValue(
       agg.resolveContextClosure({
@@ -556,7 +567,7 @@ describe('ChatDbAggregateService — resolve-context-closure anchor detail (meta
         intent: 'inherit',
         sourceTopicId: sourceId,
         sourceAnchorGroupKey: 's4',
-        contextCount: 1,
+        contextCount: 2,
         currentAnchorGroupKey: 'u1'
       })
     ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
@@ -575,21 +586,33 @@ describe('ChatDbAggregateService — resolve-context-closure anchor detail (meta
           intent: 'inherit',
           sourceTopicId: sourceId,
           sourceAnchorGroupKey: 's4',
-          contextCount: 1,
+          contextCount: 2,
           detail: 'anchor'
         })
       ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
       expect(anchor.resolvedAnchorGroupKey).toBe('u2')
       expect(anchor.resolvedAnchorGroupKey).toBe(closure.resolvedAnchorGroupKey)
       expect(anchor.changed).toBe(closure.changed)
-      // Stale-current variant keeps the clamped key with changed:true.
+      const anchorNull = okValue(
+        agg.resolveContextClosure({
+          topicId: targetId,
+          intent: 'inherit',
+          sourceTopicId: sourceId,
+          sourceAnchorGroupKey: 's4',
+          contextCount: null,
+          detail: 'anchor'
+        })
+      ) as { resolvedAnchorGroupKey: string | null; changed: boolean }
+      expect(anchorNull.resolvedAnchorGroupKey).toBe('u1')
+      expect(anchorNull.resolvedAnchorGroupKey).toBe(closureNull.resolvedAnchorGroupKey)
+      // Stale-current variant keeps the default key with changed:true.
       const anchorStale = okValue(
         agg.resolveContextClosure({
           topicId: targetId,
           intent: 'inherit',
           sourceTopicId: sourceId,
           sourceAnchorGroupKey: 's4',
-          contextCount: 1,
+          contextCount: 2,
           currentAnchorGroupKey: 'u1',
           detail: 'anchor'
         })

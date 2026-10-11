@@ -330,13 +330,16 @@ describe('isValidContextClosureCacheHit', () => {
     }
     expect(isValidContextClosureCacheHit(res, 't1', 'u1')).toBe(false)
   })
-  it('rejects when fingerprint indicates same-length mutation (LOCK-R06-006)', () => {
+  it('viewport fingerprint never gates a valid hit (viewport independence)', () => {
     const res = makeClosure()
-    // fingerprint mismatch should fail hit
-    expect(isValidContextClosureCacheHit(res, 't1', 'u1', 'fp-current', 'fp-cached-different')).toBe(false)
+    // Viewport membership/shape mismatch must NOT fail the hit: full-route
+    // authority is independent of the loaded viewport. Same-length and
+    // outside-viewport mutations are covered by the semantic generation, not
+    // by viewport fingerprints.
+    expect(isValidContextClosureCacheHit(res, 't1', 'u1', 'fp-current', 'fp-cached-different')).toBe(true)
     // matching fingerprints still valid
     expect(isValidContextClosureCacheHit(res, 't1', 'u1', 'fp-same', 'fp-same')).toBe(true)
-    // missing fingerprint (null) does not trigger fingerprint check — still valid if other checks pass
+    // missing fingerprint (null) still valid if other checks pass
     expect(isValidContextClosureCacheHit(res, 't1', 'u1', null, null)).toBe(true)
   })
   it('rejects when counts invalid or boundary mismatch (LOCK-001)', () => {

@@ -1,11 +1,14 @@
 import { loggerService } from '@logger'
 import { convertMessagesToSdkMessages } from '@renderer/aiCore/prepareParams'
 import { getAssistantSettings } from '@renderer/services/AssistantService'
-import { computeClosureFingerprint, getFreshValidatedClosure } from '@renderer/services/contextClosure'
+import { isValidContextClosureResponse } from '@renderer/services/contextClosure'
 import { computeContextInfo } from '@renderer/services/contextInfoService'
+import { dbService } from '@renderer/services/db'
 import type { BlockOverlay } from '@renderer/services/requestBlockOverlay'
+import { buildBlockOverlay, mergeBlockOverlays } from '@renderer/services/requestBlockOverlay'
 import type { Assistant } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import type { Message, MessageBlock } from '@renderer/types/newMessage'
+import { filterEmptyMessages } from '@renderer/utils/messageUtils/filters'
 import { createNoModelError } from '@renderer/utils/noModelError'
 import type { ModelMessage } from 'ai'
 import { findLast, isEmpty } from 'lodash'
@@ -32,48 +35,166 @@ export class ConversationService {
     authorityUser?: AuthorityUserSnapshot,
     branchId?: string | null
   ): Promise<{ modelMessages: ModelMessage[]; uiMessages: Message[] }> {
-    let effectiveMessages = messages
-    let overlay: BlockOverlay | undefined
+    // Trigger boundary: the initiating last-user request. The caller slice is
+    // already clipped to the triggering user (messageThunk); the full
+    // authority closure below must never include later queued user turns or
+    // the assistant stub after this trigger.
+    let triggerId: string | undefined
     if (authorityUser) {
-      overlay = authorityUser.blocks
-      const hasUser = effectiveMessages.some((m) => m.id === authorityUser.message.id)
-      if (!hasUser) {
-        effectiveMessages = [...effectiveMessages, authorityUser.message]
+      triggerId = authorityUser.message.id
+    } else {
+      const lastUserMessage = findLast(messages, (m) => m.role === 'user')
+      if (!lastUserMessage) {
+        return {
+          modelMessages: [],
+          uiMessages: []
+        }
       }
+      triggerId = lastUserMessage.id
     }
-    const lastUserMessage = findLast(effectiveMessages, (m) => m.role === 'user')
-    if (!lastUserMessage) {
+    if (!triggerId) {
       return {
         modelMessages: [],
         uiMessages: []
       }
     }
 
-    // R-06: attempt freshness-gated closure cache for single resolver semantics (centralized helper).
-    // Structural + anchor + generation/fingerprint freshness; fail-closed to viewport when freshness cannot be proven.
-    // Authority overlay never routes through the closure cache: the closure is
-    // keyed on loaded-projection fingerprints and must not swallow the
-    // request-local authority user.
-    let contextMessages: Message[] = effectiveMessages
-    if (topicId && !authorityUser) {
-      const anchorKey = typeof branchId === 'string' && branchId.length > 0 ? `${topicId}:${branchId}` : topicId
-      const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorKey]?.groupKey ?? null
-      if (anchorGroupKey) {
-        const currentFp = computeClosureFingerprint(effectiveMessages as any)
-        const fresh = getFreshValidatedClosure(topicId, anchorGroupKey, currentFp, branchId ?? null)
-        if (fresh) {
-          contextMessages = fresh.messages as unknown as Message[]
+    // No-topic local helpers (summary/translate/ephemeral): retain the
+    // existing bounded projection behavior. No authority read, no anchor.
+    if (!topicId) {
+      let effectiveMessages = messages
+      let overlay: BlockOverlay | undefined
+      if (authorityUser) {
+        overlay = authorityUser.blocks
+        const hasUser = effectiveMessages.some((m) => m.id === authorityUser.message.id)
+        if (!hasUser) {
+          effectiveMessages = [...effectiveMessages, authorityUser.message]
+        }
+      }
+      const lastUserMessage = findLast(effectiveMessages, (m) => m.role === 'user')
+      if (!lastUserMessage) {
+        return {
+          modelMessages: [],
+          uiMessages: []
+        }
+      }
+      const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(
+        effectiveMessages,
+        assistant,
+        topicId,
+        overlay,
+        branchId ?? null
+      )
+      const model = assistant.model || getDefaultModel()
+      if (!model) {
+        throw createNoModelError()
+      }
+      logger.debug('uiMessagesFromPipeline', uiMessagesFromPipeline)
+      let uiMessages = uiMessagesFromPipeline
+      if ((!uiMessages || uiMessages.length === 0) && lastUserMessage) {
+        uiMessages = [lastUserMessage]
+      }
+      return {
+        modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay),
+        uiMessages
+      }
+    }
+
+    // Topic request path: actual outbound window correctness. The request
+    // preparation acquires a caller-local Main complete effective-route
+    // anchor-to-end closure before constructing model messages whenever the
+    // topic carries a persisted active-route anchor. Pinned branchId (never
+    // the current active) addresses the effective route. No UI cache warmup,
+    // no ephemeral cache publish, no viewport/Redux full hydration.
+    // The persisted anchor snapshot is captured once here; the Main single
+    // response is the current transaction for this request (request-local
+    // snapshot per ADR). Persisted anchors are never reread, overwritten, or
+    // default-derived in this service.
+    const pinnedRoute = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+    const anchorKey = pinnedRoute ? `${topicId}:${pinnedRoute}` : topicId
+    const anchorGroupKey = getAssistantSettings(assistant).contextWindowAnchor?.[anchorKey]?.groupKey ?? null
+    if (!anchorGroupKey) {
+      // Initialized topics establish the anchor before queueing (send await);
+      // a missing anchor here is fail-closed, never a silent viewport default.
+      throw new Error(
+        `[ConversationService] missing persisted context anchor for route ${anchorKey}; refusing partial viewport request`
+      )
+    }
+
+    let closureResponse: Awaited<ReturnType<typeof dbService.fetchContextClosure>>
+    try {
+      closureResponse = await dbService.fetchContextClosure({
+        topicId,
+        branchId: pinnedRoute,
+        anchorGroupKey
+      })
+    } catch (error) {
+      // Real authority read failure must NOT fall back to a partial
+      // projection; it errors via the existing request error path
+      // (transformMessagesAndFetch emits the ERROR chunk).
+      throw error
+    }
+    if (!isValidContextClosureResponse({ topicId, anchorGroupKey, branchId: pinnedRoute }, closureResponse as any)) {
+      throw new Error(
+        `[ConversationService] invalid context closure for route ${anchorKey}; refusing partial viewport request`
+      )
+    }
+    const closureMessages = closureResponse.messages as unknown as Message[]
+    const closureBlocks = closureResponse.blocks as unknown as MessageBlock[]
+    // Readonly request-local overlay from the closure blocks, merged with the
+    // authority-user override (override wins) so fresh triggering data
+    // resolves off-viewport blocks without mutating Redux.
+    const closureOverlay = buildBlockOverlay(closureBlocks)
+    const overlay = mergeBlockOverlays(closureOverlay, authorityUser?.blocks)
+
+    // Clip the full closure through the triggering user inclusive (stable ID),
+    // keeping the existing last-assistant/filter policy downstream. Future
+    // queued users and assistant stubs after the trigger are excluded.
+    const triggerIndex = closureMessages.findIndex((m) => m?.id === triggerId)
+    let requestMessages: Message[]
+    let preAnchorAvailability = false
+    if (triggerIndex === -1) {
+      if (authorityUser && authorityUser.message.id === triggerId) {
+        // Retry/regenerate target precedes the current anchor: preserve the
+        // explicitly designed lastUser-availability semantic (at least the
+        // triggering user is sent) without widening the anchor or deriving a
+        // silent default. The anchor window (future relative to the target)
+        // is not included.
+        requestMessages = [authorityUser.message]
+        preAnchorAvailability = true
+      } else {
+        throw new Error(
+          `[ConversationService] triggering user ${triggerId} not in authority closure for route ${anchorKey}; refusing partial viewport request`
+        )
+      }
+    } else if (authorityUser && authorityUser.message.id === triggerId) {
+      // Fresh triggering object (edited resend) at the same stable position.
+      requestMessages = [...closureMessages.slice(0, triggerIndex), authorityUser.message]
+    } else {
+      requestMessages = closureMessages.slice(0, triggerIndex + 1)
+    }
+
+    let uiMessages: Message[]
+    if (preAnchorAvailability) {
+      const nonEmpty = filterEmptyMessages(requestMessages, overlay)
+      uiMessages = nonEmpty.length > 0 ? nonEmpty : requestMessages
+    } else {
+      const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(
+        requestMessages,
+        assistant,
+        topicId,
+        overlay,
+        pinnedRoute
+      )
+      uiMessages = uiMessagesFromPipeline
+      if (!uiMessages || uiMessages.length === 0) {
+        const triggerMessage = requestMessages.find((m) => m?.id === triggerId)
+        if (triggerMessage) {
+          uiMessages = [triggerMessage]
         }
       }
     }
-    // Use the unified pipeline — same filtering as computeContextInfo
-    const { uiMessages: uiMessagesFromPipeline } = computeContextInfo(
-      contextMessages,
-      assistant,
-      topicId,
-      overlay,
-      branchId ?? null
-    )
+
     const model = assistant.model || getDefaultModel()
     if (!model) {
       // Unconfigured model slot: emit the stable NoModelError marker so
@@ -81,13 +202,7 @@ export class ConversationService {
       // recovery action. Same category as the ApiService resolver guard.
       throw createNoModelError()
     }
-    logger.debug('uiMessagesFromPipeline', uiMessagesFromPipeline)
-
-    // Fallback: ensure at least the last user message is present to avoid empty payloads
-    let uiMessages = uiMessagesFromPipeline
-    if ((!uiMessages || uiMessages.length === 0) && lastUserMessage) {
-      uiMessages = [lastUserMessage]
-    }
+    logger.debug('uiMessagesFromPipeline', uiMessages)
 
     return {
       modelMessages: await convertMessagesToSdkMessages(uiMessages, model, overlay),

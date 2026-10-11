@@ -39,7 +39,7 @@ import storeSyncService from '../services/StoreSyncService'
 import assistants from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
-import { getClosureTopicIds } from './closureOwnership'
+import { getClosureTopicIds, isClosureReadOnly } from './closureOwnership'
 import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
@@ -514,27 +514,65 @@ storeSyncService.setOptions({
 
 /**
  * R-06 closure freshness invalidation middleware (Task A: topic-scoped).
- * Authoritative renderer publication/mutation paths for messages/blocks bump
- * the per-topic closure generation and invalidate cached closure entries.
+ * Genuine semantic mutations bump the per-topic closure generation and
+ * invalidate cached closure entries. Full-route authoritative counts are
+ * independent of the currently loaded viewport: pure latest/around/load-more
+ * read publications never invalidate.
  *
- * - `newMessages/*` actions invalidate their payload topic only (unchanged).
+ * - `newMessages/*` genuine mutations invalidate their payload topic only.
+ *   Explicitly enumerated read-only projection publications never invalidate:
+ *   `rebaseRouteMessages` / `messagesWindowMerged` / `messagesReceived`
+ *   (Main window reads), lifecycle markers (`setCurrentTopicId`,
+ *   `setTopicLoading`, `setTopicFulfilled`, `setDisplayCount`), and
+ *   capability maintenance (`mergeRouteMutability`, `pruneRouteMutability`,
+ *   `invalidateRouteMutability`). Unknown `newMessages/*` types keep the safe
+ *   default (invalidate).
  * - `messageBlocks/*` CONTENT mutations consume ONLY the explicit trustworthy
  *   topic ownership in `action.meta.closureTopicIds` (see `withClosureTopics`
  *   in store/closureOwnership.ts): one/many unique topics -> `bumpAndInvalidate`
  *   each; absent/invalid/explicit-unknown -> `bumpAndInvalidateAll` (deliberate
  *   global fallback). Ownership is never inferred from Redux entities or
- *   projections here.
+ *   projections here. Explicitly marked read-only hydrations
+ *   (`meta.closureReadOnly`, see `markClosureReadOnly`) — Main window block
+ *   hydration and closure hydration for the same topic — never invalidate.
+ *   Safe default: absent marker means mutate (invalidate).
  * - `messageBlocks/setMessageBlocksLoading|setMessageBlocksError` are not
  *   block-content mutations and never invalidate.
+ * - `resident/jointPublishComplete`, `residentRegistry/*`, `retention/*` are
+ *   read/projection lifecycle and never invalidate semantic context.
  * This gives same-length/outside-viewport mutations a generation signal
  * without a new IPC protocol. Generation check before cache publication
  * and before cache use ensures stale data is never claimed.
  */
+const READONLY_NEW_MESSAGES_TYPES = new Set([
+  'newMessages/rebaseRouteMessages',
+  'newMessages/messagesWindowMerged',
+  'newMessages/messagesReceived',
+  'newMessages/setCurrentTopicId',
+  'newMessages/setTopicLoading',
+  'newMessages/setTopicFulfilled',
+  'newMessages/setDisplayCount',
+  'newMessages/mergeRouteMutability',
+  'newMessages/pruneRouteMutability',
+  'newMessages/invalidateRouteMutability'
+])
 export const closureInvalidationMiddleware: Middleware = () => (next) => (action: any) => {
   const result = next(action)
   try {
     const type = typeof action?.type === 'string' ? (action.type as string) : ''
+    if (!type) return result
+    // Explicit authoritative read-only hydration/publication never invalidates,
+    // regardless of slice. Only read sites set this marker.
+    if (isClosureReadOnly(action)) return result
+    if (
+      type === 'resident/jointPublishComplete' ||
+      type.startsWith('residentRegistry/') ||
+      type.startsWith('retention/')
+    ) {
+      return result
+    }
     if (type.startsWith('newMessages/')) {
+      if (READONLY_NEW_MESSAGES_TYPES.has(type)) return result
       const topicId = action.payload?.topicId as string | undefined
       if (typeof topicId === 'string' && topicId.length > 0) {
         closureCache.bumpAndInvalidate(topicId)

@@ -1369,7 +1369,8 @@ export class ChatDbAggregateService {
         if (!topic.found) {
           throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
         }
-        const allMessages = repos.messages.listByTopic(request.topicId)
+        const routeBranchId = this.normalizeBranchId(request.branchId)
+        const allMessages = this.resolveRouteMessagesInTx(repos, request.topicId, routeBranchId).messages
         // Build context turns deterministically in authority order.
         type ContextTurn = { key: string; messages: MessageData[] }
         const turns: ContextTurn[] = []
@@ -1485,8 +1486,11 @@ export class ChatDbAggregateService {
    *   reject as validation); groupKey uses the canonical 3-step anchor match.
    *   Missing message/target is NOT_FOUND.
    * - inherit(sourceTopicId, sourceAnchor, contextCount, current target anchor):
-   *   valid source index maps to the target by index with clamp to the last
-   *   target turn; invalid source anchor falls back to the target default.
+   *   valid source index inside the target maps to the target by index
+   *   (clone remaps fresh UUID/askId IDs, index preserved); missing/invalid
+   *   source or an index outside the target falls back to the target
+   *   default at CURRENT contextCount (null => first, same position as a
+   *   TokenCount click), never clamped to last. Empty target stays null.
    *   Missing source/target topic is NOT_FOUND.
    *
    * Existing empty target succeeds with null anchor and zero counts; missing
@@ -1648,9 +1652,10 @@ export class ChatDbAggregateService {
               }
               throw new ChatDbValidationError('move requires messageId or groupKey')
             }
-            // inherit: valid source index maps to the target by index with
-            // clamp to the last target turn; invalid source falls back to the
-            // target default. Both sides use effective routes.
+            // inherit: valid source index inside the target maps to the target
+            // by index (clone remaps IDs, index preserved); missing/invalid
+            // source or an index outside the target falls back to the target
+            // default at CURRENT contextCount. Both sides use effective routes.
             if (typeof request.sourceTopicId !== 'string' || request.sourceTopicId.length === 0) {
               throw new ChatDbValidationError('inherit requires sourceTopicId')
             }
@@ -1668,11 +1673,8 @@ export class ChatDbAggregateService {
             const anchorSourceKey =
               typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
             const sourceIdx = anchorSourceKey !== null ? resolveAnchorIndexOf(sourceTurns, anchorSourceKey) : -1
-            if (sourceIdx !== -1) {
-              if (anchorTurns.length === 0) {
-                return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
-              }
-              const resolved = anchorTurns[Math.min(sourceIdx, anchorTurns.length - 1)].key
+            if (sourceIdx !== -1 && sourceIdx < anchorTurns.length) {
+              const resolved = anchorTurns[sourceIdx].key
               return { resolvedAnchorGroupKey: resolved, changed: resolved !== currentKey }
             }
             return resolveEffectiveDefault(request.contextCount ?? null, currentKey)
@@ -1813,9 +1815,11 @@ export class ChatDbAggregateService {
             }
             throw new ChatDbValidationError('move requires messageId or groupKey')
           }
-          // inherit: valid source index maps to the target by index with clamp
-          // to the last target turn; invalid source falls back to the target
-          // default. Bounded forward scans only — no listByTopic, no blocks.
+          // inherit: valid source index inside the target maps to the target by
+          // index; missing/invalid source or an index outside the target falls
+          // back to the target default at CURRENT contextCount (null => first,
+          // same position as a TokenCount click), never clamped to last.
+          // Bounded forward scans only — no listByTopic, no blocks.
           // A pathological single turn may expand across chunks, but the topic
           // is never materialized wholesale via listByTopic.
           if (typeof request.sourceTopicId !== 'string' || request.sourceTopicId.length === 0) {
@@ -1855,8 +1859,9 @@ export class ChatDbAggregateService {
               const tail = acc[acc.length - 1]
               const page = repos.messages.listAfter(dstTopicId, tail.sortOrder, tail.id, HEAD_CHUNK)
               if (page.length === 0) {
-                if (turns.length === 0) return null
-                return turns[turns.length - 1].key
+                // Index outside the target (or empty target): no clamp.
+                // Caller falls back to the CURRENT-contextCount default.
+                return null
               }
               acc = [...acc, ...page]
             }
@@ -1864,10 +1869,11 @@ export class ChatDbAggregateService {
           const sourceIdx = sourceKey !== null ? findSourceIndex(sourceId, sourceKey) : -1
           if (sourceIdx !== -1) {
             const targetKey = findTargetKeyAtIndex(request.topicId, sourceIdx)
-            if (targetKey === null) {
-              return { resolvedAnchorGroupKey: null, changed: currentKey !== null }
+            if (targetKey !== null) {
+              return { resolvedAnchorGroupKey: targetKey, changed: targetKey !== currentKey }
             }
-            return { resolvedAnchorGroupKey: targetKey, changed: targetKey !== currentKey }
+            // Outside the target (or empty target): default at CURRENT
+            // contextCount; empty resolves null via the default path.
           }
           return resolveDefaultAnchor(request.topicId, request.contextCount ?? null, currentKey)
         }
@@ -1994,8 +2000,8 @@ export class ChatDbAggregateService {
           const sourceTurns = buildTurns(sourceMessages)
           const sourceKey = typeof request.sourceAnchorGroupKey === 'string' ? request.sourceAnchorGroupKey : null
           const sourceIdx = sourceKey !== null ? resolveAnchorIndex(sourceTurns, sourceKey) : -1
-          if (sourceIdx !== -1) {
-            resolvedIdx = Math.min(sourceIdx, total - 1)
+          if (sourceIdx !== -1 && sourceIdx < total) {
+            resolvedIdx = sourceIdx
           } else {
             resolvedIdx = resolveDefaultIndex(total, request.contextCount ?? null)
           }

@@ -155,28 +155,34 @@ export function transferAnchorsAfterDeletion(
  * Branch anchor inheritance (docs/adr/context-window.md §9, CW-4 · 分支继承):
  * deterministically maps the parent topic's persisted anchor into a new
  * branch by position (group-list index transfer), never by recomputing from
- * `contextCount`.
+ * `contextCount` for the in-range case.
  *
  * Rules:
- *   - Source anchor missing or not active → `undefined` (nothing to inherit).
+ *   - Source anchor missing or not active → `undefined` (nothing to inherit;
+ *     non-empty caller establishes the default at CURRENT `contextCount`).
  *   - Source anchor groupKey absent from `sourceGroupList` (invalid source
- *     anchor) → `undefined`.
+ *     anchor) → `undefined` (caller establishes the default).
  *   - Empty branch group list → `undefined` (empty topics have no anchor,
  *     I-1).
  *   - In-range index (`sourceIndex < branchGroupList.length`) → maps the
- *     parent position into the branch by index.
+ *     parent position into the branch by index (clone remaps fresh
+ *     UUID/askId IDs, index preserved).
  *   - Out-of-range index (`sourceIndex >= branchGroupList.length`, the branch
- *     is a strict prefix of the source) → clamped to the branch's LAST
- *     available group — the nearest available predecessor (CW-FIX-1). A
- *     non-empty branch always receives a persisted anchor; it never silently
- *     stays anchorless.
+ *     is a strict prefix of the source, e.g. creating/cloning above the
+ *     context-start divider excludes the original anchor) → NEVER clamp to
+ *     last. Returns the CURRENT-`contextCount` default when `contextCount`
+ *     is provided (`null` => first turn, same position as a TokenCount
+ *     click); returns `undefined` when `contextCount` is omitted so the
+ *     caller establishes the default. A non-empty branch never silently stays
+ *     anchorless.
  *
  * Pure function: no store access, no dispatch.
  */
 export function inheritAnchorForBranch(
   sourceAnchor: ContextWindowAnchor | undefined,
   sourceGroupList: string[],
-  branchGroupList: string[]
+  branchGroupList: string[],
+  contextCount?: number | null
 ): ContextWindowAnchor | undefined {
   if (sourceAnchor?.kind !== 'active') {
     return undefined
@@ -191,9 +197,14 @@ export function inheritAnchorForBranch(
   if (sourceIndex < branchGroupList.length) {
     return { kind: 'active', groupKey: branchGroupList[sourceIndex] }
   }
-  // Out-of-range: clamp to the branch's last available group (nearest
-  // available predecessor).
-  return { kind: 'active', groupKey: branchGroupList[branchGroupList.length - 1] }
+  // Out-of-range: fall back to the CURRENT-contextCount default position
+  // (resolveDefaultIndex semantics), never clamp to last.
+  if (contextCount === undefined) {
+    return undefined
+  }
+  const total = branchGroupList.length
+  const defaultIndex = contextCount === null ? 0 : Math.max(0, total - Math.max(1, Math.floor(contextCount)))
+  return { kind: 'active', groupKey: branchGroupList[defaultIndex] }
 }
 
 /**

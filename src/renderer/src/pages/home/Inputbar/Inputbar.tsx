@@ -293,12 +293,19 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     if (!config.showTokenCount || estimateTokenCount === undefined) {
       return undefined
     }
+    // Authority-pending: a persisted anchor exists but no fresh authoritative
+    // closure is available yet (initial fetch / pending branch switch). Never
+    // display viewport-derived partial counts — hide until the authoritative
+    // result arrives. Empty/no-anchor routes are not pending and render normally.
+    if (previewContextInfo.isAuthoritativePending) {
+      return undefined
+    }
 
     return {
       estimateTokenCount,
       contextCount
     }
-  }, [config.showTokenCount, contextCount, estimateTokenCount])
+  }, [config.showTokenCount, contextCount, estimateTokenCount, previewContextInfo.isAuthoritativePending])
 
   // Context-window anchor control (stable anchor semantics): the persisted
   // `contextWindowAnchor[topicId]` is the stable topic context start. The
