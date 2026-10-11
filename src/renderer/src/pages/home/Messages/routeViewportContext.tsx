@@ -759,14 +759,332 @@ export const resolveAnswerTabElement = (container: HTMLElement, tabMessageId: st
 }
 
 /**
+ * Shared interaction-region semantics (stable layout identities, never button
+ * names): `answer-tab` is the clicked answer tab strip; `message-controls`
+ * is the message footer ↔ editor action area surviving editor replacement as
+ * the same stable interaction area; `fold-controls` is the group-level
+ * expand/compress control. Any non-empty region key is structurally
+ * resolvable — the resolver accepts no allowlist, so new regions need no
+ * code change, only the annotation.
+ */
+export const INTERACTION_REGION_TAB = 'answer-tab' as const
+export const INTERACTION_REGION_CONTROLS = 'message-controls' as const
+export const INTERACTION_REGION_FOLD = 'fold-controls' as const
+
+/**
+ * Fail-closed correspondence deadline: a handoff representative that stays
+ * hidden/unresolvable longer than this after capture is treated as a dead
+ * target (deleted route content, never-committing selection) and the intent
+ * is dropped with no adopt. Generous wall-clock bound (async selections and
+ * slow commits land far inside it); it only ever drops, never certifies.
+ */
+export const INTERACTION_PENDING_DEADLINE_MS = 20000
+/**
+ * Quiet proof for adoption: consecutive agreeing subpixel reads required
+ * alongside an observed layout change before handing off. Only gates the
+ * fingerprinted path; legacy fingerprint-less intents keep single-frame
+ * handoff.
+ */
+export const INTERACTION_QUIET_READS_FOR_ADOPT = 2
+/**
+ * Stillness bound for dropping a genuinely no-effect action WITHOUT
+ * adopting: consecutive agreeing reads with no observable layout change
+ * versus the capture fingerprint. The count only ever gates a
+ * snapshot-free drop — stillness alone never certifies success.
+ */
+export const INTERACTION_QUIET_READS_FOR_DROP = 8
+
+const escapeSelectorValue = (v: string): string => {
+  try {
+    const api = (globalThis as unknown as { CSS?: { escape?: (x: string) => string } }).CSS
+    if (api?.escape) return api.escape(v)
+    return v
+  } catch {
+    return v
+  }
+}
+
+/**
+ * Resolve the structural scope element (the layout owner): a message row's
+ * real content box for message scopes, the stable group wrapper for group
+ * scopes. Fail-closed (null) when the scope is missing or disconnected.
+ */
+export const resolveInteractionScopeElement = (
+  container: HTMLElement,
+  scope: { kind: string; id: string }
+): HTMLElement | null => {
+  try {
+    if (!scope || typeof scope.id !== 'string' || scope.id.length === 0) return null
+    if (scope.kind === 'group') {
+      let el: HTMLElement | null = null
+      try {
+        el = container.querySelector(`[data-stable-group-id="${escapeSelectorValue(scope.id)}"]`) as HTMLElement | null
+      } catch {
+        el = null
+      }
+      if (el && el.isConnected && container.contains(el)) return el
+      return null
+    }
+    if (scope.kind !== 'message') return null
+    return resolveRealMessageBox(container, scope.id)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the live element for a shared interaction region inside the
+ * viewport container. The same region key is re-resolved in the same scope
+ * after replacement (structural correspondence: footer ↔ action bar,
+ * compact ↔ expanded toggle, pre/post-selection tab strip). Tabs resolve
+ * through the stable tab-strip selector; every other region resolves to the
+ * annotated element within its scope. Fail-closed (null) when the scope or
+ * region is missing: disappearance without a legitimate structural mapping
+ * must never guess another control.
+ */
+export const resolveInteractionRegionElement = (
+  container: HTMLElement,
+  scope: { kind: string; id: string },
+  region: string
+): HTMLElement | null => {
+  try {
+    if (!scope || !region) return null
+    if (region === INTERACTION_REGION_TAB) {
+      if (scope.kind !== 'message') return null
+      return resolveAnswerTabElement(container, scope.id)
+    }
+    const scopeEl = resolveInteractionScopeElement(container, scope)
+    if (!scopeEl) return null
+    let el: HTMLElement | null = null
+    try {
+      el = scopeEl.querySelector(`[data-interaction-region="${escapeSelectorValue(region)}"]`) as HTMLElement | null
+    } catch {
+      el = null
+    }
+    if (el && el.isConnected && scopeEl.contains(el)) return el
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the handoff representative for a settled interaction: the visible
+ * message row whose identity + offset the stable snapshot adopts. Tabs hand
+ * off to their target answer's real box (hidden pre-commit = mutation still
+ * pending); message scopes hand off to their own row; group scopes hand off
+ * to the first visible real box in the group. Null when no visible
+ * representative exists (pending or fail-closed, decided by the caller).
+ */
+export const resolveInteractionRepresentative = (
+  container: HTMLElement,
+  scope: { kind: string; id: string },
+  region: string
+): { id: string; offset: number } | null => {
+  try {
+    const containerTop = container.getBoundingClientRect().top
+    if (!Number.isFinite(containerTop)) return null
+    if (region === INTERACTION_REGION_TAB || scope.kind === 'message') {
+      if (scope.kind !== 'message') return null
+      const row = resolveRealMessageBox(container, scope.id)
+      if (!row) return null
+      if (isKeeperAnchorRowHidden(row, container)) return null
+      const top = row.getBoundingClientRect().top
+      if (!Number.isFinite(top)) return null
+      return { id: scope.id, offset: top - containerTop }
+    }
+    if (scope.kind !== 'group') return null
+    const scopeEl = resolveInteractionScopeElement(container, scope)
+    if (!scopeEl) return null
+    const rows = scopeEl.querySelectorAll('[data-message-id]:not([data-testid="answer-group-selector"])')
+    for (const cand of rows) {
+      if (!(cand instanceof HTMLElement)) continue
+      let id: string | null = null
+      try {
+        id = cand.getAttribute('data-message-id')
+      } catch {
+        id = null
+      }
+      if (typeof id !== 'string' || id.length === 0) continue
+      const real = resolveRealMessageBox(container, id)
+      if (!real) continue
+      try {
+        if (isKeeperAnchorRowHidden(real, container)) continue
+      } catch {
+        continue
+      }
+      const top = real.getBoundingClientRect().top
+      if (!Number.isFinite(top)) continue
+      return { id, offset: top - containerTop }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Record the layout-owner fingerprint BEFORE the mutation: the scope
+ * element's own dimensions. Null when unmeasurable (the intent is still
+ * armed; the keeper then completes on quiet + visible representative without
+ * the layout-change proof — the pre-existing legacy semantic).
+ */
+export const captureLayoutFingerprint = (
+  container: HTMLElement,
+  scope: { kind: string; id: string }
+): { scopeH: number; scopeW: number } | null => {
+  try {
+    const scopeEl = resolveInteractionScopeElement(container, scope)
+    if (!scopeEl) return null
+    const rect = scopeEl.getBoundingClientRect()
+    if (!Number.isFinite(rect.height) || !Number.isFinite(rect.width)) return null
+    return { scopeH: rect.height, scopeW: rect.width }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Capture a shared interaction intent BEFORE the layout-changing mutation.
+ * Measures the region's viewport offset plus the scope owner's fingerprint
+ * synchronously and arms both on the existing viewport owner. Fail-closed
+ * (false) when the container/scope/region is missing, geometry is
+ * non-finite, or the controller refuses (owned/dirty/user-live/bottom for
+ * non-tab regions). Never opens ownership, never writes snapshots.
+ */
+export const captureInteractionIntent = (
+  controller: {
+    beginInteractionIntent: (
+      t: RouteRef,
+      scope: { kind: 'message' | 'group'; id: string },
+      region: string,
+      off: number,
+      opts?: { fingerprint?: { scopeH: number; scopeW: number } }
+    ) => boolean
+    displayedRoute: RouteRef
+  },
+  scope: { kind: 'message' | 'group'; id: string },
+  region: string,
+  container?: HTMLElement | null
+): boolean => {
+  try {
+    const liveContainer = container ?? document.getElementById('messages')
+    if (!liveContainer || !liveContainer.isConnected) return false
+    const el = resolveInteractionRegionElement(liveContainer, scope, region)
+    if (!el) return false
+    let elTop = NaN
+    let containerTop = NaN
+    try {
+      elTop = el.getBoundingClientRect().top
+      containerTop = liveContainer.getBoundingClientRect().top
+    } catch {
+      return false
+    }
+    if (!Number.isFinite(elTop) || !Number.isFinite(containerTop)) return false
+    const offset = elTop - containerTop
+    if (!Number.isFinite(offset)) return false
+    const target: RouteRef = { ...controller.displayedRoute }
+    const fingerprint = captureLayoutFingerprint(liveContainer, scope)
+    return controller.beginInteractionIntent(target, scope, region, offset, fingerprint ? { fingerprint } : undefined)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Shared structural click boundary: derive the structural scope plus the
+ * interaction region from the event target's annotations and capture
+ * synchronously before the mutation. Region keys are arbitrary stable layout
+ * identities, never button names; scope prefers the message row and falls
+ * back to the stable group wrapper (group-level controls such as fold
+ * expand/compress live outside any single row). Non-region clicks (message
+ * body, textarea focus, content selection) arm nothing. Fail-closed on any
+ * helper error. Never prevents, stops, or rewrites the native control
+ * action; never declares a scroll session.
+ */
+export const captureInteractionFromEvent = (
+  controller: {
+    beginInteractionIntent: (
+      t: RouteRef,
+      scope: { kind: 'message' | 'group'; id: string },
+      region: string,
+      off: number,
+      opts?: { fingerprint?: { scopeH: number; scopeW: number } }
+    ) => boolean
+    displayedRoute: RouteRef
+  },
+  event: { target?: unknown } | null | undefined,
+  container?: HTMLElement | null
+): boolean => {
+  try {
+    if (!event || typeof event !== 'object') return false
+    const target = (event as { target?: unknown }).target
+    // Control buttons render lucide SVG icons: the click target is commonly
+    // an SVGElement (`svg`/`path`), never an HTMLElement — accept any Element.
+    if (!(target instanceof Element)) return false
+    let regionEl: HTMLElement | null = null
+    try {
+      regionEl = target.closest?.('[data-interaction-region]') as HTMLElement | null
+    } catch {
+      regionEl = null
+    }
+    if (!regionEl) return false
+    let region: string | null = null
+    try {
+      region = regionEl.getAttribute('data-interaction-region')
+    } catch {
+      region = null
+    }
+    if (typeof region !== 'string' || region.length === 0) return false
+    let scope: { kind: 'message' | 'group'; id: string } | null = null
+    try {
+      const rowId =
+        regionEl.getAttribute('data-message-id') ??
+        target
+          .closest?.('[data-message-id]:not([data-testid="answer-group-selector"])')
+          ?.getAttribute('data-message-id') ??
+        null
+      if (typeof rowId === 'string' && rowId.length > 0) {
+        scope = { kind: 'message', id: rowId }
+      }
+    } catch {
+      scope = null
+    }
+    if (!scope) {
+      try {
+        const groupEl = target.closest?.('[data-stable-group-id]') as HTMLElement | null
+        const groupId = groupEl?.getAttribute('data-stable-group-id') ?? null
+        if (typeof groupId === 'string' && groupId.length > 0) {
+          scope = { kind: 'group', id: groupId }
+        }
+      } catch {
+        scope = null
+      }
+    }
+    if (!scope) return false
+    return captureInteractionIntent(controller, scope, region, container)
+  } catch {
+    return false
+  }
+}
+
+/**
  * Capture a bounded route-local tab-switch intent BEFORE selection/layout
- * change. Measures the clicked tab's viewport offset (tab top − container
- * top) synchronously in the click handler and arms it on the existing
- * viewport owner. Fail-closed (false) when the container/tab is missing,
- * geometry is non-finite, or the controller refuses (owned/dirty/user-live).
+ * change. Compatibility entry over the shared interaction intent
+ * (`answer-tab` region in the target answer's message scope, fingerprint of
+ * the target row included); the same fail-closed ownership/provenance rules
+ * apply.
  */
 export const captureAnswerTabSwitchIntent = (
-  controller: { beginAnswerTabSwitch: (t: RouteRef, id: string, off: number) => boolean; displayedRoute: RouteRef },
+  controller: {
+    beginAnswerTabSwitch: (
+      t: RouteRef,
+      id: string,
+      off: number,
+      opts?: { fingerprint?: { scopeH: number; scopeW: number } }
+    ) => boolean
+    displayedRoute: RouteRef
+  },
   tabMessageId: string,
   container?: HTMLElement | null
 ): boolean => {
@@ -787,7 +1105,8 @@ export const captureAnswerTabSwitchIntent = (
     const offset = tabTop - containerTop
     if (!Number.isFinite(offset)) return false
     const target: RouteRef = { ...controller.displayedRoute }
-    return controller.beginAnswerTabSwitch(target, tabMessageId, offset)
+    const fingerprint = captureLayoutFingerprint(liveContainer, { kind: 'message', id: tabMessageId })
+    return controller.beginAnswerTabSwitch(target, tabMessageId, offset, fingerprint ? { fingerprint } : undefined)
   } catch {
     return false
   }
@@ -807,6 +1126,32 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
   // freeze captures the converged tab-stable geometry. Invalid geometry,
   // route/epoch drift, user intent, or a missing tab drops the intent.
   const tabRafRef = useRef<number | null>(null)
+  // Bounded quiet agreement plus effect evidence per pending interaction (no
+  // timers, no polling loops): consecutive validation reads agreeing within
+  // subpixel tolerance prove layout-quiet. The count only ever gates
+  // DROPPING a genuinely no-effect action (never adopting): adoption
+  // additionally requires proven effect — an observed scope-dimension change
+  // versus the capture fingerprint, actual observed region displacement
+  // before compensation, or a legitimate structural replacement under the
+  // same scope + region key (or a legacy fingerprint-less arming, which
+  // keeps the pre-existing assume-effect semantic) — plus a visible handoff
+  // representative and currency throughout. Effect evidence is keyed to the
+  // same gesture identity as the intent (epoch/route/scope/region/gesture):
+  // a newer overwrite starts clean, and resets ride the intent clears, so
+  // evidence never leaks across gestures or epochs.
+  const interactionQuietRef = useRef<{
+    gestureId: number
+    offset: number
+    scopeH: number
+    scopeW: number
+    quiet: number
+    effect: boolean
+    replaced: boolean
+    node: Element | null
+  } | null>(null)
+  // Scheduler bridge for the capture-phase click boundary below (defined in
+  // the layout effect; read at event time, never re-registered per version).
+  const scheduleValidationRef = useRef<() => void>(() => {})
   const cancelTabValidationLocked = (): void => {
     try {
       const id = tabRafRef.current
@@ -863,6 +1208,24 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     container.addEventListener('wheel', declare, { capture: true, passive: true })
     container.addEventListener('touchstart', declare, { capture: true, passive: true })
     container.addEventListener('pointerdown', declare, { capture: true, passive: true })
+    // Shared structural interaction boundary (capture-phase, before the
+    // mutation): derive the structural scope + interaction region from
+    // annotations and arm the shared intent synchronously, then queue one
+    // quiet validation so a genuinely no-effect action is dropped promptly
+    // instead of lingering. Runs after the streaming pause's pointerdown
+    // handoff (pause first, region second) and before React's click
+    // mutation. Never prevents/stops input, never declares a scroll
+    // session, never writes snapshots — arming only.
+    const onClickCapture = (e: MouseEvent) => {
+      try {
+        if (captureInteractionFromEvent(controller, e, container)) {
+          try {
+            scheduleValidationRef.current()
+          } catch {}
+        }
+      } catch {}
+    }
+    container.addEventListener('click', onClickCapture, { capture: true })
     const onKey = (e: KeyboardEvent) => {
       const keys = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'])
       if (!keys.has(e.key)) return
@@ -923,6 +1286,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       container.removeEventListener('wheel', declare, { capture: true } as AddEventListenerOptions)
       container.removeEventListener('touchstart', declare, { capture: true } as AddEventListenerOptions)
       container.removeEventListener('pointerdown', declare, { capture: true } as AddEventListenerOptions)
+      container.removeEventListener('click', onClickCapture, { capture: true } as AddEventListenerOptions)
       container.removeEventListener('keydown', onKey, { capture: true } as AddEventListenerOptions)
       removeTyped(container, 'scrollend', onScrollEnd)
       removeTyped(container, 'pointerup', onPointerUp)
@@ -1078,17 +1442,20 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         } catch {}
       }
     }
-    // Bounded tab-switch validation: the pending interaction stays valid
-    // through the async DB-first selection and settles ONLY after the target
-    // answer is actually visible + layout-committed with the clicked tab back
-    // at its captured offset. Drift re-arms via hold(); a still-hidden
-    // target (selection not yet committed) re-arms without clearing so an
-    // unrelated layout/observer before the IPC response can never end the
-    // intent. On quiet + visible the keeper hands off to the current
-    // post-switch visible geometry via the existing same-route programmatic
-    // adopt + snapshot write (measured target offset + scrollTop, never the
-    // old hidden body anchor and never intermediate geometry), then the
-    // intent clears and ordinary anchoring resumes. Currency loss drops the
+    // Bounded shared-interaction validation: the pending interaction stays
+    // valid through its mutation (async DB-first tab selection, editor
+    // replacement, fold expand/compress) and settles ONLY after an observed
+    // layout change versus the capture fingerprint plus a visible handoff
+    // representative plus layout-quiet, with the clicked region back at its
+    // captured offset. Drift re-arms via hold(); a still-hidden handoff
+    // target (selection not yet committed) re-arms as pending without
+    // clearing so an unrelated layout/observer before the commit can never
+    // end the intent. On completion the keeper hands off to the current
+    // post-mutation visible geometry via the existing same-route
+    // programmatic adopt + snapshot write (measured representative offset +
+    // scrollTop, never the old hidden body anchor and never intermediate
+    // geometry); a genuinely no-effect action drops with no adopt and no
+    // write. Then ordinary anchoring resumes. Currency loss drops the
     // intent; all clears are gesture-guarded so a stale frame never clears a
     // newer gesture.
     const runTabValidation = (): void => {
@@ -1098,194 +1465,429 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       const vpNow = viewportRef.current
       if (!vpNow) return
       const ctrl = vpNow.controller
-      let intent: {
-        topicId: string
-        route: string | null
-        epoch: number
-        tabMessageId: string
-        tabOffset: number
-        gestureId: number
-      } | null
+      // Unified interaction validation: EVERY region (answer tabs, message
+      // controls, fold controls, …) completes through the same single-owner
+      // gate — an observed layout change versus the capture fingerprint,
+      // plus a visible handoff representative, plus layout-quiet, plus
+      // currency throughout. Intermediate frames never commit; a genuinely
+      // no-effect action is dropped WITHOUT adopting (no snapshot write,
+      // never a false success). A target that is still hidden (async tab
+      // selection mid IPC round-trip, uncommitted render) re-arms as
+      // pending — bounded by the fail-closed correspondence deadline, never
+      // forever. Fingerprint-less intents (legacy/test-armed) keep the
+      // assume-effect semantic.
       try {
-        intent = ctrl.activeAnswerTabIntent as typeof intent
-      } catch {
-        return
-      }
-      if (!intent) return
-      const clearGuarded = (): void => {
+        const intent = ctrl.activeInteractionIntent as {
+          topicId: string
+          route: string | null
+          epoch: number
+          scopeKind: 'message' | 'group'
+          scopeId: string
+          region: string
+          offset: number
+          gestureId: number
+          fingerprint?: { scopeH: number; scopeW: number }
+          capturedAt: number
+        } | null
+        if (!intent) return
+        const clearGuarded = (): void => {
+          try {
+            ctrl.clearInteractionIntent(intent.epoch, intent.scopeId, intent.gestureId, intent.region)
+          } catch {}
+          try {
+            if (interactionQuietRef.current?.gestureId === intent.gestureId) interactionQuietRef.current = null
+          } catch {}
+        }
         try {
-          ctrl.clearAnswerTabSwitch(intent.epoch, intent.tabMessageId, intent.gestureId)
-        } catch {}
-      }
-      try {
-        if (ctrl.programmaticOwned || ctrl.hasActiveUserInteraction()) {
+          if (ctrl.programmaticOwned || ctrl.hasActiveUserInteraction()) {
+            clearGuarded()
+            return
+          }
+        } catch {
           clearGuarded()
           return
         }
-      } catch {
-        clearGuarded()
-        return
-      }
-      try {
-        if (!ctrl.isDomProvenanceClean || ctrl.currentEpoch !== intent.epoch) {
+        try {
+          if (!ctrl.isDomProvenanceClean || ctrl.currentEpoch !== intent.epoch) {
+            clearGuarded()
+            return
+          }
+          const cur = ctrl.displayedRoute
+          if (cur.topicId !== intent.topicId || cur.route !== intent.route) {
+            clearGuarded()
+            return
+          }
+        } catch {
+          return
+        }
+        const scope = { kind: intent.scopeKind, id: intent.scopeId }
+        const scopeEl = resolveInteractionScopeElement(liveContainer, scope)
+        if (!scopeEl) {
+          // Scope gone with no valid correspondence: fail closed.
           clearGuarded()
           return
         }
-        const cur = ctrl.displayedRoute
-        if (cur.topicId !== intent.topicId || cur.route !== intent.route) {
+        let regionEl: HTMLElement | null = null
+        try {
+          regionEl = resolveInteractionRegionElement(liveContainer, scope, intent.region)
+        } catch {
+          regionEl = null
+        }
+        if (!regionEl) {
           clearGuarded()
           return
         }
-      } catch {
-        return
-      }
-      let tab: HTMLElement | null = null
-      try {
-        tab = resolveAnswerTabElement(liveContainer, intent.tabMessageId)
-      } catch {
-        tab = null
-      }
-      if (!tab) {
-        clearGuarded()
-        return
-      }
-      let current = NaN
-      try {
-        current = tab.getBoundingClientRect().top - liveContainer.getBoundingClientRect().top
-      } catch {
-        clearGuarded()
-        return
-      }
-      if (!Number.isFinite(current)) {
-        clearGuarded()
-        return
-      }
-      if (Math.abs(current - intent.tabOffset) > 1) {
-        // Still settling: compensate now and re-arm one more quiet frame.
+        let containerTop = NaN
         try {
-          holdRef.current('tab-validate')
-        } catch {}
+          containerTop = liveContainer.getBoundingClientRect().top
+        } catch {
+          containerTop = NaN
+        }
+        let current = NaN
         try {
-          scheduleTabValidation()
-        } catch {}
-        return
-      }
-      // Target-selection gate: the DB-first thunk commits the Redux group
-      // only after the IPC round-trip. While the target answer's real box is
-      // still hidden (selection not yet committed) the tab may already sit
-      // quiet at its old offset — clearing now would end the hold before the
-      // height swap. Re-arm instead so the pending interaction survives the
-      // async gap + any unrelated observer/resize inside it.
-      let real: HTMLElement | null = null
-      try {
-        real = resolveRealMessageBox(liveContainer, intent.tabMessageId)
-      } catch {
-        real = null
-      }
-      try {
-        if (
-          !real ||
-          !real.isConnected ||
-          !liveContainer.contains(real) ||
-          isKeeperAnchorRowHidden(real, liveContainer)
-        ) {
+          current = regionEl.getBoundingClientRect().top - containerTop
+        } catch {
+          clearGuarded()
+          return
+        }
+        if (!Number.isFinite(current) || !Number.isFinite(containerTop)) {
+          clearGuarded()
+          return
+        }
+        let scopeH = NaN
+        let scopeW = NaN
+        try {
+          const rect = scopeEl.getBoundingClientRect()
+          scopeH = rect.height
+          scopeW = rect.width
+        } catch {
+          scopeH = NaN
+          scopeW = NaN
+        }
+        // A hidden region is never measurable stable geometry: hold nothing
+        // yet, re-arm as pending — bounded by the fail-closed correspondence
+        // deadline, so a dead target can never trap the hold. The tab strip
+        // itself stays visible across selection swaps, so async tab drift
+        // still compensates below while its hidden target pends.
+        // Pending helper for an unlanded mutation: re-arm, fail-closed past
+        // the correspondence deadline (a dead target never traps the hold,
+        // and nothing is ever adopted from an unproven target).
+        const rearmPending = (): void => {
+          let expired = false
+          try {
+            expired =
+              typeof intent.capturedAt === 'number' &&
+              intent.capturedAt > 0 &&
+              Date.now() - intent.capturedAt > INTERACTION_PENDING_DEADLINE_MS
+          } catch {
+            expired = false
+          }
+          if (expired) {
+            clearGuarded()
+            return
+          }
+          try {
+            scheduleTabValidation()
+          } catch {}
+        }
+        try {
+          if (isKeeperAnchorRowHidden(regionEl, liveContainer)) {
+            rearmPending()
+            return
+          }
+        } catch {
+          clearGuarded()
+          return
+        }
+        // Observed layout change versus the capture fingerprint (scope-owner
+        // dimensions only — never scroll metrics, which compensation writes
+        // and passive stream growth move).
+        const fp = intent.fingerprint
+        const hasFingerprint =
+          !!fp &&
+          Number.isFinite(fp.scopeH) &&
+          Number.isFinite(fp.scopeW) &&
+          Number.isFinite(scopeH) &&
+          Number.isFinite(scopeW)
+        const layoutChanged =
+          !hasFingerprint ||
+          (fp !== undefined && (Math.abs(scopeH - fp.scopeH) > 1 || Math.abs(scopeW - fp.scopeW) > 1))
+        // Consecutive-agreement quiet proof (subpixel reads) plus same-gesture
+        // effect evidence. The count only ever gates DROPPING a no-effect
+        // action; adoption additionally needs proven effect (layoutChanged,
+        // observed displacement, or structural replacement below — or the
+        // legacy assume-effect) plus the gates below — stillness alone never
+        // certifies success. Displacement is the region's own measured offset
+        // versus its captured offset BEFORE this frame's compensation:
+        // keeper-induced scroll is never counted as a layout effect.
+        // Replacement is a different connected node under the same scope +
+        // region key (editor swap, expanded layout); the resolver already
+        // guarantees scope/key/connected/contained, so only identity is
+        // compared here. Both latch only for the live gesture — a newer
+        // overwrite starts clean and every intent clear resets the record.
+        let quiet = 0
+        let effect = false
+        let replaced = false
+        try {
+          const tracked = interactionQuietRef.current
+          const same = tracked && tracked.gestureId === intent.gestureId ? tracked : null
+          if (same && same.effect === true) effect = true
+          if (same && (same as { replaced?: unknown }).replaced === true) replaced = true
+          let agrees = false
+          try {
+            agrees =
+              same !== null &&
+              Number.isFinite(current) &&
+              Number.isFinite(same.offset) &&
+              Math.abs(current - same.offset) <= 0.5 &&
+              Number.isFinite(scopeH) &&
+              Number.isFinite(scopeW) &&
+              Number.isFinite(same.scopeH) &&
+              Number.isFinite(same.scopeW) &&
+              Math.abs(scopeH - same.scopeH) <= 0.5 &&
+              Math.abs(scopeW - same.scopeW) <= 0.5
+          } catch {
+            agrees = false
+          }
+          quiet = agrees && same !== null ? same.quiet + 1 : 0
+          try {
+            if (Math.abs(current - intent.offset) > 1) effect = true
+          } catch {
+            // keep prior evidence on measure errors
+          }
+          try {
+            const priorNode = same !== null ? same.node : null
+            if (priorNode && priorNode !== regionEl) {
+              effect = true
+              replaced = true
+            }
+          } catch {
+            // keep prior evidence on compare errors
+          }
+          interactionQuietRef.current = {
+            gestureId: intent.gestureId,
+            offset: current,
+            scopeH,
+            scopeW,
+            quiet,
+            effect,
+            replaced,
+            node: regionEl
+          }
+        } catch {
+          quiet = 0
+          effect = false
+          replaced = false
+        }
+        const proven = layoutChanged || effect || !hasFingerprint
+        // Structural proof for rebasing away from the live reading row:
+        // scope-owner dimension change or a replaced region node under the
+        // same scope + region key (editor swap, expanded layout). Passive
+        // stream displacement of a static row (no dims, same node) never
+        // proves a click effect — it must not rebase a pause/reading anchor
+        // to another row. Same-row holds keep the displacement-inclusive
+        // `proven` above (F1 same-size reflow still hands off to its own
+        // row); cross-row rebases require structural proof below.
+        const structuralProven = layoutChanged || replaced || !hasFingerprint
+        let liveAnchorId: string | null = null
+        try {
+          const live = ctrl.getAnchorFor({ topicId: intent.topicId, route: intent.route })
+          if (live && live.kind === 'message' && typeof live.messageId === 'string') {
+            liveAnchorId = live.messageId
+          }
+        } catch {
+          liveAnchorId = null
+        }
+        // Handoff representative (structural correspondence under the same
+        // semantic key): tabs hand off to the target answer, message scopes
+        // to their own row, group scopes to the first visible row in the
+        // group. A hidden target means the mutation has not landed yet
+        // (async selection, uncommitted render) — drift below still
+        // compensates so churn during the gap never moves the region, but
+        // nothing completes until the target resolves.
+        let rep: { id: string; offset: number } | null = null
+        try {
+          rep = resolveInteractionRepresentative(liveContainer, scope, intent.region)
+        } catch {
+          rep = null
+        }
+        const drift = current - intent.offset
+        // Cross-row rebase guard: when the handoff representative names a
+        // different reading row than the live pause/reading anchor, passive
+        // displacement alone (static scope dims, same region node, e.g. stream
+        // growth pushing an unrelated footer) must never rebase the anchor.
+        // Same-row holds keep the displacement-inclusive `proven` (F1
+        // same-size reflow still hands off to its own row); cross-row rebases
+        // require structural proof (scope dims or replaced node) or legacy
+        // fingerprint-less assume-effect.
+        const crossRow =
+          rep !== null && liveAnchorId !== null && rep.id !== liveAnchorId
+            ? true
+            : rep !== null && liveAnchorId === null
+              ? true
+              : false
+        const provenForHandoff = crossRow ? structuralProven : proven
+        if (Math.abs(drift) > 1) {
+          // Honest boundary clamp: at the true scroll limit the region
+          // cannot be held further. Early-fit short viewports sit at this
+          // limit (scrollTop 0, no overflow), so passive stream growth
+          // displacing a static footer would previously fall through and
+          // hand off with a vicinity-follow clear — undoing the pointerdown
+          // pause. Require structural proof + quiet here too: passive
+          // displacement alone re-arms (preserving the ORIGINAL pause
+          // anchor) until sustained stillness drops it with no adopt and no
+          // snapshot. A hidden target still pends (no provable geometry).
+          let atLimit = false
+          try {
+            const st = liveContainer.scrollTop
+            const sh = liveContainer.scrollHeight
+            const ch = liveContainer.clientHeight
+            const extreme = -(sh - ch)
+            atLimit = st >= -1 || st <= extreme + 1
+          } catch {
+            atLimit = false
+          }
+          if (!atLimit) {
+            try {
+              holdRef.current('interaction-validate')
+            } catch {}
+            try {
+              scheduleTabValidation()
+            } catch {}
+            return
+          }
+          if (!rep) {
+            rearmPending()
+            return
+          }
+          if (!structuralProven) {
+            if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
+              clearGuarded()
+              return
+            }
+            try {
+              scheduleTabValidation()
+            } catch {}
+            return
+          }
+          if (hasFingerprint && quiet < INTERACTION_QUIET_READS_FOR_ADOPT) {
+            try {
+              scheduleTabValidation()
+            } catch {}
+            return
+          }
+        } else if (!rep) {
+          rearmPending()
+          return
+        } else if (!provenForHandoff) {
+          // No proven effect of this gesture with its handoff target
+          // visible (scope dims unchanged, no observed displacement, no
+          // structural replacement; cross-row additionally excludes passive
+          // displacement): after sustained provable stillness drop
+          // it WITHOUT adopting, so an accompanied pause or reading anchor
+          // is never rebased and no stale snapshot is written. A hidden
+          // target never reaches here (pending above), so a deliberately
+          // delayed async mutation is never mistaken for a no-effect click.
+          if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
+            clearGuarded()
+            return
+          }
+          try {
+            scheduleTabValidation()
+          } catch {}
+          return
+        } else if (hasFingerprint && quiet < INTERACTION_QUIET_READS_FOR_ADOPT) {
+          // Effect observed but not yet provably quiet: one more frame.
           try {
             scheduleTabValidation()
           } catch {}
           return
         }
-      } catch {
+        let st = NaN
         try {
-          scheduleTabValidation()
-        } catch {}
-        return
-      }
-      let targetOffset = NaN
-      try {
-        targetOffset = real.getBoundingClientRect().top - liveContainer.getBoundingClientRect().top
-      } catch {
-        targetOffset = NaN
-      }
-      if (!Number.isFinite(targetOffset)) {
-        try {
-          scheduleTabValidation()
-        } catch {}
-        return
-      }
-      // Stable handoff to the current post-switch visible geometry under the
-      // existing same-route owner: adopt the measured target offset +
-      // scrollTop (never the old hidden body anchor, never intermediate
-      // geometry) and persist the route-local snapshot so later layout holds
-      // and the departure freeze converge on the same geometry.
-      let scrollTop = NaN
-      try {
-        scrollTop = liveContainer.scrollTop
-      } catch {
-        scrollTop = NaN
-      }
-      if (!Number.isFinite(scrollTop)) {
-        try {
-          scheduleTabValidation()
-        } catch {}
-        return
-      }
-      let adopted: unknown = null
-      try {
-        adopted = ctrl.adoptProgrammaticViewport(
-          { topicId: intent.topicId, route: intent.route },
-          {
-            messageId: intent.tabMessageId,
-            intraRowOffset: targetOffset,
-            scrollTop,
-            isAtBottom: isAtBottom(scrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
-          },
-          { expectedEpoch: intent.epoch }
-        )
-      } catch {
-        adopted = null
-      }
-      if (adopted && typeof adopted === 'object' && (adopted as { taken: unknown }).taken === true) {
-        const taken = adopted as {
-          taken: true
-          routeKey: string
-          snapshot: { scrollTop: number; messageId: string | null; intraRowOffset: number | null; isAtBottom: boolean }
+          st = liveContainer.scrollTop
+        } catch {
+          st = NaN
         }
-        // Adopt succeeded synchronously for the live-validated gesture above
-        // (validation always acts on the CURRENT live intent, and adopt is
-        // epoch-guarded, so a stale frame can never reach here for an older
-        // gesture). Adopt itself cleared the intent; persist the handoff
-        // snapshot for this same gesture and notify.
-        try {
-          writeRouteSnapshot(taken.routeKey, {
-            scrollTop: taken.snapshot.scrollTop,
-            messageId: taken.snapshot.messageId,
-            intraRowOffset: taken.snapshot.intraRowOffset,
-            isAtBottom: taken.snapshot.isAtBottom
-          })
-        } catch {}
-        try {
-          vpNow.notifyChanged()
-        } catch {}
-        return
-      }
-      // Adopt rejected on currency (route/epoch drift handled above) or on a
-      // transient phase: re-arm once more when still current, otherwise drop
-      // the stale gesture only.
-      try {
-        const live = ctrl.activeAnswerTabIntent
-        if (
-          live &&
-          live.epoch === intent.epoch &&
-          live.tabMessageId === intent.tabMessageId &&
-          live.gestureId === intent.gestureId
-        ) {
+        if (!Number.isFinite(st)) {
           try {
             scheduleTabValidation()
           } catch {}
           return
         }
-      } catch {}
-      clearGuarded()
+        let adopted: unknown = null
+        try {
+          // Interaction handoff never follows on vicinity: the row is kept
+          // even when truthfully at the bottom (short content, physical
+          // bottom). Only true scroll to the exact bottom or explicit
+          // send/bottom resumes follow — never a control press.
+          adopted = (
+            ctrl as unknown as Pick<RouteViewportController, 'adoptInteractionViewport'>
+          ).adoptInteractionViewport(
+            { topicId: intent.topicId, route: intent.route },
+            {
+              messageId: rep.id,
+              intraRowOffset: rep.offset,
+              scrollTop: st,
+              isAtBottom: isAtBottom(st, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+            },
+            { expectedEpoch: intent.epoch }
+          )
+        } catch {
+          adopted = null
+        }
+        if (adopted && typeof adopted === 'object' && (adopted as { taken: unknown }).taken === true) {
+          const taken = adopted as {
+            taken: true
+            routeKey: string
+            snapshot: {
+              scrollTop: number
+              messageId: string | null
+              intraRowOffset: number | null
+              isAtBottom: boolean
+            }
+          }
+          // Adopt succeeded synchronously for the live-validated gesture
+          // above (validation always acts on the CURRENT live intent, and
+          // adopt is epoch-guarded, so a stale frame can never reach here
+          // for an older gesture). Adopt itself cleared the intent; persist
+          // the handoff snapshot for this same gesture and notify.
+          try {
+            writeRouteSnapshot(taken.routeKey, {
+              scrollTop: taken.snapshot.scrollTop,
+              messageId: taken.snapshot.messageId,
+              intraRowOffset: taken.snapshot.intraRowOffset,
+              isAtBottom: taken.snapshot.isAtBottom
+            })
+          } catch {}
+          try {
+            vpNow.notifyChanged()
+          } catch {}
+          return
+        }
+        // Adopt rejected on currency (route/epoch drift handled above) or on
+        // a transient phase: re-arm once more when still current, otherwise
+        // drop the stale gesture only.
+        try {
+          const live = ctrl.activeInteractionIntent
+          if (
+            live &&
+            live.epoch === intent.epoch &&
+            live.scopeId === intent.scopeId &&
+            live.gestureId === intent.gestureId &&
+            live.region === intent.region
+          ) {
+            try {
+              scheduleTabValidation()
+            } catch {}
+            return
+          }
+        } catch {}
+        clearGuarded()
+      } catch {
+        // Fail-closed: helper errors never adopt and never disturb a newer
+        // gesture.
+      }
     }
     const scheduleTabValidation = (): void => {
       cancelTabValidationLocked()
@@ -1306,6 +1908,13 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         tabRafRef.current = null
       }
     }
+    // Bridge the capture-phase click boundary (registered in the listener
+    // effect above, outside this closure): after a successful arm it queues
+    // one quiet validation so genuinely no-effect actions drop promptly.
+    // Same single scheduler — never a second rAF site.
+    try {
+      scheduleValidationRef.current = scheduleTabValidation
+    } catch {}
     const hold = (reason: string): void => {
       void reason
       // Geometry-only quantum sync BEFORE every guard: a DPR change inside
@@ -1344,53 +1953,97 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         if (!commitHold) return
       }
       if (!vp.controller.isDomProvenanceClean) return
-      // SWITCHING contract (explicit tab gesture): a pending tab-switch
-      // intent owns same-route geometry. Hold the CLICKED TAB at its
-      // captured viewport offset across the async selection + height swap;
-      // the competing body-anchor hold must not fight it. Converge via the
-      // quiet validation (which additionally requires the target answer
-      // visible + hands off to the post-switch geometry), then ordinary
-      // anchoring resumes.
+      // Shared interaction hold: a pending interaction intent (answer tab,
+      // message controls, fold controls, …) owns same-route geometry. Hold
+      // the captured region — re-resolved by structural scope + region key
+      // so replacement elements (editor action bar, expanded layout) are
+      // held, not the stale node — at its captured viewport offset; the
+      // competing body-anchor hold must not fight it. Converge via the
+      // quiet validation (observed layout change + visible representative +
+      // quiet), then ordinary anchoring resumes. Disappearance without a
+      // legitimate mapping holds nothing (fail-closed, no sibling transfer).
       try {
-        const tabIntent = vp.controller.activeAnswerTabIntent as {
+        const pending = vp.controller.activeInteractionIntent as {
           topicId: string
           route: string | null
           epoch: number
-          tabMessageId: string
-          tabOffset: number
+          scopeKind: 'message' | 'group'
+          scopeId: string
+          region: string
+          offset: number
           gestureId: number
         } | null
-        if (tabIntent) {
+        if (pending) {
           const clearHoldGuarded = (): void => {
             try {
-              vp.controller.clearAnswerTabSwitch(tabIntent.epoch, tabIntent.tabMessageId, tabIntent.gestureId)
+              vp.controller.clearInteractionIntent(pending.epoch, pending.scopeId, pending.gestureId, pending.region)
             } catch {}
           }
           const curDisplayed = vp.controller.displayedRoute
           if (
-            curDisplayed.topicId !== tabIntent.topicId ||
-            curDisplayed.route !== tabIntent.route ||
-            vp.controller.currentEpoch !== tabIntent.epoch
+            curDisplayed.topicId !== pending.topicId ||
+            curDisplayed.route !== pending.route ||
+            vp.controller.currentEpoch !== pending.epoch
           ) {
             clearHoldGuarded()
           } else {
-            const tabEl = resolveAnswerTabElement(container, tabIntent.tabMessageId)
-            if (!tabEl) {
+            const regionEl = resolveInteractionRegionElement(
+              container,
+              { kind: pending.scopeKind, id: pending.scopeId },
+              pending.region
+            )
+            if (!regionEl) {
               clearHoldGuarded()
             } else {
-              let tabCurrent = NaN
+              let regionCurrent = NaN
               try {
-                tabCurrent = tabEl.getBoundingClientRect().top - container.getBoundingClientRect().top
+                regionCurrent = regionEl.getBoundingClientRect().top - container.getBoundingClientRect().top
               } catch {
-                tabCurrent = NaN
+                regionCurrent = NaN
               }
-              if (!Number.isFinite(tabCurrent)) {
+              if (!Number.isFinite(regionCurrent)) {
                 clearHoldGuarded()
               } else {
-                const tabDelta = tabCurrent - tabIntent.tabOffset
-                if (Math.abs(tabDelta) > 1) {
+                const regionDelta = regionCurrent - pending.offset
+                if (Math.abs(regionDelta) > 1) {
+                  // Effect evidence for the same gesture: the region really
+                  // displaced before this compensation (a same-size
+                  // intra-scope reflow may leave scope dims unchanged, so the
+                  // fingerprint alone cannot prove it). Latched here because
+                  // the hold can compensate before any validation frame
+                  // observes the displacement — without this, the later
+                  // stillness would be mistaken for a no-effect click and
+                  // the handoff missed. Keyed to the live gesture only; a
+                  // newer overwrite starts clean.
                   try {
-                    container.scrollTop += tabDelta
+                    const tracked = interactionQuietRef.current
+                    if (!tracked || tracked.gestureId !== pending.gestureId) {
+                      interactionQuietRef.current = {
+                        gestureId: pending.gestureId,
+                        offset: NaN,
+                        scopeH: NaN,
+                        scopeW: NaN,
+                        quiet: 0,
+                        effect: true,
+                        replaced: false,
+                        node: regionEl
+                      }
+                    } else {
+                      const wasReplaced =
+                        (tracked as { replaced?: unknown }).replaced === true ||
+                        (tracked.node !== null && tracked.node !== regionEl)
+                      interactionQuietRef.current = {
+                        ...tracked,
+                        effect: true,
+                        replaced: wasReplaced,
+                        node: regionEl
+                      }
+                    }
+                  } catch {
+                    // compensation below still holds the frame
+                  }
+                  try {
+                    container.scrollTop += regionDelta
                     compensatingRef.current = { expected: container.scrollTop }
                   } catch {}
                 }

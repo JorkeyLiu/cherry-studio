@@ -88,6 +88,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
               $isSelected={message.id === selectMessageId}
               data-testid="answer-group-selector"
               data-message-id={message.id}
+              data-interaction-region="answer-tab"
               aria-disabled={disabled}
               onClick={handleSelect}>
               <motion.span variants={lightbulbSoftVariants} animate={isProcessing ? 'active' : 'idle'} initial="idle">
@@ -102,6 +103,7 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
           $isSelected={message.id === selectMessageId}
           data-testid="answer-group-selector"
           data-message-id={message.id}
+          data-interaction-region="answer-tab"
           aria-disabled={disabled}
           onClick={handleSelect}>
           <SegmentedLabel>
@@ -127,6 +129,8 @@ const MessageGroupModelList: FC<MessageGroupModelListProps> = ({
         mouseLeaveDelay={0}>
         <DisplayModeToggle
           displayMode={foldDisplayMode}
+          data-testid="fold-display-mode-toggle"
+          data-interaction-region="fold-controls"
           onClick={() => dispatch(setFoldDisplayMode(isCompact ? 'expanded' : 'compact'))}>
           {isCompact ? <ArrowsAltOutlined /> : <ShrinkOutlined />}
         </DisplayModeToggle>

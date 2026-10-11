@@ -258,14 +258,20 @@ describe('visual position contracts', () => {
     expect(context.slice(cancelIdx, cancelIdx + 600)).toMatch(/cancelAnimationFrame/)
     // Scheduler coalesces: re-arm cancels the pending frame first.
     expect(context.slice(schedulerIdx, schedulerIdx + 1200)).toMatch(/cancelTabValidationLocked/)
-    // Tab interaction contract: click captures the tab offset synchronously,
-    // the keeper holds it across the async selection, validation settles
-    // into the post-switch visible geometry.
+    // Shared interaction contract: the click boundary captures scope +
+    // region synchronously, the keeper holds it across the mutation,
+    // validation settles into the post-mutation visible geometry through one
+    // observed-layout-change + quiet gate (answer tabs keep their async
+    // target-visible semantics through the same gate via the handoff
+    // representative).
     expect(context).toMatch(/captureAnswerTabSwitchIntent/)
+    expect(context).toMatch(/captureInteractionFromEvent/)
     expect(context).toMatch(/beginAnswerTabSwitch/)
-    expect(context).toMatch(/activeAnswerTabIntent/)
-    expect(context).toMatch(/clearAnswerTabSwitch/)
+    expect(context).toMatch(/activeInteractionIntent/)
+    expect(context).toMatch(/clearInteractionIntent/)
     expect(context).toMatch(/resolveAnswerTabElement/)
+    expect(context).toMatch(/resolveInteractionRegionElement/)
+    expect(context).toMatch(/resolveInteractionRepresentative/)
     expect(context).toMatch(/resolveRealMessageBox/)
     expect(context).toMatch(/isKeeperAnchorRowHidden/)
     expect(context).toMatch(/isCaptureContainerHidden/)
@@ -286,22 +292,27 @@ describe('visual position contracts', () => {
       validationEnd > validationIdx ? validationEnd : validationIdx + 9500
     )
     expect(validationSlice).toMatch(/tabRafRef\.current = null/)
-    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    expect(validationSlice).toMatch(/adoptInteractionViewport/)
     expect(validationSlice.indexOf('tabRafRef.current = null')).toBeLessThan(
-      validationSlice.indexOf('adoptProgrammaticViewport')
+      validationSlice.indexOf('adoptInteractionViewport')
     )
-    expect(validationSlice).toMatch(/activeAnswerTabIntent/)
-    expect(validationSlice).toMatch(/clearAnswerTabSwitch/)
+    // Interaction handoff never follows on vicinity: it keeps the row via
+    // the interaction adopt, never the bottom-priority programmatic adopt
+    // (which stays reserved for explicit send/bottom).
+    expect(validationSlice).not.toMatch(/\.adoptProgrammaticViewport\(/)
+    expect(validationSlice).toMatch(/activeInteractionIntent/)
+    expect(validationSlice).toMatch(/clearInteractionIntent/)
     expect(validationSlice).toMatch(/currentEpoch !== intent\.epoch/)
     expect(validationSlice).toMatch(/programmaticOwned/)
     expect(validationSlice).toMatch(/hasActiveUserInteraction/)
     expect(validationSlice).toMatch(/isDomProvenanceClean/)
-    expect(validationSlice).toMatch(/resolveAnswerTabElement/)
-    expect(validationSlice).toMatch(/resolveRealMessageBox/)
-    expect(validationSlice).toMatch(/isKeeperAnchorRowHidden/)
+    expect(validationSlice).toMatch(/resolveInteractionScopeElement/)
+    expect(validationSlice).toMatch(/resolveInteractionRegionElement/)
+    expect(validationSlice).toMatch(/resolveInteractionRepresentative/)
     // Stable handoff uses the measured post-switch target geometry (never
-    // the old hidden body anchor, never intermediate geometry).
-    expect(validationSlice).toMatch(/adoptProgrammaticViewport/)
+    // the old hidden body anchor, never intermediate geometry) via the
+    // row-preserving interaction adopt (never a vicinity follow).
+    expect(validationSlice).toMatch(/adoptInteractionViewport/)
     expect(validationSlice).toMatch(/writeRouteSnapshot/)
     // Hold prefers the pending tab intent over the body anchor: a hidden
     // body row holds nothing (fail-closed, no sibling transfer); ordinary
@@ -311,13 +322,13 @@ describe('visual position contracts', () => {
     const holdEnd = context.indexOf('holdRef.current = hold', holdIdx)
     expect(holdEnd).toBeGreaterThan(holdIdx)
     const holdSlice = context.slice(holdIdx, holdEnd)
-    expect(holdSlice).toMatch(/activeAnswerTabIntent/)
-    expect(holdSlice).toMatch(/clearAnswerTabSwitch/)
-    expect(holdSlice).toMatch(/resolveAnswerTabElement/)
+    expect(holdSlice).toMatch(/activeInteractionIntent/)
+    expect(holdSlice).toMatch(/clearInteractionIntent/)
+    expect(holdSlice).toMatch(/resolveInteractionRegionElement/)
     expect(holdSlice).toMatch(/scheduleTabValidation/)
-    expect(holdSlice).toMatch(/isKeeperAnchorRowHidden/)
     expect(holdSlice).not.toMatch(/findVisibleFoldSiblingId/)
     expect(holdSlice).not.toMatch(/adoptProgrammaticViewport/)
+    expect(holdSlice).not.toMatch(/adoptInteractionViewport/)
     expect(holdSlice).not.toMatch(/writeRouteSnapshot/)
     // User input declares intent first (wheel/touch/pointer/key, inputs
     // excluded by the shared key guard). Pending-only, never terminates.

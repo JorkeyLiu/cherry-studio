@@ -281,14 +281,21 @@ describe('MessageGroup', () => {
     expect(groupContainer).not.toBeNull()
     expect(groupContainer!.className).toContain('fold')
 
-    // In fold mode only the selected message is visible (display: inline-block)
-    const selectedWrapper = document.getElementById('message-msg-1')
+    // In fold mode only the selected message is visible (display: inline-block).
+    // Stable row identity lives solely on the inner MessageItem
+    // (`id="message-<id>"` + `data-message-id`); the outer fold wrapper
+    // carries no id, so resolve it via the stable inner scope.
+    const selectedInner = container.querySelector('#message-msg-1[data-message-id="msg-1"]')
+    expect(selectedInner).not.toBeNull()
+    const selectedWrapper = (selectedInner as HTMLElement).closest('.fold')
     expect(selectedWrapper).not.toBeNull()
-    expect(getComputedStyle(selectedWrapper!).display).toBe('inline-block')
+    expect(getComputedStyle(selectedWrapper as HTMLElement).display).toBe('inline-block')
 
-    const hiddenWrapper = document.getElementById('message-msg-2')
+    const hiddenInner = container.querySelector('#message-msg-2[data-message-id="msg-2"]')
+    expect(hiddenInner).not.toBeNull()
+    const hiddenWrapper = (hiddenInner as HTMLElement).closest('.fold')
     expect(hiddenWrapper).not.toBeNull()
-    expect(getComputedStyle(hiddenWrapper!).display).toBe('none')
+    expect(getComputedStyle(hiddenWrapper as HTMLElement).display).toBe('none')
   })
 
   it('renders the fold/tag group menu bar (MessageGroupModelList) for grouped assistant messages', () => {

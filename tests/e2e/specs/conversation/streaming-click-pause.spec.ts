@@ -35,13 +35,22 @@
 import type { Page } from '@playwright/test'
 
 import { clearRequestLog, expect, findProductRequest, test } from '../../fixtures/electron.fixture'
-import { getSlowStreamReply, SLOW_STREAM_MARKER } from '../../fixtures/mock-openai-server'
+import {
+  EXTENDED_SLOW_STREAM_MARKER,
+  getExtendedSlowStreamReply,
+  getSlowStreamReply,
+  SLOW_STREAM_MARKER
+} from '../../fixtures/mock-openai-server'
 
 const MODEL = 'mock-model'
 const BOTTOM_TOL = 100
 const PAUSED_MIN = 200
 const IMMEDIATE_TOL = 6
 const ANCHOR_TOL = 12
+/** Product gate for genuine physical-bottom arrival (column-reverse scrollTop ~= 0). */
+const PRODUCT_BOTTOM_TOL = 1
+/** Meaningful post-pause hold growth: multiple chunks, bounded to the finite mock budget. */
+const HOLD_GROWTH = 500
 
 interface Anchor {
   id: string
@@ -133,6 +142,59 @@ async function waitForBlockGrowth(page: Page, blockId: string, minLength: number
   )
 }
 
+/** Finite slow-stream budget: 4145 chars / 152 content chunks / 60ms (~9120ms). */
+function slowStreamTotalLength(): number {
+  return getSlowStreamReply(MODEL).length
+}
+
+/**
+ * Extended slow-stream budget (wheel/zoom legs only): ~2x default at the same
+ * 60ms realistic pacing — 300 paragraphs / 302 chunks (~18120ms, ~8200 chars).
+ * Arithmetic: default sampler (3.5s ~= 58 chunks * ~27 chars ~= 1566) + hold
+ * 500 + wheel return while active + resume 500 fits with margin; the default
+ * 4145-char tail (len 4128/4145) starved the exact-bottom driver. Default
+ * stays byte-identical for every other spec.
+ */
+function extendedSlowStreamTotalLength(): number {
+  return getExtendedSlowStreamReply(MODEL).length
+}
+
+/**
+ * Budget-guarded growth wait (diagnostic numerics only — never raw content,
+ * user data, or paths). Logs initial length/status/total/remaining before
+ * waiting; on timeout re-reads final length/status and throws with the same
+ * numerics so a budget-exhausted wait is distinguishable from a pause bug.
+ * The caller passes the scenario-correct total (default vs extended); when
+ * omitted the default total applies so non-XL legs keep their arithmetic.
+ */
+async function waitForBlockGrowthWithBudget(
+  page: Page,
+  blockId: string,
+  target: number,
+  label: string,
+  scenarioTotal?: number
+): Promise<void> {
+  const total = scenarioTotal ?? slowStreamTotalLength()
+  const initial = await streamBlockState(page, blockId)
+  const initLen = initial?.length ?? -1
+  const initStatus = initial?.status ?? '?'
+  console.log(
+    `[E2E] ${label} wait: initLen=${initLen} target=${target} total=${total} remaining=${total - initLen} status=${initStatus}`
+  )
+  try {
+    await waitForBlockGrowth(page, blockId, target)
+  } catch (e) {
+    const final = await streamBlockState(page, blockId)
+    throw new Error(
+      `[E2E] ${label} growth wait failed: initLen=${initLen} target=${target} total=${total} ` +
+        `remaining=${total - initLen} finalLen=${final?.length ?? -1} finalStatus=${final?.status ?? '?'}: ` +
+        (e instanceof Error ? e.message : String(e))
+    )
+  }
+  const done = await streamBlockState(page, blockId)
+  console.log(`[E2E] ${label} wait done: finalLen=${done?.length ?? -1} finalStatus=${done?.status ?? '?'}`)
+}
+
 async function readScrollTop(page: Page): Promise<number> {
   return page.locator('#messages').evaluate((el) => el.scrollTop)
 }
@@ -204,6 +266,112 @@ async function findReadingPoint(page: Page): Promise<{ x: number; y: number } | 
     }
     return null
   })
+}
+
+interface VerifiedReadingTarget {
+  x: number
+  y: number
+  head: string
+  rowId: string | null
+  pTop: number
+  pBottom: number
+}
+
+/** Fresh geometry + identity for one fully-visible non-control paragraph (event-time trace source). */
+async function readVerifiedReadingTarget(page: Page): Promise<VerifiedReadingTarget | null> {
+  return page.evaluate(() => {
+    const container = document.getElementById('messages') as HTMLElement | null
+    if (!container) return null
+    const c = container.getBoundingClientRect()
+    const paras = Array.from(document.querySelectorAll('#messages .markdown p')) as HTMLElement[]
+    const interactive =
+      'button,a,input,textarea,select,summary,video,audio,img,[contenteditable],[data-testid="answer-group-selector"],[role="button"],[role="menu"]'
+    for (const p of paras) {
+      const r = p.getBoundingClientRect()
+      if (r.width < 40 || r.height < 8) continue
+      if (r.top < c.top + 4 || r.bottom > c.bottom - 4) continue
+      const x = r.x + r.width / 2
+      const y = r.y + Math.min(r.height / 2, 20)
+      const hit = document.elementFromPoint(x, y) as HTMLElement | null
+      if (!hit) continue
+      try {
+        if (typeof hit.closest === 'function' && hit.closest(interactive)) continue
+      } catch {
+        continue
+      }
+      const hitP =
+        hit && typeof hit.closest === 'function' ? (hit.closest('#messages .markdown p') as HTMLElement | null) : null
+      if (hitP !== p) continue
+      const row = p.closest?.('#messages [data-message-id]') as HTMLElement | null
+      return {
+        x,
+        y,
+        head: (p.textContent ?? '').slice(0, 40),
+        rowId: row?.getAttribute('data-message-id') ?? null,
+        pTop: r.top,
+        pBottom: r.bottom
+      }
+    }
+    return null
+  })
+}
+
+/**
+ * Verified real press on a REAL event-time paragraph (native mouse only, no
+ * programmatic pointer dispatch, no DOM.click). Stabilizes the known
+ * paragraph identity: acquires a fresh target, moves the physical mouse to
+ * its CURRENT geometry, re-verifies elementFromPoint still hits the SAME
+ * paragraph identity, then presses immediately. Retries on continuous-growth
+ * drift between read/move/down. Logs the event-time rect/hit precondition
+ * for diagnosis; the sampler probe still resolves the ACTUAL hit at event
+ * time and its null assertion is never weakened.
+ */
+async function pressVerifiedReadingPoint(page: Page, attempts = 6): Promise<VerifiedReadingTarget> {
+  let last: VerifiedReadingTarget | null = null
+  for (let i = 0; i < attempts; i++) {
+    const target = await readVerifiedReadingTarget(page)
+    if (!target || !target.rowId) {
+      await page.waitForTimeout(120)
+      continue
+    }
+    last = target
+    await page.mouse.move(target.x, target.y)
+    const fresh = await page.evaluate(
+      ({ x, y, head }: { x: number; y: number; head: string }) => {
+        const hit = document.elementFromPoint(x, y) as HTMLElement | null
+        const p =
+          hit && typeof hit.closest === 'function' ? (hit.closest('#messages .markdown p') as HTMLElement | null) : null
+        const r = p?.getBoundingClientRect()
+        const row = p?.closest?.('#messages [data-message-id]') as HTMLElement | null
+        return {
+          hasP: !!p,
+          sameHead: (p?.textContent ?? '').slice(0, 40) === head,
+          rowId: row?.getAttribute('data-message-id') ?? null,
+          pTop: r?.top ?? NaN,
+          pBottom: r?.bottom ?? NaN
+        }
+      },
+      { x: target.x, y: target.y, head: target.head }
+    )
+    console.log(
+      `[E2E] pause-press pre-press attempt=${i} x=${Math.round(target.x)} y=${Math.round(target.y)} ` +
+        `head=${JSON.stringify(target.head.slice(0, 24))} row=${target.rowId} ` +
+        `hasP=${fresh.hasP} sameHead=${fresh.sameHead} freshRow=${fresh.rowId} ` +
+        `pTop=${Number(target.pTop).toFixed(1)}->${Number(fresh.pTop).toFixed(1)}`
+    )
+    if (!fresh.hasP || !fresh.sameHead || !fresh.rowId) {
+      await page.waitForTimeout(120)
+      continue
+    }
+    // Geometry verified fresh — press immediately with no further evaluate gap.
+    await page.mouse.down()
+    await page.mouse.up()
+    return target
+  }
+  throw new Error(
+    `[E2E] no verified reading paragraph stabilized after ${attempts} attempts ` +
+      `(lastRow=${last?.rowId ?? 'null'} lastHead=${JSON.stringify(last?.head?.slice(0, 24) ?? 'null')})`
+  )
 }
 
 async function currentTopicId(page: Page): Promise<string> {
@@ -415,18 +583,24 @@ interface PauseProbe {
 /**
  * Shared atomic pause-press sampler (single implementation for all pause
  * tests): installs the native pointerdown CAPTURE probe resolving the ACTUAL
- * hit paragraph/row at event time, performs the real primary press at the
- * given reading point, waits the >=3s same-element rAF window, collects and
- * returns the log. The tracked length is the CURRENT topic block id passed
- * in (never a global max — a prior probe used a cross-topic counter and
- * reported negative growth). Observational only, no viewport mutation.
+ * hit paragraph/row at event time, performs a VERIFIED real primary press on
+ * a CURRENT-geometry paragraph (fresh acquire + hit re-verify, retry on
+ * continuous-growth drift), waits the >=3s same-element rAF window, collects
+ * and returns the log. The tracked length is the CURRENT topic block id
+ * passed in (never a global max — a prior probe used a cross-topic counter
+ * and reported negative growth). Observational only, no viewport mutation.
+ * The optional point param is a hover hint only; the press itself always uses
+ * fresh verified geometry so a stale findReadingPoint can never fake or null
+ * the event row.
  */
 async function performAtomicPauseProbe(
   page: Page,
-  point: { x: number; y: number },
+  point: { x: number; y: number } | null,
   blockId: string
 ): Promise<PauseProbe> {
-  await page.mouse.move(point.x, point.y)
+  if (point) {
+    await page.mouse.move(point.x, point.y)
+  }
   await page.evaluate((id: string) => {
     const w = window as any
     try {
@@ -521,8 +695,9 @@ async function performAtomicPauseProbe(
     w.__pauseProbe = log
     w.__pauseProbeCleanup = cleanup
   }, blockId)
-  await page.mouse.down()
-  await page.mouse.up()
+  // Verified native press: fresh CURRENT-geometry paragraph, hit re-verified
+  // before down (retry on drift). Probe captures the ACTUAL event-time hit.
+  await pressVerifiedReadingPoint(page)
   await page.waitForFunction(() => !!(window as any).__pauseProbe?.raf, undefined, { timeout: 15000 })
   await page.waitForFunction(() => (window as any).__pauseProbe?.long?.done === true, undefined, {
     timeout: 30000
@@ -658,10 +833,12 @@ test.describe('Streaming click-to-pause follow', () => {
     // tuples — never two separate wire reads across stream chunks. Threshold
     // IMMEDIATE_TOL is unchanged; raw scroll is only guarded with growth
     // compensation, paint stability is the real claim.
-    const pausePoint = await findReadingPoint(page)
-    expect(pausePoint, 'visible reading point for pause must exist').not.toBeNull()
+    const pauseHint = await findReadingPoint(page)
+    expect(pauseHint, 'visible reading point for pause must exist').not.toBeNull()
     const lenAtPause = (await streamBlockState(page, blockB))?.length ?? 0
-    await page.mouse.move(pausePoint!.x, pausePoint!.y)
+    if (pauseHint) {
+      await page.mouse.move(pauseHint.x, pauseHint.y)
+    }
     await page.evaluate((blockId: string) => {
       const w = window as any
       try {
@@ -762,11 +939,11 @@ test.describe('Streaming click-to-pause follow', () => {
       w.__pauseProbe = log
       w.__pauseProbeCleanup = cleanup
     }, blockB)
-    // Real primary content press (no DOM.click): down/up at the reading point.
-    // The probe resolves the ACTUAL hit paragraph at event time, so any follow
-    // drift between findReadingPoint and the press cannot fake the baseline.
-    await page.mouse.down()
-    await page.mouse.up()
+    // Verified native press (no DOM.click, no synthetic dispatch): fresh
+    // CURRENT-geometry paragraph with hit re-verified before down; the probe
+    // still resolves the ACTUAL hit paragraph/row at event time (null
+    // assertion unchanged) so drift can never fake the baseline.
+    await pressVerifiedReadingPoint(page)
     await page.waitForFunction(() => !!(window as any).__pauseProbe?.raf, undefined, { timeout: 15000 })
     // Long-window sampler: >=3s of rAF frames on the SAME paragraph while
     // the stream is still actively growing (meaningful growth, not tail).
@@ -888,8 +1065,20 @@ test.describe('Streaming click-to-pause follow', () => {
     // press; the racy pre-press anchor is gone — no separate-wire pre/post claim.
     const postAnchor = await readAnchor(page)
     expect(postAnchor, 'anchor must still resolve immediately after the pause press').not.toBeNull()
-    // Continued growth must NOT pull the viewport back to the bottom.
-    await waitForBlockGrowth(page, blockB, lenAtPause + 2000)
+    // Continued growth must NOT pull the viewport back to the bottom. Uses the
+    // already-observed sampler-end length + HOLD_GROWTH (not lenAtPause+2000):
+    // the >=3.5s sampler already consumed ~1500 chars of the finite 4145-char
+    // budget, so a redundant +2000 from the stale pre-press length is
+    // arithmetically unreachable once lenAtPause exceeds ~2145.
+    const samplerEndLenB = frames[frames.length - 1].len
+    const samplerEndStatusB = frames[frames.length - 1].status
+    console.log(
+      `[E2E] pause-hold budget: lenAtPause=${lenAtPause} samplerEndLen=${samplerEndLenB} ` +
+        `samplerEndStatus=${samplerEndStatusB} total=${slowStreamTotalLength()} ` +
+        `target=${samplerEndLenB + HOLD_GROWTH}`
+    )
+    expect(samplerEndStatusB, 'stream still active at sampler end (remaining budget for hold)').toBe('streaming')
+    await waitForBlockGrowthWithBudget(page, blockB, samplerEndLenB + HOLD_GROWTH, 'pause-hold')
     const pausedTop = await readScrollTop(page)
     expect(Math.abs(pausedTop), 'continued growth after pause never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
     const pausedAnchor = await readAnchor(page)
@@ -1333,7 +1522,9 @@ test.describe('Streaming click-to-pause follow', () => {
     expect(pressState?.status, 'generation continues after the control press').toBe('streaming')
 
     // Continued growth never pulls back to the bottom; the held row stays put.
-    await waitForBlockGrowth(page, pressBlock, lenAtPress + 2000)
+    // Early-press budget: lenAtPress < 600 so lenAtPress+2000 (~2600) fits the
+    // finite 4145-char budget with margin; budget-guarded wait for numerics.
+    await waitForBlockGrowthWithBudget(page, pressBlock, lenAtPress + 2000, 'control-hold')
     expect(Math.abs(await readScrollTop(page)), 'control press pauses follow').toBeGreaterThan(PAUSED_MIN)
     const heldAnchor = await readAnchor(page)
     expect(heldAnchor, 'anchor must still resolve while control-paused').not.toBeNull()
@@ -1372,7 +1563,10 @@ test.describe('Streaming click-to-pause follow', () => {
     // a genuine wheel return to the exact bottom resumes follow — no
     // navigation button, no DOM scrollTop write, no scrollIntoView, no
     // forced scroll.
-    const needle = `wheel resume slow stream ${SLOW_STREAM_MARKER}`
+    // XL budget for this leg only: ~8200 chars / 302 chunks / 60ms (~18s)
+    // so the 3.5s-class pause + genuine wheel return + 500 resume hold all
+    // land while streaming. Default 4145 stays for every other spec.
+    const needle = `wheel resume slow stream ${EXTENDED_SLOW_STREAM_MARKER}`
     await uiSendMessage(page, needle)
     const blockW = await waitForStreamingContent(page, 2000)
     expect(await readScrollTop(page), 'wheel leg starts following at the bottom').toBeLessThanOrEqual(BOTTOM_TOL)
@@ -1387,20 +1581,24 @@ test.describe('Streaming click-to-pause follow', () => {
       await page.mouse.move(wheelCenter.x, wheelCenter.y)
       await page.waitForTimeout(600)
     }
-    const wheelPausePoint = await findReadingPoint(page)
-    expect(wheelPausePoint, 'visible reading point for wheel-leg pause must exist').not.toBeNull()
+    const wheelPauseHint = await findReadingPoint(page)
+    expect(wheelPauseHint, 'visible reading point for wheel-leg pause must exist').not.toBeNull()
     const lenAtPress = (await streamBlockState(page, blockW))?.length ?? 0
     const wheelPreAnchor = await readAnchor(page)
     expect(wheelPreAnchor, 'anchor must resolve before the wheel-leg pause').not.toBeNull()
-    await page.mouse.move(wheelPausePoint!.x, wheelPausePoint!.y)
-    await page.mouse.down()
-    await page.mouse.up()
+    // Verified native paragraph press (no auto-scroll, no DOM writes).
+    await pressVerifiedReadingPoint(page)
     const pressStateW = await streamBlockState(page, blockW)
     expect(pressStateW?.status, 'generation continues after the wheel-leg pause').toBe('streaming')
-    // Bounded hold proof sized to the fixed stream budget (≈4145 chars):
-    // pause at ~2000 + 500 hold + fast wheel + 500 resumed growth fits with
-    // margin; larger holds would outrun the mock stream (not a tolerance).
-    await waitForBlockGrowth(page, blockW, lenAtPress + 500)
+    // XL-bounded hold: pause at ~2000 + 500 hold + wheel return + 500 resume
+    // fits the ~8200-char XL budget with margin.
+    await waitForBlockGrowthWithBudget(
+      page,
+      blockW,
+      lenAtPress + 500,
+      'wheel-leg-hold',
+      extendedSlowStreamTotalLength()
+    )
     expect(Math.abs(await readScrollTop(page)), 'content press pauses follow').toBeGreaterThan(PAUSED_MIN)
     const wheelHeld = await readAnchor(page)
     expect(wheelHeld, 'anchor must still resolve while wheel-leg paused').not.toBeNull()
@@ -1409,7 +1607,11 @@ test.describe('Streaming click-to-pause follow', () => {
     // Genuine wheel return: real wheel events over #messages only (the mouse
     // stays inside the viewport; positive deltaY drives toward the
     // column-reverse bottom). Never clicks the Back-to-bottom rail, never
-    // writes scrollTop, never calls scrollIntoView.
+    // writes scrollTop, never calls scrollIntoView, never forces adoption.
+    // Driver targets the exact physical bottom (product gate <= 1): the old
+    // <= 100 break stopped at e.g. -81 and later growth carried the viewport
+    // to 852 before the pin check, while a true 0 landing passed — so the
+    // driver must keep wheeling with settle stabilization until <= 1.
     const center = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       if (!el) return null
@@ -1418,41 +1620,65 @@ test.describe('Streaming click-to-pause follow', () => {
     })
     expect(center, '#messages center must resolve').not.toBeNull()
     await page.mouse.move(center!.x, center!.y)
-    let bottomed = false
-    for (let i = 0; i < 30; i++) {
+    await page.waitForTimeout(300)
+    let landedTop = await readScrollTop(page)
+    let wheelSteps = 0
+    let bottomedExact = Math.abs(landedTop) <= PRODUCT_BOTTOM_TOL
+    for (let i = 0; i < 40 && !bottomedExact; i++) {
       const state = await streamBlockState(page, blockW)
       if (state?.status !== 'streaming') break
+      // Meaningful large stride to overcome concurrent 60ms growth without a
+      // tiny-step chase + state-based settle: one frame for the wheel to
+      // apply, one more for stream-growth interleaving to settle.
       await page.mouse.wheel(0, 640)
-      await page.waitForTimeout(120)
-      const top = await readScrollTop(page)
-      if (Math.abs(top) <= BOTTOM_TOL) {
-        bottomed = true
-        break
+      await page.waitForTimeout(150)
+      await page.waitForTimeout(150)
+      landedTop = await readScrollTop(page)
+      wheelSteps++
+      console.log(
+        `[E2E] wheel-resume step=${wheelSteps} scrollTop=${landedTop} len=${state?.length ?? -1} status=${state?.status ?? '?'}`
+      )
+      if (Math.abs(landedTop) <= PRODUCT_BOTTOM_TOL) {
+        // Stabilization confirm: one more frame with no new input; growth
+        // while resumed must keep the viewport pinned, not drift away.
+        await page.waitForTimeout(150)
+        landedTop = await readScrollTop(page)
+        if (Math.abs(landedTop) <= PRODUCT_BOTTOM_TOL) bottomedExact = true
       }
     }
-    expect(bottomed, 'genuine wheel must reach the bottom while streaming').toBe(true)
-    // Eventual exact bottom (physical distance 0 vicinity): the wheel lands
-    // at the clamped edge, not a wide-threshold jump.
-    await page.waitForFunction(
-      () => {
-        const el = document.getElementById('messages') as HTMLElement | null
-        return !!el && Math.abs(el.scrollTop) <= 100
-      },
-      undefined,
-      { timeout: 10000 }
+    console.log(`[E2E] wheel-resume landed: scrollTop=${landedTop} steps=${wheelSteps}`)
+    expect(
+      bottomedExact,
+      `genuine wheel must reach the exact physical bottom (<=${PRODUCT_BOTTOM_TOL}) while streaming (landed=${landedTop})`
+    ).toBe(true)
+    // Exact physical arrival oracle (product gate), asserted BEFORE any growth
+    // pinning below. The near-bottom BOTTOM_TOL follow checks elsewhere keep
+    // their existing negative semantics; this is the strict arrival proof.
+    expect(Math.abs(landedTop), 'wheel resume lands at the exact physical bottom').toBeLessThanOrEqual(
+      PRODUCT_BOTTOM_TOL
     )
-    const landedTop = await readScrollTop(page)
-    console.log(`[E2E] wheel-resume landed: scrollTop=${landedTop}`)
-    expect(Math.abs(landedTop), 'wheel resume lands at the bottom').toBeLessThanOrEqual(BOTTOM_TOL)
 
     // Continued growth (500+ chars, still streaming) stays pinned to the
     // bottom through the resumed follow; the stream completes normally.
+    // Near-bottom BOTTOM_TOL pin semantics unchanged (negative-away check is
+    // the paused oracle; pinned-follow keeps the wide gate here).
     const lenAtResume = (await streamBlockState(page, blockW))?.length ?? 0
-    await waitForBlockGrowth(page, blockW, lenAtResume + 500)
+    const resumeStatus = (await streamBlockState(page, blockW))?.status ?? '?'
+    console.log(
+      `[E2E] wheel-resume budget: lenAtResume=${lenAtResume} status=${resumeStatus} ` +
+        `total=${extendedSlowStreamTotalLength()} target=${lenAtResume + HOLD_GROWTH}`
+    )
+    await waitForBlockGrowthWithBudget(
+      page,
+      blockW,
+      lenAtResume + HOLD_GROWTH,
+      'wheel-resume',
+      extendedSlowStreamTotalLength()
+    )
     expect(Math.abs(await readScrollTop(page)), 'resumed wheel follow stays pinned through growth').toBeLessThanOrEqual(
       BOTTOM_TOL
     )
-    const expectedW = getSlowStreamReply(MODEL)
+    const expectedW = getExtendedSlowStreamReply(MODEL)
     await page.waitForFunction(
       (expected: string) => {
         const s = (window as any).store?.getState()
@@ -1483,7 +1709,8 @@ test.describe('Streaming click-to-pause follow', () => {
       return { zoom: win.webContents.getZoomFactor() as number, w: size[0], h: size[1] }
     })
     try {
-      await uiSendMessage(page, `zoom slow stream ${SLOW_STREAM_MARKER}`)
+      // XL budget for this leg only (same rationale as the wheel leg).
+      await uiSendMessage(page, `zoom slow stream ${EXTENDED_SLOW_STREAM_MARKER}`)
       const topicZoom = await currentTopicId(page)
       const blockZoom = await waitForStreamingContent(page, 1500)
       // Deterministic bottom-follow baseline before the zoom change.
@@ -1560,10 +1787,12 @@ test.describe('Streaming click-to-pause follow', () => {
         await page.mouse.move(zoomCenter.x, zoomCenter.y)
         await page.waitForTimeout(600)
       }
-      const pausePoint = await findReadingPoint(page)
-      expect(pausePoint, 'visible reading point for zoom pause must exist').not.toBeNull()
+      const pauseHint = await findReadingPoint(page)
+      expect(pauseHint, 'visible reading point for zoom pause must exist').not.toBeNull()
       const lenAtPause = (await streamBlockState(page, blockZoom))?.length ?? 0
-      const probe = await performAtomicPauseProbe(page, pausePoint!, blockZoom)
+      // Shared sampler now presses a freshly-verified CURRENT-geometry
+      // paragraph (event-time ACTUAL hit, null assertion unchanged).
+      const probe = await performAtomicPauseProbe(page, pauseHint, blockZoom)
       expect(probe?.event, 'zoom pause probe must capture the pointerdown tuple').toBeTruthy()
       expect(probe?.micro, 'zoom pause probe must capture the microtask tuple').toBeTruthy()
       expect(probe?.raf, 'zoom pause probe must capture the first-rAF tuple').toBeTruthy()
@@ -1622,10 +1851,29 @@ test.describe('Streaming click-to-pause follow', () => {
       ).toBeLessThanOrEqual(1 / 64 + 1e-6)
       // Held pause: background scroll is negative (column-reverse reading
       // position, not bottom) and business state is preserved, never rewritten
-      // to a missing value.
+      // to a missing value. Uses the already-observed sampler-end length +
+      // HOLD_GROWTH on the XL ~8200-char budget (not lenAtPause+2000 on the
+      // default 4145): the >=3.5s sampler consumes ~1500 chars. The
+      // every-frame quantum geometry above stays intact (exact 1/64 quantum,
+      // no widened positions/quiet tolerance); late generation end is never
+      // hidden by loosening.
       const postAnchor = await readAnchor(page)
       expect(postAnchor, 'anchor must still resolve immediately after the zoom pause').not.toBeNull()
-      await waitForBlockGrowth(page, blockZoom, lenAtPause + 2000)
+      const samplerEndLenZ = frames[frames.length - 1].len
+      const samplerEndStatusZ = frames[frames.length - 1].status
+      console.log(
+        `[E2E] zoom-hold budget: lenAtPause=${lenAtPause} samplerEndLen=${samplerEndLenZ} ` +
+          `samplerEndStatus=${samplerEndStatusZ} total=${extendedSlowStreamTotalLength()} ` +
+          `target=${samplerEndLenZ + HOLD_GROWTH}`
+      )
+      expect(samplerEndStatusZ, 'zoom stream still active at sampler end (remaining budget for hold)').toBe('streaming')
+      await waitForBlockGrowthWithBudget(
+        page,
+        blockZoom,
+        samplerEndLenZ + HOLD_GROWTH,
+        'zoom-hold',
+        extendedSlowStreamTotalLength()
+      )
       const pausedTop = await readScrollTop(page)
       expect(pausedTop, 'paused background scroll stays negative (column-reverse reading position)').toBeLessThan(0)
       expect(Math.abs(pausedTop), 'continued zoom growth never pulls to bottom').toBeGreaterThan(PAUSED_MIN)

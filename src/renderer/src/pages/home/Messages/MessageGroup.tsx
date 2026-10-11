@@ -217,8 +217,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
       } satisfies ComponentProps<typeof MessageItem>
 
       return (
+        // Stable row identity lives SOLELY on the inner MessageItem
+        // (`id="message-<id>"` + `data-message-id`); this wrapper carries no
+        // id so duplicate-ID geometry ambiguity (outer vs. inner rect) can
+        // never falsely read stable.
         <MessageWrapper
-          id={`message-${message.id}`}
           key={message.id}
           className={classNames([
             {

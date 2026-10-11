@@ -2275,6 +2275,11 @@ const Messages = ({
    */
   const navigate = useCallback(
     (intent: MessageNavigationIntent) => {
+      // Explicit navigation invalidates any pending shared interaction hold:
+      // the navigation owns viewport geometry from here.
+      try {
+        controller.clearInteractionIntent()
+      } catch {}
       if (intent.kind !== 'message') return runTransaction(intent)
       const targetId = intent.targetId
       if (messagesRef.current.some((m) => m.id === targetId)) return runTransaction(intent)
@@ -2373,7 +2378,7 @@ const Messages = ({
         return runTransaction(intent)
       })()
     },
-    [dispatch, runTransaction, waitForProjectionCommit]
+    [controller, dispatch, runTransaction, waitForProjectionCommit]
   )
 
   /**

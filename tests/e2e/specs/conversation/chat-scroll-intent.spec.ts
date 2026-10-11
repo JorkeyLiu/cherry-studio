@@ -1387,14 +1387,18 @@ async function expectTabStationary(
 }
 
 async function expectTabSelectionRendered(page: Page, selectedId: string, hiddenId: string): Promise<void> {
-  // Production reuses message IDs across seams (MessageWrapper id=`message-X`
-  // + inner MessageContainer id=`message-X` data-message-id=X + tab
-  // data-message-id=X), so bare ID or bare data-message-id is ambiguous.
-  // Disambiguate without relaxing: the message row carries BOTH.
+  // Stable row identity lives solely on the inner MessageContainer
+  // (`id="message-X"` + `data-message-id="X"`); the group wrapper carries no
+  // id (never a duplicate), only the `.selected` fold class. The inner
+  // selected box visible + the hidden sibling hidden proves the selection
+  // rendered; the `.selected` wrapper containing the inner box proves the
+  // fold state — without relaxing either gate.
   await expect(page.locator(`#message-${selectedId}[data-message-id="${selectedId}"]`)).toBeVisible({
     timeout: 10000
   })
-  await expect(page.locator(`#message-${selectedId}.selected`)).toBeVisible({ timeout: 10000 })
+  await expect(
+    page.locator('.selected', { has: page.locator(`#message-${selectedId}[data-message-id="${selectedId}"]`) })
+  ).toBeVisible({ timeout: 10000 })
   await expect(page.locator(`#message-${hiddenId}[data-message-id="${hiddenId}"]`)).toBeHidden({ timeout: 10000 })
 }
 

@@ -25,6 +25,7 @@ import styled from 'styled-components'
 import { FileNameRender, getFileIcon } from '../Inputbar/AttachmentPreview'
 import AttachmentButton from '../Inputbar/tools/components/AttachmentButton'
 import { releaseStagedAttachmentUploads, stageAttachmentUploads } from './MessageEditorAttachmentUpload'
+import { captureInteractionIntent, INTERACTION_REGION_CONTROLS, useOptionalRouteViewport } from './routeViewportContext'
 
 interface Props {
   message: Message
@@ -90,6 +91,7 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
   const { t } = useTranslation()
   const textareaRef = useRef<TextAreaRef>(null)
   const isUserMessage = message.role === 'user'
+  const routeViewport = useOptionalRouteViewport()
 
   // Unit B: edit attachments are never gated by vision metadata. All ordinary
   // attachment kinds stay selectable; endpoint/adapter encodability is decided
@@ -101,13 +103,27 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
   }, [])
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus({ cursor: 'end' })
-      }
-    }, 0)
-
-    return () => clearTimeout(timer)
+    // Single usable focus with preventScroll: the shared interaction hold
+    // owns viewport geometry through the editor swap, so the editor must
+    // never scroll the viewport itself. The former timer focus + autoFocus
+    // prop + second focus effect competed with the hold (forced centering
+    // vs. region hold); one preventScroll focus keeps editing usable with no
+    // scroll competition. Internal textarea end-scroll stays local.
+    const realTextarea = textareaRef.current?.resizableTextArea?.textArea as
+      | (HTMLTextAreaElement & { scrollTo?: (opts: { top: number }) => void })
+      | undefined
+    try {
+      realTextarea?.scrollTo?.({ top: realTextarea.scrollHeight })
+    } catch {}
+    try {
+      realTextarea?.focus({ preventScroll: true })
+    } catch {
+      try {
+        ;(textareaRef.current as unknown as { focus?: (opts?: { preventScroll?: boolean }) => void })?.focus?.({
+          preventScroll: true
+        })
+      } catch {}
+    }
   }, [])
 
   useEffect(() => {
@@ -118,14 +134,16 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
     }
   }, [])
 
-  // 仅在打开时执行一次
+  // 仅在打开时执行一次 (local textarea end position; viewport untouched —
+  // focus already landed above with preventScroll, no second focus here).
   useEffect(() => {
     if (textareaRef.current) {
       const realTextarea = textareaRef.current.resizableTextArea?.textArea
       if (realTextarea) {
-        realTextarea.scrollTo({ top: realTextarea.scrollHeight })
+        try {
+          realTextarea.scrollTo({ top: realTextarea.scrollHeight })
+        } catch {}
       }
-      textareaRef.current.focus({ cursor: 'end' })
     }
   }, [])
 
@@ -463,6 +481,14 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
 
   const handleCancel = () => {
     if (isProcessingRef.current || isRemovingRef.current) return
+    // Esc-key cancel carries no click-boundary capture: arm the shared
+    // region hold synchronously before the close (click cancels already
+    // armed; re-arming is harmless).
+    try {
+      const controller = routeViewport?.controller
+      if (controller)
+        captureInteractionIntent(controller, { kind: 'message', id: message.id }, INTERACTION_REGION_CONTROLS)
+    } catch {}
     isCancelledRef.current = true
     releaseEditorOwnedAttachments()
     onCancel()
@@ -519,7 +545,6 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
                     handleTextChange(block.id, e.target.value)
                   }}
                   onKeyDown={handleKeyDown}
-                  autoFocus
                   spellCheck={enableSpellCheck}
                   onPaste={(e) => onPaste(e.nativeEvent)}
                   onFocus={() => {
@@ -572,7 +597,7 @@ const MessageBlockEditor: FC<Props> = ({ message, onSave, onResend, onCancel }) 
               </FileBlocksContainer>
             )}
           </EditorBody>
-          <ActionBar>
+          <ActionBar data-interaction-region="message-controls">
             <ActionBarLeft>
               {isUserMessage && (
                 <AttachmentButton

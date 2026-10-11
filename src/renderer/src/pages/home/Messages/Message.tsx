@@ -28,6 +28,7 @@ import MessageHeader from './MessageHeader'
 import MessageMenubar from './MessageMenubar'
 import MessageOutline from './MessageOutline'
 import { areProjectedMessagesEqual, areTopicsViewportEqual, isSameViewportPosition } from './messageViewportProjection'
+import { captureInteractionIntent, INTERACTION_REGION_CONTROLS, useOptionalRouteViewport } from './routeViewportContext'
 
 interface Props {
   message: Message
@@ -93,16 +94,23 @@ const MessageItem: FC<Props> = ({
   const isEditing = editingMessageId === message.id
   const editMode = useOptionalEditMode()
   const selectedGroupIds = editMode?.selectedGroupIds ?? EMPTY_SELECTED_GROUP_IDS
+  const routeViewport = useOptionalRouteViewport()
+  // Stable controller identity: the context value versions on every notify,
+  // but the controller instance is stable — depend on it, never the version.
+  const viewportController = routeViewport?.controller ?? null
 
-  useEffect(() => {
-    if (isEditing && messageContainerRef.current) {
-      scrollIntoView(messageContainerRef.current, {
-        behavior: 'smooth',
-        block: 'center',
-        container: 'nearest'
-      })
-    }
-  }, [isEditing])
+  // Edit open/cancel never smooth-centers: the shared interaction hold keeps
+  // the footer ↔ action-bar region stationary through the editor swap, and
+  // the editor focuses with preventScroll (see MessageEditor). The former
+  // `scrollIntoView(center, smooth)` competing write is removed; explicit
+  // locate navigation (messageHighlightHandler below) keeps its own path.
+
+  const captureControlsIntent = useCallback(() => {
+    try {
+      if (!viewportController) return
+      captureInteractionIntent(viewportController, { kind: 'message', id: message.id }, INTERACTION_REGION_CONTROLS)
+    } catch {}
+  }, [viewportController, message.id])
 
   const handleEditSave = useCallback(
     async (blocks: MessageBlock[], onCommit: (blockIds: readonly string[]) => void) => {
@@ -129,8 +137,13 @@ const MessageItem: FC<Props> = ({
   )
 
   const handleEditCancel = useCallback(() => {
+    // Non-click cancel paths (Esc key, programmatic) carry no click-boundary
+    // capture: arm the shared region hold synchronously before the close.
+    // Click cancels already armed via the shared click boundary; re-arming
+    // with the same pre-mutation geometry is harmless (newer gesture wins).
+    captureControlsIntent()
     stopEditing()
-  }, [stopEditing])
+  }, [stopEditing, captureControlsIntent])
 
   const isLastMessage = index === 0 || !!isGrouped
   const isAssistantMessage = message.role === 'assistant'
@@ -228,6 +241,9 @@ const MessageItem: FC<Props> = ({
   useEffect(() => {
     const handleEditRequest = (targetId: string) => {
       if (targetId === message.id) {
+        // Shortcut/programmatic open carries no click: capture the live
+        // footer region synchronously before the editor swap.
+        captureControlsIntent()
         startEditing(message.id)
       }
     }
@@ -235,7 +251,7 @@ const MessageItem: FC<Props> = ({
     return () => {
       unsubscribe()
     }
-  }, [message.id, startEditing])
+  }, [message.id, startEditing, captureControlsIntent])
 
   return (
     <WrapperContainer isMultiSelectMode={isMultiSelectMode}>
@@ -286,6 +302,7 @@ const MessageItem: FC<Props> = ({
             </MessageContentContainer>
             {showMenubar && (
               <MessageFooter
+                data-interaction-region="message-controls"
                 className={classNames({
                   MessageFooter: true,
                   'edit-mode-toolbar-hidden': isEditMode

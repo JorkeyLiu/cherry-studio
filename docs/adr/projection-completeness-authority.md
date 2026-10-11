@@ -159,7 +159,7 @@
 - 聊天权威持久化是 Main SQLite（Drizzle + better-sqlite3），经版本化迁移治理；本文档不改变其 schema、迁移流程与 L2 兼容导入语义，一律以 [SQLite migration governance](../archived/sqlite-migration.md) 为准。
 - 上下文锚点与 `contextCount` 属普通 renderer 设置持久化（`assistants` slice + redux-persist），不是聊天权威；其有效性/默认位置/继承/闭包派生由 Main 解析，详见 [Context window governance](./context-window.md)。分支路由的上下文锚点键是路由隔离的（main 用 topicId，分支用 `topicId:branchId`）；有效源 turn 序号在目标分支内可映射时按索引映射（clone ID 重映射后索引保留），被排除/缺失的非空新分支锚点以**当前** `contextCount` 在默认窗口位置建立——由 Main `inherit` 解析器拥有，此处仅说明锚点继承的归属，不混淆“上下文锚点”（context-window 的单稳定锚点）与“分支锚点”（true-branch 的 fork 消息）。
 - 驻留注册、视口 `MessageWindow`、本地最新窗口完备性、闭包缓存、调用者本地读取结果、请求本地执行覆盖、暂定候选均为不持久化、可丢弃、可重建的状态；不得经 StoreSync 或任何持久化通道变成第二权威。
-- **视口定位区分**：路由切换时的稳定视口归属、恢复意图/所有权、快照/默认定位、分隔线稳定完成与可见性原子性由 [Route Viewport Position](./route-viewport-position.md)（VIEWPORT-1…VIEWPORT-12）治理；`MessageWindow` 仍是本地有界投影，稳定视口语义不在本文档定义。
+- **视口定位区分**：聊天视口定位（路由本地稳定视口归属、页面重激活、同路由在位交互连续性、流式阅读/跟随、意图优先级、恢复意图/所有权、快照/默认定位、分隔线稳定完成与可见性原子性）由 [Chat Viewport Position](./chat-viewport-position.md)（VIEWPORT-1…VIEWPORT-16）治理；`MessageWindow` 仍是本地有界投影，稳定视口语义不在本文档定义。
 - Dexie 表（文件目录、设置、知识笔记、翻译历史/语言、快捷短语）与消息块 UI / 遗留导入兼容例外保持现状；任何跨存储的聊天权威移动都属于迁移治理域，不属于本文档。
 
 ---
