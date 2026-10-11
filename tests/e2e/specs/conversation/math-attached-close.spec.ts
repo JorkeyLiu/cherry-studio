@@ -34,6 +34,12 @@ import { waitForAppReady } from '../../utils/wait-helpers'
 // newline keeps the mock `You said: "` prefix off the `$$` opener line so the
 // echoed assistant reply contains a standalone display-block opener (<100 chars).
 const PROBE_USER_MESSAGE = '\n$$\n\\begin{aligned}\na&=1\n\\end{aligned}$$\n\nok **b7**'
+// Direct attached opener plus attached close: opening $$ touches \begin.
+// Leading newline keeps the mock prefix off the opener line (<100 chars).
+const PROBE_ATTACHED_BOTH = '\n$$\\begin{aligned}\na&=1\n\\end{aligned}$$\n\nok **b7**'
+// Bracket-converted formula: multiline \[...\] with an attached environment.
+// Leading newline keeps the mock prefix off the bracket line (<100 chars).
+const PROBE_BRACKET_ENV = '\n\\[\\begin{aligned}\na&=1\n\\end{aligned}\\]\n\nok **b7**'
 
 async function getActiveTopicId(page: import('@playwright/test').Page): Promise<string> {
   return page.evaluate(() => {
@@ -206,5 +212,135 @@ test.describe('Attached block-math close rendering contract', () => {
     const errorTexts = await markdown.locator('.katex-error').allTextContents()
     expect(errorTexts.every((text) => !text.includes('b7'))).toBe(true)
     await expect(markdown.locator('.katex-error', { hasText: 'b7' })).toHaveCount(0)
+  })
+
+  test('attached $$ opener plus attached close renders bounded formula with bold outside katex-error', async ({
+    mainWindow
+  }) => {
+    const page = mainWindow
+    await waitForAppReady(page)
+
+    const topicId = await getActiveTopicId(page)
+    expect(topicId).not.toBe('')
+    const prevCount = await getAssistantCount(page, topicId)
+    const preSequence = getRequestSequence()
+
+    await uiSendMessage(page, PROBE_ATTACHED_BOTH)
+    await waitForAssistantResponseComplete(page, topicId, prevCount)
+
+    const productReq = findProductRequestAfter(preSequence)
+    expect(productReq).not.toBeNull()
+
+    const sentText = (() => {
+      const parsed = (productReq as unknown as { parsed?: unknown }).parsed as
+        | { messages?: Array<{ role?: string; content?: unknown }> }
+        | null
+        | undefined
+      const messages = parsed?.messages ?? []
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const content = lastUser?.content
+      if (typeof content === 'string') return content
+      if (Array.isArray(content)) {
+        return (content as Array<{ type?: string; text?: string }>)
+          .filter((p) => p.type === 'text' && typeof p.text === 'string')
+          .map((p) => p.text as string)
+          .join('\n')
+      }
+      return ''
+    })()
+    expect(sentText.startsWith('\n$$\\begin')).toBe(true)
+
+    const assistantMsgId = await getLastAssistantMessageId(page, topicId)
+    expect(assistantMsgId).not.toBe('')
+    const assistantContainer = page.locator(`[data-message-id="${assistantMsgId}"]`)
+    await assistantContainer.scrollIntoViewIfNeeded()
+
+    // Raw persisted reply retains delimiters (presentation-only normalization).
+    const rawAssistant = await page.evaluate((msgId: string) => {
+      const s = (window as any).store.getState()
+      const msg = s.messages.entities[msgId]
+      const blockId = msg?.blocks?.[0]
+      return (s.messageBlocks.entities[blockId]?.content ?? '') as string
+    }, assistantMsgId)
+    expect(rawAssistant).toContain('$$\\begin{aligned}')
+    expect(rawAssistant).toContain('a&=1')
+    expect(rawAssistant).toContain('ok **b7**')
+
+    const markdown = assistantContainer.locator('.markdown')
+    await expect(markdown.locator('.katex').first()).toBeVisible({ timeout: 15000 })
+    const katexTexts = await markdown.locator('.katex').allTextContents()
+    expect(katexTexts.some((text) => text.includes('a') && text.includes('1'))).toBe(true)
+
+    const bold = markdown.locator('strong', { hasText: 'b7' })
+    await expect(bold).toBeVisible({ timeout: 10000 })
+    await expect(bold).toHaveText('b7')
+
+    const swallowed = await bold.evaluate((el) => el.closest('.katex-error, .katex, .katex-display, .math') !== null)
+    expect(swallowed).toBe(false)
+    await expect(markdown.locator('.katex-error')).toHaveCount(0)
+  })
+
+  test('bracket-converted multiline formula renders bounded with bold outside katex-error', async ({ mainWindow }) => {
+    const page = mainWindow
+    await waitForAppReady(page)
+
+    const topicId = await getActiveTopicId(page)
+    expect(topicId).not.toBe('')
+    const prevCount = await getAssistantCount(page, topicId)
+    const preSequence = getRequestSequence()
+
+    await uiSendMessage(page, PROBE_BRACKET_ENV)
+    await waitForAssistantResponseComplete(page, topicId, prevCount)
+
+    const productReq = findProductRequestAfter(preSequence)
+    expect(productReq).not.toBeNull()
+
+    const sentText = (() => {
+      const parsed = (productReq as unknown as { parsed?: unknown }).parsed as
+        | { messages?: Array<{ role?: string; content?: unknown }> }
+        | null
+        | undefined
+      const messages = parsed?.messages ?? []
+      const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+      const content = lastUser?.content
+      if (typeof content === 'string') return content
+      if (Array.isArray(content)) {
+        return (content as Array<{ type?: string; text?: string }>)
+          .filter((p) => p.type === 'text' && typeof p.text === 'string')
+          .map((p) => p.text as string)
+          .join('\n')
+      }
+      return ''
+    })()
+    expect(sentText.startsWith('\n\\[')).toBe(true)
+
+    const assistantMsgId = await getLastAssistantMessageId(page, topicId)
+    expect(assistantMsgId).not.toBe('')
+    const assistantContainer = page.locator(`[data-message-id="${assistantMsgId}"]`)
+    await assistantContainer.scrollIntoViewIfNeeded()
+
+    // Raw persisted reply retains bracket delimiters (presentation-only conversion).
+    const rawAssistant = await page.evaluate((msgId: string) => {
+      const s = (window as any).store.getState()
+      const msg = s.messages.entities[msgId]
+      const blockId = msg?.blocks?.[0]
+      return (s.messageBlocks.entities[blockId]?.content ?? '') as string
+    }, assistantMsgId)
+    expect(rawAssistant).toContain('\\[')
+    expect(rawAssistant).toContain('a&=1')
+    expect(rawAssistant).toContain('ok **b7**')
+
+    const markdown = assistantContainer.locator('.markdown')
+    await expect(markdown.locator('.katex').first()).toBeVisible({ timeout: 15000 })
+    const katexTexts = await markdown.locator('.katex').allTextContents()
+    expect(katexTexts.some((text) => text.includes('a') && text.includes('1'))).toBe(true)
+
+    const bold = markdown.locator('strong', { hasText: 'b7' })
+    await expect(bold).toBeVisible({ timeout: 10000 })
+    await expect(bold).toHaveText('b7')
+
+    const swallowed = await bold.evaluate((el) => el.closest('.katex-error, .katex, .katex-display, .math') !== null)
+    expect(swallowed).toBe(false)
+    await expect(markdown.locator('.katex-error')).toHaveCount(0)
   })
 })

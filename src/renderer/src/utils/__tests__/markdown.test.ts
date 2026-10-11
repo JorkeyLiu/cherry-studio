@@ -527,6 +527,19 @@ $$
           expect(processLatexBrackets(input)).toBe(expected)
         }
       })
+
+      it('should canonically bound multiline display brackets on separate lines', () => {
+        expect(processLatexBrackets('\\[\\begin{aligned}\na &= 1\n\\end{aligned}\\]')).toBe(
+          '$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$'
+        )
+        expect(processLatexBrackets('\\[a\nb\\]')).toBe('$$\na\nb\n$$')
+        // Single-line brackets keep inline display semantics.
+        expect(processLatexBrackets('The formula is \\[a+b=c\\]')).toBe('The formula is $$a+b=c$$')
+        // Already line-bounded brackets do not gain extra blank lines.
+        expect(processLatexBrackets('\\[\na+b=c\n\\]')).toBe('$$\na+b=c\n$$')
+        // Unmatched/streaming brackets stay unchanged.
+        expect(processLatexBrackets('\\[unclosed bracket')).toBe('\\[unclosed bracket')
+      })
     })
 
     describe('complex cases', () => {
@@ -684,12 +697,50 @@ $$
     })
 
     it('does not touch mid-line openers or same-line trailing prose guesses', () => {
-      // opener attached to content: out of scope, left as-is
+      // generic opener attached to content: out of scope, left as-is
       const attachedOpen = '$$a\nb$$\n\ntail'
       expect(normalizeAttachedBlockMathClose(attachedOpen)).toBe(attachedOpen)
       // close followed by same-line prose: no guessing
       const sameLine = '$$\nfoo\nbar$$ baz\n\ntail'
       expect(normalizeAttachedBlockMathClose(sameLine)).toBe(sameLine)
+    })
+
+    it('splits attached LaTeX-environment openers with a general begin mechanism', () => {
+      const attachedBoth = '$$\\begin{aligned}\na &= 1\n\\end{aligned}$$\n\nok **b7**'
+      expect(normalizeAttachedBlockMathClose(attachedBoth)).toBe(
+        '$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**'
+      )
+      const spaced = '$$ \\begin{aligned}\na &= 1\n\\end{aligned}$$\n\nok **b7**'
+      expect(normalizeAttachedBlockMathClose(spaced)).toBe(
+        '$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**'
+      )
+      const otherEnv = '$$\\begin{pmatrix}\na & b\n\\end{pmatrix}$$\n\nok **b7**'
+      expect(normalizeAttachedBlockMathClose(otherEnv)).toBe(
+        '$$\n\\begin{pmatrix}\na & b\n\\end{pmatrix}\n$$\n\nok **b7**'
+      )
+    })
+
+    it('splits attached opener while keeping an already standalone close', () => {
+      const input = '$$\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**'
+      expect(normalizeAttachedBlockMathClose(input)).toBe(
+        '$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**'
+      )
+    })
+
+    it('preserves arbitrary opener suffixes as possible remark-math metadata', () => {
+      const meta = '$$meta\nfoo\nbar$$\n\ntail'
+      expect(normalizeAttachedBlockMathClose(meta)).toBe(meta)
+      const singleChar = '$$x\nfoo\nbar$$\n\ntail'
+      expect(normalizeAttachedBlockMathClose(singleChar)).toBe(singleChar)
+    })
+
+    it('leaves attached-environment streaming/incomplete delimiters unchanged', () => {
+      const unclosed = '$$\\begin{aligned}\na &= 1\n'
+      expect(normalizeAttachedBlockMathClose(unclosed)).toBe(unclosed)
+      const loneOpen = '$$\\begin{aligned}'
+      expect(normalizeAttachedBlockMathClose(loneOpen)).toBe(loneOpen)
+      const prefixed = '[Mock mock-model] "$$\\begin{aligned}\na&=1\n\\end{aligned}$$\n\nok **b7**"'
+      expect(normalizeAttachedBlockMathClose(prefixed)).toBe(prefixed)
     })
 
     it('leaves mock-echo prefixed inline $$ untouched (no attached-close split)', () => {

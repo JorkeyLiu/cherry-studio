@@ -70,7 +70,7 @@ export const processLatexBrackets = (text: string) => {
       return `__CHERRY_STUDIO_PROTECTED_${index}__`
     })
 
-  // LaTeX 括号转换函数
+  // LaTeX 括号转换函数：块级多行输出独立成行的 $$，单行语义不变
   const processMath = (content: string, openDelim: string, closeDelim: string, wrapper: string): string => {
     let result = ''
     let remaining = content
@@ -83,7 +83,14 @@ export const processLatexBrackets = (text: string) => {
       }
 
       result += match.pre
-      result += `${wrapper}${match.body}${wrapper}`
+      if (wrapper === '$$' && match.body.includes('\n')) {
+        const body = match.body
+        const prefix = /^[ \t]*\n/.test(body) ? '' : '\n'
+        const suffix = /\n[ \t]*$/.test(body) ? '' : '\n'
+        result += `${wrapper}${prefix}${body}${suffix}${wrapper}`
+      } else {
+        result += `${wrapper}${match.body}${wrapper}`
+      }
       remaining = match.post
     }
 
@@ -160,21 +167,26 @@ const findLatexMatch = (text: string, openDelim: string, closeDelim: string) => 
 }
 
 /**
- * 将多行 `$$` 块公式吸附在末行公式内容上的闭合 `$$` 拆到独立一行。
+ * 将多行 `$$` 块公式吸附在公式内容上的开启/闭合 `$$` 拆到独立一行。
  *
- * 背景：remark-math 的块级公式要求闭合 `$$` 独立成行（或至少与公式体分行）。
- * 当上游文本把闭合 `$$` 直接吸附在末行公式之后（如 `\end{aligned}$$`），
- * remark-math 会把闭合 `$$` 及后续正文都误判为未闭合 math 节点的一部分，
- * rehype-katex 再把整段（公式 + 后续正文）包进红色 `span.katex-error`，
- * 表现为公式源码与后续 `**加粗**` 正文一起变红。
+ * 背景：remark-math 的块级公式要求开启与闭合 `$$` 各自独立成行
+ * （或至少与公式体分行）。当上游文本把 `$$` 直接吸附在公式体之后
+ * （如 `$$\begin{aligned}` 开启吸附、`\end{aligned}$$` 闭合吸附），
+ * remark-math 会把 `\begin` 误判为 math 元数据、把闭合 `$$` 及后续正文
+ * 都误判为未闭合 math 节点的一部分，rehype-katex 再把整段包进红色
+ * `span.katex-error`，表现为公式源码与后续 `**加粗**` 正文一起变红。
  *
  * 本函数只做呈现层换行归一化，不改写数学内容、不做补全猜测：
- * - 只处理“真实配对”的闭合：按顺序配对非转义、非代码内的 `$$`，
+ * - 只处理“真实配对”的分隔符：按顺序配对非转义、非代码内的 `$$`，
  *   落单（流式未完成/真正未闭合）的 opener 保持原样，绝不主动闭合；
- * - 只处理多行块：open 与 close 不在同一行，且 open 本身是独立成行的
- *   展示块 opener（行内仅有 `$$`，至多允许 ≤3 空格缩进、无制表符；
- *   前缀带正文的行内 `$$` 与四空格/制表符缩进代码一律不动），
- *   close 吸附且行尾仅有空白；
+ * - 只处理多行块：open 与 close 不在同一行；
+ * - opener 须为独立成行（行内仅有 `$$`，≤3 空格、无制表符）或明确的
+ *   LaTeX 环境吸附开启（`$$` 后仅允许空格/制表符再接通用
+ *   `\begin{env}`，不限定具体环境名；任意其他后缀视为可能的
+ *   remark-math 元数据一律不动）。前缀带正文的行内 `$$`
+ *   与四空格/制表符缩进代码一律不动；
+ * - closer 须为独立成行（已界定，无需拆分）或吸附且行尾仅有空白、
+ *   且所在行唯一的 `$$`；同行尾随正文（如 `bar$$ baz`）不猜测；
  * - 单行 `$$x$$`、已独立成行的 `$$`、行内单个 `$`、美元金额、
  *   转义 `\$`、围栏/行内代码（含 ```math）一律不动；
  * - 不校验公式合法性：显式闭合但内容非法（如未知命令）的公式
@@ -308,56 +320,100 @@ export function normalizeAttachedBlockMathClose(text: string): string {
     }
   }
 
+  const countDelimsOnLine = (line: string): number => {
+    const ranges = inlineCodeRanges(line)
+    let occurrences = 0
+    let c = 0
+    while (c < line.length - 1) {
+      if (line[c] === '$' && line[c + 1] === '$' && !inRanges(ranges, c)) {
+        if (backslashCountBefore(line, c) % 2 === 0) {
+          occurrences += 1
+          c += 2
+          continue
+        }
+      }
+      c += 1
+    }
+    return occurrences
+  }
+  // 通用 LaTeX 环境开启：$$ 后仅允许空格/制表符再接 \begin{env}（不限环境名）。
+  const LATEX_ENV_OPEN_RE = /^[ \t]*\\begin\{[A-Za-z][A-Za-z0-9]*\*?\}/
+
   // 顺序配对：奇数落单的 opener（流式未完成）保持原样
-  const splits = new Map<number, number[]>()
+  const closeSplits = new Map<number, number[]>()
+  const openSplits = new Map<number, number>()
   for (let d = 0; d + 1 < delims.length; d += 2) {
     const open = delims[d]
     const close = delims[d + 1]
     if (open.line === close.line) continue
     const openLine = lines[open.line]
     const closeLine = lines[close.line]
-    // opener 必须是独立成行的展示块 opener：前缀仅允许空白（≤3 空格、无制表符），
-    // 且 $$ 后行尾仅有空白。前缀带正文（如 mock 回显 `[Mock ...] "$$`）属于行内
-    // 公式语义，四空格/制表符缩进属于缩进代码块，一律不动。
+    // opener 前缀仅允许空白（≤3 空格、无制表符）。前缀带正文
+    // （如 mock 回显 `[Mock ...] "$$`）属于行内公式语义，
+    // 四空格/制表符缩进属于缩进代码块，一律不动。
     const openPrefix = openLine.slice(0, open.col)
     if (openPrefix.trim() !== '') continue
     if (openPrefix.includes('\t') || openPrefix.length >= 4) continue
-    if (openLine.slice(open.col + 2).trim() !== '') continue
+    const openSuffix = openLine.slice(open.col + 2)
+    let openKind: 'standalone' | 'attachedEnv' | null = null
+    if (openSuffix.trim() === '') {
+      openKind = 'standalone'
+    } else if (LATEX_ENV_OPEN_RE.test(openSuffix)) {
+      // 明确数学吸附开启：通用 \begin{ANY} 机制，不特判 aligned。
+      // 任意其他后缀视为可能的 remark-math 元数据，不重解释。
+      if (countDelimsOnLine(openLine) !== 1) continue
+      openKind = 'attachedEnv'
+    } else {
+      continue
+    }
     // closer 所在整行是缩进代码块时不动（四空格/制表符开头）。
     if (closeLine.startsWith('    ') || closeLine.startsWith('\t')) continue
-    // closer 必须吸附在公式内容之后且行尾仅有空白
-    if (closeLine.slice(0, close.col).trim() === '') continue
-    if (closeLine.slice(close.col + 2).trim() !== '') continue
-    // closer 必须是所在行唯一的 $$：行内另有 $$ 时不猜测分隔语义
-    let occurrences = 0
-    {
-      const ranges = inlineCodeRanges(closeLine)
-      let c = 0
-      while (c < closeLine.length - 1) {
-        if (closeLine[c] === '$' && closeLine[c + 1] === '$' && !inRanges(ranges, c)) {
-          if (backslashCountBefore(closeLine, c) % 2 === 0) {
-            occurrences += 1
-            c += 2
-            continue
-          }
-        }
-        c += 1
+    const closePrefix = closeLine.slice(0, close.col)
+    const closeSuffix = closeLine.slice(close.col + 2)
+    let closeKind: 'standalone' | 'attached' | null = null
+    if (closePrefix.trim() === '' && closeSuffix.trim() === '') {
+      closeKind = 'standalone'
+    } else if (closePrefix.trim() !== '' && closeSuffix.trim() === '') {
+      // closer 必须是所在行唯一的 $$：行内另有 $$ 时不猜测分隔语义
+      if (countDelimsOnLine(closeLine) !== 1) continue
+      closeKind = 'attached'
+    } else {
+      // close 同行尾随正文（如 bar$$ baz）不猜测；前缀空白但后缀非空
+      // 的独立 $$ 行亦视为已界定之外的未知形态，保持原样。
+      continue
+    }
+    if (openKind === 'standalone' && closeKind === 'standalone') continue
+    if (openKind === 'standalone' && closeKind === 'attached') {
+      let cols = closeSplits.get(close.line)
+      if (!cols) {
+        cols = []
+        closeSplits.set(close.line, cols)
       }
+      cols.push(close.col)
+    } else if (openKind === 'attachedEnv' && closeKind === 'standalone') {
+      if (!openSplits.has(open.line)) openSplits.set(open.line, open.col)
+    } else if (openKind === 'attachedEnv' && closeKind === 'attached') {
+      if (!openSplits.has(open.line)) openSplits.set(open.line, open.col)
+      let cols = closeSplits.get(close.line)
+      if (!cols) {
+        cols = []
+        closeSplits.set(close.line, cols)
+      }
+      cols.push(close.col)
     }
-    if (occurrences !== 1) continue
-    // closer 所在行在 opener 之后还有别的 $$ 时只处理行尾最后一个
-    let cols = splits.get(close.line)
-    if (!cols) {
-      cols = []
-      splits.set(close.line, cols)
-    }
-    cols.push(close.col)
   }
 
-  if (splits.size === 0) return text
+  if (closeSplits.size === 0 && openSplits.size === 0) return text
 
   const next = lines.slice()
-  for (const [li, cols] of splits) {
+  for (const [li, col] of openSplits) {
+    const line = next[li]
+    const prefix = line.slice(0, col)
+    const suffix = line.slice(col + 2)
+    const body = suffix.replace(/^[ \t]*/, '')
+    next[li] = `${prefix}$$\n${body}`
+  }
+  for (const [li, cols] of closeSplits) {
     // 同一行多个命中时只拆行尾最后一个，避免猜测中间分隔
     const col = Math.max(...cols)
     const line = next[li]

@@ -1,6 +1,6 @@
 import type { MainTextMessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage'
-import { normalizeAttachedBlockMathClose } from '@renderer/utils/markdown'
+import { normalizeAttachedBlockMathClose, processLatexBrackets } from '@renderer/utils/markdown'
 import { render, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
 import rehypeKatex from 'rehype-katex'
@@ -62,6 +62,70 @@ describe('attached block-math close (screenshot regression)', () => {
     expect(values[0]).not.toContain('boldCheck')
     expect(values[0]).toContain('\\end{aligned}')
     expect(hasStrongWith(tree, 'boldCheck')).toBe(true)
+  })
+
+  it('attached opener plus attached close normalizes with begin retained and prose outside math', () => {
+    const raw = '$$\\begin{aligned}\na &= 1\n\\end{aligned}$$\n\nok **b7**'
+    const normalized = normalizeAttachedBlockMathClose(raw)
+    expect(normalized).toBe('$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**')
+    const tree = parseMath(normalized)
+    const values = collectMathValues(tree)
+    expect(values).toHaveLength(1)
+    // Opener body is preserved: \begin remains actual formula, not remark-math metadata.
+    expect(values[0]).toContain('\\begin{aligned}')
+    expect(values[0]).toContain('\\end{aligned}')
+    expect(values[0]).not.toContain('$$')
+    expect(values[0]).not.toContain('b7')
+    expect(hasStrongWith(tree, 'b7')).toBe(true)
+  })
+
+  it('spaced attached opener and other environments use the general begin mechanism', () => {
+    const spaced = normalizeAttachedBlockMathClose('$$ \\begin{aligned}\na &= 1\n\\end{aligned}$$\n\nok **b7**')
+    expect(spaced).toBe('$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**')
+    const other = normalizeAttachedBlockMathClose('$$\\begin{pmatrix}\na & b\n\\end{pmatrix}$$\n\nok **b7**')
+    expect(other).toBe('$$\n\\begin{pmatrix}\na & b\n\\end{pmatrix}\n$$\n\nok **b7**')
+    for (const normalized of [spaced, other]) {
+      const tree = parseMath(normalized)
+      expect(collectMathValues(tree)).toHaveLength(1)
+      expect(hasStrongWith(tree, 'b7')).toBe(true)
+    }
+  })
+
+  it('attached opener with already standalone close keeps begin and bounds prose', () => {
+    const raw = '$$\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**'
+    const normalized = normalizeAttachedBlockMathClose(raw)
+    expect(normalized).toBe('$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**')
+    const tree = parseMath(normalized)
+    const values = collectMathValues(tree)
+    expect(values).toHaveLength(1)
+    expect(values[0]).toContain('\\begin{aligned}')
+    expect(values[0]).not.toContain('b7')
+    expect(hasStrongWith(tree, 'b7')).toBe(true)
+  })
+
+  it('bracket-converted multiline formulas parse bounded with prose outside math', () => {
+    const converted = processLatexBrackets('\\[\\begin{aligned}\na &= 1\n\\end{aligned}\\]\n\nok **b7**')
+    expect(converted).toBe('$$\n\\begin{aligned}\na &= 1\n\\end{aligned}\n$$\n\nok **b7**')
+    const tree = parseMath(normalizeAttachedBlockMathClose(converted))
+    const values = collectMathValues(tree)
+    expect(values).toHaveLength(1)
+    expect(values[0]).toContain('\\begin{aligned}')
+    expect(values[0]).not.toContain('b7')
+    expect(hasStrongWith(tree, 'b7')).toBe(true)
+    const generic = processLatexBrackets('\\[a\nb\\]\n\nok **b7**')
+    expect(generic).toBe('$$\na\nb\n$$\n\nok **b7**')
+    const genericTree = parseMath(normalizeAttachedBlockMathClose(generic))
+    expect(hasStrongWith(genericTree, 'b7')).toBe(true)
+  })
+
+  it('unmatched streaming delimiters stay unchanged and genuine errors stay confined', () => {
+    const unclosed = '$$\\begin{aligned}\na &= 1\n'
+    expect(normalizeAttachedBlockMathClose(unclosed)).toBe(unclosed)
+    expect(processLatexBrackets('\\[unclosed')).toBe('\\[unclosed')
+    const malformed = normalizeAttachedBlockMathClose('$$\n\\badcommand{oops}\n\\end{aligned}$$\n\nok **b7**')
+    expect(malformed).toBe('$$\n\\badcommand{oops}\n\\end{aligned}\n$$\n\nok **b7**')
+    const tree = parseMath(malformed)
+    expect(hasStrongWith(tree, 'b7')).toBe(true)
   })
 
   it('mock-prefixed inline $$ is left untouched and keeps strong prose outside math', () => {
@@ -154,6 +218,80 @@ describe('attached block-math close (screenshot regression)', () => {
     // The whole message must not be swallowed into a single error span.
     const errors = [...container.querySelectorAll('.katex-error')]
     expect(errors.every((el) => !el.textContent?.includes('boldCheck'))).toBe(true)
+  })
+
+  it('home Markdown renders attached opener plus attached close with bold outside katex-error', async () => {
+    vi.resetModules()
+
+    vi.doMock('../mathLoader', () => ({
+      loadMathRuntime: vi.fn(async () => ({
+        remarkMath: remarkMath as unknown as MathRuntime['remarkMath'],
+        rehypeKatex: rehypeKatex as unknown as MathRuntime['rehypeKatex']
+      }))
+    }))
+
+    vi.doMock('@logger', () => ({
+      loggerService: {
+        withContext: () => ({
+          error: vi.fn(),
+          info: vi.fn(),
+          warn: vi.fn()
+        })
+      }
+    }))
+
+    vi.doMock('../CodeBlock', () => ({
+      __esModule: true,
+      default: () => null
+    }))
+    vi.doMock('../Link', () => ({
+      __esModule: true,
+      default: () => null
+    }))
+    vi.doMock('../Table', () => ({
+      __esModule: true,
+      default: () => null
+    }))
+    vi.doMock('../MarkdownSvgRenderer', () => ({
+      __esModule: true,
+      default: () => null
+    }))
+    vi.doMock('@renderer/components/ImageViewer', () => ({
+      __esModule: true,
+      default: () => null
+    }))
+    vi.doMock('@renderer/components/MarkdownShadowDOMRenderer', () => ({
+      __esModule: true,
+      default: () => null
+    }))
+    vi.doMock('react-i18next', () => ({
+      useTranslation: () => ({ t: (key: string) => key }),
+      initReactI18next: { type: '3rdParty', init: vi.fn() }
+    }))
+
+    const { default: Markdown } = await import('../Markdown')
+
+    const block: MainTextMessageBlock = {
+      id: 'b-attached-both',
+      messageId: 'msg-1',
+      type: MessageBlockType.MAIN_TEXT,
+      status: MessageBlockStatus.SUCCESS,
+      createdAt: new Date().toISOString(),
+      content: '$$\\begin{aligned}\na &= 1\n\\end{aligned}$$\n\nok **b7**'
+    }
+
+    const { container } = render(createElement(Markdown, { block }))
+
+    await waitFor(() => {
+      expect(container.querySelector('.katex')).not.toBeNull()
+    })
+
+    const katexTexts = [...container.querySelectorAll('.katex')].map((el) => el.textContent ?? '')
+    expect(katexTexts.some((text) => text.includes('a') && text.includes('1'))).toBe(true)
+    const strong = container.querySelector('.markdown strong')
+    expect(strong?.textContent).toBe('b7')
+    expect(strong?.closest('.katex-error, .katex, .katex-display, .math')).toBeNull()
+    expect(container.querySelector('.katex-error')).toBeNull()
   })
 
   it('home Markdown keeps already-bounded math and code/escape protection intact', async () => {
