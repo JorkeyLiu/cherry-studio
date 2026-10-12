@@ -27,6 +27,13 @@ export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   display: flex;
   flex-direction: column-reverse;
   overflow-x: hidden;
+  // Single scroll owner (#messages): the route viewport keeper owns all
+  // compensation on this host (column-reverse bottom pin + region holds).
+  // Browser scroll anchoring would fight it during editor resize/entry/cancel
+  // (native corrections vs keeper corrections read as bottom wobble and a
+  // release snap), so it stays disabled here only — never on editor, notes,
+  // history, or other native scrollers.
+  overflow-anchor: none;
   // Short content sizes to content height instead of stretching the full
   // wrapper height (flex:1 forced full fill, pushing the column-reverse
   // content to the visual bottom and leaving blank above Prompt).

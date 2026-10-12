@@ -186,6 +186,8 @@ import {
 import {
   buildContainerCapturer,
   isCaptureContainerHidden,
+  isViewportLayoutControlTarget,
+  isViewportLayoutResizeKey,
   useOptionalRouteViewport,
   useStableVisualAnchor,
   viewportPhaseAttrFor
@@ -4070,6 +4072,18 @@ const Messages = ({
   // so ordinary buttons/links still bubble here.
   const handleStabilizerUserInput = useCallback(
     (e?: React.PointerEvent | React.TouchEvent | React.MouseEvent) => {
+      // Layout-control press (trusted resize handle): same-arbiter
+      // LAYOUTCONTROL, not user-scroll — neither streaming pause nor a
+      // genuine-scroll session may open/clear the pending shared hold here.
+      // Wheels stay genuine via the separate wheel path below.
+      try {
+        if (e) {
+          const t = (e as unknown as { target?: unknown }).target ?? null
+          if (isViewportLayoutControlTarget(t, scrollContainerRef.current)) return
+        }
+      } catch {
+        // fail-closed to declare-only on helper errors
+      }
       try {
         if (
           e &&
@@ -4145,6 +4159,18 @@ const Messages = ({
   // at the oldest edge (it cannot — away motion leaves the edge).
   const handleStabilizerKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // Layout-resize keys on the trusted handle are layout resizing, never
+      // genuine scroll: no session, no clamped-edge paging. All other keys
+      // (including Space/Escape on the handle) keep existing semantics.
+      try {
+        const rawTarget = (e as unknown as { target?: unknown }).target ?? null
+        const rawKey = (e as unknown as { key?: unknown }).key
+        if (isViewportLayoutResizeKey(rawKey) && isViewportLayoutControlTarget(rawTarget, scrollContainerRef.current)) {
+          return
+        }
+      } catch {
+        // fail-closed to existing behavior on helper errors
+      }
       let target: { tagName?: string; isContentEditable?: boolean } | null = null
       try {
         target = e.target as unknown as { tagName?: string; isContentEditable?: boolean }

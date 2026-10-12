@@ -23,7 +23,8 @@
  *
  * Seams (existing only): #messages, [data-message-id],
  * [data-testid="msg-assistant-edit-btn"], .message-editor-area,
- * .editing-message, window.store (seed/introspection),
+ * .editing-message (+ .cm-content[contenteditable] in source mode),
+ * window.store (seed/introspection),
  * window.api.chatDb.ensureTopic/pasteMessagesToTopic/getRawTopic
  * (seed/introspection), window.keyv scroll snapshot (supporting only),
  * data-viewport-phase (supporting only). UI actions (topic click, hover,
@@ -416,7 +417,7 @@ async function captureControlGeometry(page: Page, messageId: string): Promise<Co
     let regionOffset: number | null = null
     if (region) {
       const fr = region.getBoundingClientRect()
-      if (fr.width > 0 && fr.height > 0) regionOffset = fr.top - c.top
+      if (fr.width > 0 && fr.height > 0) regionOffset = fr.bottom - c.top
     }
     const norm = (r: DOMRect) => ({
       x: r.x,
@@ -472,7 +473,12 @@ async function captureEditorGeometry(
       width: r.width,
       height: r.height
     })
-    const ta = row.querySelector('.editing-message') as HTMLElement | null
+    // CodeMirror contract: .editing-message stays the visible wrapper; the
+    // real editable surface is .cm-content[contenteditable=true] in source
+    // mode. Height geometry tracks the .editing-message wrapper (stable
+    // viewport bounds; .cm-content doc height varies with virtualization) —
+    // viewport semantics unchanged, actual input still targets .cm-content.
+    const ta = (row.querySelector('.editing-message') as HTMLElement | null) ?? null
     let textareaRect: Rect | null = null
     if (ta) {
       const tr = ta.getBoundingClientRect()
@@ -484,30 +490,34 @@ async function captureEditorGeometry(
     let regionOffset: number | null = null
     if (region) {
       const rr = region.getBoundingClientRect()
-      if (rr.width > 0 && rr.height > 0) regionOffset = rr.top - c.top
+      if (rr.width > 0 && rr.height > 0) regionOffset = rr.bottom - c.top
     }
     // Cancel is the action-bar X button: locale-independent. Save carries
     // .message-editor-save-btn, resend carries .message-editor-resend-btn.
-    // Scope to the LAST direct surface child (the ActionBar sits after
-    // EditorBody, so the in-body TranslateButton is excluded), then pick the
-    // non-save/non-resend visible button; fall back to aria-label match.
+    // Scope explicitly to the existing controls region
+    // ([data-interaction-region="message-controls"] ActionBar) — never DOM
+    // first/last-child assumptions (EditorSurface last child is the edit
+    // surface, whose first visible non-save button is the toolbar Source
+    // toggle, not Cancel).
     const area = row.querySelector('.message-editor-area') as HTMLElement | null
     let cancelCenter: { x: number; y: number } | null = null
     let cancelOffset: number | null = null
     if (area) {
-      const surface = area.firstElementChild as HTMLElement | null
-      const actionBar = surface?.lastElementChild as HTMLElement | null
-      const scope: HTMLElement | null = actionBar ?? area
+      const controls = row.querySelector(
+        '.message-editor-area [data-interaction-region="message-controls"]'
+      ) as HTMLElement | null
+      const scope: HTMLElement | null = controls ?? area
       const btns = Array.from(scope.querySelectorAll('button')) as HTMLElement[]
       let cancel =
         btns.find(
           (b) =>
             !b.classList.contains('message-editor-save-btn') &&
             !b.classList.contains('message-editor-resend-btn') &&
-            b.getBoundingClientRect().width > 0
+            b.getBoundingClientRect().width > 0 &&
+            b.getBoundingClientRect().height > 0
         ) ?? null
-      if (!cancel) {
-        const all = Array.from(area.querySelectorAll('button')) as HTMLElement[]
+      if (!cancel && scope) {
+        const all = Array.from(scope.querySelectorAll('button')) as HTMLElement[]
         cancel = all.find((b) => /cancel|取消/.test((b.getAttribute('aria-label') ?? '').toLowerCase())) ?? null
       }
       if (cancel) {
@@ -779,7 +789,7 @@ async function readRegionOffset(page: Page, messageId: string): Promise<number> 
         (row.querySelector('[data-interaction-region="message-controls"]') as HTMLElement | null) ??
         (row.querySelector('.MessageFooter, [class*="MessageFooter"]') as HTMLElement | null)
       if (!region) return NaN
-      return region.getBoundingClientRect().top - container.getBoundingClientRect().top
+      return region.getBoundingClientRect().bottom - container.getBoundingClientRect().top
     }, messageId)
     .catch(() => NaN)
 }
@@ -865,7 +875,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       post.messageRect.left - pre.messageRect.left,
       post.messageRect.top - pre.messageRect.top
     )
-    // Primary region oracle: the footer ↔ action-bar interaction area stays
+    // Primary region oracle: the footer ↔ action-bar interaction area BOTTOM stays
     // where the click found it (same semantic area through replacement).
     expect(pre.regionOffset, 'precondition: footer interaction region must be measurable').not.toBeNull()
     expect(post.regionOffset, 'editor action-bar interaction region must be measurable').not.toBeNull()
@@ -1200,7 +1210,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
         rowTopOff: r.top - c.top,
         rowBottomOff: r.bottom - c.top,
         regionH: rr ? rr.height : null,
-        regionTopOff: rr ? rr.top - c.top : null
+        regionBottomOff: rr ? rr.bottom - c.top : null
       }
     }, newestAssistantId)
     await installEditSpy(page)
@@ -1328,7 +1338,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'ASSISTANT-EDIT REGION ESCAPE (KEYBOARD): from the verified non-bottom reading viewport, open the assistant editor with a real click, confirm real textarea focus (preventScroll path), then press the physical Escape key. Geometry (first/every frame) is primary: the structural action-bar region must not move unexpectedly. Assistant Escape is currently a documented no-op (MessageEditor handleKeyDown guards role!==user); the test proves no-move in that state and records cancel as uncovered, or — if a future build closes on Escape — proves the exact pre-edit return.'
+        'ASSISTANT-EDIT REGION ESCAPE (KEYBOARD): from the verified non-bottom reading viewport, open the assistant editor with a real click, confirm real editor focus (.cm-content preventScroll path), then press the physical Escape key. Geometry (first/every frame) is primary: the structural action-bar region must not move unexpectedly. Assistant Escape is currently a documented no-op (MessageEditor handleKeyDown guards role!==user); the test proves no-move in that state and records cancel as uncovered, or — if a future build closes on Escape — proves the exact pre-edit return.'
     })
     const page: Page = mainWindow
     const { targetAssistantId } = await test.step('seed mid-topic assistant topic and cold-activate', async () =>
@@ -1343,7 +1353,10 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     const editGeom = await captureEditorGeometry(page, targetAssistantId)
     const editScroll = await readScroll(page)
     const focusBefore = await describeActiveElement(page)
-    const focusIsTextarea = /textarea/i.test(focusBefore) || /editing-message/i.test(focusBefore)
+    const focusIsTextarea =
+      /textarea/i.test(focusBefore) ||
+      /editing-message/i.test(focusBefore) ||
+      /cm-content|cm-editor|contenteditable/i.test(focusBefore)
     test.info().annotations.push({
       type: 'aer-escape-focus',
       description: `focusBefore=${focusBefore} isTextarea=${focusIsTextarea} editScroll=${Math.round(editScroll.scrollTop)} editRegion=${editGeom.regionOffset !== null ? Math.round(editGeom.regionOffset) : 'null'}`
@@ -1352,7 +1365,7 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
     // preventScroll auto-focus did not land (never synthesize focus).
     if (!focusIsTextarea) {
       const taBox = await page
-        .locator('.message-editor-area .editing-message')
+        .locator('.message-editor-area .editing-message .cm-content')
         .first()
         .boundingBox()
         .catch(() => null)
@@ -1496,8 +1509,8 @@ test.describe('Assistant Edit/Cancel interaction-region stationary baseline', ()
       takenTopExtreme - OFFSET_TOL
     )
     // Genuine editor resize while taken over: real typing into the focused
-    // textarea (never a height injection). Must not snap back to pre-edit.
-    const textarea = page.locator('.message-editor-area .editing-message').first()
+    // CodeMirror surface (never a height injection). Must not snap back to pre-edit.
+    const textarea = page.locator('.message-editor-area .editing-message .cm-content').first()
     await textarea.click().catch(() => {})
     await page.keyboard.type('\n\ntakeover resize probe line one\ntakeover resize probe line two', { delay: 20 })
     await page.waitForTimeout(800)

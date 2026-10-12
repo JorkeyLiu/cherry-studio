@@ -4,6 +4,7 @@ import { MessageBlockStatus, MessageBlockType } from '@renderer/types/newMessage
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactNode } from 'react'
+import React, { useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -117,10 +118,6 @@ vi.mock('@renderer/components/Tags/CustomTag', () => ({
   )
 }))
 
-vi.mock('@renderer/components/TranslateButton', () => ({
-  default: () => null
-}))
-
 vi.mock('../../Inputbar/AttachmentPreview', () => ({
   FileNameRender: ({ file }: { file: FileMetadata }) => <span>{file.name}</span>,
   getFileIcon: () => null
@@ -135,13 +132,69 @@ vi.mock('../../Inputbar/tools/components/AttachmentButton', () => ({
 }))
 
 vi.mock('antd', () => ({
-  Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>
+  Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
+  Modal: ({ open, children }: { open?: boolean; children?: ReactNode }) => (open ? <div>{children}</div> : null),
+  Input: ({ onPressEnter, ...props }: { onPressEnter?: (e: unknown) => void } & Record<string, unknown>) => (
+    <input {...props} />
+  )
 }))
 
-vi.mock('antd/es/input/TextArea', () => ({
-  default: ({ ref, ...props }: Record<string, unknown> & { ref?: React.RefObject<HTMLTextAreaElement | null> }) => (
-    <textarea ref={ref} {...props} />
-  )
+// The editor surface is CodeMirror (lazy shared CodeEditor). Tests bridge it
+// with a textarea for input events plus the contract .cm-content marker; the
+// lazy-load/engine contract itself is owned by CodeEditor.lazy.test.tsx.
+vi.mock('@renderer/components/CodeEditor', () => ({
+  default: function MockCodeEditor({
+    ref,
+    value,
+    onChange,
+    onEditorKeyDown,
+    onEditorReady,
+    editable
+  }: {
+    ref?: React.RefObject<{
+      save?: () => void
+      getContent?: () => string
+      focus?: () => void
+      getView?: () => null
+    } | null>
+    value?: string
+    onChange?: (value: string) => void
+    onEditorKeyDown?: (event: KeyboardEvent) => boolean
+    onEditorReady?: () => void
+    editable?: boolean
+  }) {
+    useEffect(() => {
+      onEditorReady?.()
+    }, [])
+    useEffect(() => {
+      if (ref) {
+        ref.current = {
+          save: () => {},
+          getContent: () => value ?? '',
+          focus: () => {},
+          getView: () => null
+        }
+      }
+    })
+    return (
+      <div>
+        <div className="cm-content" contentEditable={true} />
+        <textarea
+          aria-label="message-editor-source"
+          value={value ?? ''}
+          disabled={editable === false}
+          onChange={(e) => onChange?.(e.target.value)}
+          onKeyDown={(e) => {
+            if (onEditorKeyDown?.(e.nativeEvent as unknown as KeyboardEvent)) e.preventDefault()
+          }}
+        />
+      </div>
+    )
+  }
+}))
+
+vi.mock('../../Markdown/Markdown', () => ({
+  default: ({ block }: { block: { content: string } }) => <div className="markdown">{block.content}</div>
 }))
 
 vi.mock('@renderer/config/models', () => ({

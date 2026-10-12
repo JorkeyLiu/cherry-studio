@@ -2169,6 +2169,32 @@
       "failed": "下载失败",
       "success": "下载成功"
     },
+    "edit": {
+      "bold": "加粗",
+      "bullet_list": "无序列表",
+      "code": "代码",
+      "collapse": "收起编辑器",
+      "expand": "展开编辑器",
+      "expanded_hint": "正在展开窗口中编辑…",
+      "expanded_title": "编辑消息",
+      "find_count": "第 {{current}} 个，共 {{total}} 个",
+      "find_next": "下一个匹配",
+      "find_placeholder": "查找",
+      "find_previous": "上一个匹配",
+      "find_replace": "查找替换",
+      "heading": "标题",
+      "link": "链接",
+      "no_results": "无结果",
+      "quote": "引用",
+      "redo": "重做",
+      "replace": "替换",
+      "replace_all": "全部替换",
+      "replace_placeholder": "替换为",
+      "resize_height": "调整编辑器高度",
+      "show_preview": "切换到预览",
+      "show_source": "切换到编辑",
+      "undo": "撤销"
+    },
     "empty_url": "无法下载图片，可能是提示词包含敏感内容或违禁词汇",
     "error": {
       "attachment": {

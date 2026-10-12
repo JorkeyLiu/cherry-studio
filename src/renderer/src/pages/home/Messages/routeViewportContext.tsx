@@ -772,11 +772,172 @@ export const INTERACTION_REGION_CONTROLS = 'message-controls' as const
 export const INTERACTION_REGION_FOLD = 'fold-controls' as const
 
 /**
- * Fail-closed correspondence deadline: a handoff representative that stays
- * hidden/unresolvable longer than this after capture is treated as a dead
- * target (deleted route content, never-committing selection) and the intent
- * is dropped with no adopt. Generous wall-clock bound (async selections and
- * slow commits land far inside it); it only ever drops, never certifies.
+ * Per-region visual baseline edge (VIEWPORT-13/14 visual-baseline rule).
+ *
+ * The baseline is a geometric point declared by the region, not a direction
+ * enum and not a per-feature case list: `start` measures the region TOP
+ * (default, existing model-label/FOLD compatible), `end` measures the region
+ * BOTTOM (the true change-domain lower bound for message edit controls whose
+ * own height changes across the footer ↔ action-bar swap). Missing or illegal
+ * values fail to the default existing model (`start`); reference changes use
+ * the stable data-identity resolver above so an attribute change mid-gesture
+ * never forces two ends. One helper below serves capture/hold/validation and
+ * the answer-tab entry with identical semantics and a unified signed delta.
+ */
+export const VIEWPORT_BASELINE_EDGE_ATTR = 'data-viewport-baseline-edge' as const
+export const VIEWPORT_BASELINE_EDGE_START = 'start' as const
+export const VIEWPORT_BASELINE_EDGE_END = 'end' as const
+export type ViewportBaselineEdge = 'start' | 'end'
+
+/**
+ * Resolve the declared visual baseline edge for a region element.
+ * Returns `end` only for an explicit `end` declaration; every other state
+ * (missing, illegal, helper error) is the default original `start`.
+ */
+export const resolveViewportBaselineEdge = (el: Element | null | undefined): ViewportBaselineEdge => {
+  try {
+    if (!el || typeof el.getAttribute !== 'function') return VIEWPORT_BASELINE_EDGE_START
+    const raw = el.getAttribute(VIEWPORT_BASELINE_EDGE_ATTR)
+    return raw === VIEWPORT_BASELINE_EDGE_END ? VIEWPORT_BASELINE_EDGE_END : VIEWPORT_BASELINE_EDGE_START
+  } catch {
+    return VIEWPORT_BASELINE_EDGE_START
+  }
+}
+
+/**
+ * Shared visual-baseline measurement: the region's declared edge offset
+ * minus the container top (unified signed delta). `start` uses TOP,
+ * `end` uses BOTTOM. Returns NaN when unmeasurable (fail-closed by callers).
+ * Capture, hold, validation, and the answer-tab entry all share this helper
+ * so re-resolution across replacement never changes ends.
+ */
+export const measureViewportRegionOffset = (regionEl: HTMLElement, container: HTMLElement): number => {
+  try {
+    if (!regionEl || !container) return NaN
+    let containerTop = NaN
+    try {
+      containerTop = container.getBoundingClientRect().top
+    } catch {
+      return NaN
+    }
+    let rect: DOMRect | null = null
+    try {
+      rect = regionEl.getBoundingClientRect()
+    } catch {
+      return NaN
+    }
+    if (!rect) return NaN
+    const edge = resolveViewportBaselineEdge(regionEl)
+    const base = edge === VIEWPORT_BASELINE_EDGE_END ? rect.bottom : rect.top
+    if (!Number.isFinite(base) || !Number.isFinite(containerTop)) return NaN
+    const offset = base - containerTop
+    return Number.isFinite(offset) ? offset : NaN
+  } catch {
+    return NaN
+  }
+}
+
+/**
+ * Trusted layout-control marker for the message-editor top-edge resize
+ * handle (VIEWPORT-13/14 same-arbiter classification, not a second
+ * lifecycle). The handle is a DIV separator owned by a message row; its
+ * press/drag and its Arrow/Home/End/PageUp/PageDown keys are layout
+ * resizing, never genuine user-scroll intent. Wheels on/near it stay
+ * genuine scroll intent; untagged presses stay genuine.
+ */
+export const VIEWPORT_LAYOUT_CONTROL_ATTR = 'data-viewport-layout-control' as const
+export const VIEWPORT_LAYOUT_CONTROL_RESIZE = 'message-editor-resize' as const
+export const VIEWPORT_LAYOUT_RESIZE_TESTID = 'message-editor-resize-handle' as const
+
+/** Nav keys the resize handle consumes as layout resizing (editor-owned). */
+export const VIEWPORT_LAYOUT_RESIZE_KEYS: ReadonlySet<string> = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'PageUp',
+  'PageDown',
+  'Home',
+  'End'
+])
+
+/**
+ * Narrow trusted check: true only for a real connected resize handle owned
+ * by a message row (marker + known testid + message-row ownership +
+ * container containment when a container is supplied). Fail-closed on any
+ * helper error, disconnected node, missing testid, or missing row owner —
+ * spoofed markers outside a row never qualify.
+ */
+export const isViewportLayoutControlTarget = (target: unknown, container?: HTMLElement | null): boolean => {
+  try {
+    if (!(target instanceof Element)) return false
+    let handle: Element | null = null
+    try {
+      handle = target.closest?.(
+        `[${VIEWPORT_LAYOUT_CONTROL_ATTR}="${VIEWPORT_LAYOUT_CONTROL_RESIZE}"]`
+      ) as Element | null
+    } catch {
+      return false
+    }
+    if (!handle) return false
+    try {
+      if (handle.getAttribute('data-testid') !== VIEWPORT_LAYOUT_RESIZE_TESTID) return false
+    } catch {
+      return false
+    }
+    try {
+      if (!handle.isConnected) return false
+    } catch {
+      return false
+    }
+    if (container) {
+      try {
+        if (!container.contains(handle)) return false
+      } catch {
+        return false
+      }
+    }
+    try {
+      const owner = handle.closest?.('[data-message-id]:not([data-testid="answer-group-selector"])') as Element | null
+      if (!owner) return false
+      try {
+        if (!owner.isConnected) return false
+      } catch {
+        return false
+      }
+      if (container) {
+        try {
+          if (!container.contains(owner)) return false
+        } catch {
+          return false
+        }
+      }
+    } catch {
+      return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** True when a keydown on a layout handle is a layout resize (not a scroll). */
+export const isViewportLayoutResizeKey = (key: unknown): boolean => {
+  try {
+    return typeof key === 'string' && VIEWPORT_LAYOUT_RESIZE_KEYS.has(key)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Fail-closed STRUCTURAL correspondence deadline: a lost/hidden/disconnected
+ * scope or region that stays unresolvable longer than this after capture is
+ * treated as a dead target (deleted route content, never-committing
+ * selection) and the intent is dropped with no adopt. Generous wall-clock
+ * bound (async selections and slow commits land far inside it); it only ever
+ * drops, never certifies. A still-connected, finite, visible region baseline
+ * with valid route/provenance/currency/user/ownership is NOT structural loss
+ * and never expires on wall time — it is retained event-driven (see the
+ * keeper validation below), even with no handoff row below.
  */
 export const INTERACTION_PENDING_DEADLINE_MS = 20000
 /**
@@ -869,23 +1030,131 @@ export const resolveInteractionRegionElement = (
 }
 
 /**
+ * First visible message row strictly BELOW the scope row (visual order).
+ *
+ * The edit baseline is the stable structural boundary BELOW the change
+ * domain: the change (editor body growth above the action bar) must rise
+ * into the upper space while content below stays still. Adopting the scope
+ * row's own TOP would re-anchor to a moving edge (the row top moves when the
+ * row grows above a fixed bottom), so the handoff adopts the nearest visible
+ * row below whose TOP is adjacent to the scope row's BOTTOM. Holding that
+ * TOP stationary across later steps preserves the same bottom baseline.
+ * Fail-closed (null) when no visible below row exists — the caller stays
+ * pending with the valid baseline retained event-driven (no deadline expiry
+ * while the region stays connected/finite/visible and currency holds),
+ * never the scope row. The correspondence deadline bounds only lost/hidden/
+ * disconnected structural correspondence.
+ */
+export const resolveBelowVisibleRow = (
+  container: HTMLElement,
+  scopeId: string
+): { id: string; offset: number } | null => {
+  try {
+    const containerTop = container.getBoundingClientRect().top
+    if (!Number.isFinite(containerTop)) return null
+    const scopeRow = resolveRealMessageBox(container, scopeId)
+    if (!scopeRow) return null
+    if (isKeeperAnchorRowHidden(scopeRow, container)) return null
+    const scopeBottom = scopeRow.getBoundingClientRect().bottom
+    if (!Number.isFinite(scopeBottom)) return null
+    let best: { id: string; offset: number; top: number } | null = null
+    let rows: NodeListOf<Element> | null = null
+    try {
+      rows = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+    } catch {
+      return null
+    }
+    if (!rows) return null
+    for (const cand of rows) {
+      if (!(cand instanceof HTMLElement)) continue
+      let id: string | null = null
+      try {
+        id =
+          cand.getAttribute('data-message-id') ??
+          (typeof cand.id === 'string' && cand.id.startsWith('message-') ? cand.id.replace(/^message-/, '') : null)
+      } catch {
+        id = null
+      }
+      if (typeof id !== 'string' || id.length === 0 || id === scopeId) continue
+      const real = resolveRealMessageBox(container, id)
+      if (!real) continue
+      try {
+        if (isKeeperAnchorRowHidden(real, container)) continue
+      } catch {
+        continue
+      }
+      let top = NaN
+      try {
+        top = real.getBoundingClientRect().top
+      } catch {
+        continue
+      }
+      if (!Number.isFinite(top)) continue
+      // Strictly below the scope bottom (1px tolerance for subpixel seams).
+      if (!(top >= scopeBottom - 1)) continue
+      if (!best || top < best.top) best = { id, offset: top - containerTop, top }
+    }
+    if (!best) return null
+    return { id: best.id, offset: best.offset }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Resolve the handoff representative for a settled interaction: the visible
  * message row whose identity + offset the stable snapshot adopts. Tabs hand
  * off to their target answer's real box (hidden pre-commit = mutation still
- * pending); message scopes hand off to their own row; group scopes hand off
- * to the first visible real box in the group. Null when no visible
- * representative exists (pending or fail-closed, decided by the caller).
+ * pending); dimensionally-stable message scopes hand off to their own row;
+ * a message-controls scope whose owner changed dimensions hands off to the
+ * first visible row BELOW the edited row (the stable boundary below the
+ * change domain) and otherwise stays pending (null) — never to its own
+ * moving TOP and never to a row above with the changing row height between
+ * them, both of which re-anchor later steps of the same session to the
+ * wrong end; group scopes hand off to the first visible real box in the
+ * group. Null when no visible representative exists (pending or
+ * fail-closed, decided by the caller).
  */
 export const resolveInteractionRepresentative = (
   container: HTMLElement,
   scope: { kind: string; id: string },
-  region: string
+  region: string,
+  opts?: { avoidScopeRow?: boolean }
 ): { id: string; offset: number } | null => {
   try {
     const containerTop = container.getBoundingClientRect().top
     if (!Number.isFinite(containerTop)) return null
     if (region === INTERACTION_REGION_TAB || scope.kind === 'message') {
       if (scope.kind !== 'message') return null
+      // Edit controls hand off below the change domain (see helper above).
+      // Tabs keep their target-answer handoff: the tab strip height is stable
+      // so its bottom delta equals its top delta, and the answer TOP below the
+      // strip is the adjacent stable reading row.
+      if (region === INTERACTION_REGION_CONTROLS && opts?.avoidScopeRow === true) {
+        // The scope row itself changed height (edit growth/shrink): its
+        // own TOP is a moving edge, and adopting it would re-anchor later
+        // steps to the wrong end. The only valid handoff is the first
+        // visible row BELOW (adjacent to the bottom baseline — nothing
+        // changing lies between them). A row above is NOT a substitute: the
+        // changing row height lies between it and the baseline, so holding
+        // it lets continued motion drift the region. With no visible row
+        // below (bottommost), stay pending (null) with the valid baseline
+        // retained event-driven (no deadline expiry while the region stays
+        // connected/finite/visible and currency holds; the keeper hold
+        // keeps compensating the captured bottom on layout events and
+        // persistence is covered by the departure freeze, which captures
+        // the converged live DOM). The correspondence deadline bounds only
+        // lost/hidden/disconnected structural correspondence, never a valid
+        // measurable baseline. Tabs keep their target-answer
+        // handoff below via the shared branch above.
+        try {
+          const below = resolveBelowVisibleRow(container, scope.id)
+          if (below) return below
+        } catch {
+          // fall through to pending (null) below
+        }
+        return null
+      }
       const row = resolveRealMessageBox(container, scope.id)
       if (!row) return null
       if (isKeeperAnchorRowHidden(row, container)) return null
@@ -946,10 +1215,15 @@ export const captureLayoutFingerprint = (
 
 /**
  * Capture a shared interaction intent BEFORE the layout-changing mutation.
- * Measures the region's viewport offset plus the scope owner's fingerprint
- * synchronously and arms both on the existing viewport owner. Fail-closed
- * (false) when the container/scope/region is missing, geometry is
- * non-finite, or the controller refuses (owned/dirty/user-live/bottom for
+ * Measures the region's declared visual-baseline viewport offset (shared
+ * helper: default TOP, message-controls declares BOTTOM as the true
+ * change-domain lower bound) plus the scope owner's fingerprint synchronously
+ * and arms both on the existing viewport owner. Stable-height regions
+ * (tabs, fold) keep their TOP holds unchanged; the edit footer↔action-bar
+ * swap (whose own heights differ) holds its BOTTOM invariant while the height
+ * delta rises into the upper space and content below stays still.
+ * Fail-closed (false) when the container/scope/region is missing, geometry
+ * is non-finite, or the controller refuses (owned/dirty/user-live/bottom for
  * non-tab regions). Never opens ownership, never writes snapshots.
  */
 export const captureInteractionIntent = (
@@ -972,16 +1246,12 @@ export const captureInteractionIntent = (
     if (!liveContainer || !liveContainer.isConnected) return false
     const el = resolveInteractionRegionElement(liveContainer, scope, region)
     if (!el) return false
-    let elTop = NaN
-    let containerTop = NaN
+    let offset = NaN
     try {
-      elTop = el.getBoundingClientRect().top
-      containerTop = liveContainer.getBoundingClientRect().top
+      offset = measureViewportRegionOffset(el, liveContainer)
     } catch {
       return false
     }
-    if (!Number.isFinite(elTop) || !Number.isFinite(containerTop)) return false
-    const offset = elTop - containerTop
     if (!Number.isFinite(offset)) return false
     const target: RouteRef = { ...controller.displayedRoute }
     const fingerprint = captureLayoutFingerprint(liveContainer, scope)
@@ -1073,7 +1343,9 @@ export const captureInteractionFromEvent = (
  * change. Compatibility entry over the shared interaction intent
  * (`answer-tab` region in the target answer's message scope, fingerprint of
  * the target row included); the same fail-closed ownership/provenance rules
- * apply.
+ * apply. The clicked tab uses the shared visual-baseline helper with its
+ * default TOP (no `end` declaration on the tab strip), distinct from the
+ * follow/body-row TOP — same edge value, different region identity.
  */
 export const captureAnswerTabSwitchIntent = (
   controller: {
@@ -1093,16 +1365,12 @@ export const captureAnswerTabSwitchIntent = (
     if (!liveContainer || !liveContainer.isConnected) return false
     const tab = resolveAnswerTabElement(liveContainer, tabMessageId)
     if (!tab) return false
-    let tabTop = NaN
-    let containerTop = NaN
+    let offset = NaN
     try {
-      tabTop = tab.getBoundingClientRect().top
-      containerTop = liveContainer.getBoundingClientRect().top
+      offset = measureViewportRegionOffset(tab, liveContainer)
     } catch {
       return false
     }
-    if (!Number.isFinite(tabTop) || !Number.isFinite(containerTop)) return false
-    const offset = tabTop - containerTop
     if (!Number.isFinite(offset)) return false
     const target: RouteRef = { ...controller.displayedRoute }
     const fingerprint = captureLayoutFingerprint(liveContainer, { kind: 'message', id: tabMessageId })
@@ -1195,6 +1463,18 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       compensatingRef.current = null
       notify()
     }
+    // Layout-control press (resize handle): same-arbiter LAYOUTCONTROL, not
+    // user-scroll — never opens/refreshes the genuine session and never
+    // clears the pending shared hold. Wheels stay genuine (separate path).
+    const declareForEvent = (e: Event | null | undefined): void => {
+      try {
+        const t = (e as { target?: unknown } | null | undefined)?.target ?? null
+        if (isViewportLayoutControlTarget(t, container)) return
+      } catch {
+        // fail-closed to declare-only on helper errors
+      }
+      declare()
+    }
     const endOnScrollEnd = () => {
       try {
         if (controller.noteInteractionScrollEnd()) notify()
@@ -1206,8 +1486,10 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       } catch {}
     }
     container.addEventListener('wheel', declare, { capture: true, passive: true })
-    container.addEventListener('touchstart', declare, { capture: true, passive: true })
-    container.addEventListener('pointerdown', declare, { capture: true, passive: true })
+    const onTouchStartCapture = (e: Event): void => declareForEvent(e)
+    const onPointerDownCapture = (e: Event): void => declareForEvent(e)
+    container.addEventListener('touchstart', onTouchStartCapture, { capture: true, passive: true })
+    container.addEventListener('pointerdown', onPointerDownCapture, { capture: true, passive: true })
     // Shared structural interaction boundary (capture-phase, before the
     // mutation): derive the structural scope + interaction region from
     // annotations and arm the shared intent synchronously, then queue one
@@ -1233,6 +1515,12 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       const t = e.target as HTMLElement | null
       const tag = t?.tagName?.toUpperCase() ?? ''
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return
+      // Layout-resize keys on the trusted handle are layout, not scroll.
+      try {
+        if (isViewportLayoutResizeKey(e.key) && isViewportLayoutControlTarget(e.target, container)) return
+      } catch {
+        // fail-closed to declare-only on helper errors
+      }
       declare()
     }
     container.addEventListener('keydown', onKey, { capture: true })
@@ -1284,8 +1572,8 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
     addTyped(container, 'touchcancel', onTouchEnd, { passive: true } as AddEventListenerOptions)
     return () => {
       container.removeEventListener('wheel', declare, { capture: true } as AddEventListenerOptions)
-      container.removeEventListener('touchstart', declare, { capture: true } as AddEventListenerOptions)
-      container.removeEventListener('pointerdown', declare, { capture: true } as AddEventListenerOptions)
+      container.removeEventListener('touchstart', onTouchStartCapture, { capture: true } as AddEventListenerOptions)
+      container.removeEventListener('pointerdown', onPointerDownCapture, { capture: true } as AddEventListenerOptions)
       container.removeEventListener('click', onClickCapture, { capture: true } as AddEventListenerOptions)
       container.removeEventListener('keydown', onKey, { capture: true } as AddEventListenerOptions)
       removeTyped(container, 'scrollend', onScrollEnd)
@@ -1545,7 +1833,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         }
         let current = NaN
         try {
-          current = regionEl.getBoundingClientRect().top - containerTop
+          current = measureViewportRegionOffset(regionEl, liveContainer)
         } catch {
           clearGuarded()
           return
@@ -1612,6 +1900,10 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
         const layoutChanged =
           !hasFingerprint ||
           (fp !== undefined && (Math.abs(scopeH - fp.scopeH) > 1 || Math.abs(scopeW - fp.scopeW) > 1))
+        // Height-only gate for the below-row handoff: a width-only reflow
+        // leaves the row TOP stationary, so the scope keeps its own row.
+        // Width stays only generic structural/convergence evidence above.
+        const heightChanged = !hasFingerprint || (fp !== undefined && Math.abs(scopeH - fp.scopeH) > 1)
         // Consecutive-agreement quiet proof (subpixel reads) plus same-gesture
         // effect evidence. The count only ever gates DROPPING a no-effect
         // action; adoption additionally needs proven effect (layoutChanged,
@@ -1699,15 +1991,20 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
           liveAnchorId = null
         }
         // Handoff representative (structural correspondence under the same
-        // semantic key): tabs hand off to the target answer, message scopes
-        // to their own row, group scopes to the first visible row in the
-        // group. A hidden target means the mutation has not landed yet
+        // semantic key): tabs hand off to the target answer, stable message
+        // scopes to their own row, group scopes to the first visible row in
+        // the group. A message-controls scope whose owner changed height
+        // (edit growth/shrink) never hands off to its own moving TOP: it
+        // takes the first visible row below, else pending, so later steps
+        // keep holding the same bottom baseline. A hidden target means the mutation has not landed yet
         // (async selection, uncommitted render) — drift below still
         // compensates so churn during the gap never moves the region, but
         // nothing completes until the target resolves.
         let rep: { id: string; offset: number } | null = null
         try {
-          rep = resolveInteractionRepresentative(liveContainer, scope, intent.region)
+          const avoidScopeRow =
+            intent.region === INTERACTION_REGION_CONTROLS && intent.scopeKind === 'message' && heightChanged === true
+          rep = resolveInteractionRepresentative(liveContainer, scope, intent.region, { avoidScopeRow })
         } catch {
           rep = null
         }
@@ -1757,7 +2054,21 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
             return
           }
           if (!rep) {
-            rearmPending()
+            // Valid-baseline retain at the honest clamp (no below row, region
+            // still connected/finite/visible with valid currency): stay armed
+            // with NO polling — later layout retries via the event path.
+            // Without structural proof, sustained stillness drops with no
+            // adopt instead (same as the below-row path underneath).
+            if (!structuralProven) {
+              if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
+                clearGuarded()
+                return
+              }
+              try {
+                scheduleTabValidation()
+              } catch {}
+              return
+            }
             return
           }
           if (!structuralProven) {
@@ -1777,7 +2088,28 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
             return
           }
         } else if (!rep) {
-          rearmPending()
+          // Valid-baseline retain (bottommost, no visible row below): the
+          // region baseline is still connected, finite, visible and
+          // currency-valid, so it never expires on wall time — stay armed
+          // and STOP validation polling (no infinite pending rAF). Future
+          // layout events re-drive through the keeper hold path, which
+          // compensates drift and schedules one validation only when an
+          // update/adopt may be due; a later-appearing below row then hands
+          // off through the original quiet-verified path. Only a genuinely
+          // no-effect gesture (sustained stillness, no proven effect) drops
+          // here with no adopt and no snapshot. Lost/hidden/disconnected
+          // structural correspondence never reaches here (pending with the
+          // correspondence deadline above).
+          if (!provenForHandoff) {
+            if (quiet >= INTERACTION_QUIET_READS_FOR_DROP) {
+              clearGuarded()
+              return
+            }
+            try {
+              scheduleTabValidation()
+            } catch {}
+            return
+          }
           return
         } else if (!provenForHandoff) {
           // No proven effect of this gesture with its handoff target
@@ -1955,13 +2287,17 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
       if (!vp.controller.isDomProvenanceClean) return
       // Shared interaction hold: a pending interaction intent (answer tab,
       // message controls, fold controls, …) owns same-route geometry. Hold
-      // the captured region — re-resolved by structural scope + region key
-      // so replacement elements (editor action bar, expanded layout) are
-      // held, not the stale node — at its captured viewport offset; the
-      // competing body-anchor hold must not fight it. Converge via the
-      // quiet validation (observed layout change + visible representative +
-      // quiet), then ordinary anchoring resumes. Disappearance without a
-      // legitimate mapping holds nothing (fail-closed, no sibling transfer).
+      // the captured region at its declared visual baseline — re-resolved by
+      // structural scope + region key so replacement elements (editor action
+      // bar, expanded layout) are held, not the stale node — at its captured
+      // baseline viewport offset; the competing body-anchor hold must not
+      // fight it. Default TOP keeps model-label/FOLD holds unchanged; the
+      // message-controls `end` declaration holds the true change-domain lower
+      // bound while the height delta rises into the upper space and content
+      // below stays still. Converge via the quiet validation (observed layout
+      // change + visible representative + quiet), then ordinary anchoring
+      // resumes. Disappearance without a legitimate mapping holds nothing
+      // (fail-closed, no sibling transfer).
       try {
         const pending = vp.controller.activeInteractionIntent as {
           topicId: string
@@ -1997,7 +2333,7 @@ export function useStableVisualAnchor(containerRef: React.RefObject<HTMLElement 
             } else {
               let regionCurrent = NaN
               try {
-                regionCurrent = regionEl.getBoundingClientRect().top - container.getBoundingClientRect().top
+                regionCurrent = measureViewportRegionOffset(regionEl, container)
               } catch {
                 regionCurrent = NaN
               }

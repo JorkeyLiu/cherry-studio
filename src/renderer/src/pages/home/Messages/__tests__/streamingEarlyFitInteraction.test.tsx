@@ -394,7 +394,16 @@ describe('VIEWPORT15 early-fit: pause + copy + passive growth preserves ORIGINAL
     keeper.unmount()
   })
 
-  it('real structural replacement at the bottom still handoffs to its own row without implicit follow', async () => {
+  it('real structural replacement at the true bottom retains the valid baseline event-driven without implicit follow', async () => {
+    // Approved BOTTOM baseline (VIEWPORT-13/14): a message-controls scope
+    // whose owner changed height hands off ONLY to the first visible row
+    // BELOW (adjacent to the bottom baseline) — never to its own moving TOP.
+    // With no visible row below (true bottom: m-read above, m-stream above,
+    // nothing adjacent below m-user) there is no valid handoff target, so the
+    // intent stays pending with the valid baseline retained event-driven (no
+    // deadline expiry while the region stays connected/finite/visible and
+    // currency holds). The ORIGINAL pause anchor stands, follow never opens,
+    // and nothing is snapshotted while compensating.
     const controller = new RouteViewportController({ topicId: 't1', route: null })
     driveBottomFollow(controller)
     pressPauseEarlyFit(controller, 'm-read', 87.4)
@@ -402,7 +411,7 @@ describe('VIEWPORT15 early-fit: pause + copy + passive growth preserves ORIGINAL
     rects.set('row-m-user', { top: 160, height: 80 })
     rects.set('footer-m-user', { top: 200, height: 26 })
     rects.set('row-m-stream', { top: -40, height: 40 })
-    const { container, ref, userRow, footer } = buildEarlyFit()
+    const { ref, userRow, footer } = buildEarlyFit()
     expect(
       controller.beginInteractionIntent(
         { topicId: 't1', route: null },
@@ -417,7 +426,8 @@ describe('VIEWPORT15 early-fit: pause + copy + passive growth preserves ORIGINAL
       await flushFrame()
     })
     // Editor swap lands at identical-then-growing geometry: same region key,
-    // different connected node (structural replacement) plus scope growth.
+    // different connected node (structural replacement) plus scope growth
+    // (80 → 150, a genuine layout effect — not passive displacement).
     const replacement = document.createElement('div')
     replacement.setAttribute('data-interaction-region', 'message-controls')
     mockRect(replacement, 'footer-m-user')
@@ -431,20 +441,116 @@ describe('VIEWPORT15 early-fit: pause + copy + passive growth preserves ORIGINAL
     await act(async () => {
       for (let i = 0; i < 10; i++) await flushFrame()
     })
-    expect(controller.activeInteractionIntent).toBeNull()
-    // Handoff to the post-swap visible row geometry — but as a ROW, never a
-    // follow clear: vicinity is not permission to follow.
+    // No below row: retained pending, never the moving own TOP.
+    expect(controller.activeInteractionIntent).not.toBeNull()
+    expect(controller.activeInteractionIntent).toMatchObject({
+      scopeId: 'm-user',
+      region: 'message-controls',
+      offset: 200
+    })
+    // ORIGINAL pause anchor stands (never rebased to the copy row, never
+    // cleared to follow — vicinity is not permission to follow).
     expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
       kind: 'message',
-      messageId: 'm-user',
-      offset: 160
+      messageId: 'm-read',
+      offset: 87.4
     })
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).not.toBeNull()
+    // Layout compensation never snapshots: the pause snapshot is untouched.
     const stored = store.get('scroll:topic-t1::main') as
       | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
       | undefined
-    expect(stored?.messageId).toBe('m-user')
-    expect(stored?.intraRowOffset).toBe(160)
-    expect(container.scrollTop).toBe(0)
+    expect(stored?.messageId).toBe('m-read')
+    expect(stored?.intraRowOffset).toBe(87.4)
+    // Valid baseline never expires on wall time: past the correspondence
+    // deadline (which bounds only lost/hidden/disconnected correspondence)
+    // the intent is still armed with the same anchor and no snapshot.
+    const capturedAt = controller.activeInteractionIntent?.capturedAt ?? 0
+    expect(capturedAt).toBeGreaterThan(0)
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(capturedAt + 20000 + 1)
+    try {
+      await act(async () => {
+        for (let i = 0; i < 3; i++) await flushFrame()
+      })
+    } finally {
+      nowSpy.mockRestore()
+    }
+    expect(controller.activeInteractionIntent).not.toBeNull()
+    expect(controller.getAnchorFor({ topicId: 't1', route: null })).toEqual({
+      kind: 'message',
+      messageId: 'm-read',
+      offset: 87.4
+    })
+    const storedLate = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(storedLate?.messageId).toBe('m-read')
+    expect(storedLate?.intraRowOffset).toBe(87.4)
+    keeper.unmount()
+  })
+
+  it('real structural replacement with a below row hands off to the neighbor without implicit follow', async () => {
+    // Same genuine structural replacement as above, but a real visible row
+    // exists below the change domain: the heightChanged handoff adopts the
+    // adjacent lower neighbor (m-tail at 320, below the grown scope bottom
+    // 310) — never the moving scope TOP (160) and never a row above. Still a
+    // ROW handoff, never a follow clear.
+    const controller = new RouteViewportController({ topicId: 't1', route: null })
+    driveBottomFollow(controller)
+    pressPauseEarlyFit(controller, 'm-read', 87.4)
+    rects.set('row-m-read', { top: 87.4, height: 60 })
+    rects.set('row-m-user', { top: 160, height: 80 })
+    rects.set('footer-m-user', { top: 200, height: 26 })
+    rects.set('row-m-stream', { top: -40, height: 40 })
+    rects.set('row-m-tail', { top: 320, height: 60 })
+    const { container, ref, userRow, footer } = buildEarlyFit()
+    const tail = document.createElement('div')
+    tail.id = 'message-m-tail'
+    tail.setAttribute('data-message-id', 'm-tail')
+    mockRect(tail, 'row-m-tail')
+    container.append(tail)
+    expect(
+      controller.beginInteractionIntent(
+        { topicId: 't1', route: null },
+        { kind: 'message', id: 'm-user' },
+        'message-controls',
+        200,
+        { fingerprint: { scopeH: 80, scopeW: 300 } }
+      )
+    ).toBe(true)
+    const keeper = renderKeeper(controller, ref, 0)
+    await act(async () => {
+      await flushFrame()
+    })
+    const replacement = document.createElement('div')
+    replacement.setAttribute('data-interaction-region', 'message-controls')
+    mockRect(replacement, 'footer-m-user')
+    act(() => {
+      userRow.removeChild(footer)
+      userRow.append(replacement)
+      rects.set('row-m-user', { top: 160, height: 150 })
+      rects.set('footer-m-user', { top: 200, height: 38 })
+      rects.set('row-m-tail', { top: 320, height: 60 })
+      keeper.rerender(1)
+    })
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await flushFrame()
+    })
+    expect(controller.activeInteractionIntent).toBeNull()
+    // Neighbor adopt — explicitly not the moving own TOP and not above.
+    const anchor = controller.getAnchorFor({ topicId: 't1', route: null })
+    expect(anchor).toEqual({ kind: 'message', messageId: 'm-tail', offset: 320 })
+    expect(anchor?.kind).toBe('message')
+    if (anchor?.kind === 'message') {
+      expect(anchor.messageId).not.toBe('m-user')
+      expect(anchor.messageId).not.toBe('m-read')
+    }
+    const stored = store.get('scroll:topic-t1::main') as
+      | { messageId: string | null; intraRowOffset: number | null; scrollTop: number; isAtBottom: boolean }
+      | undefined
+    expect(stored?.messageId).toBe('m-tail')
+    expect(stored?.intraRowOffset).toBe(320)
+    expect(typeof stored?.scrollTop).toBe('number')
     keeper.unmount()
   })
 })

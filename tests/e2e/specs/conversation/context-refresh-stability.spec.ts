@@ -35,6 +35,7 @@ import type { Page } from '@playwright/test'
 
 import { clearRequestLog, expect, test } from '../../fixtures/electron.fixture'
 import { getSlowStreamReply, SLOW_STREAM_MARKER } from '../../fixtures/mock-openai-server'
+import { cmContent, replaceEditorContent } from '../../utils/message-editor'
 import { waitForChatReady } from '../../utils/wait-helpers'
 import { activateTopic, letterMessageId, pad, prepareAssistant, seedSourceTopic } from '../../utils/branch-route-setup'
 
@@ -711,8 +712,8 @@ test.describe('Context refresh stability (no hide during ordinary stream)', () =
     timeline.push(await sampleEditFrame('pre-edit-baseline'))
 
     // Real UI edit (normal toolbar action, existing seams only): hover reveals
-    // the menubar, msg-edit-btn opens the editor, React-compatible textarea
-    // setter stages the change, save-btn commits authoritatively.
+    // the menubar, msg-edit-btn opens the editor, the CodeMirror helper stages
+    // the change through the real onChange path, save-btn commits authoritatively.
     const msgContainer = page.locator(`[data-message-id="${targetId}"]`)
     await msgContainer.scrollIntoViewIfNeeded()
     await expect(msgContainer, 'edit target must be visible').toBeVisible({ timeout: 15000 })
@@ -725,21 +726,12 @@ test.describe('Context refresh stability (no hide during ordinary stream)', () =
     const editorArea = msgContainer.locator('.message-editor-area')
     await expect(editorArea, 'editor must open').toBeVisible({ timeout: 5000 })
     timeline.push(await expectEditFrameStable('editor-open'))
-    const editingTextarea = editorArea.locator('.editing-message')
-    await expect(editingTextarea, 'editing textarea must render').toBeVisible({ timeout: 5000 })
-    await editingTextarea.click()
-    await page.keyboard.press('Meta+A')
-    await page.keyboard.press('Backspace')
-    await page.evaluate((value: string) => {
-      const el = document.querySelector('.editing-message') as HTMLTextAreaElement
-      if (!el) throw new Error('Editing textarea not found')
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-      if (!nativeSetter) throw new Error('No native textarea setter')
-      nativeSetter.call(el, value)
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    }, editedText)
-    await expect(editingTextarea).toHaveValue(editedText, { timeout: 5000 })
+    const editorWrapper = editorArea.locator('.editing-message')
+    await expect(editorWrapper, 'editing wrapper must render').toBeVisible({ timeout: 5000 })
+    const cmEditor = cmContent(editorArea)
+    await expect(cmEditor, 'CodeMirror content must mount').toBeVisible({ timeout: 5000 })
+    await replaceEditorContent(page, editorArea, editedText)
+    await expect(cmEditor).toContainText(editedText, { timeout: 5000 })
     timeline.push(await expectEditFrameStable('staged-edit'))
 
     // Commit: save-only. Poll the background invalidation window with the

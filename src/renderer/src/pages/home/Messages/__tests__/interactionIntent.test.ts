@@ -254,6 +254,7 @@ describe('captureInteractionIntent (structural, fail-closed)', () => {
     row.setAttribute('data-message-id', 'm1')
     const footer = document.createElement('div')
     footer.setAttribute('data-interaction-region', 'message-controls')
+    footer.setAttribute('data-viewport-baseline-edge', 'end')
     row.append(footer)
     const group = document.createElement('div')
     group.setAttribute('data-stable-group-id', 'group:ask-1')
@@ -269,14 +270,18 @@ describe('captureInteractionIntent (structural, fail-closed)', () => {
     row.getBoundingClientRect = () => rect(0, 300, 300)
     toggle.getBoundingClientRect = () => rect(400, 26, 300)
     group.getBoundingClientRect = () => rect(350, 200, 300)
+    // Message edit controls declare the `end` baseline: footer top 100 + 26 =
+    // bottom 126 stays invariant across the footer ↔ action-bar swap.
     expect(mod.captureInteractionIntent(c, MSG('m1'), 'message-controls', container)).toBe(true)
     expect(c.activeInteractionIntent).toMatchObject({
       scopeKind: 'message',
       scopeId: 'm1',
       region: 'message-controls',
-      offset: 100,
+      offset: 126,
       fingerprint: { scopeH: 300, scopeW: 300 }
     })
+    // Fold keeps the default TOP baseline (no `end` declaration): toggle top
+    // 400 is the correct model, not the 426 bottom.
     // Group scope capture carries the group fingerprint, not the row's.
     expect(mod.captureInteractionIntent(c, GROUP('group:ask-1'), 'fold-controls', container)).toBe(true)
     expect(c.activeInteractionIntent).toMatchObject({
@@ -292,5 +297,74 @@ describe('captureInteractionIntent (structural, fail-closed)', () => {
     expect(mod.captureInteractionFromEvent(c, { target: unnested }, container)).toBe(true)
     expect(c.activeInteractionIntent).toMatchObject({ scopeKind: 'group', region: 'fold-controls' })
     document.body.innerHTML = ''
+  })
+})
+
+describe('continuous drag uses the shared discrete hold (no deferred settle)', () => {
+  it('a plain controls hold carries no settle flag; invalidation still clears via the locked path', () => {
+    const c = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(c, 'm1', -100)
+    expect(
+      c.beginInteractionIntent({ topicId: 't1', route: null }, MSG('m1'), 'message-controls', 120, {
+        fingerprint: { scopeH: 300, scopeW: 300 }
+      })
+    ).toBe(true)
+    expect((c.activeInteractionIntent as unknown as { deferSettle?: unknown }).deferSettle).toBeUndefined()
+    c.declareUserIntent()
+    expect(c.activeInteractionIntent).toBeNull()
+  })
+})
+
+describe('visual baseline edge (default start vs declared end)', () => {
+  it('default measures TOP; declared end measures BOTTOM through the same helper', async () => {
+    const mod = await import('../routeViewportContext')
+    const c = new RouteViewportController({ topicId: 't1', route: null })
+    driveStableMessage(c, 'm1', -100)
+    document.body.innerHTML = ''
+    const container = document.createElement('div')
+    container.id = 'messages'
+    const row = document.createElement('div')
+    row.id = 'message-m1'
+    row.setAttribute('data-message-id', 'm1')
+    const plain = document.createElement('div')
+    plain.setAttribute('data-interaction-region', 'plain-region')
+    row.append(plain)
+    const endRegion = document.createElement('div')
+    endRegion.setAttribute('data-interaction-region', 'message-controls')
+    endRegion.setAttribute('data-viewport-baseline-edge', 'end')
+    row.append(endRegion)
+    container.append(row)
+    document.body.append(container)
+    const rect = (top: number, h: number, w: number) =>
+      ({ top, bottom: top + h, height: h, width: w, left: 0, right: w, x: 0, y: top, toJSON: () => ({}) }) as DOMRect
+    container.getBoundingClientRect = () => rect(0, 600, 300)
+    row.getBoundingClientRect = () => rect(0, 300, 300)
+    plain.getBoundingClientRect = () => rect(120, 26, 300)
+    endRegion.getBoundingClientRect = () => rect(120, 26, 300)
+    expect(mod.captureInteractionIntent(c, MSG('m1'), 'plain-region', container)).toBe(true)
+    expect(c.activeInteractionIntent).toMatchObject({ region: 'plain-region', offset: 120 })
+    expect(mod.captureInteractionIntent(c, MSG('m1'), 'message-controls', container)).toBe(true)
+    expect(c.activeInteractionIntent).toMatchObject({ region: 'message-controls', offset: 146 })
+    expect(mod.resolveViewportBaselineEdge(plain)).toBe('start')
+    expect(mod.resolveViewportBaselineEdge(endRegion)).toBe('end')
+    expect(mod.measureViewportRegionOffset(plain, container)).toBe(120)
+    expect(mod.measureViewportRegionOffset(endRegion, container)).toBe(146)
+    document.body.innerHTML = ''
+  })
+
+  it('missing/illegal declarations fail to the default TOP (never a second end)', async () => {
+    const mod = await import('../routeViewportContext')
+    const el = document.createElement('div')
+    expect(mod.resolveViewportBaselineEdge(null)).toBe('start')
+    expect(mod.resolveViewportBaselineEdge(undefined)).toBe('start')
+    expect(mod.resolveViewportBaselineEdge(el)).toBe('start')
+    el.setAttribute('data-viewport-baseline-edge', 'bottom')
+    expect(mod.resolveViewportBaselineEdge(el)).toBe('start')
+    el.setAttribute('data-viewport-baseline-edge', '')
+    expect(mod.resolveViewportBaselineEdge(el)).toBe('start')
+    el.setAttribute('data-viewport-baseline-edge', 'end')
+    expect(mod.resolveViewportBaselineEdge(el)).toBe('end')
+    el.removeAttribute('data-viewport-baseline-edge')
+    expect(mod.resolveViewportBaselineEdge(el)).toBe('start')
   })
 })

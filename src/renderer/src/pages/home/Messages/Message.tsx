@@ -302,7 +302,10 @@ const MessageItem: FC<Props> = ({
               </MessageErrorBoundary>
             </MessageContentContainer>
             {showMenubar && (
-              <MessageFooter data-interaction-region="message-controls" className="MessageFooter">
+              <MessageFooter
+                data-interaction-region="message-controls"
+                data-viewport-baseline-edge="end"
+                className="MessageFooter">
                 <HorizontalScrollContainer
                   classNames={{
                     content: cn(

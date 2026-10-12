@@ -2169,6 +2169,32 @@
       "failed": "Download failed",
       "success": "Download successfully"
     },
+    "edit": {
+      "bold": "Bold",
+      "bullet_list": "Bulleted list",
+      "code": "Code",
+      "collapse": "Collapse editor",
+      "expand": "Expand editor",
+      "expanded_hint": "Editing in the expanded window…",
+      "expanded_title": "Edit message",
+      "find_count": "{{current}} of {{total}}",
+      "find_next": "Next match",
+      "find_placeholder": "Find",
+      "find_previous": "Previous match",
+      "find_replace": "Find and replace",
+      "heading": "Heading",
+      "link": "Link",
+      "no_results": "No results",
+      "quote": "Quote",
+      "redo": "Redo",
+      "replace": "Replace",
+      "replace_all": "Replace all",
+      "replace_placeholder": "Replace with",
+      "resize_height": "Resize editor height",
+      "show_preview": "Show preview",
+      "show_source": "Show edit",
+      "undo": "Undo"
+    },
     "empty_url": "Failed to download image, possibly due to prompt containing sensitive content or prohibited words",
     "error": {
       "attachment": {

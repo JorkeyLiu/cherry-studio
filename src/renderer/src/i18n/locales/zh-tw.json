@@ -2169,6 +2169,32 @@
       "failed": "下載失敗",
       "success": "下載成功"
     },
+    "edit": {
+      "bold": "粗體",
+      "bullet_list": "無序清單",
+      "code": "程式碼",
+      "collapse": "收起編輯器",
+      "expand": "展開編輯器",
+      "expanded_hint": "正在展開視窗中編輯…",
+      "expanded_title": "編輯訊息",
+      "find_count": "第 {{current}} 個，共 {{total}} 個",
+      "find_next": "下一個符合項目",
+      "find_placeholder": "尋找",
+      "find_previous": "上一個符合項目",
+      "find_replace": "尋找取代",
+      "heading": "標題",
+      "link": "連結",
+      "no_results": "無結果",
+      "quote": "引用",
+      "redo": "重做",
+      "replace": "取代",
+      "replace_all": "全部取代",
+      "replace_placeholder": "取代為",
+      "resize_height": "調整編輯器高度",
+      "show_preview": "切換到預覽",
+      "show_source": "切換到編輯",
+      "undo": "復原"
+    },
     "empty_url": "無法下載圖片，可能是提示詞包含敏感內容或違禁詞彙",
     "error": {
       "attachment": {
