@@ -194,10 +194,6 @@ export function getAppConfigDir(name: string) {
   return path.join(getConfigDir(), name)
 }
 
-export function getMcpDir() {
-  return path.join(os.homedir(), HOME_CHERRY_DIR, 'mcp')
-}
-
 /**
  * 读取文件内容并自动检测编码格式进行解码
  * @param filePath - 文件路径

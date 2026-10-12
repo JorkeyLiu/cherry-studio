@@ -285,9 +285,9 @@ export default class AiProvider {
       const accumulate = this.model!.supported_text_delta !== false // true and undefined
       const adapter = new AiSdkToChunkAdapter(
         middlewareConfig.onChunk,
-        middlewareConfig.mcpTools,
+        [],
         accumulate,
-        middlewareConfig.enableWebSearch,
+        false,
         providerConfig.providerId,
         middlewareConfig.idleTimeout
       )

@@ -230,5 +230,5 @@ export type ExtractToolConfigMap<TExtUnion, K extends string> = UnionToIntersect
       : never)
 >
 
-/** Auto-extracted from coreExtensions' toolFactories.webSearch declarations */
-export type WebSearchToolConfigMap = ExtractToolConfigMap<(typeof coreExtensions)[number], 'webSearch'>
+/** Auto-extracted from coreExtensions' toolFactories.urlContext declarations */
+export type UrlContextToolConfigMap = ExtractToolConfigMap<(typeof coreExtensions)[number], 'urlContext'>

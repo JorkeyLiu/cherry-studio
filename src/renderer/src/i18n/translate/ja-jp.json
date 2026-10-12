@@ -505,13 +505,6 @@
         "title": "自律モード"
       },
       "tooling": {
-        "mcp": {
-          "description": "MCPサーバーを接続して、上で承認できる追加ツールを解放します。",
-          "empty": "MCPサーバーが検出されませんでした。MCP設定ページから追加してください。",
-          "inactiveTooltip": "このMCPサーバーはアクティブではありません。まず起動してください。",
-          "manageHint": "高度な設定が必要ですか？設定 → MCPサーバーにアクセスしてください。",
-          "toggle": "{{name}}を切り替え"
-        },
         "permissionMode": {
           "acceptEdits": {
             "description": "ファイルの編集とファイルシステムの操作は自動的に承認されます。",
@@ -543,7 +536,6 @@
           "autoDescription": "このツールは現在の権限モードによって自動承認されています。",
           "autoDisabledTooltip": "「{{mode}}」によって自動承認されており、無効化できません。",
           "empty": "フィルターに一致するツールはありません。",
-          "mcpBadge": "MCPツール",
           "requiresApproval": "無効にするには承認が必要",
           "search": "検索ツール",
           "toggle": "{{name}}を切り替える"
@@ -557,16 +549,6 @@
         "tab": "事前承認済みツール",
         "title": "ツール",
         "toggle": "{{defaultValue}}"
-      },
-      "toolsMcp": {
-        "mcp": {
-          "tab": "MCP",
-          "title": "MCPサーバー"
-        },
-        "tab": "ツール",
-        "tools": {
-          "title": "事前承認済みツール"
-        }
       }
     },
     "sidebar_title": "エージェント",
@@ -654,9 +636,6 @@
         },
         "WebFetch": {
           "description": "指定されたURLからコンテンツを取得します"
-        },
-        "WebSearch": {
-          "description": "ドメインフィルタリング付きのウェブ検索を実行します"
         },
         "Write": {
           "description": "ファイルを作成または上書きします"
@@ -897,27 +876,6 @@
         "label": "最大ツール呼び出し数",
         "tip": "1回の会話で許可される最大のツール呼び出し回数。高い値に設定すると、より複雑な多段階操作が可能になりますが、トークン使用量と応答時間が増加する可能性があります。"
       },
-      "mcp": {
-        "description": "デフォルトで有効な MCP サーバー",
-        "enableFirst": "まず MCP 設定でこのサーバーを有効にしてください",
-        "label": "MCP サーバー",
-        "mode": {
-          "auto": {
-            "description": "AIはツールを自動的に発見し、使用する",
-            "label": "オート"
-          },
-          "disabled": {
-            "description": "MCPツールなし",
-            "label": "無効"
-          },
-          "manual": {
-            "description": "特定のMCPサーバーを選択",
-            "label": "マニュアル"
-          }
-        },
-        "noServersAvailable": "利用可能な MCP サーバーがありません。設定でサーバーを追加してください",
-        "title": "MCP 設定"
-      },
       "model": "モデル設定",
       "more": "アシスタント設定",
       "prompt": "プロンプト設定",
@@ -1118,36 +1076,7 @@
         "image_or_document": "画像またはドキュメントをアップロード",
         "upload_from_local": "ローカルファイルをアップロード..."
       },
-      "url_context": "URLコンテキスト",
-      "web_search": {
-        "builtin": {
-          "disabled_content": "現在のモデルはウェブ検索をサポートしていません",
-          "enabled_content": "モデル内蔵のウェブ検索機能を使用",
-          "label": "モデル内蔵"
-        },
-        "button": {
-          "ok": "設定に移動"
-        },
-        "enable": "ウェブ検索を有効にする",
-        "enable_content": "ウェブ検索の接続性を先に設定で確認する必要があります",
-        "label": "ウェブ検索",
-        "no_web_search": {
-          "description": "ウェブ検索を無効にする",
-          "label": "ウェブ検索を無効にする"
-        },
-        "settings": "ウェブ検索設定"
-      }
-    },
-    "mcp": {
-      "error": {
-        "parse_tool_call": "有効なツール呼び出し形式に変換できません：{{toolCall}}"
-      },
-      "warning": {
-        "gemini_web_search": "Geminiは、ネイティブのネットワーク検索ツールと関数呼び出しを同時に使用することをサポートしていません。",
-        "multiple_tools": "複数の一致するMCPツールが存在するため、{{tool}} が選択されました",
-        "no_tool": "必要なMCPツール {{tool}} が見つかりません",
-        "url_context": "Geminiは、URLコンテキストと関数呼び出しを同時に使用することをサポートしていません。"
-      }
+      "url_context": "URLコンテキスト"
     },
     "message": {
       "copy_topic": {
@@ -1469,12 +1398,7 @@
       },
       "unpin": "固定解除"
     },
-    "translate": "翻訳",
-    "web_search": {
-      "warning": {
-        "openai": "GPT5モデルの最小思考強度ではネット検索はサポートされません"
-      }
-    }
+    "translate": "翻訳"
   },
   "code": {
     "auto_update_to_latest": "最新バージョンを自動的に更新する",
@@ -1732,10 +1656,7 @@
         "message": "何か問題が発生したようです...",
         "reload": "再読み込み"
       },
-      "details": "詳細情報",
-      "mcp": {
-        "invalid": "無効なMCPサーバー"
-      }
+      "details": "詳細情報"
     },
     "cause": "エラーの原因",
     "chat": {
@@ -1758,12 +1679,10 @@
       "deprecated": "このモデルは廃止されました。別のモデルに切り替えてください。",
       "go_to_settings": "設定へ移動",
       "knowledge": "ナレッジベースのベクトル化に失敗しました",
-      "mcp": "MCP サーバーへの接続に失敗しました。サービスが実行中か確認してください",
       "model": "モデルが見つからないか、アクセス権がありません",
       "model_conflict": "診断モデルとエラーモデルが同一のため、診断できません",
       "network": "サーバーに接続できません。ネットワークまたはプロキシの設定を確認してください",
       "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
-      "ocr": "OCR エンジンが初期化されていません。OCR 設定を確認してください",
       "parse": "AIが無効な応答を返しました。再試行するか、別のモデルに切り替えてください。",
       "payload": "リクエスト内容が大きすぎます。ファイルまたはテキストのサイズを減らしてください。",
       "proxy": "プロキシまたはSSL証明書エラー、プロキシとネットワーク設定を確認してください",
@@ -2182,112 +2101,6 @@
     },
     "title": "LM Studio"
   },
-  "memory": {
-    "actions": "アクション",
-    "add_failed": "メモリーの追加に失敗しました",
-    "add_first_memory": "最初のメモリを追加",
-    "add_memory": "メモリーを追加",
-    "add_new_user": "新しいユーザーを追加",
-    "add_success": "メモリーが正常に追加されました",
-    "add_user": "ユーザーを追加",
-    "add_user_failed": "ユーザーの追加に失敗しました",
-    "all_users": "すべてのユーザー",
-    "cannot_delete_default_user": "デフォルトユーザーは削除できません",
-    "configure_memory_first": "最初にメモリ設定を構成してください",
-    "content": "内容",
-    "current_user": "現在のユーザー",
-    "custom": "カスタム",
-    "default": "デフォルト",
-    "default_user": "デフォルトユーザー",
-    "delete_confirm": "このメモリーを削除してもよろしいですか？",
-    "delete_confirm_content": "{{count}}件のメモリーを削除してもよろしいですか？",
-    "delete_confirm_single": "このメモリを削除してもよろしいですか？",
-    "delete_confirm_title": "メモリーを削除",
-    "delete_failed": "メモリーの削除に失敗しました",
-    "delete_selected": "選択したものを削除",
-    "delete_success": "メモリーが正常に削除されました",
-    "delete_user": "ユーザーを削除",
-    "delete_user_confirm_content": "ユーザー{{user}}とそのすべてのメモリを削除してもよろしいですか？",
-    "delete_user_confirm_title": "ユーザーを削除",
-    "delete_user_failed": "ユーザーの削除に失敗しました",
-    "description": "メモリは、アシスタントとのやりとりに関する情報を保存・管理する機能です。メモリの追加、編集、削除のほか、フィルタリングや検索を行うことができます。",
-    "edit_memory": "メモリーを編集",
-    "embedding_dimensions": "埋め込み次元",
-    "embedding_model": "埋め込みモデル",
-    "enable_global_memory_first": "最初にグローバルメモリを有効にしてください",
-    "end_date": "終了日",
-    "global_memory": "グローバルメモリ",
-    "global_memory_description": "メモリ機能を使用するには、アシスタント設定でグローバルメモリを有効にしてください。",
-    "global_memory_disabled_desc": "メモリ機能を使用するには、まずアシスタント設定でグローバルメモリを有効にしてください。",
-    "global_memory_disabled_title": "グローバルメモリが無効です",
-    "global_memory_enabled": "グローバルメモリが有効化されました",
-    "go_to_memory_page": "メモリページに移動",
-    "initial_memory_content": "ようこそ！これはあなたの最初の記憶です。",
-    "llm_model": "LLMモデル",
-    "load_failed": "メモリーの読み込みに失敗しました",
-    "loading": "思い出を読み込み中...",
-    "loading_memories": "メモリを読み込み中...",
-    "memories_description": "{{total}}件中{{count}}件のメモリーを表示",
-    "memories_reset_success": "{{user}}のすべてのメモリが正常にリセットされました",
-    "memory": "個のメモリ",
-    "memory_content": "メモリー内容",
-    "memory_placeholder": "メモリー内容を入力...",
-    "new_user_id": "新しいユーザーID",
-    "new_user_id_placeholder": "一意のユーザーIDを入力",
-    "no_matching_memories": "一致するメモリが見つかりません",
-    "no_memories": "メモリがありません",
-    "no_memories_description": "最初のメモリを追加してください",
-    "not_configured_desc": "メモリ機能を有効にするには、メモリ設定で埋め込みとLLMモデルを設定してください。",
-    "not_configured_title": "メモリが設定されていません",
-    "pagination_total": "{{total}}件中{{start}}-{{end}}件",
-    "please_enter_memory": "メモリー内容を入力してください",
-    "please_select_embedding_model": "埋め込みモデルを選択してください",
-    "please_select_llm_model": "LLMモデルを選択してください",
-    "reset_filters": "フィルターをリセット",
-    "reset_memories": "メモリをリセット",
-    "reset_memories_confirm_content": "{{user}}のすべてのメモリを完全に削除してもよろしいですか？この操作は元に戻せません。",
-    "reset_memories_confirm_title": "すべてのメモリをリセット",
-    "reset_memories_failed": "メモリのリセットに失敗しました",
-    "reset_user_memories": "ユーザーメモリをリセット",
-    "reset_user_memories_confirm_content": "{{user}}のすべてのメモリをリセットしてもよろしいですか？",
-    "reset_user_memories_confirm_title": "ユーザーメモリをリセット",
-    "reset_user_memories_failed": "ユーザーメモリのリセットに失敗しました",
-    "score": "スコア",
-    "search": "検索",
-    "search_placeholder": "メモリーを検索...",
-    "select_embedding_model_placeholder": "埋め込みモデルを選択",
-    "select_llm_model_placeholder": "LLMモデルを選択",
-    "select_user": "ユーザーを選択",
-    "settings": "設定",
-    "settings_title": "メモリ設定",
-    "start_date": "開始日",
-    "statistics": "統計",
-    "stored_memories": "保存された記憶",
-    "switch_user": "ユーザーを切り替え",
-    "switch_user_confirm": "ユーザーコンテキストを{{user}}に切り替えますか？",
-    "time": "時間",
-    "title": "グローバルメモリ",
-    "total_memories": "個のメモリ",
-    "try_different_filters": "検索条件を調整してください",
-    "update_failed": "メモリーの更新に失敗しました",
-    "update_success": "メモリーが正常に更新されました",
-    "user": "ユーザー",
-    "user_created": "ユーザー{{user}}が作成され、切り替えが成功しました",
-    "user_deleted": "ユーザー{{user}}が正常に削除されました",
-    "user_id": "ユーザーID",
-    "user_id_exists": "このユーザーIDはすでに存在します",
-    "user_id_invalid_chars": "ユーザーIDには文字、数字、ハイフン、アンダースコアのみ使用できます",
-    "user_id_placeholder": "ユーザーIDを入力（オプション）",
-    "user_id_required": "ユーザーIDは必須です",
-    "user_id_reserved": "'default-user'は予約済みです。別のIDを使用してください",
-    "user_id_rules": "ユーザーIDは一意であり、文字、数字、ハイフン(-)、アンダースコア(_)のみ含む必要があります",
-    "user_id_too_long": "ユーザーIDは50文字を超えられません",
-    "user_management": "ユーザー管理",
-    "user_memories_reset": "{{user}}のすべてのメモリがリセットされました",
-    "user_switch_failed": "ユーザーの切り替えに失敗しました",
-    "user_switched": "ユーザーコンテキストが{{user}}に切り替わりました",
-    "users": "ユーザー"
-  },
   "message": {
     "agents": {
       "import": {
@@ -2367,9 +2180,6 @@
       "chunk_overlap_too_large": "チャンクのオーバーラップがチャンクサイズより大きくなることはできません",
       "copy": "複製に失敗しました",
       "dimension_too_large": "内容のサイズが大きすぎます",
-      "endpoint": {
-        "web_search_unsupported": "[to be translated]:Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
-      },
       "enter": {
         "api": {
           "host": "APIホストを入力してください",
@@ -2557,7 +2367,6 @@
         "exitPlanMode": "ExitPlanMode",
         "glob": "グローブ",
         "grep": "グレップ",
-        "mcpServerTool": "MCPサーバーツール",
         "multiEdit": "マルチエディット",
         "notebookEdit": "ノートブック編集",
         "readFile": "ファイルを読む",
@@ -2567,7 +2376,6 @@
         "todoWrite": "やること 書く",
         "tool": "ツール",
         "webFetch": "ウェブフェッチ",
-        "webSearch": "ウェブ検索",
         "write": "書く"
       },
       "noData": "このツールに利用可能なデータはありません",
@@ -2641,11 +2449,7 @@
       }
     },
     "websearch": {
-      "cutoff": "検索内容を切り詰めています...",
-      "fetch_complete": "{{count}}件の検索結果",
-      "rag": "RAGを実行中...",
-      "rag_complete": "{{countBefore}}個の結果から{{countAfter}}個を保持...",
-      "rag_failed": "RAGが失敗しました。空の結果を返します..."
+      "fetch_complete": "{{count}}件の検索結果"
     }
   },
   "minapp": {
@@ -2946,30 +2750,6 @@
       "success": "ナレッジベースに{{type}}を正常に追加しました"
     },
     "tip": "応答が成功した場合、30秒を超えるメッセージのみに通知を行います"
-  },
-  "ocr": {
-    "builtin": {
-      "system": "システム OCR"
-    },
-    "error": {
-      "provider": {
-        "cannot_remove_builtin": "組み込みプロバイダーは削除できません",
-        "existing": "プロバイダーはすでに存在します",
-        "get_providers": "利用可能なプロバイダーの取得に失敗しました",
-        "not_found": "OCRプロバイダーが存在しません",
-        "update_failed": "更新構成に失敗しました"
-      },
-      "unknown": "OCR処理中にエラーが発生しました"
-    },
-    "file": {
-      "not_supported": "サポートされていないファイルタイプ {{type}}"
-    },
-    "processing": "OCR処理中...",
-    "warning": {
-      "provider": {
-        "fallback": "{{name}} に戻されました。これにより問題が発生する可能性があります。"
-      }
-    }
   },
   "ollama": {
     "keep_alive_time": {
@@ -4762,258 +4542,6 @@
       "title": "起動",
       "totray": "起動時にトレイに最小化"
     },
-    "mcp": {
-      "actions": "操作",
-      "active": "有効",
-      "addError": "サーバーの追加に失敗しました",
-      "addServer": {
-        "create": "クイック作成",
-        "importFrom": {
-          "connectionFailed": "接続に失敗しました",
-          "dxt": "DXTパッケージをインポート",
-          "dxtFile": "DXTパッケージファイル",
-          "dxtHelp": "MCPサーバーパッケージを含む.dxtファイルを選択",
-          "dxtProcessFailed": "DXTファイルの処理に失敗しました",
-          "error": {
-            "multipleServers": "複数のサーバーからインポートすることはできません"
-          },
-          "invalid": "無効な入力です。JSON形式を確認してください。",
-          "json": "JSONからインポート",
-          "method": "インポート方法",
-          "nameExists": "サーバーはすでに存在します: {{name}}",
-          "noDxtFile": "DXTファイルを選択してください",
-          "oneServer": "一度に1つのMCPサーバー設定のみを保存できます",
-          "placeholder": "MCPサーバーJSON設定を貼り付け",
-          "selectDxtFile": "DXT ファイルを選択してください",
-          "tooltip": "MCPサーバー紹介ページから設定JSON（NPXまたはUVX設定を優先）をコピーし、入力ボックスに貼り付けてください。"
-        },
-        "label": "サーバーを追加"
-      },
-      "addSuccess": "サーバーが正常に追加されました",
-      "advancedSettings": "詳細設定",
-      "args": "引数",
-      "argsTooltip": "1行に1つの引数を入力してください",
-      "baseUrlTooltip": "リモートURLアドレス",
-      "builtinServers": "組み込みサーバー",
-      "builtinServersDescriptions": {
-        "brave_search": "Brave検索APIを統合したMCPサーバーの実装で、ウェブ検索とローカル検索の両機能を提供します。BRAVE_API_KEY環境変数の設定が必要です",
-        "browser": "Chrome DevTools Protocolを介してheadless Electronウィンドウを制御します。ツール：URLを開く、単一行JSを実行、セッションをリセット。",
-        "didi_mcp": "DiDi MCPサーバーは、地図検索、料金見積もり、注文管理、ドライバー追跡を含むライドシェアサービスを提供します。中国本土でのみ利用可能です。DIDI_API_KEY環境変数の設定が必要です",
-        "dify_knowledge": "DifyのMCPサーバー実装は、Difyと対話するためのシンプルなAPIを提供します。Dify Keyの設定が必要です。",
-        "fetch": "URLのウェブページコンテンツを取得するためのMCPサーバー",
-        "filesystem": "Node.jsサーバーによるファイルシステム操作を実現するモデルコンテキストプロトコル（MCP）。アクセスを許可するディレクトリの設定が必要です",
-        "flomo": "flomoに接続して、AIを通じてメモやアイデアを素早くキャプチャします。flomoアカウントの認可が必要です。",
-        "mcp_auto_install": "MCPサービスの自動インストール（ベータ版）",
-        "memory": "ローカルのナレッジグラフに基づく永続的なメモリの基本的な実装です。これにより、モデルは異なる会話間でユーザーの関連情報を記憶できるようになります。MEMORY_FILE_PATH 環境変数の設定が必要です。",
-        "no": "説明なし",
-        "nowledge_mem": "Nowledge Mem アプリをローカルで実行する必要があります。AI チャット、ツール、ノート、エージェント、ファイルをコンピューター上のプライベートメモリに保存します。https://mem.nowledge.co/ からダウンロードしてください",
-        "python": "安全なサンドボックス環境でPythonコードを実行します。Pyodideを使用してPythonを実行し、ほとんどの標準ライブラリと科学計算パッケージをサポートしています。",
-        "sequentialthinking": "構造化された思考プロセスを通じて動的かつ反省的な問題解決を行うためのツールを提供するMCPサーバーの実装"
-      },
-      "command": "コマンド",
-      "config_description": "モデルコンテキストプロトコルサーバーの設定",
-      "customRegistryPlaceholder": "プライベート倉庫のアドレスを入力してください（例：https://npm.company.com）",
-      "deleteError": "サーバーの削除に失敗しました",
-      "deleteServer": "サーバーを削除",
-      "deleteServerConfirm": "このサーバーを削除してもよろしいですか？",
-      "deleteSuccess": "サーバーが正常に削除されました",
-      "dependenciesInstall": "依存関係をインストール",
-      "dependenciesInstalling": "依存関係をインストール中...",
-      "description": "説明",
-      "disable": {
-        "description": "MCP機能を有効にしない",
-        "label": "MCPサーバーを無効にする"
-      },
-      "discover": "発見",
-      "duplicateName": "同じ名前のサーバーが既に存在します",
-      "editJson": "JSONを編集",
-      "editMcpJson": "MCP 設定を編集",
-      "editServer": "サーバーを編集",
-      "env": "環境変数",
-      "envTooltip": "形式: KEY=value, 1行に1つ",
-      "errors": {
-        "32000": "MCP サーバーが起動しませんでした。パラメーターを確認してください",
-        "toolNotFound": "ツール {{name}} が見つかりません"
-      },
-      "fetch": {
-        "button": "サーバーを取得",
-        "success": "MCPサーバーの取得に成功しました"
-      },
-      "findMore": "MCP を見つける",
-      "headers": "ヘッダー",
-      "headersTooltip": "HTTP リクエストのカスタムヘッダー",
-      "inMemory": "メモリ",
-      "install": "インストール",
-      "installError": "依存関係のインストールに失敗しました",
-      "installSuccess": "依存関係のインストールに成功しました",
-      "jsonFormatError": "JSONフォーマットエラー",
-      "jsonModeHint": "MCPサーバー設定のJSON表現を編集します。保存する前に、フォーマットが正しいことを確認してください。",
-      "jsonSaveError": "JSON設定の保存に失敗しました",
-      "jsonSaveSuccess": "JSON設定が保存されました。",
-      "lanyun": {
-        "description": "Lanyun Technology Cloud Platform MCP Service",
-        "name": "ランユン・テクノロジー"
-      },
-      "logoUrl": "ロゴURL",
-      "logs": "ログ",
-      "longRunning": "長時間運行モード",
-      "longRunningTooltip": "このオプションを有効にすると、サーバーは長時間のタスクをサポートします。進行状況通知を受信すると、タイムアウトがリセットされ、最大実行時間が10分に延長されます。",
-      "marketplaces": "マーケットプレイス",
-      "missingDependencies": "が不足しています。続行するにはインストールしてください。",
-      "more": {
-        "awesome": "厳選された MCP サーバーリスト",
-        "composio": "Composio MCP 開発ツール",
-        "glama": "Glama MCP サーバーディレクトリ",
-        "higress": "Higress MCP サーバー",
-        "mcpso": "MCP サーバー発見プラットフォーム",
-        "mcpworld": "Baidu傘下のMCPアグリゲーションプラットフォーム",
-        "modelscope": "魔搭コミュニティ MCP サーバー",
-        "official": "公式 MCP サーバーコレクション",
-        "pulsemcp": "Pulse MCP サーバー",
-        "smithery": "Smithery MCP ツール",
-        "zhipu": "厳選MCP、高速統合"
-      },
-      "name": "名前",
-      "newServer": "MCP サーバー",
-      "noDescriptionAvailable": "説明がありません",
-      "noLogs": "ログはまだありません",
-      "noServers": "サーバーが設定されていません",
-      "not_support": "モデルはサポートされていません",
-      "npx_list": {
-        "actions": "アクション",
-        "description": "説明",
-        "no_packages": "パッケージが見つかりません",
-        "npm": "NPM",
-        "package_name": "パッケージ名",
-        "scope_placeholder": "npm スコープを入力 (例: @your-org)",
-        "scope_required": "npm スコープを入力してください",
-        "search": "検索",
-        "search_error": "パッケージの検索に失敗しました",
-        "usage": "使用法",
-        "version": "バージョン"
-      },
-      "oauth": {
-        "callback": {
-          "message": "このページを閉じてCherry Chatに戻ることができます",
-          "title": "認証成功"
-        }
-      },
-      "prompts": {
-        "arguments": "引数",
-        "availablePrompts": "利用可能なプロンプト",
-        "genericError": "プロンプト取得エラー",
-        "loadError": "プロンプト取得エラー",
-        "noPromptsAvailable": "利用可能なプロンプトはありません",
-        "requiredField": "必須フィールド"
-      },
-      "protocolInstallWarning": {
-        "command": "起動コマンド",
-        "message": "このMCPは外部ソースからプロトコル経由でインストールされました。不明なツールを実行すると、コンピューターに危害を及ぼす可能性があります。",
-        "run": "走る",
-        "title": "外部のMCPを実行しますか？"
-      },
-      "provider": "プロバイダー",
-      "providerPlaceholder": "プロバイダー名",
-      "providerUrl": "プロバイダーURL",
-      "providers": "プロバイダー",
-      "registry": "パッケージ管理レジストリ",
-      "registryDefault": "デフォルト",
-      "registryTooltip": "デフォルトのレジストリでネットワークの問題が発生した場合、パッケージインストールに使用するレジストリを選択してください。",
-      "requiresConfig": "設定が必要",
-      "resources": {
-        "availableResources": "利用可能なリソース",
-        "blob": "バイナリデータ",
-        "blobInvisible": "バイナリデータを非表示",
-        "genericError": "リソースの取得エラー",
-        "mimeType": "MIMEタイプ",
-        "noResourcesAvailable": "利用可能なリソースはありません",
-        "size": "サイズ",
-        "text": "テキスト",
-        "uri": "URI"
-      },
-      "search": {
-        "placeholder": "MCP サーバーを検索...",
-        "tooltip": "MCP サーバーを検索"
-      },
-      "searchNpx": "MCP を検索",
-      "serverPlural": "サーバー",
-      "serverSingular": "サーバー",
-      "servers": "MCPサーバー",
-      "sse": "サーバー送信イベント (sse)",
-      "startError": "起動に失敗しました",
-      "stdio": "標準入力/出力 (stdio)",
-      "streamableHttp": "ストリーミング可能なHTTP (streamable)",
-      "sync": {
-        "button": "同期する",
-        "discoverMcpServers": "MCPサーバーを発見",
-        "discoverMcpServersDescription": "プラットフォームを訪れて利用可能なMCPサーバーを発見",
-        "error": "MCPサーバーの同期エラー",
-        "getToken": "API トークンを取得する",
-        "getTokenDescription": "アカウントから個人用 API トークンを取得します",
-        "noServersAvailable": "利用可能な MCP サーバーがありません",
-        "providerDescriptions": {
-          "302ai": "302.AIプラットフォームMCPサービス",
-          "bailian": "Alibaba Cloud Bailian Platform MCP Service",
-          "lanyun": "Lanyun Technology Cloud Platform MCP Service",
-          "mcprouter": "MCPルータープラットフォーム MCPサービス",
-          "modelscope": "ModelScopeプラットフォームMCPサービス",
-          "tokenflux": "TokenFlux Platform MCP Service"
-        },
-        "selectProvider": "プロバイダーを選択：",
-        "setToken": "トークンを入力してください",
-        "success": "MCPサーバーの同期成功",
-        "title": "サーバーの同期",
-        "tokenPlaceholder": "ここに API トークンを入力してください",
-        "tokenRequired": "API トークンは必須です",
-        "unauthorized": "同期が許可されていません"
-      },
-      "system": "システム",
-      "tabs": {
-        "description": "説明",
-        "general": "一般",
-        "prompts": "プロンプト",
-        "resources": "リソース",
-        "tools": "ツール"
-      },
-      "tags": "タグ",
-      "tagsPlaceholder": "タグを入力",
-      "timeout": "タイムアウト",
-      "timeoutTooltip": "このサーバーへのリクエストのタイムアウト時間（秒）、デフォルトは60秒です",
-      "title": "MCP",
-      "tools": {
-        "autoApprove": {
-          "label": "自動承認",
-          "tooltip": {
-            "confirm": "このMCPツールを実行してもよろしいですか？",
-            "disabled": "ツールは実行前に手動承認が必要です",
-            "enabled": "ツールは承認なしで自動実行されます",
-            "howToEnable": "ツールを有効にしてから自動承認を使用できます"
-          }
-        },
-        "availableTools": "利用可能なツール",
-        "enable": "ツールを有効にする",
-        "inputSchema": {
-          "enum": {
-            "allowedValues": "許可された値"
-          },
-          "label": "入力スキーマ"
-        },
-        "loadError": "ツール取得エラー",
-        "noToolsAvailable": "利用可能なツールなし",
-        "run": "実行"
-      },
-      "type": "タイプ",
-      "types": {
-        "inMemory": "組み込み",
-        "sse": "SSE",
-        "stdio": "STDIO",
-        "streamableHttp": "ストリーミング"
-      },
-      "updateError": "サーバーの更新に失敗しました",
-      "updateSuccess": "サーバーが正常に更新されました",
-      "url": "URL",
-      "user": "ユーザー"
-    },
     "messages": {
       "divider": {
         "label": "メッセージ間に区切り線を表示",
@@ -5643,38 +5171,6 @@
     },
     "title": "設定",
     "tool": {
-      "ocr": {
-        "common": {
-          "langs": "サポートされている言語"
-        },
-        "error": {
-          "not_system": "システムOCRはWindowsとMacOSのみをサポートしています"
-        },
-        "image": {
-          "error": {
-            "provider_not_found": "該提供者は存在しません"
-          },
-          "system": {
-            "no_need_configure": "MacOS は設定不要"
-          },
-          "title": "画像"
-        },
-        "image_provider": "OCRサービスプロバイダー",
-        "paddleocr": {
-          "aistudio_access_token": "AI Studio Community のアクセス・トークン",
-          "api_url": "API URL",
-          "api_url_label": "アクセストークンとAPI URLを取得する"
-        },
-        "system": {
-          "win": {
-            "langs_tooltip": "Windows が提供するサービスに依存しており、関連する言語をサポートするには、システムで言語パックをダウンロードする必要があります。"
-          }
-        },
-        "tesseract": {
-          "langs_tooltip": "ドキュメントを読んで、どのカスタム言語がサポートされているかを確認してください。"
-        },
-        "title": "OCRサービス"
-      },
       "preprocess": {
         "paddleocr": {
           "aistudio_access_token": "AI Studioコミュニティのアクセストークン",
@@ -5687,100 +5183,7 @@
         "title": "前処理",
         "tooltip": "設定 → ツールで、ドキュメント前処理サービスプロバイダーを設定します。ドキュメント前処理は、複雑な形式のドキュメントやスキャンされたドキュメントの検索性能を効果的に向上させます。"
       },
-      "title": "その他の設定",
-      "websearch": {
-        "api_key_required": {
-          "content": "{{provider}}はAPIキーが必要です。今すぐ設定しますか？",
-          "ok": "設定",
-          "title": "APIキーが必要"
-        },
-        "api_providers": "APIプロバイダー",
-        "apikey": "APIキー",
-        "blacklist": "ブラックリスト",
-        "blacklist_description": "以下のウェブサイトの結果は検索結果に表示されません",
-        "blacklist_tooltip": "以下の形式を使用してください(改行区切り)\nexample.com\nhttps://www.example.com\nhttps://example.com\n*://*.example.com",
-        "check": "チェック",
-        "check_failed": "検証に失敗しました",
-        "check_success": "検証に成功しました",
-        "compression": {
-          "cutoff": {
-            "limit": {
-              "label": "切り捨て長",
-              "placeholder": "長さを入力",
-              "tooltip": "検索結果の内容長を制限し、制限を超える内容は切り捨てられます（例：2000文字）"
-            },
-            "unit": {
-              "char": "文字",
-              "token": "トークン"
-            }
-          },
-          "error": {
-            "rag_failed": "RAG に失敗しました"
-          },
-          "info": {
-            "dimensions_auto_success": "次元が自動取得されました。次元: {{dimensions}}"
-          },
-          "method": {
-            "cutoff": "切り捨て",
-            "label": "圧縮方法",
-            "none": "圧縮しない",
-            "rag": "RAG"
-          },
-          "rag": {
-            "document_count": {
-              "label": "文書チャンク数",
-              "tooltip": "単一の検索結果から抽出する文書チャンク数。実際に抽出される文書チャンク数は、この値に検索結果数を乗じたものです。"
-            }
-          },
-          "title": "検索結果の圧縮"
-        },
-        "content_limit": "コンテンツ制限",
-        "content_limit_tooltip": "検索結果のコンテンツの長さを制限します。制限を超えるコンテンツは切り捨てられます。",
-        "default_provider": "デフォルトプロバイダー",
-        "free": "無料",
-        "is_default": "デフォルト",
-        "local_provider": {
-          "hint": "ウェブサイトにログインして、より良い検索結果を得て、検索設定をパーソナライズしてください。",
-          "open_settings": "{{provider}}設定を開く",
-          "settings": "ローカル検索設定"
-        },
-        "local_providers": "地元のプロバイダー",
-        "no_provider_selected": "検索サービスプロバイダーを選択してから再確認してください。",
-        "overwrite": "検索サービスを上書き",
-        "overwrite_tooltip": "LLMの代わりに検索サービスを強制的に使用する",
-        "search_max_result": {
-          "label": "検索結果の数",
-          "tooltip": "検索結果の圧縮が無効な場合、結果の数が多すぎるとトークンが不足する可能性があります"
-        },
-        "search_provider": "検索サービスプロバイダー",
-        "search_provider_placeholder": "検索サービスプロバイダーを選択する",
-        "search_with_time": "日付を含む検索",
-        "set_as_default": "既定として設定",
-        "subscribe": "ブラックリスト購読",
-        "subscribe_add": "購読を追加",
-        "subscribe_add_failed": "購読ソースの追加に失敗しました",
-        "subscribe_add_success": "購読フィードが正常に追加されました!",
-        "subscribe_delete": "削除",
-        "subscribe_name": {
-          "label": "代替名",
-          "placeholder": "ダウンロードした購読フィードに名前がない場合に使用される代替名。"
-        },
-        "subscribe_update": "更新",
-        "subscribe_update_failed": "フィードの更新に失敗しました",
-        "subscribe_update_success": "订阅源更新成功",
-        "subscribe_url": "購読URL",
-        "tavily": {
-          "api_key": {
-            "label": "Tavily API キー",
-            "placeholder": "Tavily API キーを入力してください"
-          },
-          "description": "Tavily は、AI エージェントのために特別に開発された検索エンジンで、最新の結果、インテリジェントな検索提案、そして深い研究能力を提供します",
-          "title": "Tavily"
-        },
-        "title": "ウェブ検索",
-        "url_invalid": "無効なURLが入力されました",
-        "url_required": "URLの入力が必要です"
-      }
+      "title": "その他の設定"
     },
     "translate": {
       "custom": {
@@ -5861,8 +5264,6 @@
     "home": "ホーム",
     "knowledge": "ナレッジベース",
     "launchpad": "ランチパッド",
-    "mcp-servers": "MCP サーバー",
-    "memories": "メモリ",
     "notes": "ノート",
     "openclaw": "オープンクロー",
     "paintings": "ペインティング",

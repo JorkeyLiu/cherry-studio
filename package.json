@@ -105,7 +105,6 @@
     "@expo/sudo-prompt": "^9.3.2",
     "@libsql/client": "0.14.0",
     "@napi-rs/canvas": "0.1.80",
-    "@napi-rs/system-ocr": "1.0.2",
     "@paymoapp/electron-shutdown-handler": "1.1.2",
     "better-sqlite3": "13.0.3",
     "canonicalize": "^2.1.0",
@@ -121,14 +120,10 @@
     "pdf-parse": "^2.4.5",
     "sharp": "0.34.5",
     "swagger-ui-express": "5.0.1",
-    "tesseract.js": "6.0.1",
     "turndown": "7.2.0",
     "ws": "^8.18.2"
   },
   "devDependencies": {
-    "@agentic/exa": "^7.3.3",
-    "@agentic/searxng": "^7.3.3",
-    "@agentic/tavily": "^7.3.3",
     "@ai-sdk/anthropic": "^3.0.71",
     "@ai-sdk/google": "^3.0.64",
     "@ai-sdk/openai": "^3.0.53",
@@ -191,7 +186,6 @@
     "@langchain/openai": "1.0.0",
     "@langchain/textsplitters": "0.1.0",
     "@mistralai/mistralai": "^1.7.5",
-    "@modelcontextprotocol/sdk": "1.27.1",
     "@mozilla/readability": "^0.6.0",
     "@notionhq/client": "^2.2.15",
     "@opentelemetry/api": "^1.9.0",
@@ -481,8 +475,6 @@
       "@ai-sdk/provider-utils": "4.0.23"
     },
     "patchedDependencies": {
-      "@napi-rs/system-ocr@1.0.2": "patches/@napi-rs-system-ocr-npm-1.0.2-59e7a78e8b.patch",
-      "tesseract.js@6.0.1": "patches/tesseract.js-npm-6.0.1-2562a7e46d.patch",
       "@langchain/core@1.0.2": "patches/@langchain-core-npm-1.0.2-183ef83fe4.patch",
       "@langchain/openai@1.0.0": "patches/@langchain-openai-npm-1.0.0-474d0ad9d4.patch",
       "@tiptap/extension-drag-handle@3.2.0": "patches/@tiptap-extension-drag-handle-npm-3.2.0-5a9ebff7c9.patch",
@@ -511,7 +503,6 @@
       "protobufjs",
       "registry-js",
       "sharp",
-      "tesseract.js",
       "zipfile"
     ]
   },
@@ -546,10 +537,6 @@
     "@napi-rs/canvas-linux-x64-musl": "0.1.97",
     "@napi-rs/canvas-win32-arm64-msvc": "0.1.97",
     "@napi-rs/canvas-win32-x64-msvc": "0.1.97",
-    "@napi-rs/system-ocr-darwin-arm64": "1.0.2",
-    "@napi-rs/system-ocr-darwin-x64": "1.0.2",
-    "@napi-rs/system-ocr-win32-arm64-msvc": "1.0.2",
-    "@napi-rs/system-ocr-win32-x64-msvc": "1.0.2",
     "@strongtz/win32-arm64-msvc": "0.4.7"
   }
 }

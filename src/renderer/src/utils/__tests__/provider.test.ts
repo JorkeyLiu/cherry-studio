@@ -8,7 +8,6 @@ import {
   isAnthropicSupportedProvider,
   isAzureOpenAIProvider,
   isGeminiProvider,
-  isGeminiWebSearchProvider,
   isOpenAICompatibleProvider,
   isOpenAIProvider,
   isSupportArrayContentProvider,
@@ -168,12 +167,6 @@ describe('provider utils (debranded: apiOptions/type semantics only)', () => {
   it('detects URL context capable providers', () => {
     expect(isSupportUrlContextProvider(createProvider({ type: 'gemini' }))).toBe(true)
     expect(isSupportUrlContextProvider(createProvider())).toBe(false)
-  })
-
-  it('identifies Gemini web search providers by protocol only', () => {
-    expect(isGeminiWebSearchProvider(createProvider({ id: 'anything', type: 'gemini' }))).toBe(true)
-    expect(isGeminiWebSearchProvider(createProvider({ id: 'gemini', type: 'openai' }))).toBe(false)
-    expect(isGeminiWebSearchProvider(createProvider())).toBe(false)
   })
 
   it('recognizes OpenAI compatible providers (generic openai only)', () => {

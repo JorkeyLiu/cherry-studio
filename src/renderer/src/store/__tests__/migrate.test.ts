@@ -2034,4 +2034,154 @@ describe('store migrations', () => {
       expect(isSupportEnableThinkingProvider(local)).toBe(false)
     })
   })
+
+  describe('migration 226: strip removed MCP/websearch/memory without losing history', () => {
+    it('drops removed slices/assistant fields/tool keys while keeping urlContext/knowledge/history', async () => {
+      const state = {
+        mcp: { servers: [{ id: 's1' }] },
+        memory: { memoryConfig: {} },
+        websearch: { providers: [{ id: 'tavily' }] },
+        assistants: {
+          assistants: [
+            {
+              id: 'a1',
+              enableWebSearch: true,
+              webSearchProviderId: 'tavily',
+              mcpMode: 'manual',
+              mcpServers: [{ id: 's1' }],
+              enableMemory: true,
+              enableUrlContext: true,
+              knowledge_bases: [{ id: 'kb1' }]
+            }
+          ],
+          assistantDefaults: {
+            enableWebSearch: true,
+            mcpMode: 'auto',
+            enableMemory: true,
+            enableUrlContext: true
+          },
+          defaultAssistant: {
+            enableWebSearch: true,
+            mcpServers: [],
+            enableMemory: true
+          }
+        },
+        inputTools: {
+          toolOrder: {
+            visible: ['new_topic', 'web_search', 'url_context', 'mcp_tools'],
+            hidden: ['web_search']
+          }
+        },
+        llm: { providers: [] },
+        _persist: { version: 225, rehydrated: false }
+      }
+
+      const migrated: any = await migrate(state as any, 226)
+
+      expect(migrated.mcp).toBeUndefined()
+      expect(migrated.memory).toBeUndefined()
+      expect(migrated.websearch).toBeUndefined()
+      for (const a of migrated.assistants.assistants) {
+        expect(a.enableWebSearch).toBeUndefined()
+        expect(a.webSearchProviderId).toBeUndefined()
+        expect(a.mcpMode).toBeUndefined()
+        expect(a.mcpServers).toBeUndefined()
+        expect(a.enableMemory).toBeUndefined()
+        expect(a.enableUrlContext).toBe(true)
+        expect(a.knowledge_bases).toEqual([{ id: 'kb1' }])
+      }
+      expect(migrated.assistants.assistantDefaults.enableUrlContext).toBe(true)
+      expect(migrated.assistants.assistantDefaults.enableWebSearch).toBeUndefined()
+      expect(migrated.inputTools.toolOrder.visible).toEqual(['new_topic', 'url_context'])
+      expect(migrated.inputTools.toolOrder.hidden).toEqual([])
+    })
+  })
+
+  describe('migration 227: terminal OCR slice scrub (full OCR removal)', () => {
+    const makeState = () => ({
+      ocr: {
+        providers: [
+          { id: 'tesseract', name: 'Tesseract', capabilities: { image: true }, config: {} },
+          { id: 'system', name: 'System', capabilities: { image: true }, config: {} }
+        ],
+        imageProviderId: 'system'
+      },
+      mcp: { servers: [{ id: 's1' }] },
+      memory: { memoryConfig: {} },
+      websearch: { providers: [{ id: 'tavily' }] },
+      preprocess: {
+        providers: [{ id: 'mineru', name: 'MinerU', apiKey: '', apiHost: 'https://mineru.net' }],
+        defaultProvider: 'mineru'
+      },
+      assistants: {
+        assistants: [
+          {
+            id: 'a1',
+            enableWebSearch: true,
+            mcpServers: [{ id: 's1' }],
+            enableMemory: true,
+            enableUrlContext: true,
+            knowledge_bases: [{ id: 'kb1' }]
+          }
+        ],
+        assistantDefaults: { enableUrlContext: true, enableMemory: true }
+      },
+      knowledge: { bases: [{ id: 'kb1' }] },
+      inputTools: {
+        toolOrder: {
+          visible: ['new_topic', 'web_search', 'url_context', 'mcp_tools'],
+          hidden: []
+        }
+      },
+      llm: { providers: [] },
+      _persist: { version: 226, rehydrated: false }
+    })
+
+    it('deletes the ocr slice terminally', async () => {
+      const migrated: any = await migrate(makeState() as any, 227)
+      expect(migrated.ocr).toBeUndefined()
+    })
+
+    it('retains the 226 scrubs and keeps preprocess/urlContext/knowledge', async () => {
+      const migrated: any = await migrate(makeState() as any, 227)
+      expect(migrated.mcp).toBeUndefined()
+      expect(migrated.memory).toBeUndefined()
+      expect(migrated.websearch).toBeUndefined()
+      expect(migrated.assistants.assistants[0].enableWebSearch).toBeUndefined()
+      expect(migrated.assistants.assistants[0].mcpServers).toBeUndefined()
+      expect(migrated.assistants.assistants[0].enableMemory).toBeUndefined()
+      expect(migrated.assistants.assistants[0].enableUrlContext).toBe(true)
+      expect(migrated.assistants.assistants[0].knowledge_bases).toEqual([{ id: 'kb1' }])
+      expect(migrated.assistants.assistantDefaults.enableUrlContext).toBe(true)
+      expect(migrated.preprocess.providers.map((p: { id: string }) => p.id)).toContain('mineru')
+      expect(migrated.preprocess.defaultProvider).toBe('mineru')
+      expect(migrated.knowledge.bases).toEqual([{ id: 'kb1' }])
+      expect(migrated.inputTools.toolOrder.visible).toEqual(['new_topic', 'url_context'])
+    })
+
+    it('137 → 227 full chain: legacy ocr shape is rebuilt then cleared', async () => {
+      const state = {
+        translate: {},
+        assistants: { assistants: [], assistantDefaults: { enableUrlContext: true } },
+        llm: { providers: [], settings: {} },
+        settings: {},
+        inputTools: { toolOrder: { visible: ['url_context'], hidden: [] } },
+        _persist: { version: 136, rehydrated: false }
+      }
+      const migrated: any = await migrate(state as any, 227)
+      expect(migrated.ocr).toBeUndefined()
+      expect(migrated.assistants.assistantDefaults.enableUrlContext).toBe(true)
+    })
+
+    it('is a no-op for state without an ocr slice', async () => {
+      const state = {
+        assistants: { assistants: [], assistantDefaults: {} },
+        llm: { providers: [] },
+        _persist: { version: 226, rehydrated: false }
+      }
+      const migrated: any = await migrate(state as any, 227)
+      expect(migrated.ocr).toBeUndefined()
+      expect(migrated.llm.providers).toEqual([])
+    })
+  })
 })

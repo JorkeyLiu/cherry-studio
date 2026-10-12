@@ -2,7 +2,6 @@ import { useTheme } from '@renderer/context/ThemeProvider'
 import type { FC } from 'react'
 
 import { SettingContainer } from '..'
-import OcrSettings from './OcrSettings'
 import PreprocessSettings from './PreprocessSettings'
 
 const DocProcessSettings: FC = () => {
@@ -10,7 +9,6 @@ const DocProcessSettings: FC = () => {
 
   return (
     <SettingContainer theme={themeMode}>
-      <OcrSettings />
       <PreprocessSettings />
     </SettingContainer>
   )

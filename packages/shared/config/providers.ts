@@ -8,7 +8,7 @@
  * join keys only; Anthropic-protocol support follows `type === 'anthropic'`
  * plus the per-connection stored `anthropicApiHost`.
  *
- * Mistral preprocess/OCR and WebSearch/MCP/OCR domain ids live in their own
+ * Mistral preprocess and WebSearch/MCP domain ids live in their own
  * stores and are intentionally untouched here.
  */
 

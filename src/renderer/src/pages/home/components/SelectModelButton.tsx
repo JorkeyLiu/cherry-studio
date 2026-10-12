@@ -37,11 +37,8 @@ const SelectModelButton: FC<Props> = ({ assistant }) => {
       // 避免更新数据造成关闭弹框的卡顿
       clearTimeout(timerRef.current)
       timerRef.current = setTimeout(() => {
-        // Unit B: preserve the user's web-search toggle; adapter decides at
-        // request time, never model metadata.
         updateAssistant({
-          model: selectedModel,
-          enableWebSearch: assistant.enableWebSearch
+          model: selectedModel
         })
       }, 200)
     }

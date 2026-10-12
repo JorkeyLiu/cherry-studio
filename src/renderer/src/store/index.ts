@@ -44,15 +44,12 @@ import editMode from './editMode'
 import inputToolsReducer from './inputTools'
 import knowledge from './knowledge'
 import llm from './llm'
-import mcp from './mcp'
-import memory from './memory'
 import messageBlocksReducer from './messageBlock'
 import migrate from './migrate'
 import newMessagesReducer from './newMessage'
 import { setNotesPath } from './note'
 import note from './note'
 import nutstore from './nutstore'
-import ocr from './ocr'
 import preprocess from './preprocess'
 import residentRegistryReducer, {
   JOINT_PUBLISH_COMPLETE,
@@ -67,7 +64,6 @@ import topicBranch, { topicBranchPersistTransform } from './topicBranch'
 import topicSegment from './topicSegment'
 import translate from './translate'
 import undoStack from './undoStack'
-import websearch from './websearch'
 
 const logger = loggerService.withContext('Store')
 
@@ -80,16 +76,12 @@ const appReducer = combineReducers({
   runtime,
   shortcuts,
   knowledge,
-  websearch,
-  mcp,
-  memory,
   tabs,
   preprocess,
   messages: newMessagesReducer,
   messageBlocks: messageBlocksReducer,
   inputTools: inputToolsReducer,
   translate,
-  ocr,
   note,
   clipboard,
   editMode,
@@ -478,7 +470,7 @@ const persistedReducer = persistReducer<RootState>(
   {
     key: 'cherry-studio',
     storage,
-    version: 225,
+    version: 227,
     transforms: [topicBranchPersistTransform],
     blacklist: [
       'runtime',

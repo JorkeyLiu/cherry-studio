@@ -38,8 +38,7 @@ describe('model', () => {
         reasoning: false,
         rerank: false,
         free: false,
-        function_calling: false,
-        web_search: false
+        function_calling: false
       }
       expect(getModelTags([baseModel])).toStrictEqual(expected)
       expect(

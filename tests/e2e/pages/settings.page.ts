@@ -13,8 +13,6 @@ export class SettingsPage extends BasePage {
   readonly generalMenuItem: Locator
   readonly displayMenuItem: Locator
   readonly dataMenuItem: Locator
-  readonly mcpMenuItem: Locator
-  readonly memoryMenuItem: Locator
   readonly aboutMenuItem: Locator
 
   constructor(page: Page) {
@@ -25,8 +23,6 @@ export class SettingsPage extends BasePage {
     this.generalMenuItem = page.locator('a[href*="/settings/general"]')
     this.displayMenuItem = page.locator('a[href*="/settings/display"]')
     this.dataMenuItem = page.locator('a[href*="/settings/data"]')
-    this.mcpMenuItem = page.locator('a[href*="/settings/mcp"]')
-    this.memoryMenuItem = page.locator('a[href*="/settings/memory"]')
     this.aboutMenuItem = page.locator('a[href*="/settings/about"]')
   }
 
@@ -103,30 +99,6 @@ export class SettingsPage extends BasePage {
       await this.navigateTo('/settings/data')
     }
     await this.page.waitForURL('**/#/settings/data**', { timeout: 10000 }).catch(() => {})
-  }
-
-  /**
-   * Navigate to MCP settings.
-   */
-  async goToMCP(): Promise<void> {
-    try {
-      await this.mcpMenuItem.click({ timeout: 5000 })
-    } catch {
-      await this.navigateTo('/settings/mcp')
-    }
-    await this.page.waitForURL('**/#/settings/mcp**', { timeout: 10000 }).catch(() => {})
-  }
-
-  /**
-   * Navigate to Memory settings.
-   */
-  async goToMemory(): Promise<void> {
-    try {
-      await this.memoryMenuItem.click({ timeout: 5000 })
-    } catch {
-      await this.navigateTo('/settings/memory')
-    }
-    await this.page.waitForURL('**/#/settings/memory**', { timeout: 10000 }).catch(() => {})
   }
 
   /**

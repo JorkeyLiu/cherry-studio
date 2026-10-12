@@ -16,10 +16,10 @@ import { getReasoningTagName } from '../utils/reasoning'
 import { createAnthropicCachePlugin } from './anthropicCachePlugin'
 import { createAnthropicThinkingFormatPlugin } from './anthropicThinkingFormatPlugin'
 import { createDeepseekDsmlParserPlugin } from './deepseekDsmlParserPlugin'
+import { knowledgeOrchestrationPlugin } from './knowledgeOrchestrationPlugin'
 import { createPdfCompatibilityPlugin } from './pdfCompatibilityPlugin'
 import { createQwenThinkingPlugin } from './qwenThinkingPlugin'
 import { createReasoningExtractionPlugin } from './reasoningExtractionPlugin'
-import { searchOrchestrationPlugin } from './searchOrchestrationPlugin'
 import { createSimulateStreamingPlugin } from './simulateStreamingPlugin'
 import { createSkipGeminiThoughtSignaturePlugin } from './skipGeminiThoughtSignaturePlugin'
 import { createTelemetryPlugin } from './telemetryPlugin'
@@ -118,16 +118,13 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
     plugins.push(createSkipGeminiThoughtSignaturePlugin())
   }
 
-  // 1. Provider 工具注入 — providerToolPlugin 自动按 provider 分发工具
-  if (config.enableWebSearch && config.webSearchPluginConfig) {
-    plugins.push(providerToolPlugin('webSearch', config.webSearchPluginConfig))
-  }
+  // 1. Provider 工具注入 — 仅保留原生网页上下文（urlContext），按 provider 分发
   if (config.enableUrlContext) {
     plugins.push(providerToolPlugin('urlContext', config.urlContextConfig))
   }
-  // 2. 支持工具调用时添加搜索插件
+  // 2. 支持工具调用时添加知识库编排（仅知识库，无外部搜索/记忆/MCP）
   if (config.isSupportedToolUse || config.isPromptToolUse) {
-    plugins.push(searchOrchestrationPlugin(config.assistant, config.topicId || ''))
+    plugins.push(knowledgeOrchestrationPlugin(config.assistant, config.topicId || ''))
   }
 
   // 3. 推理模型时添加推理插件
@@ -139,8 +136,7 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
   if (config.isPromptToolUse) {
     plugins.push(
       createPromptToolUsePlugin({
-        enabled: true,
-        mcpMode: config.mcpMode
+        enabled: true
       })
     )
   }

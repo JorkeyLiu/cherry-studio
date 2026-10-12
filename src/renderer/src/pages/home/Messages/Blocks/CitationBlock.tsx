@@ -32,46 +32,18 @@ function CitationBlock({
     [snapshotBlocksById, block]
   )
   const formattedCitations = snapshotBlocksById ? (snapshotCitations ?? []) : selectorCitations
-  const { websearch } = useSelector((state: RootState) => state.runtime)
-  const message = useSelector((state: RootState) => state.messages.entities[block.messageId])
-  const userMessageId = message?.askId || block.messageId // 如果没有 askId 则回退到 messageId
 
   const hasGeminiBlock = block.response?.source === WEB_SEARCH_SOURCE.GEMINI
   const hasCitations = useMemo(() => {
     return (
       (formattedCitations && formattedCitations.length > 0) ||
       hasGeminiBlock ||
-      (block.knowledge && block.knowledge.length > 0) ||
-      (block.memories && block.memories.length > 0)
+      (block.knowledge && block.knowledge.length > 0)
     )
-  }, [formattedCitations, block.knowledge, block.memories, hasGeminiBlock])
-
-  const getWebSearchStatusText = (requestId: string) => {
-    const status = websearch.activeSearches[requestId] ?? { phase: 'default' }
-
-    switch (status.phase) {
-      case 'fetch_complete':
-        return t('message.websearch.fetch_complete', {
-          count: status.countAfter ?? 0
-        })
-      case 'rag':
-        return t('message.websearch.rag')
-      case 'rag_complete':
-        return t('message.websearch.rag_complete', {
-          countBefore: status.countBefore ?? 0,
-          countAfter: status.countAfter ?? 0
-        })
-      case 'rag_failed':
-        return t('message.websearch.rag_failed')
-      case 'cutoff':
-        return t('message.websearch.cutoff')
-      default:
-        return t('message.searching')
-    }
-  }
+  }, [formattedCitations, block.knowledge, hasGeminiBlock])
 
   if (block.status === MessageBlockStatus.PROCESSING) {
-    return <Spinner text={getWebSearchStatusText(userMessageId)} />
+    return <Spinner text={t('message.searching')} />
   }
 
   if (!hasCitations) {

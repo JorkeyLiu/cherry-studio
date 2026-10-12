@@ -505,13 +505,6 @@
         "title": "Mod Autonom"
       },
       "tooling": {
-        "mcp": {
-          "description": "Conectează servere MCP pentru a debloca instrumente suplimentare pe care le poți aproba mai sus.",
-          "empty": "Nu au fost detectate servere MCP. Adaugă unul din pagina de setări MCP.",
-          "inactiveTooltip": "Acest server MCP nu este activ. Vă rugăm să-l porniți mai întâi.",
-          "manageHint": "Ai nevoie de configurare avansată? Vizitează Setări → Servere MCP.",
-          "toggle": "Comută {{name}}"
-        },
         "permissionMode": {
           "acceptEdits": {
             "description": "Editările de fișiere și operațiunile sistemului de fișiere sunt aprobate automat.",
@@ -543,7 +536,6 @@
           "autoDescription": "Acest instrument este aprobat automat de modul de permisiune curent.",
           "autoDisabledTooltip": "Aprobat automat de „{{mode}}” și nu poate fi dezactivat.",
           "empty": "Niciun instrument nu corespunde filtrelor tale.",
-          "mcpBadge": "Instrument MCP",
           "requiresApproval": "Necesită aprobare când este dezactivat",
           "search": "Caută instrumente",
           "toggle": "Comută {{name}}"
@@ -557,16 +549,6 @@
         "tab": "Instrumente pre-aprobate",
         "title": "Instrumente pre-aprobate",
         "toggle": "{{defaultValue}}"
-      },
-      "toolsMcp": {
-        "mcp": {
-          "tab": "MCP",
-          "title": "Servere MCP"
-        },
-        "tab": "Unelte",
-        "tools": {
-          "title": "Instrumente pre-aprobate"
-        }
       }
     },
     "sidebar_title": "Agenți",
@@ -654,9 +636,6 @@
         },
         "WebFetch": {
           "description": "Preia conținutul de la o adresă URL specificată"
-        },
-        "WebSearch": {
-          "description": "Efectuează căutări pe web cu filtrare pe domeniu"
         },
         "Write": {
           "description": "Creează sau suprascrie fișiere"
@@ -897,27 +876,6 @@
         "label": "Apeluri maxime de instrumente",
         "tip": "Numărul maxim de apeluri de instrumente permise într-o singură conversație. Valorile mai mari permit operațiuni multi-etapă mai complexe, dar pot crește utilizarea tokenilor și timpul de răspuns."
       },
-      "mcp": {
-        "description": "Servere MCP activate implicit",
-        "enableFirst": "Activează mai întâi acest server în setările MCP",
-        "label": "Servere MCP",
-        "mode": {
-          "auto": {
-            "description": "AI descoperă și folosește instrumente automat",
-            "label": "Auto"
-          },
-          "disabled": {
-            "description": "Niciun instrument MCP",
-            "label": "Dezactivat"
-          },
-          "manual": {
-            "description": "Selectați servere MCP specifice",
-            "label": "Manual"
-          }
-        },
-        "noServersAvailable": "Nu există servere MCP disponibile. Adaugă servere în setări",
-        "title": "Setări MCP"
-      },
       "model": "Setări model",
       "more": "Setări asistent",
       "prompt": "Setări prompt",
@@ -1118,36 +1076,7 @@
         "image_or_document": "Încarcă imagine sau fișier document",
         "upload_from_local": "Încarcă fișier local..."
       },
-      "url_context": "Context URL",
-      "web_search": {
-        "builtin": {
-          "disabled_content": "Modelul curent nu acceptă căutarea web",
-          "enabled_content": "Folosește funcția de căutare web integrată a modelului",
-          "label": "Integrat în model"
-        },
-        "button": {
-          "ok": "Mergi la Setări"
-        },
-        "enable": "Activează căutarea web",
-        "enable_content": "Trebuie să verifici mai întâi conectivitatea căutării web în setări",
-        "label": "Căutare web",
-        "no_web_search": {
-          "description": "Nu activa căutarea web",
-          "label": "Dezactivează căutarea web"
-        },
-        "settings": "Setări căutare web"
-      }
-    },
-    "mcp": {
-      "error": {
-        "parse_tool_call": "Nu se poate converti într-un format valid de apelare a instrumentului: {{toolCall}}"
-      },
-      "warning": {
-        "gemini_web_search": "Gemini nu acceptă utilizarea simultană a instrumentelor native de căutare web și a apelării funcțiilor",
-        "multiple_tools": "Există mai multe instrumente MCP care se potrivesc, a fost selectat {{tool}}",
-        "no_tool": "Nu s-a găsit niciun instrument MCP potrivit pentru {{tool}}",
-        "url_context": "Gemini nu acceptă utilizarea simultană a contextului URL și a apelării funcțiilor"
-      }
+      "url_context": "Context URL"
     },
     "message": {
       "copy_topic": {
@@ -1469,12 +1398,7 @@
       },
       "unpin": "Detașează subiectul"
     },
-    "translate": "Tradu",
-    "web_search": {
-      "warning": {
-        "openai": "Efortul minim de raționament al modelului GPT-5 nu acceptă căutarea web."
-      }
-    }
+    "translate": "Tradu"
   },
   "code": {
     "auto_update_to_latest": "Actualizează automat la cea mai recentă versiune",
@@ -1732,10 +1656,7 @@
         "message": "Se pare că ceva nu a mers bine...",
         "reload": "Reîncarcă"
       },
-      "details": "Detalii",
-      "mcp": {
-        "invalid": "Server MCP invalid"
-      }
+      "details": "Detalii"
     },
     "cause": "Cauză eroare",
     "chat": {
@@ -1758,12 +1679,10 @@
       "deprecated": "Acest model a fost retras, te rugăm să treci la alt model",
       "go_to_settings": "Mergi la setări",
       "knowledge": "Vectorizarea bazei de cunoștințe a eșuat",
-      "mcp": "Conexiunea la serverul MCP a eșuat, verificați dacă serviciul rulează",
       "model": "Model negăsit sau fără acces",
       "model_conflict": "Modelul de diagnostic este identic cu modelul cu eroare",
       "network": "Nu se poate conecta la server, verificați setările de rețea sau proxy",
       "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
-      "ocr": "Motorul OCR nu este inițializat, verificați setările OCR",
       "parse": "IA a returnat un răspuns invalid, vă rugăm să reîncercați sau să schimbați modelul",
       "payload": "Conținutul cererii este prea mare, reduceți dimensiunea fișierului sau a textului.",
       "proxy": "Eroare de proxy sau certificat SSL, verificați setările de proxy și de rețea",
@@ -2182,112 +2101,6 @@
     },
     "title": "LM Studio"
   },
-  "memory": {
-    "actions": "Acțiuni",
-    "add_failed": "Nu s-a putut adăuga amintirea",
-    "add_first_memory": "Adaugă prima ta amintire",
-    "add_memory": "Adaugă amintire",
-    "add_new_user": "Adaugă utilizator nou",
-    "add_success": "Amintire adăugată cu succes",
-    "add_user": "Adaugă utilizator",
-    "add_user_failed": "Nu s-a putut adăuga utilizatorul",
-    "all_users": "Toți utilizatorii",
-    "cannot_delete_default_user": "Nu se poate șterge utilizatorul implicit",
-    "configure_memory_first": "Te rugăm să configurezi mai întâi setările de memorie",
-    "content": "Conținut",
-    "current_user": "Utilizator curent",
-    "custom": "Personalizat",
-    "default": "Implicit",
-    "default_user": "Utilizator implicit",
-    "delete_confirm": "Ești sigur că vrei să ștergi această amintire?",
-    "delete_confirm_content": "Ești sigur că vrei să ștergi {{count}} amintiri?",
-    "delete_confirm_single": "Ești sigur că vrei să ștergi această amintire?",
-    "delete_confirm_title": "Șterge amintiri",
-    "delete_failed": "Nu s-a putut șterge amintirea",
-    "delete_selected": "Șterge selectate",
-    "delete_success": "Amintire ștearsă cu succes",
-    "delete_user": "Șterge utilizator",
-    "delete_user_confirm_content": "Ești sigur că vrei să ștergi utilizatorul {{user}} și toate amintirile sale?",
-    "delete_user_confirm_title": "Șterge utilizator",
-    "delete_user_failed": "Nu s-a putut șterge utilizatorul",
-    "description": "Memoria îți permite să stochezi și să gestionezi informații despre interacțiunile tale cu asistentul. Poți adăuga, edita și șterge amintiri, precum și să le filtrezi și să cauți prin ele.",
-    "edit_memory": "Editează amintirea",
-    "embedding_dimensions": "Dimensiuni embedding",
-    "embedding_model": "Model embedding",
-    "enable_global_memory_first": "Te rugăm să activezi mai întâi memoria globală",
-    "end_date": "Data de sfârșit",
-    "global_memory": "Memorie globală",
-    "global_memory_description": "Pentru a folosi funcțiile de memorie, te rugăm să activezi memoria globală în setările asistentului.",
-    "global_memory_disabled_desc": "Pentru a folosi funcțiile de memorie, te rugăm să activezi mai întâi memoria globală în setările asistentului.",
-    "global_memory_disabled_title": "Memorie globală dezactivată",
-    "global_memory_enabled": "Memorie globală activată",
-    "go_to_memory_page": "Mergi la pagina Memorie",
-    "initial_memory_content": "Bun venit! Aceasta este prima ta amintire.",
-    "llm_model": "Model LLM",
-    "load_failed": "Nu s-au putut încărca amintirile",
-    "loading": "Se încarcă amintirile...",
-    "loading_memories": "Se încarcă amintirile...",
-    "memories_description": "Se afișează {{count}} din {{total}} amintiri",
-    "memories_reset_success": "Toate amintirile pentru {{user}} au fost resetate cu succes",
-    "memory": "amintire",
-    "memory_content": "Conținut amintire",
-    "memory_placeholder": "Introdu conținutul amintirii...",
-    "new_user_id": "ID utilizator nou",
-    "new_user_id_placeholder": "Introdu un ID de utilizator unic",
-    "no_matching_memories": "Nu s-au găsit amintiri potrivite",
-    "no_memories": "Încă nu există amintiri",
-    "no_memories_description": "Începe prin a adăuga prima ta amintire",
-    "not_configured_desc": "Te rugăm să configurezi modelele de embedding și LLM în setările de memorie pentru a activa funcționalitatea de memorie.",
-    "not_configured_title": "Memorie neconfigurată",
-    "pagination_total": "{{start}}-{{end}} din {{total}} elemente",
-    "please_enter_memory": "Te rugăm să introduci conținutul amintirii",
-    "please_select_embedding_model": "Te rugăm să selectezi un model de embedding",
-    "please_select_llm_model": "Te rugăm să selectezi un model LLM",
-    "reset_filters": "Resetează filtrele",
-    "reset_memories": "Resetează amintirile",
-    "reset_memories_confirm_content": "Ești sigur că vrei să ștergi definitiv toate amintirile pentru {{user}}? Această acțiune nu poate fi anulată.",
-    "reset_memories_confirm_title": "Resetează toate amintirile",
-    "reset_memories_failed": "Nu s-au putut reseta amintirile",
-    "reset_user_memories": "Resetează amintirile utilizatorului",
-    "reset_user_memories_confirm_content": "Ești sigur că vrei să resetezi toate amintirile pentru {{user}}?",
-    "reset_user_memories_confirm_title": "Resetează amintirile utilizatorului",
-    "reset_user_memories_failed": "Nu s-au putut reseta amintirile utilizatorului",
-    "score": "Scor",
-    "search": "Caută",
-    "search_placeholder": "Caută amintiri...",
-    "select_embedding_model_placeholder": "Selectează model embedding",
-    "select_llm_model_placeholder": "Selectează model LLM",
-    "select_user": "Selectează utilizator",
-    "settings": "Setări",
-    "settings_title": "Setări memorie",
-    "start_date": "Data de început",
-    "statistics": "Statistici",
-    "stored_memories": "Amintiri stocate",
-    "switch_user": "Schimbă utilizatorul",
-    "switch_user_confirm": "Schimbi contextul de utilizator la {{user}}?",
-    "time": "Timp",
-    "title": "Amintiri",
-    "total_memories": "Total amintiri",
-    "try_different_filters": "Încearcă să ajustezi criteriile de căutare",
-    "update_failed": "Nu s-a putut actualiza amintirea",
-    "update_success": "Amintire actualizată cu succes",
-    "user": "Utilizator",
-    "user_created": "Utilizatorul {{user}} a fost creat și comutat cu succes",
-    "user_deleted": "Utilizatorul {{user}} a fost șters cu succes",
-    "user_id": "ID utilizator",
-    "user_id_exists": "Acest ID de utilizator există deja",
-    "user_id_invalid_chars": "ID-ul de utilizator poate conține doar litere, cifre, cratime și liniuțe de subliniere",
-    "user_id_placeholder": "Introdu ID utilizator (opțional)",
-    "user_id_required": "ID-ul de utilizator este obligatoriu",
-    "user_id_reserved": "'default-user' este rezervat, te rugăm să folosești un ID diferit",
-    "user_id_rules": "ID-ul de utilizator trebuie să fie unic și să conțină doar litere, cifre, cratime (-) și liniuțe de subliniere (_)",
-    "user_id_too_long": "ID-ul de utilizator nu poate depăși 50 de caractere",
-    "user_management": "Gestionare utilizatori",
-    "user_memories_reset": "Toate amintirile pentru {{user}} au fost resetate",
-    "user_switch_failed": "Nu s-a putut schimba utilizatorul",
-    "user_switched": "Contextul de utilizator a fost schimbat la {{user}}",
-    "users": "Utilizatori"
-  },
   "message": {
     "agents": {
       "import": {
@@ -2367,9 +2180,6 @@
       "chunk_overlap_too_large": "Suprapunerea fragmentelor nu poate fi mai mare decât dimensiunea fragmentului",
       "copy": "Copiere eșuată",
       "dimension_too_large": "Dimensiunea conținutului este prea mare",
-      "endpoint": {
-        "web_search_unsupported": "[to be translated]:Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
-      },
       "enter": {
         "api": {
           "host": "Te rugăm să introduci mai întâi gazda (host) API",
@@ -2557,7 +2367,6 @@
         "exitPlanMode": "ExitPlanMode",
         "glob": "Glob",
         "grep": "Grep",
-        "mcpServerTool": "Instrument Server MCP",
         "multiEdit": "MultiEdit",
         "notebookEdit": "NotebookEdit",
         "readFile": "Citește fișier",
@@ -2567,7 +2376,6 @@
         "todoWrite": "Totul Scrie",
         "tool": "Unelte",
         "webFetch": "Preluare web",
-        "webSearch": "Căutare pe web",
         "write": "Scrie"
       },
       "noData": "Nu sunt disponibile date pentru acest instrument",
@@ -2641,11 +2449,7 @@
       }
     },
     "websearch": {
-      "cutoff": "Se trunchiază conținutul căutării...",
-      "fetch_complete": "{{count}} rezultat(e) căutare",
-      "rag": "Se execută RAG...",
-      "rag_complete": "Se păstrează {{countAfter}} din {{countBefore}} rezultate...",
-      "rag_failed": "RAG a eșuat, se returnează rezultate goale..."
+      "fetch_complete": "{{count}} rezultat(e) căutare"
     }
   },
   "minapp": {
@@ -2946,30 +2750,6 @@
       "success": "S-a adăugat cu succes {{type}} în baza de cunoștințe"
     },
     "tip": "Dacă răspunsul este de succes, atunci doar mesajele care depășesc 30 de secunde vor declanșa un memento"
-  },
-  "ocr": {
-    "builtin": {
-      "system": "OCR de sistem"
-    },
-    "error": {
-      "provider": {
-        "cannot_remove_builtin": "Nu se poate șterge furnizorul integrat",
-        "existing": "Furnizorul există deja",
-        "get_providers": "Nu s-au putut obține furnizorii disponibili",
-        "not_found": "Furnizorul OCR nu există",
-        "update_failed": "Nu s-a putut actualiza configurația"
-      },
-      "unknown": "A apărut o eroare în timpul procesului OCR"
-    },
-    "file": {
-      "not_supported": "Tip de fișier neacceptat {{type}}"
-    },
-    "processing": "Procesare OCR...",
-    "warning": {
-      "provider": {
-        "fallback": "S-a recurs la {{name}}, ceea ce poate cauza probleme"
-      }
-    }
   },
   "ollama": {
     "keep_alive_time": {
@@ -4762,258 +4542,6 @@
       "title": "Lansare",
       "totray": "Minimizează în zona de notificare la pornire"
     },
-    "mcp": {
-      "actions": "Acțiuni",
-      "active": "Activ",
-      "addError": "Nu s-a putut adăuga serverul",
-      "addServer": {
-        "create": "Creare rapidă",
-        "importFrom": {
-          "connectionFailed": "Conexiune eșuată",
-          "dxt": "Importă pachet DXT",
-          "dxtFile": "Fișier pachet DXT",
-          "dxtHelp": "Selectează un fișier .dxt care conține un pachet de server MCP",
-          "dxtProcessFailed": "Procesarea fișierului DXT a eșuat",
-          "error": {
-            "multipleServers": "Nu se poate importa din mai multe servere"
-          },
-          "invalid": "Intrare invalidă, te rugăm să verifici formatul JSON",
-          "json": "Importă din JSON",
-          "method": "Metodă import",
-          "nameExists": "Serverul există deja: {{name}}",
-          "noDxtFile": "Te rugăm să selectezi un fișier DXT",
-          "oneServer": "Doar o singură configurație de server MCP la un moment dat",
-          "placeholder": "Lipește configurația JSON a serverului MCP",
-          "selectDxtFile": "Selectează fișierul DXT",
-          "tooltip": "Te rugăm să copiezi JSON-ul de configurare (prioritizând configurațiile\n NPX sau UVX) din pagina de introducere a serverelor MCP și să-l lipești în caseta de intrare."
-        },
-        "label": "Adaugă server"
-      },
-      "addSuccess": "Server adăugat cu succes",
-      "advancedSettings": "Setări avansate",
-      "args": "Argumente",
-      "argsTooltip": "Fiecare argument pe o linie nouă",
-      "baseUrlTooltip": "URL de bază server la distanță",
-      "builtinServers": "Servere integrate",
-      "builtinServersDescriptions": {
-        "brave_search": "O implementare de server MCP care integrează API-ul Brave Search, oferind funcționalități de căutare web și locală. Necesită configurarea variabilei de mediu BRAVE_API_KEY",
-        "browser": "Controlează o fereastră Electron headless prin Protocolul Chrome DevTools. Instrumente: deschide URL, execută JS pe o singură linie, resetează sesiunea.",
-        "didi_mcp": "Server DiDi MCP care oferă servicii de ride-hailing, inclusiv căutare pe hartă, estimare preț, gestionare comenzi și urmărire șofer. Disponibil doar în China continentală. Necesită configurarea variabilei de mediu DIDI_API_KEY",
-        "dify_knowledge": "Implementarea serverului MCP Dify oferă un API simplu pentru a interacționa cu Dify. Necesită configurarea cheii Dify",
-        "fetch": "Server MCP pentru preluarea conținutului web de la URL",
-        "filesystem": "Un server Node.js care implementează Protocolul de Context Model (MCP) pentru operațiuni în sistemul de fișiere. Necesită configurarea directoarelor permise pentru acces.",
-        "flomo": "Conectează-te la flomo pentru a captura rapid notițe și idei prin AI. Necesită autorizarea contului flomo.",
-        "mcp_auto_install": "Instalează automat serviciul MCP (beta)",
-        "memory": "Implementare de memorie persistentă bazată pe un graf de cunoștințe local. Aceasta permite modelului să rețină informații legate de utilizator între conversații diferite. Necesită configurarea variabilei de mediu MEMORY_FILE_PATH.",
-        "no": "Fără descriere",
-        "nowledge_mem": "Necesită aplicația Nowledge Mem rulând local. Păstrează chat-urile AI, instrumentele, notițele, agenții și fișierele în memoria privată de pe computerul tău. Descarcă de la https://mem.nowledge.co/",
-        "python": "Execută cod Python într-un mediu sandbox securizat. Rulează Python cu Pyodide, suportând majoritatea bibliotecilor standard și pachetelor de calcul științific",
-        "sequentialthinking": "O implementare de server MCP care oferă instrumente pentru rezolvarea dinamică și reflexivă a problemelor prin procese de gândire structurată"
-      },
-      "command": "Comandă",
-      "config_description": "Configurează serverele Protocolului de Context Model",
-      "customRegistryPlaceholder": "Introdu URL registru privat, de ex.: https://npm.company.com",
-      "deleteError": "Nu s-a putut șterge serverul",
-      "deleteServer": "Șterge serverul",
-      "deleteServerConfirm": "Ești sigur că vrei să ștergi acest server?",
-      "deleteSuccess": "Server șters cu succes",
-      "dependenciesInstall": "Instalează dependențe",
-      "dependenciesInstalling": "Se instalează dependențele...",
-      "description": "Descriere",
-      "disable": {
-        "description": "Nu activa funcționalitatea serverului MCP",
-        "label": "Dezactivează serverul MCP"
-      },
-      "discover": "Descoperă",
-      "duplicateName": "Un server cu acest nume există deja",
-      "editJson": "Editează JSON",
-      "editMcpJson": "Editează configurația MCP",
-      "editServer": "Editează serverul",
-      "env": "Variabile de mediu",
-      "envTooltip": "Format: CHEIE=valoare, una pe linie",
-      "errors": {
-        "32000": "Serverul MCP nu a pornit, te rugăm să verifici parametrii conform tutorialului",
-        "toolNotFound": "Instrumentul {{name}} nu a fost găsit"
-      },
-      "fetch": {
-        "button": "Preluare servere",
-        "success": "Serverele MCP au fost preluate cu succes"
-      },
-      "findMore": "Găsește mai multe MCP",
-      "headers": "Headere",
-      "headersTooltip": "Headere personalizate pentru cereri HTTP",
-      "inMemory": "Memorie",
-      "install": "Instalează",
-      "installError": "Instalarea dependențelor a eșuat",
-      "installSuccess": "Dependențe instalate cu succes",
-      "jsonFormatError": "Eroare formatare JSON",
-      "jsonModeHint": "Editează reprezentarea JSON a configurației serverului MCP. Te rugăm să te asiguri că formatul este corect înainte de salvare.",
-      "jsonSaveError": "Nu s-a putut salva configurația JSON.",
-      "jsonSaveSuccess": "Configurația JSON a fost salvată.",
-      "lanyun": {
-        "description": "Lanyun Technology Cloud Platform MCP Service",
-        "name": "Lanyun Technology"
-      },
-      "logoUrl": "URL logo",
-      "logs": "Jurnale",
-      "longRunning": "Mod rulare lungă",
-      "longRunningTooltip": "Când este activat, serverul acceptă sarcini de lungă durată. La primirea notificărilor de progres, timpul de expirare va fi resetat, iar timpul maxim de execuție va fi extins la 10 minute.",
-      "marketplaces": "Piețe",
-      "missingDependencies": "Lipsește, te rugăm să îl instalezi pentru a continua.",
-      "more": {
-        "awesome": "Listă curatoriată servere MCP",
-        "composio": "Instrumente dezvoltare MCP Composio",
-        "glama": "Director servere MCP Glama",
-        "higress": "Server MCP Higress",
-        "mcpso": "Platformă descoperire servere MCP",
-        "mcpworld": "Platforma de agregare MCP Baidu",
-        "modelscope": "Server MCP comunitate ModelScope",
-        "official": "Colecție oficială servere MCP",
-        "pulsemcp": "Server MCP Pulse",
-        "smithery": "Instrumente MCP Smithery",
-        "zhipu": "MCP curatoriat, integrare rapidă"
-      },
-      "name": "Nume",
-      "newServer": "Server MCP",
-      "noDescriptionAvailable": "Nicio descriere disponibilă",
-      "noLogs": "Niciun jurnal încă",
-      "noServers": "Niciun server configurat",
-      "not_support": "Model neacceptat",
-      "npx_list": {
-        "actions": "Acțiuni",
-        "description": "Descriere",
-        "no_packages": "Nu s-au găsit pachete",
-        "npm": "NPM",
-        "package_name": "Nume pachet",
-        "scope_placeholder": "Introdu domeniul npm (de ex. @organizatia-ta)",
-        "scope_required": "Te rugăm să introduci domeniul npm",
-        "search": "Caută",
-        "search_error": "Eroare căutare",
-        "usage": "Utilizare",
-        "version": "Versiune"
-      },
-      "oauth": {
-        "callback": {
-          "message": "Poți închide această pagină și te poți întoarce la Cherry Chat",
-          "title": "Autentificare reușită"
-        }
-      },
-      "prompts": {
-        "arguments": "Argumente",
-        "availablePrompts": "Prompturi disponibile",
-        "genericError": "Eroare obținere prompt",
-        "loadError": "Eroare obținere prompturi",
-        "noPromptsAvailable": "Nu există prompturi disponibile",
-        "requiredField": "Câmp obligatoriu"
-      },
-      "protocolInstallWarning": {
-        "command": "Comandă pornire",
-        "message": "Acest MCP a fost instalat dintr-o sursă externă prin protocol. Rularea instrumentelor necunoscute poate dăuna computerului tău.",
-        "run": "Rulează",
-        "title": "Rulezi MCP extern?"
-      },
-      "provider": "Furnizor",
-      "providerPlaceholder": "Nume furnizor",
-      "providerUrl": "URL furnizor",
-      "providers": "Furnizori",
-      "registry": "Registru pachete",
-      "registryDefault": "Implicit",
-      "registryTooltip": "Alege registrul pentru instalarea pachetelor pentru a rezolva problemele de rețea cu registrul implicit.",
-      "requiresConfig": "Necesită configurare",
-      "resources": {
-        "availableResources": "Resurse disponibile",
-        "blob": "Blob",
-        "blobInvisible": "Blob invizibil",
-        "genericError": "Eroare achiziție resursă",
-        "mimeType": "Tip MIME",
-        "noResourcesAvailable": "Nu există resurse disponibile",
-        "size": "Dimensiune",
-        "text": "Text",
-        "uri": "URI"
-      },
-      "search": {
-        "placeholder": "Caută servere MCP...",
-        "tooltip": "Caută servere MCP"
-      },
-      "searchNpx": "Caută MCP",
-      "serverPlural": "servere",
-      "serverSingular": "server",
-      "servers": "Servere MCP",
-      "sse": "Evenimente trimise de server (sse)",
-      "startError": "Pornire eșuată",
-      "stdio": "Intrare/Ieșire standard (stdio)",
-      "streamableHttp": "HTTP fluxabil (streamableHttp)",
-      "sync": {
-        "button": "Sincronizează",
-        "discoverMcpServers": "Descoperă servere MCP",
-        "discoverMcpServersDescription": "Vizitează platforma pentru a descoperi servere MCP disponibile",
-        "error": "Eroare sincronizare servere MCP",
-        "getToken": "Obține token API",
-        "getTokenDescription": "Obține tokenul tău personal API din contul tău",
-        "noServersAvailable": "Nu există servere MCP disponibile",
-        "providerDescriptions": {
-          "302ai": "Serviciul MCP al Platformei 302.AI",
-          "bailian": "Serviciul MCP al Platformei Bailian Alibaba Cloud",
-          "lanyun": "Platforma Cloud Lanyun Technology - Serviciul MCP",
-          "mcprouter": "Platformă Router MCP Serviciu MCP",
-          "modelscope": "Serviciul MCP al Platformei ModelScope",
-          "tokenflux": "Serviciul MCP al Platformei TokenFlux"
-        },
-        "selectProvider": "Selectează furnizor:",
-        "setToken": "Introdu tokenul tău",
-        "success": "Sincronizare servere MCP reușită",
-        "title": "Sincronizare servere",
-        "tokenPlaceholder": "Introdu tokenul API aici",
-        "tokenRequired": "Tokenul API este obligatoriu",
-        "unauthorized": "Sincronizare neautorizată"
-      },
-      "system": "Sistem",
-      "tabs": {
-        "description": "Descriere",
-        "general": "General",
-        "prompts": "Prompturi",
-        "resources": "Resurse",
-        "tools": "Instrumente"
-      },
-      "tags": "Etichete",
-      "tagsPlaceholder": "Introdu etichete",
-      "timeout": "Expirare",
-      "timeoutTooltip": "Timpul de expirare în secunde pentru cererile către acest server, implicit este 60 secunde",
-      "title": "Servere MCP",
-      "tools": {
-        "autoApprove": {
-          "label": "Aprobare automată",
-          "tooltip": {
-            "confirm": "Ești sigur că vrei să rulezi acest instrument MCP?",
-            "disabled": "Instrumentul va necesita aprobare manuală înainte de rulare",
-            "enabled": "Instrumentul va rula automat fără confirmare",
-            "howToEnable": "Activează mai întâi instrumentul pentru a folosi aprobarea automată"
-          }
-        },
-        "availableTools": "Instrumente disponibile",
-        "enable": "Activează instrumentul",
-        "inputSchema": {
-          "enum": {
-            "allowedValues": "Valori permise"
-          },
-          "label": "Schemă intrare"
-        },
-        "loadError": "Eroare obținere instrumente",
-        "noToolsAvailable": "Nu există instrumente disponibile",
-        "run": "Rulează"
-      },
-      "type": "Tip",
-      "types": {
-        "inMemory": "În memorie",
-        "sse": "SSE",
-        "stdio": "STDIO",
-        "streamableHttp": "HTTP fluxabil"
-      },
-      "updateError": "Actualizarea serverului a eșuat",
-      "updateSuccess": "Server actualizat cu succes",
-      "url": "URL",
-      "user": "Utilizator"
-    },
     "messages": {
       "divider": {
         "label": "Afișează divizor între mesaje",
@@ -5643,38 +5171,6 @@
     },
     "title": "Setări",
     "tool": {
-      "ocr": {
-        "common": {
-          "langs": "Limbi acceptate"
-        },
-        "error": {
-          "not_system": "OCR-ul de sistem acceptă doar Windows și MacOS"
-        },
-        "image": {
-          "error": {
-            "provider_not_found": "Furnizorul nu există"
-          },
-          "system": {
-            "no_need_configure": "MacOS nu necesită configurare"
-          },
-          "title": "Imagine"
-        },
-        "image_provider": "Furnizor serviciu OCR",
-        "paddleocr": {
-          "aistudio_access_token": "Token de acces Comunitatea AI Studio",
-          "api_url": "URL API",
-          "api_url_label": "Obțineți token-ul de acces și URL-ul API"
-        },
-        "system": {
-          "win": {
-            "langs_tooltip": "Dependent de Windows pentru a furniza servicii, trebuie să descarci pachete lingvistice în sistem pentru a suporta limbile relevante."
-          }
-        },
-        "tesseract": {
-          "langs_tooltip": "Citește documentația pentru a afla ce limbi personalizate sunt acceptate"
-        },
-        "title": "Serviciu OCR"
-      },
       "preprocess": {
         "paddleocr": {
           "aistudio_access_token": "Token de acces al Comunității AI Studio",
@@ -5687,100 +5183,7 @@
         "title": "Procesare documente",
         "tooltip": "În Setări -> Instrumente, setează un furnizor de servicii de procesare a documentelor. Procesarea documentelor poate îmbunătăți eficient performanța de recuperare a documentelor cu format complex și a documentelor scanate."
       },
-      "title": "Alte setări",
-      "websearch": {
-        "api_key_required": {
-          "content": "{{provider}} necesită o cheie API pentru a funcționa. Dorești să o configurezi acum?",
-          "ok": "Configurează",
-          "title": "Cheie API necesară"
-        },
-        "api_providers": "Furnizori API",
-        "apikey": "Cheie API",
-        "blacklist": "Listă neagră",
-        "blacklist_description": "Rezultatele de pe următoarele site-uri web nu vor apărea în rezultatele căutării",
-        "blacklist_tooltip": "Te rugăm să folosești următorul format (separate prin linie nouă)\nPotrivire model: *://*.exemplu.com/*\nExpresie regulată: /exemplu\\.(net|org)/",
-        "check": "Verifică",
-        "check_failed": "Verificare eșuată",
-        "check_success": "Verificare reușită",
-        "compression": {
-          "cutoff": {
-            "limit": {
-              "label": "Limită trunchiere",
-              "placeholder": "Introdu lungimea",
-              "tooltip": "Limitează lungimea conținutului rezultatelor căutării, conținutul care depășește limita va fi trunchiat (de ex., 2000 caractere)"
-            },
-            "unit": {
-              "char": "Caractere",
-              "token": "Token"
-            }
-          },
-          "error": {
-            "rag_failed": "RAG eșuat"
-          },
-          "info": {
-            "dimensions_auto_success": "Dimensiuni obținute automat cu succes, dimensiuni: {{dimensions}}"
-          },
-          "method": {
-            "cutoff": "Trunchiere",
-            "label": "Metodă compresie",
-            "none": "Niciuna",
-            "rag": "RAG"
-          },
-          "rag": {
-            "document_count": {
-              "label": "Număr fragmente document",
-              "tooltip": "Numărul așteptat de fragmente de document de extras din fiecare rezultat al căutării; numărul total real de fragmente extrase este această valoare înmulțită cu numărul de rezultate ale căutării."
-            }
-          },
-          "title": "Compresie rezultate căutare"
-        },
-        "content_limit": "Limită lungime conținut",
-        "content_limit_tooltip": "Limitează lungimea conținutului rezultatelor căutării; conținutul care depășește limita va fi trunchiat.",
-        "default_provider": "Furnizor implicit",
-        "free": "Gratuit",
-        "is_default": "Implicit",
-        "local_provider": {
-          "hint": "Conectează-te la site pentru a obține rezultate mai bune ale căutării și pentru a personaliza setările de căutare.",
-          "open_settings": "Deschide setările {{provider}}",
-          "settings": "Setări căutare locală"
-        },
-        "local_providers": "Furnizori locali",
-        "no_provider_selected": "Te rugăm să selectezi un furnizor de servicii de căutare înainte de a verifica.",
-        "overwrite": "Suprascrie serviciul de căutare",
-        "overwrite_tooltip": "Forțează utilizarea serviciului de căutare în loc de LLM",
-        "search_max_result": {
-          "label": "Număr de rezultate căutare",
-          "tooltip": "Când compresia rezultatelor căutării este dezactivată, numărul de rezultate poate fi prea mare, ceea ce poate duce la tokeni insuficienți"
-        },
-        "search_provider": "Furnizor serviciu căutare",
-        "search_provider_placeholder": "Alege un furnizor de servicii de căutare.",
-        "search_with_time": "Caută cu date incluse",
-        "set_as_default": "Setează ca implicit",
-        "subscribe": "Abonare listă neagră",
-        "subscribe_add": "Adaugă abonament",
-        "subscribe_add_failed": "Adăugarea sursei fluxului a eșuat",
-        "subscribe_add_success": "Flux de abonament adăugat cu succes!",
-        "subscribe_delete": "Șterge",
-        "subscribe_name": {
-          "label": "Nume alternativ",
-          "placeholder": "Nume alternativ folosit când fluxul de abonament descărcat nu are nume."
-        },
-        "subscribe_update": "Actualizează",
-        "subscribe_update_failed": "Actualizarea sursei abonamentului a eșuat",
-        "subscribe_update_success": "Sursa abonamentului a fost actualizată cu succes",
-        "subscribe_url": "Url abonament",
-        "tavily": {
-          "api_key": {
-            "label": "Cheie API Tavily",
-            "placeholder": "Introdu cheia API Tavily"
-          },
-          "description": "Tavily este un motor de căutare adaptat pentru agenți AI, oferind rezultate în timp real, precise, sugestii inteligente de interogare și capacități de cercetare aprofundată.",
-          "title": "Tavily"
-        },
-        "title": "Căutare web",
-        "url_invalid": "S-a introdus un URL invalid",
-        "url_required": "Te rugăm să introduci un URL"
-      }
+      "title": "Alte setări"
     },
     "translate": {
       "custom": {
@@ -5861,8 +5264,6 @@
     "home": "Acasă",
     "knowledge": "Bază de cunoștințe",
     "launchpad": "Launchpad",
-    "mcp-servers": "Servere MCP",
-    "memories": "Amintiri",
     "notes": "Notițe",
     "openclaw": "OpenClaw",
     "paintings": "Imagini",

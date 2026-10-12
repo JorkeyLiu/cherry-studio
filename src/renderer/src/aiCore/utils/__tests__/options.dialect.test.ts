@@ -78,7 +78,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     const model = modelWith('grok-3-mini', 'custom')
     const result = buildProviderOptions(assistant, model, provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(result.providerOptions['openai-compatible']).toMatchObject({ reasoningEffort: 'none' })
@@ -94,7 +93,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     const model = modelWith('deepseek-v4', 'custom')
     const result = buildProviderOptions(assistant, model, provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(result.providerOptions['openai-compatible']).toMatchObject({ reasoningEffort: 'none' })
@@ -109,7 +107,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     const model = modelWith('deepseek-v4', 'deepseek')
     const result = buildProviderOptions(assistant, model, provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(result.providerOptions['openai-compatible']).toMatchObject({ reasoningEffort: 'none' })
@@ -125,7 +122,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     const model = modelWith('grok-3-mini', 'silicon')
     const result = buildProviderOptions(assistant, model, provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(result.providerOptions['openai-compatible']).toMatchObject({ enable_thinking: false })
@@ -141,7 +137,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     const model = modelWith('deepseek-v3.2', 'dashscope')
     const result = buildProviderOptions(assistant, model, provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(result.providerOptions['openai-compatible']).toMatchObject({ enable_thinking: false })
@@ -164,7 +159,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
       const model = modelWith('any-model', 'custom')
       const result = buildProviderOptions(assistant, model, provider, {
         enableReasoning: true,
-        enableWebSearch: false,
         enableGenerateImage: false
       })
       expect(result.providerOptions['openai-compatible']).toMatchObject({ reasoningEffort: expected })
@@ -179,7 +173,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     vi.mocked(getProviderByModel).mockReturnValue(provider)
     const high = buildProviderOptions(assistantWith('high'), modelWith('any', 'silicon'), provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(high.providerOptions['openai-compatible']).toMatchObject({
@@ -189,7 +182,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     expect(high.providerOptions['openai-compatible']).not.toHaveProperty('thinking')
     const xhigh = buildProviderOptions(assistantWith('xhigh'), modelWith('any', 'silicon'), provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(xhigh.providerOptions['openai-compatible']).toMatchObject({
@@ -200,7 +192,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     vi.mocked(getProviderByModel).mockReturnValue(dash)
     const auto = buildProviderOptions(assistantWith('auto'), modelWith('any', 'dashscope'), dash, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(auto.providerOptions['openai-compatible']).toMatchObject({
@@ -221,7 +212,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
       vi.mocked(getProviderByModel).mockReturnValue(provider)
       const result = buildProviderOptions(assistantWith('none'), modelWith('deepseek-v4', 'custom'), provider, {
         enableReasoning: true,
-        enableWebSearch: false,
         enableGenerateImage: false
       })
       expect(result.providerOptions['openai-compatible']).toMatchObject({ reasoningEffort: 'none' })
@@ -235,7 +225,6 @@ describe('buildProviderOptions dialect contract — openai-compatible bucket sha
     vi.mocked(getProviderByModel).mockReturnValue(provider)
     const result = buildProviderOptions(assistantWith('low'), modelWith('grok-3-mini', 'silicon'), provider, {
       enableReasoning: true,
-      enableWebSearch: false,
       enableGenerateImage: false
     })
     expect(result.providerOptions['openai-compatible']).toMatchObject({

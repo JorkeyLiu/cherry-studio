@@ -76,7 +76,7 @@ export class ToolExecutor {
           isError: false
         })
       } catch (error) {
-        console.error(`[MCP Prompt Stream] Tool execution failed: ${toolUse.toolName}`, error)
+        console.error(`[PromptToolUse Stream] Tool execution failed: ${toolUse.toolName}`, error)
 
         // 处理错误情况
         const errorResult = this.handleToolError(toolUse, error, controller)

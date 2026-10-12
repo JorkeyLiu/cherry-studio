@@ -10,7 +10,6 @@ import { errorHandler } from './middleware/error'
 import { setupOpenAPIDocumentation } from './middleware/openapi'
 import { chatRoutes } from './routes/chat'
 import { knowledgeRoutes } from './routes/knowledge'
-import { mcpRoutes } from './routes/mcp'
 import { messagesProviderRoutes, messagesRoutes } from './routes/messages'
 import { modelsRoutes } from './routes/models'
 
@@ -128,9 +127,6 @@ app.get('/', (_req, res) => {
       models: 'GET /v1/models',
       messages: 'POST /v1/messages',
       messages_provider: 'POST /:provider/v1/messages',
-      mcps: 'GET /v1/mcps',
-      mcp_server: 'GET /v1/mcps/:server_id',
-      mcp_proxy: 'ALL /v1/mcps/:server_id/mcp',
       knowledge_bases: 'GET /v1/knowledge-bases',
       knowledge_search: 'POST /v1/knowledge-bases/search'
     }
@@ -148,7 +144,6 @@ const apiRouter = express.Router()
 apiRouter.use(authMiddleware)
 // Mount routes
 apiRouter.use('/chat', chatRoutes)
-apiRouter.use('/mcps', mcpRoutes)
 apiRouter.use('/messages', extendMessagesTimeout, messagesRoutes)
 apiRouter.use('/models', modelsRoutes)
 apiRouter.use('/knowledge-bases', knowledgeRoutes)

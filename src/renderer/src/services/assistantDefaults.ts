@@ -1,15 +1,6 @@
 import { DEFAULT_CONTEXTCOUNT, DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from '@renderer/config/constant'
 import i18n from '@renderer/i18n'
-import type {
-  Assistant,
-  AssistantSettings,
-  KnowledgeBase,
-  McpMode,
-  MCPServer,
-  Model,
-  Topic,
-  WebSearchProvider
-} from '@renderer/types'
+import type { Assistant, AssistantSettings, KnowledgeBase, Model, Topic } from '@renderer/types'
 import { v4 as uuid } from 'uuid'
 
 /**
@@ -59,15 +50,10 @@ export interface AssistantDefaults {
   defaultModel?: Model
   settings: AssistantSettings
   knowledge_bases?: KnowledgeBase[]
-  enableWebSearch?: boolean
-  webSearchProviderId?: WebSearchProvider['id']
   enableUrlContext?: boolean
   enableGenerateImage?: boolean
-  mcpMode?: McpMode
-  mcpServers?: MCPServer[]
   knowledgeRecognition?: 'off' | 'on'
   tags?: string[]
-  enableMemory?: boolean
 }
 
 export function getDefaultTopic(assistantId: string): Topic {
@@ -130,15 +116,10 @@ export function toAssistantDefaults(source: unknown): AssistantDefaults {
     'model',
     'defaultModel',
     'knowledge_bases',
-    'enableWebSearch',
-    'webSearchProviderId',
     'enableUrlContext',
     'enableGenerateImage',
-    'mcpMode',
-    'mcpServers',
     'knowledgeRecognition',
-    'tags',
-    'enableMemory'
+    'tags'
   ] as const
   for (const key of optionalKeys) {
     const value = legacy[key]
@@ -162,7 +143,22 @@ export function createAssistantFromDefaults(
   overrides: Partial<Assistant> = {}
 ): Assistant {
   const id = typeof overrides.id === 'string' && overrides.id.length > 0 ? overrides.id : uuid()
-  const { ...rest } = overrides
+  // Strip removed backend capabilities that may still be present in old
+  // persisted/imported assistants — they must never re-enter new entities.
+  const {
+    enableWebSearch: _droppedWebSearch,
+    webSearchProviderId: _droppedProviderId,
+    mcpMode: _droppedMcpMode,
+    mcpServers: _droppedMcpServers,
+    enableMemory: _droppedMemory,
+    ...rest
+  } = overrides as Record<string, unknown> as Partial<Assistant> & {
+    enableWebSearch?: unknown
+    webSearchProviderId?: unknown
+    mcpMode?: unknown
+    mcpServers?: unknown
+    enableMemory?: unknown
+  }
   return {
     name: defaults.name,
     emoji: defaults.emoji,
@@ -173,15 +169,10 @@ export function createAssistantFromDefaults(
     defaultModel: defaults.defaultModel,
     settings: { ...defaults.settings },
     knowledge_bases: defaults.knowledge_bases,
-    enableWebSearch: defaults.enableWebSearch,
-    webSearchProviderId: defaults.webSearchProviderId,
     enableUrlContext: defaults.enableUrlContext,
     enableGenerateImage: defaults.enableGenerateImage,
-    mcpMode: defaults.mcpMode,
-    mcpServers: defaults.mcpServers,
     knowledgeRecognition: defaults.knowledgeRecognition,
     tags: defaults.tags,
-    enableMemory: defaults.enableMemory,
     ...rest,
     id,
     topics: [getDefaultTopic(id)],
@@ -208,7 +199,21 @@ export function createInitialAssistant(defaults: AssistantDefaults = createAssis
  * this fallback where reasonably possible.
  */
 export function createEphemeralAssistant(init: Partial<Assistant> = {}): Assistant {
-  const { settings, ...rest } = init
+  const {
+    settings,
+    enableWebSearch: _droppedWebSearch,
+    webSearchProviderId: _droppedProviderId,
+    mcpMode: _droppedMcpMode,
+    mcpServers: _droppedMcpServers,
+    enableMemory: _droppedMemory,
+    ...rest
+  } = init as Record<string, unknown> as Partial<Assistant> & {
+    enableWebSearch?: unknown
+    webSearchProviderId?: unknown
+    mcpMode?: unknown
+    mcpServers?: unknown
+    enableMemory?: unknown
+  }
   return {
     name: '',
     prompt: '',

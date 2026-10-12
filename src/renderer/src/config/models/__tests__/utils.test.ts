@@ -35,7 +35,6 @@ import {
   isZhipuModel
 } from '../utils'
 import { isGenerateImageModel, isTextToImageModel, isVisionModel } from '../vision'
-import { isOpenAIWebSearchChatCompletionOnlyModel } from '../websearch'
 
 vi.mock('@renderer/hooks/useStore', () => ({
   getStoreProviders: vi.fn(() => [])
@@ -94,10 +93,6 @@ vi.mock(import('../openai'), async (importOriginal) => {
   }
 })
 
-vi.mock('../websearch', () => ({
-  isOpenAIWebSearchChatCompletionOnlyModel: vi.fn()
-}))
-
 const createModel = (overrides: Partial<Model> = {}): Model => ({
   id: 'gpt-4o',
   name: 'gpt-4o',
@@ -112,7 +107,6 @@ const visionMock = vi.mocked(isVisionModel)
 const textToImageMock = vi.mocked(isTextToImageModel)
 const generateImageMock = vi.mocked(isGenerateImageModel)
 const reasoningMock = vi.mocked(isOpenAIReasoningModel)
-const openAIWebSearchOnlyMock = vi.mocked(isOpenAIWebSearchChatCompletionOnlyModel)
 
 describe('model utils', () => {
   beforeEach(() => {
@@ -123,7 +117,6 @@ describe('model utils', () => {
     textToImageMock.mockReturnValue(false)
     generateImageMock.mockReturnValue(true)
     reasoningMock.mockReturnValue(false)
-    openAIWebSearchOnlyMock.mockReturnValue(false)
   })
 
   describe('Verbosity support', () => {

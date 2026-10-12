@@ -24,17 +24,7 @@ type ToolOrder = {
 }
 
 export const DEFAULT_TOOL_ORDER: ToolOrder = {
-  visible: [
-    'new_topic',
-    'attachment',
-    'thinking',
-    'web_search',
-    'url_context',
-    'knowledge_base',
-    'mcp_tools',
-    'generate_image',
-    'mention_models'
-  ],
+  visible: ['new_topic', 'attachment', 'thinking', 'url_context', 'knowledge_base', 'generate_image', 'mention_models'],
   hidden: []
 }
 
@@ -63,9 +53,19 @@ const inputToolsSlice = createSlice({
 
 export const { setToolOrder, setIsCollapsed } = inputToolsSlice.actions
 
-// Selector to get tool order for the (single) ordinary Chat scope
+// Selector to get tool order for the (single) ordinary Chat scope.
+// Legacy persisted orders may still contain removed keys
+// ('web_search', 'mcp_tools'); they are stripped here so old profiles never
+// reintroduce removed backend capabilities via UI ordering.
 export const selectToolOrder = (state: { inputTools: InputToolsState }): ToolOrder => {
-  return state.inputTools.toolOrder
+  const stripLegacy = (list: InputBarToolType[]): InputBarToolType[] =>
+    list.filter((t) => t !== ('web_search' as InputBarToolType) && t !== ('mcp_tools' as InputBarToolType))
+  const toolOrder = state.inputTools.toolOrder
+  if (!toolOrder) return DEFAULT_TOOL_ORDER
+  return {
+    visible: stripLegacy(toolOrder.visible ?? []),
+    hidden: stripLegacy(toolOrder.hidden ?? [])
+  }
 }
 
 export default inputToolsSlice.reducer

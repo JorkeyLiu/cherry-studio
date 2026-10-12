@@ -6,9 +6,7 @@ import type {
   FileMetadata,
   GenerateImageResponse,
   KnowledgeReference,
-  MCPServer,
   MCPToolResponse,
-  MemoryItem,
   Metrics,
   Model,
   NormalToolResponse,
@@ -132,7 +130,6 @@ export interface CitationMessageBlock extends BaseMessageBlock {
   type: MessageBlockType.CITATION
   response?: WebSearchResponse
   knowledge?: KnowledgeReference[]
-  memories?: MemoryItem[]
 }
 
 // 文件块
@@ -212,9 +209,9 @@ export type Message = {
   askId?: string // 关联的问题消息ID
   mentions?: Model[]
   /**
-   * @deprecated
+   * Legacy history-only server refs (removed MCP). Read-only; never constructed.
    */
-  enabledMCPs?: MCPServer[]
+  enabledMCPs?: Array<Record<string, unknown>>
 
   usage?: Usage
   metrics?: Metrics
@@ -256,8 +253,8 @@ export interface MessageInputBaseParams {
   knowledgeBaseIds?: string[]
   mentions?: Model[]
   /**
-   * @deprecated
+   * Legacy history-only server refs (removed MCP). Read-only; never constructed.
    */
-  enabledMCPs?: MCPServer[]
+  enabledMCPs?: Array<Record<string, unknown>>
   usage?: CompletionUsage
 }

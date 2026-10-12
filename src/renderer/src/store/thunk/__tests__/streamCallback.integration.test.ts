@@ -362,7 +362,6 @@ describe('streamCallback Integration Tests', () => {
       name: 'Test Model'
     } as Model,
     prompt: '',
-    enableWebSearch: false,
     enableGenerateImage: false,
     knowledge_bases: [],
     topics: [],
@@ -757,10 +756,6 @@ describe('streamCallback Integration Tests', () => {
     const callbacks = createMockCallbacks(mockAssistantMsgId, mockTopicId, mockAssistant, dispatch, getState)
 
     const mockExternalToolResult: ExternalToolResult = {
-      webSearch: {
-        source: WEB_SEARCH_SOURCE.WEBSEARCH,
-        results: [{ title: 'External Result', url: 'http://external.com', snippet: 'External snippet' }]
-      },
       knowledge: [
         {
           id: 1,
@@ -786,7 +781,6 @@ describe('streamCallback Integration Tests', () => {
 
     const citationBlock = blocks.find((block) => block.type === MessageBlockType.CITATION)
     expect(citationBlock).toBeDefined()
-    expect((citationBlock as any)?.response).toEqual(mockExternalToolResult.webSearch)
     expect((citationBlock as any)?.knowledge).toEqual(mockExternalToolResult.knowledge)
     expect(citationBlock?.status).toBe(MessageBlockStatus.SUCCESS)
   })

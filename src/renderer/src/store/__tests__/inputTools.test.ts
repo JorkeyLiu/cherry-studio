@@ -59,4 +59,19 @@ describe('inputTools slice', () => {
     const state = inputToolsReducer(undefined, { type: '@@INIT' })
     expect(selectToolOrder({ inputTools: state })).toEqual(DEFAULT_TOOL_ORDER)
   })
+
+  it('strips removed web_search/mcp_tools keys from legacy persisted orders', () => {
+    const legacy = {
+      toolOrder: {
+        visible: ['new_topic', 'web_search', 'url_context', 'mcp_tools'] as unknown as InputBarToolType[],
+        hidden: ['web_search'] as unknown as InputBarToolType[]
+      },
+      isCollapsed: true
+    }
+    const selected = selectToolOrder({ inputTools: legacy })
+    expect(selected.visible).not.toContain('web_search' as unknown as InputBarToolType)
+    expect(selected.visible).not.toContain('mcp_tools' as unknown as InputBarToolType)
+    expect(selected.visible).toContain('url_context')
+    expect(selected.hidden).not.toContain('web_search' as unknown as InputBarToolType)
+  })
 })

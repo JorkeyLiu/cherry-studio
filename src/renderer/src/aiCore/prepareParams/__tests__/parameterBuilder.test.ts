@@ -16,8 +16,7 @@ import { buildStreamTextParams, getEffectiveMaxToolCalls } from '../parameterBui
 vi.mock('@renderer/store', () => ({
   default: {
     getState: () => ({
-      llm: { defaultModel: undefined },
-      websearch: { maxResults: 5, excludeDomains: [], searchWithTime: false }
+      llm: { defaultModel: undefined }
     }),
     dispatch: vi.fn()
   }
@@ -25,10 +24,6 @@ vi.mock('@renderer/store', () => ({
 
 vi.mock('@renderer/aiCore/utils/options', () => ({
   buildProviderOptions: vi.fn(() => ({ providerOptions: {}, standardParams: {} }))
-}))
-
-vi.mock('@renderer/aiCore/utils/mcp', () => ({
-  setupToolsConfig: vi.fn(() => undefined)
 }))
 
 vi.mock('@renderer/utils/prompt', () => ({
@@ -45,10 +40,6 @@ vi.mock('@cherrystudio/ai-core/provider', async (importOriginal) => {
 
 vi.mock('@renderer/utils/provider', () => ({
   isSupportUrlContextProvider: vi.fn(() => false)
-}))
-
-vi.mock('@renderer/config/prompts-code-mode', () => ({
-  getHubModeSystemPrompt: vi.fn(() => undefined)
 }))
 
 vi.mock('../header', async (importOriginal) => {
@@ -136,7 +127,6 @@ describe('buildStreamTextParams never injects x-opencode-session (AiProvider bou
       topics: [],
       messages: [],
       type: 'assistant',
-      mcpMode: 'disabled',
       settings: {},
       model
     }) as unknown as Assistant

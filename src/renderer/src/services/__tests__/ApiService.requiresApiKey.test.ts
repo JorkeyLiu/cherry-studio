@@ -13,7 +13,6 @@ vi.mock('@renderer/store', () => ({
     dispatch: (action: unknown) => mockStore.dispatch(action as never)
   }
 }))
-vi.mock('@renderer/store/mcp', () => ({ hubMCPServer: { id: 'hub' } }))
 vi.mock('@renderer/i18n', () => ({ default: { t: (k: string) => k } }))
 vi.mock('@renderer/config/models', async (importOriginal) => {
   const actual = await importOriginal<typeof ConfigModelsModule>()

@@ -17,7 +17,6 @@ export const getModelTags = (_models: Model[]): Record<ModelTag, boolean> => {
     embedding: false,
     reasoning: false,
     function_calling: false,
-    web_search: false,
     rerank: false,
     free: false
   }

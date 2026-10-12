@@ -70,29 +70,7 @@ export enum IpcChannel {
   Config_Set = 'config:set',
   Config_Get = 'config:get',
 
-  // Mcp
-  Mcp_AddServer = 'mcp:add-server',
-  Mcp_RemoveServer = 'mcp:remove-server',
-  Mcp_RestartServer = 'mcp:restart-server',
-  Mcp_StopServer = 'mcp:stop-server',
-  Mcp_ListTools = 'mcp:list-tools',
-  Mcp_CallTool = 'mcp:call-tool',
-  Mcp_ListPrompts = 'mcp:list-prompts',
-  Mcp_GetPrompt = 'mcp:get-prompt',
-  Mcp_ListResources = 'mcp:list-resources',
-  Mcp_GetResource = 'mcp:get-resource',
-  Mcp_GetInstallInfo = 'mcp:get-install-info',
-  Mcp_ServersChanged = 'mcp:servers-changed',
-  Mcp_ServersUpdated = 'mcp:servers-updated',
-  Mcp_CheckConnectivity = 'mcp:check-connectivity',
-  Mcp_UploadDxt = 'mcp:upload-dxt',
-  Mcp_AbortTool = 'mcp:abort-tool',
-  Mcp_ResolveHubTool = 'mcp:resolve-hub-tool',
-  Mcp_GetServerVersion = 'mcp:get-server-version',
-  Mcp_Progress = 'mcp:progress',
-  Mcp_GetServerLogs = 'mcp:get-server-logs',
-  Mcp_ServerLog = 'mcp:server-log',
-  // Python
+  // Python — generic script execution channel (independent of removed MCP/DXT runtime).
   Python_Execute = 'python:execute',
 
   // obsidian
@@ -253,11 +231,6 @@ export enum IpcChannel {
 
   ReduxStoreReady = 'redux-store-ready',
 
-  // Search Window
-  SearchWindow_Open = 'search-window:open',
-  SearchWindow_Close = 'search-window:close',
-  SearchWindow_OpenUrl = 'search-window:open-url',
-
   //Store Sync
   StoreSync_Subscribe = 'store-sync:subscribe',
   StoreSync_Unsubscribe = 'store-sync:unsubscribe',
@@ -275,19 +248,6 @@ export enum IpcChannel {
   // ProviderLogo — optional models.dev logo enhancement (never gates admission).
   ProviderLogo_GetLogo = 'provider-logo:get-logo',
   ProviderLogo_GetLogos = 'provider-logo:get-logos',
-
-  // Memory
-  Memory_Add = 'memory:add',
-  Memory_Search = 'memory:search',
-  Memory_List = 'memory:list',
-  Memory_Delete = 'memory:delete',
-  Memory_Update = 'memory:update',
-  Memory_Get = 'memory:get',
-  Memory_SetConfig = 'memory:set-config',
-  Memory_DeleteUser = 'memory:delete-user',
-  Memory_DeleteAllMemoriesForUser = 'memory:delete-all-memories-for-user',
-  Memory_GetUsersList = 'memory:get-users-list',
-  Memory_MigrateMemoryDb = 'memory:migrate-memory-db',
 
   // TRACE
   TRACE_SAVE_DATA = 'trace:saveData',
@@ -315,10 +275,6 @@ export enum IpcChannel {
 
   // ExternalApps
   ExternalApps_DetectInstalled = 'external-apps:detect-installed',
-
-  // OCR
-  OCR_ocr = 'ocr:ocr',
-  OCR_ListProviders = 'ocr:list-providers',
 
   // Analytics
   Analytics_TrackTokenUsage = 'analytics:track-token-usage',

@@ -505,13 +505,6 @@
         "title": "Autonomer Modus"
       },
       "tooling": {
-        "mcp": {
-          "description": "Verbinden Sie MCP-Server, um weitere Tools freizuschalten, die oben vorab autorisiert werden können.",
-          "empty": "Keine MCP-Server erkannt. Bitte fügen Sie welche auf der MCP-Einstellungsseite hinzu.",
-          "inactiveTooltip": "Dieser MCP-Server ist nicht aktiv. Bitte starten Sie ihn zuerst.",
-          "manageHint": "Benötigen Sie weitere Konfigurationen? Gehen Sie zu Einstellungen → MCP-Server.",
-          "toggle": "{{name}} umschalten"
-        },
         "permissionMode": {
           "acceptEdits": {
             "description": "Dateibearbeitungen und Dateisystemoperationen werden automatisch genehmigt.",
@@ -543,7 +536,6 @@
           "autoDescription": "Dieses Tool wird vom aktuellen Berechtigungsmodus automatisch vorab autorisiert.",
           "autoDisabledTooltip": "Automatisch genehmigt durch „{{mode}}“ und kann nicht deaktiviert werden.",
           "empty": "Keine Tools entsprechen den Filterkriterien.",
-          "mcpBadge": "MCP-Tool",
           "requiresApproval": "Erfordert bei Deaktivierung manuelle Genehmigung",
           "search": "Tools suchen",
           "toggle": "{{name}} umschalten"
@@ -557,16 +549,6 @@
         "tab": "Vorab autorisierte Tools",
         "title": "Vorab autorisierte Tools",
         "toggle": "{{defaultValue}}"
-      },
-      "toolsMcp": {
-        "mcp": {
-          "tab": "MCP",
-          "title": "MCP-Server"
-        },
-        "tab": "Tools",
-        "tools": {
-          "title": "Vorab genehmigte Tools"
-        }
       }
     },
     "sidebar_title": "Agenten",
@@ -654,9 +636,6 @@
         },
         "WebFetch": {
           "description": "Ruft Inhalte von einer angegebenen URL ab"
-        },
-        "WebSearch": {
-          "description": "Führt Websuchen mit Domainfilterung durch"
         },
         "Write": {
           "description": "Erstellt oder überschreibt Dateien"
@@ -897,27 +876,6 @@
         "label": "Maximale Werkzeugaufrufe",
         "tip": "Maximale Anzahl von Tool-Aufrufen, die in einer einzelnen Konversation erlaubt sind. Höhere Werte ermöglichen komplexere, mehrstufige Operationen, können aber den Token-Verbrauch und die Antwortzeit erhöhen."
       },
-      "mcp": {
-        "description": "Standardmäßig aktivierte MCP-Server",
-        "enableFirst": "Bitte aktivieren Sie diesen Server zuerst in den MCP-Einstellungen",
-        "label": "MCP-Server",
-        "mode": {
-          "auto": {
-            "description": "KI entdeckt und nutzt Werkzeuge automatisch",
-            "label": "Auto"
-          },
-          "disabled": {
-            "description": "Keine MCP-Tools",
-            "label": "Deaktiviert"
-          },
-          "manual": {
-            "description": "Wählen Sie spezifische MCP-Server",
-            "label": "Handbuch"
-          }
-        },
-        "noServersAvailable": "Keine MCP-Server verfügbar. Bitte fügen Sie Server in den Einstellungen hinzu",
-        "title": "MCP-Server"
-      },
       "model": "Modelleinstellungen",
       "more": "Assistenteneinstellungen",
       "prompt": "Prompt-Einstellungen",
@@ -1118,36 +1076,7 @@
         "image_or_document": "Bild oder Dokument hochladen",
         "upload_from_local": "Lokale Datei hochladen..."
       },
-      "url_context": "Webseiten-Kontext",
-      "web_search": {
-        "builtin": {
-          "disabled_content": "Aktuelles Modell unterstützt keine Websuche",
-          "enabled_content": "Verwenden Sie die integrierte Websuchfunktion des Modells",
-          "label": "Modell integriert"
-        },
-        "button": {
-          "ok": "Zu Einstellungen"
-        },
-        "enable": "Websuche aktivieren",
-        "enable_content": "Bitte überprüfen Sie zunächst die Websuch-Konnektivität in den Einstellungen",
-        "label": "Websuche",
-        "no_web_search": {
-          "description": "Websuchfunktion nicht aktivieren",
-          "label": "Keine Websuche"
-        },
-        "settings": "Websuch-Einstellungen"
-      }
-    },
-    "mcp": {
-      "error": {
-        "parse_tool_call": "Kann nicht in gültiges Tool-Aufrufformat konvertiert werden: {{toolCall}}"
-      },
-      "warning": {
-        "gemini_web_search": "Gemini unterstützt nicht die gleichzeitige Verwendung von nativer Websuche und Funktionsaufrufen",
-        "multiple_tools": "Mehrere übereinstimmende MCP-Tools gefunden, {{tool}} wurde ausgewählt",
-        "no_tool": "Erforderliches MCP-Tool {{tool}} nicht gefunden",
-        "url_context": "Gemini unterstützt nicht die gleichzeitige Verwendung von Webseiten-Kontext und Funktionsaufrufen"
-      }
+      "url_context": "Webseiten-Kontext"
     },
     "message": {
       "copy_topic": {
@@ -1469,12 +1398,7 @@
       },
       "unpin": "Anheften aufheben"
     },
-    "translate": "Übersetzen",
-    "web_search": {
-      "warning": {
-        "openai": "GPT5-Modell mit minimaler Denkstärke unterstützt keine Websuche"
-      }
-    }
+    "translate": "Übersetzen"
   },
   "code": {
     "auto_update_to_latest": "Updates prüfen und neueste Version installieren",
@@ -1732,10 +1656,7 @@
         "message": "Es scheint ein Problem aufgetreten zu sein...",
         "reload": "Neu laden"
       },
-      "details": "Details",
-      "mcp": {
-        "invalid": "Ungültiger MCP-Server"
-      }
+      "details": "Details"
     },
     "cause": "Fehlerursache",
     "chat": {
@@ -1758,12 +1679,10 @@
       "deprecated": "Dieses Modell wurde außer Betrieb genommen, bitte wechseln Sie zu einem anderen Modell",
       "go_to_settings": "Zu Einstellungen",
       "knowledge": "Vektorisierung der Wissensdatenbank fehlgeschlagen",
-      "mcp": "Verbindung zum MCP-Server fehlgeschlagen, prüfen Sie ob der Dienst läuft",
       "model": "Modell nicht gefunden oder kein Zugriff",
       "model_conflict": "Diagnosemodell ist identisch mit dem fehlerhaften Modell",
       "network": "Verbindung zum Server nicht möglich, Netzwerk- oder Proxy-Einstellungen prüfen",
       "no_model": "[to be translated]:No model is selected or its provider is not configured, please add a model first",
-      "ocr": "OCR-Engine nicht initialisiert, OCR-Einstellungen prüfen",
       "parse": "Die KI hat eine ungültige Antwort zurückgegeben, bitte versuchen Sie es erneut oder wechseln Sie das Modell.",
       "payload": "Anfrageinhalt zu groß, bitte verringern Sie die Datei- oder Textgröße",
       "proxy": "Proxy- oder SSL-Zertifikatsfehler, überprüfen Sie die Proxy- und Netzwerkeinstellungen",
@@ -2182,112 +2101,6 @@
     },
     "title": "LM Studio"
   },
-  "memory": {
-    "actions": "Aktionen",
-    "add_failed": "Erinnerung hinzufügen fehlgeschlagen",
-    "add_first_memory": "Erste Erinnerung hinzufügen",
-    "add_memory": "Erinnerung hinzufügen",
-    "add_new_user": "Neuen Benutzer hinzufügen",
-    "add_success": "Erinnerung erfolgreich hinzugefügt",
-    "add_user": "Benutzer hinzufügen",
-    "add_user_failed": "Benutzer hinzufügen fehlgeschlagen",
-    "all_users": "Alle Benutzer",
-    "cannot_delete_default_user": "Standardbenutzer kann nicht gelöscht werden",
-    "configure_memory_first": "Bitte konfigurieren Sie zuerst die Erinnerungseinstellungen",
-    "content": "Inhalt",
-    "current_user": "Aktueller Benutzer",
-    "custom": "Benutzerdefiniert",
-    "default": "Standard",
-    "default_user": "Standardbenutzer",
-    "delete_confirm": "Möchten Sie diese Erinnerung wirklich löschen?",
-    "delete_confirm_content": "Möchten Sie {{count}} Erinnerungen wirklich löschen?",
-    "delete_confirm_single": "Möchten Sie diese Erinnerung wirklich löschen?",
-    "delete_confirm_title": "Erinnerung löschen",
-    "delete_failed": "Erinnerung löschen fehlgeschlagen",
-    "delete_selected": "Ausgewählte löschen",
-    "delete_success": "Erinnerung erfolgreich gelöscht",
-    "delete_user": "Benutzer löschen",
-    "delete_user_confirm_content": "Möchten Sie Benutzer {{user}} und alle zugehörigen Erinnerungen wirklich löschen?",
-    "delete_user_confirm_title": "Benutzer löschen",
-    "delete_user_failed": "Benutzer löschen fehlgeschlagen",
-    "description": "Die Erinnerungsfunktion ermöglicht es Ihnen, Informationen aus Ihren Interaktionen mit dem Assistenten zu speichern und zu verwalten. Sie können Erinnerungen hinzufügen, bearbeiten und löschen sowie filtern und durchsuchen.",
-    "edit_memory": "Erinnerung bearbeiten",
-    "embedding_dimensions": "Embedding-Dimensionen",
-    "embedding_model": "Embedding-Modell",
-    "enable_global_memory_first": "Bitte aktivieren Sie zuerst die globale Erinnerung",
-    "end_date": "Enddatum",
-    "global_memory": "Globale Erinnerung",
-    "global_memory_description": "Globale Erinnerung muss in den Assistenteneinstellungen aktiviert werden, um sie zu verwenden",
-    "global_memory_disabled_desc": "Um die Erinnerungsfunktion zu nutzen, aktivieren Sie bitte zuerst die globale Erinnerung in den Assistenteneinstellungen.",
-    "global_memory_disabled_title": "Globale Erinnerung ist deaktiviert",
-    "global_memory_enabled": "Globale Erinnerung ist aktiviert",
-    "go_to_memory_page": "Zur Erinnerungsseite",
-    "initial_memory_content": "Willkommen! Dies ist Ihre erste Erinnerung.",
-    "llm_model": "LLM-Modell",
-    "load_failed": "Erinnerungen laden fehlgeschlagen",
-    "loading": "Erinnerungen werden geladen...",
-    "loading_memories": "Erinnerungen werden geladen...",
-    "memories_description": "{{count}} / {{total}} Erinnerungen angezeigt",
-    "memories_reset_success": "Alle Erinnerungen von {{user}} wurden erfolgreich zurückgesetzt",
-    "memory": "Erinnerungen",
-    "memory_content": "Erinnerungsinhalt",
-    "memory_placeholder": "Erinnerungsinhalt eingeben...",
-    "new_user_id": "Neue Benutzer-ID",
-    "new_user_id_placeholder": "Eindeutige Benutzer-ID eingeben",
-    "no_matching_memories": "Keine passenden Erinnerungen gefunden",
-    "no_memories": "Keine Erinnerungen vorhanden",
-    "no_memories_description": "Beginnen Sie damit, Ihre erste Erinnerung hinzuzufügen",
-    "not_configured_desc": "Bitte konfigurieren Sie Embedding- und LLM-Modelle in den Erinnerungseinstellungen, um die Erinnerungsfunktion zu aktivieren.",
-    "not_configured_title": "Erinnerung nicht konfiguriert",
-    "pagination_total": "Eintrag {{start}}-{{end}} von {{total}}",
-    "please_enter_memory": "Bitte Erinnerungsinhalt eingeben",
-    "please_select_embedding_model": "Bitte Embedding-Modell auswählen",
-    "please_select_llm_model": "Bitte LLM-Modell auswählen",
-    "reset_filters": "Filter zurücksetzen",
-    "reset_memories": "Erinnerungen zurücksetzen",
-    "reset_memories_confirm_content": "Möchten Sie alle Erinnerungen von {{user}} dauerhaft löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.",
-    "reset_memories_confirm_title": "Alle Erinnerungen zurücksetzen",
-    "reset_memories_failed": "Erinnerungen zurücksetzen fehlgeschlagen",
-    "reset_user_memories": "Benutzererinnerungen zurücksetzen",
-    "reset_user_memories_confirm_content": "Möchten Sie alle Erinnerungen von {{user}} wirklich zurücksetzen?",
-    "reset_user_memories_confirm_title": "Benutzererinnerungen zurücksetzen",
-    "reset_user_memories_failed": "Benutzererinnerungen zurücksetzen fehlgeschlagen",
-    "score": "Bewertung",
-    "search": "Suchen",
-    "search_placeholder": "Erinnerungen durchsuchen...",
-    "select_embedding_model_placeholder": "Embedding-Modell auswählen",
-    "select_llm_model_placeholder": "LLM-Modell auswählen",
-    "select_user": "Benutzer auswählen",
-    "settings": "Einstellungen",
-    "settings_title": "Erinnerungseinstellungen",
-    "start_date": "Startdatum",
-    "statistics": "Statistiken",
-    "stored_memories": "Gespeicherte Erinnerungen",
-    "switch_user": "Benutzer wechseln",
-    "switch_user_confirm": "Benutzerkontext zu {{user}} wechseln?",
-    "time": "Zeit",
-    "title": "Globale Erinnerung",
-    "total_memories": "Erinnerungen",
-    "try_different_filters": "Versuchen Sie, die Suchkriterien anzupassen",
-    "update_failed": "Erinnerung aktualisieren fehlgeschlagen",
-    "update_success": "Erinnerung erfolgreich aktualisiert",
-    "user": "Benutzer",
-    "user_created": "Benutzer {{user}} erfolgreich erstellt und gewechselt",
-    "user_deleted": "Benutzer {{user}} erfolgreich gelöscht",
-    "user_id": "Benutzer-ID",
-    "user_id_exists": "Diese Benutzer-ID existiert bereits",
-    "user_id_invalid_chars": "Benutzer-ID darf nur Buchstaben, Zahlen, Bindestriche und Unterstriche enthalten",
-    "user_id_placeholder": "Benutzer-ID eingeben (optional)",
-    "user_id_required": "Benutzer-ID ist erforderlich",
-    "user_id_reserved": "'default-user' ist reserviert. Bitte verwenden Sie eine andere ID",
-    "user_id_rules": "Benutzer-ID muss eindeutig sein und darf nur Buchstaben, Zahlen, Bindestriche (-) und Unterstriche (_) enthalten",
-    "user_id_too_long": "Benutzer-ID darf 50 Zeichen nicht überschreiten",
-    "user_management": "Benutzerverwaltung",
-    "user_memories_reset": "Alle Erinnerungen von {{user}} wurden zurückgesetzt",
-    "user_switch_failed": "Benutzer wechseln fehlgeschlagen",
-    "user_switched": "Benutzerkontext zu {{user}} gewechselt",
-    "users": "Benutzer"
-  },
   "message": {
     "agents": {
       "import": {
@@ -2367,9 +2180,6 @@
       "chunk_overlap_too_large": "Segmentüberlappung darf nicht größer als Segmentgröße sein",
       "copy": "Kopieren fehlgeschlagen",
       "dimension_too_large": "Inhaltsgröße zu groß",
-      "endpoint": {
-        "web_search_unsupported": "[to be translated]:Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider"
-      },
       "enter": {
         "api": {
           "host": "Bitte geben Sie Ihre API-Adresse ein",
@@ -2557,7 +2367,6 @@
         "exitPlanMode": "ExitPlanModus",
         "glob": "Globus",
         "grep": "Grep",
-        "mcpServerTool": "MCP-Server-Tool",
         "multiEdit": "MultiEdit",
         "notebookEdit": "NotizbuchBearbeiten",
         "readFile": "Datei lesen",
@@ -2567,7 +2376,6 @@
         "todoWrite": "Alles schreiben",
         "tool": "Werkzeug",
         "webFetch": "Web abrufen",
-        "webSearch": "Websuche",
         "write": "Schreiben"
       },
       "noData": "Keine Daten für dieses Tool verfügbar",
@@ -2641,11 +2449,7 @@
       }
     },
     "websearch": {
-      "cutoff": "Suchergebnisse werden gekürzt...",
-      "fetch_complete": "{{count}} Suchergebnisse",
-      "rag": "RAG wird ausgeführt...",
-      "rag_complete": "{{countAfter}} von {{countBefore}} Ergebnissen behalten...",
-      "rag_failed": "RAG fehlgeschlagen, leere Ergebnisse zurückgegeben..."
+      "fetch_complete": "{{count}} Suchergebnisse"
     }
   },
   "minapp": {
@@ -2946,30 +2750,6 @@
       "success": "{{type}} erfolgreich zur Wissensdatenbank hinzugefügt"
     },
     "tip": "Bei erfolgreicher Antwort wird nur für Nachrichten über 30 Sekunden eine Benachrichtigung angezeigt"
-  },
-  "ocr": {
-    "builtin": {
-      "system": "System-OCR"
-    },
-    "error": {
-      "provider": {
-        "cannot_remove_builtin": "Eingebauter Anbieter kann nicht entfernt werden",
-        "existing": "Anbieter existiert bereits",
-        "get_providers": "Failed to obtain available providers",
-        "not_found": "OCR-Anbieter nicht gefunden",
-        "update_failed": "Konfiguration aktualisieren fehlgeschlagen"
-      },
-      "unknown": "Fehler während OCR-Prozess"
-    },
-    "file": {
-      "not_supported": "Nicht unterstützter Dateityp {{type}}"
-    },
-    "processing": "OCR wird verarbeitet...",
-    "warning": {
-      "provider": {
-        "fallback": "Auf {{name}} zurückgefallen, dies kann zu Problemen führen"
-      }
-    }
   },
   "ollama": {
     "keep_alive_time": {
@@ -4762,258 +4542,6 @@
       "title": "Starten",
       "totray": "Beim Start ins Tray minimieren"
     },
-    "mcp": {
-      "actions": "Aktionen",
-      "active": "Aktivieren",
-      "addError": "Server hinzufügen fehlgeschlagen",
-      "addServer": {
-        "create": "Schnell erstellen",
-        "importFrom": {
-          "connectionFailed": "Verbindung fehlgeschlagen",
-          "dxt": "DXT-Paket importieren",
-          "dxtFile": "DXT-Paket-Datei",
-          "dxtHelp": "MCP-Server-Datei .dxt auswählen",
-          "dxtProcessFailed": "DXT-Datei verarbeiten fehlgeschlagen",
-          "error": {
-            "multipleServers": "Import von mehreren Servern nicht möglich"
-          },
-          "invalid": "Ungültige Eingabe, bitte JSON-Format überprüfen",
-          "json": "Von JSON importieren",
-          "method": "Importmethode",
-          "nameExists": "Server existiert bereits: {{name}}",
-          "noDxtFile": "Eine DXT-Datei auswählen",
-          "oneServer": "Nur eine MCP-Server-Konfiguration kann gespeichert werden",
-          "placeholder": "MCP-Server-JSON-Konfiguration einfügen",
-          "selectDxtFile": "DXT-Datei auswählen",
-          "tooltip": "Konfigurations-JSON von MCP-Servers kopieren (Vorzugsweise NPX oder UVX-Konfigurationen verwenden) und in das Eingabefeld einfügen"
-        },
-        "label": "Server hinzufügen"
-      },
-      "addSuccess": "Server erfolgreich hinzugefügt",
-      "advancedSettings": "Erweiterte Einstellungen",
-      "args": "Parameter",
-      "argsTooltip": "Ein Parameter pro Zeile",
-      "baseUrlTooltip": "Remote-URL-Adresse",
-      "builtinServers": "Integrierter Server",
-      "builtinServersDescriptions": {
-        "brave_search": "MCP-Server-Implementierung mit Brave-Search-API, die sowohl Web- als auch lokale Suchfunktionen bietet. BRAVE_API_KEY-Umgebungsvariable muss konfiguriert werden",
-        "browser": "Steuert ein headless Electron-Fenster über das Chrome DevTools Protocol. Tools: URL öffnen, einzeiligen JS ausführen, Sitzung zurücksetzen.",
-        "didi_mcp": "An integrated Didi MCP server implementation that provides ride-hailing services including map search, price estimation, order management, and driver tracking. Only available in mainland China. Requires the DIDI_API_KEY environment variable to be configured.",
-        "dify_knowledge": "MCP-Server-Implementierung von Dify, die einen einfachen API-Zugriff auf Dify bietet. Dify Key muss konfiguriert werden",
-        "fetch": "MCP-Server zum Abrufen von Webseiteninhalten",
-        "filesystem": "MCP-Server für Dateisystemoperationen (Node.js), der den Zugriff auf bestimmte Verzeichnisse ermöglicht",
-        "flomo": "Verbinde dich mit flomo, um Notizen und Ideen schnell per KI zu erfassen. Eine Autorisierung des flomo-Kontos ist erforderlich.",
-        "mcp_auto_install": "MCP-Service automatisch installieren (Beta-Version)",
-        "memory": "MCP-Server mit persistenter Erinnerungsbasis auf lokalem Wissensgraphen, der Informationen über verschiedene Dialoge hinweg speichert. MEMORY_FILE_PATH-Umgebungsvariable muss konfiguriert werden",
-        "no": "Keine Beschreibung",
-        "nowledge_mem": "Erfordert lokal laufende Nowledge Mem App. Speichert KI-Chats, Tools, Notizen, Agenten und Dateien in einem privaten Speicher auf Ihrem Computer. Download unter https://mem.nowledge.co/",
-        "python": "Python-Code in einem sicheren Sandbox-Umgebung ausführen. Verwendung von Pyodide für Python, Unterstützung für die meisten Standardbibliotheken und wissenschaftliche Pakete",
-        "sequentialthinking": "MCP-Server-Implementierung mit strukturiertem Denkprozess, der dynamische und reflektierende Problemlösungen ermöglicht"
-      },
-      "command": "Befehl",
-      "config_description": "Model-Context-Protocol-Server konfigurieren",
-      "customRegistryPlaceholder": "Privates Repository-Adresse eingeben, z. B. https://npm.company.com",
-      "deleteError": "Server löschen fehlgeschlagen",
-      "deleteServer": "Server löschen",
-      "deleteServerConfirm": "Diesen Server wirklich löschen?",
-      "deleteSuccess": "Server erfolgreich gelöscht",
-      "dependenciesInstall": "Abhängigkeiten installieren",
-      "dependenciesInstalling": "Abhängigkeiten werden installiert...",
-      "description": "Beschreibung",
-      "disable": {
-        "description": "MCP-Service-Funktion nicht aktivieren",
-        "label": "MCP-Server nicht verwenden"
-      },
-      "discover": "Entdecken",
-      "duplicateName": "Server mit gleichem Namen existiert bereits",
-      "editJson": "JSON bearbeiten",
-      "editMcpJson": "MCP-Konfiguration bearbeiten",
-      "editServer": "Server bearbeiten",
-      "env": "Umgebungsvariablen",
-      "envTooltip": "Format: KEY=value, jede Zeile eine Variable",
-      "errors": {
-        "32000": "MCP-Server starten fehlgeschlagen, bitte überprüfen Sie, ob alle Parameter vollständig ausgefüllt sind",
-        "toolNotFound": "Tool {{name}} nicht gefunden"
-      },
-      "fetch": {
-        "button": "Server abrufen",
-        "success": "MCP-Server erfolgreich abgerufen"
-      },
-      "findMore": "Mehr MCP",
-      "headers": "Request-Header",
-      "headersTooltip": "Benutzerdefinierte Request-Header für HTTP-Anfragen",
-      "inMemory": "Speicher",
-      "install": "Installieren",
-      "installError": "Installation der Abhängigkeiten fehlgeschlagen",
-      "installSuccess": "Abhängigkeiten erfolgreich installiert",
-      "jsonFormatError": "JSON-Formatierungsfehler",
-      "jsonModeHint": "JSON-Darstellung der MCP-Server-Konfiguration. Bitte sicherstellen, dass das Format korrekt ist, bevor gespeichert wird",
-      "jsonSaveError": "JSON-Konfiguration speichern fehlgeschlagen",
-      "jsonSaveSuccess": "JSON-Konfiguration erfolgreich gespeichert",
-      "lanyun": {
-        "description": "Lanyun Technology Cloud Platform MCP Service",
-        "name": "Lanyun Technology"
-      },
-      "logoUrl": "Logo-URL",
-      "logs": "Protokolle",
-      "longRunning": "Lang laufender Modus",
-      "longRunningTooltip": "Nach Aktivierung unterstützt der Server lange Aufgaben. Wenn ein Fortschrittsbenachrichtigung empfangen wird, wird der Timeout-Timer zurückgesetzt und die maximale Timeout-Zeit auf 10 Minuten verlängert",
-      "marketplaces": "Marktplätze",
-      "missingDependencies": "Abhängigkeiten fehlen, bitte installieren Sie sie, um fortzufahren",
-      "more": {
-        "awesome": "Kuratierte MCP-Serverliste",
-        "composio": "Composio MCP-Entwicklungstool",
-        "glama": "Glama MCP-Server-Verzeichnis",
-        "higress": "Higress MCP-Server",
-        "mcpso": "MCP-Server-Discovery-Plattform",
-        "mcpworld": "Baidu MCP-Aggregationsplattform",
-        "modelscope": "Modelscope MCP-Server",
-        "official": "Offizielle MCP-Server-Sammlung",
-        "pulsemcp": "Pulse MCP-Server",
-        "smithery": "Smithery MCP-Tool",
-        "zhipu": "Ausgewählte MCP, schnelle Integration"
-      },
-      "name": "Name",
-      "newServer": "MCP-Server",
-      "noDescriptionAvailable": "Keine Beschreibung",
-      "noLogs": "Noch keine Protokolle",
-      "noServers": "Server nicht konfiguriert",
-      "not_support": "Modell nicht unterstützt",
-      "npx_list": {
-        "actions": "Aktionen",
-        "description": "Beschreibung",
-        "no_packages": "Paket nicht gefunden",
-        "npm": "NPM",
-        "package_name": "Paketname",
-        "scope_placeholder": "npm-Scope eingeben (z.B. @your-org)",
-        "scope_required": "npm-Scope eingeben (z.B. @your-org)",
-        "search": "Suchen",
-        "search_error": "Suche fehlgeschlagen",
-        "usage": "Verwendung",
-        "version": "Version"
-      },
-      "oauth": {
-        "callback": {
-          "message": "Sie können diese Seite schließen und zu Cherry Chat zurückkehren",
-          "title": "Authentifizierung erfolgreich"
-        }
-      },
-      "prompts": {
-        "arguments": "Parameter",
-        "availablePrompts": "Verfügbare Prompts",
-        "genericError": "Prompt-Fehler abrufen",
-        "loadError": "Prompt-Fehler abrufen",
-        "noPromptsAvailable": "Keine Prompts verfügbar",
-        "requiredField": "Pflichtfeld"
-      },
-      "protocolInstallWarning": {
-        "command": "Startbefehl",
-        "message": "Dieses MCP wurde über ein Protokoll aus einer externen Quelle installiert. Das Ausführen unbekannter Tools kann Ihren Computer schädigen.",
-        "run": "Laufen",
-        "title": "Externes MCP ausführen?"
-      },
-      "provider": "Anbieter",
-      "providerPlaceholder": "Anbietername",
-      "providerUrl": "Anbieter-Website",
-      "providers": "Anbieter",
-      "registry": "Paketverwaltungsquelle",
-      "registryDefault": "Standard",
-      "registryTooltip": "Quelle für Paketinstallation auswählen um Netzwerkprobleme der Standardquelle zu lösen",
-      "requiresConfig": "Konfiguration erforderlich",
-      "resources": {
-        "availableResources": "Verfügbare Ressourcen",
-        "blob": "Binärdaten",
-        "blobInvisible": "Binärdaten ausblenden",
-        "genericError": "Ressourcenfehler abrufen",
-        "mimeType": "MIME-Typ",
-        "noResourcesAvailable": "Keine Ressourcen verfügbar",
-        "size": "Größe",
-        "text": "Text",
-        "uri": "URI"
-      },
-      "search": {
-        "placeholder": "MCP-Server durchsuchen...",
-        "tooltip": "MCP-Server durchsuchen"
-      },
-      "searchNpx": "MCP durchsuchen",
-      "serverPlural": "Server",
-      "serverSingular": "Server",
-      "servers": "MCP-Server",
-      "sse": "Server-Sende-Ereignisse (sse)",
-      "startError": "Start fehlgeschlagen",
-      "stdio": "Standard-Eingabe / -Ausgabe (stdio)",
-      "streamableHttp": "Streaming-HTTP (streamableHttp)",
-      "sync": {
-        "button": "Synchronisieren",
-        "discoverMcpServers": "MCP-Server finden",
-        "discoverMcpServersDescription": "Zugriff auf die Plattform, um verfügbare MCP-Server zu finden",
-        "error": "Synchronisation von MCP-Server fehlgeschlagen",
-        "getToken": "API-Token abrufen",
-        "getTokenDescription": "Persönlichen API-Token aus Ihrem Konto abrufen",
-        "noServersAvailable": "Keine MCP-Server verfügbar",
-        "providerDescriptions": {
-          "302ai": "302.AI-Plattform MCP-Dienst",
-          "bailian": "Alibaba Cloud Bailian Platform MCP-Dienst",
-          "lanyun": "Lanyun Technology Cloud Platform MCP-Dienst",
-          "mcprouter": "MCP-Router-Plattform MCP-Service",
-          "modelscope": "ModelScope-Plattform MCP-Dienst",
-          "tokenflux": "TokenFlux Platform MCP Service"
-        },
-        "selectProvider": "Anbieter auswählen:",
-        "setToken": "Ihren Token eingeben",
-        "success": "MCP-Server erfolgreich synchronisiert",
-        "title": "Server synchronisieren",
-        "tokenPlaceholder": "API-Token hier eingeben",
-        "tokenRequired": "API-Token ist erforderlich",
-        "unauthorized": "Synchronisation nicht autorisiert"
-      },
-      "system": "System",
-      "tabs": {
-        "description": "Beschreibung",
-        "general": "Allgemein",
-        "prompts": "Hinweis",
-        "resources": "Ressourcen",
-        "tools": "Tools"
-      },
-      "tags": "Tags",
-      "tagsPlaceholder": "Tag eingeben",
-      "timeout": "Timeout",
-      "timeoutTooltip": "Timeout für Anfragen an den Server in Sekunden. Standardmäßig 60 Sekunden.",
-      "title": "MCP-Server",
-      "tools": {
-        "autoApprove": {
-          "label": "Automatische Genehmigung",
-          "tooltip": {
-            "confirm": "MCP-Tool ausführen?",
-            "disabled": "Manuelle Genehmigung vor Tool-Ausführung erforderlich",
-            "enabled": "Tool wird automatisch ohne Genehmigung ausgeführt",
-            "howToEnable": "Tool muss aktiviert sein für Auto-Genehmigung"
-          }
-        },
-        "availableTools": "Verfügbare Tools",
-        "enable": "Tool aktivieren",
-        "inputSchema": {
-          "enum": {
-            "allowedValues": "Erlaubte Werte"
-          },
-          "label": "Eingabemodus"
-        },
-        "loadError": "Tool-Abruf fehlgeschlagen",
-        "noToolsAvailable": "Keine Tools verfügbar",
-        "run": "Ausführen"
-      },
-      "type": "Typ",
-      "types": {
-        "inMemory": "Integriert",
-        "sse": "SSE",
-        "stdio": "STDIO",
-        "streamableHttp": "Streaming"
-      },
-      "updateError": "Server-Update fehlgeschlagen",
-      "updateSuccess": "Server erfolgreich aktualisiert",
-      "url": "URL",
-      "user": "Benutzer"
-    },
     "messages": {
       "divider": {
         "label": "Nachrichtentrennlinie",
@@ -5643,38 +5171,6 @@
     },
     "title": "Einstellungen",
     "tool": {
-      "ocr": {
-        "common": {
-          "langs": "Unterstützte Sprachen"
-        },
-        "error": {
-          "not_system": "System OCR unterstützt nur Windows und MacOS"
-        },
-        "image": {
-          "error": {
-            "provider_not_found": "Der Anbieter wurde nicht gefunden"
-          },
-          "system": {
-            "no_need_configure": "MacOS nicht konfigurieren"
-          },
-          "title": "Bild"
-        },
-        "image_provider": "OCR-Anbieter",
-        "paddleocr": {
-          "aistudio_access_token": "StarRiver Community Access Token",
-          "api_url": "API-URL",
-          "api_url_label": "Zugriffstoken und API-URL abrufen"
-        },
-        "system": {
-          "win": {
-            "langs_tooltip": "Abhängig von Windows, müssen Sie Sprachpakete im System herunterladen, um die entsprechenden Sprachen zu unterstützen."
-          }
-        },
-        "tesseract": {
-          "langs_tooltip": "Lesen Sie die Dokumentation, um zu erfahren, welche benutzerdefinierten Sprachen unterstützt werden"
-        },
-        "title": "OCR-Dienst"
-      },
       "preprocess": {
         "paddleocr": {
           "aistudio_access_token": "Zugriffstoken der AI Studio Community",
@@ -5687,100 +5183,7 @@
         "title": "Dokumentverarbeitung",
         "tooltip": "Setzen Sie den Dokumentverarbeitungsanbieter in den Einstellungen -> Tools, um die Suche nach komplexen Formatdokumenten und gescannten Dokumenten zu verbessern"
       },
-      "title": "Weitere Einstellungen",
-      "websearch": {
-        "api_key_required": {
-          "content": "{{provider}} erfordert einen API-Schlüssel, um zu funktionieren. Möchten Sie ihn jetzt konfigurieren?",
-          "ok": "Konfigurieren",
-          "title": "API-Schlüssel erforderlich"
-        },
-        "api_providers": "API-Anbieter",
-        "apikey": "API-Schlüssel",
-        "blacklist": "Schwarze Liste",
-        "blacklist_description": "Folgende Websites werden nicht in Suchergebnissen angezeigt",
-        "blacklist_tooltip": "Verwenden Sie das folgende Format (Zeilenumbruch getrennt)\nÜbereinstimmungsmodus: *://*.example.com/*\nRegex: /example\\.(net|org)/",
-        "check": "Erkennen",
-        "check_failed": "Erkennung fehlgeschlagen",
-        "check_success": "Erkennung erfolgreich",
-        "compression": {
-          "cutoff": {
-            "limit": {
-              "label": "Abschneidelänge",
-              "placeholder": "Eingabegröße",
-              "tooltip": "Begrenzen Sie die Länge der Suchergebnisse, überschreitende Inhalte werden abgeschnitten (z. B. 2000 Zeichen)"
-            },
-            "unit": {
-              "char": "Zeichen",
-              "token": "Token"
-            }
-          },
-          "error": {
-            "rag_failed": "RAG fehlgeschlagen"
-          },
-          "info": {
-            "dimensions_auto_success": "Dimensionen automatisch erfolgreich abgerufen, Dimensionen sind {{dimensions}}"
-          },
-          "method": {
-            "cutoff": "Abschneiden",
-            "label": "Kompressionsmethode",
-            "none": "Nicht komprimieren",
-            "rag": "RAG"
-          },
-          "rag": {
-            "document_count": {
-              "label": "Anzahl Dokumentfragmente",
-              "tooltip": "Die erwartete Anzahl von Dokumentfragmenten, die aus einem einzelnen Suchergebnis extrahiert werden, ist dieser Wert multipliziert mit der Anzahl der Suchergebnisse."
-            }
-          },
-          "title": "Suchergebnis-Kompression"
-        },
-        "content_limit": "Inhaltslängenbegrenzung",
-        "content_limit_tooltip": "Begrenzen Sie die Länge der Suchergebnisse, überschreitende Inhalte werden abgeschnitten",
-        "default_provider": "Standardanbieter",
-        "free": "Kostenlos",
-        "is_default": "Standard",
-        "local_provider": {
-          "hint": "Melden Sie sich auf der Website an, um bessere Suchergebnisse zu erhalten und Ihre Sucheinstellungen zu personalisieren.",
-          "open_settings": "{{provider}}-Einstellungen öffnen",
-          "settings": "Lokale Sucheinstellungen"
-        },
-        "local_providers": "Lokale Anbieter",
-        "no_provider_selected": "Wählen Sie einen Suchanbieter aus, bevor Sie suchen",
-        "overwrite": "Suchanbieter statt LLM für Suche erzwingen",
-        "overwrite_tooltip": "Suchanbieter statt LLM für Suche erzwingen",
-        "search_max_result": {
-          "label": "Anzahl Suchergebnisse",
-          "tooltip": "Bei deaktiviertem Suchergebnis-Komprimierung kann die Anzahl zu groß sein, was zu vielen Tokens führen kann"
-        },
-        "search_provider": "Suchanbieter",
-        "search_provider_placeholder": "Einen Suchanbieter auswählen",
-        "search_with_time": "Suche mit Datum",
-        "set_as_default": "Als Standard festlegen",
-        "subscribe": "Schwarze Liste-Abonnement",
-        "subscribe_add": "Abonnement hinzufügen",
-        "subscribe_add_failed": "Abonnement-Quelle hinzufügen fehlgeschlagen",
-        "subscribe_add_success": "Abonnement-Quelle hinzufügen erfolgreich!",
-        "subscribe_delete": "Abonnement löschen",
-        "subscribe_name": {
-          "label": "Alternativer Name",
-          "placeholder": "Alternativer Name wenn heruntergeladenes Abonnement keinen Namen hat"
-        },
-        "subscribe_update": "Jetzt aktualisieren",
-        "subscribe_update_failed": "Abonnement-Quelle aktualisieren fehlgeschlagen",
-        "subscribe_update_success": "Abonnement-Quelle aktualisieren erfolgreich",
-        "subscribe_url": "Abonnement-Quelle-Adresse",
-        "tavily": {
-          "api_key": {
-            "label": "Tavily API-Schlüssel",
-            "placeholder": "Bitte Tavily API-Schlüssel eingeben"
-          },
-          "description": "Tavily ist ein für AI-Agenten spezifiziertes Suchmaschinen-Tool, das realtime, präzise Ergebnisse, intelligente Suchvorschläge und tiefergehende Forschungsmöglichkeiten bietet",
-          "title": "Tavily"
-        },
-        "title": "Websuche",
-        "url_invalid": "Ungültige URL eingegeben",
-        "url_required": "URL eingeben"
-      }
+      "title": "Weitere Einstellungen"
     },
     "translate": {
       "custom": {
@@ -5861,8 +5264,6 @@
     "home": "Startseite",
     "knowledge": "Wissensdatenbank",
     "launchpad": "Launchpad",
-    "mcp-servers": "MCP-Server",
-    "memories": "Erinnerungen",
     "notes": "Notizen",
     "openclaw": "OpenClaw",
     "paintings": "Zeichnen",

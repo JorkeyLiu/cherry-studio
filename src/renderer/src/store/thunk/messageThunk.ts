@@ -663,11 +663,30 @@ export const mergeRequestAssistantSnapshot = (
   topicId: string
 ): Assistant => {
   const topic = freshAssistant.topics.find((t) => t.id === topicId)
+  const {
+    enableWebSearch: _droppedWebSearch,
+    webSearchProviderId: _droppedProviderId,
+    mcpMode: _droppedMcpMode,
+    mcpServers: _droppedMcpServers,
+    enableMemory: _droppedMemory,
+    ...origRest
+  } = origAssistant as Record<string, unknown> as Assistant & {
+    enableWebSearch?: unknown
+    webSearchProviderId?: unknown
+    mcpMode?: unknown
+    mcpServers?: unknown
+    enableMemory?: unknown
+  }
+  void _droppedWebSearch
+  void _droppedProviderId
+  void _droppedMcpMode
+  void _droppedMcpServers
+  void _droppedMemory
   return {
-    ...origAssistant,
+    ...origRest,
     settings: freshAssistant.settings,
     prompt: topic?.prompt ? `${freshAssistant.prompt}\n${topic.prompt}` : freshAssistant.prompt
-  }
+  } as Assistant
 }
 
 /**

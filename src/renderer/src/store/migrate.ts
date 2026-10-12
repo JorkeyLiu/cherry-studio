@@ -25,7 +25,6 @@ import {
 } from '@renderer/config/constant'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models/embedding'
 import { resolveCapabilityWithOverride, resolveExternalToolCallSupport } from '@renderer/config/models/modelMetadata'
-import { BUILTIN_OCR_PROVIDERS, BUILTIN_OCR_PROVIDERS_MAP, DEFAULT_OCR_PROVIDER } from '@renderer/config/ocr'
 import { TRANSLATE_PROMPT } from '@renderer/config/prompts'
 import { DEFAULT_SIDEBAR_ICONS } from '@renderer/config/sidebar'
 import i18n from '@renderer/i18n'
@@ -35,15 +34,12 @@ import { SYSTEM_PROVIDERS } from '@renderer/store/migrations/history/systemProvi
 import { defaultPreprocessProviders } from '@renderer/store/preprocess'
 import type {
   Assistant,
-  BuiltinOcrProvider,
   ContextWindowAnchor,
   Model,
   Provider,
   ProviderApiOptions,
-  TranslateLanguageCode,
-  WebSearchProvider
+  TranslateLanguageCode
 } from '@renderer/types'
-import { isBuiltinMCPServer } from '@renderer/types'
 import { getDefaultGroupName, getLeadingEmoji, getLowerBaseModelName } from '@renderer/utils/naming'
 import {
   isSupportArrayContentProvider,
@@ -56,13 +52,10 @@ import { isEmpty } from 'lodash'
 import { createMigrate } from 'redux-persist'
 import { v4 as uuidv4 } from 'uuid'
 
-import type { RootState } from '.'
 import { DEFAULT_TOOL_ORDER } from './inputTools'
 import { initialState as llmInitialState, moveProvider } from './llm'
-import { mcpSlice } from './mcp'
 import { initialState as notesInitialState } from './note'
 import { initialState as settingsInitialState } from './settings'
-import { defaultWebSearchProviders } from './websearch'
 
 const logger = loggerService.withContext('Migrate')
 
@@ -349,24 +342,24 @@ function isMigrationNotSupportTextDeltaModel(model: Model): boolean {
 // types; they are pushed verbatim for replay, never validated as active).
 
 // MinApp functions removed - kept as no-ops for migration compatibility
-function removeMiniAppIconsFromState(_state: RootState) {
+function removeMiniAppIconsFromState(_state: any) {
   // no-op: minapp module removed
 }
 
-function removeMiniAppFromState(_state: RootState, _id: string) {
+function removeMiniAppFromState(_state: any, _id: string) {
   // no-op: minapp module removed
 }
 
-function addMiniApp(_state: RootState, _id: string) {
+function addMiniApp(_state: any, _id: string) {
   // no-op: minapp module removed
 }
 
 // addShortcuts removed - kept as no-op for migration compatibility
-function addShortcuts(_state: RootState, _ids: string[], _position: string) {
+function addShortcuts(_state: any, _ids: string[], _position: string) {
   // no-op: shortcuts module slimmed
 }
 
-function addProvider(state: RootState, id: string) {
+function addProvider(state: any, id: string) {
   if (!state.llm.providers.find((p) => p.id === id)) {
     const _provider = (SYSTEM_PROVIDERS as unknown as LegacyProviderRecord[]).find((p) => p.id === id)
     if (_provider) {
@@ -379,7 +372,7 @@ function addProvider(state: RootState, id: string) {
 // later: the custom-connection bootstrap never re-adds missing system
 // providers; unconfigured entries stay absent and configured compatible
 // entries are converted to ordinary user providers by migration 221).
-function fixMissingProvider(state: RootState) {
+function fixMissingProvider(state: any) {
   ;(SYSTEM_PROVIDERS as unknown as LegacyProviderRecord[]).forEach((p) => {
     if (!state.llm.providers.find((provider) => provider.id === p.id)) {
       state.llm.providers.push(p as unknown as Provider)
@@ -387,14 +380,22 @@ function fixMissingProvider(state: RootState) {
   })
 }
 
-// add ocr provider
-function addOcrProvider(state: RootState, provider: BuiltinOcrProvider) {
+// add ocr provider (history-only: OCR slice is removed in 227; this helper
+// only rebuilds the legacy shape for old persisted states and never imports
+// the deleted OCR config/store modules).
+function addOcrProvider(
+  state: any,
+  provider: { id: string; name?: string; capabilities?: Record<string, boolean>; config?: Record<string, unknown> }
+) {
+  if (!state.ocr || !Array.isArray(state.ocr.providers)) {
+    state.ocr = { providers: [], imageProviderId: 'tesseract' }
+  }
   if (!state.ocr.providers.find((p) => p.id === provider.id)) {
     state.ocr.providers.push(provider)
   }
 }
 
-function updateProvider(state: RootState, id: string, provider: Partial<Provider>) {
+function updateProvider(state: any, id: string, provider: Partial<Provider>) {
   if (state.llm.providers) {
     const index = state.llm.providers.findIndex((p) => p.id === id)
     if (index !== -1) {
@@ -406,32 +407,21 @@ function updateProvider(state: RootState, id: string, provider: Partial<Provider
   }
 }
 
-function addWebSearchProvider(state: RootState, id: string) {
-  if (state.websearch && state.websearch.providers) {
-    if (!state.websearch.providers.find((p) => p.id === id)) {
-      const provider = defaultWebSearchProviders.find((p) => p.id === id)
-      if (provider) {
-        // Prevent mutating read only property of object
-        // Otherwise, it will cause the error: Cannot assign to read only property 'apiKey' of object '#<Object>'
-        state.websearch.providers.push({ ...provider })
-      }
-    }
-  }
+function addWebSearchProvider(state: any, id: string) {
+  // Removed feature: historical websearch provider additions are no-ops.
+  // Old persisted `websearch.providers` (if present) is left untouched here;
+  // the terminal scrub migration strips the entire slice.
+  void state
+  void id
 }
 
-function updateWebSearchProvider(state: RootState, provider: Partial<WebSearchProvider>) {
-  if (state.websearch && state.websearch.providers) {
-    const index = state.websearch.providers.findIndex((p) => p.id === provider.id)
-    if (index !== -1) {
-      state.websearch.providers[index] = {
-        ...state.websearch.providers[index],
-        ...provider
-      }
-    }
-  }
+function updateWebSearchProvider(state: any, provider: Record<string, unknown>) {
+  // Removed feature: historical websearch provider updates are no-ops (see above).
+  void state
+  void provider
 }
 
-function addPreprocessProviders(state: RootState, id: string) {
+function addPreprocessProviders(state: any, id: string) {
   if (state.preprocess && state.preprocess.providers) {
     if (!state.preprocess.providers.find((p) => p.id === id)) {
       const provider = defaultPreprocessProviders.find((p) => p.id === id)
@@ -443,7 +433,7 @@ function addPreprocessProviders(state: RootState, id: string) {
 }
 
 const migrateConfig = {
-  '2': (state: RootState) => {
+  '2': (state: any) => {
     try {
       addProvider(state, 'yi')
       return state
@@ -451,7 +441,7 @@ const migrateConfig = {
       return state
     }
   },
-  '3': (state: RootState) => {
+  '3': (state: any) => {
     try {
       addProvider(state, 'zhipu')
       return state
@@ -459,7 +449,7 @@ const migrateConfig = {
       return state
     }
   },
-  '4': (state: RootState) => {
+  '4': (state: any) => {
     try {
       addProvider(state, 'ollama')
       return state
@@ -467,7 +457,7 @@ const migrateConfig = {
       return state
     }
   },
-  '5': (state: RootState) => {
+  '5': (state: any) => {
     try {
       addProvider(state, 'moonshot')
       return state
@@ -475,7 +465,7 @@ const migrateConfig = {
       return state
     }
   },
-  '6': (state: RootState) => {
+  '6': (state: any) => {
     try {
       addProvider(state, 'openrouter')
       return state
@@ -483,7 +473,7 @@ const migrateConfig = {
       return state
     }
   },
-  '7': (state: RootState) => {
+  '7': (state: any) => {
     try {
       return {
         ...state,
@@ -496,7 +486,7 @@ const migrateConfig = {
       return state
     }
   },
-  '8': (state: RootState) => {
+  '8': (state: any) => {
     try {
       const fixAssistantName = (assistant: Assistant) => {
         // 2025/07/25 这俩键早没了，从远古版本迁移包出错的
@@ -518,7 +508,7 @@ const migrateConfig = {
         ...state,
         assistants: {
           ...state.assistants,
-          defaultAssistant: fixAssistantName((state.assistants as any).defaultAssistant),
+          defaultAssistant: fixAssistantName(state.assistants.defaultAssistant),
           assistants: state.assistants.assistants.map((assistant) => fixAssistantName(assistant))
         }
       }
@@ -526,7 +516,7 @@ const migrateConfig = {
       return state
     }
   },
-  '9': (state: RootState) => {
+  '9': (state: any) => {
     try {
       return {
         ...state,
@@ -544,7 +534,7 @@ const migrateConfig = {
       return state
     }
   },
-  '10': (state: RootState) => {
+  '10': (state: any) => {
     try {
       addProvider(state, 'baichuan')
       return state
@@ -552,7 +542,7 @@ const migrateConfig = {
       return state
     }
   },
-  '11': (state: RootState) => {
+  '11': (state: any) => {
     try {
       addProvider(state, 'dashscope')
       addProvider(state, 'anthropic')
@@ -561,7 +551,7 @@ const migrateConfig = {
       return state
     }
   },
-  '12': (state: RootState) => {
+  '12': (state: any) => {
     try {
       addProvider(state, 'aihubmix')
       return state
@@ -569,17 +559,17 @@ const migrateConfig = {
       return state
     }
   },
-  '13': (state: RootState) => {
+  '13': (state: any) => {
     try {
       return {
         ...state,
         assistants: {
           ...state.assistants,
           defaultAssistant: {
-            ...(state.assistants as any).defaultAssistant,
-            name: ['Default Assistant', '默认助手'].includes((state.assistants as any).defaultAssistant.name)
+            ...state.assistants.defaultAssistant,
+            name: ['Default Assistant', '默认助手'].includes(state.assistants.defaultAssistant.name)
               ? i18n.t('settings.assistant.label')
-              : (state.assistants as any).defaultAssistant.name
+              : state.assistants.defaultAssistant.name
           }
         }
       }
@@ -587,7 +577,7 @@ const migrateConfig = {
       return state
     }
   },
-  '14': (state: RootState) => {
+  '14': (state: any) => {
     try {
       return {
         ...state,
@@ -601,7 +591,7 @@ const migrateConfig = {
       return state
     }
   },
-  '15': (state: RootState) => {
+  '15': (state: any) => {
     try {
       return {
         ...state,
@@ -615,7 +605,7 @@ const migrateConfig = {
       return state
     }
   },
-  '16': (state: RootState) => {
+  '16': (state: any) => {
     try {
       return {
         ...state,
@@ -629,7 +619,7 @@ const migrateConfig = {
       return state
     }
   },
-  '17': (state: RootState) => {
+  '17': (state: any) => {
     try {
       return {
         ...state,
@@ -642,7 +632,7 @@ const migrateConfig = {
       return state
     }
   },
-  '19': (state: RootState) => {
+  '19': (state: any) => {
     try {
       return {
         ...state,
@@ -662,7 +652,7 @@ const migrateConfig = {
       return state
     }
   },
-  '20': (state: RootState) => {
+  '20': (state: any) => {
     try {
       return {
         ...state,
@@ -675,7 +665,7 @@ const migrateConfig = {
       return state
     }
   },
-  '21': (state: RootState) => {
+  '21': (state: any) => {
     try {
       addProvider(state, 'gemini')
       addProvider(state, 'stepfun')
@@ -685,7 +675,7 @@ const migrateConfig = {
       return state
     }
   },
-  '22': (state: RootState) => {
+  '22': (state: any) => {
     try {
       addProvider(state, 'minimax')
       return state
@@ -693,7 +683,7 @@ const migrateConfig = {
       return state
     }
   },
-  '23': (state: RootState) => {
+  '23': (state: any) => {
     try {
       return {
         ...state,
@@ -707,7 +697,7 @@ const migrateConfig = {
       return state
     }
   },
-  '24': (state: RootState) => {
+  '24': (state: any) => {
     try {
       return {
         ...state,
@@ -731,7 +721,7 @@ const migrateConfig = {
       return state
     }
   },
-  '25': (state: RootState) => {
+  '25': (state: any) => {
     try {
       addProvider(state, 'github')
       return state
@@ -739,7 +729,7 @@ const migrateConfig = {
       return state
     }
   },
-  '26': (state: RootState) => {
+  '26': (state: any) => {
     try {
       addProvider(state, 'ocoolai')
       return state
@@ -747,7 +737,7 @@ const migrateConfig = {
       return state
     }
   },
-  '27': (state: RootState) => {
+  '27': (state: any) => {
     try {
       return {
         ...state,
@@ -760,7 +750,7 @@ const migrateConfig = {
       return state
     }
   },
-  '28': (state: RootState) => {
+  '28': (state: any) => {
     try {
       addProvider(state, 'together')
       addProvider(state, 'fireworks')
@@ -772,7 +762,7 @@ const migrateConfig = {
       return state
     }
   },
-  '29': (state: RootState) => {
+  '29': (state: any) => {
     try {
       return {
         ...state,
@@ -791,7 +781,7 @@ const migrateConfig = {
       return state
     }
   },
-  '30': (state: RootState) => {
+  '30': (state: any) => {
     try {
       addProvider(state, 'azure-openai')
       return state
@@ -799,7 +789,7 @@ const migrateConfig = {
       return state
     }
   },
-  '31': (state: RootState) => {
+  '31': (state: any) => {
     try {
       return {
         ...state,
@@ -820,7 +810,7 @@ const migrateConfig = {
       return state
     }
   },
-  '32': (state: RootState) => {
+  '32': (state: any) => {
     try {
       addProvider(state, 'hunyuan')
       return state
@@ -828,9 +818,9 @@ const migrateConfig = {
       return state
     }
   },
-  '33': (state: RootState) => {
+  '33': (state: any) => {
     try {
-      ;(state.assistants as any).defaultAssistant.type = 'assistant'
+      state.assistants.defaultAssistant.type = 'assistant'
 
       // @ts-ignore
       state.agents.agents.forEach((agent) => {
@@ -858,7 +848,7 @@ const migrateConfig = {
       return state
     }
   },
-  '34': (state: RootState) => {
+  '34': (state: any) => {
     try {
       state.assistants.assistants.forEach((assistant) => {
         assistant.topics.forEach((topic) => {
@@ -870,7 +860,7 @@ const migrateConfig = {
       return state
     }
   },
-  '35': (state: RootState) => {
+  '35': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.mathEngine = 'KaTeX'
@@ -879,7 +869,7 @@ const migrateConfig = {
       return state
     }
   },
-  '36': (state: RootState) => {
+  '36': (state: any) => {
     try {
       state.settings.topicPosition = 'left'
       return state
@@ -887,7 +877,7 @@ const migrateConfig = {
       return state
     }
   },
-  '37': (state: RootState) => {
+  '37': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.messageStyle = 'plain'
@@ -896,7 +886,7 @@ const migrateConfig = {
       return state
     }
   },
-  '38': (state: RootState) => {
+  '38': (state: any) => {
     try {
       addProvider(state, 'grok')
       addProvider(state, 'hyperbolic')
@@ -906,7 +896,7 @@ const migrateConfig = {
       return state
     }
   },
-  '39': (state: RootState) => {
+  '39': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.codeStyle = 'auto'
@@ -915,7 +905,7 @@ const migrateConfig = {
       return state
     }
   },
-  '40': (state: RootState) => {
+  '40': (state: any) => {
     try {
       state.settings.tray = true
       return state
@@ -923,7 +913,7 @@ const migrateConfig = {
       return state
     }
   },
-  '41': (state: RootState) => {
+  '41': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'gemini') {
@@ -939,7 +929,7 @@ const migrateConfig = {
       return state
     }
   },
-  '42': (state: RootState) => {
+  '42': (state: any) => {
     try {
       state.settings.proxyMode = state.settings.proxyUrl ? 'custom' : 'none'
       return state
@@ -947,7 +937,7 @@ const migrateConfig = {
       return state
     }
   },
-  '43': (state: RootState) => {
+  '43': (state: any) => {
     try {
       if (state.settings.proxyMode === 'none') {
         state.settings.proxyMode = 'system'
@@ -957,7 +947,7 @@ const migrateConfig = {
       return state
     }
   },
-  '44': (state: RootState) => {
+  '44': (state: any) => {
     try {
       state.settings.translateModelPrompt = TRANSLATE_PROMPT
       return state
@@ -965,11 +955,11 @@ const migrateConfig = {
       return state
     }
   },
-  '45': (state: RootState) => {
+  '45': (state: any) => {
     state.settings.enableTopicNaming = true
     return state
   },
-  '46': (state: RootState) => {
+  '46': (state: any) => {
     try {
       if (
         state.settings?.translateModelPrompt?.includes(
@@ -983,7 +973,7 @@ const migrateConfig = {
       return state
     }
   },
-  '47': (state: RootState) => {
+  '47': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         provider.models.forEach((model) => {
@@ -995,7 +985,7 @@ const migrateConfig = {
       return state
     }
   },
-  '48': (state: RootState) => {
+  '48': (state: any) => {
     try {
       if (state.shortcuts) {
         state.shortcuts.shortcuts.forEach((shortcut) => {
@@ -1021,7 +1011,7 @@ const migrateConfig = {
       return state
     }
   },
-  '49': (state: RootState) => {
+  '49': (state: any) => {
     try {
       state.settings.pasteLongTextThreshold = 1500
       if (state.shortcuts) {
@@ -1041,7 +1031,7 @@ const migrateConfig = {
       return state
     }
   },
-  '50': (state: RootState) => {
+  '50': (state: any) => {
     try {
       addProvider(state, 'jina')
       return state
@@ -1049,11 +1039,11 @@ const migrateConfig = {
       return state
     }
   },
-  '51': (state: RootState) => {
+  '51': (state: any) => {
     state.settings.topicNamingPrompt = ''
     return state
   },
-  '54': (state: RootState) => {
+  '54': (state: any) => {
     try {
       if (state.shortcuts) {
         state.shortcuts.shortcuts.push({
@@ -1073,7 +1063,7 @@ const migrateConfig = {
       return state
     }
   },
-  '55': (state: RootState) => {
+  '55': (state: any) => {
     try {
       if (!state.settings.sidebarIcons) {
         state.settings.sidebarIcons = {
@@ -1086,7 +1076,7 @@ const migrateConfig = {
       return state
     }
   },
-  '57': (state: RootState) => {
+  '57': (state: any) => {
     try {
       if (state.shortcuts) {
         state.shortcuts.shortcuts.push({
@@ -1113,7 +1103,7 @@ const migrateConfig = {
       return state
     }
   },
-  '58': (state: RootState) => {
+  '58': (state: any) => {
     try {
       if (state.shortcuts) {
         state.shortcuts.shortcuts.push(
@@ -1138,7 +1128,7 @@ const migrateConfig = {
       return state
     }
   },
-  '59': (state: RootState) => {
+  '59': (state: any) => {
     try {
       addMiniApp(state, 'flowith')
       return state
@@ -1146,7 +1136,7 @@ const migrateConfig = {
       return state
     }
   },
-  '60': (state: RootState) => {
+  '60': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.multiModelMessageStyle = 'fold'
@@ -1155,7 +1145,7 @@ const migrateConfig = {
       return state
     }
   },
-  '61': (state: RootState) => {
+  '61': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'qwenlm') {
@@ -1168,7 +1158,7 @@ const migrateConfig = {
       return state
     }
   },
-  '62': (state: RootState) => {
+  '62': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'azure-openai') {
@@ -1181,7 +1171,7 @@ const migrateConfig = {
       return state
     }
   },
-  '63': (state: RootState) => {
+  '63': (state: any) => {
     try {
       addMiniApp(state, '3mintop')
       return state
@@ -1189,7 +1179,7 @@ const migrateConfig = {
       return state
     }
   },
-  '64': (state: RootState) => {
+  '64': (state: any) => {
     try {
       state.llm.providers = state.llm.providers.filter((provider) => provider.id !== 'qwenlm')
       addProvider(state, 'baidu-cloud')
@@ -1198,7 +1188,7 @@ const migrateConfig = {
       return state
     }
   },
-  '65': (state: RootState) => {
+  '65': (state: any) => {
     try {
       // @ts-ignore expect error
       state.settings.targetLanguage = 'english'
@@ -1207,7 +1197,7 @@ const migrateConfig = {
       return state
     }
   },
-  '66': (state: RootState) => {
+  '66': (state: any) => {
     try {
       addProvider(state, 'gitee-ai')
       addProvider(state, 'ppio')
@@ -1219,7 +1209,7 @@ const migrateConfig = {
       return state
     }
   },
-  '67': (state: RootState) => {
+  '67': (state: any) => {
     try {
       addMiniApp(state, 'xiaoyi')
       addProvider(state, 'modelscope')
@@ -1237,7 +1227,7 @@ const migrateConfig = {
       return state
     }
   },
-  '68': (state: RootState) => {
+  '68': (state: any) => {
     try {
       addMiniApp(state, 'notebooklm')
       addProvider(state, 'modelscope')
@@ -1247,7 +1237,7 @@ const migrateConfig = {
       return state
     }
   },
-  '69': (state: RootState) => {
+  '69': (state: any) => {
     try {
       addMiniApp(state, 'coze')
       // @ts-ignore eslint-disable-next-line
@@ -1259,7 +1249,7 @@ const migrateConfig = {
       return state
     }
   },
-  '70': (state: RootState) => {
+  '70': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'dmxapi') {
@@ -1271,7 +1261,7 @@ const migrateConfig = {
       return state
     }
   },
-  '71': (state: RootState) => {
+  '71': (state: any) => {
     try {
       // minapp operations removed - no-op for migration compatibility
       state.settings.thoughtAutoCollapse = true
@@ -1281,7 +1271,7 @@ const migrateConfig = {
       return state
     }
   },
-  '72': (state: RootState) => {
+  '72': (state: any) => {
     try {
       addMiniApp(state, 'monica')
 
@@ -1299,7 +1289,7 @@ const migrateConfig = {
       return state
     }
   },
-  '73': (state: RootState) => {
+  '73': (state: any) => {
     try {
       if (state.websearch) {
         state.websearch.searchWithTime = true
@@ -1328,11 +1318,11 @@ const migrateConfig = {
         }
       })
 
-      const defaultAssistantEmoji = getLeadingEmoji((state.assistants as any).defaultAssistant.name)
+      const defaultAssistantEmoji = getLeadingEmoji(state.assistants.defaultAssistant.name)
 
       if (defaultAssistantEmoji) {
-        ;(state.assistants as any).defaultAssistant.emoji = defaultAssistantEmoji
-        ;(state.assistants as any).defaultAssistant.name = (state.assistants as any).defaultAssistant.name
+        state.assistants.defaultAssistant.emoji = defaultAssistantEmoji
+        state.assistants.defaultAssistant.name = state.assistants.defaultAssistant.name
           .replace(defaultAssistantEmoji, '')
           .trim()
       }
@@ -1342,7 +1332,7 @@ const migrateConfig = {
       return state
     }
   },
-  '74': (state: RootState) => {
+  '74': (state: any) => {
     try {
       addProvider(state, 'xirang')
       return state
@@ -1350,7 +1340,7 @@ const migrateConfig = {
       return state
     }
   },
-  '75': (state: RootState) => {
+  '75': (state: any) => {
     try {
       addMiniApp(state, 'you')
       addMiniApp(state, 'cici')
@@ -1360,7 +1350,7 @@ const migrateConfig = {
       return state
     }
   },
-  '76': (state: RootState) => {
+  '76': (state: any) => {
     try {
       addProvider(state, 'tencent-cloud-ti')
       return state
@@ -1368,7 +1358,7 @@ const migrateConfig = {
       return state
     }
   },
-  '77': (state: RootState) => {
+  '77': (state: any) => {
     try {
       addWebSearchProvider(state, 'searxng')
       addWebSearchProvider(state, 'exa')
@@ -1383,7 +1373,7 @@ const migrateConfig = {
       return state
     }
   },
-  '78': (state: RootState) => {
+  '78': (state: any) => {
     try {
       state.llm.providers = moveProvider(state.llm.providers, 'ppio', 9)
       state.llm.providers = moveProvider(state.llm.providers, 'infini', 10)
@@ -1393,7 +1383,7 @@ const migrateConfig = {
       return state
     }
   },
-  '79': (state: RootState) => {
+  '79': (state: any) => {
     try {
       addProvider(state, 'gpustack')
       return state
@@ -1401,7 +1391,7 @@ const migrateConfig = {
       return state
     }
   },
-  '80': (state: RootState) => {
+  '80': (state: any) => {
     try {
       addProvider(state, 'alayanew')
       state.llm.providers = moveProvider(state.llm.providers, 'alayanew', 10)
@@ -1410,7 +1400,7 @@ const migrateConfig = {
       return state
     }
   },
-  '81': (state: RootState) => {
+  '81': (state: any) => {
     try {
       addProvider(state, 'copilot')
       return state
@@ -1418,9 +1408,9 @@ const migrateConfig = {
       return state
     }
   },
-  '82': (state: RootState) => {
+  '82': (state: any) => {
     try {
-      const runtimeState = state.runtime as any
+      const runtimeState = state.runtime
       if (runtimeState?.webdavSync) {
         state.backup = state.backup || {}
         state.backup = {
@@ -1438,7 +1428,7 @@ const migrateConfig = {
       return state
     }
   },
-  '83': (state: RootState) => {
+  '83': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.messageNavigation = 'buttons'
@@ -1451,7 +1441,7 @@ const migrateConfig = {
       return state
     }
   },
-  '84': (state: RootState) => {
+  '84': (state: any) => {
     try {
       addProvider(state, 'voyageai')
       return state
@@ -1460,7 +1450,7 @@ const migrateConfig = {
       return state
     }
   },
-  '85': (state: RootState) => {
+  '85': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.autoCheckUpdate = !state.settings.manualUpdateCheck
@@ -1473,7 +1463,7 @@ const migrateConfig = {
       return state
     }
   },
-  '86': (state: RootState) => {
+  '86': (state: any) => {
     try {
       if (state?.mcp?.servers) {
         state.mcp.servers = state.mcp.servers.map((server) => ({
@@ -1486,7 +1476,7 @@ const migrateConfig = {
     }
     return state
   },
-  '87': (state: RootState) => {
+  '87': (state: any) => {
     try {
       // @ts-ignore legacy minapp settings - removed in slimming refactor
       state.settings.maxKeepAliveMinapps = 3
@@ -1497,21 +1487,17 @@ const migrateConfig = {
       return state
     }
   },
-  '88': (state: RootState) => {
+  '88': (state: any) => {
     try {
-      if (state?.mcp?.servers) {
-        const hasAutoInstall = state.mcp.servers.some((server) => server.name === '@cherry/mcp-auto-install')
-        if (!hasAutoInstall) {
-          const defaultServer = mcpSlice.getInitialState().servers[0]
-          state.mcp.servers = [{ ...defaultServer, id: nanoid() }, ...state.mcp.servers]
-        }
-      }
+      // Removed MCP feature: no auto-install backfill; terminal scrub strips the slice.
+      void nanoid
+      void state
       return state
     } catch (error) {
       return state
     }
   },
-  '89': (state: RootState) => {
+  '89': (state: any) => {
     try {
       removeMiniAppFromState(state, 'aistudio')
       return state
@@ -1519,7 +1505,7 @@ const migrateConfig = {
       return state
     }
   },
-  '90': (state: RootState) => {
+  '90': (state: any) => {
     try {
       state.settings.enableDataCollection = true
       return state
@@ -1527,7 +1513,7 @@ const migrateConfig = {
       return state
     }
   },
-  '91': (state: RootState) => {
+  '91': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.codeCacheable = false
@@ -1543,7 +1529,7 @@ const migrateConfig = {
       return state
     }
   },
-  '92': (state: RootState) => {
+  '92': (state: any) => {
     try {
       addMiniApp(state, 'dangbei')
       state.llm.providers = moveProvider(state.llm.providers, 'qiniu', 12)
@@ -1552,7 +1538,7 @@ const migrateConfig = {
       return state
     }
   },
-  '93': (state: RootState) => {
+  '93': (state: any) => {
     try {
       if (!state?.settings?.exportMenuOptions) {
         state.settings.exportMenuOptions = settingsInitialState.exportMenuOptions
@@ -1563,18 +1549,18 @@ const migrateConfig = {
       return state
     }
   },
-  '94': (state: RootState) => {
+  '94': (state: any) => {
     try {
       // enableQuickPanelTriggers removed with QuickPanel; clean up if present
-      if ('enableQuickPanelTriggers' in (state.settings as any)) {
-        delete (state.settings as any).enableQuickPanelTriggers
+      if ('enableQuickPanelTriggers' in state.settings) {
+        delete state.settings.enableQuickPanelTriggers
       }
       return state
     } catch (error) {
       return state
     }
   },
-  '95': (state: RootState) => {
+  '95': (state: any) => {
     try {
       addWebSearchProvider(state, 'local-google')
       addWebSearchProvider(state, 'local-bing')
@@ -1595,7 +1581,7 @@ const migrateConfig = {
       return state
     }
   },
-  '96': (state: RootState) => {
+  '96': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.assistantIconType = state.settings?.showAssistantIcon ? 'model' : 'emoji'
@@ -1606,7 +1592,7 @@ const migrateConfig = {
       return state
     }
   },
-  '97': (state: RootState) => {
+  '97': (state: any) => {
     try {
       addMiniApp(state, 'zai')
       state.settings.webdavMaxBackups = 0
@@ -1621,7 +1607,7 @@ const migrateConfig = {
       return state
     }
   },
-  '98': (state: RootState) => {
+  '98': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (legacyTypeOf(provider) === 'openai' && provider.id !== 'openai') {
@@ -1633,7 +1619,7 @@ const migrateConfig = {
       return state
     }
   },
-  '99': (state: RootState) => {
+  '99': (state: any) => {
     try {
       state.settings.showPrompt = true
 
@@ -1665,7 +1651,7 @@ const migrateConfig = {
       return state
     }
   },
-  '100': (state: RootState) => {
+  '100': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (['openai-compatible', 'openai'].includes(legacyTypeOf(provider))) {
@@ -1684,7 +1670,7 @@ const migrateConfig = {
       return state
     }
   },
-  '101': (state: RootState) => {
+  '101': (state: any) => {
     try {
       state.assistants.assistants.forEach((assistant) => {
         if (assistant.settings) {
@@ -1712,10 +1698,9 @@ const migrateConfig = {
       return state
     }
   },
-  '102': (state: RootState) => {
+  '102': (state: any) => {
     try {
       state.settings.openAI = {
-        // @ts-expect-error it's a removed type. migrated on 177
         summaryText: 'off',
         serviceTier: 'auto',
         verbosity: 'medium'
@@ -1766,7 +1751,7 @@ const migrateConfig = {
       return state
     }
   },
-  '103': (state: RootState) => {
+  '103': (state: any) => {
     try {
       if (state.shortcuts) {
         if (!state.shortcuts.shortcuts.find((shortcut) => shortcut.key === 'search_message_in_chat')) {
@@ -1795,7 +1780,7 @@ const migrateConfig = {
       return state
     }
   },
-  '104': (state: RootState) => {
+  '104': (state: any) => {
     try {
       addProvider(state, 'burncloud')
       state.llm.providers = moveProvider(state.llm.providers, 'burncloud', 10)
@@ -1805,13 +1790,12 @@ const migrateConfig = {
       return state
     }
   },
-  '105': (state: RootState) => {
+  '105': (state: any) => {
     try {
       state.settings.notification = settingsInitialState.notification
       addMiniApp(state, 'google')
       if (!state.settings.openAI) {
         state.settings.openAI = {
-          // @ts-expect-error it's a removed type. migrated on 177
           summaryText: 'off',
           serviceTier: 'auto',
           verbosity: 'medium'
@@ -1823,7 +1807,7 @@ const migrateConfig = {
       return state
     }
   },
-  '106': (state: RootState) => {
+  '106': (state: any) => {
     try {
       addProvider(state, 'tokenflux')
       state.llm.providers = moveProvider(state.llm.providers, 'tokenflux', 15)
@@ -1833,7 +1817,7 @@ const migrateConfig = {
       return state
     }
   },
-  '107': (state: RootState) => {
+  '107': (state: any) => {
     try {
       // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.dmxapi_paintings) {
@@ -1846,7 +1830,7 @@ const migrateConfig = {
       return state
     }
   },
-  '108': (state: RootState) => {
+  '108': (state: any) => {
     try {
       // @ts-ignore
       state.inputTools.toolOrder = DEFAULT_TOOL_ORDER
@@ -1857,7 +1841,7 @@ const migrateConfig = {
       return state
     }
   },
-  '109': (state: RootState) => {
+  '109': (state: any) => {
     try {
       state.settings.userTheme = settingsInitialState.userTheme
       return state
@@ -1866,7 +1850,7 @@ const migrateConfig = {
       return state
     }
   },
-  '110': (state: RootState) => {
+  '110': (state: any) => {
     try {
       // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.tokenflux_paintings) {
@@ -1880,7 +1864,7 @@ const migrateConfig = {
       return state
     }
   },
-  '111': (state: RootState) => {
+  '111': (state: any) => {
     try {
       if (
         state.llm.translateModel?.provider === 'silicon' &&
@@ -1895,7 +1879,7 @@ const migrateConfig = {
       return state
     }
   },
-  '112': (state: RootState) => {
+  '112': (state: any) => {
     try {
       addProvider(state, 'cephalon')
       addProvider(state, '302ai')
@@ -1909,11 +1893,11 @@ const migrateConfig = {
       return state
     }
   },
-  '113': (state: RootState) => {
+  '113': (state: any) => {
     try {
       addProvider(state, 'vertexai')
-      if (!(state.llm.settings as any).vertexai) {
-        ;(state.llm.settings as any).vertexai = (llmInitialState.settings as any).vertexai
+      if (!state.llm.settings.vertexai) {
+        state.llm.settings.vertexai = (llmInitialState.settings as any).vertexai
       }
       updateProvider(state, 'gemini', {
         isVertex: false
@@ -1927,7 +1911,7 @@ const migrateConfig = {
       return state
     }
   },
-  '114': (state: RootState) => {
+  '114': (state: any) => {
     try {
       if (state.settings && state.settings.exportMenuOptions) {
         if (typeof state.settings.exportMenuOptions.plain_text === 'undefined') {
@@ -1944,7 +1928,7 @@ const migrateConfig = {
       return state
     }
   },
-  '115': (state: RootState) => {
+  '115': (state: any) => {
     try {
       state.assistants.assistants.forEach((assistant) => {
         if (!assistant.settings) {
@@ -1965,7 +1949,7 @@ const migrateConfig = {
       return state
     }
   },
-  '116': (state: RootState) => {
+  '116': (state: any) => {
     try {
       if (state.websearch) {
         // migrate contentLimit to cutoffLimit
@@ -1997,7 +1981,7 @@ const migrateConfig = {
       return state
     }
   },
-  '117': (state: RootState) => {
+  '117': (state: any) => {
     try {
       const ppioProvider = state.llm.providers.find((provider) => provider.id === 'ppio')
       const modelsToRemove = [
@@ -2035,7 +2019,7 @@ const migrateConfig = {
       return state
     }
   },
-  '118': (state: RootState) => {
+  '118': (state: any) => {
     try {
       addProvider(state, 'ph8')
       state.llm.providers = moveProvider(state.llm.providers, 'ph8', 14)
@@ -2056,7 +2040,7 @@ const migrateConfig = {
       return state
     }
   },
-  '119': (state: RootState) => {
+  '119': (state: any) => {
     try {
       addProvider(state, 'new-api')
       state.llm.providers = moveProvider(state.llm.providers, 'new-api', 16)
@@ -2074,7 +2058,7 @@ const migrateConfig = {
       return state
     }
   },
-  '120': (state: RootState) => {
+  '120': (state: any) => {
     try {
       // migrate to remove memory feature from sidebar (moved to settings)
       if (state.settings && state.settings.sidebarIcons) {
@@ -2122,7 +2106,7 @@ const migrateConfig = {
       return state
     }
   },
-  '121': (state: RootState) => {
+  '121': (state: any) => {
     try {
       const { toolOrder } = state.inputTools
       const urlContextKey = 'url_context'
@@ -2160,7 +2144,7 @@ const migrateConfig = {
       return state
     }
   },
-  '122': (state: RootState) => {
+  '122': (state: any) => {
     try {
       state.settings.navbarPosition = 'left'
       return state
@@ -2170,7 +2154,7 @@ const migrateConfig = {
     }
   },
 
-  '123': (state: RootState) => {
+  '123': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         provider.models.forEach((model) => {
@@ -2195,7 +2179,7 @@ const migrateConfig = {
       return state
     }
   }, // 1.5.4
-  '124': (state: RootState) => {
+  '124': (state: any) => {
     try {
       state.assistants.assistants.forEach((assistant) => {
         if (assistant.settings && !assistant.settings.toolUseMode) {
@@ -2226,16 +2210,16 @@ const migrateConfig = {
       updateModelTextDelta(state.llm.topicNamingModel)
       updateModelTextDelta(state.llm.translateModel)
 
-      if ((state.assistants as any).defaultAssistant.model) {
-        updateModelTextDelta((state.assistants as any).defaultAssistant.model)
-        updateModelTextDelta((state.assistants as any).defaultAssistant.defaultModel)
+      if (state.assistants.defaultAssistant.model) {
+        updateModelTextDelta(state.assistants.defaultAssistant.model)
+        updateModelTextDelta(state.assistants.defaultAssistant.defaultModel)
       }
 
       addProvider(state, 'aws-bedrock')
 
       // 初始化 awsBedrock 设置 (history-only: retired in 222)
-      if (!(state.llm.settings as any).awsBedrock) {
-        ;(state.llm.settings as any).awsBedrock = (llmInitialState.settings as any).awsBedrock
+      if (!state.llm.settings.awsBedrock) {
+        state.llm.settings.awsBedrock = (llmInitialState.settings as any).awsBedrock
       }
 
       return state
@@ -2244,7 +2228,7 @@ const migrateConfig = {
       return state
     }
   },
-  '125': (state: RootState) => {
+  '125': (state: any) => {
     try {
       // Initialize API server configuration if not present
       if (!state.settings.apiServer) {
@@ -2261,7 +2245,7 @@ const migrateConfig = {
       return state
     }
   },
-  '126': (state: RootState) => {
+  '126': (state: any) => {
     try {
       state.knowledge.bases.forEach((base) => {
         // @ts-ignore eslint-disable-next-line
@@ -2283,7 +2267,7 @@ const migrateConfig = {
       return state
     }
   },
-  '127': (state: RootState) => {
+  '127': (state: any) => {
     try {
       addProvider(state, 'poe')
 
@@ -2324,7 +2308,7 @@ const migrateConfig = {
       return state
     }
   },
-  '128': (state: RootState) => {
+  '128': (state: any) => {
     try {
       // 迁移 service tier 设置
       const openai = state.llm.providers.find((provider) => provider.id === SystemProviderIds.openai)
@@ -2350,7 +2334,7 @@ const migrateConfig = {
       return state
     }
   },
-  '129': (state: RootState) => {
+  '129': (state: any) => {
     try {
       // 聚合 api options
       state.llm.providers.forEach((p) => {
@@ -2372,7 +2356,7 @@ const migrateConfig = {
       return state
     }
   },
-  '130': (state: RootState) => {
+  '130': (state: any) => {
     try {
       if (state.settings && state.settings.openAI && !state.settings.openAI.verbosity) {
         state.settings.openAI.verbosity = 'medium'
@@ -2387,7 +2371,7 @@ const migrateConfig = {
       return state
     }
   },
-  '131': (state: RootState) => {
+  '131': (state: any) => {
     try {
       // @ts-ignore eslint-disable-next-line
       state.settings.mathEnableSingleDollar = true
@@ -2397,7 +2381,7 @@ const migrateConfig = {
       return state
     }
   },
-  '132': (state: RootState) => {
+  '132': (state: any) => {
     try {
       state.llm.providers.forEach((p) => {
         // 如果原本是undefined则不做改动，静默从默认支持改为默认不支持
@@ -2414,7 +2398,7 @@ const migrateConfig = {
       return state
     }
   },
-  '133': (state: RootState) => {
+  '133': (state: any) => {
     try {
       return state
     } catch (error) {
@@ -2422,7 +2406,7 @@ const migrateConfig = {
       return state
     }
   },
-  '134': (state: RootState) => {
+  '134': (state: any) => {
     try {
       state.llm.quickModel = state.llm.topicNamingModel
 
@@ -2432,12 +2416,12 @@ const migrateConfig = {
       return state
     }
   },
-  '135': (state: RootState) => {
+  '135': (state: any) => {
     try {
-      if (!(state.assistants as any).defaultAssistant.settings) {
-        ;(state.assistants as any).defaultAssistant.settings = MIGRATION_DEFAULT_ASSISTANT_SETTINGS as any
-      } else if (!(state.assistants as any).defaultAssistant.settings.toolUseMode) {
-        ;(state.assistants as any).defaultAssistant.settings.toolUseMode = 'prompt'
+      if (!state.assistants.defaultAssistant.settings) {
+        state.assistants.defaultAssistant.settings = MIGRATION_DEFAULT_ASSISTANT_SETTINGS as any
+      } else if (!state.assistants.defaultAssistant.settings.toolUseMode) {
+        state.assistants.defaultAssistant.settings.toolUseMode = 'prompt'
       }
       return state
     } catch (error) {
@@ -2445,13 +2429,13 @@ const migrateConfig = {
       return state
     }
   },
-  '136': (state: RootState) => {
+  '136': (state: any) => {
     try {
-      state.settings.sidebarIcons.visible = [...new Set(state.settings.sidebarIcons.visible)].filter((icon) =>
-        DEFAULT_SIDEBAR_ICONS.includes(icon)
+      state.settings.sidebarIcons.visible = [...new Set(state.settings.sidebarIcons.visible)].filter((icon: any) =>
+        (DEFAULT_SIDEBAR_ICONS as readonly unknown[]).includes(icon)
       )
-      state.settings.sidebarIcons.disabled = [...new Set(state.settings.sidebarIcons.disabled)].filter((icon) =>
-        DEFAULT_SIDEBAR_ICONS.includes(icon)
+      state.settings.sidebarIcons.disabled = [...new Set(state.settings.sidebarIcons.disabled)].filter((icon: any) =>
+        (DEFAULT_SIDEBAR_ICONS as readonly unknown[]).includes(icon)
       )
       return state
     } catch (error) {
@@ -2459,11 +2443,14 @@ const migrateConfig = {
       return state
     }
   },
-  '137': (state: RootState) => {
+  '137': (state: any) => {
     try {
+      // History-only legacy OCR shape (store-free inline literal; the OCR
+      // config module is deleted). Minimal shape sufficient for replay; the
+      // terminal 227 scrub deletes the slice.
       state.ocr = {
-        providers: BUILTIN_OCR_PROVIDERS,
-        imageProviderId: DEFAULT_OCR_PROVIDER.image.id
+        providers: [{ id: 'tesseract', name: 'Tesseract', capabilities: { image: true }, config: {} }],
+        imageProviderId: 'tesseract'
       }
       state.translate.translateInput = ''
       return state
@@ -2472,16 +2459,16 @@ const migrateConfig = {
       return state
     }
   },
-  '138': (state: RootState) => {
+  '138': (state: any) => {
     try {
-      addOcrProvider(state, BUILTIN_OCR_PROVIDERS_MAP.system)
+      addOcrProvider(state, { id: 'system', name: 'System', capabilities: { image: true }, config: {} })
       return state
     } catch (error) {
       logger.error('migrate 138 error', error as Error)
       return state
     }
   },
-  '139': (state: RootState) => {
+  '139': (state: any) => {
     try {
       addProvider(state, 'cherryin')
       state.llm.providers = moveProvider(state.llm.providers, 'cherryin', 1)
@@ -2518,7 +2505,7 @@ const migrateConfig = {
       return state
     }
   },
-  '140': (state: RootState) => {
+  '140': (state: any) => {
     try {
       // paintings state removed in slimming refactor
       return state
@@ -2527,7 +2514,7 @@ const migrateConfig = {
       return state
     }
   },
-  '141': (state: RootState) => {
+  '141': (state: any) => {
     try {
       if (state.settings && state.settings.sidebarIcons) {
         // Check if 'notes' is not already in visible icons
@@ -2541,7 +2528,7 @@ const migrateConfig = {
       return state
     }
   },
-  '142': (state: RootState) => {
+  '142': (state: any) => {
     try {
       // Initialize notes settings if not present
       if (!state.note) {
@@ -2553,7 +2540,7 @@ const migrateConfig = {
       return state
     }
   },
-  '143': (state: RootState) => {
+  '143': (state: any) => {
     try {
       addMiniApp(state, 'longcat')
       return state
@@ -2561,7 +2548,7 @@ const migrateConfig = {
       return state
     }
   },
-  '144': (state: RootState) => {
+  '144': (state: any) => {
     try {
       if (state.settings) {
         state.settings.confirmDeleteMessage = settingsInitialState.confirmDeleteMessage
@@ -2573,7 +2560,7 @@ const migrateConfig = {
       return state
     }
   },
-  '145': (state: RootState) => {
+  '145': (state: any) => {
     try {
       if (state.settings) {
         if (state.settings.showMessageOutline === undefined || state.settings.showMessageOutline === null) {
@@ -2586,16 +2573,16 @@ const migrateConfig = {
       return state
     }
   },
-  '146': (state: RootState) => {
+  '146': (state: any) => {
     try {
       // Migrate showWorkspace from settings to note store
       if (state.settings && state.note) {
-        const showWorkspaceValue = (state.settings as any)?.showWorkspace
+        const showWorkspaceValue = state.settings?.showWorkspace
         if (showWorkspaceValue !== undefined) {
           // @ts-ignore eslint-disable-next-line
           state.note.settings.showWorkspace = showWorkspaceValue
           // Remove from settings
-          delete (state.settings as any).showWorkspace
+          delete state.settings.showWorkspace
           // @ts-ignore eslint-disable-next-line
         } else if (state.note.settings.showWorkspace === undefined) {
           // Set default value if not exists
@@ -2609,11 +2596,11 @@ const migrateConfig = {
       return state
     }
   },
-  '147': (state: RootState) => {
+  '147': (state: any) => {
     try {
       state.knowledge.bases.forEach((base) => {
-        if ((base as any).framework) {
-          delete (base as any).framework
+        if (base.framework) {
+          delete base.framework
         }
       })
       return state
@@ -2622,20 +2609,20 @@ const migrateConfig = {
       return state
     }
   },
-  '148': (state: RootState) => {
+  '148': (state: any) => {
     try {
-      addOcrProvider(state, BUILTIN_OCR_PROVIDERS_MAP.paddleocr)
+      addOcrProvider(state, { id: 'paddleocr', name: 'PaddleOCR', capabilities: { image: true }, config: {} })
       return state
     } catch (error) {
       logger.error('migrate 148 error', error as Error)
       return state
     }
   },
-  '149': (state: RootState) => {
+  '149': (state: any) => {
     try {
       state.knowledge.bases.forEach((base) => {
-        if ((base as any).framework) {
-          delete (base as any).framework
+        if (base.framework) {
+          delete base.framework
         }
       })
       return state
@@ -2644,7 +2631,7 @@ const migrateConfig = {
       return state
     }
   },
-  '150': (state: RootState) => {
+  '150': (state: any) => {
     try {
       addShortcuts(state, ['rename_topic'], 'new_topic')
       addShortcuts(state, ['edit_last_user_message'], 'copy_last_message')
@@ -2654,7 +2641,7 @@ const migrateConfig = {
       return state
     }
   },
-  '151': (state: RootState) => {
+  '151': (state: any) => {
     try {
       if (state.settings) {
         // @ts-ignore eslint-disable-next-line
@@ -2666,7 +2653,7 @@ const migrateConfig = {
       return state
     }
   },
-  '152': (state: RootState) => {
+  '152': (state: any) => {
     try {
       state.translate.settings = {
         autoCopy: false
@@ -2677,7 +2664,7 @@ const migrateConfig = {
       return state
     }
   },
-  '153': (state: RootState) => {
+  '153': (state: any) => {
     try {
       if (state.note.settings) {
         state.note.settings.fontSize = notesInitialState.settings.fontSize
@@ -2689,7 +2676,7 @@ const migrateConfig = {
       return state
     }
   },
-  '154': (state: RootState) => {
+  '154': (state: any) => {
     try {
       if (state.settings.userTheme) {
         state.settings.userTheme.userFontFamily = settingsInitialState.userTheme.userFontFamily
@@ -2701,11 +2688,11 @@ const migrateConfig = {
       return state
     }
   },
-  '155': (state: RootState) => {
+  '155': (state: any) => {
     try {
       state.knowledge.bases.forEach((base) => {
-        if ((base as any).framework) {
-          delete (base as any).framework
+        if (base.framework) {
+          delete base.framework
         }
       })
       return state
@@ -2714,7 +2701,7 @@ const migrateConfig = {
       return state
     }
   },
-  '156': (state: RootState) => {
+  '156': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds.anthropic) {
@@ -2729,7 +2716,7 @@ const migrateConfig = {
       return state
     }
   },
-  '157': (state: RootState) => {
+  '157': (state: any) => {
     try {
       addProvider(state, 'aionly')
       state.llm.providers = moveProvider(state.llm.providers, 'aionly', 10)
@@ -2781,7 +2768,7 @@ const migrateConfig = {
       return state
     }
   },
-  '158': (state: RootState) => {
+  '158': (state: any) => {
     try {
       state.llm.providers = state.llm.providers.filter((provider) => provider.id !== 'cherryin')
       addProvider(state, 'longcat')
@@ -2791,7 +2778,7 @@ const migrateConfig = {
       return state
     }
   },
-  '159': (state: RootState) => {
+  '159': (state: any) => {
     try {
       addProvider(state, 'ovms')
       fixMissingProvider(state)
@@ -2801,7 +2788,7 @@ const migrateConfig = {
       return state
     }
   },
-  '161': (state: RootState) => {
+  '161': (state: any) => {
     try {
       removeMiniAppFromState(state, 'nm-search')
       removeMiniAppFromState(state, 'hika')
@@ -2814,7 +2801,7 @@ const migrateConfig = {
       return state
     }
   },
-  '167': (state: RootState) => {
+  '167': (state: any) => {
     try {
       addProvider(state, 'huggingface')
       return state
@@ -2823,7 +2810,7 @@ const migrateConfig = {
       return state
     }
   },
-  '168': (state: RootState) => {
+  '168': (state: any) => {
     try {
       addPreprocessProviders(state, 'open-mineru')
       return state
@@ -2832,11 +2819,14 @@ const migrateConfig = {
       return state
     }
   },
-  '169': (state: RootState) => {
+  '169': (state: any) => {
     try {
       if (state?.mcp?.servers) {
         state.mcp.servers = state.mcp.servers.map((server) => {
-          const inferredSource = isBuiltinMCPServer(server) ? 'builtin' : 'unknown'
+          const inferredSource =
+            server?.type === 'inMemory' && typeof server?.name === 'string' && server.name.startsWith('@cherry/')
+              ? 'builtin'
+              : 'unknown'
           return {
             ...server,
             installSource: inferredSource
@@ -2849,7 +2839,7 @@ const migrateConfig = {
       return state
     }
   },
-  '170': (state: RootState) => {
+  '170': (state: any) => {
     try {
       addProvider(state, 'sophnet')
       state.llm.providers = moveProvider(state.llm.providers, 'sophnet', 17)
@@ -2859,21 +2849,21 @@ const migrateConfig = {
       return state
     }
   },
-  '171': (state: RootState) => {
+  '171': (state: any) => {
     try {
       // Ensure aws-bedrock provider exists (history-only: retired in 222)
       addProvider(state, 'aws-bedrock')
 
       // Ensure awsBedrock settings exist and have all required fields
-      if (!(state.llm.settings as any).awsBedrock) {
-        ;(state.llm.settings as any).awsBedrock = (llmInitialState.settings as any).awsBedrock
+      if (!state.llm.settings.awsBedrock) {
+        state.llm.settings.awsBedrock = (llmInitialState.settings as any).awsBedrock
       } else {
         // For users who have awsBedrock but missing new fields (authType and apiKey)
-        if (!(state.llm.settings as any).awsBedrock.authType) {
-          ;(state.llm.settings as any).awsBedrock.authType = 'iam'
+        if (!state.llm.settings.awsBedrock.authType) {
+          state.llm.settings.awsBedrock.authType = 'iam'
         }
-        if ((state.llm.settings as any).awsBedrock.apiKey === undefined) {
-          ;(state.llm.settings as any).awsBedrock.apiKey = ''
+        if (state.llm.settings.awsBedrock.apiKey === undefined) {
+          state.llm.settings.awsBedrock.apiKey = ''
         }
       }
       return state
@@ -2882,14 +2872,14 @@ const migrateConfig = {
       return state
     }
   },
-  '172': (state: RootState) => {
+  '172': (state: any) => {
     try {
       // Add ling and huggingchat mini apps
       addMiniApp(state, 'ling')
       addMiniApp(state, 'huggingchat')
 
-      // Add ovocr provider
-      addOcrProvider(state, BUILTIN_OCR_PROVIDERS_MAP.ovocr)
+      // Add ovocr provider (history-only inline literal; OCR config deleted)
+      addOcrProvider(state, { id: 'ovocr', name: 'Intel OV(NPU) OCR', capabilities: { image: true }, config: {} })
 
       // Migrate agents to assistants presets
       // @ts-ignore
@@ -2968,7 +2958,7 @@ const migrateConfig = {
       return state
     }
   },
-  '173': (state: RootState) => {
+  '173': (state: any) => {
     try {
       // Migrate toolOrder from global state to scope-based state.
       // Historical: persisted Session-scope tool order default. The Agent
@@ -2989,7 +2979,7 @@ const migrateConfig = {
       return state
     }
   },
-  '174': (state: RootState) => {
+  '174': (state: any) => {
     try {
       addProvider(state, SystemProviderIds.longcat)
 
@@ -3006,7 +2996,7 @@ const migrateConfig = {
       return state
     }
   },
-  '175': (state: RootState) => {
+  '175': (state: any) => {
     try {
       state.assistants.assistants.forEach((assistant) => {
         // @ts-ignore
@@ -3027,7 +3017,7 @@ const migrateConfig = {
       return state
     }
   },
-  '176': (state: RootState) => {
+  '176': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds.qiniu) {
@@ -3043,9 +3033,8 @@ const migrateConfig = {
       return state
     }
   },
-  '177': (state: RootState) => {
+  '177': (state: any) => {
     try {
-      // @ts-expect-error it's a removed type
       if (state.settings.openAI.summaryText === 'off') {
         state.settings.openAI.summaryText = 'auto'
       }
@@ -3056,7 +3045,7 @@ const migrateConfig = {
       return state
     }
   },
-  '178': (state: RootState) => {
+  '178': (state: any) => {
     try {
       const groq = state.llm.providers.find((p) => p.id === SystemProviderIds.groq)
       if (groq) {
@@ -3069,7 +3058,7 @@ const migrateConfig = {
       return state
     }
   },
-  '179': (state: RootState) => {
+  '179': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         switch (provider.id) {
@@ -3091,7 +3080,7 @@ const migrateConfig = {
       return state
     }
   },
-  '181': (state: RootState) => {
+  '181': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'ai-gateway') {
@@ -3114,7 +3103,7 @@ const migrateConfig = {
       return state
     }
   },
-  '182': (state: RootState) => {
+  '182': (state: any) => {
     try {
       // Initialize streamOptions in settings.openAI if not exists
       if (!state.settings.openAI.streamOptions) {
@@ -3129,7 +3118,7 @@ const migrateConfig = {
       return state
     }
   },
-  '183': (state: RootState) => {
+  '183': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'cherryin') {
@@ -3145,7 +3134,7 @@ const migrateConfig = {
       return state
     }
   },
-  '184': (state: RootState) => {
+  '184': (state: any) => {
     try {
       // Add exa-mcp (free) web search provider if not exists
       const exaMcpExists = state.websearch.providers.some((p) => p.id === 'exa-mcp')
@@ -3170,11 +3159,11 @@ const migrateConfig = {
       return state
     }
   },
-  '185': (state: RootState) => {
+  '185': (state: any) => {
     try {
       // Reset toolUseMode to function for default assistant
-      if ((state.assistants as any).defaultAssistant.settings?.toolUseMode) {
-        ;(state.assistants as any).defaultAssistant.settings.toolUseMode = 'function'
+      if (state.assistants.defaultAssistant.settings?.toolUseMode) {
+        state.assistants.defaultAssistant.settings.toolUseMode = 'function'
       }
       // Reset toolUseMode to function for assistants
       state.assistants.assistants.forEach((assistant) => {
@@ -3191,16 +3180,14 @@ const migrateConfig = {
       return state
     }
   },
-  '186': (state: RootState) => {
+  '186': (state: any) => {
     try {
       if (state.settings.apiServer) {
         state.settings.apiServer.host = API_SERVER_DEFAULTS.HOST
       }
-      // @ts-expect-error
       if (state.settings.openAI.summaryText === 'undefined') {
         state.settings.openAI.summaryText = undefined
       }
-      // @ts-expect-error
       if (state.settings.openAI.verbosity === 'undefined') {
         state.settings.openAI.verbosity = undefined
       }
@@ -3216,7 +3203,7 @@ const migrateConfig = {
       return state
     }
   },
-  '187': (state: RootState) => {
+  '187': (state: any) => {
     try {
       state.assistants.assistants.forEach((assistant) => {
         if (assistant.settings && assistant.settings.reasoning_effort === undefined) {
@@ -3232,7 +3219,7 @@ const migrateConfig = {
     }
   },
   // 1.7.7
-  '188': (state: RootState) => {
+  '188': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds.openrouter) {
@@ -3247,9 +3234,9 @@ const migrateConfig = {
     }
   },
   // 1.7.7
-  '189': (state: RootState) => {
+  '189': (state: any) => {
     try {
-      void window.api.memory.migrateMemoryDb()
+      // Removed memory feature: no main memory DB migration.
       // @ts-ignore
       const memoryLlmApiClient = state?.memory?.memoryConfig?.llmApiClient
       // @ts-ignore
@@ -3281,7 +3268,7 @@ const migrateConfig = {
     }
   },
   // 1.7.8
-  '190': (state: RootState) => {
+  '190': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === SystemProviderIds.ollama) {
@@ -3295,7 +3282,7 @@ const migrateConfig = {
       return state
     }
   },
-  '191': (state: RootState) => {
+  '191': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'tokenflux') {
@@ -3310,7 +3297,7 @@ const migrateConfig = {
       return state
     }
   },
-  '192': (state: RootState) => {
+  '192': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === '302ai') {
@@ -3325,7 +3312,7 @@ const migrateConfig = {
       return state
     }
   },
-  '193': (state: RootState) => {
+  '193': (state: any) => {
     try {
       addPreprocessProviders(state, 'paddleocr')
       logger.info('migrate 193 success')
@@ -3335,7 +3322,7 @@ const migrateConfig = {
       return state
     }
   },
-  '194': (state: RootState) => {
+  '194': (state: any) => {
     try {
       const GLM_4_5_FLASH_MODEL = 'glm-4.5-flash'
       if (state.llm.defaultModel?.provider === 'cherryai' && state.llm.defaultModel?.id === GLM_4_5_FLASH_MODEL) {
@@ -3361,7 +3348,7 @@ const migrateConfig = {
       return state
     }
   },
-  '195': (state: RootState) => {
+  '195': (state: any) => {
     try {
       logger.info('migrate 195 success')
       return state
@@ -3370,7 +3357,7 @@ const migrateConfig = {
       return state
     }
   },
-  '196': (state: RootState) => {
+  '196': (state: any) => {
     try {
       // @ts-ignore legacy paintings state - removed in slimming refactor
       if (state.paintings && !state.paintings.ppio_draw) {
@@ -3389,7 +3376,7 @@ const migrateConfig = {
       return state
     }
   },
-  '197': (state: RootState) => {
+  '197': (state: any) => {
     try {
       logger.info('migrate 197 success')
       return state
@@ -3398,7 +3385,7 @@ const migrateConfig = {
       return state
     }
   },
-  '198': (state: RootState) => {
+  '198': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'minimax') {
@@ -3412,7 +3399,7 @@ const migrateConfig = {
       return state
     }
   },
-  '199': (state: RootState) => {
+  '199': (state: any) => {
     try {
       addShortcuts(state, ['select_model'], 'toggle_new_context')
       return state
@@ -3421,7 +3408,7 @@ const migrateConfig = {
       return state
     }
   },
-  '200': (state: RootState) => {
+  '200': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (legacyTypeOf(provider) === 'ollama') {
@@ -3446,7 +3433,7 @@ const migrateConfig = {
       return state
     }
   },
-  '201': (state: RootState) => {
+  '201': (state: any) => {
     try {
       addWebSearchProvider(state, 'querit')
       return state
@@ -3455,7 +3442,7 @@ const migrateConfig = {
       return state
     }
   },
-  '202': (state: RootState) => {
+  '202': (state: any) => {
     try {
       const filesystemServer = state.mcp?.servers?.find((s: any) => s.name === '@cherry/filesystem')
       if (filesystemServer && filesystemServer.disabledAutoApproveTools === undefined) {
@@ -3467,7 +3454,7 @@ const migrateConfig = {
       return state
     }
   },
-  '203': (state: RootState) => {
+  '203': (state: any) => {
     try {
       if (state.settings && state.settings.sidebarIcons) {
         // Remove 'agents' from visible icons if present (agents subsystem removed)
@@ -3496,7 +3483,7 @@ const migrateConfig = {
       return state
     }
   },
-  '204': (state: RootState) => {
+  '204': (state: any) => {
     try {
       if (state.llm.defaultModel?.provider === 'cherryai') {
         state.llm.defaultModel = qwenModel
@@ -3522,7 +3509,7 @@ const migrateConfig = {
       return state
     }
   },
-  '205': (state: RootState) => {
+  '205': (state: any) => {
     try {
       localStorage.setItem('onboarding-completed', 'true')
 
@@ -3543,7 +3530,7 @@ const migrateConfig = {
       return state
     }
   },
-  '206': (state: RootState) => {
+  '206': (state: any) => {
     try {
       // Historical: reconcile the retired Session-scope tool order with the
       // permission_mode entry. Preserved for persisted state from older
@@ -3572,7 +3559,7 @@ const migrateConfig = {
       return state
     }
   },
-  '207': (state: RootState) => {
+  '207': (state: any) => {
     try {
       state.llm.providers.forEach((provider) => {
         if (provider.id === 'stepfun' && !provider.anthropicApiHost) {
@@ -3587,7 +3574,7 @@ const migrateConfig = {
       return state
     }
   },
-  '208': (state: RootState) => {
+  '208': (state: any) => {
     try {
       state.settings.enableDataCollection = true
       logger.info('migrate 208 success')
@@ -3597,7 +3584,7 @@ const migrateConfig = {
       return state
     }
   },
-  '209': (state: RootState) => {
+  '209': (state: any) => {
     try {
       // Migrate fixedWindowAnchorIndex (per-assistant, index-based) to fixedWindowAnchor (per-topic, messageId-based)
       // NOTE: this legacy migration operates on the OLD persisted schema
@@ -3616,7 +3603,7 @@ const migrateConfig = {
         return assistant
       }
 
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
 
       logger.info('migrate 209 success')
@@ -3626,34 +3613,34 @@ const migrateConfig = {
       return state
     }
   },
-  '210': (state: RootState) => {
+  '210': (state: any) => {
     try {
       // 清除已删除的 slice 残留数据
-      delete (state as any).paintings
-      delete (state as any).toolPermissions
-      delete (state as any).minapps
-      delete (state as any).openclaw
-      delete (state as any).codeTools
-      delete (state as any).selectionStore
+      delete state.paintings
+      delete state.toolPermissions
+      delete state.minapps
+      delete state.openclaw
+      delete state.codeTools
+      delete state.selectionStore
 
       // 清除 runtime 中已删除的字段
       if (state.runtime) {
-        delete (state.runtime as any).activeAgentId
-        delete (state.runtime as any).activeSessionIdMap
-        delete (state.runtime as any).minappShow
-        delete (state.runtime as any).openedKeepAliveMinapps
-        delete (state.runtime as any).openedOneOffMinapp
-        delete (state.runtime as any).currentMinappId
-        delete (state.runtime as any).detectedRegion
+        delete state.runtime.activeAgentId
+        delete state.runtime.activeSessionIdMap
+        delete state.runtime.minappShow
+        delete state.runtime.openedKeepAliveMinapps
+        delete state.runtime.openedOneOffMinapp
+        delete state.runtime.currentMinappId
+        delete state.runtime.detectedRegion
       }
 
       // 清除 settings 中已删除的字段
       if (state.settings) {
-        delete (state.settings as any).defaultPaintingProvider
-        delete (state.settings as any).maxKeepAliveMinapps
-        delete (state.settings as any).showOpenedMinappsInSidebar
-        delete (state.settings as any).minappsOpenLinkExternal
-        delete (state.settings as any).minAppRegion
+        delete state.settings.defaultPaintingProvider
+        delete state.settings.maxKeepAliveMinapps
+        delete state.settings.showOpenedMinappsInSidebar
+        delete state.settings.minappsOpenLinkExternal
+        delete state.settings.minAppRegion
       }
 
       logger.info('migrate 210 success')
@@ -3663,7 +3650,7 @@ const migrateConfig = {
       return state
     }
   },
-  '211': (state: RootState) => {
+  '211': (state: any) => {
     try {
       // Migrate fixedWindowAnchor from string form to ContextWindowAnchor form (group-granularity)
       // NOTE: operates on the OLD persisted schema (fixedWindowAnchor).
@@ -3683,7 +3670,7 @@ const migrateConfig = {
               newMap[topicId] = { kind: 'vacant' } as unknown as ContextWindowAnchor
             } else {
               // 尝试查找该 id 对应的消息，判断是 user 还是 assistant
-              const message = (state as any).messages?.entities?.[value]
+              const message = state.messages?.entities?.[value]
               if (message?.role === 'assistant' && message?.askId) {
                 // 旧锚点设在 assistant 消息上，恢复到其所属的 user 消息
                 newMap[topicId] = { kind: 'active', groupKey: message.askId }
@@ -3702,7 +3689,7 @@ const migrateConfig = {
         }
         return assistant
       }
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 211 success')
       return state
@@ -3711,7 +3698,7 @@ const migrateConfig = {
       return state
     }
   },
-  '212': (state: RootState) => {
+  '212': (state: any) => {
     try {
       // NOTE: operates on the OLD persisted schema (fixedWindowAnchor,
       // topicContextWindowMode).
@@ -3736,7 +3723,7 @@ const migrateConfig = {
         }
         return assistant
       }
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
       logger.info('migrate 212 success')
       return state
@@ -3745,7 +3732,7 @@ const migrateConfig = {
       return state
     }
   },
-  '213': (state: RootState) => {
+  '213': (state: any) => {
     try {
       // Remove 100 = unlimited sentinel: convert persisted contextCount === 100 → null.
       // All other finite values are left unchanged (they represent conversation turns).
@@ -3756,7 +3743,7 @@ const migrateConfig = {
         }
         return assistant
       }
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((a) => migrateAssistant(a))
       logger.info('migrate 213 success')
       return state
@@ -3765,7 +3752,7 @@ const migrateConfig = {
       return state
     }
   },
-  '214': (state: RootState) => {
+  '214': (state: any) => {
     try {
       if (state.shortcuts) {
         if (!state.shortcuts.shortcuts.some((s) => s.key === 'toggle_edit_mode')) {
@@ -3785,7 +3772,7 @@ const migrateConfig = {
       return state
     }
   },
-  '215': (state: RootState) => {
+  '215': (state: any) => {
     try {
       if (state.shortcuts) {
         const removedKeys = new Set(['selection_assistant_toggle', 'selection_assistant_select_text'])
@@ -3810,7 +3797,7 @@ const migrateConfig = {
       return state
     }
   },
-  '216': (state: RootState) => {
+  '216': (state: any) => {
     try {
       // Single anchor-to-end context window model:
       //  - Rename fixedWindowAnchor → contextWindowAnchor (mode-neutral).
@@ -3860,7 +3847,7 @@ const migrateConfig = {
         return assistant
       }
 
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 216 success')
       return state
@@ -3869,7 +3856,7 @@ const migrateConfig = {
       return state
     }
   },
-  '217': (state: RootState) => {
+  '217': (state: any) => {
     try {
       // Remove the CherryIN / CherryAI platform:
       //  - Drop providers whose id is `cherryin` or `cherryai`.
@@ -3895,13 +3882,9 @@ const migrateConfig = {
       state.llm.quickModel = clearIfPlatform(state.llm.quickModel)
       state.llm.translateModel = clearIfPlatform(state.llm.translateModel)
 
-      if ((state.assistants as any)?.defaultAssistant) {
-        ;(state.assistants as any).defaultAssistant.model = clearIfPlatform(
-          (state.assistants as any).defaultAssistant.model
-        )
-        ;(state.assistants as any).defaultAssistant.defaultModel = clearIfPlatform(
-          (state.assistants as any).defaultAssistant.defaultModel
-        )
+      if (state.assistants?.defaultAssistant) {
+        state.assistants.defaultAssistant.model = clearIfPlatform(state.assistants.defaultAssistant.model)
+        state.assistants.defaultAssistant.defaultModel = clearIfPlatform(state.assistants.defaultAssistant.defaultModel)
       }
       state.assistants.assistants.forEach((assistant) => {
         assistant.model = clearIfPlatform(assistant.model)
@@ -3963,7 +3946,7 @@ const migrateConfig = {
       return state
     }
   },
-  '218': (state: RootState) => {
+  '218': (state: any) => {
     try {
       // Quick-settings consolidation.
       // Clean obsolete preference fields removed by the consolidation:
@@ -4019,7 +4002,7 @@ const migrateConfig = {
       return state
     }
   },
-  '219': (state: RootState) => {
+  '219': (state: any) => {
     try {
       // Unified context-anchor domain model:
       //  - Rename the persisted per-topic context-window anchor field
@@ -4050,7 +4033,7 @@ const migrateConfig = {
         return assistant
       }
 
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 219 success')
       return state
@@ -4059,7 +4042,7 @@ const migrateConfig = {
       return state
     }
   },
-  '220': (state: RootState) => {
+  '220': (state: any) => {
     try {
       // Stable context-window anchor model (docs/adr/context-window.md):
       //  - Rename the persisted per-topic context-window anchor field
@@ -4092,7 +4075,7 @@ const migrateConfig = {
         return assistant
       }
 
-      ;(state.assistants as any).defaultAssistant = migrateAssistant((state.assistants as any).defaultAssistant)
+      state.assistants.defaultAssistant = migrateAssistant(state.assistants.defaultAssistant)
       state.assistants.assistants = state.assistants.assistants.map((assistant) => migrateAssistant(assistant))
       logger.info('migrate 220 success')
       return state
@@ -4101,7 +4084,7 @@ const migrateConfig = {
       return state
     }
   },
-  '221': (state: RootState) => {
+  '221': (state: any) => {
     try {
       // Custom-connection bootstrap (slice 1):
       //  - Fresh state starts with no system providers (see store/llm.ts), so
@@ -4142,8 +4125,8 @@ const migrateConfig = {
         collectModel(state.llm?.topicNamingModel)
         collectModel(state.llm?.quickModel)
         collectModel(state.llm?.translateModel)
-        collectModel((state.assistants as any)?.defaultAssistant?.model)
-        collectModel((state.assistants as any)?.defaultAssistant?.defaultModel)
+        collectModel(state.assistants?.defaultAssistant?.model)
+        collectModel(state.assistants?.defaultAssistant?.defaultModel)
         state.assistants?.assistants?.forEach((assistant) => {
           collectModel(assistant.model)
           collectModel(assistant.defaultModel)
@@ -4223,12 +4206,10 @@ const migrateConfig = {
           state.llm.translateModel = clearIfDropped(state.llm.translateModel)
         }
 
-        if ((state.assistants as any)?.defaultAssistant) {
-          ;(state.assistants as any).defaultAssistant.model = clearIfDropped(
-            (state.assistants as any).defaultAssistant.model
-          )
-          ;(state.assistants as any).defaultAssistant.defaultModel = clearIfDropped(
-            (state.assistants as any).defaultAssistant.defaultModel
+        if (state.assistants?.defaultAssistant) {
+          state.assistants.defaultAssistant.model = clearIfDropped(state.assistants.defaultAssistant.model)
+          state.assistants.defaultAssistant.defaultModel = clearIfDropped(
+            state.assistants.defaultAssistant.defaultModel
           )
         }
         state.assistants?.assistants?.forEach((assistant) => {
@@ -4258,7 +4239,7 @@ const migrateConfig = {
           state.websearch.compressionConfig.rerankModel = clearIfDropped(state.websearch.compressionConfig.rerankModel)
         }
         state.knowledge?.bases?.forEach((base) => {
-          ;(base as any).model = clearIfDropped(base.model)
+          base.model = clearIfDropped(base.model)
           base.rerankModel = clearIfDropped(base.rerankModel)
         })
       }
@@ -4270,7 +4251,7 @@ const migrateConfig = {
       return state
     }
   },
-  '222': (state: RootState) => {
+  '222': (state: any) => {
     try {
       // Active-protocol consolidation (slice 3):
       //  - Approved ProviderType values are openai/openai-response/anthropic/
@@ -4360,12 +4341,10 @@ const migrateConfig = {
           state.llm.translateModel = clearIfRemoved(state.llm.translateModel)
         }
 
-        if ((state.assistants as any)?.defaultAssistant) {
-          ;(state.assistants as any).defaultAssistant.model = clearIfRemoved(
-            (state.assistants as any).defaultAssistant.model
-          )
-          ;(state.assistants as any).defaultAssistant.defaultModel = clearIfRemoved(
-            (state.assistants as any).defaultAssistant.defaultModel
+        if (state.assistants?.defaultAssistant) {
+          state.assistants.defaultAssistant.model = clearIfRemoved(state.assistants.defaultAssistant.model)
+          state.assistants.defaultAssistant.defaultModel = clearIfRemoved(
+            state.assistants.defaultAssistant.defaultModel
           )
         }
         state.assistants?.assistants?.forEach((assistant) => {
@@ -4395,16 +4374,16 @@ const migrateConfig = {
           state.websearch.compressionConfig.rerankModel = clearIfRemoved(state.websearch.compressionConfig.rerankModel)
         }
         state.knowledge?.bases?.forEach((base) => {
-          ;(base as any).model = clearIfRemoved(base.model)
+          base.model = clearIfRemoved(base.model)
           base.rerankModel = clearIfRemoved(base.rerankModel)
         })
       }
 
       if (state.llm?.settings) {
-        delete (state.llm.settings as any).vertexai
-        delete (state.llm.settings as any).awsBedrock
+        delete state.llm.settings.vertexai
+        delete state.llm.settings.awsBedrock
       }
-      delete (state as any).copilot
+      delete state.copilot
 
       logger.info('migrate 222 success')
       return state
@@ -4413,7 +4392,7 @@ const migrateConfig = {
       return state
     }
   },
-  '223': (state: RootState) => {
+  '223': (state: any) => {
     try {
       // No-key backfill for states already at 222 (pre-requiresApiKey):
       //  - Only unmistakable legacy local no-key connections opt out via
@@ -4487,7 +4466,7 @@ const migrateConfig = {
       return state
     }
   },
-  '224': (state: RootState) => {
+  '224': (state: any) => {
     try {
       // Capability-flag carryover for the debranded active runtime (slice 4):
       //  - Generic service-tier carryover: for any provider with a genuinely
@@ -4582,7 +4561,7 @@ const migrateConfig = {
       return state
     }
   },
-  '225': (state: RootState) => {
+  '225': (state: any) => {
     try {
       // Assistant-defaults redesign: replace the persisted
       // `assistants.defaultAssistant` Assistant entity with the pure
@@ -4598,7 +4577,7 @@ const migrateConfig = {
       // malformed/missing legacy values fall back to fresh defaults.
       // Implemented locally so this module stays free of the service-layer
       // import chain, per this file's convention.
-      const assistantsState = (state as any).assistants ?? {}
+      const assistantsState = state.assistants ?? {}
       const legacy = assistantsState.defaultAssistant
       if (assistantsState.assistantDefaults && (legacy === undefined || legacy === null)) {
         // Already migrated (idempotent re-run): keep stored config as-is.
@@ -4639,15 +4618,10 @@ const migrateConfig = {
           'model',
           'defaultModel',
           'knowledge_bases',
-          'enableWebSearch',
-          'webSearchProviderId',
           'enableUrlContext',
           'enableGenerateImage',
-          'mcpMode',
-          'mcpServers',
           'knowledgeRecognition',
-          'tags',
-          'enableMemory'
+          'tags'
         ]) {
           if (record[key] !== undefined) {
             next[key] = record[key]
@@ -4664,6 +4638,113 @@ const migrateConfig = {
       return state
     } catch (error) {
       logger.error('migrate 225 error', error as Error)
+      return state
+    }
+  },
+  '226': (state: any) => {
+    try {
+      // Terminal scrub for removed MCP / external+provider-native websearch / global memory.
+      // - Drops entire persisted slices (no empty shells, no imports of deleted modules).
+      // - Strips removed assistant/defaults fields so old imports/rehydration never
+      //   reintroduce backend capabilities; retains urlContext/knowledge/generateImage.
+      // - Strips removed inputTools ordering keys.
+      // - Historic message/block storage formats are untouched: SQLite/Dexie payloads,
+      //   existing messages, and compatibility identifiers pass through unchanged.
+      // - redux-persist key is unchanged (see store/index.ts).
+      const s = state
+      if (s && typeof s === 'object') {
+        delete s.mcp
+        delete s.memory
+        delete s.websearch
+      }
+      const stripAssistant = (a: any) => {
+        if (!a || typeof a !== 'object') return
+        delete a.enableWebSearch
+        delete a.webSearchProviderId
+        delete a.mcpMode
+        delete a.mcpServers
+        delete a.enableMemory
+      }
+      const assistantsState = state?.assistants
+      if (assistantsState && typeof assistantsState === 'object') {
+        const list = assistantsState.assistants
+        if (Array.isArray(list)) {
+          for (const a of list) stripAssistant(a)
+        }
+        const defaults = assistantsState.assistantDefaults
+        if (defaults && typeof defaults === 'object') stripAssistant(defaults)
+        const legacyDefault = assistantsState.defaultAssistant
+        if (legacyDefault && typeof legacyDefault === 'object') stripAssistant(legacyDefault)
+      }
+      const toolOrder = state?.inputTools?.toolOrder
+      if (toolOrder && typeof toolOrder === 'object') {
+        const stripKeys = (arr: unknown): void => {
+          if (!Array.isArray(arr)) return
+          for (let i = arr.length - 1; i >= 0; i--) {
+            if (arr[i] === 'web_search' || arr[i] === 'mcp_tools') arr.splice(i, 1)
+          }
+        }
+        stripKeys(toolOrder.visible)
+        stripKeys(toolOrder.hidden)
+      }
+      logger.info('migrate 226 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 226 error', error as Error)
+      return state
+    }
+  },
+  '227': (state: any) => {
+    try {
+      // Terminal scrub for removed OCR runtime (user-authorized full removal).
+      // - Drops the entire persisted `ocr` slice (no empty shell).
+      // - Historic migrations (137/138/148/172) may rebuild the legacy shape
+      //   in the same full-chain run; this terminal step clears it last.
+      // - Retains the 226 scrubs (mcp/memory/websearch slices, assistant
+      //   backend fields, inputTools keys) and preprocess/urlContext/
+      //   knowledge state. SQLite/Dexie payloads and `persist:cherry-studio`
+      //   key are untouched.
+      const s = state
+      if (s && typeof s === 'object') {
+        delete s.ocr
+        delete s.mcp
+        delete s.memory
+        delete s.websearch
+      }
+      const stripAssistant = (a: any) => {
+        if (!a || typeof a !== 'object') return
+        delete a.enableWebSearch
+        delete a.webSearchProviderId
+        delete a.mcpMode
+        delete a.mcpServers
+        delete a.enableMemory
+      }
+      const assistantsState = state?.assistants
+      if (assistantsState && typeof assistantsState === 'object') {
+        const list = assistantsState.assistants
+        if (Array.isArray(list)) {
+          for (const a of list) stripAssistant(a)
+        }
+        const defaults = assistantsState.assistantDefaults
+        if (defaults && typeof defaults === 'object') stripAssistant(defaults)
+        const legacyDefault = assistantsState.defaultAssistant
+        if (legacyDefault && typeof legacyDefault === 'object') stripAssistant(legacyDefault)
+      }
+      const toolOrder = state?.inputTools?.toolOrder
+      if (toolOrder && typeof toolOrder === 'object') {
+        const stripKeys = (arr: unknown): void => {
+          if (!Array.isArray(arr)) return
+          for (let i = arr.length - 1; i >= 0; i--) {
+            if (arr[i] === 'web_search' || arr[i] === 'mcp_tools') arr.splice(i, 1)
+          }
+        }
+        stripKeys(toolOrder.visible)
+        stripKeys(toolOrder.hidden)
+      }
+      logger.info('migrate 227 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 227 error', error as Error)
       return state
     }
   }

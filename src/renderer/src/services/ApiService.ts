@@ -8,10 +8,8 @@ import { buildProviderOptions } from '@renderer/aiCore/utils/options'
 import { isDedicatedImageGenerationModel, isEmbeddingModel } from '@renderer/config/models'
 import { getStoreSetting } from '@renderer/hooks/useSettings'
 import i18n from '@renderer/i18n'
-import store from '@renderer/store'
-import { hubMCPServer } from '@renderer/store/mcp'
-import type { Assistant, MCPServer, MCPTool, Model, Provider } from '@renderer/types'
-import { type FetchChatCompletionParams, getEffectiveMcpMode } from '@renderer/types'
+import type { Assistant, Model, Provider } from '@renderer/types'
+import type { FetchChatCompletionParams } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { type Chunk, ChunkType } from '@renderer/types/chunk'
 import type { Message, ResponseError } from '@renderer/types/newMessage'
@@ -30,7 +28,6 @@ import {
 } from '@renderer/utils/messageUtils/snapshotBlocks'
 import { assertProviderMatchesModel, createNoModelError, isNoModelError } from '@renderer/utils/noModelError'
 import { containsSupportedVariables, replacePromptVariables } from '@renderer/utils/prompt'
-import { elapsedMs } from '@shared/diagnostics/sendTiming'
 import { isEmpty, takeRight } from 'lodash'
 
 import type { AiProviderConfig } from '../aiCore'
@@ -44,7 +41,6 @@ import {
   getQuickModel
 } from './AssistantService'
 import { type AuthorityUserSnapshot, ConversationService } from './ConversationService'
-import { logColdPathDiagnostic } from './db/sendTimingDiagnostics'
 import { injectUserMessageWithKnowledgeSearchPrompt } from './KnowledgeService'
 import type { BlockManager } from './messageStreaming'
 import type { StreamProcessorCallbacks } from './StreamProcessingService'
@@ -68,100 +64,6 @@ export function resolveModelAndProvider(model: Model | undefined): { model: Mode
   const provider = getProviderByModel(model)
   assertProviderMatchesModel(model, provider)
   return { model, provider }
-}
-
-/**
- * Get the MCP servers to use based on the assistant's MCP mode.
- */
-export function getMcpServersForAssistant(assistant: Assistant): MCPServer[] {
-  const mode = getEffectiveMcpMode(assistant)
-  const allMcpServers = store.getState().mcp.servers || []
-  const activedMcpServers = allMcpServers.filter((s) => s.isActive)
-
-  switch (mode) {
-    case 'disabled':
-      return []
-    case 'auto':
-      return [hubMCPServer]
-    case 'manual': {
-      const assistantMcpServers = assistant.mcpServers || []
-      return activedMcpServers.filter((server) => assistantMcpServers.some((s) => s.id === server.id))
-    }
-    default:
-      return []
-  }
-}
-
-export async function fetchAllActiveServerTools(): Promise<MCPTool[]> {
-  const allMcpServers = store.getState().mcp.servers || []
-  const activedMcpServers = allMcpServers.filter((s) => s.isActive)
-
-  if (activedMcpServers.length === 0) {
-    return []
-  }
-
-  try {
-    const toolPromises = activedMcpServers.map(async (mcpServer: MCPServer) => {
-      try {
-        const tools = await window.api.mcp.listTools(mcpServer)
-        return tools.filter((tool: any) => !mcpServer.disabledTools?.includes(tool.name))
-      } catch (error) {
-        logger.error(`Error fetching tools from MCP server ${mcpServer.name}:`, error as Error)
-        return []
-      }
-    })
-    const results = await Promise.allSettled(toolPromises)
-    return results
-      .filter((result): result is PromiseFulfilledResult<MCPTool[]> => result.status === 'fulfilled')
-      .map((result) => result.value)
-      .flat()
-  } catch (toolError) {
-    logger.error('Error fetching all active server tools:', toolError as Error)
-    return []
-  }
-}
-
-export async function fetchMcpTools(assistant: Assistant) {
-  let mcpTools: MCPTool[] = []
-  const enabledMCPs = getMcpServersForAssistant(assistant)
-
-  if (enabledMCPs && enabledMCPs.length > 0) {
-    // LOCK-001/003: bounded cold-path timing for the renderer→main MCP tool
-    // discovery round trip. Never logs server names/args/env.
-    const t0 = performance.now()
-    try {
-      const toolPromises = enabledMCPs.map(async (mcpServer: MCPServer) => {
-        try {
-          const tools = await window.api.mcp.listTools(mcpServer)
-          return tools.filter((tool: any) => !mcpServer.disabledTools?.includes(tool.name))
-        } catch (error) {
-          // Per-server failure: log and swallow exactly as before, but rethrow
-          // so the settled result records the failure for the diagnostic.
-          logger.error(`Error fetching tools from MCP server ${mcpServer.name}:`, error as Error)
-          throw error
-        }
-      })
-      const results = await Promise.allSettled(toolPromises)
-      const failedCount = results.filter((result) => result.status === 'rejected').length
-      mcpTools = results
-        .filter((result): result is PromiseFulfilledResult<MCPTool[]> => result.status === 'fulfilled')
-        .map((result) => result.value)
-        .flat()
-      logColdPathDiagnostic('renderer.mcp.listTools', elapsedMs(t0), {
-        serverCount: enabledMCPs.length,
-        toolCount: mcpTools.length,
-        failedCount,
-        ok: failedCount === 0
-      })
-    } catch (toolError) {
-      logColdPathDiagnostic('renderer.mcp.listTools', elapsedMs(t0), {
-        serverCount: enabledMCPs.length,
-        ok: false
-      })
-      logger.error('Error fetching MCP tools:', toolError as Error)
-    }
-  }
-  return mcpTools
 }
 
 /**
@@ -280,12 +182,8 @@ export async function fetchChatCompletion({
   const AI = new AiProvider(resolvedModel, providerWithRotatedKey)
   const provider = AI.getActualProvider()
 
-  const mcpTools: MCPTool[] = []
   onChunkReceived({ type: ChunkType.LLM_RESPONSE_CREATED })
 
-  if (isPromptToolUse(assistant) || isSupportedToolUse(assistant)) {
-    mcpTools.push(...(await fetchMcpTools(assistant)))
-  }
   if (prompt) {
     messages = [
       {
@@ -300,33 +198,25 @@ export async function fetchChatCompletion({
     params: aiSdkParams,
     modelId,
     capabilities,
-    webSearchPluginConfig,
     idleTimeout
   } = await buildStreamTextParams(messages, assistant, provider, {
-    mcpTools: mcpTools,
     allowedTools,
-    webSearchProviderId: assistant.webSearchProviderId,
     requestOptions
   })
 
   // Unit B: prompt tool use applies only on explicit user selection. Native
   // `function` mode is never downgraded because of model function-calling
-  // metadata; protocol encode failures surface via the APICallError chain.
+  // metadata; protocol encode failures surface through the existing APICallError chain.
   const usePromptToolUse = isPromptToolUse(assistant)
 
-  const mcpMode = getEffectiveMcpMode(assistant)
   const middlewareConfig: AiSdkMiddlewareConfig = {
     streamOutput: assistant.settings?.streamOutput ?? true,
     onChunk: onChunkReceived,
     enableReasoning: capabilities.enableReasoning,
     isPromptToolUse: usePromptToolUse,
     isSupportedToolUse: isSupportedToolUse(assistant),
-    webSearchPluginConfig: webSearchPluginConfig,
-    enableWebSearch: capabilities.enableWebSearch,
     enableGenerateImage: capabilities.enableGenerateImage,
     enableUrlContext: capabilities.enableUrlContext,
-    mcpMode,
-    mcpTools,
     uiMessages,
     knowledgeRecognition: assistant.knowledgeRecognition,
     idleTimeout
@@ -596,7 +486,6 @@ export async function fetchMessagesSummary({
 
   const { providerOptions, standardParams } = buildProviderOptions(summaryAssistant, model, actualProvider, {
     enableReasoning: false,
-    enableWebSearch: false,
     enableGenerateImage: false
   })
 
@@ -614,10 +503,8 @@ export async function fetchMessagesSummary({
     enableReasoning: false,
     isPromptToolUse: false,
     isSupportedToolUse: false,
-    enableWebSearch: false,
     enableGenerateImage: false,
-    enableUrlContext: false,
-    mcpTools: []
+    enableUrlContext: false
   }
   try {
     // 从 messages 中找到有 traceId 的助手消息，用于绑定现有 trace
@@ -716,10 +603,8 @@ export async function fetchNoteSummary({ content, assistant }: { content: string
     enableReasoning: false,
     isPromptToolUse: false,
     isSupportedToolUse: false,
-    enableWebSearch: false,
     enableGenerateImage: false,
-    enableUrlContext: false,
-    mcpTools: []
+    enableUrlContext: false
   }
 
   try {
@@ -818,7 +703,6 @@ export async function fetchGenerate({
     enableReasoning: false,
     isPromptToolUse: false,
     isSupportedToolUse: false,
-    enableWebSearch: false,
     enableGenerateImage: false,
     enableUrlContext: false
   }
@@ -985,7 +869,6 @@ export async function checkApi(provider: Provider, model: Model, timeout = 15000
       streamOutput: true,
       enableReasoning: false,
       isSupportedToolUse: false,
-      enableWebSearch: false,
       enableGenerateImage: false,
       isPromptToolUse: false,
       enableUrlContext: false,

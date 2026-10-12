@@ -22,7 +22,6 @@ import FileManager from '@renderer/services/FileManager'
 import { checkRateLimit, getUserMessage } from '@renderer/services/MessagesService'
 import { spanManagerService } from '@renderer/services/SpanManagerService'
 import { estimateUserPromptUsage } from '@renderer/services/TokenService'
-import WebSearchService from '@renderer/services/WebSearchService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { sendMessage as _sendMessage } from '@renderer/store/thunk/messageThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
@@ -394,15 +393,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     if (!document.querySelector('.topview-fullscreen-container')) {
       focusTextarea()
     }
-  }, [
-    topic.id,
-    assistant.mcpServers,
-    assistant.knowledge_bases,
-    assistant.enableWebSearch,
-    assistant.webSearchProviderId,
-    mentionedModels,
-    focusTextarea
-  ])
+  }, [topic.id, assistant.knowledge_bases, mentionedModels, focusTextarea])
 
   // TODO: Just use assistant.knowledge_bases as selectedKnowledgeBases. context state is overdesigned.
   useEffect(() => {
@@ -414,9 +405,7 @@ const InputbarInner: FC<InputbarInnerProps> = ({
     // follows the current provider's explicit search adapter at request time
     // (missing adapter fails explicitly there); the user's toggle is preserved.
     // Clear web search provider if disabled
-    if (assistant.webSearchProviderId && !WebSearchService.isWebSearchEnabled(assistant.webSearchProviderId)) {
-      updateAssistant({ ...assistant, webSearchProviderId: undefined })
-    }
+    // Removed targets (external websearch/MCP/memory) never re-enter the assistant here.
 
     // Auto-enable/disable image generation based on model capabilities
     if (isGenerateImageModel(model)) {

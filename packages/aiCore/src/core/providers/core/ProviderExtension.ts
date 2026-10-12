@@ -47,7 +47,7 @@ interface ProviderExtensionConfigBase<
 
   /**
    * Tool factory 映射
-   * 声明该 provider 支持的工具能力（如 webSearch）
+   * 声明该 provider 支持的工具能力（如 urlContext）
    * 工具工厂从 provider 实例的 .tools 属性提取
    */
   toolFactories?: ToolFactoryMap<TProvider>

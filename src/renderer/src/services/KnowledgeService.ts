@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import type { Span } from '@opentelemetry/api'
 import { AiProvider } from '@renderer/aiCore'
-import { getMessageContent } from '@renderer/aiCore/plugins/searchOrchestrationPlugin'
+import { getMessageContent } from '@renderer/aiCore/plugins/knowledgeOrchestrationPlugin'
 import { DEFAULT_KNOWLEDGE_DOCUMENT_COUNT, DEFAULT_KNOWLEDGE_THRESHOLD } from '@renderer/config/constant'
 import { getEmbeddingMaxContext } from '@renderer/config/embedings'
 import { REFERENCE_PROMPT } from '@renderer/config/prompts'

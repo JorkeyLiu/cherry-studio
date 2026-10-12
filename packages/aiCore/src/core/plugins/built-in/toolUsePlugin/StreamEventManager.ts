@@ -120,7 +120,7 @@ export class StreamEventManager {
     if (hasFullStream(recursiveResult)) {
       await this.pipeRecursiveStream(controller, recursiveResult.fullStream)
     } else {
-      console.warn('[MCP Prompt] No fullstream found in recursive result:', recursiveResult)
+      console.warn('[PromptToolUse] No fullstream found in recursive result:', recursiveResult)
     }
     // } catch (error) {
     //   this.handleRecursiveCallError(controller, error, stepId)

@@ -4,18 +4,14 @@
  */
 
 import { combineHeaders } from '@ai-sdk/provider-utils'
-import type { WebSearchPluginConfig } from '@cherrystudio/ai-core/built-in/plugins'
-import { extensionRegistry } from '@cherrystudio/ai-core/provider'
 import { loggerService } from '@logger'
 import { MAX_TOOL_CALLS, MIN_TOOL_CALLS } from '@renderer/config/constant'
 import { isFixedReasoningModel } from '@renderer/config/models/reasoning'
 import { isAnthropicModel, isGeminiModel } from '@renderer/config/models/utils'
 import { isGenerateImageModel, isPureGenerateImageModel } from '@renderer/config/models/vision'
-import { getHubModeSystemPrompt } from '@renderer/config/prompts-code-mode'
 import { DEFAULT_ASSISTANT_SETTINGS } from '@renderer/services/assistantDefaults'
 import store from '@renderer/store'
-import type { CherryWebSearchConfig } from '@renderer/store/websearch'
-import { type Assistant, getEffectiveMcpMode, type MCPTool, type Provider } from '@renderer/types'
+import type { Assistant, Provider } from '@renderer/types'
 import type { StreamTextParams } from '@renderer/types/aiCoreTypes'
 import { IdleTimeoutController, type IdleTimeoutHandle } from '@renderer/utils/IdleTimeoutController'
 import { replacePromptVariables } from '@renderer/utils/prompt'
@@ -24,12 +20,8 @@ import { DEFAULT_TIMEOUT } from '@shared/config/constant'
 import type { ModelMessage } from 'ai'
 import { stepCountIs } from 'ai'
 
-import { getAiSdkProviderId } from '../provider/factory'
 import type { ProviderCapabilities } from '../types'
-import { setupToolsConfig } from '../utils/mcp'
 import { buildProviderOptions } from '../utils/options'
-import { buildProviderBuiltinWebSearchConfig } from '../utils/websearch'
-import { webSearchEndpointError } from './attachmentErrors'
 import { addAnthropicHeaders } from './header'
 import { filterStandardParams, getMaxTokens, getTemperature, getTopP } from './modelParameters'
 
@@ -67,24 +59,20 @@ export async function buildStreamTextParams(
   assistant: Assistant,
   provider: Provider,
   options: {
-    mcpTools?: MCPTool[]
     allowedTools?: string[]
-    webSearchProviderId?: string
-    webSearchConfig?: CherryWebSearchConfig
     requestOptions?: {
       signal?: AbortSignal
       timeout?: number
       headers?: Record<string, string | undefined>
     }
-  }
+  } = {}
 ): Promise<{
   params: StreamTextParams
   modelId: string
   capabilities: ProviderCapabilities
-  webSearchPluginConfig?: WebSearchPluginConfig
   idleTimeout: IdleTimeoutHandle
 }> {
-  const { mcpTools, requestOptions = {} } = options
+  const { requestOptions = {} } = options
   // No caller currently provides a custom timeout; defaultTimeout (10 min) is the fallback.
   const { signal: externalSignal, timeout = DEFAULT_TIMEOUT, headers: inputHeaders = {} } = requestOptions
 
@@ -103,25 +91,11 @@ export async function buildStreamTextParams(
     // invocation.
     throw new Error('No model configured')
   }
-  const aiSdkProviderId = getAiSdkProviderId(provider)
-
   // Unit B: user-intent lazy execution. Reasoning is enabled whenever the user
   // has an explicit setting (`default` still means no override; lanes emit {}
   // for it). Fixed-reasoning protocol facts still enable the path. No model
   // name/metadata veto.
   const enableReasoning = assistant.settings?.reasoning_effort !== undefined || isFixedReasoningModel(model)
-
-  // Unit B: built-in web search is gated by the current provider's explicit
-  // search adapter only (openai/openai-chat/anthropic/google toolFactories),
-  // never by model names/metadata. Generic OpenAI-compatible has no search
-  // adapter and never claims built-in search (no fabricated fields). External
-  // RAG (webSearchProviderId) stays distinct. Ordinary-chat path only.
-  const hasExternalSearch = !!options.webSearchProviderId
-  const hasBuiltinSearchAdapter = ['openai', 'openai-chat', 'anthropic', 'google'].includes(aiSdkProviderId)
-  const enableWebSearch = !hasExternalSearch && !!assistant.enableWebSearch && hasBuiltinSearchAdapter
-  if (!hasExternalSearch && assistant.enableWebSearch && !hasBuiltinSearchAdapter) {
-    throw webSearchEndpointError(aiSdkProviderId)
-  }
 
   // Validate provider and model support to prevent stale state from triggering urlContext
   const enableUrlContext = !!(
@@ -133,34 +107,14 @@ export async function buildStreamTextParams(
 
   const enableGenerateImage = !!(isGenerateImageModel(model) && assistant.enableGenerateImage)
 
-  const tools = setupToolsConfig(mcpTools, options.allowedTools)
-
-  // 构建真正的 providerOptions
-  const webSearchConfig: CherryWebSearchConfig = {
-    maxResults: store.getState().websearch.maxResults,
-    excludeDomains: store.getState().websearch.excludeDomains,
-    searchWithTime: store.getState().websearch.searchWithTime
-  }
-
   const { providerOptions, standardParams } = buildProviderOptions(assistant, model, provider, {
     enableReasoning,
-    enableWebSearch,
     enableGenerateImage
   })
 
-  // Web search + URL context 的工具注入由 plugin 系统处理：
-  // - webSearchPlugin: 根据 provider 的 toolFactories.webSearch 自动注入
+  // URL context 的工具注入由 plugin 系统处理：
   // - urlContextPlugin: 根据 provider 的 toolFactories.urlContext 自动注入
   // parameterBuilder 只构建 config，传给 plugin
-  // Built-in web search resolves through the registered AI SDK provider id.
-  // Retired gateway/vertex model-id routing is gone: unknown protocols fall
-  // back to generic OpenAI-compatible, which carries no built-in search.
-  let webSearchPluginConfig: WebSearchPluginConfig | undefined = undefined
-  if (enableWebSearch) {
-    if (extensionRegistry.has(aiSdkProviderId)) {
-      webSearchPluginConfig = buildProviderBuiltinWebSearchConfig(aiSdkProviderId, webSearchConfig, model)
-    }
-  }
 
   let headers = inputHeaders
 
@@ -203,18 +157,7 @@ export async function buildStreamTextParams(
 
   params.stopWhen = stepCountIs(maxToolCalls)
 
-  if (tools) {
-    params.tools = tools
-  }
-
-  let systemPrompt = assistant.prompt ? await replacePromptVariables(assistant.prompt, model.name) : ''
-
-  if (getEffectiveMcpMode(assistant) === 'auto') {
-    const autoModePrompt = getHubModeSystemPrompt()
-    if (autoModePrompt) {
-      systemPrompt = systemPrompt ? `${systemPrompt}\n\n${autoModePrompt}` : autoModePrompt
-    }
-  }
+  const systemPrompt = assistant.prompt ? await replacePromptVariables(assistant.prompt, model.name) : ''
 
   if (systemPrompt) {
     params.system = systemPrompt
@@ -225,8 +168,7 @@ export async function buildStreamTextParams(
   return {
     params,
     modelId: model.id,
-    capabilities: { enableReasoning, enableWebSearch, enableGenerateImage, enableUrlContext },
-    webSearchPluginConfig,
+    capabilities: { enableReasoning, enableGenerateImage, enableUrlContext },
     idleTimeout
   }
 }
@@ -239,7 +181,6 @@ export async function buildGenerateTextParams(
   assistant: Assistant,
   provider: Provider,
   options: {
-    mcpTools?: MCPTool[]
     allowedTools?: string[]
     enableTools?: boolean
   } = {}

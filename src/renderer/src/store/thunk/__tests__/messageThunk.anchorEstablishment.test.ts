@@ -752,12 +752,18 @@ describe('messageThunk anchor hooks', () => {
       expect((fresh as { settings: { contextCount: number } }).settings.contextCount).toBe(7)
     })
 
-    it('retains caller-only fields that the fresh assistant does not carry', async () => {
+    it('strips removed backend capabilities from caller-only fields', async () => {
       const { mergeRequestAssistantSnapshot } = await import('../messageThunk')
       const fresh = makeFresh()
-      const merged = mergeRequestAssistantSnapshot(makeOrig({ mcpMode: 'auto' }) as never, fresh as never, 'topic-1')
+      const merged = mergeRequestAssistantSnapshot(
+        makeOrig({ mcpMode: 'auto', enableWebSearch: true, enableMemory: true } as never) as never,
+        fresh as never,
+        'topic-1'
+      )
 
-      expect(merged.mcpMode).toBe('auto')
+      expect((merged as Record<string, unknown>).mcpMode).toBeUndefined()
+      expect((merged as Record<string, unknown>).enableWebSearch).toBeUndefined()
+      expect((merged as Record<string, unknown>).enableMemory).toBeUndefined()
       // Fresh-only fields still win on the settings surface only.
       expect(merged.settings).toBe(fresh.settings)
     })

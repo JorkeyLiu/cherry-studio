@@ -17,7 +17,7 @@
 import type { PayloadAction } from '@reduxjs/toolkit'
 import { createSlice } from '@reduxjs/toolkit'
 import { AppLogo, UserAvatar } from '@renderer/config/env'
-import type { Topic, WebSearchStatus } from '@renderer/types'
+import type { Topic } from '@renderer/types'
 import type { UpdateInfo } from 'builder-util-runtime'
 
 export interface ChatState {
@@ -28,10 +28,6 @@ export interface ChatState {
   renamingTopics: string[]
   /** topic ids that are newly renamed */
   newlyRenamedTopics: string[]
-}
-
-export interface WebSearchState {
-  activeSearches: Record<string, WebSearchStatus>
 }
 
 export interface UpdateState {
@@ -57,7 +53,6 @@ export interface RuntimeState {
   update: UpdateState
   export: ExportState
   chat: ChatState
-  websearch: WebSearchState
   /** Query whether a task is processing or not. undefined and false share same semantics.  */
   loadingMap: Record<string, boolean>
   // Migrated from useApiServer, it's global state now
@@ -95,9 +90,6 @@ const initialState: RuntimeState = {
     activeTopic: null,
     renamingTopics: [],
     newlyRenamedTopics: []
-  },
-  websearch: {
-    activeSearches: {}
   },
   loadingMap: {},
   apiServerRunning: false
@@ -154,17 +146,6 @@ const runtimeSlice = createSlice({
     setNewlyRenamedTopics: (state, action: PayloadAction<string[]>) => {
       state.chat.newlyRenamedTopics = action.payload
     },
-    // WebSearch related actions
-    setActiveSearches: (state, action: PayloadAction<Record<string, WebSearchStatus>>) => {
-      state.websearch.activeSearches = action.payload
-    },
-    setWebSearchStatus: (state, action: PayloadAction<{ requestId: string; status: WebSearchStatus }>) => {
-      const { requestId, status } = action.payload
-      if (status.phase === 'default') {
-        delete state.websearch.activeSearches[requestId]
-      }
-      state.websearch.activeSearches[requestId] = status
-    },
     startLoadingAction: (state, action: PayloadAction<{ id: string }>) => {
       const { id } = action.payload
       state.loadingMap[id] = true
@@ -197,9 +178,6 @@ export const {
   setNewlyRenamedTopics,
   startLoadingAction,
   finishLoadingAction,
-  // WebSearch related actions
-  setActiveSearches,
-  setWebSearchStatus,
   setApiServerRunningAction
 } = runtimeSlice.actions
 

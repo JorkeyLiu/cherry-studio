@@ -1,5 +1,4 @@
 import { loggerService } from '@logger'
-import type { McpError } from '@modelcontextprotocol/sdk/types.js'
 import type {
   AiSdkErrorUnion,
   SerializedAiSdkError,
@@ -132,10 +131,6 @@ export const isAbortError = (error: any): boolean => {
 }
 
 // TODO: format
-export const formatMcpError = (error: McpError) => {
-  return error.message
-}
-
 const getBaseError = (error: Error) => {
   return {
     name: error.name ?? null,

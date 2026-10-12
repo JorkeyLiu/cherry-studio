@@ -246,12 +246,8 @@ const Chat: FC<Props> = (props) => {
       filter: modelFilter
     })
     if (selectedModel) {
-      // Unit B: preserve the user's web-search toggle across model switches.
-      // Availability follows the current provider's search adapter at request
-      // time, never model metadata.
       updateAssistant({
-        model: selectedModel,
-        enableWebSearch: assistant.enableWebSearch
+        model: selectedModel
       })
     }
   })

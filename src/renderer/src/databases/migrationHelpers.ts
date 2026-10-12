@@ -268,7 +268,7 @@ export function createCitationBlock(
   citationData: Omit<CitationMessageBlock, keyof BaseMessageBlock | 'type'>,
   overrides: Partial<Omit<CitationMessageBlock, 'id' | 'messageId' | 'type' | keyof typeof citationData>> = {}
 ): CitationMessageBlock {
-  const { response, knowledge, memories, ...baseOverrides } = {
+  const { response, knowledge, ...baseOverrides } = {
     ...citationData,
     ...overrides
   }
@@ -281,7 +281,6 @@ export function createCitationBlock(
   return {
     ...baseBlock,
     response,
-    knowledge,
-    memories
+    knowledge
   }
 }

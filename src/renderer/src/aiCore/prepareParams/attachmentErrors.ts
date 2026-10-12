@@ -72,16 +72,3 @@ export function attachmentImageUrlError(reason: string): Error {
     )
   )
 }
-
-export function webSearchEndpointError(endpoint: string): Error {
-  const params = { endpoint }
-  return mark(
-    new Error(
-      localized(
-        'message.error.endpoint.web_search_unsupported',
-        params,
-        'Web search cannot be encoded on the {{endpoint}} endpoint: no explicit search adapter for the current provider'
-      )
-    )
-  )
-}

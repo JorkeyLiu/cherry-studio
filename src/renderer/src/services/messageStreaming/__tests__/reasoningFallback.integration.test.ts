@@ -41,7 +41,6 @@ describe('reasoning fallback integration: normal completion must not leave STREA
     name: 'Test',
     model: { id: 'm', name: 'M' } as Model,
     prompt: '',
-    enableWebSearch: false,
     enableGenerateImage: false,
     knowledge_bases: [],
     topics: [],

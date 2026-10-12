@@ -36,7 +36,7 @@ export type {
   ToolFactory,
   ToolFactoryMap,
   ToolFactoryPatch,
-  WebSearchToolConfigMap
+  UrlContextToolConfigMap
 } from './core/providers'
 
 // ==================== 错误处理 ====================

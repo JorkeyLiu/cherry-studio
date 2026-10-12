@@ -19,7 +19,6 @@ export interface AiRequestMetadata {
   topicId?: string
   callType?: string
   enableReasoning?: boolean
-  enableWebSearch?: boolean
   enableGenerateImage?: boolean
   isPromptToolUse?: boolean
   isSupportedToolUse?: boolean
@@ -51,7 +50,9 @@ export interface AiRequestContext<TParams = unknown, TResult = unknown> {
   recursiveDepth: number // 当前递归深度
   maxRecursiveDepth: number // 最大递归深度限制，默认 10
 
-  mcpTools?: ToolSet
+  // 通用 prompt 模式工具集：transformParams 自 params.tools 分离出的
+  // 非 provider 工具（普通函数工具，如知识库工具），经系统提示词通道执行。
+  promptTools?: ToolSet
 
   extensions: Map<string, JSONValue>
 

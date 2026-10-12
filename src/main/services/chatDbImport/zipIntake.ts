@@ -54,7 +54,7 @@
  *            and requires the final count to equal the claimed size exactly
  *   Layer 4: post-extract Chromium IndexedDB structure validation
  *
- *  Uses node-stream-zip (already in repo deps — BackupManager, DxtService).
+ *  Uses node-stream-zip (already in repo deps — BackupManager).
  *
  *  R-6 (zip-slip): path.resolve cross-platform check BEFORE extraction.
  *  R-7 (zip-bomb): layer 2 + 3.5 + 3.55 caps BEFORE extraction.

@@ -21,7 +21,7 @@ const logger = loggerService.withContext('Utils:Process')
  * The script receives the canonical binary install directory through the
  * `CHERRY_BIN_DIR` environment variable. The value is derived from the single
  * application identity contract (`HOME_CHERRY_DIR`), which is exactly the
- * directory the runtime binary lookup (`getBinaryPath`, `MCPService`) resolves,
+ * directory the runtime binary lookup (`getBinaryPath`) resolves,
  * so the installer writes binaries where the runtime expects them. Scripts must
  * not duplicate the home-directory identity literal (USER-SCOPE-011); they may
  * only fall back for direct invocation without this app bridge.
