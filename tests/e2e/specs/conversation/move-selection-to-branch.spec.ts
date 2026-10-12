@@ -62,15 +62,242 @@ async function enableEditMode(page: Page): Promise<void> {
   )
 }
 
-async function clickGroup(page: Page, messageId: string, modifiers?: { shift?: boolean }): Promise<void> {
+/**
+ * Edit-turn interaction shield: in edit mode the message content is native
+ * `inert` (`display: contents`) and a sibling `[data-testid=edit-turn-cover]`
+ * receives pointer/hover/right-click. A Playwright click on the inner
+ * `[data-message-id]` node is intentionally no longer actionable, so edit
+ * gestures target the cover at a truthfully hit-tested point (real
+ * elementFromPoint, no force, no synthetic DOM click).
+ *
+ * Electron reality: `page.viewportSize()` is null (no Playwright viewport),
+ * so the window size fallback is `window.innerWidth/innerHeight`. The
+ * route-stable keeper compensates programmatic `scrollIntoViewIfNeeded`
+ * (no interaction token), so visibility is established with genuine
+ * `page.mouse.wheel` intent over `#messages` and remeasured immediately
+ * before each click.
+ */
+type CoverGeom = {
+  found: boolean
+  turnAsk: string | null
+  winW: number
+  winH: number
+  messageRect: { x: number; y: number; width: number; height: number } | null
+  coverRect: { x: number; y: number; width: number; height: number } | null
+  containerRect: { x: number; y: number; width: number; height: number } | null
+  ok: boolean
+  x: number
+  y: number
+  hitKind: string | null
+  hitTurnAsk: string | null
+}
+
+async function readCoverGeom(page: Page, messageId: string): Promise<CoverGeom> {
+  return page.evaluate((mid: string) => {
+    const out: CoverGeom = {
+      found: false,
+      turnAsk: null,
+      winW: window.innerWidth,
+      winH: window.innerHeight,
+      messageRect: null,
+      coverRect: null,
+      containerRect: null,
+      ok: false,
+      x: -1,
+      y: -1,
+      hitKind: null,
+      hitTurnAsk: null
+    }
+    const msg = document.querySelector(`[data-message-id="${mid}"]`) as HTMLElement | null
+    const container = document.getElementById('messages') as HTMLElement | null
+    if (!msg || !container) return out
+    const turn = msg.closest('[data-testid="edit-turn"]') as HTMLElement | null
+    if (!turn) return out
+    const cover = turn.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement | null
+    if (!cover) return out
+    out.found = true
+    out.turnAsk = turn.getAttribute('data-turn-ask')
+    const mr = msg.getBoundingClientRect()
+    const cr = cover.getBoundingClientRect()
+    const vr = container.getBoundingClientRect()
+    out.messageRect = { x: mr.left, y: mr.top, width: mr.width, height: mr.height }
+    out.coverRect = { x: cr.left, y: cr.top, width: cr.width, height: cr.height }
+    out.containerRect = { x: vr.left, y: vr.top, width: vr.width, height: vr.height }
+    // Visible intersection of message + cover + #messages viewport.
+    const ix0 = Math.max(mr.left, cr.left, vr.left)
+    const iy0 = Math.max(mr.top, cr.top, vr.top)
+    const ix1 = Math.min(mr.right, cr.right, vr.right)
+    const iy1 = Math.min(mr.bottom, cr.bottom, vr.bottom)
+    if (ix1 - ix0 < 10 || iy1 - iy0 < 10) return out
+    // Floating edit action-bar occlusion zone: union of edit-* buttons + margin.
+    let barTop = Infinity
+    let barBottom = -Infinity
+    let barLeft = Infinity
+    let barRight = -Infinity
+    let hasBar = false
+    for (const btn of Array.from(
+      document.querySelectorAll(
+        '[data-testid="edit-copy-btn"],[data-testid="edit-cut-btn"],[data-testid="edit-paste-btn"],[data-testid="edit-delete-btn"],[data-testid="edit-close-btn"]'
+      )
+    )) {
+      const b = (btn as HTMLElement).getBoundingClientRect()
+      if (b.width <= 0 || b.height <= 0) continue
+      hasBar = true
+      barTop = Math.min(barTop, b.top)
+      barBottom = Math.max(barBottom, b.bottom)
+      barLeft = Math.min(barLeft, b.left)
+      barRight = Math.max(barRight, b.right)
+    }
+    const inBar = (x: number, y: number): boolean => {
+      if (!hasBar) return false
+      return x >= barLeft - 6 && x <= barRight + 6 && y >= barTop - 6 && y <= barBottom + 6
+    }
+    const cands: Array<{ x: number; y: number }> = []
+    const insetX0 = ix0 + 5
+    const insetX1 = ix1 - 5
+    const insetY0 = iy0 + 5
+    const insetY1 = iy1 - 5
+    // Prefer vertical center-away-from-top-bar: middle rows first.
+    for (const fy of [0.5, 0.65, 0.35, 0.8, 0.2]) {
+      for (const fx of [0.5, 0.35, 0.65, 0.2, 0.8]) {
+        cands.push({ x: insetX0 + (insetX1 - insetX0) * fx, y: insetY0 + (insetY1 - insetY0) * fy })
+      }
+    }
+    for (const c of cands) {
+      if (!(c.x >= 0 && c.y >= 0 && c.x < window.innerWidth && c.y < window.innerHeight)) continue
+      if (inBar(c.x, c.y)) continue
+      let hit: HTMLElement | null = null
+      try {
+        hit = document.elementFromPoint(c.x, c.y) as HTMLElement | null
+      } catch {
+        continue
+      }
+      if (!hit) continue
+      const hitCover = hit.closest('[data-testid="edit-turn-cover"]') as HTMLElement | null
+      const hitTurn = hit.closest('[data-testid="edit-turn"]') as HTMLElement | null
+      const hitAsk = hitTurn?.getAttribute('data-turn-ask') ?? null
+      out.hitKind = hitCover ? 'cover' : hitTurn ? 'turn' : hit.tagName
+      out.hitTurnAsk = hitAsk
+      if ((hitCover || hitTurn) && hitAsk === out.turnAsk) {
+        out.ok = true
+        out.x = c.x
+        out.y = c.y
+        return out
+      }
+    }
+    return out
+  }, messageId)
+}
+
+async function isCoverBoxStable(page: Page, messageId: string, tol = 2): Promise<boolean> {
+  const frames: Array<{ x: number; y: number } | null> = await page.evaluate(
+    (mid: string) =>
+      new Promise<Array<{ x: number; y: number } | null>>((resolve) => {
+        const read = (): { x: number; y: number } | null => {
+          const msg = document.querySelector(`[data-message-id="${mid}"]`) as HTMLElement | null
+          if (!msg) return null
+          const r = msg.getBoundingClientRect()
+          return { x: r.left, y: r.top }
+        }
+        const acc: Array<{ x: number; y: number } | null> = []
+        const step = (): void => {
+          acc.push(read())
+          if (acc.length < 3) {
+            requestAnimationFrame(step)
+            return
+          }
+          resolve(acc)
+        }
+        requestAnimationFrame(step)
+      }),
+    messageId
+  )
+  if (frames.some((f) => !f)) return false
+  const xs = frames.map((f) => f!.x)
+  const ys = frames.map((f) => f!.y)
+  return Math.max(...xs) - Math.min(...xs) <= tol && Math.max(...ys) - Math.min(...ys) <= tol
+}
+
+async function wheelCoverIntoView(page: Page, messageId: string, maxSteps = 20): Promise<CoverGeom> {
+  const focusMessages = async (): Promise<void> => {
+    const box = await page.locator('#messages').first().boundingBox()
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  }
+  const frameSettle = async (): Promise<void> => {
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        })
+    )
+  }
+  await focusMessages()
+  let last: CoverGeom = await readCoverGeom(page, messageId)
+  for (let i = 0; i < maxSteps; i++) {
+    if (last.ok && (await isCoverBoxStable(page, messageId))) return last
+    // Wheel direction follows the cover center relative to the container.
+    let dy = 480
+    if (last.coverRect && last.containerRect) {
+      const mid = (last.coverRect.y + last.coverRect.height / 2) as number
+      const cTop = last.containerRect.y
+      const cBottom = last.containerRect.y + last.containerRect.height
+      if (last.coverRect.y + last.coverRect.height <= cTop) dy = -480
+      else if (last.coverRect.y >= cBottom) dy = 480
+      else dy = mid < cTop + (cBottom - cTop) / 2 ? -240 : 240
+    }
+    await focusMessages()
+    await page.mouse.wheel(0, dy)
+    await frameSettle()
+    last = await readCoverGeom(page, messageId)
+  }
+  if (last.ok && (await isCoverBoxStable(page, messageId))) return last
+  return last
+}
+
+async function messageCoverPoint(page: Page, messageId: string): Promise<{ x: number; y: number }> {
   const sel = `[data-message-id="${messageId}"]`
-  const target = page.locator(sel).first()
-  await target.scrollIntoViewIfNeeded()
-  await expect(target).toBeVisible({ timeout: 15000 })
+  const message = page.locator(sel).first()
+  await message.scrollIntoViewIfNeeded()
+  await expect(message).toBeVisible({ timeout: 15000 })
+  // Same ask-split assumption: one EditTurn owns this group and renders a
+  // cover in edit mode. Fail here (not in production) if the wrapper changes.
+  const turn = page.locator(`[data-testid="edit-turn"]:has(${sel})`).first()
+  await expect(turn).toBeVisible({ timeout: 15000 })
+  await expect(turn.locator('[data-testid="edit-turn-cover"]').first()).toBeVisible({ timeout: 15000 })
+  // Genuine user-intent reveal: programmatic scroll may be restored by the
+  // viewport keeper, so wheel over #messages and remeasure immediately.
+  const settled = await wheelCoverIntoView(page, messageId)
+  if (!settled.ok) {
+    throw new Error(
+      `[E2E] cover point not hit-testable for ${messageId}: ` +
+        JSON.stringify({
+          turnAsk: settled.turnAsk,
+          win: { w: settled.winW, h: settled.winH },
+          messageRect: settled.messageRect,
+          coverRect: settled.coverRect,
+          containerRect: settled.containerRect,
+          hitKind: settled.hitKind,
+          hitTurnAsk: settled.hitTurnAsk
+        })
+    )
+  }
+  if (!(settled.x >= 0 && settled.y >= 0 && settled.x < settled.winW && settled.y < settled.winH)) {
+    throw new Error(`[E2E] cover point outside window for ${messageId}: (${settled.x},${settled.y})`)
+  }
+  return { x: settled.x, y: settled.y }
+}
+
+async function clickGroup(page: Page, messageId: string, modifiers?: { shift?: boolean }): Promise<void> {
+  const point = await messageCoverPoint(page, messageId)
   if (modifiers?.shift) {
-    await target.click({ modifiers: ['Shift'] })
+    await page.keyboard.down('Shift')
+    try {
+      await page.mouse.click(point.x, point.y)
+    } finally {
+      await page.keyboard.up('Shift')
+    }
   } else {
-    await target.click()
+    await page.mouse.click(point.x, point.y)
   }
 }
 
@@ -82,10 +309,8 @@ async function selectedGroups(page: Page): Promise<string[]> {
 }
 
 async function openEditMenu(page: Page, messageId: string): Promise<void> {
-  const sel = `[data-message-id="${messageId}"]`
-  const target = page.locator(sel).first()
-  await target.scrollIntoViewIfNeeded()
-  await target.click({ button: 'right' })
+  const point = await messageCoverPoint(page, messageId)
+  await page.mouse.click(point.x, point.y, { button: 'right' })
 }
 
 function moveMenuItem(page: Page) {

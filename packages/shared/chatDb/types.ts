@@ -1624,8 +1624,61 @@ export interface InsertMessageGroupsRequest {
   groups: InsertMessageGroup[]
 }
 
-/** @see IpcChannel.ChatDb_InsertMessageGroups */
-export type InsertMessageGroupsResponse = FileCleanupResult
+/**
+ * One committed insertion run for `insert-message-groups`.
+ *
+ * Each entry corresponds to one request group in request order. Placement
+ * follows the existing `InsertMessagesAfterAnchor` convention: stable
+ * neighbors in post-insert effective order, never numeric indexes.
+ */
+export interface InsertMessageGroupsGroupResult {
+  /** Stable IDs of truly inserted messages for this group (request order). */
+  insertedMessageIds: string[]
+  /**
+   * Post-insert effective-route predecessor of this group's run (stable ID),
+   * or null when the run starts the effective route.
+   */
+  beforeMessageId: string | null
+  /**
+   * Post-insert effective-route successor of this group's run (stable ID),
+   * or null when the run ends the effective route.
+   */
+  nextMessageId: string | null
+}
+
+/**
+ * @see IpcChannel.ChatDb_InsertMessageGroups
+ *
+ * Main-issued typed batch insertion acknowledgment. Main stamps every
+ * inserted row with the normalized addressed route and publishes the exact
+ * final committed canonical wires plus capability; no empty guessed
+ * acknowledgments. `insertedMessageIds` matches `insertedMessages` ids in
+ * flat request-group concatenated order; `groups` carries per-group stable
+ * placement in request order so multi-group restores preserve their
+ * pre-delete relation. `mutableMessageIds` is the authoritative capability
+ * delta (always a subset of `insertedMessageIds`; all fresh own rows today).
+ * A failure publishes nothing.
+ */
+export interface InsertMessageGroupsResponse extends FileCleanupResult {
+  /** Echo of the request topic. */
+  topicId: string
+  /** Normalized addressed route (null = main route). */
+  branchId: string | null
+  /** Canonical post-write wire for truly inserted messages (flat request-group order). */
+  insertedMessages: JsonObject[]
+  /** Canonical post-write wire for blocks under truly inserted messages (authority block order). */
+  insertedBlocks: JsonObject[]
+  /** Stable IDs of truly inserted messages (flat request-group order; matches insertedMessages ids). */
+  insertedMessageIds: string[]
+  /**
+   * Main-authoritative mutability delta for this command: the inserted owned
+   * IDs mutable through the addressed route. Renderer unions same-route only;
+   * never infers from branchId.
+   */
+  mutableMessageIds: string[]
+  /** Per-group committed runs in request order with stable placement. */
+  groups: InsertMessageGroupsGroupResult[]
+}
 
 // ---------------------------------------------------------------------------
 // Search command DTOs (Phase 5.1B-2)

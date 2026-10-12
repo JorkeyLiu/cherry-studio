@@ -22,6 +22,7 @@ const { mocks } = vi.hoisted(() => ({
     insertMessageGroups: vi.fn(),
     deleteMessagesFromDB: vi.fn(),
     executeDeleteMessagesWithDependents: vi.fn(),
+    executeStagedCutSourceDelete: vi.fn(),
     deleteMessagesWithDependents: vi.fn(),
     consumeFileCleanupResult: vi.fn(),
     updateFileCount: vi.fn(),
@@ -29,7 +30,11 @@ const { mocks } = vi.hoisted(() => ({
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/removeManyBlocks', payload: p })),
     newMessagesActions: {
       removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p })),
-      insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p }))
+      insertMessageAtIndex: vi.fn((p: unknown) => ({ type: 'newMessages/insertMessageAtIndex', payload: p })),
+      applyInsertedMessageGroups: vi.fn((p: unknown) => ({
+        type: 'newMessages/applyInsertedMessageGroups',
+        payload: p
+      }))
     },
     selectLoadedMessagesForTopic: vi.fn(() => []),
     prepareUndo: vi.fn(() => ({ type: 'prepareUndo' })),
@@ -60,7 +65,8 @@ vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
   deleteMessagesFromDB: mocks.deleteMessagesFromDB,
-  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
+  executeStagedCutSourceDelete: mocks.executeStagedCutSourceDelete
 }))
 
 vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
@@ -97,6 +103,36 @@ let storeState: RootState
 
 const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} as Record<string, number> }
 
+function ackFromGroups(
+  topicId: string,
+  groups: Array<{ entries: Array<{ message: { id: string } }> }>,
+  branchId: string | null = null
+) {
+  const flatIds = groups.flatMap((g) => g.entries.map((e) => e.message.id))
+  return {
+    affectedFileIds: [],
+    remainingReferenceCounts: {},
+    topicId,
+    branchId,
+    insertedMessages: flatIds.map((id) => ({ id })),
+    insertedBlocks: [],
+    insertedMessageIds: flatIds,
+    mutableMessageIds: [...flatIds],
+    groups: groups.map((g) => ({
+      insertedMessageIds: g.entries.map((e) => e.message.id),
+      beforeMessageId: null,
+      nextMessageId: null
+    }))
+  }
+}
+
+function mockInsertAckDefault() {
+  mocks.insertMessageGroups.mockImplementation(
+    async (topicId: string, groups: Array<{ entries: Array<{ message: { id: string } }> }>, branchId?: string | null) =>
+      ackFromGroups(topicId, groups, branchId ?? null)
+  )
+}
+
 function makeMessage(id: string): Message {
   return {
     id,
@@ -117,9 +153,13 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
       messages: { entities: {}, messageIdsByTopic: {} },
       messageBlocks: { entities: {} }
     } as unknown as RootState
-    mocks.insertMessageGroups.mockResolvedValue(emptyCleanup)
+    mockInsertAckDefault()
     mocks.deleteMessagesFromDB.mockResolvedValue(emptyCleanup)
     mocks.executeDeleteMessagesWithDependents.mockResolvedValue({
+      response: { deletedMessageIds: [] },
+      undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }
+    })
+    mocks.executeStagedCutSourceDelete.mockResolvedValue({
       response: { deletedMessageIds: [] },
       undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }
     })
@@ -171,10 +211,16 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     storeState.undoStack = { undoStack: [action], redoStack: [] }
 
     const callOrder: string[] = []
-    mocks.insertMessageGroups.mockImplementation(async () => {
-      callOrder.push('source-restore')
-      return emptyCleanup
-    })
+    mocks.insertMessageGroups.mockImplementation(
+      async (
+        topicId: string,
+        groups: Array<{ entries: Array<{ message: { id: string } }> }>,
+        branchId?: string | null
+      ) => {
+        callOrder.push('source-restore')
+        return ackFromGroups(topicId, groups, branchId ?? null)
+      }
+    )
     mocks.deleteMessagesFromDB.mockImplementation(async () => {
       callOrder.push('paste-delete')
       return emptyCleanup
@@ -246,7 +292,7 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     expect(mocks.newMessagesActions.removeMessages).not.toHaveBeenCalled()
   })
 
-  it('redo uses the semantic plural helper with stable member roots (outside-loaded member) and no legacy delete', async () => {
+  it('redo uses the staged authority helper with stable member roots (outside-loaded member) and no legacy delete', async () => {
     // Source group u1 = [u1, a1, a2] where a2 was outside the loaded
     // projection at paste time. Stable roots carry the complete member set.
     const u1 = makeMessage('u1')
@@ -270,6 +316,8 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
       pastedBlocksSnapshot: [pastedBlock],
       fileReferenceDeltas: [],
       sourceTopicId: 'topic-1',
+      sourceBranchId: null,
+      targetBranchId: null,
       sourceRootIds: ['u1', 'a1', 'a2'],
       sourceGroupAnchors: [
         {
@@ -302,14 +350,14 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
 
     expect(result).not.toBeNull()
-    // Same semantic plural helper as the initial cut-paste, with the complete
-    // member roots in authority order (outside-loaded a2 included).
-    expect(mocks.executeDeleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(
+    // Staged-cut authority helper with the stored route and complete member
+    // roots in authority order (outside-loaded a2 included).
+    expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      'topic-1',
-      ['u1', 'a1', 'a2']
+      { sourceTopicId: 'topic-1', sourceBranchId: null, rootIds: ['u1', 'a1', 'a2'] }
     )
+    expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
     // No legacy plain-delete authority mutation for the source.
     expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
     expect(mocks.consumeFileCleanupResult).not.toHaveBeenCalled()
@@ -319,5 +367,193 @@ describe('UndoService cut-paste undo/redo (same-topic hazard + semantic redo)', 
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     const [, groups] = mocks.insertMessageGroups.mock.calls[0] as unknown as [string, Array<{ intent: unknown }>]
     expect(groups[0].intent).toEqual({ kind: 'topic-tail' })
+  })
+
+  it('staged cut undo works after projection mutable IDs are cleared (no capability rerequire)', async () => {
+    const srcU = makeMessage('src-u')
+    const copy1 = makeMessage('paste-copy-1')
+    const action: CutPasteUndoAction = {
+      id: 'undo-staged-route',
+      type: 'cut_paste',
+      timestamp: Date.now(),
+      targetTopicId: 'topic-1',
+      insertedMessageIds: ['paste-copy-1'],
+      pastedMessagesSnapshot: [copy1],
+      pastedBlocksSnapshot: [],
+      fileReferenceDeltas: [],
+      sourceTopicId: 'topic-1',
+      sourceBranchId: null,
+      targetBranchId: null,
+      sourceRootIds: ['src-u'],
+      sourceGroupAnchors: [
+        {
+          messages: [srcU],
+          blocks: [],
+          positionIndex: 0,
+          anchorMessageId: null,
+          loadedMessageIds: []
+        }
+      ],
+      sourceSegmentSnapshots: [],
+      targetSegmentSnapshots: [],
+      targetAnchorMessageId: null,
+      targetInsertPositionIndex: 0
+    }
+    // Projection capability cleared (messagesReceived without capability):
+    // no mutable set, but the staged routes still match main (null).
+    storeState.messages.entities = { 'paste-copy-1': copy1 } as unknown as Record<string, Message>
+    storeState.messages.messageIdsByTopic = { 'topic-1': ['paste-copy-1'] }
+    ;(storeState.messages as unknown as Record<string, unknown>).mutableMessageIdsByTopic = {}
+    ;(storeState.messages as unknown as Record<string, unknown>).mutableRouteByTopic = {}
+    storeState.undoStack = { undoStack: [action], redoStack: [] }
+
+    const { executeUndo } = await import('../UndoService')
+    const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
+
+    expect(result).not.toBeNull()
+    expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['paste-copy-1'], null)
+  })
+
+  it('staged cut undo fails closed before any write on route mismatch', async () => {
+    const srcU = makeMessage('src-u')
+    const copy1 = makeMessage('paste-copy-1')
+    const action: CutPasteUndoAction = {
+      id: 'undo-route-mismatch',
+      type: 'cut_paste',
+      timestamp: Date.now(),
+      targetTopicId: 'topic-1',
+      insertedMessageIds: ['paste-copy-1'],
+      pastedMessagesSnapshot: [copy1],
+      pastedBlocksSnapshot: [],
+      fileReferenceDeltas: [],
+      sourceTopicId: 'topic-1',
+      sourceBranchId: 'branch-staged',
+      targetBranchId: null,
+      sourceRootIds: ['src-u'],
+      sourceGroupAnchors: [
+        {
+          messages: [srcU],
+          blocks: [],
+          positionIndex: 0,
+          anchorMessageId: null,
+          loadedMessageIds: ['src-u']
+        }
+      ],
+      sourceSegmentSnapshots: [],
+      targetSegmentSnapshots: [],
+      targetAnchorMessageId: null,
+      targetInsertPositionIndex: 0
+    }
+    storeState.undoStack = { undoStack: [action], redoStack: [] }
+
+    const { executeUndo } = await import('../UndoService')
+    const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
+
+    expect(result).toBeNull()
+    expect(mocks.insertMessageGroups).not.toHaveBeenCalled()
+    expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
+  })
+
+  it('staged cut redo fails closed before any write on route mismatch', async () => {
+    const pasted = makeMessage('pasted-1')
+    const action: CutPasteUndoAction = {
+      id: 'redo-route-mismatch',
+      type: 'cut_paste',
+      timestamp: Date.now(),
+      targetTopicId: 'topic-1',
+      insertedMessageIds: ['pasted-1'],
+      pastedMessagesSnapshot: [pasted],
+      pastedBlocksSnapshot: [],
+      fileReferenceDeltas: [],
+      sourceTopicId: 'topic-1',
+      sourceBranchId: 'branch-staged',
+      targetBranchId: null,
+      sourceRootIds: ['src-u'],
+      sourceGroupAnchors: [
+        {
+          messages: [makeMessage('src-u')],
+          blocks: [],
+          positionIndex: 0,
+          anchorMessageId: null,
+          loadedMessageIds: []
+        }
+      ],
+      sourceSegmentSnapshots: [],
+      targetSegmentSnapshots: [],
+      targetAnchorMessageId: null,
+      targetInsertPositionIndex: 0,
+      targetInsertIntent: { kind: 'topic-tail' }
+    }
+    storeState.undoStack = { undoStack: [], redoStack: [action] }
+
+    const { executeRedo } = await import('../UndoService')
+    const result = await executeRedo(vi.fn() as unknown as AppDispatch, () => storeState)
+
+    expect(result).toBeNull()
+    expect(mocks.executeStagedCutSourceDelete).not.toHaveBeenCalled()
+    expect(mocks.insertMessageGroups).not.toHaveBeenCalled()
+  })
+
+  it('cut_paste undo sync keeps the pinned target route when live switches mid-cleanup', async () => {
+    const srcU = makeMessage('src-u')
+    srcU.topicId = 'topic-2'
+    const copy1 = makeMessage('paste-copy-1')
+    copy1.topicId = 'topic-1'
+    const action: CutPasteUndoAction = {
+      id: 'undo-pinned-route',
+      type: 'cut_paste',
+      timestamp: Date.now(),
+      targetTopicId: 'topic-1',
+      insertedMessageIds: ['paste-copy-1'],
+      pastedMessagesSnapshot: [copy1],
+      pastedBlocksSnapshot: [],
+      fileReferenceDeltas: [],
+      sourceTopicId: 'topic-2',
+      sourceBranchId: 'branch-src',
+      targetBranchId: 'branch-orig',
+      sourceRootIds: ['src-u'],
+      sourceGroupAnchors: [
+        {
+          messages: [srcU],
+          blocks: [],
+          positionIndex: 0,
+          anchorMessageId: null,
+          loadedMessageIds: ['src-u']
+        }
+      ],
+      sourceSegmentSnapshots: [],
+      targetSegmentSnapshots: [],
+      targetAnchorMessageId: null,
+      targetInsertPositionIndex: 0
+    }
+    ;(storeState as unknown as Record<string, unknown>).topicBranch = {
+      branchesByTopic: {},
+      activeBranchIdByTopic: { 'topic-1': 'branch-orig', 'topic-2': 'branch-src' },
+      routeGenerationByTopic: {}
+    }
+    storeState.messages.entities = { 'paste-copy-1': copy1 } as unknown as Record<string, Message>
+    storeState.messages.messageIdsByTopic = { 'topic-1': ['paste-copy-1'] }
+    storeState.undoStack = { undoStack: [action], redoStack: [] }
+    mocks.deleteMessagesFromDB.mockImplementation(async () => {
+      ;(
+        storeState as unknown as Record<string, { activeBranchIdByTopic: Record<string, string> }>
+      ).topicBranch.activeBranchIdByTopic['topic-1'] = 'branch-new'
+      return emptyCleanup
+    })
+
+    const { executeUndo } = await import('../UndoService')
+    const result = await executeUndo(vi.fn() as unknown as AppDispatch, () => storeState)
+
+    expect(result).not.toBeNull()
+    // Target copy removal stays on the pinned original route.
+    expect(mocks.deleteMessagesFromDB).toHaveBeenCalledExactlyOnceWith('topic-1', ['paste-copy-1'], 'branch-orig')
+    expect(mocks.syncSegmentsAfterMessageDeletion).toHaveBeenCalledTimes(1)
+    expect(mocks.syncSegmentsAfterMessageDeletion.mock.calls[0][2]).toBe('topic-1')
+    expect(mocks.syncSegmentsAfterMessageDeletion.mock.calls[0][4]).toBe('branch-orig')
+    for (const call of mocks.syncSegmentsAfterMessageDeletion.mock.calls) {
+      expect(call[4]).not.toBe('branch-new')
+      expect(call[2]).not.toBe('topic-2')
+    }
   })
 })

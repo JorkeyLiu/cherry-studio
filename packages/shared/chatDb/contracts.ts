@@ -4399,7 +4399,139 @@ const insertMessageGroupsContract: ChatDbContract = {
       }
     }
   },
-  validateResult: fileCleanupResultValidator('chatdb:insert-message-groups')
+  validateResult: validateInsertMessageGroupsResult
+}
+
+const INSERT_MESSAGE_GROUPS_VALUE_KEYS = new Set([
+  'affectedFileIds',
+  'remainingReferenceCounts',
+  'topicId',
+  'branchId',
+  'insertedMessages',
+  'insertedBlocks',
+  'insertedMessageIds',
+  'mutableMessageIds',
+  'groups'
+])
+
+const INSERT_MESSAGE_GROUPS_GROUP_KEYS = new Set(['insertedMessageIds', 'beforeMessageId', 'nextMessageId'])
+
+/**
+ * Main-issued batch insertion acknowledgment result validation
+ * (`chatdb:insert-message-groups`).
+ *
+ * The addressed route echoes normalized (null = main route); the flat delta
+ * is limited to actual new owned rows in flat request-group order with the
+ * capability delta a subset of inserted; per-group runs preserve transaction
+ * ordering with stable neighbors (InsertAfter convention, never numeric
+ * order). Fail-closed on inconsistent IDs/rows/routes/mutable extras.
+ */
+function validateInsertMessageGroupsResult(result: unknown): void {
+  const channel = 'chatdb:insert-message-groups'
+  validateResultEnvelope(result, channel)
+  const obj = result as Record<string, unknown>
+  if (obj.ok === true) {
+    const value = obj.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('result.value', `[${channel}] Expected InsertMessageGroupsResponse object`)
+    }
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) {
+      throw new ValidationError('result.value', `[${channel}] Success value must be a plain object`)
+    }
+    const v = value as Record<string, unknown>
+    for (const key of Object.keys(v)) {
+      if (!INSERT_MESSAGE_GROUPS_VALUE_KEYS.has(key)) {
+        throw new ValidationError(`result.value.${key}`, `[${channel}] Unknown key in success value: "${key}"`)
+      }
+    }
+    validateStringArray(v.affectedFileIds, 'result.value.affectedFileIds')
+    validateJsonObject(v.remainingReferenceCounts, 'result.value.remainingReferenceCounts')
+    const counts = v.remainingReferenceCounts as Record<string, unknown>
+    for (const key of Object.keys(counts)) {
+      if (key.length === 0) {
+        throw new ValidationError(
+          'result.value.remainingReferenceCounts',
+          `[${channel}] remainingReferenceCounts key must be a non-empty string`
+        )
+      }
+      validateNonNegativeInteger(counts[key], `result.value.remainingReferenceCounts.${key}`)
+    }
+    validateNonEmptyString(v.topicId, 'result.value.topicId')
+    if (v.branchId !== null) {
+      validateNonEmptyString(v.branchId, 'result.value.branchId')
+    }
+    validateJsonObjectArray(v.insertedMessages, 'result.value.insertedMessages')
+    validateJsonObjectArrayBlock(v.insertedBlocks, 'result.value.insertedBlocks', BLOCK_JSON_PROFILE)
+    validateStringArray(v.insertedMessageIds, 'result.value.insertedMessageIds')
+    validateStringArray(v.mutableMessageIds, 'result.value.mutableMessageIds')
+    const inserted = v.insertedMessageIds as string[]
+    const wireIds = (v.insertedMessages as Array<Record<string, unknown>>).map((m) => m.id as string)
+    if (inserted.length !== wireIds.length || !inserted.every((id, i) => id === wireIds[i])) {
+      throw new ValidationError(
+        'result.value.insertedMessageIds',
+        `[${channel}] insertedMessageIds must match insertedMessages ids in order`
+      )
+    }
+    if (new Set(inserted).size !== inserted.length) {
+      throw new ValidationError('result.value.insertedMessageIds', `[${channel}] Duplicate insertedMessageId`)
+    }
+    if (inserted.length === 0) {
+      throw new ValidationError('result.value.insertedMessageIds', `[${channel}] insert must carry inserted rows`)
+    }
+    const mutable = v.mutableMessageIds as string[]
+    for (const id of mutable) {
+      if (!inserted.includes(id)) {
+        throw new ValidationError('result.value.mutableMessageIds', `[${channel}] mutable id must be an inserted id`)
+      }
+    }
+    if (!Array.isArray(v.groups) || (v.groups as unknown[]).length === 0) {
+      throw new ValidationError('result.value.groups', `[${channel}] groups must be a non-empty array`)
+    }
+    const groups = v.groups as Array<Record<string, unknown>>
+    const groupedIds: string[] = []
+    for (let gi = 0; gi < groups.length; gi++) {
+      const gpath = `result.value.groups[${gi}]`
+      const group = groups[gi]
+      if (group === null || typeof group !== 'object' || Array.isArray(group)) {
+        throw new ValidationError(gpath, `[${channel}] Expected group result object`)
+      }
+      for (const key of Object.keys(group)) {
+        if (!INSERT_MESSAGE_GROUPS_GROUP_KEYS.has(key)) {
+          throw new ValidationError(`${gpath}.${key}`, `[${channel}] Unknown key in group result: "${key}"`)
+        }
+      }
+      validateStringArray(group.insertedMessageIds, `${gpath}.insertedMessageIds`)
+      const gids = group.insertedMessageIds as string[]
+      if (gids.length === 0) {
+        throw new ValidationError(`${gpath}.insertedMessageIds`, `[${channel}] group run must not be empty`)
+      }
+      if (new Set(gids).size !== gids.length) {
+        throw new ValidationError(`${gpath}.insertedMessageIds`, `[${channel}] Duplicate insertedMessageId in group`)
+      }
+      if (group.beforeMessageId !== null) {
+        validateNonEmptyString(group.beforeMessageId, `${gpath}.beforeMessageId`)
+      }
+      if (group.nextMessageId !== null) {
+        validateNonEmptyString(group.nextMessageId, `${gpath}.nextMessageId`)
+      }
+      for (const id of gids) {
+        if (groupedIds.includes(id)) {
+          throw new ValidationError(
+            `${gpath}.insertedMessageIds`,
+            `[${channel}] Duplicate insertedMessageId across groups`
+          )
+        }
+        groupedIds.push(id)
+      }
+    }
+    if (groupedIds.length !== inserted.length || !groupedIds.every((id, i) => id === inserted[i])) {
+      throw new ValidationError(
+        'result.value.groups',
+        `[${channel}] groups insertedMessageIds concatenated must equal flat insertedMessageIds in order`
+      )
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

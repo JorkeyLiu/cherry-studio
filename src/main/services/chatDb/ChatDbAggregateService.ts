@@ -44,6 +44,7 @@ import type {
   FileCleanupResult,
   FileReferenceWire,
   HardDeleteTopicResponse,
+  InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
   JsonObject,
   JsonValue,
@@ -3048,19 +3049,21 @@ export class ChatDbAggregateService {
    * New message/block IDs must be truly new: any same-topic or cross-topic
    * collision fails the whole transaction (no silent patch). Blocks upsert +
    * file-ref sync + sync/frame capture reuse the established paste patterns.
-   * Returns FileCleanupResult (empty for pure inserts).
+   * Returns the typed batch insertion acknowledgment with exact final
+   * committed canonical wires, flat ids, per-group stable placement, and the
+   * Main-produced mutability delta (subset of actual inserted IDs).
    */
   insertMessageGroups(
     topicId: string,
     groups: Array<{ entries: Array<{ message: JsonObject; blocks: JsonObject[] }>; intent: JsonObject }>,
     branchId?: string | null
-  ): ChatDbResult<FileCleanupResult> {
+  ): ChatDbResult<InsertMessageGroupsResponse> {
     return wrapResult(() => {
       const route = this.normalizeBranchId(branchId)
       const ctx = this.syncCtxForTopic('insertMessageGroups', topicId, route)
       let syncNotify = false
       const unsupportedBlockIds: string[] = []
-      let result: FileCleanupResult
+      let result: InsertMessageGroupsResponse
       try {
         result = this.db.transaction((tx) => {
           const repos = createRepositories(tx)
@@ -3383,7 +3386,49 @@ export class ChatDbAggregateService {
             }
           }
 
-          return buildFileCleanupResult(repos, [])
+          const cleanup = buildFileCleanupResult(repos, [])
+          // Canonical authoritative batch acknowledgment: truly inserted rows
+          // only (no patch path — collisions fail above). Flat ids follow
+          // flat request-group concatenated order; per-group runs carry
+          // stable neighbors in post-insert effective order (InsertAfter
+          // convention, never numeric order) so multi-group restores preserve
+          // their pre-delete relation.
+          const flatInsertedMessages = planned.flatMap((p) => p.messages)
+          const insertedIds = flatInsertedMessages.map((m) => m.id)
+          const durableBlocks = insertedIds.flatMap((mid) => repos.blocks.listByMessage(mid))
+          const messagesWithBlocks =
+            insertedIds.length > 0
+              ? reconstructMessageBlockRelations(messagesToWire(flatInsertedMessages), blocksToWire(durableBlocks))
+              : []
+          const effective = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          const groupRuns = planned.map((plan) => {
+            const gids = plan.messages.map((m) => m.id)
+            const firstIdx = effective.findIndex((m) => m.id === gids[0])
+            const lastIdx = effective.findIndex((m) => m.id === gids[gids.length - 1])
+            if (firstIdx === -1 || lastIdx === -1 || lastIdx - firstIdx + 1 !== gids.length) {
+              throw new Error('insertMessageGroups inserted run is not contiguous in effective order')
+            }
+            for (let k = 0; k < gids.length; k++) {
+              if (effective[firstIdx + k].id !== gids[k]) {
+                throw new Error('insertMessageGroups inserted run order mismatch in effective order')
+              }
+            }
+            return {
+              insertedMessageIds: [...gids],
+              beforeMessageId: firstIdx > 0 ? effective[firstIdx - 1].id : null,
+              nextMessageId: lastIdx + 1 < effective.length ? effective[lastIdx + 1].id : null
+            }
+          })
+          return {
+            ...cleanup,
+            topicId,
+            branchId: route,
+            insertedMessages: messagesWithBlocks,
+            insertedBlocks: blocksToWire(durableBlocks),
+            insertedMessageIds: insertedIds,
+            mutableMessageIds: [...insertedIds],
+            groups: groupRuns
+          }
         })
       } catch (e) {
         this.recordSyncTxFailure('insertMessageGroups', ctx, e)

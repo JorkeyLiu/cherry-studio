@@ -1,9 +1,10 @@
 /**
- * Edit-mode message-toolbar hiding contract (MessageItem level):
- * - The ordinary message menubar keeps its DOM/layout mount in edit mode
- *   but is forcibly hidden, noninteractive, and inaccessible
- *   (edit-mode-toolbar-hidden + inert + aria-hidden); outside edit mode it
- *   renders visibly with no hiding treatment.
+ * Edit-mode message-toolbar ownership contract (MessageItem level):
+ * - The ordinary message menubar renders identically in all modes at this
+ *   level (no hiding treatment here): forced hiding is owned one layer up
+ *   by the turn container (EditTurn — see messageEditSelectionLayout),
+ *   which hides the footer in the same edit-mode commit with no transition
+ *   while reserving height.
  * - Hover preview is owned by the turn container (one neutral outline per
  *   Q&A turn), never per MessageItem; messages keep the pointer cursor.
  */
@@ -226,25 +227,19 @@ describe('MessageItem edit-mode toolbar hiding', () => {
     expect(window.getComputedStyle(messageEl).cursor).toBe('pointer')
   })
 
-  it('menubar stays mounted but forced hidden, noninteractive, and inaccessible in edit mode', () => {
+  it('menubar stays mounted and visibly owned by the outer turn in edit mode (no hiding here)', () => {
     const { container } = render(<MessageItem message={makeMessage()} topic={topic} isEditMode />)
-    // Layout mount preserved (same node the non-edit render produces).
+    // Same node the non-edit render produces, with no hiding treatment at
+    // this level — the outer EditTurn shield hides it (proven in
+    // messageEditSelectionLayout against the real turn container).
     const footer = container.querySelector('.MessageFooter') as HTMLElement
     expect(footer).not.toBeNull()
     expect(footer.querySelector('[data-testid="menubar-stub"]')).not.toBeNull()
-    expect(footer.classList.contains('edit-mode-toolbar-hidden')).toBe(true)
-    expect(footer.hasAttribute('inert')).toBe(true)
-    expect(footer.getAttribute('aria-hidden')).toBe('true')
-    // Forced hide defeats the container-hover opacity reveal.
-    expect(window.getComputedStyle(footer).visibility).toBe('hidden')
-    expect(window.getComputedStyle(footer).pointerEvents).toBe('none')
+    expect(footer.classList.contains('edit-mode-toolbar-hidden')).toBe(false)
+    expect(footer.hasAttribute('inert')).toBe(false)
+    expect(footer.hasAttribute('aria-hidden')).toBe(false)
+    expect(window.getComputedStyle(footer).visibility).not.toBe('hidden')
     expect(window.getComputedStyle(footer).display).not.toBe('none')
-    // The bubble user-message metadata hover reveal is defeated too: the
-    // time/tokens line stays hidden with the toolbar.
-    const metadata = footer.querySelector('.message-footer-metadata') as HTMLElement
-    expect(metadata).not.toBeNull()
-    expect(window.getComputedStyle(metadata).visibility).toBe('hidden')
-    expect(window.getComputedStyle(metadata).opacity).toBe('0')
   })
 
   it('menubar renders visibly with no hiding treatment outside edit mode', () => {

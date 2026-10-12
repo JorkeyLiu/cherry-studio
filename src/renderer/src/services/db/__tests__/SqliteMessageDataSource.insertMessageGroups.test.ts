@@ -29,7 +29,18 @@ describe('SqliteMessageDataSource.insertMessageGroups', () => {
   })
 
   it('maps to the named bridge with exact stable request and dispatches topic-updated once', async () => {
-    mocks.insertMessageGroups.mockResolvedValue(successResult({ affectedFileIds: [], remainingReferenceCounts: {} }))
+    const ack = {
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      topicId: 't-1',
+      branchId: null,
+      insertedMessages: [{ id: 'm-1' }],
+      insertedBlocks: [],
+      insertedMessageIds: ['m-1'],
+      mutableMessageIds: ['m-1'],
+      groups: [{ insertedMessageIds: ['m-1'], beforeMessageId: null, nextMessageId: 'a-1' }]
+    }
+    mocks.insertMessageGroups.mockResolvedValue(successResult(ack))
     const { SqliteMessageDataSource } = await import('../SqliteMessageDataSource')
     const store = (await import('@renderer/store')).default as unknown as { dispatch: ReturnType<typeof vi.fn> }
     const ds = new SqliteMessageDataSource({ insertMessageGroups: mocks.insertMessageGroups } as any)
@@ -42,7 +53,7 @@ describe('SqliteMessageDataSource.insertMessageGroups', () => {
     const result = await ds.insertMessageGroups('t-1', groups)
     expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
     expect(mocks.insertMessageGroups).toHaveBeenCalledWith({ topicId: 't-1', branchId: null, groups })
-    expect(result).toEqual({ affectedFileIds: [], remainingReferenceCounts: {} })
+    expect(result).toEqual(ack)
     expect(store.dispatch).toHaveBeenCalledTimes(1)
     expect(mocks.updateTopicUpdatedAt).toHaveBeenCalledExactlyOnceWith({ topicId: 't-1' })
   })

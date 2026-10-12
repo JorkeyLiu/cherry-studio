@@ -142,8 +142,17 @@ describe('flow turns and boundaries', () => {
       forkBoundary('branch-fork-anchor-main', 'div-fork'),
       turnNode('g-anchor', 'ask-a')
     ])
-    // DOM order preserved exactly.
-    expect(testIds(container)).toEqual(['edit-turn', 'body-g-newer', 'div-fork', 'edit-turn', 'body-g-anchor'])
+    // DOM order preserved exactly (the edit-only cover closes each turn;
+    // boundaries stay siblings outside turns).
+    expect(testIds(container)).toEqual([
+      'edit-turn',
+      'body-g-newer',
+      'edit-turn-cover',
+      'div-fork',
+      'edit-turn',
+      'body-g-anchor',
+      'edit-turn-cover'
+    ])
     // Column-reverse: DOM-earlier is visually lower, so the boundary
     // (DOM between newer and anchor) sits visually below the anchor and
     // above the newer content.
@@ -157,7 +166,15 @@ describe('flow turns and boundaries', () => {
       turnNode('g-anchor', 'ask-a'),
       contextBoundary('legacy-anchor')
     ])
-    expect(testIds(container)).toEqual(['edit-turn', 'body-g-newer', 'edit-turn', 'body-g-anchor', 'context-boundary'])
+    expect(testIds(container)).toEqual([
+      'edit-turn',
+      'body-g-newer',
+      'edit-turn-cover',
+      'edit-turn',
+      'body-g-anchor',
+      'edit-turn-cover',
+      'context-boundary'
+    ])
     // DOM-later is visually higher, so the line sits visually above the
     // anchor on the older side — same visual placement as legacy.
     const line = container.querySelector('[data-testid="context-boundary"]') as Element
@@ -204,7 +221,15 @@ describe('flow turns and boundaries', () => {
     const line = container.querySelector('[data-testid="div-span-main"]') as Element
     expect(line.closest('[data-stable-segment-id]')).toBe(outlines[0])
     expect(container.querySelectorAll('[data-testid="div-span-main"]').length).toBe(1)
-    expect(testIds(container)).toEqual(['edit-turn', 'body-g-newer', 'div-span-main', 'edit-turn', 'body-g-anchor'])
+    expect(testIds(container)).toEqual([
+      'edit-turn',
+      'body-g-newer',
+      'edit-turn-cover',
+      'div-span-main',
+      'edit-turn',
+      'body-g-anchor',
+      'edit-turn-cover'
+    ])
   })
 
   it('multiple adjacent fork boundaries keep stable relative order (outside edge, inside span)', () => {
@@ -230,10 +255,12 @@ describe('flow turns and boundaries', () => {
     expect(testIds(edge.container)).toEqual([
       'edit-turn',
       'body-g-newer',
+      'edit-turn-cover',
       'div-main',
       'div-b1',
       'edit-turn',
-      'body-g-anchor'
+      'body-g-anchor',
+      'edit-turn-cover'
     ])
     edge.unmount()
 
@@ -253,10 +280,12 @@ describe('flow turns and boundaries', () => {
     expect(testIds(span.container)).toEqual([
       'edit-turn',
       'body-g-newer',
+      'edit-turn-cover',
       'div-main',
       'div-b1',
       'edit-turn',
-      'body-g-anchor'
+      'body-g-anchor',
+      'edit-turn-cover'
     ])
     span.unmount()
     expect(adjacent().length).toBe(4)
@@ -455,14 +484,19 @@ describe('turn runs with boundary flush', () => {
 })
 
 describe('renderEditFlowNodes', () => {
-  it('encloses a normal user + assistant turn in exactly one container with no geometry overlay', () => {
-    // Render order is newest→oldest: assistant first, user second.
+  it('encloses a normal user + assistant turn in exactly one container with an out-of-flow cover only', () => {
+    // Render order is newest→oldest: assistant first, user second. The
+    // edit-only cover is absolutely positioned (out of flow), so turn
+    // geometry matches normal mode exactly.
     const { container } = renderFlow([turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')])
     const turns = container.querySelectorAll('[data-testid="edit-turn"]')
     expect(turns.length).toBe(1)
     expect(turns[0].getAttribute('data-turn-ask')).toBe('u1')
     expect(turns[0].querySelector('[data-testid="body-g-assistant"]')).not.toBeNull()
     expect(turns[0].querySelector('[data-testid="body-g-user"]')).not.toBeNull()
+    const cover = turns[0].querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    expect(cover).not.toBeNull()
+    expect(window.getComputedStyle(cover).position).toBe('absolute')
     expect(container.querySelector('[data-testid="edit-preview-frame"]')).toBeNull()
     expect(container.querySelector('[data-group-ask]')).toBeNull()
   })
@@ -653,6 +687,151 @@ describe('renderEditFlowNodes', () => {
     fireEvent.click(container.querySelector('[data-testid="nested-action"]') as HTMLElement)
     expect(nestedAction).not.toHaveBeenCalled()
     expect(onTurnClick).toHaveBeenCalledTimes(4)
+  })
+
+  it('edit mode shields content with inert display:contents and an edit-only cover, hiding the footer immediately', () => {
+    // Single-owner contract: the turn preserves the original body mount
+    // (markers, Sortable structure, label bar) with no per-child edit
+    // branches; the inert content + absolute cover block pointer/hover/
+    // drag/focus while the same edit-class commit hides the message footer
+    // with no transition (height reserved). The multi-answer label bar is
+    // intentionally unaffected.
+    const shieldTurn: FlowNode = {
+      kind: 'turn',
+      entry: {
+        groupKey: 'g-assistant',
+        turnAskId: 'u1',
+        selected: false,
+        segmentId: 'seg:edit',
+        segmentIsLive: false,
+        kind: 'history',
+        layerRunId: 'layer:x',
+        bodyNode: (
+          <div data-testid="body-shield">
+            <div data-testid="answer-group-selector" data-message-id="a2" data-interaction-region="answer-tab">
+              model b label
+            </div>
+            <div className="group-menu-bar" data-testid="shield-bar">
+              bar
+            </div>
+            <div className="MessageFooter" data-testid="shield-footer">
+              <div className="menubar show" data-testid="shield-menubar">
+                <div className="message-action-button" data-testid="shield-action">
+                  action
+                </div>
+              </div>
+              <span className="message-footer-metadata" data-testid="shield-metadata">
+                meta
+              </span>
+            </div>
+          </div>
+        )
+      }
+    }
+    const { container, rerender } = renderFlow([shieldTurn, turnNode('g-user', 'u1')], true, vi.fn())
+    const turn = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(turn.classList.contains('edit-turn-interactive')).toBe(true)
+    // Preserved geometry: relative positioning adds no offset; the cover
+    // is out of flow.
+    expect(window.getComputedStyle(turn).position).toBe('relative')
+    // Stable content wrapper present with no box-layout change + inert.
+    const body = turn.querySelector('[data-testid="body-shield"]') as HTMLElement
+    expect(body).not.toBeNull()
+    const content = body.parentElement
+    expect(content).not.toBeNull()
+    expect(content!.hasAttribute('inert')).toBe(true)
+    expect(window.getComputedStyle(content!).display).toBe('contents')
+    // Original child identity preserved verbatim (no child rewrites).
+    expect(turn.querySelector('[data-testid="answer-group-selector"]')).not.toBeNull()
+    expect(turn.querySelector('[data-testid="answer-group-selector"]')?.getAttribute('data-interaction-region')).toBe(
+      'answer-tab'
+    )
+    // Edit-only cover: non-focusable descriptive layer receiving pointer.
+    const cover = turn.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    expect(cover).not.toBeNull()
+    expect(cover.getAttribute('aria-hidden')).toBe('true')
+    expect(cover.hasAttribute('tabindex')).toBe(false)
+    expect(cover.getAttribute('role')).toBeNull()
+    expect(window.getComputedStyle(cover).position).toBe('absolute')
+    expect(window.getComputedStyle(cover).zIndex).toBe('1')
+    // Immediate footer hide in the same commit: no transition, height
+    // reserved (visibility, not display:none).
+    const footer = turn.querySelector('[data-testid="shield-footer"]') as HTMLElement
+    expect(window.getComputedStyle(footer).visibility).toBe('hidden')
+    expect(window.getComputedStyle(footer).opacity).toBe('0')
+    expect(window.getComputedStyle(footer).transition).toBe('none')
+    expect(window.getComputedStyle(footer).display).not.toBe('none')
+    for (const testId of ['shield-menubar', 'shield-action', 'shield-metadata']) {
+      const el = turn.querySelector(`[data-testid="${testId}"]`) as HTMLElement
+      expect(window.getComputedStyle(el).visibility).toBe('hidden')
+      expect(window.getComputedStyle(el).opacity).toBe('0')
+      expect(window.getComputedStyle(el).transition).toBe('none')
+    }
+    // Multi-answer label bar is NOT affected by the footer hide.
+    const bar = turn.querySelector('[data-testid="shield-bar"]') as HTMLElement
+    expect(window.getComputedStyle(bar).visibility).not.toBe('hidden')
+    // Normal mode restores: no cover, no inert, footer visible, static box.
+    rerender(<>{renderEditFlowNodes({ nodes: [shieldTurn, turnNode('g-user', 'u1')], isEditMode: false })}</>)
+    const plain = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(plain.querySelector('[data-testid="edit-turn-cover"]')).toBeNull()
+    const plainBody = plain.querySelector('[data-testid="body-shield"]') as HTMLElement
+    expect(plainBody.parentElement?.hasAttribute('inert')).toBe(false)
+    expect(window.getComputedStyle(plain).position).not.toBe('relative')
+    const plainFooter = plain.querySelector('[data-testid="shield-footer"]') as HTMLElement
+    expect(window.getComputedStyle(plainFooter).visibility).not.toBe('hidden')
+  })
+
+  it('cover click selects the whole turn once with modifier forwarding', () => {
+    const onTurnClick = vi.fn()
+    const { container } = renderFlow([turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')], true, onTurnClick)
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    fireEvent.click(cover)
+    expect(onTurnClick).toHaveBeenCalledTimes(1)
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, false)
+    fireEvent.click(cover, { ctrlKey: true })
+    expect(onTurnClick).toHaveBeenCalledWith('u1', true, false)
+    fireEvent.click(cover, { shiftKey: true })
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, true)
+  })
+
+  it('right-click auto-selects a non-selected turn and preserves selection without suppressing the batch menu', () => {
+    const parentMenu = vi.fn()
+    const { container, rerender } = render(
+      <div onContextMenu={parentMenu}>
+        {renderEditFlowNodes({
+          nodes: [turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')],
+          isEditMode: true,
+          onTurnClick: vi.fn()
+        })}
+      </div>
+    )
+    // Replace the turn click spy via a fresh flow with a known handler.
+    const onTurnClick = vi.fn()
+    rerender(
+      <div onContextMenu={parentMenu}>
+        {renderEditFlowNodes({
+          nodes: [turnNode('g-assistant', 'u1'), turnNode('g-user', 'u1')],
+          isEditMode: true,
+          onTurnClick
+        })}
+      </div>
+    )
+    const cover = container.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    const result = fireEvent.contextMenu(cover)
+    expect(onTurnClick).toHaveBeenCalledTimes(1)
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, false)
+    // No blanket suppression: the ancestor batch menu still receives the
+    // bubbled event (not canceled).
+    expect(result).toBe(true)
+    expect(parentMenu).toHaveBeenCalledTimes(1)
+    // An already-selected turn preserves the selection (no toggle-clear).
+    const keep = vi.fn()
+    const selectedNode: FlowNode = turnNode('g-assistant', 'u1', { selected: true, segmentId: 'seg:sel' })
+    const userNode: FlowNode = turnNode('g-user', 'u1', { selected: true, segmentId: 'seg:sel' })
+    const { container: selectedContainer } = renderFlow([selectedNode, userNode], true, keep)
+    const selectedCover = selectedContainer.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement
+    fireEvent.contextMenu(selectedCover)
+    expect(keep).not.toHaveBeenCalled()
   })
 
   it('selected turns show the selected outline only, with no preview ring', () => {

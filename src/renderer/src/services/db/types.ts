@@ -15,6 +15,7 @@ import type {
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
   InsertMessageGroup,
+  InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
   ListBranchesResponse,
   MessageBlockEntry,
@@ -357,7 +358,7 @@ export interface MessageDataSource {
     topicId: string,
     groups: InsertMessageGroup[],
     branchId?: BranchRoute
-  ): Promise<FileCleanupResult>
+  ): Promise<InsertMessageGroupsResponse>
 
   // ============ Batch Operations ============
   /**

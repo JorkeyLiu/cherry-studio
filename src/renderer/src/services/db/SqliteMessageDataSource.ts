@@ -1042,7 +1042,7 @@ export class SqliteMessageDataSource implements MessageDataSource {
     topicId: string,
     groups: InsertMessageGroup[],
     branchId?: string | null
-  ): Promise<FileCleanupResult> {
+  ): Promise<InsertMessageGroupsResponse> {
     if (!this.api.insertMessageGroups) {
       throw new Error('ChatDb API unavailable: insertMessageGroups not exposed')
     }

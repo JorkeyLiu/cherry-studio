@@ -31,7 +31,12 @@ const { mocks } = vi.hoisted(() => ({
     selectLoadedMessagesForTopic: vi.fn(),
     setClipboard: vi.fn((p: unknown) => ({ type: 'clipboard/setClipboard', payload: p })),
     clearClipboard: vi.fn(() => ({ type: 'clipboard/clearClipboard' })),
-    executeDeleteMessagesWithDependents: vi.fn()
+    executeDeleteMessagesWithDependents: vi.fn(),
+    executeStagedCutSourceDelete: vi.fn(),
+    deleteMessagesFromDB: vi.fn(),
+    consumeFileCleanupResult: vi.fn(),
+    deleteSegmentsBySnapshots: vi.fn().mockResolvedValue(undefined),
+    syncSegmentsAfterMessageDeletion: vi.fn().mockResolvedValue(undefined)
   }
 }))
 
@@ -75,7 +80,25 @@ vi.mock('@renderer/store/messageBlock', () => ({
 }))
 
 vi.mock('@renderer/store/thunk/messageThunk', () => ({
-  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents
+  executeDeleteMessagesWithDependents: mocks.executeDeleteMessagesWithDependents,
+  executeStagedCutSourceDelete: mocks.executeStagedCutSourceDelete,
+  deleteMessagesFromDB: mocks.deleteMessagesFromDB,
+  isDeletePostCommitConvergenceError: (error: unknown) => {
+    if (typeof error !== 'object' || error === null) return false
+    const candidate = error as { committed?: unknown; response?: unknown; undoParts?: unknown }
+    return (
+      candidate.committed === true && typeof candidate.response === 'object' && typeof candidate.undoParts === 'object'
+    )
+  }
+}))
+
+vi.mock('@renderer/services/db/topicTrashLifecycle', () => ({
+  consumeFileCleanupResult: mocks.consumeFileCleanupResult
+}))
+
+vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
+  deleteSegmentsBySnapshots: mocks.deleteSegmentsBySnapshots,
+  syncSegmentsAfterMessageDeletion: mocks.syncSegmentsAfterMessageDeletion
 }))
 
 vi.mock('@renderer/store/topicSegment', () => ({
@@ -348,6 +371,7 @@ describe('ClipboardService copy/cut group-scoped authority (no whole-topic read)
     const payload = dispatch.mock.calls[0][0].payload
     expect(dispatch.mock.calls[0][0].type).toBe('clipboard/setClipboard')
     expect(payload.mode).toBe('cut')
+    expect(payload.sourceBranchId).toBe(null)
     expect(payload.items[0].messages.map((m) => m.id)).toEqual(['u1', 'a1', 'a2'])
     expect(payload.items[0].blocks.map((b) => b.id)).toEqual(['bu1', 'ba1', 'ba2'])
     expect(payload.segmentSnapshots).toHaveLength(1)

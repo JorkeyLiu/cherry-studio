@@ -82,6 +82,7 @@ export type {
   HardDeleteTopicResponse,
   InsertMessageGroup,
   InsertMessageGroupIntent,
+  InsertMessageGroupsGroupResult,
   InsertMessageGroupsRequest,
   InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorRequest,

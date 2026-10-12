@@ -6,6 +6,7 @@ const initialState: ClipboardState = {
   mode: null,
   items: [],
   sourceTopicId: null,
+  sourceBranchId: null,
   timestamp: 0,
   segmentSnapshots: []
 }
@@ -20,13 +21,15 @@ const clipboardSlice = createSlice({
         mode: ClipboardMode
         items: ClipboardItem[]
         sourceTopicId: string
+        sourceBranchId: string | null
         segmentSnapshots?: ClipboardSegmentSnapshot[]
       }>
     ) {
-      const { mode, items, sourceTopicId, segmentSnapshots } = action.payload
+      const { mode, items, sourceTopicId, sourceBranchId, segmentSnapshots } = action.payload
       state.mode = mode
       state.items = items
       state.sourceTopicId = sourceTopicId
+      state.sourceBranchId = sourceBranchId
       state.timestamp = Date.now()
       state.segmentSnapshots = segmentSnapshots ?? []
     },
@@ -34,6 +37,7 @@ const clipboardSlice = createSlice({
       state.mode = null
       state.items = []
       state.sourceTopicId = null
+      state.sourceBranchId = null
       state.timestamp = 0
       state.segmentSnapshots = []
     }

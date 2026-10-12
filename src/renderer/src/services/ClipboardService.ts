@@ -1,11 +1,19 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
+import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
+import { publishInsertMessageGroupsAck } from '@renderer/services/insertGroupsAck'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { clearClipboard, setClipboard } from '@renderer/store/clipboard'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
-import { upsertManyBlocks } from '@renderer/store/messageBlock'
+import { removeManyBlocks } from '@renderer/store/messageBlock'
 import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
-import { executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
+import {
+  deleteMessagesFromDB,
+  executeDeleteMessagesWithDependents,
+  executeStagedCutSourceDelete,
+  isDeletePostCommitConvergenceError
+} from '@renderer/store/thunk/messageThunk'
+import { deleteSegmentsBySnapshots, syncSegmentsAfterMessageDeletion } from '@renderer/store/thunk/topicSegmentThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import { addSegment } from '@renderer/store/topicSegment'
 import { pushUndoAction } from '@renderer/store/undoStack'
@@ -28,37 +36,6 @@ import { t } from 'i18next'
 import { v4 as uuidv4 } from 'uuid'
 
 const logger = loggerService.withContext('ClipboardService')
-
-/**
- * Local-projection-only insertion index after a target message.
- * Never an authority index: used solely to splice the already-committed
- * pasted messages into the currently loaded list when the anchor is loaded.
- * Main resolves the authoritative position from the stable intent.
- */
-function calculateLocalInsertIndex(messages: Message[], targetMessageId: string): number {
-  const targetIndex = messages.findIndex((m) => m.id === targetMessageId || m.askId === targetMessageId)
-  if (targetIndex === -1) return messages.length
-
-  const targetMessage = messages[targetIndex]
-  let insertIndex = targetIndex + 1
-
-  // Determine the group key: user message uses its own ID, assistant uses askId
-  const groupKey = targetMessage.role === 'user' ? targetMessage.id : targetMessage.askId
-
-  if (groupKey) {
-    // Match Main after-group-tail authority: scan the entire loaded
-    // projection after the anchor and track the last loaded assistant with
-    // the same group key (including non-contiguous members). Never stop at
-    // intervening rows.
-    for (let i = targetIndex + 1; i < messages.length; i++) {
-      if (messages[i].role === 'assistant' && messages[i].askId === groupKey) {
-        insertIndex = i + 1
-      }
-    }
-  }
-
-  return insertIndex
-}
 
 /**
  * Find the first message after `positionIndex` whose ID is not in `excludedIds`.
@@ -230,11 +207,13 @@ export async function copyMessages(
     return 0
   }
 
+  const stagedBranchId = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
   dispatch(
     setClipboard({
       mode: 'copy',
       items: payload.items,
       sourceTopicId: topicId,
+      sourceBranchId: stagedBranchId,
       segmentSnapshots: payload.segmentSnapshots
     })
   )
@@ -290,11 +269,17 @@ export async function cutMessages(
     return 0
   }
 
+  // Staged-cut authority provenance: the addressed source route plus the
+  // complete authority member IDs (in `payload.items`) are captured only after
+  // the cut selection precheck above. Paste addresses the Main source delete
+  // with this staged route without rerequiring projection capability.
+  const stagedBranchId = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
   dispatch(
     setClipboard({
       mode: 'cut',
       items: payload.items,
       sourceTopicId: topicId,
+      sourceBranchId: stagedBranchId,
       segmentSnapshots: payload.segmentSnapshots
     })
   )
@@ -321,6 +306,37 @@ export async function cutMessages(
  * topic-tail append; an outside-loaded anchor injects nothing and never
  * replaces the loaded list with an assumed whole topic.
  */
+/**
+ * Best-effort transactional rollback for a cut-paste whose source delete
+ * failed after the target insert committed. Removes the fresh copies through
+ * the existing plain authority delete path (same addressed target route),
+ * including target segments created for the paste. Throws when the rollback
+ * itself cannot complete; callers retain the staged clipboard and push no
+ * undo in both cases.
+ */
+async function rollbackPastedCutCopies(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  targetTopicId: string,
+  targetBranchId: string | null,
+  insertedMessageIds: string[],
+  insertedBlockIds: string[],
+  targetSegmentSnapshots: TopicSegment[]
+): Promise<void> {
+  if (targetSegmentSnapshots.length > 0) {
+    await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots)
+  }
+  if (insertedMessageIds.length > 0) {
+    const cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds, targetBranchId)
+    await consumeFileCleanupResult(cleanup)
+    dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: insertedMessageIds }))
+    if (insertedBlockIds.length > 0) {
+      dispatch(withClosureTopics(removeManyBlocks(insertedBlockIds), targetTopicId))
+    }
+    await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds, targetBranchId)
+  }
+}
+
 export async function pasteMessages(
   dispatch: AppDispatch,
   getState: () => RootState,
@@ -329,10 +345,41 @@ export async function pasteMessages(
 ): Promise<number> {
   const state = getState()
   const { items: rawItems, mode, sourceTopicId, segmentSnapshots: clipboardSegmentSnapshots } = state.clipboard
+  const stagedSourceBranchId = (state.clipboard as { sourceBranchId?: string | null }).sourceBranchId
 
   if (rawItems.length === 0) {
     logger.warn('[pasteMessages] Clipboard is empty')
     return 0
+  }
+
+  // Staged-cut route fail-closed BEFORE any paste write: the captured source
+  // route must still match the current source route. Missing legacy
+  // provenance (undefined) also rejects. Ordinary copy paste skips this gate.
+  if (mode === 'cut' && sourceTopicId) {
+    if (typeof stagedSourceBranchId === 'undefined') {
+      logger.error('[pasteMessages] Missing staged cut route; refusing paste before any write')
+      throw new Error('[pasteMessages] Missing staged cut route provenance')
+    }
+    if (
+      stagedSourceBranchId !== null &&
+      !(typeof stagedSourceBranchId === 'string' && stagedSourceBranchId.length > 0)
+    ) {
+      logger.error('[pasteMessages] Invalid staged cut route; refusing paste before any write')
+      throw new Error('[pasteMessages] Invalid staged cut route provenance')
+    }
+    let currentSourceRoute: string | null = null
+    try {
+      currentSourceRoute = selectActiveBranchId(getState(), sourceTopicId)
+    } catch (error) {
+      logger.error('[pasteMessages] Unknown source route; refusing paste before any write', error as Error)
+      throw new Error(`[pasteMessages] Unknown source route for topic ${sourceTopicId}`)
+    }
+    if (currentSourceRoute !== stagedSourceBranchId) {
+      logger.error(
+        `[pasteMessages] Source route changed (staged ${String(stagedSourceBranchId)}, current ${String(currentSourceRoute)}); refusing paste before any write`
+      )
+      throw new Error(`[pasteMessages] Source route changed for topic ${sourceTopicId}`)
+    }
   }
 
   // Sort items by their original position to preserve document order
@@ -434,84 +481,38 @@ export async function pasteMessages(
     }
   }
 
-  // Active-topic projection precondition (correctness fix): this guard is a
-  // PURE renderer-state check against persistence — it runs BEFORE the DB
-  // batch call so a topic-switch race cannot commit pasted rows and then fail
-  // before renderer projection. Projection still occurs only after DB success
-  // (DB-first unchanged).
-  //
-  // `pasteMessages` is only reachable from edit-mode in the ACTIVE topic
-  // (useEditMode.handlePaste ← EditModeProvider topic.id in the Messages
-  // view), so `targetTopicId` === `state.messages.currentTopicId` always
-  // holds here. `messagesReceived` replaces `messageIdsByTopic[topicId]` with
-  // the supplied ordered list AND sets `currentTopicId = topicId`; under this
-  // precondition the active-topic side effect is a no-op, making the single
-  // ordered projection commit safe. The assertion makes the precondition
-  // mechanical: a future non-active-topic call fails loudly instead of
-  // silently re-pointing the active topic.
-  //
-  // Bounded projection contract (same as the existing `messageGroupReorder`
-  // `messagesReceived` usage): the list is a consistent pre-batch snapshot
-  // spliced with the regenerated IDs only at a locally visible point, so any
-  // message a NON-paste path appends to this same topic during the single
-  // batch IPC round-trip is not carried into the replacement list. The paste
-  // runs under the edit-mode `isProcessing` lock and targets only the active
-  // topic, so the exposure window is one IPC round-trip — the identical
-  // bounded contract the reorder projection already established.
-  const activeTopicId = getState().messages.currentTopicId
-  if (activeTopicId !== targetTopicId) {
-    logger.error(
-      `[pasteMessages] messagesReceived active-topic precondition failed: target ${targetTopicId}, active ${String(activeTopicId)}`
-    )
-    throw new Error(
-      `[pasteMessages] cannot project paste into non-active topic ${targetTopicId} (active: ${String(activeTopicId)})`
-    )
+  // Addressed target route captured once for the whole paste (insert, segment
+  // reconstruction, undo provenance, and cut-failure rollback share it).
+  let targetBranchId: string | null = null
+  try {
+    const liveTarget = selectActiveBranchId(getState(), targetTopicId)
+    targetBranchId = typeof liveTarget === 'string' && liveTarget.length > 0 ? liveTarget : null
+  } catch {
+    targetBranchId = null
   }
 
   // DB-first (LOCK-001): ONE atomic stable insertion BEFORE any Redux commit.
   // If the batch fails, Redux is never touched and nothing is projected.
+  // Main success publishes the exact final committed canonical wires plus
+  // capability; the shared ack below installs rows+capability atomically.
+  let insertAck: Awaited<ReturnType<typeof dbService.insertMessageGroups>>
   try {
-    await dbService.insertMessageGroups(
+    insertAck = await dbService.insertMessageGroups(
       targetTopicId,
       [{ entries: entries as unknown as MessageBlockEntry[], intent: stableIntent }],
-      selectActiveBranchId(getState(), targetTopicId)
+      targetBranchId
     )
   } catch (error) {
     logger.error('[pasteMessages] Failed to persist paste batch to DB', error as Error)
     throw new Error(`[pasteMessages] DB batch write failed for ${entries.length} entries`)
   }
 
-  // Bounded local projection: splice only when the insertion point is locally
-  // visible. Anchored intents insert at the loaded group tail when the anchor
-  // is loaded; an outside-loaded anchor injects nothing. Topic-tail appends
-  // to the loaded end while preserving existing loaded order (never a
-  // whole-topic assumption).
-  let localInsertIndex: number | null = null
-  if (stableIntent.kind === 'topic-tail') {
-    localInsertIndex = targetMessages.length
-  } else {
-    const anchorLoaded =
-      targetMessages.some((m) => m.id === stableIntent.messageId) ||
-      targetMessages.some((m) => m.askId === stableIntent.messageId)
-    if (anchorLoaded) {
-      localInsertIndex = Math.max(
-        0,
-        Math.min(calculateLocalInsertIndex(targetMessages, stableIntent.messageId), targetMessages.length)
-      )
-    }
-  }
-  if (localInsertIndex !== null) {
-    const postBatchMessages = [...targetMessages]
-    postBatchMessages.splice(localInsertIndex, 0, ...allInsertedMessages)
-    dispatch(newMessagesActions.messagesReceived({ topicId: targetTopicId, messages: postBatchMessages }))
-  }
-
-  // ONE block commit for all pasted blocks (after the message projection).
-  // Paste ownership is the target topic only; cut-mode source deletion is a
-  // separate annotated dispatch inside executeDeleteMessagesWithDependents.
-  if (allInsertedBlocks.length > 0) {
-    dispatch(withClosureTopics(upsertManyBlocks(allInsertedBlocks), targetTopicId))
-  }
+  // Bounded local projection via the shared Main acknowledgment: the ack's
+  // stable neighbors decide placement against the current resident order;
+  // pasted new rows enter only when the anchor is resident or the run is the
+  // canonical topic-tail, otherwise nothing is injected. Capability comes
+  // from Main only — never inferred from the request.
+  publishInsertMessageGroupsAck(dispatch, targetTopicId, targetBranchId, insertAck, [insertedMessageIds])
 
   // Increment file reference counts for pasted content
   if (fileReferenceDeltas.length > 0) {
@@ -555,7 +556,7 @@ export async function pasteMessages(
         clipSnap.name,
         newMessageIds,
         clipSnap.color,
-        selectActiveBranchId(getState(), targetTopicId)
+        targetBranchId
       )
       const newSegment = mapSegmentWireToTopicSegment(wire)
       if (wire.name == null) newSegment.name = clipSnap.name
@@ -579,20 +580,26 @@ export async function pasteMessages(
     )
   }
 
-  // If cut mode: remove source messages through the single semantic delete
-  // transaction. Stable member roots only — ALL complete clipboard member
-  // message IDs (deduped, authority order), never just `originalAskId`. Main
-  // expands user dependents (so outside-loaded siblings are deleted too),
-  // dedupes overlapping expansions, and handles orphan-assistant roots
-  // directly (a user root alone cannot expand an orphan group). The helper
-  // returns the full authority undo snapshot (actual expanded deleted IDs as
-  // restore groups + segment snapshots). It owns file cleanup, loaded-
-  // intersection removal, authority segment convergence, and anchor transfer,
-  // so no second delete protocol lives here. Multi-group cuts stay one
-  // transaction. A failed source delete keeps the existing swallow semantics:
-  // the successful insertion stands, the clipboard is still cleared, and the
-  // undo action carries empty source anchors/roots (nothing was deleted).
+  // If cut mode: remove COMPLETE stable source members through the staged-cut
+  // authority transaction (cut-specific, no projection capability rerequire).
+  // Stable member roots only — ALL complete clipboard member message IDs
+  // (deduped, authority order), never just `originalAskId`. Main expands user
+  // dependents, validates every root owner == staged addressed route with
+  // all-owned atomicity, and returns the full authority undo snapshot. The
+  // helper owns file cleanup, loaded-intersection removal, authority segment
+  // convergence, and anchor transfer. Multi-group cuts stay one transaction.
+  // Insert-first safety is preserved (source untouched when insertion fails).
+  // Pre-commit source deletion failure rolls back the fresh copies through
+  // the existing plain authority delete path (same addressed target route),
+  // the staged clipboard is retained for retry, no cut_paste undo is pushed,
+  // and the failure propagates (never swallowed as success).
+  // Post-commit convergence failure (Main COMMITTED, typed committed marker):
+  // the movement already happened — pasted copies are PRESERVED (no rollback),
+  // the authoritative undo parts from the marker are retained, real cut
+  // clipboard/undo bookkeeping finalizes below, and the convergence error is
+  // surfaced truthfully only after that bookkeeping.
   let sourceRootIds: string[] = []
+  let pendingPostCommitError: unknown = null
   if (mode === 'cut' && sourceTopicId) {
     const stableRoots = [
       ...new Set(
@@ -602,12 +609,48 @@ export async function pasteMessages(
 
     if (stableRoots.length > 0) {
       try {
-        const result = await executeDeleteMessagesWithDependents(dispatch, getState, sourceTopicId, stableRoots)
+        const result = await executeStagedCutSourceDelete(dispatch, getState, {
+          sourceTopicId,
+          sourceBranchId: stagedSourceBranchId as string | null,
+          rootIds: stableRoots
+        })
         sourceGroupAnchors = result.undoParts.groupAnchors
         sourceSegmentSnapshots = result.undoParts.segmentSnapshots
         sourceRootIds = [...stableRoots]
       } catch (error) {
-        logger.error('[pasteMessages] Failed to delete source messages (semantic cut delete)', error as Error)
+        if (isDeletePostCommitConvergenceError(error)) {
+          // Committed: source rows are gone in Main. Never roll back the
+          // surviving pasted copies and never claim a fake cut failure.
+          sourceGroupAnchors = error.undoParts.groupAnchors
+          sourceSegmentSnapshots = error.undoParts.segmentSnapshots
+          sourceRootIds = [...stableRoots]
+          pendingPostCommitError = error
+          logger.error(
+            '[pasteMessages] Cut source deleted but renderer convergence failed; preserving pasted copies with usable undo',
+            error as Error
+          )
+        } else {
+          logger.error('[pasteMessages] Cut source delete failed; rolling back pasted copies', error as Error)
+          try {
+            await rollbackPastedCutCopies(
+              dispatch,
+              getState,
+              targetTopicId,
+              targetBranchId,
+              insertedMessageIds,
+              allInsertedBlocks.map((b) => b.id),
+              targetSegmentSnapshots
+            )
+          } catch (rollbackError) {
+            logger.error('[pasteMessages] Cut rollback failed; clipboard retained without undo', rollbackError as Error)
+            throw new Error(
+              `[pasteMessages] Cut source delete failed and rollback incomplete for ${insertedMessageIds.length} copies: ${(error as Error)?.message ?? String(error)}`
+            )
+          }
+          throw new Error(
+            `[pasteMessages] Cut source delete failed; pasted copies rolled back: ${(error as Error)?.message ?? String(error)}`
+          )
+        }
       }
     }
 
@@ -620,14 +663,25 @@ export async function pasteMessages(
   }
 
   // Create undo action
-  // Calculate anchor: first non-pasted message after the locally visible paste
-  // region when projected; otherwise after the loaded end. The stable redo
-  // authority is `stableIntent` (never the numeric index).
+  // Calculate anchor: first non-pasted message after the published inserted
+  // run in current loaded order when projected; otherwise null (tail). The
+  // stable redo authority is `stableIntent` (never the numeric index).
   const finalTargetMessages = (selectLoadedMessagesForTopic(getState(), targetTopicId) ?? []) as Message[]
-  const afterInsertIndex = localInsertIndex ?? finalTargetMessages.length
   const insertedIdSet = new Set(insertedMessageIds)
-  const anchorMessageId = findAnchorAfterPosition(finalTargetMessages, afterInsertIndex, insertedIdSet)
-  const legacyPositionIndex = localInsertIndex ?? targetMessages.length
+  let anchorMessageId: string | null = null
+  {
+    let firstInsertedIdx = -1
+    for (let i = 0; i < finalTargetMessages.length; i++) {
+      if (insertedIdSet.has(finalTargetMessages[i].id)) {
+        firstInsertedIdx = i
+        break
+      }
+    }
+    if (firstInsertedIdx !== -1) {
+      anchorMessageId = findAnchorAfterPosition(finalTargetMessages, firstInsertedIdx, insertedIdSet)
+    }
+  }
+  const legacyPositionIndex = targetMessages.length
 
   if (mode === 'cut' && sourceTopicId) {
     const undoAction: CutPasteUndoAction = {
@@ -640,6 +694,8 @@ export async function pasteMessages(
       targetAnchorMessageId: anchorMessageId,
       targetInsertIntent: stableIntent,
       sourceTopicId,
+      sourceBranchId: stagedSourceBranchId as string | null,
+      targetBranchId,
       sourceRootIds,
       sourceGroupAnchors,
       sourceSegmentSnapshots,
@@ -665,6 +721,14 @@ export async function pasteMessages(
       fileReferenceDeltas
     }
     dispatch(pushUndoAction(undoAction))
+  }
+
+  // Committed convergence failure surfaces AFTER real cut bookkeeping above
+  // (clipboard cleared, usable cut_paste undo pushed, copies preserved).
+  if (pendingPostCommitError !== null) {
+    throw new Error(
+      `[pasteMessages] Cut source deleted; renderer convergence failed after commit (pasted copies preserved): ${(pendingPostCommitError as Error)?.message ?? String(pendingPostCommitError)}`
+    )
   }
 
   logger.info(`[pasteMessages] Pasted ${items.length} groups with stable intent ${stableIntent.kind}`)

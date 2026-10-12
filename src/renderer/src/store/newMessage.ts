@@ -190,6 +190,55 @@ export interface ApplyInsertedMessagesAfterAnchorPayload {
 }
 
 /**
+ * One committed batch run for `applyInsertedMessageGroups`.
+ *
+ * `insertedMessageIds` is the Main-committed run for one request group in
+ * authority order; `visibleMessageIds` is the caller-computed bounded
+ * intersection for this run in authority order (pre-delete loaded subset for
+ * undo, all ids for paste/redo when the anchor is resident or the run is the
+ * canonical topic-tail). Empty visible injects nothing. Placement follows the
+ * Main stable neighbors; a non-tail run with neither neighbor resident
+ * injects nothing (no false position, no whole-topic assumption).
+ */
+export interface InsertMessageGroupsGroupApply {
+  /** Main-committed run ids for this group (authority order). */
+  insertedMessageIds: string[]
+  /** Post-insert effective predecessor (null at head). */
+  beforeMessageId: string | null
+  /** Post-insert effective successor (null at tail). */
+  nextMessageId: string | null
+  /** Bounded visible subset in authority order (subset of insertedMessageIds). */
+  visibleMessageIds: string[]
+}
+
+/**
+ * Payload for applying a Main-issued batch insertion acknowledgment.
+ *
+ * Single-commit install of canonical inserted rows at their durable stable
+ * placements plus the same-route mutability delta — no frame ever contains
+ * a new row without its capability. Each group splices its visible run after
+ * `beforeMessageId` when resident, else before `nextMessageId` when
+ * resident, else appends only for tail runs (`nextMessageId == null`) with
+ * non-empty visible; other non-resident runs inject nothing. Route mismatch
+ * against the stored resident route fails the whole batch closed with zero
+ * change. Capability is Main-only: the delta is trimmed to
+ * inserted ∩ resident and unioned same-route with prior resident capability.
+ */
+export interface ApplyInsertedMessageGroupsPayload {
+  topicId: string
+  /** Addressed route key (null = main). Must match the ack route. */
+  route: string | null
+  /** Canonical post-write inserted messages (flat request-group order). */
+  messages: Message[]
+  /** Stable IDs of truly inserted messages (flat request-group order). */
+  insertedMessageIds: string[]
+  /** Main-authoritative mutability delta (subset of insertedMessageIds). */
+  mutableMessageIds: string[]
+  /** Per-group committed runs with bounded visible subsets in request order. */
+  groups: InsertMessageGroupsGroupApply[]
+}
+
+/**
  * Payload for applying a Main-issued append creation acknowledgment.
  *
  * Single-commit install of one ordinary-send row plus its authoritative
@@ -603,6 +652,152 @@ export const messagesSlice = createSlice({
       }
       // Same-route capability delta, trimmed to the merged resident.
       const nextSet = new Set(state.messageIdsByTopic[topicId])
+      const incoming = [...new Set((mutableMessageIds ?? []).filter((id) => typeof id === 'string' && id.length > 0))]
+        .filter((id) => insertedSet.has(id))
+        .filter((id) => nextSet.has(id))
+      const storedHasCapability = Object.prototype.hasOwnProperty.call(state.mutableMessageIdsByTopic, topicId)
+      if (!hasStoredRoute && !storedHasCapability) {
+        state.mutableRouteByTopic[topicId] = route
+        state.mutableMessageIdsByTopic[topicId] = incoming
+        return
+      }
+      const resident = new Set((state.mutableMessageIdsByTopic[topicId] ?? []).filter((id) => nextSet.has(id)))
+      for (const id of incoming) resident.add(id)
+      state.mutableRouteByTopic[topicId] = route
+      state.mutableMessageIdsByTopic[topicId] = [...resident]
+    },
+    /**
+     * Apply a Main-issued batch insertion acknowledgment atomically.
+     *
+     * Batch row + capability commit in ONE reducer action: only actually
+     * placed visible rows are upserted, each group's visible run splices at
+     * its Main stable neighbors against the evolving resident order (later
+     * groups see earlier visible inserts), and the same-route mutability
+     * delta unions in the same commit. Stable-neighbor links are followed
+     * THROUGH invisible same-batch siblings via local group-edge traversal
+     * to the nearest evolving-resident or already-projected row, or through
+     * full group edges to the stable surviving anchor/tail — never numeric
+     * sortOrder, never request order as authority, never invisible-sibling
+     * injection, never topic-tail fallback for genuine external nonresident
+     * anchors, never guessed mutability. Traversal is finite with a local
+     * cycle guard; malformed cycles fail closed. Non-tail runs with no
+     * resolvable resident anchor inject nothing; only a genuine empty-topic
+     * tail (`before == null && next == null`) appends at the loaded end.
+     * Empty visible runs inject nothing. Multi-visible chains preserve Main
+     * physical order independent of request-group order. Route mismatch
+     * against the stored resident route fails the whole batch closed with
+     * zero change. Capability is Main-only, trimmed to inserted ∩ resident.
+     */
+    applyInsertedMessageGroups(state, action: PayloadAction<ApplyInsertedMessageGroupsPayload>) {
+      const { topicId, route, messages, insertedMessageIds, mutableMessageIds, groups } = action.payload
+      if (!Array.isArray(insertedMessageIds) || insertedMessageIds.length === 0) return
+      if (!Array.isArray(groups) || groups.length === 0) return
+      if (!Array.isArray(messages) || messages.length === 0) return
+      const hasStoredRoute = Object.prototype.hasOwnProperty.call(state.mutableRouteByTopic, topicId)
+      if (hasStoredRoute && (state.mutableRouteByTopic[topicId] ?? null) !== route) return
+      const insertedSet = new Set(insertedMessageIds)
+      const byId = new Map<string, Message>()
+      for (const m of messages) {
+        if (m && typeof m.id === 'string' && m.id.length > 0 && insertedSet.has(m.id) && !byId.has(m.id)) {
+          byId.set(m.id, m)
+        }
+      }
+      if (byId.size === 0) return
+      // Local batch graph: inserted id -> owning group index (first wins).
+      const ownerById = new Map<string, number>()
+      for (let gi = 0; gi < groups.length; gi++) {
+        const g = groups[gi]
+        if (!g || !Array.isArray(g.insertedMessageIds)) continue
+        for (const id of g.insertedMessageIds) {
+          if (typeof id === 'string' && id.length > 0 && !ownerById.has(id)) ownerById.set(id, gi)
+        }
+      }
+      const oldIds = state.messageIdsByTopic[topicId] ?? []
+      const baseIds = oldIds.filter((id) => !insertedSet.has(id))
+      const evolving = [...baseIds]
+      // Finite local traversal: follow one edge direction through same-batch
+      // ids via owning-group edges to the nearest evolving row. External
+      // (non-batch, non-evolving) anchors stop with null (no fallback).
+      // Cycles fail closed via the visited-group guard.
+      const resolveThroughBatch = (startId: string | null, edge: 'before' | 'next'): string | null => {
+        let cur: string | null = startId
+        const visited = new Set<number>()
+        // Bound iterations to groups.length + 1 so malformed graphs terminate.
+        for (let step = 0; step <= groups.length; step++) {
+          if (typeof cur !== 'string' || cur.length === 0) return null
+          if (evolving.includes(cur)) return cur
+          if (!insertedSet.has(cur)) return null
+          const ownerIdx = ownerById.get(cur)
+          if (ownerIdx === undefined) return null
+          if (visited.has(ownerIdx)) return null
+          visited.add(ownerIdx)
+          const owner = groups[ownerIdx]
+          if (!owner || typeof owner !== 'object') return null
+          cur = edge === 'before' ? owner.beforeMessageId : owner.nextMessageId
+          if (cur === null) return null
+        }
+        return null
+      }
+      const placedIds: string[] = []
+      const placedSet = new Set<string>()
+      for (const g of groups) {
+        if (!g || !Array.isArray(g.insertedMessageIds) || g.insertedMessageIds.length === 0) continue
+        const seenInGroup = new Set<string>()
+        const visible = (Array.isArray(g.visibleMessageIds) ? g.visibleMessageIds : []).filter((id) => {
+          if (typeof id !== 'string' || id.length === 0 || !byId.has(id)) return false
+          if (seenInGroup.has(id)) return false
+          seenInGroup.add(id)
+          return true
+        })
+        if (visible.length === 0) continue
+        // Never project the same row twice within one batch commit.
+        const fresh = visible.filter((id) => !evolving.includes(id) && !placedSet.has(id))
+        if (fresh.length === 0) continue
+        let insertAt: number | null = null
+        if (typeof g.beforeMessageId === 'string' && g.beforeMessageId.length > 0) {
+          const anchor = resolveThroughBatch(g.beforeMessageId, 'before')
+          if (anchor !== null) insertAt = evolving.indexOf(anchor) + 1
+        } else if (g.beforeMessageId === null) {
+          // Head edge: no before anchor; fall through to next-chain below.
+        }
+        if (insertAt === null && typeof g.nextMessageId === 'string' && g.nextMessageId.length > 0) {
+          const anchor = resolveThroughBatch(g.nextMessageId, 'next')
+          if (anchor !== null) insertAt = evolving.indexOf(anchor)
+        }
+        if (insertAt === null) {
+          // Genuine empty-topic tail only; never fallback for external ghosts
+          // or cycles, even when next == null with a non-null ghost before.
+          if (g.nextMessageId !== null) continue
+          if (g.beforeMessageId !== null) continue
+          insertAt = evolving.length
+        }
+        const safeAt = Math.max(0, Math.min(insertAt, evolving.length))
+        evolving.splice(safeAt, 0, ...fresh)
+        for (const id of fresh) {
+          placedSet.add(id)
+          placedIds.push(id)
+        }
+      }
+      // Upsert only actually placed rows (never skipped/invisible siblings).
+      if (placedIds.length > 0) {
+        const placedMessages: Message[] = []
+        for (const id of placedIds) {
+          const entity = byId.get(id)
+          if (entity && !placedMessages.some((v) => v.id === id)) placedMessages.push(entity)
+        }
+        if (placedMessages.length > 0) {
+          // @ts-ignore ts-2589 false positive
+          messagesAdapter.upsertMany(state, placedMessages)
+        }
+      }
+      state.messageIdsByTopic[topicId] = evolving
+      if (!(topicId in state.loadingByTopic)) {
+        state.loadingByTopic[topicId] = false
+      }
+      if (!(topicId in state.fulfilledByTopic)) {
+        state.fulfilledByTopic[topicId] = false
+      }
+      const nextSet = new Set(evolving)
       const incoming = [...new Set((mutableMessageIds ?? []).filter((id) => typeof id === 'string' && id.length > 0))]
         .filter((id) => insertedSet.has(id))
         .filter((id) => nextSet.has(id))

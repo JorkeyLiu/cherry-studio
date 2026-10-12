@@ -256,11 +256,11 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
         <GridContainer className={classNames([multiModelMessageStyle, { 'multi-select-mode': isMultiSelectMode }])}>
           {messages.map(renderMessage)}
         </GridContainer>
-        {/* Edit-mode forced hide (not non-render): the bar keeps its DOM
-            structure and occupied height while staying invisible,
-            noninteractive, and inaccessible — see MessageGroupMenuBar.
-            Group selection still flows through the group-level capture
-            interaction. */}
+        {/* The group bar renders identically in all modes: edit-mode
+            interaction blocking and message-toolbar hiding are owned one
+            layer up by the turn container (EditTurn), whose outer shield
+            covers this bar. Label clicks land on the cover for whole-turn
+            selection; ordinary actions run unchanged behind the shield. */}
         {isGrouped && (
           <MessageGroupMenuBar
             messages={messages}
@@ -269,7 +269,6 @@ const MessageGroup = ({ messages, topic, registerMessageElement, isEditMode = fa
             onReorderMessages={handleReorderMessages}
             topic={topic}
             disabled={!groupMutable}
-            isEditMode={isEditMode}
           />
         )}
       </GroupContainer>

@@ -149,10 +149,11 @@ const MessageItem: FC<Props> = ({
   const isAssistantMessage = message.role === 'assistant'
   const isProcessing = isMessageProcessing(message)
   // Edit mode is selection-only: the ordinary message toolbar keeps its
-  // DOM/layout structure and occupied height but is forcibly hidden (never
-  // hover-revealed) and noninteractive/inaccessible — see the
-  // edit-mode-toolbar-hidden treatment on MessageFooter. The floating
-  // edit-mode selection action bar is a separate overlay and is unaffected.
+  // DOM/layout structure and occupied height. Forced hiding is owned one
+  // layer up by the turn container (EditTurn), which hides this footer in
+  // the same edit-mode commit with no transition while reserving height.
+  // The floating edit-mode selection action bar is a separate overlay and
+  // is unaffected.
   const showMenubar = !hideMenuBar && !isEditing && !isProcessing
   // LOCK-105: message style is always bubble; every assistant-message
   // toolbar sits on the LEFT side (not only the last assistant message).
@@ -301,14 +302,7 @@ const MessageItem: FC<Props> = ({
               </MessageErrorBoundary>
             </MessageContentContainer>
             {showMenubar && (
-              <MessageFooter
-                data-interaction-region="message-controls"
-                className={classNames({
-                  MessageFooter: true,
-                  'edit-mode-toolbar-hidden': isEditMode
-                })}
-                inert={isEditMode ? true : undefined}
-                aria-hidden={isEditMode ? true : undefined}>
+              <MessageFooter data-interaction-region="message-controls" className="MessageFooter">
                 <HorizontalScrollContainer
                   classNames={{
                     content: cn(
@@ -387,22 +381,6 @@ const MessageFooter = styled.div`
   margin-left: 46px;
   margin-top: 3px;
   user-select: none;
-  // Edit-mode forced hide: keeps DOM structure and occupied height (no
-  // layout shift when toggling edit mode) while defeating the
-  // container-hover opacity reveal above. visibility:hidden removes the
-  // subtree from mouse hit-testing, sequential keyboard focus, and the
-  // accessibility tree; pointer-events and inert/aria-hidden belt it. The
-  // metadata rule below additionally defeats the bubble user-message hover
-  // reveal, which sets opacity/visibility directly on the metadata child
-  // with higher specificity than inheritance.
-  &.edit-mode-toolbar-hidden {
-    visibility: hidden;
-    pointer-events: none;
-    .message-footer-metadata {
-      opacity: 0 !important;
-      visibility: hidden !important;
-    }
-  }
 `
 
 /**

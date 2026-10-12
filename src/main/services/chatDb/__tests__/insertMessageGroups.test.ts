@@ -256,4 +256,102 @@ describe('insertMessageGroups — stable intents, atomic multi-group', () => {
     expect(fetched.messages.map((m: any) => m.id)).toEqual([m0, uNew])
     expect(fetched.blocks.map((b: any) => b.id)).toContain(userBlock.id)
   })
+
+  it('acknowledgment carries exact canonical ids/order/route/mutable subset with per-group placement', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0 }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1 }) as any, [])
+    const beforeId = `b-${uid()}`
+    const tailId = `tl-${uid()}`
+    const tailBlock = makeBlockJson(tailId, 'main_text')
+    const res = agg.insertMessageGroups(topic, [
+      {
+        entries: [{ message: makeMessageJson(topic, { id: beforeId }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      },
+      {
+        entries: [{ message: makeMessageJson(topic, { id: tailId }) as any, blocks: [tailBlock as any] }],
+        intent: { kind: 'topic-tail' } as any
+      }
+    ])
+    expect(res.ok).toBe(true)
+    validateChatDbResult('chatdb:insert-message-groups', res)
+    const value = okValue(res) as unknown as {
+      topicId: string
+      branchId: string | null
+      insertedMessages: Array<{ id: string }>
+      insertedBlocks: Array<{ id: string; messageId: string }>
+      insertedMessageIds: string[]
+      mutableMessageIds: string[]
+      groups: Array<{ insertedMessageIds: string[]; beforeMessageId: string | null; nextMessageId: string | null }>
+    }
+    expect(value.topicId).toBe(topic)
+    expect(value.branchId).toBeNull()
+    // Flat ids follow flat request-group order and match wires in order.
+    expect(value.insertedMessageIds).toEqual([beforeId, tailId])
+    expect(value.insertedMessages.map((m) => m.id)).toEqual([beforeId, tailId])
+    // Capability is the Main-produced subset of actual inserted ids.
+    expect(value.mutableMessageIds).toEqual([beforeId, tailId])
+    // Per-group runs preserve transaction ordering with stable neighbors.
+    expect(value.groups).toHaveLength(2)
+    expect(value.groups[0].insertedMessageIds).toEqual([beforeId])
+    expect(value.groups[0].beforeMessageId).toBe(m0)
+    expect(value.groups[0].nextMessageId).toBe(m1)
+    expect(value.groups[1].insertedMessageIds).toEqual([tailId])
+    expect(value.groups[1].nextMessageId).toBeNull()
+    expect(value.insertedBlocks.map((b) => b.id)).toContain(tailBlock.id)
+  })
+
+  it('three same-anchor groups chain through batch neighbors with request-order flat ids', () => {
+    const topic = `t-${uid()}`
+    const m0 = `m0-${uid()}`
+    const m1 = `m1-${uid()}`
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m0 }) as any, [])
+    agg.appendMessage(topic, makeMessageJson(topic, { id: m1 }) as any, [])
+    const g0 = `g0-${uid()}`
+    const g1 = `g1-${uid()}`
+    const g2 = `g2-${uid()}`
+    const res = agg.insertMessageGroups(topic, [
+      {
+        entries: [{ message: makeMessageJson(topic, { id: g0 }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      },
+      {
+        entries: [{ message: makeMessageJson(topic, { id: g1 }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      },
+      {
+        entries: [{ message: makeMessageJson(topic, { id: g2 }) as any, blocks: [] }],
+        intent: { kind: 'before-message', messageId: m1 } as any
+      }
+    ])
+    expect(res.ok).toBe(true)
+    validateChatDbResult('chatdb:insert-message-groups', res)
+    const value = okValue(res) as unknown as {
+      insertedMessages: Array<{ id: string }>
+      insertedMessageIds: string[]
+      mutableMessageIds: string[]
+      groups: Array<{ insertedMessageIds: string[]; beforeMessageId: string | null; nextMessageId: string | null }>
+    }
+    // Flat ids follow flat request-group concatenated order.
+    expect(value.insertedMessageIds).toEqual([g0, g1, g2])
+    expect(value.insertedMessages.map((m) => m.id)).toEqual([g0, g1, g2])
+    expect(value.mutableMessageIds).toEqual([g0, g1, g2])
+    // Same-anchor stacking preserves request order physically; middle group
+    // neighbors are same-batch inserted ids (the partial-load gap trigger).
+    expect(value.groups).toHaveLength(3)
+    expect(value.groups[0].insertedMessageIds).toEqual([g0])
+    expect(value.groups[0].beforeMessageId).toBe(m0)
+    expect(value.groups[0].nextMessageId).toBe(g1)
+    expect(value.groups[1].insertedMessageIds).toEqual([g1])
+    expect(value.groups[1].beforeMessageId).toBe(g0)
+    expect(value.groups[1].nextMessageId).toBe(g2)
+    expect(value.groups[2].insertedMessageIds).toEqual([g2])
+    expect(value.groups[2].beforeMessageId).toBe(g1)
+    expect(value.groups[2].nextMessageId).toBe(m1)
+    const order = okValue(agg.fetchMessages(topic)).messages.map((m: any) => m.id)
+    expect(order).toEqual([m0, g0, g1, g2, m1])
+  })
 })

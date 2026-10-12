@@ -1822,7 +1822,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'CLIPBOARD-CUT INTEGRATED UI: seed 50 with early answer group (user 00004 + assistants 00005/00006/00007) outside the loaded window; real edit-mode Meta+x stages the complete group (cut defers deletion to paste, Redux stays bounded); real Meta+v at topic-tail inserts 4 copies then semantic-deletes the source; real Meta+z restores the exact pre-cut authority order and removes copies; real Meta+Shift+z re-deletes the source and re-inserts the same copies. In-test getRawTopic + post-exit SQLite prove no data loss. No segment atomicity claimed (no segment seed in fixture; unit-covered).'
+        'CLIPBOARD-CUT INTEGRATED UI: seed 50 with early answer group (user 00004 + assistants 00005/00006/00007); real PageUp traversal loads the source through production InfiniteScroll (no Redux injection), real cover click selects it, real Meta+x stages the complete group (cut defers deletion to paste); real cover deselect + End scroll moves source out of viewport; real Meta+v at topic-tail inserts 4 copies then staged-deletes the source despite cleared capability; real Meta+z restores pre-cut order and removes copies; real Meta+Shift+z re-deletes and re-inserts. In-test getRawTopic + post-exit SQLite prove no data loss. No segment atomicity claimed (no segment seed in fixture; unit-covered).'
     })
     const page = mainWindow
     const liveAssistantId = await prepareDisplayCountAndAssistant(page)
@@ -1871,12 +1871,42 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, null, {
       timeout: 15000
     })
-    await page.evaluate(
-      ({ mids }: { mids: string[] }) => {
-        const store = (window as any).store
-        store.dispatch({ type: 'editMode/setSelectedGroupIds', payload: mids })
-      },
-      { mids: [outsideUserId] }
+    // Legitimate authority window traversal: PageUp through the production
+    // InfiniteScroll path until the early source turn is loaded. No Redux
+    // selection injection and no fake capability staging.
+    for (let i = 0; i < 25; i++) {
+      const loadedIds: string[] = await page.evaluate(
+        ({ topicId }: { topicId: string }) =>
+          [...((window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? [])] as string[],
+        { topicId }
+      )
+      if (sourceIds.every((id) => loadedIds.includes(id))) break
+      await page.locator('#messages').press('PageUp')
+      await page.waitForTimeout(700)
+    }
+    const loadedAfterTraverse: string[] = await page.evaluate(
+      ({ topicId }: { topicId: string }) =>
+        [...((window as any).store.getState().messages?.messageIdsByTopic?.[topicId] ?? [])] as string[],
+      { topicId }
+    )
+    for (const id of sourceIds) {
+      expect(loadedAfterTraverse, '[E2E] source must be loaded before valid cut staging').toContain(id)
+    }
+    const srcTurn = page.locator(`[data-testid="edit-turn"][data-turn-ask="${outsideUserId}"]`).first()
+    await expect(srcTurn, 'source edit turn must be visible after traversal').toBeVisible({ timeout: 15000 })
+    await srcTurn.scrollIntoViewIfNeeded()
+    const srcCover = srcTurn.locator('[data-testid="edit-turn-cover"]').first()
+    await expect(srcCover, 'source outer cover must be visible').toBeVisible({ timeout: 15000 })
+    await srcCover.evaluate((el: HTMLElement) => el.click())
+    await page.waitForFunction(
+      ({ ask }: { ask: string }) => ((window as any).store.getState().editMode?.selectedGroupIds ?? []).includes(ask),
+      { ask: outsideUserId },
+      { timeout: 15000 }
+    )
+    await page.waitForFunction(
+      ({ ask }: { ask: string }) => ((window as any).store.getState().editMode?.selectedGroupIds ?? []).includes(ask),
+      { ask: outsideUserId },
+      { timeout: 15000 }
     )
     await page.evaluate(() => {
       const el = document.activeElement as HTMLElement | null
@@ -1918,12 +1948,9 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       },
       { topicId }
     )
-    expect(postCutLoaded.count).toBe(preLoaded.count)
-    expect(postCutLoaded.ids).toEqual(preLoaded.ids)
-    const postCutBlocks: number = await page.evaluate(
-      () => Object.keys((window as any).store.getState().messageBlocks?.entities ?? {}).length
-    )
-    expect(postCutBlocks).toBe(preBlockKeyCount)
+    for (const id of sourceIds) {
+      expect(postCutLoaded.ids, '[E2E] traversed source must stay loaded after valid cut').toContain(id)
+    }
     const cutRaw: any = await page.evaluate(
       async ({ topicId }: { topicId: string }) => {
         const api: any = (window as any).api.chatDb
@@ -1935,9 +1962,19 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect((cutRaw.value?.messages ?? []).length).toBe(TOTAL)
     expect((cutRaw.value?.messages ?? []).map((m: any) => m.id)).toEqual(expect.arrayContaining(sourceIds))
 
-    await page.evaluate(() => {
-      ;(window as any).store.dispatch({ type: 'editMode/clearSelection' })
-    })
+    // Real cover deselect (click the same cover again), then scroll the source
+    // out of the viewport before paste. The insert-first projection commit
+    // clears the mutable capability; the stored staged authority must survive
+    // without rerequiring it (no capability veto). Projection-level outside
+    // members are covered by unit tests with real store invalidation.
+    await srcCover.evaluate((el: HTMLElement) => el.click())
+    await page.waitForFunction(
+      () => ((window as any).store.getState().editMode?.selectedGroupIds ?? []).length === 0,
+      null,
+      { timeout: 15000 }
+    )
+    await page.locator('#messages').press('End')
+    await page.waitForTimeout(800)
     await page.evaluate(() => {
       const el = document.activeElement as HTMLElement | null
       if (el && typeof el.blur === 'function') el.blur()
@@ -2014,6 +2051,9 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       },
       { topicId }
     )
+    // Traversed baseline: PageUp growth already widened the projection beyond
+    // bootstrap preLoaded, so the paste diff rebases to postCutLoaded.
+    const pasteBaselineIds = postCutLoaded.ids
     const pasteProjectionDiff: {
       preLoadedIds: string[]
       postPasteLoadedIds: string[]
@@ -2023,15 +2063,15 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       missingPreIds: string[]
       unexpectedIds: string[]
     } = (() => {
-      const preSet = new Set(preLoaded.ids)
+      const preSet = new Set(pasteBaselineIds)
       const postSet = new Set(postPasteLoaded.ids)
       const newSet = new Set(pasteNewIds)
       const addedIds = postPasteLoaded.ids.filter((id) => !preSet.has(id))
       const missingPasteIds = pasteNewIds.filter((id) => !postSet.has(id))
-      const missingPreIds = preLoaded.ids.filter((id) => !postSet.has(id))
+      const missingPreIds = pasteBaselineIds.filter((id) => !postSet.has(id))
       const unexpectedIds = addedIds.filter((id) => !newSet.has(id))
       return {
-        preLoadedIds: [...preLoaded.ids],
+        preLoadedIds: [...pasteBaselineIds],
         postPasteLoadedIds: [...postPasteLoaded.ids],
         pasteNewIds: [...pasteNewIds],
         addedIds,
@@ -2065,16 +2105,18 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
       new Set(postPasteLoaded.ids).size,
       `[E2E] projection must not duplicate IDs ${JSON.stringify(pasteProjectionDiff)}`
     ).toBe(postPasteLoaded.ids.length)
-    const survivingPreIds = preLoaded.ids.filter((id) => new Set(postPasteLoaded.ids).has(id))
-    const missingCount = pasteProjectionDiff.missingPreIds.length
+    // Traversed baseline contains the staged source in the middle (00004-00007):
+    // the staged delete removes exactly those middle IDs, not an oldest-prefix
+    // eviction. Surviving baseline order is preserved before the pasted tail.
+    const survivingPreIds = pasteBaselineIds.filter((id) => new Set(postPasteLoaded.ids).has(id))
     expect(
-      pasteProjectionDiff.missingPreIds,
-      `[E2E] missing pre IDs must form only the contiguous oldest prefix ${JSON.stringify(pasteProjectionDiff)}`
-    ).toEqual(preLoaded.ids.slice(0, missingCount))
+      [...pasteProjectionDiff.missingPreIds].sort(),
+      `[E2E] missing pre IDs must be exactly the staged source ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual([...sourceIds].sort())
     expect(
       survivingPreIds,
-      `[E2E] surviving pre IDs must form the contiguous suffix ${JSON.stringify(pasteProjectionDiff)}`
-    ).toEqual(preLoaded.ids.slice(missingCount))
+      `[E2E] surviving pre IDs must be baseline minus source in order ${JSON.stringify(pasteProjectionDiff)}`
+    ).toEqual(pasteBaselineIds.filter((id) => !sourceSet.has(id)))
     expect(
       postPasteLoaded.ids.slice(0, survivingPreIds.length),
       `[E2E] surviving pre IDs must preserve order before pasted tail ${JSON.stringify(pasteProjectionDiff)}`
@@ -2088,7 +2130,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(
       postPasteLoaded.count,
       `[E2E] projection count must stay bounded by pre + inserted ${JSON.stringify(pasteProjectionDiff)}`
-    ).toBeLessThanOrEqual(preLoaded.count + pasteNewIds.length)
+    ).toBeLessThanOrEqual(pasteBaselineIds.length + pasteNewIds.length)
     expect(
       postPasteLoaded.count,
       `[E2E] projection must contain at least all new IDs ${JSON.stringify(pasteProjectionDiff)}`
@@ -2182,12 +2224,14 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(
       (postUndoLoaded.ids as string[]).length,
       `[E2E] undo projection must stay bounded ${JSON.stringify(undoProjectionDiff)}`
-    ).toBeLessThanOrEqual(preLoaded.count + sourceIds.length)
+    ).toBeLessThanOrEqual(pasteBaselineIds.length + sourceIds.length)
+    // Traversed baseline had the source loaded, so undo must restore it into
+    // the projection (loaded intersection from the authority delete).
     for (const id of sourceIds) {
       expect(
         postUndoLoaded.ids,
-        `[E2E] outside restored ${id} must stay absent from Redux (undo must not inject) ${JSON.stringify(undoProjectionDiff)}`
-      ).not.toContain(id)
+        `[E2E] traversed restored ${id} must return to Redux ${JSON.stringify(undoProjectionDiff)}`
+      ).toContain(id)
     }
     const redoTop: any = await page.evaluate(() => {
       const s = (window as any).store.getState()
@@ -2292,7 +2336,7 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     expect(
       postRedoLoaded.length,
       `[E2E] redo projection must stay bounded ${JSON.stringify(redoProjectionDiff)}`
-    ).toBeLessThanOrEqual(preLoaded.count + pasteNewIds.length)
+    ).toBeLessThanOrEqual(pasteBaselineIds.length + pasteNewIds.length)
     expect(
       postRedoLoaded.length,
       `[E2E] redo projection must contain at least all pasted IDs ${JSON.stringify(redoProjectionDiff)}`
@@ -2330,5 +2374,663 @@ test.describe('S6.2 R-05 / branch / insert — integrated UI', () => {
     )
     expect(redoBlocksProbe.ok, `SQLite redo block probe failed: ${JSON.stringify(redoBlocksProbe)}`).toBe(true)
     expect(((redoBlocksProbe as any).rows ?? []).map((r: any) => r.content)).toEqual(expectedContents)
+  })
+
+  test('same-topic cut-paste deletes source and restores via undo-redo (minimal regression)', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CLIPBOARD-CUT INTEGRATED UI: minimal one-turn topic (user + 2 assistants sharing the ask, fully loaded so mutable); real edit-mode toggle click, real outer-cover coordinate click selects the whole turn (no Redux staging, no force clicks); real Meta+x stages cut (deletion deferred); real cover click deselects; real Meta+v pastes at topic-tail inserts 3 copies then staged-deletes the source; real Meta+z restores the source and removes copies; real Meta+Shift+z re-deletes and re-inserts. In-test getRawTopic + post-exit SQLite prove source absence, clone persistence, and undo/redo stability. Sanitized diagnostics only (IDs/counts, no content/paths).'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const topicId = `s62-cutprobe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const name = `S62 CutProbe ${topicId}`
+    const askId = `${topicId}-user-00000`
+    const firstId = `${topicId}-assistant-a1`
+    const secondId = `${topicId}-assistant-a2`
+    const sourceIds = [askId, firstId, secondId]
+    const stamp = '2026-01-01T00:00:00.000Z'
+    const blockFor = (msgId: string, content: string) => ({
+      id: `${msgId}-block`,
+      messageId: msgId,
+      type: 'main_text',
+      content,
+      status: 'success',
+      createdAt: stamp,
+      updatedAt: stamp
+    })
+    const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = [
+      {
+        message: {
+          id: askId,
+          topicId,
+          role: 'user',
+          assistantId: liveAssistantId,
+          createdAt: stamp,
+          updatedAt: stamp,
+          status: 'success',
+          blocks: [`${askId}-block`],
+          sortOrder: 0
+        },
+        blocks: [blockFor(askId, 'cutprobe-question')]
+      },
+      {
+        message: {
+          id: firstId,
+          topicId,
+          role: 'assistant',
+          assistantId: liveAssistantId,
+          askId,
+          foldSelected: true,
+          model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' },
+          modelId: 'mock-model',
+          createdAt: stamp,
+          updatedAt: stamp,
+          status: 'success',
+          blocks: [`${firstId}-block`],
+          sortOrder: 1
+        },
+        blocks: [blockFor(firstId, 'cutprobe-first')]
+      },
+      {
+        message: {
+          id: secondId,
+          topicId,
+          role: 'assistant',
+          assistantId: liveAssistantId,
+          askId,
+          model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' },
+          modelId: 'mock-model',
+          createdAt: stamp,
+          updatedAt: stamp,
+          status: 'success',
+          blocks: [`${secondId}-block`],
+          sortOrder: 2
+        },
+        blocks: [blockFor(secondId, 'cutprobe-second')]
+      }
+    ]
+    const addOk = await page.evaluate(
+      ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+        try {
+          const store = (window as any).store
+          store.dispatch({
+            type: 'assistants/addTopic',
+            payload: {
+              assistantId,
+              topic: {
+                id: topicId,
+                assistantId,
+                name,
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z'
+              }
+            }
+          })
+          return { ok: true }
+        } catch (e) {
+          return { ok: false, err: e instanceof Error ? e.message : String(e) }
+        }
+      },
+      { topicId, assistantId: liveAssistantId, name }
+    )
+    expect(addOk.ok, `addTopic failed: ${(addOk as any).err}`).toBe(true)
+    const persist = await page.evaluate(
+      async ({ topicId, assistantId, name, entries }: any) => {
+        try {
+          const api = (window as any).api as any
+          const ensured = await api.chatDb.ensureTopic({ topicId, assistantId, name })
+          if (!ensured || ensured.ok !== true)
+            return { ok: false, err: `ensureTopic failed ${JSON.stringify(ensured)}` }
+          const pasted = await api.chatDb.pasteMessagesToTopic({ topicId, entries })
+          if (!pasted || pasted.ok !== true) return { ok: false, err: `paste failed ${JSON.stringify(pasted)}` }
+          return { ok: true }
+        } catch (e) {
+          return { ok: false, err: e instanceof Error ? e.message : String(e) }
+        }
+      },
+      { topicId, assistantId: liveAssistantId, name, entries }
+    )
+    expect(persist.ok, `persist failed: ${(persist as any).err}`).toBe(true)
+
+    const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
+    await topicItem.waitFor({ state: 'attached', timeout: 15000 })
+    await topicItem.scrollIntoViewIfNeeded()
+    await topicItem.waitFor({ state: 'visible', timeout: 15000 })
+    await topicItem.click()
+    await page.waitForFunction(
+      ({ topicId }: { topicId: string }) => {
+        const s = (window as any).store.getState()
+        const ids = s.messages?.messageIdsByTopic?.[topicId]
+        const loading = s.messages?.loadingByTopic?.[topicId]
+        return Array.isArray(ids) && ids.length === 3 && loading !== true
+      },
+      { topicId },
+      { timeout: 30000 }
+    )
+    await page.waitForFunction(() => document.querySelectorAll('#messages [data-message-id]').length >= 3, null, {
+      timeout: 30000
+    })
+
+    const preRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(preRaw.ok).toBe(true)
+    expect((preRaw.value?.messages ?? []).map((m: any) => m.id)).toEqual(sourceIds)
+
+    const diagPre: any = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const s = (window as any).store.getState()
+        return {
+          loaded: [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])],
+          mutableCount: (s.messages?.mutableMessageIdsByTopic?.[topicId] ?? []).length,
+          mutableRoute: s.messages?.mutableRouteByTopic?.[topicId] ?? null,
+          activeBranch: s.topicBranch?.activeBranchIdByTopic?.[topicId] ?? null
+        }
+      },
+      { topicId }
+    )
+    expect(
+      diagPre.loaded,
+      `[E2E] all 3 source rows must be loaded ${JSON.stringify({ mutableCount: diagPre.mutableCount, mutableRoute: diagPre.mutableRoute, activeBranch: diagPre.activeBranch })}`
+    ).toEqual(sourceIds)
+    expect(diagPre.mutableCount, `[E2E] loaded source must be fully mutable ${JSON.stringify(diagPre)}`).toBe(3)
+
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle, 'edit-mode toggle must be visible').toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, null, {
+      timeout: 15000
+    })
+
+    const turn = page.locator('#messages [data-testid="edit-turn"]').first()
+    await expect(turn, 'edit turn must be visible').toBeVisible({ timeout: 15000 })
+    const box = await turn.boundingBox()
+    expect(box, 'turn geometry must be measurable').not.toBeNull()
+    const cx = (box?.x ?? 0) + (box?.width ?? 0) / 2
+    const cy = (box?.y ?? 0) + (box?.height ?? 0) / 2
+    const hit: any = await page.evaluate(
+      ({ x, y }: { x: number; y: number }) => {
+        const el = document.elementFromPoint(x, y) as HTMLElement | null
+        const t = el?.closest('[data-testid="edit-turn"]') as HTMLElement | null
+        return {
+          onCover: !!el?.closest('[data-testid="edit-turn-cover"]'),
+          onTurn: !!t,
+          coverAsk: t?.getAttribute('data-turn-ask') ?? null
+        }
+      },
+      { x: cx, y: cy }
+    )
+    expect(hit.onCover, `[E2E] click point must land on outer cover ${JSON.stringify(hit)}`).toBe(true)
+    expect(hit.onTurn, `[E2E] click point must land on the turn ${JSON.stringify(hit)}`).toBe(true)
+    expect(hit.coverAsk, `[E2E] cover must belong to the seeded turn ${JSON.stringify(hit)}`).toBe(askId)
+    await page.mouse.click(cx, cy)
+    await page.waitForFunction(
+      ({ askId }: { askId: string }) =>
+        ((window as any).store.getState().editMode?.selectedGroupIds ?? []).includes(askId),
+      { askId },
+      { timeout: 15000 }
+    )
+
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+x')
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        const c = s.clipboard
+        return (
+          c?.mode === 'cut' &&
+          Array.isArray(c.items) &&
+          c.items.length === 1 &&
+          c.items[0]?.messages?.length === 3 &&
+          s.editMode?.isProcessing === false
+        )
+      },
+      null,
+      { timeout: 30000 }
+    )
+    const cutClip: any = await page.evaluate(() => {
+      const c = (window as any).store.getState().clipboard
+      return {
+        mode: c.mode,
+        sourceTopicId: c.sourceTopicId,
+        messageIds: c.items[0].messages.map((m: any) => m.id)
+      }
+    })
+    expect(cutClip.mode).toBe('cut')
+    expect(cutClip.sourceTopicId).toBe(topicId)
+    expect(cutClip.messageIds).toEqual(sourceIds)
+    const cutRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(cutRaw.ok).toBe(true)
+    expect((cutRaw.value?.messages ?? []).map((m: any) => m.id)).toEqual(sourceIds)
+
+    const box2 = await turn.boundingBox()
+    expect(box2, 'turn geometry must be re-measurable for deselect').not.toBeNull()
+    const dx = (box2?.x ?? 0) + (box2?.width ?? 0) / 2
+    const dy = (box2?.y ?? 0) + (box2?.height ?? 0) / 2
+    const hit2: any = await page.evaluate(
+      ({ x, y }: { x: number; y: number }) => {
+        const el = document.elementFromPoint(x, y) as HTMLElement | null
+        return {
+          onCover: !!el?.closest('[data-testid="edit-turn-cover"]'),
+          onTurn: !!el?.closest('[data-testid="edit-turn"]')
+        }
+      },
+      { x: dx, y: dy }
+    )
+    expect(hit2.onCover, `[E2E] deselect point must land on outer cover ${JSON.stringify(hit2)}`).toBe(true)
+    await page.mouse.click(dx, dy)
+    await page.waitForFunction(
+      () => ((window as any).store.getState().editMode?.selectedGroupIds ?? []).length === 0,
+      null,
+      { timeout: 15000 }
+    )
+
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+v')
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        return s.clipboard?.mode === null && s.clipboard?.items?.length === 0 && s.editMode?.isProcessing === false
+      },
+      null,
+      { timeout: 30000 }
+    )
+    const postRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(postRaw.ok).toBe(true)
+    const postIds: string[] = (postRaw.value?.messages ?? []).map((m: any) => m.id)
+    const diagPost: any = await page.evaluate(
+      ({ topicId }: { topicId: string }) => {
+        const s = (window as any).store.getState()
+        const stack: any[] = s.undoStack?.undoStack ?? []
+        const top = stack[stack.length - 1] ?? null
+        return {
+          loaded: [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])],
+          undoType: top?.type ?? null,
+          undoSourceTopic: top?.sourceTopicId ?? null,
+          undoSourceRoots: Array.isArray(top?.sourceRootIds) ? [...top.sourceRootIds] : null,
+          undoInserted: Array.isArray(top?.insertedMessageIds) ? [...top.insertedMessageIds] : null,
+          undoSourceBranch: top?.sourceBranchId ?? null,
+          undoTargetBranch: top?.targetBranchId ?? null
+        }
+      },
+      { topicId }
+    )
+    expect(postIds.length, `[E2E] authority count must stay 3 after cut-paste ${JSON.stringify(diagPost)}`).toBe(3)
+    for (const id of sourceIds) {
+      expect(
+        postIds,
+        `[E2E] source ${id} must be semantic-deleted after loaded same-topic cut-paste ${JSON.stringify(diagPost)}`
+      ).not.toContain(id)
+    }
+    const newIds = postIds.filter((id) => !sourceIds.includes(id))
+    expect(newIds.length, `[E2E] exactly 3 pasted copies expected ${JSON.stringify(diagPost)}`).toBe(3)
+    const postById = new Map((postRaw.value?.messages ?? []).map((m: any) => [m.id as string, m]))
+    expect((postById.get(newIds[0]) as any)?.role).toBe('user')
+    for (const id of newIds.slice(1)) {
+      expect((postById.get(id) as any)?.role).toBe('assistant')
+      expect((postById.get(id) as any)?.askId).toBe(newIds[0])
+    }
+    for (const id of newIds) {
+      expect((((postById.get(id) as any)?.blocks ?? []) as string[]).length).toBeGreaterThan(0)
+    }
+    expect(diagPost.undoType, `[E2E] cut-paste must push a cut_paste undo ${JSON.stringify(diagPost)}`).toBe(
+      'cut_paste'
+    )
+    expect(diagPost.undoSourceTopic, `[E2E] undo must target the source topic ${JSON.stringify(diagPost)}`).toBe(
+      topicId
+    )
+    expect(
+      diagPost.undoSourceRoots,
+      `[E2E] undo must carry the deleted source roots ${JSON.stringify(diagPost)}`
+    ).toEqual(sourceIds)
+    expect(diagPost.undoInserted, `[E2E] undo must carry the pasted copies ${JSON.stringify(diagPost)}`).toEqual(newIds)
+    expect(diagPost.undoSourceBranch, `[E2E] undo must carry the staged source route ${JSON.stringify(diagPost)}`).toBe(
+      null
+    )
+    expect(diagPost.undoTargetBranch, `[E2E] undo must carry the staged target route ${JSON.stringify(diagPost)}`).toBe(
+      null
+    )
+    expect(diagPost.loaded, `[E2E] projection must be exactly the pasted copies ${JSON.stringify(diagPost)}`).toEqual(
+      newIds
+    )
+
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+z')
+    await page.waitForFunction(
+      async ({ topicId, expected }: { topicId: string; expected: string[] }) => {
+        const api: any = (window as any).api?.chatDb
+        if (!api || typeof api.getRawTopic !== 'function') return false
+        try {
+          const raw = await api.getRawTopic({ topicId })
+          if (raw?.ok !== true) return false
+          const ids: string[] = (raw.value?.messages ?? []).map((m: any) => m.id)
+          return ids.length === expected.length && expected.every((id) => ids.includes(id))
+        } catch {
+          return false
+        }
+      },
+      { topicId, expected: sourceIds },
+      { timeout: 30000 }
+    )
+    const undoRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(undoRaw.ok).toBe(true)
+    expect((undoRaw.value?.messages ?? []).map((m: any) => m.id).sort()).toEqual([...sourceIds].sort())
+
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+Shift+z')
+    await page.waitForFunction(
+      async ({ topicId, expectedLen }: { topicId: string; expectedLen: number }) => {
+        const api: any = (window as any).api?.chatDb
+        if (!api || typeof api.getRawTopic !== 'function') return false
+        try {
+          const raw = await api.getRawTopic({ topicId })
+          return raw?.ok === true && (raw.value?.messages ?? []).length === expectedLen
+        } catch {
+          return false
+        }
+      },
+      { topicId, expectedLen: 3 },
+      { timeout: 30000 }
+    )
+    const redoRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => {
+        const api: any = (window as any).api.chatDb
+        return await api.getRawTopic({ topicId })
+      },
+      { topicId }
+    )
+    expect(redoRaw.ok).toBe(true)
+    const redoIds: string[] = (redoRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(redoIds.length).toBe(3)
+    for (const id of sourceIds) {
+      expect(redoIds, '[E2E] redo must re-delete the source').not.toContain(id)
+    }
+
+    await electronApp.close()
+    const dbPath = getChatDbPath()
+    expect(dbPath).not.toBeNull()
+    await expect.poll(() => fs.existsSync(dbPath!), { timeout: 30000, intervals: [250, 500] }).toBe(true)
+    const esc = (v: string) => v.replace(/'/g, "''")
+    const sqlOrder = `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' ORDER BY sort_order ASC, id ASC`
+    await pollDbUntil(dbPath!, sqlOrder, (rows) => rows.length === 3, 30000)
+    const probe = queryChatDbViaElectron(dbPath!, sqlOrder)
+    expect(probe.ok, `SQLite order probe failed: ${JSON.stringify(probe)}`).toBe(true)
+    expect(((probe as any).rows ?? []).map((r: any) => r.id)).toEqual(redoIds)
+    const inSrc = sourceIds.map((v) => `'${esc(v)}'`).join(',')
+    const srcGoneProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT id FROM messages WHERE topic_id = '${esc(topicId)}' AND id IN (${inSrc})`
+    )
+    expect(srcGoneProbe.ok, `SQLite source-absence probe failed: ${JSON.stringify(srcGoneProbe)}`).toBe(true)
+    expect(((srcGoneProbe as any).rows ?? []).length).toBe(0)
+    const inNew = newIds.map((v) => `'${esc(v)}'`).join(',')
+    const newBlocksProbe = queryChatDbViaElectron(
+      dbPath!,
+      `SELECT mb.message_id AS mid FROM message_blocks mb JOIN messages m ON m.id = mb.message_id WHERE m.topic_id = '${esc(topicId)}' AND mb.message_id IN (${inNew})`
+    )
+    expect(newBlocksProbe.ok, `SQLite pasted block probe failed: ${JSON.stringify(newBlocksProbe)}`).toBe(true)
+    expect(((newBlocksProbe as any).rows ?? []).length).toBe(3)
+  })
+
+  test('cross-topic cut-paste moves source authority to target (small regression)', async ({
+    mainWindow,
+    electronApp
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CLIPBOARD-CUT CROSS-TOPIC: minimal one-turn source topic cut via real cover UI, pasted at target topic-tail via real UI; source authority semantic-deleted, target gains 3 clones with intact ask linkage/blocks, cut_paste undo carries staged routes. Sanitized IDs only.'
+    })
+    const page = mainWindow
+    const liveAssistantId = await prepareDisplayCountAndAssistant(page)
+    const srcTopicId = `s62-cutx-src-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const dstTopicId = `s62-cutx-dst-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const mkEntries = (topicId: string, tag: string) => {
+      const ask = `${topicId}-user-00000`
+      const a1 = `${topicId}-assistant-a1`
+      const a2 = `${topicId}-assistant-a2`
+      const stamp = '2026-01-01T00:00:00.000Z'
+      const blockFor = (msgId: string, content: string) => ({
+        id: `${msgId}-block`,
+        messageId: msgId,
+        type: 'main_text',
+        content,
+        status: 'success',
+        createdAt: stamp,
+        updatedAt: stamp
+      })
+      return {
+        ask,
+        ids: [ask, a1, a2] as string[],
+        entries: [
+          {
+            message: {
+              id: ask,
+              topicId,
+              role: 'user',
+              assistantId: liveAssistantId,
+              createdAt: stamp,
+              updatedAt: stamp,
+              status: 'success',
+              blocks: [`${ask}-block`],
+              sortOrder: 0
+            },
+            blocks: [blockFor(ask, `${tag}-q`)]
+          },
+          {
+            message: {
+              id: a1,
+              topicId,
+              role: 'assistant',
+              assistantId: liveAssistantId,
+              askId: ask,
+              foldSelected: true,
+              model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' },
+              modelId: 'mock-model',
+              createdAt: stamp,
+              updatedAt: stamp,
+              status: 'success',
+              blocks: [`${a1}-block`],
+              sortOrder: 1
+            },
+            blocks: [blockFor(a1, `${tag}-a1`)]
+          },
+          {
+            message: {
+              id: a2,
+              topicId,
+              role: 'assistant',
+              assistantId: liveAssistantId,
+              askId: ask,
+              model: { id: 'mock-model', provider: 'mock-openai', name: 'Mock Model' },
+              modelId: 'mock-model',
+              createdAt: stamp,
+              updatedAt: stamp,
+              status: 'success',
+              blocks: [`${a2}-block`],
+              sortOrder: 2
+            },
+            blocks: [blockFor(a2, `${tag}-a2`)]
+          }
+        ] as Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }>
+      }
+    }
+    const src = mkEntries(srcTopicId, 'cutx-src')
+    const dst = mkEntries(dstTopicId, 'cutx-dst')
+    for (const [tid, name, entries] of [
+      [srcTopicId, `S62 CutX Src ${srcTopicId}`, src.entries],
+      [dstTopicId, `S62 CutX Dst ${dstTopicId}`, dst.entries]
+    ] as Array<[string, string, typeof src.entries]>) {
+      const addOk: any = await page.evaluate(
+        ({ topicId, assistantId, name }: { topicId: string; assistantId: string; name: string }) => {
+          try {
+            const store = (window as any).store
+            store.dispatch({
+              type: 'assistants/addTopic',
+              payload: {
+                assistantId,
+                topic: {
+                  id: topicId,
+                  assistantId,
+                  name,
+                  createdAt: '2026-01-01T00:00:00.000Z',
+                  updatedAt: '2026-01-01T00:00:00.000Z'
+                }
+              }
+            })
+            return { ok: true }
+          } catch (e) {
+            return { ok: false, err: e instanceof Error ? e.message : String(e) }
+          }
+        },
+        { topicId: tid, assistantId: liveAssistantId, name }
+      )
+      expect(addOk.ok).toBe(true)
+      const persist: any = await page.evaluate(
+        async ({ topicId, assistantId, name, entries }: any) => {
+          try {
+            const api = (window as any).api as any
+            const ensured = await api.chatDb.ensureTopic({ topicId, assistantId, name })
+            if (!ensured || ensured.ok !== true) return { ok: false, err: `ensureTopic ${JSON.stringify(ensured)}` }
+            const pasted = await api.chatDb.pasteMessagesToTopic({ topicId, entries })
+            if (!pasted || pasted.ok !== true) return { ok: false, err: `paste ${JSON.stringify(pasted)}` }
+            return { ok: true }
+          } catch (e) {
+            return { ok: false, err: e instanceof Error ? e.message : String(e) }
+          }
+        },
+        { topicId: tid, assistantId: liveAssistantId, name, entries }
+      )
+      expect(persist.ok).toBe(true)
+    }
+    const clickTopic = async (tid: string) => {
+      const item = page.locator(`[data-testid="topic-item"][data-topic-id="${tid}"]`)
+      await item.waitFor({ state: 'attached', timeout: 15000 })
+      await item.scrollIntoViewIfNeeded()
+      await item.waitFor({ state: 'visible', timeout: 15000 })
+      await item.click()
+      await page.waitForFunction(
+        ({ topicId }: { topicId: string }) => {
+          const s = (window as any).store.getState()
+          const ids = s.messages?.messageIdsByTopic?.[topicId]
+          return Array.isArray(ids) && ids.length === 3
+        },
+        { topicId: tid },
+        { timeout: 30000 }
+      )
+    }
+    await clickTopic(srcTopicId)
+    const toggle = page.locator('[data-testid="edit-mode-toggle"]').first()
+    await expect(toggle).toBeVisible({ timeout: 15000 })
+    await toggle.click()
+    await page.waitForFunction(() => (window as any).store.getState().editMode?.enabled === true, null, {
+      timeout: 15000
+    })
+    const turn = page.locator('#messages [data-testid="edit-turn"]').first()
+    await expect(turn).toBeVisible({ timeout: 15000 })
+    const box = await turn.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click((box?.x ?? 0) + (box?.width ?? 0) / 2, (box?.y ?? 0) + (box?.height ?? 0) / 2)
+    await page.waitForFunction(
+      ({ ask }: { ask: string }) => ((window as any).store.getState().editMode?.selectedGroupIds ?? []).includes(ask),
+      { ask: src.ask },
+      { timeout: 15000 }
+    )
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+x')
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        return s.clipboard?.mode === 'cut' && s.clipboard?.items?.[0]?.messages?.length === 3
+      },
+      null,
+      { timeout: 30000 }
+    )
+    await page.evaluate(() => {
+      ;(window as any).store.dispatch({ type: 'editMode/clearSelection' })
+    })
+    await clickTopic(dstTopicId)
+    await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && typeof el.blur === 'function') el.blur()
+    })
+    await page.keyboard.press('Meta+v')
+    await page.waitForFunction(
+      () => {
+        const s = (window as any).store.getState()
+        return s.clipboard?.mode === null && s.editMode?.isProcessing === false
+      },
+      null,
+      { timeout: 30000 }
+    )
+    const srcRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => (window as any).api.chatDb.getRawTopic({ topicId }),
+      { topicId: srcTopicId }
+    )
+    expect(srcRaw.ok).toBe(true)
+    expect((srcRaw.value?.messages ?? []).length).toBe(0)
+    const dstRaw: any = await page.evaluate(
+      async ({ topicId }: { topicId: string }) => (window as any).api.chatDb.getRawTopic({ topicId }),
+      { topicId: dstTopicId }
+    )
+    expect(dstRaw.ok).toBe(true)
+    const dstIds: string[] = (dstRaw.value?.messages ?? []).map((m: any) => m.id)
+    expect(dstIds.length).toBe(6)
+    for (const id of src.ids) {
+      expect(dstIds).not.toContain(id)
+    }
+    const undoTop: any = await page.evaluate(() => {
+      const s = (window as any).store.getState()
+      const stack: any[] = s.undoStack?.undoStack ?? []
+      return stack[stack.length - 1] ?? null
+    })
+    expect(undoTop?.type).toBe('cut_paste')
+    expect(undoTop?.sourceTopicId).toBe(srcTopicId)
+    expect(undoTop?.sourceRootIds).toEqual(src.ids)
+    expect(undoTop?.sourceBranchId).toBe(null)
+    expect(undoTop?.targetBranchId).toBe(null)
+    await electronApp.close()
   })
 })

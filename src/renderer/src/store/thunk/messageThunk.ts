@@ -1157,6 +1157,110 @@ export function buildDeleteDependentsUndoParts(
   return { groupAnchors, segmentSnapshots, fileReferenceDeltas }
 }
 
+/**
+ * Typed post-commit convergence failure for the shared semantic delete core.
+ *
+ * Main `deleteMessagesWithDependents` COMMITTED (source rows removed) but a
+ * renderer-side post-commit step (projection dispatch / anchor transfer /
+ * awaited cleanup) threw. Carries the authoritative response plus the
+ * pre-delete-loaded undo parts so callers retain usable undo metadata without
+ * re-deriving it from projection. `committed === true` distinguishes this
+ * from a pre-commit rejection (Main never committed, safe to roll back fresh
+ * copies). No recovery ownership: callers decide, never this error.
+ */
+export class DeletePostCommitConvergenceError extends Error {
+  readonly committed = true as const
+  readonly response: DeleteMessagesWithDependentsResponse
+  readonly undoParts: DeleteDependentsUndoParts
+
+  constructor(
+    message: string,
+    response: DeleteMessagesWithDependentsResponse,
+    undoParts: DeleteDependentsUndoParts,
+    options?: ErrorOptions
+  ) {
+    super(message, options)
+    this.name = 'DeletePostCommitConvergenceError'
+    this.response = response
+    this.undoParts = undoParts
+  }
+}
+
+/** Narrow guard for the committed marker (works across mocked module boundaries). */
+export function isDeletePostCommitConvergenceError(error: unknown): error is DeletePostCommitConvergenceError {
+  if (error instanceof DeletePostCommitConvergenceError) return true
+  if (typeof error !== 'object' || error === null) return false
+  const candidate = error as { committed?: unknown; response?: unknown; undoParts?: unknown }
+  return (
+    candidate.committed === true && typeof candidate.response === 'object' && typeof candidate.undoParts === 'object'
+  )
+}
+
+async function executeDeleteCore(
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  topicId: string,
+  rootIds: string[],
+  addressedRoute: string | null
+): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> {
+  // Capture the pre-delete loaded projection BEFORE any persistence. The
+  // intersection below bounds the Redux undo projection; Main always keeps
+  // the full authority restore groups.
+  const preDeleteLoadedIds = new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
+  // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
+  // A throw here is a PRE-COMMIT failure: Main never committed, no typed marker.
+  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds, addressedRoute)
+
+  // Undo parts are derived from the authoritative response plus the pre-delete
+  // loaded IDs BEFORE any convergence step, so a later convergence throw never
+  // loses the payload.
+  const undoParts = buildDeleteDependentsUndoParts(response, preDeleteLoadedIds)
+
+  // Post-commit convergence: every throw below means Main COMMITTED. Wrap into
+  // the typed marker carrying response + undoParts; callers must NOT treat it
+  // as a pre-commit failure (no fresh-copy rollback).
+  try {
+    // Cancel throttled block updates for the authoritative deleted blocks.
+    response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
+
+    // Consume file cleanup exactly once after commit.
+    await consumeFileCleanupResult(response)
+
+    // Redux mutations AFTER successful SQLite commit — reducers naturally
+    // affect only the loaded intersection, never injecting window-outside entities.
+    dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
+    if (response.deletedBlockIds.length > 0) {
+      dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
+    }
+    dispatch({
+      ...replaceSegmentsForTopic({
+        topicId,
+        segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
+      }),
+      meta: { isDeletePairedFollowUp: true }
+    } as any)
+
+    // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
+    transferAnchorsWithAuthorityGroupKeys(
+      dispatch,
+      getState,
+      topicId,
+      response.previousUserMessageIds,
+      response.remainingUserMessageIds,
+      addressedRoute
+    )
+  } catch (convergenceError) {
+    throw new DeletePostCommitConvergenceError(
+      '[executeDeleteCore] Renderer convergence failed after Main commit; source deletion committed',
+      response,
+      undoParts,
+      { cause: convergenceError }
+    )
+  }
+
+  return { response, undoParts }
+}
+
 export const executeDeleteMessagesWithDependents = async (
   dispatch: AppDispatch,
   getState: () => RootState,
@@ -1168,44 +1272,54 @@ export const executeDeleteMessagesWithDependents = async (
   // issue a mutation (existing toast path on throw).
   const preState = getState()
   for (const rootId of rootIds) requireMutableForActiveRoute(preState, topicId, rootId)
-  // Capture the pre-delete loaded projection BEFORE any persistence. The
-  // intersection below bounds the Redux undo projection; Main always keeps
-  // the full authority restore groups.
-  const preDeleteLoadedIds = new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
-  // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
-  const response = await dbService.deleteMessagesWithDependents(topicId, rootIds, activeRouteOf(getState, topicId))
+  return executeDeleteCore(dispatch, getState, topicId, rootIds, activeRouteOf(getState, topicId))
+}
 
-  // Cancel throttled block updates for the authoritative deleted blocks.
-  response.deletedBlockIds.forEach((id) => cancelThrottledBlockUpdate(id))
+/**
+ * Staged-cut authority execution for cut-paste source deletion only.
+ *
+ * A cut stages its authority at cut time (after the edit-selection precheck):
+ * the addressed source route plus the complete authority member IDs. Paste
+ * reuses that staged authority without rerequiring projection capability,
+ * because a straddling source may include complete outside-loaded members.
+ * Batch insertion now publishes its own Main capability atomically (no
+ * projection clear), so this helper covers only the source side. Main
+ * remains the final owner guard (every root owner == addressed route, user
+ * dependents all-owned, atomic).
+ *
+ * Fail-closed before any Main call when the staged route is missing (legacy
+ * provenance) or no longer matches the current source route. Ordinary delete
+ * paths stay per-root guarded; this helper is cut-specific and takes no
+ * generic skip flag.
+ */
+export interface StagedCutAuthority {
+  sourceTopicId: string
+  sourceBranchId: string | null
+  rootIds: string[]
+}
 
-  // Consume file cleanup exactly once after commit.
-  await consumeFileCleanupResult(response)
-
-  // Redux mutations AFTER successful SQLite commit — reducers naturally
-  // affect only the loaded intersection, never injecting window-outside entities.
-  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
-  if (response.deletedBlockIds.length > 0) {
-    dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
+export const executeStagedCutSourceDelete = async (
+  dispatch: AppDispatch,
+  getState: () => RootState,
+  authority: StagedCutAuthority
+): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> => {
+  const { sourceTopicId, sourceBranchId, rootIds } = authority
+  if (typeof sourceBranchId === 'undefined') {
+    throw new Error(`[stagedCutDelete] Missing staged source route for topic ${sourceTopicId}`)
   }
-  dispatch({
-    ...replaceSegmentsForTopic({
-      topicId,
-      segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
-    }),
-    meta: { isDeletePairedFollowUp: true }
-  } as any)
-
-  // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
-  transferAnchorsWithAuthorityGroupKeys(
-    dispatch,
-    getState,
-    topicId,
-    response.previousUserMessageIds,
-    response.remainingUserMessageIds,
-    activeRouteOf(getState, topicId)
-  )
-
-  return { response, undoParts: buildDeleteDependentsUndoParts(response, preDeleteLoadedIds) }
+  if (!Array.isArray(rootIds) || rootIds.length === 0) {
+    throw new Error(`[stagedCutDelete] Missing staged source roots for topic ${sourceTopicId}`)
+  }
+  let currentRoute: string | null = null
+  try {
+    currentRoute = activeRouteOf(getState, sourceTopicId)
+  } catch {
+    throw new Error(`[stagedCutDelete] Unknown source route for topic ${sourceTopicId}`)
+  }
+  if (currentRoute !== sourceBranchId) {
+    throw new Error(`[stagedCutDelete] Source route changed for topic ${sourceTopicId}`)
+  }
+  return executeDeleteCore(dispatch, getState, sourceTopicId, rootIds, sourceBranchId)
 }
 
 export const deleteMessagesWithDependentsThunk =

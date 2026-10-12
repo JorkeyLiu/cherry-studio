@@ -27,10 +27,16 @@ export const syncSegmentsAfterMessageDeletion = async (
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
-  messageIds: string[]
+  messageIds: string[],
+  addressedRoute?: string | null
 ): Promise<void> => {
   const state = getState()
   const segmentIds = state.topicSegments.segmentsByTopic[topicId] || []
+  // Pinned addressed route when the caller supplies one (cut-paste rollback /
+  // cut_paste undo target cleanup); omitted retains the existing live-route
+  // behavior for ordinary callers. Never re-reads live selection when pinned,
+  // so a route switch mid-cleanup cannot retarget the membership write.
+  const route = typeof addressedRoute === 'undefined' ? routeOfTopic(topicId, getState) : addressedRoute
   for (const segId of segmentIds) {
     const segment = state.topicSegments.segments.entities[segId]
     if (!segment) continue
@@ -40,7 +46,7 @@ export const syncSegmentsAfterMessageDeletion = async (
       dispatch(removeSegment(segId))
     } else if (newMessageIds.length !== segment.messageIds.length) {
       // DB-first enriched: converge from the Main wire authority fields.
-      const wire = await dbService.replaceSegmentMembership(segId, newMessageIds, routeOfTopic(topicId, getState))
+      const wire = await dbService.replaceSegmentMembership(segId, newMessageIds, route)
       if (wire === null) {
         dispatch(removeSegment(segId))
       } else {

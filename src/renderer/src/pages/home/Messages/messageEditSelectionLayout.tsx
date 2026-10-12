@@ -25,15 +25,18 @@ export const SelectionBlock = styled.div`
  *   toggling edit mode or moving the pointer never reparents/remounts
  *   children: same type + same stable key keep node identity.
  * - Directly owns the edit-mode hover outline (one continuous neutral
- *   ring via CSS `:hover`, no geometry measurement, no overlay, no timers,
- *   no parent hover state) and the edit-selection click capture (toggles
- *   the turn once; nested ordinary actions are intercepted at this
- *   boundary).
+ *   ring via CSS `:hover`, no geometry measurement, no timers, no parent
+ *   hover state), the edit-selection click capture (toggles the turn once),
+ *   and the message-toolbar immediate hide (same edit-class commit, no
+ *   transition, height reserved). Nested ordinary actions run unchanged
+ *   behind the outer shield — no per-child edit branches.
  * - `column-reverse` mirrors the scroll container and SelectionBlock:
  *   render order is newest→oldest, so the reversed flex keeps the older
  *   user group visually above the newer assistant group(s).
  * - Adds no spacing: no margin/padding/gap, only the shared 10px radius
  *   so the hover ring tracks the same corners as the selected outline.
+ *   The edit cover is absolutely positioned (out of flow), so edit-mode
+ *   geometry matches normal mode exactly.
  * - Never contains a boundary node: dividers are siblings of turns, so
  *   turn click capture cannot swallow divider controls.
  */
@@ -42,14 +45,60 @@ export const EditTurnContainer = styled.div`
   flex-direction: column-reverse;
   border-radius: 10px;
   &.edit-turn-interactive {
+    position: relative;
     cursor: pointer;
   }
   &.edit-turn-interactive:hover {
     box-shadow: 0 0 0 1px var(--color-border);
   }
   &.edit-turn-selected {
+    position: relative;
     cursor: pointer;
   }
+  // Single owner for edit-mode message-toolbar hiding: the same commit
+  // that adds the edit class hides the footer immediately (no
+  // opacity/visibility transition, noninteractive) while reserving its
+  // occupied height (visibility, not display:none). The multi-answer
+  // group bar (.group-menu-bar) is intentionally unaffected.
+  &.edit-turn-interactive,
+  &.edit-turn-selected {
+    .MessageFooter,
+    .MessageFooter .menubar,
+    .MessageFooter .message-action-button,
+    .MessageFooter .message-footer-metadata {
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+      transition: none !important;
+    }
+  }
+`
+
+/**
+ * Stable content wrapper present in both modes. `display: contents`
+ * contributes no box, so edit-mode geometry matches normal mode exactly.
+ * Native `inert` in edit mode blocks focus/keyboard/interactions across
+ * all descendants; the sibling cover receives pointer/hover/drag/
+ * right-click instead of child controls.
+ */
+export const EditTurnContent = styled.div`
+  display: contents;
+`
+
+/**
+ * Edit-only absolute cover: receives pointer/hover/drag/right-click
+ * rather than child controls (preventing pass-through, not only click).
+ * Plain non-focusable descriptive layer (aria-hidden, no tabIndex/role,
+ * no strings); clicks bubble to the turn capture for whole-turn selection
+ * with existing ctrl/meta/shift semantics. Wheel/touch bubble to the
+ * viewport ancestors; the batch context menu is preserved via the turn
+ * context-menu handler (no blanket suppression).
+ */
+export const EditTurnCover = styled.div`
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: transparent;
 `
 
 export interface EditTurnProps {
@@ -63,12 +112,16 @@ export interface EditTurnProps {
 }
 
 /**
- * The turn interaction owner. Capture-phase interception runs once per
- * gesture here, so nested model selector / reorder / retry / menubar
- * actions never execute their ordinary behavior in edit mode and no
- * duplicate toggles occur (visual MessageGroups own no click handler).
- * Boundaries are siblings of turns, so divider controls (branch switcher,
- * context UI) never pass through this capture.
+ * The turn interaction owner. The inner content keeps its original
+ * container/style/children in all modes (no per-child edit branches);
+ * in edit mode it is natively inert while the sibling cover receives
+ * pointer/hover/drag/right-click. Capture-phase click interception runs
+ * once per gesture here for whole-turn selection with existing
+ * ctrl/meta/shift semantics. Right-click auto-selects a non-selected turn
+ * (replace) and preserves an existing selection, without suppressing the
+ * ancestor batch context menu. Boundaries are siblings of turns, so
+ * divider controls (branch switcher, context UI) never pass through this
+ * capture.
  */
 export const EditTurn = memo(
   ({ turnAskId, isEditMode = false, isSelected = false, onTurnClick, children }: EditTurnProps) => {
@@ -83,6 +136,17 @@ export const EditTurn = memo(
       [isEditMode, onTurnClick, turnAskId]
     )
 
+    const handleContextMenu = useCallback(() => {
+      if (!isEditMode || !onTurnClick) return
+      if (!turnAskId) return
+      // No preventDefault/stopPropagation: the ancestor batch menu must
+      // still open; wheel/touch and viewport pointer-intent listeners keep
+      // their bubbled events.
+      if (!isSelected) {
+        onTurnClick(turnAskId, false, false)
+      }
+    }, [isEditMode, isSelected, onTurnClick, turnAskId])
+
     const className = 'edit-turn' + (isEditMode ? (isSelected ? ' edit-turn-selected' : ' edit-turn-interactive') : '')
 
     return (
@@ -90,8 +154,10 @@ export const EditTurn = memo(
         data-testid="edit-turn"
         data-turn-ask={turnAskId || undefined}
         className={className}
-        onClickCapture={isEditMode ? handleClickCapture : undefined}>
-        {children}
+        onClickCapture={isEditMode ? handleClickCapture : undefined}
+        onContextMenu={isEditMode ? handleContextMenu : undefined}>
+        <EditTurnContent inert={isEditMode ? true : undefined}>{children}</EditTurnContent>
+        {isEditMode && <EditTurnCover data-testid="edit-turn-cover" aria-hidden="true" />}
       </EditTurnContainer>
     )
   }

@@ -15,6 +15,10 @@ const { mocks } = vi.hoisted(() => ({
       type: 'newMessages/messagesReceived',
       payload: p
     })),
+    applyInsertedMessageGroups: vi.fn((p: unknown) => ({
+      type: 'newMessages/applyInsertedMessageGroups',
+      payload: p
+    })),
     removeMessages: vi.fn((p: unknown) => ({ type: 'newMessages/removeMessages', payload: p })),
     upsertManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/upsertManyBlocks', payload: p })),
     removeManyBlocks: vi.fn((p: unknown) => ({ type: 'messageBlocks/removeManyBlocks', payload: p })),
@@ -56,7 +60,11 @@ vi.mock('@renderer/store/clipboard', () => ({
 }))
 
 vi.mock('@renderer/store/newMessage', () => ({
-  newMessagesActions: { messagesReceived: mocks.messagesReceived, removeMessages: mocks.removeMessages },
+  newMessagesActions: {
+    messagesReceived: mocks.messagesReceived,
+    applyInsertedMessageGroups: mocks.applyInsertedMessageGroups,
+    removeMessages: mocks.removeMessages
+  },
   selectLoadedMessagesForTopic: mocks.selectLoadedMessagesForTopic
 }))
 
@@ -80,7 +88,59 @@ vi.mock('@renderer/store/thunk/topicSegmentThunk', () => ({
   syncSegmentsAfterMessageDeletion: mocks.syncSegmentsAfterMessageDeletion
 }))
 
-const emptyCleanup = { affectedFileIds: [], remainingReferenceCounts: {} as Record<string, number> }
+let currentState: any = null
+
+/** Build a Main-style batch ack echoing the request groups (flat ids + per-group stable neighbors). */
+function ackFromRequest(
+  topicId: string,
+  groups: Array<{ entries: Array<{ message: { id: string } }>; intent?: { kind: string; messageId?: string } }>,
+  branchId: string | null
+) {
+  const flatIds = groups.flatMap((g) => g.entries.map((e) => e.message.id))
+  const loadedIds = new Set<string>(currentState?.messages?.messageIdsByTopic?.[topicId] ?? [])
+  return {
+    affectedFileIds: [],
+    remainingReferenceCounts: {} as Record<string, number>,
+    topicId,
+    branchId,
+    insertedMessages: flatIds.map((id) => ({ id, topicId })),
+    insertedBlocks: [],
+    insertedMessageIds: flatIds,
+    mutableMessageIds: [...flatIds],
+    groups: groups.map((g) => {
+      const intent = g.intent as { kind: string; messageId?: string } | undefined
+      if (!intent || intent.kind === 'topic-tail') {
+        return { insertedMessageIds: g.entries.map((e) => e.message.id), beforeMessageId: null, nextMessageId: null }
+      }
+      const anchor = intent.messageId ?? null
+      if (anchor && loadedIds.has(anchor)) {
+        if (intent.kind === 'before-message') {
+          return {
+            insertedMessageIds: g.entries.map((e) => e.message.id),
+            beforeMessageId: null,
+            nextMessageId: anchor
+          }
+        }
+        return { insertedMessageIds: g.entries.map((e) => e.message.id), beforeMessageId: anchor, nextMessageId: null }
+      }
+      return {
+        insertedMessageIds: g.entries.map((e) => e.message.id),
+        beforeMessageId: anchor,
+        nextMessageId: 'ghost-nonresident'
+      }
+    })
+  }
+}
+
+function mockInsertAck() {
+  mocks.insertMessageGroups.mockImplementation(
+    async (
+      topicId: string,
+      groups: Array<{ entries: Array<{ message: { id: string } }>; intent?: { kind: string; messageId?: string } }>,
+      branchId?: string | null
+    ) => ackFromRequest(topicId, groups, branchId ?? null)
+  )
+}
 
 function makeMsg(id: string): Message {
   return {
@@ -109,6 +169,7 @@ function baseState(items: any[], segmentSnapshots: any[]) {
 }
 
 function mockTargetMessages(state: any) {
+  currentState = state
   mocks.selectLoadedMessagesForTopic.mockImplementation((_s: unknown, topicId: string) => {
     const ids = state.messages.messageIdsByTopic[topicId] ?? []
     return ids.map((id: string) => state.messages.entities[id]).filter(Boolean)
@@ -134,7 +195,8 @@ function wire(id: string, topicId: string, sortOrder: number, messageIds: string
 describe('ClipboardService segment batch convergence', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.insertMessageGroups.mockResolvedValue(emptyCleanup)
+    currentState = null
+    mockInsertAck()
   })
 
   it('multi-segment rebuild converges with exactly one list+replace, no per-item stale adds', async () => {

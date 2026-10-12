@@ -1,12 +1,17 @@
 import { loggerService } from '@logger'
 import { dbService } from '@renderer/services/db'
 import { consumeFileCleanupResult } from '@renderer/services/db/topicTrashLifecycle'
+import { publishInsertMessageGroupsAck } from '@renderer/services/insertGroupsAck'
 import type { AppDispatch, RootState } from '@renderer/store'
 import { withClosureTopics } from '@renderer/store/closureOwnership'
-import { removeManyBlocks, upsertManyBlocks } from '@renderer/store/messageBlock'
-import { newMessagesActions, selectLoadedMessagesForTopic } from '@renderer/store/newMessage'
+import { removeManyBlocks } from '@renderer/store/messageBlock'
+import { newMessagesActions } from '@renderer/store/newMessage'
 import { requireMutableForActiveRoute } from '@renderer/store/routeAnswerGroup'
-import { deleteMessagesFromDB, executeDeleteMessagesWithDependents } from '@renderer/store/thunk/messageThunk'
+import {
+  deleteMessagesFromDB,
+  executeDeleteMessagesWithDependents,
+  executeStagedCutSourceDelete
+} from '@renderer/store/thunk/messageThunk'
 import {
   deleteSegmentsBySnapshots,
   restoreSegmentsAfterUndo,
@@ -23,47 +28,10 @@ import type {
   PasteUndoAction,
   UndoAction
 } from '@renderer/types/editMode'
-import type { Message } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
 import type { InsertMessageGroup, InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 
 const logger = loggerService.withContext('UndoService')
-
-/**
- * Local-projection-only anchor resolution.
- * Returns the loaded index before the anchor, the loaded end for a tail, or
- * null when the anchor is outside the loaded projection (caller must not
- * inject). Never used as persistence authority.
- */
-function resolveLocalBeforeIndex(loadedMessages: Message[], anchorMessageId: string | null | undefined): number | null {
-  if (!anchorMessageId) return loadedMessages.length
-  const idx = loadedMessages.findIndex((m) => m.id === anchorMessageId)
-  return idx >= 0 ? idx : null
-}
-
-/**
- * Local-projection-only after-group-tail index.
- * Returns the loaded group tail when any member is loaded, otherwise null.
- */
-function resolveLocalAfterGroupTailIndex(loadedMessages: Message[], targetMessageId: string): number | null {
-  const targetIndex = loadedMessages.findIndex((m) => m.id === targetMessageId || m.askId === targetMessageId)
-  if (targetIndex === -1) return null
-  const targetMessage = loadedMessages[targetIndex]
-  let insertIndex = targetIndex + 1
-  const groupKey = targetMessage.role === 'user' ? targetMessage.id : targetMessage.askId
-  if (groupKey) {
-    // Match Main after-group-tail authority: scan the entire loaded
-    // projection after the anchor and track the last loaded assistant with
-    // the same group key (including non-contiguous members). Never stop at
-    // intervening rows.
-    for (let i = targetIndex + 1; i < loadedMessages.length; i++) {
-      if (loadedMessages[i].role === 'assistant' && loadedMessages[i].askId === groupKey) {
-        insertIndex = i + 1
-      }
-    }
-  }
-  return insertIndex
-}
 
 /**
  * Resolve the stable redo intent for paste/cut-paste.
@@ -112,62 +80,43 @@ async function updateFileReferenceCounts(
 /**
  * Restore groups with one atomic stable command.
  * Sends all Main-produced full restore groups in request order with
- * before-message/topic-tail intents (no numeric index). Local projection is
- * bounded by each group's pre-delete loaded intersection: only messages whose
- * IDs are in `loadedMessageIds` enter Redux (with only their blocks); an empty
- * intersection injects nothing even for topic-tail. Outside-loaded anchors
+ * before-message/topic-tail intents (no numeric index). Main success
+ * publishes the exact committed canonical wires plus capability; the shared
+ * ack installs rows+capability atomically. Local projection stays bounded by
+ * each group's pre-delete loaded intersection (`loadedMessageIds` decides
+ * WHICH rows enter, Main decides capability): an empty intersection injects
+ * nothing even for topic-tail, and non-tail runs with nonresident neighbors
  * inject nothing.
  */
 async function restoreGroupsByStableAnchors(
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
-  groupAnchors: GroupAnchor[]
+  groupAnchors: GroupAnchor[],
+  addressedRoute?: string | null
 ): Promise<void> {
   if (groupAnchors.length === 0) return
   const groups = buildRestoreGroups(groupAnchors)
+  const route = typeof addressedRoute === 'undefined' ? selectActiveBranchId(getState(), topicId) : addressedRoute
 
   // DB-first: one atomic multi-group restore with FULL entries. Missing/
   // cross-topic anchors fail the whole transaction with no partial writes and
-  // no Redux changes.
+  // no Redux changes. Main publishes canonical wires+capability on success.
+  let ack: Awaited<ReturnType<typeof dbService.insertMessageGroups>>
   try {
-    await dbService.insertMessageGroups(topicId, groups, selectActiveBranchId(getState(), topicId))
+    ack = await dbService.insertMessageGroups(topicId, groups, route)
   } catch (error) {
     logger.error('[restoreGroupsByStableAnchors] Failed to restore groups to DB', error as Error)
     throw error
   }
 
-  // Bounded local projection: evolve a loaded copy so later groups account
-  // for earlier visible inserts without assuming whole-topic order.
-  const evolving = [...((selectLoadedMessagesForTopic(getState(), topicId) ?? []) as Message[])]
-  for (const anchor of groupAnchors) {
-    // Fail-closed for legacy actions lacking the field: empty set injects nothing.
+  // Bounded visible subsets in authority order per group (caller-computed
+  // WHICH; capability is Main-only from the ack).
+  const visiblePerGroup = groupAnchors.map((anchor) => {
     const allowed = new Set(anchor.loadedMessageIds ?? [])
-    const visibleMessages = anchor.messages.filter((m) => allowed.has(m.id))
-    if (visibleMessages.length === 0) continue
-    let localIdx: number | null
-    if (anchor.anchorMessageId != null) {
-      localIdx = resolveLocalBeforeIndex(evolving, anchor.anchorMessageId)
-    } else {
-      localIdx = evolving.length
-    }
-    if (localIdx === null) continue
-    const visibleBlocks = anchor.blocks.filter((b) => allowed.has(b.messageId))
-    if (visibleBlocks.length > 0) {
-      dispatch(withClosureTopics(upsertManyBlocks(visibleBlocks), topicId))
-    }
-    for (let i = 0; i < visibleMessages.length; i++) {
-      const message = visibleMessages[i]
-      evolving.splice(localIdx + i, 0, message)
-      dispatch(
-        newMessagesActions.insertMessageAtIndex({
-          topicId,
-          message,
-          index: localIdx + i
-        })
-      )
-    }
-  }
+    return anchor.messages.filter((m) => allowed.has(m.id)).map((m) => m.id)
+  })
+  publishInsertMessageGroupsAck(dispatch, topicId, route, ack, visiblePerGroup)
 }
 
 /**
@@ -291,7 +240,8 @@ async function undoDelete(dispatch: AppDispatch, getState: () => RootState, acti
 async function undoPaste(
   dispatch: AppDispatch,
   getState: () => RootState,
-  action: PasteUndoAction | CutPasteUndoAction
+  action: PasteUndoAction | CutPasteUndoAction,
+  addressedTargetRoute?: string | null
 ): Promise<void> {
   const { targetTopicId, insertedMessageIds = [], targetSegmentSnapshots = [] } = action
 
@@ -311,14 +261,14 @@ async function undoPaste(
   }
 
   // DB-first: delete from DB before dispatching to Redux (LOCK-001).
-  // Branch-aware: pasted copies live in the topic's active route.
+  // Branch-aware: ordinary paste uses the live active route; cut_paste callers
+  // pass the staged target route explicitly (no silent live fallback for new
+  // staged actions).
+  const targetRoute =
+    typeof addressedTargetRoute === 'undefined' ? selectActiveBranchId(getState(), targetTopicId) : addressedTargetRoute
   let cleanup
   try {
-    cleanup = await deleteMessagesFromDB(
-      targetTopicId,
-      insertedMessageIds,
-      selectActiveBranchId(getState(), targetTopicId)
-    )
+    cleanup = await deleteMessagesFromDB(targetTopicId, insertedMessageIds, targetRoute)
   } catch (error) {
     logger.error('[undoPaste] Failed to delete from DB', error as Error)
     throw error
@@ -341,8 +291,15 @@ async function undoPaste(
     await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots)
   }
 
-  // Sync segments after message deletion (only non-target segments remain)
-  await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
+  // Sync segments after message deletion (only non-target segments remain).
+  // Cut_paste callers pass the staged target route explicitly so a live route
+  // switch mid-cleanup cannot retarget the membership write; ordinary paste
+  // omits the route and retains the existing live-route behavior.
+  if (typeof addressedTargetRoute === 'undefined') {
+    await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
+  } else {
+    await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds, targetRoute)
+  }
 
   // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
   // consumeFileCleanupResult above already handled physical file cleanup
@@ -378,11 +335,34 @@ async function undoCutPaste(
   action: CutPasteUndoAction
 ): Promise<void> {
   const { sourceTopicId, sourceGroupAnchors, sourceSegmentSnapshots = [] } = action
+  // Route-bound staged provenance (new actions only). Legacy actions without
+  // recorded routes retain the previous live-route behavior below.
+  const hasStagedRoutes = typeof action.sourceBranchId !== 'undefined' || typeof action.targetBranchId !== 'undefined'
+  let stagedSourceRoute: string | null | undefined
+  let stagedTargetRoute: string | null | undefined
+  if (hasStagedRoutes) {
+    if (typeof action.sourceBranchId === 'undefined' || typeof action.targetBranchId === 'undefined') {
+      throw new Error('[undoCutPaste] Missing staged cut routes; refusing undo before any write')
+    }
+    stagedSourceRoute = action.sourceBranchId
+    stagedTargetRoute = action.targetBranchId
+    let liveSource: string | null = null
+    let liveTarget: string | null = null
+    try {
+      liveSource = selectActiveBranchId(getState(), sourceTopicId)
+      liveTarget = selectActiveBranchId(getState(), action.targetTopicId)
+    } catch (error) {
+      throw new Error('[undoCutPaste] Unknown route; refusing undo before any write')
+    }
+    if (liveSource !== stagedSourceRoute || liveTarget !== stagedTargetRoute) {
+      throw new Error('[undoCutPaste] Route changed; refusing undo before any write')
+    }
+  }
 
   if (sourceGroupAnchors.length === 0) {
     // Nothing was deleted at paste time (e.g. paste source-delete failure):
     // only the pasted copies need removal.
-    await undoPaste(dispatch, getState, action)
+    await undoPaste(dispatch, getState, action, stagedTargetRoute)
     logger.warn('[undoCutPaste] No source group anchors to restore')
     return
   }
@@ -407,7 +387,7 @@ async function undoCutPaste(
   // Stable restore: one atomic command with before-message/topic-tail intents
   // (no numeric index). Throws on missing/cross-topic anchors with no partial
   // writes and no Redux changes — the copies below are then never touched.
-  await restoreGroupsByStableAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors)
+  await restoreGroupsByStableAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors, stagedSourceRoute)
 
   // Restore source segment membership before removing the copies.
   await restoreSegmentsAfterUndo(dispatch, getState, sourceSegmentSnapshots)
@@ -418,7 +398,7 @@ async function undoCutPaste(
   // Phase 2: remove the pasted copies from the target topic (plus the target
   // segments created at paste time). A throw here retains the duplicate
   // (restored source + remaining copies) rather than losing the source.
-  await undoPaste(dispatch, getState, action)
+  await undoPaste(dispatch, getState, action, stagedTargetRoute)
 }
 
 // ==================== Redo Implementations ====================
@@ -516,44 +496,18 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     blocks: pastedBlocksSnapshot.filter((b) => b.messageId === message.id) as unknown as MessageBlockEntry['blocks']
   }))
 
-  // DB-first: one atomic stable re-insert before any Redux commit.
+  // DB-first: one atomic stable re-insert before any Redux commit. Main
+  // publishes canonical wires+capability; the shared ack installs them with
+  // the stored stable placement (nonresident anchors inject nothing).
+  const redoRoute = selectActiveBranchId(getState(), targetTopicId)
+  let redoAck: Awaited<ReturnType<typeof dbService.insertMessageGroups>>
   try {
-    await dbService.insertMessageGroups(
-      targetTopicId,
-      [{ entries, intent }],
-      selectActiveBranchId(getState(), targetTopicId)
-    )
+    redoAck = await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }], redoRoute)
   } catch (error) {
     logger.error('[redoPaste] Failed to save to DB', error as Error)
     throw error
   }
-
-  // Bounded local projection only when the stable target is locally visible.
-  const loaded = (selectLoadedMessagesForTopic(getState(), targetTopicId) ?? []) as Message[]
-  let localIdx: number | null = null
-  if (intent.kind === 'topic-tail') {
-    localIdx = loaded.length
-  } else if (intent.kind === 'before-message') {
-    localIdx = resolveLocalBeforeIndex(loaded, intent.messageId)
-  } else {
-    localIdx = resolveLocalAfterGroupTailIndex(loaded, intent.messageId)
-  }
-  if (localIdx !== null) {
-    if (pastedBlocksSnapshot.length > 0) {
-      dispatch(withClosureTopics(upsertManyBlocks(pastedBlocksSnapshot), targetTopicId))
-    }
-    let index = localIdx
-    for (const message of pastedMessagesSnapshot) {
-      dispatch(
-        newMessagesActions.insertMessageAtIndex({
-          topicId: targetTopicId,
-          message,
-          index
-        })
-      )
-      index++
-    }
-  }
+  publishInsertMessageGroupsAck(dispatch, targetTopicId, redoRoute, redoAck, [redoAck.insertedMessageIds])
 
   // Re-increment file reference counts
   if (fileReferenceDeltas.length > 0) {
@@ -573,14 +527,13 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
 /**
  * Redo cut_paste = re-execute the cut+paste using snapshots.
  *
- * Source deletion uses the SAME semantic plural delete helper as the initial
- * cut-paste (`executeDeleteMessagesWithDependents` with the stored stable
- * member roots). The helper owns Main segment catalog convergence, authority
- * anchor transfer, file cleanup, and loaded-intersection projection, so no
- * legacy `deleteMessagesFromDB` + local block/segment sync lives here.
- * Fail-closed: a source restore that needs roots but lacks `sourceRootIds`
- * (legacy in-memory action) throws before any DB mutation rather than
- * issuing a numeric/plain-delete authority mutation.
+ * Source deletion uses the staged-cut authority helper with the stored stable
+ * member roots and staged source route (no projection capability rerequire
+ * for complete outside-loaded source members). The helper owns Main segment
+ * catalog convergence, authority anchor transfer, file cleanup, and
+ * loaded-intersection projection. Legacy actions without staged routes retain
+ * the previous guarded live-route helper. Fail-closed: missing `sourceRootIds`
+ * or missing staged routes for new actions throw before any DB mutation.
  */
 async function redoCutPaste(
   dispatch: AppDispatch,
@@ -596,8 +549,29 @@ async function redoCutPaste(
     fileReferenceDeltas = [],
     targetSegmentSnapshots = []
   } = action
+  const hasStagedRoutes = typeof action.sourceBranchId !== 'undefined' || typeof action.targetBranchId !== 'undefined'
+  let stagedSourceRoute: string | null | undefined
+  let stagedTargetRoute: string | null | undefined
+  if (hasStagedRoutes) {
+    if (typeof action.sourceBranchId === 'undefined' || typeof action.targetBranchId === 'undefined') {
+      throw new Error('[redoCutPaste] Missing staged cut routes; refusing redo before any write')
+    }
+    stagedSourceRoute = action.sourceBranchId
+    stagedTargetRoute = action.targetBranchId
+    let liveSource: string | null = null
+    let liveTarget: string | null = null
+    try {
+      liveSource = selectActiveBranchId(getState(), sourceTopicId)
+      liveTarget = selectActiveBranchId(getState(), targetTopicId)
+    } catch {
+      throw new Error('[redoCutPaste] Unknown route; refusing redo before any write')
+    }
+    if (liveSource !== stagedSourceRoute || liveTarget !== stagedTargetRoute) {
+      throw new Error('[redoCutPaste] Route changed; refusing redo before any write')
+    }
+  }
 
-  // Step 1: Re-delete the source via the semantic plural helper.
+  // Step 1: Re-delete the source via the staged (or legacy guarded) helper.
   if (sourceGroupAnchors.length > 0) {
     const roots = Array.isArray(action.sourceRootIds)
       ? [...new Set(action.sourceRootIds.filter((id) => typeof id === 'string' && id.length > 0))]
@@ -608,7 +582,15 @@ async function redoCutPaste(
     }
 
     try {
-      await executeDeleteMessagesWithDependents(dispatch, getState, sourceTopicId, roots)
+      if (hasStagedRoutes) {
+        await executeStagedCutSourceDelete(dispatch, getState, {
+          sourceTopicId,
+          sourceBranchId: stagedSourceRoute as string | null,
+          rootIds: roots
+        })
+      } else {
+        await executeDeleteMessagesWithDependents(dispatch, getState, sourceTopicId, roots)
+      }
     } catch (error) {
       logger.error('[redoCutPaste] Failed to delete source messages (semantic redo delete)', error as Error)
       throw error
@@ -628,43 +610,17 @@ async function redoCutPaste(
       message: message as unknown as MessageBlockEntry['message'],
       blocks: pastedBlocksSnapshot.filter((b) => b.messageId === message.id) as unknown as MessageBlockEntry['blocks']
     }))
+    const targetRoute =
+      typeof stagedTargetRoute === 'undefined' ? selectActiveBranchId(getState(), targetTopicId) : stagedTargetRoute
 
+    let reinsertAck: Awaited<ReturnType<typeof dbService.insertMessageGroups>>
     try {
-      await dbService.insertMessageGroups(
-        targetTopicId,
-        [{ entries, intent }],
-        selectActiveBranchId(getState(), targetTopicId)
-      )
+      reinsertAck = await dbService.insertMessageGroups(targetTopicId, [{ entries, intent }], targetRoute)
     } catch (error) {
       logger.error('[redoCutPaste] Failed to save pasted messages to DB', error as Error)
       throw error
     }
-
-    const loaded = (selectLoadedMessagesForTopic(getState(), targetTopicId) ?? []) as Message[]
-    let localIdx: number | null = null
-    if (intent.kind === 'topic-tail') {
-      localIdx = loaded.length
-    } else if (intent.kind === 'before-message') {
-      localIdx = resolveLocalBeforeIndex(loaded, intent.messageId)
-    } else {
-      localIdx = resolveLocalAfterGroupTailIndex(loaded, intent.messageId)
-    }
-    if (localIdx !== null) {
-      if (pastedBlocksSnapshot.length > 0) {
-        dispatch(withClosureTopics(upsertManyBlocks(pastedBlocksSnapshot), targetTopicId))
-      }
-      let index = localIdx
-      for (const message of pastedMessagesSnapshot) {
-        dispatch(
-          newMessagesActions.insertMessageAtIndex({
-            topicId: targetTopicId,
-            message,
-            index
-          })
-        )
-        index++
-      }
-    }
+    publishInsertMessageGroupsAck(dispatch, targetTopicId, targetRoute, reinsertAck, [reinsertAck.insertedMessageIds])
 
     // Re-increment file reference counts for pasted blocks
     if (fileReferenceDeltas.length > 0) {

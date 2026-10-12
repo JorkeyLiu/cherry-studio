@@ -34,6 +34,13 @@ export interface ClipboardState {
   mode: ClipboardMode | null
   items: ClipboardItem[]
   sourceTopicId: string | null
+  /**
+   * Staged source route captured at cut time (null = main route).
+   * Cut-only authority provenance: paste addresses the Main source delete
+   * with this route without rerequiring projection capability. Undefined is
+   * legacy/missing provenance and must fail closed before any paste write.
+   */
+  sourceBranchId: string | null
   timestamp: number
   /** Snapshots of fully-selected segments for segment reconstruction on paste */
   segmentSnapshots: ClipboardSegmentSnapshot[]
@@ -126,6 +133,14 @@ export interface CutPasteUndoAction extends BaseUndoAction {
   targetInsertIntent?: InsertMessageGroupIntent
   /** Source topic ID */
   sourceTopicId: string
+  /**
+   * Route-bound authority provenance for staged-cut actions (null = main).
+   * New actions always carry both; legacy in-memory actions omit them and
+   * retain the previous live-route behavior only where safe. New actions with
+   * missing fields must fail closed before any write (no silent live fallback).
+   */
+  sourceBranchId?: string | null
+  targetBranchId?: string | null
   /**
    * Stable member roots sent to the semantic delete at paste time: all
    * complete clipboard member message IDs (deduped, authority order).

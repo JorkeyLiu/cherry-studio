@@ -447,7 +447,156 @@ test.describe('Phase 5.4: Topic move and message delete undo/redo', () => {
     const userMessage = page.locator(`[data-message-id="${userMessageId}"].message-user:visible`).first()
     await userMessage.scrollIntoViewIfNeeded()
     await expect(userMessage).toBeVisible()
-    await userMessage.click()
+    // Edit-turn interaction shield: content is inert in edit mode; the
+    // sibling cover receives the click. Click the actual cover at a
+    // truthfully hit-tested point (window.innerWidth/Height fallback —
+    // page.viewportSize() is null under Electron — #messages intersect +
+    // elementFromPoint to the expected turn; genuine wheel reveal;
+    // remeasured immediately before the click). Same ask-split assumption
+    // as production: one EditTurn owns this group.
+    await expect(
+      page.locator(`[data-testid="edit-turn"]:has([data-message-id="${userMessageId}"])`).first()
+    ).toBeVisible()
+    await expect(
+      page
+        .locator(`[data-testid="edit-turn"]:has([data-message-id="${userMessageId}"])`)
+        .first()
+        .locator('[data-testid="edit-turn-cover"]')
+        .first()
+    ).toBeVisible()
+    const coverPoint = await page.evaluate((mid: string) => {
+      const msg = document.querySelector(`[data-message-id="${mid}"]`) as HTMLElement | null
+      const container = document.getElementById('messages') as HTMLElement | null
+      if (!msg || !container) return { ok: false as const }
+      const turn = msg.closest('[data-testid="edit-turn"]') as HTMLElement | null
+      if (!turn) return { ok: false as const }
+      const cover = turn.querySelector('[data-testid="edit-turn-cover"]') as HTMLElement | null
+      if (!cover) return { ok: false as const }
+      const turnAsk = turn.getAttribute('data-turn-ask')
+      const mr = msg.getBoundingClientRect()
+      const cr = cover.getBoundingClientRect()
+      const vr = container.getBoundingClientRect()
+      const ix0 = Math.max(mr.left, cr.left, vr.left)
+      const iy0 = Math.max(mr.top, cr.top, vr.top)
+      const ix1 = Math.min(mr.right, cr.right, vr.right)
+      const iy1 = Math.min(mr.bottom, cr.bottom, vr.bottom)
+      if (ix1 - ix0 < 10 || iy1 - iy0 < 10) {
+        return {
+          ok: false as const,
+          turnAsk,
+          win: { w: window.innerWidth, h: window.innerHeight },
+          mr: { x: mr.left, y: mr.top, w: mr.width, h: mr.height },
+          cr: { x: cr.left, y: cr.top, w: cr.width, h: cr.height },
+          vr: { x: vr.left, y: vr.top, w: vr.width, h: vr.height }
+        }
+      }
+      let barTop = Infinity
+      let barBottom = -Infinity
+      let barLeft = Infinity
+      let barRight = -Infinity
+      let hasBar = false
+      for (const btn of Array.from(
+        document.querySelectorAll(
+          '[data-testid="edit-copy-btn"],[data-testid="edit-cut-btn"],[data-testid="edit-paste-btn"],[data-testid="edit-delete-btn"],[data-testid="edit-close-btn"]'
+        )
+      )) {
+        const b = (btn as HTMLElement).getBoundingClientRect()
+        if (b.width <= 0 || b.height <= 0) continue
+        hasBar = true
+        barTop = Math.min(barTop, b.top)
+        barBottom = Math.max(barBottom, b.bottom)
+        barLeft = Math.min(barLeft, b.left)
+        barRight = Math.max(barRight, b.right)
+      }
+      const insetX0 = ix0 + 5
+      const insetX1 = ix1 - 5
+      const insetY0 = iy0 + 5
+      const insetY1 = iy1 - 5
+      for (const fy of [0.5, 0.65, 0.35, 0.8, 0.2]) {
+        for (const fx of [0.5, 0.35, 0.65, 0.2, 0.8]) {
+          const x = insetX0 + (insetX1 - insetX0) * fx
+          const y = insetY0 + (insetY1 - insetY0) * fy
+          if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) continue
+          if (hasBar && x >= barLeft - 6 && x <= barRight + 6 && y >= barTop - 6 && y <= barBottom + 6) continue
+          let hit: HTMLElement | null = null
+          try {
+            hit = document.elementFromPoint(x, y) as HTMLElement | null
+          } catch {
+            continue
+          }
+          if (!hit) continue
+          const hitTurn = hit.closest('[data-testid="edit-turn"]') as HTMLElement | null
+          const hitCover = hit.closest('[data-testid="edit-turn-cover"]') as HTMLElement | null
+          if ((hitCover || hitTurn) && hitTurn?.getAttribute('data-turn-ask') === turnAsk) {
+            return { ok: true as const, x, y, turnAsk }
+          }
+        }
+      }
+      return {
+        ok: false as const,
+        turnAsk,
+        win: { w: window.innerWidth, h: window.innerHeight },
+        mr: { x: mr.left, y: mr.top, w: mr.width, h: mr.height },
+        cr: { x: cr.left, y: cr.top, w: cr.width, h: cr.height },
+        vr: { x: vr.left, y: vr.top, w: vr.width, h: vr.height }
+      }
+    }, userMessageId)
+    if (!coverPoint.ok) {
+      // Genuine wheel reveal over #messages (keeper restores programmatic
+      // scrolls): move the mouse into #messages, wheel toward the message,
+      // then remeasure once immediately before the click.
+      const box = await page.locator('#messages').first().boundingBox()
+      if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+      await page.mouse.wheel(0, 240)
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+          })
+      )
+      const retry = await page.evaluate((mid: string) => {
+        const msg = document.querySelector(`[data-message-id="${mid}"]`) as HTMLElement | null
+        const container = document.getElementById('messages') as HTMLElement | null
+        if (!msg || !container) return { ok: false as const }
+        const turn = msg.closest('[data-testid="edit-turn"]') as HTMLElement | null
+        if (!turn) return { ok: false as const }
+        const turnAsk = turn.getAttribute('data-turn-ask')
+        const mr = msg.getBoundingClientRect()
+        const cr = turn.querySelector('[data-testid="edit-turn-cover"]')?.getBoundingClientRect()
+        const vr = container.getBoundingClientRect()
+        if (!cr) return { ok: false as const, turnAsk }
+        const ix0 = Math.max(mr.left, cr.left, vr.left)
+        const iy0 = Math.max(mr.top, cr.top, vr.top)
+        const ix1 = Math.min(mr.right, cr.right, vr.right)
+        const iy1 = Math.min(mr.bottom, cr.bottom, vr.bottom)
+        if (ix1 - ix0 < 10 || iy1 - iy0 < 10) return { ok: false as const, turnAsk }
+        const x = ix0 + (ix1 - ix0) / 2
+        const y = iy0 + (iy1 - iy0) / 2
+        if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) {
+          return { ok: false as const, turnAsk }
+        }
+        let hit: HTMLElement | null = null
+        try {
+          hit = document.elementFromPoint(x, y) as HTMLElement | null
+        } catch {
+          return { ok: false as const, turnAsk }
+        }
+        const hitTurn = hit?.closest('[data-testid="edit-turn"]') as HTMLElement | null
+        const hitCover = hit?.closest('[data-testid="edit-turn-cover"]') as HTMLElement | null
+        if ((hitCover || hitTurn) && hitTurn?.getAttribute('data-turn-ask') === turnAsk) {
+          return { ok: true as const, x, y, turnAsk }
+        }
+        return { ok: false as const, turnAsk }
+      }, userMessageId)
+      if (!retry.ok) {
+        throw new Error(
+          `[E2E] cover point not hit-testable for ${userMessageId}: ` + JSON.stringify({ coverPoint, retry })
+        )
+      }
+      await page.mouse.click(retry.x, retry.y)
+    } else {
+      await page.mouse.click(coverPoint.x, coverPoint.y)
+    }
     await page.waitForFunction((messageId: string) => {
       const state = (window as any).store.getState()
       return state.editMode.selectedGroupIds.includes(messageId)
@@ -465,7 +614,57 @@ test.describe('Phase 5.4: Topic move and message delete undo/redo', () => {
       `[Phase 5.4] Redux snapshot after undo: ${JSON.stringify({ messages: restored.messages, blocks: restored.blocks })}`
     )
 
+    // REDO readiness (diagnosed 497 absence, not 488 undo): handleUndo and
+    // handleRedo are async fire-and-forget behind the isProcessing guard
+    // (useEditMode 249-274) with stack moves in UndoService 177-229, and
+    // the keyboard hook drops text-input-focused events (useClipboard 89,
+    // 121). Capturing the minimum live state (no message content) before
+    // redo proves whether the immediate redo was dropped by the guard.
+    const redoReadyBefore = await page.evaluate(() => {
+      const state = (window as any).store.getState()
+      const ae = document.activeElement as HTMLElement | null
+      return {
+        enabled: state.editMode.enabled,
+        selectedCount: (state.editMode.selectedGroupIds || []).length,
+        isProcessing: state.editMode.isProcessing,
+        undoDepth: state.undoStack?.undoStack?.length ?? -1,
+        redoDepth: state.undoStack?.redoStack?.length ?? -1,
+        activeTag: ae?.tagName ?? null,
+        activeTestId: ae?.getAttribute?.('data-testid') ?? null,
+        activeEditable:
+          !!ae && (ae.isContentEditable || ae.classList.contains('ProseMirror') || ae.classList.contains('tiptap'))
+      }
+    })
+    console.log(`[E2E] redo-ready-before ${JSON.stringify(redoReadyBefore)}`)
+    // Canonical ready (no arbitrary sleep): undo finished (processing
+    // false), edit mode still enabled, redo registered (redo depth > 0).
+    await page.waitForFunction(
+      () => {
+        const state = (window as any).store.getState()
+        return (
+          state.editMode.enabled === true &&
+          state.editMode.isProcessing === false &&
+          (state.undoStack?.redoStack?.length ?? 0) > 0
+        )
+      },
+      null,
+      { timeout: 15000 }
+    )
     await page.keyboard.press('Meta+Shift+z')
+    const redoReadyAfter = await page.evaluate(() => {
+      const state = (window as any).store.getState()
+      const ae = document.activeElement as HTMLElement | null
+      return {
+        enabled: state.editMode.enabled,
+        selectedCount: (state.editMode.selectedGroupIds || []).length,
+        isProcessing: state.editMode.isProcessing,
+        undoDepth: state.undoStack?.undoStack?.length ?? -1,
+        redoDepth: state.undoStack?.redoStack?.length ?? -1,
+        activeTag: ae?.tagName ?? null,
+        activeTestId: ae?.getAttribute?.('data-testid') ?? null
+      }
+    })
+    console.log(`[E2E] redo-ready-after ${JSON.stringify(redoReadyAfter)}`)
     await assertReduxSnapshot(page, secondTopicId, captured, false)
     assertMessageRows(dbPath!, secondTopicId, captured, false)
 
