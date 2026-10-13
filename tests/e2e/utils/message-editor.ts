@@ -45,7 +45,7 @@ export function resizeHandle(editorArea: Locator): Locator {
   return editorArea.locator('[data-testid="message-editor-resize-handle"]')
 }
 
-/** Height surface whose inline height is user-resizable and persisted. */
+/** Height surface whose inline height is content-adaptive by default and user-resizable for the session. */
 export function resizeSurface(editorArea: Locator): Locator {
   return editorArea.locator('[data-testid="message-editor-resize-surface"]')
 }

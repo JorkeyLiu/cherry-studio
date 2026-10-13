@@ -25,19 +25,32 @@
  *   testid MAY exist, else `.message-editor`/`.message-editor-area`
  *   anchors the frame); drag upward grows, downward shrinks; ArrowUp/Down
  *   grow/shrink, Home/End min/max. `message-editor-resize-surface`
- *   default 340 responsive min 220 max 52vh; height saved on commit to
- *   renderer-local profile storage and remembered across editing
- *   close/reopen AND relaunch.
- * - Toolbar (strict order): mode, bold, link (`message-editor-link-btn`,
- *   guaranteed), find, divider (`message-editor-history-separator`,
- *   guaranteed) left of undo/redo, expand alone far-right; translate
- *   removed. Undo/redo expose native disabled states with a visibly dim
- *   icon treatment matching the global edit-mode disabled style (opacity
- *   and/or color, child-propagation aware) — never skipped as
- *   indeterminate. Mode wording in edit state is "show edit" (not
- *   "show source").
- * - Expanded modal `message-editor-expanded`: strict single-plane scroll in
- *   BOTH source and preview with the modal mode toggle guaranteed; outer
+ *   defaults to the content-adaptive height through ONE sizing resolver
+ *   (single one-line floor from actual rendered text geometry, growth with
+ *   editing, 52vh maximum then inner scroll — automatic and manual are only
+ *   ways to supply a desired height into the same bounds, so dragging an
+ *   adaptive short draft starts at the displayed height with no jump);
+ *   drag/keyboard commits are session-only (kept for this edit session,
+ *   never overwritten by later text edits) and reset on close/reopen AND
+ *   relaunch — no persisted height, no settings switch.
+ * - Toolbar (strict order, markup grouping never forced positioning): mode,
+ *   then the scrollable tools group carrying formatting + link
+ *   (`message-editor-link-btn`, guaranteed) + find + divider
+ *   (`message-editor-history-separator`, guaranteed) + undo/redo left near
+ *   search, then expand alone far-right in its own end group (right contains
+ *   ONLY the expand/collapse control); translate removed. Undo/redo expose
+ *   native disabled states with a visibly dim icon treatment matching the
+ *   global edit-mode disabled style (opacity and/or color,
+ *   child-propagation aware) — never skipped as indeterminate. Mode wording
+ *   in edit state is "show edit" (not "show source").
+ * - Expanded modal `message-editor-expanded`: independent fixed-window meaning
+ *   (root height min(72vh, calc(100vh - 120px)), never the inline adaptive
+ *   height — even a one-line draft fills the original bounded height with
+ *   internal CodeMirror scrolling, never sized to short natural content);
+ *   inline placeholder keeps the current session adaptive/manual height and
+ *   collapse returns it; modal measurements never alter the inline auto
+ *   state; preview fills the modal too. Strict single-plane scroll in BOTH
+ *   source and preview with the modal mode toggle guaranteed; outer
  *   root/body never scroll (scrollTop stays 0, Save/Cancel pinned) while
  *   exactly one content plane (`.cm-scroller` in source, preview scroller
  *   in preview) scrolls under a real wheel — never overflow:hidden-only.
@@ -191,14 +204,20 @@ interface SeededDraft {
   originalContent: string
 }
 
-async function seedLongAssistantDraft(page: Page, tag: string, opts?: { fillerPairs?: number }): Promise<SeededDraft> {
+async function seedLongAssistantDraft(
+  page: Page,
+  tag: string,
+  opts?: { fillerPairs?: number; assistantContent?: string }
+): Promise<SeededDraft> {
   await prepareAssistant(page, DISPLAY_LIMIT)
   const liveAssistantId = await page.evaluate(
     () => (window as any).store.getState().assistants?.assistants?.[0]?.id ?? null
   )
   expect(liveAssistantId, 'live assistant id must exist').toBeTruthy()
   const topicId = `cme-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const originalContent = longAssistantMarkdown(tag)
+  // Short-content override for the adaptive-height contract (default keeps
+  // the exact long synthetic draft): the seeded content stays byte-exact.
+  const originalContent = opts?.assistantContent ?? longAssistantMarkdown(tag)
   // Resize-stage older scroll margin: optional tall preceding synthetic pairs.
   // Default 0 keeps every other case at the exact 2-row override; only the
   // resize test passes fillerPairs (3 pairs = 6 filler rows + 2 target rows =
@@ -444,6 +463,27 @@ async function surfaceHeight(editorArea: Locator): Promise<number> {
   return box.height
 }
 
+/**
+ * Bottom slack between the last rendered text line and the input surface
+ * bottom — the user-visible empty area below the text. A short one-line
+ * draft must keep only normal padding/one-line slack here (tight oracle:
+ * a ~70px gap like the reported tall-input failure never passes).
+ * Returns NaN when the surface or its lines are unreadable (callers fail
+ * loudly on NaN, never treat it as zero).
+ */
+async function inputBottomGap(editorArea: Locator): Promise<number> {
+  return editorArea
+    .evaluate((area) => {
+      const surface = area.querySelector('[data-testid="message-editor-resize-surface"]') as HTMLElement | null
+      const lines = Array.from(area.querySelectorAll('.editing-message .cm-line')) as HTMLElement[]
+      if (!surface || lines.length === 0) return Number.NaN
+      const s = surface.getBoundingClientRect()
+      const last = lines[lines.length - 1].getBoundingClientRect()
+      return s.bottom - last.bottom
+    })
+    .catch(() => Number.NaN)
+}
+
 /** Live bottom controls-region offset (editor action bar when open). */
 async function editorRegionOffset(page: Page, messageId: string): Promise<number | null> {
   return page
@@ -461,6 +501,92 @@ async function editorRegionOffset(page: Page, messageId: string): Promise<number
       return r.bottom - c.top
     }, messageId)
     .catch(() => null)
+}
+
+/**
+ * Genuine-user placement precondition for the top-edge grip (shared by the
+ * resize session test and the outside-release test).
+ *
+ * Settled runtime fact: parking the wheel in the #messages center ALWAYS
+ * hits an inner cm-line -> .cm-scroller, so wheels there are consumed by the
+ * inner plane. ONE outer margin point (row background IN #messages, OUTSIDE
+ * the editor .cm-scroller) moves #messages and the handle to a true hit with
+ * the inner plane unchanged. This helper therefore resolves a live
+ * outer-margin point (see findOuterChatGutterWheelPoint) and wheels ONLY
+ * there — never the viewport center — with precise top before/after
+ * annotations. One or a bounded few real outer gestures as needed; no loop
+ * masking a bad target.
+ */
+async function ensureEditorHandleUnoccluded(
+  page: Page,
+  editorArea: Locator,
+  annotationPrefix: string
+): Promise<{ cx: number; cy: number }> {
+  const container = page.locator('#messages').first()
+  const handle = resizeHandle(editorArea)
+  const frame = outerEditorFrame(editorArea)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const containerBox = await container.boundingBox()
+    if (!containerBox) throw new Error('#messages has no geometry')
+    const handleBox = await handle.boundingBox()
+    if (!handleBox) throw new Error('resize handle has no geometry')
+    const frameBox = await frame.boundingBox().catch(() => null)
+    const cx = handleBox.x + handleBox.width / 2
+    const cy = handleBox.y + handleBox.height / 2
+    const probe = await probeResizeHandleHit(page, cx, cy)
+    const topEdge = frameBox ? frameBox.y : handleBox.y
+    const topSafe = containerBox.y + 72
+    const bottomSafe = containerBox.y + containerBox.height - 96
+    const frameTopSafe = containerBox.y + 48
+    const centered = cy >= topSafe && cy <= bottomSafe && topEdge >= frameTopSafe && topEdge <= bottomSafe && probe.hit
+    if (centered) {
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      )
+      await page.waitForTimeout(200)
+      const reBox = await handle.boundingBox()
+      if (!reBox) throw new Error('resize handle lost geometry after settle')
+      const rx = reBox.x + reBox.width / 2
+      const ry = reBox.y + reBox.height / 2
+      const reProbe = await probeResizeHandleHit(page, rx, ry)
+      test.info().annotations.push({
+        type: `${annotationPrefix}-placement`,
+        description: `handle=(${Math.round(rx)},${Math.round(ry)}) hit=${reProbe.describe} frameTop=${frameBox ? Math.round(frameBox.y) : 'na'} band=[${Math.round(topSafe)}..${Math.round(bottomSafe)}] outerAttempts=${attempt}`
+      })
+      expect(reProbe.hit, `resize handle center must hit-test to the handle (got ${reProbe.describe})`).toBe(true)
+      return { cx: rx, cy: ry }
+    }
+    // Genuine outer wheel only: resolve the live outer-margin point, move
+    // there, and wheel in the correct visual direction.
+    const outer = await findOuterChatGutterWheelPoint(page)
+    test.info().annotations.push({
+      type: `${annotationPrefix}-outer-point`,
+      description: `outer=(${Math.round(outer.x)},${Math.round(outer.y)}) hit=${outer.describe} owner=${outer.owner}`
+    })
+    const topBefore: number = await page
+      .evaluate(() => (document.getElementById('messages') as HTMLElement | null)?.scrollTop ?? -9999)
+      .catch(() => -9999)
+    await page.mouse.move(outer.x, outer.y)
+    await page.waitForTimeout(120)
+    if (cy < topSafe + 40 || topEdge < frameTopSafe) {
+      await page.mouse.wheel(0, -160)
+    } else {
+      await page.mouse.wheel(0, 160)
+    }
+    await page.waitForTimeout(260)
+    const topAfter: number = await page
+      .evaluate(() => (document.getElementById('messages') as HTMLElement | null)?.scrollTop ?? -9999)
+      .catch(() => -9999)
+    const afterBox = await handle.boundingBox().catch(() => null)
+    test.info().annotations.push({
+      type: `${annotationPrefix}-outer-wheel`,
+      description: `attempt=${attempt} outer=(${Math.round(outer.x)},${Math.round(outer.y)}) topBefore=${topBefore} topAfter=${topAfter} handleY=${afterBox ? Math.round(afterBox.y + afterBox.height / 2) : 'na'}`
+    })
+  }
+  const lastBox = await handle.boundingBox().catch(() => null)
+  throw new Error(
+    `resize handle never reached an unoccluded central hit-test via genuine outer wheels (last=${lastBox ? `${Math.round(lastBox.x + lastBox.width / 2)},${Math.round(lastBox.y + lastBox.height / 2)}` : 'none'})`
+  )
 }
 
 test.describe('CodeMirror message editor — long assistant draft contract', () => {
@@ -804,7 +930,7 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
     })
   })
 
-  test('resize handle drag persists across cancel/reopen and application relaunch', async ({
+  test('resize handle drag is session-only and resets on reopen and relaunch', async ({
     mainWindow,
     electronApp,
     mockPort,
@@ -813,7 +939,7 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'CODEMIRROR RESIZE PERSISTENCE (INTEGRATED): real pointer drags from the top-edge handle grow/shrink the resize surface while the bottom message-controls region stays stationary (REGION 2px / TRANSITION 4px oracle, never weakened), keyboard ArrowUp/Down/Home/End adjust height, the committed height survives Cancel + edit reopen, and the SAME height survives a same-profile application relaunch via relaunchSameProfile. No localStorage writes as evidence — gestures create the value; storage is readonly-inspected only.'
+        'CODEMIRROR RESIZE SESSION (INTEGRATED): real pointer drags from the top-edge handle grow/shrink the resize surface while the bottom message-controls region stays stationary (REGION 2px / TRANSITION 4px oracle, never weakened), keyboard ArrowUp/Down/Home/End adjust height, the committed height is session-only (kept for this edit session, never overwritten by text edits), and Cancel + edit reopen plus a same-profile application relaunch via relaunchSameProfile both reset to the content-adaptive height — no persisted height. No storage writes as evidence — gestures create the value; storage is inspected only to prove nothing was persisted.'
     })
     const page: Page = mainWindow
     const userDataDir = getUserDataDir()
@@ -852,87 +978,12 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
     // per-gesture placement below keeps its own baselines/annotations.
 
     /**
-     * Genuine-user placement precondition for the top-edge grip.
-     *
-     * Settled runtime fact: parking the wheel in the #messages center
-     * (506,286) ALWAYS hits an inner cm-line -> .cm-scroller, so 12/12
-     * wheels are consumed by the inner plane (#messages stays 0, handle at
-     * 526,54 under the navbar). ONE outer margin point (row background IN
-     * #messages, OUTSIDE the editor .cm-scroller) moves #messages 0 -> -160
-     * and the handle 54 -> 214 to a true hit with the inner plane unchanged.
-     * This helper therefore resolves a live outer-margin point (see
-     * findOuterChatGutterWheelPoint) and wheels ONLY there — never the
-     * viewport center — with precise top before/after annotations. One or a
-     * bounded few real outer gestures as needed; no loop masking a bad
-     * target.
+     * Genuine-user placement precondition for the top-edge grip: shared
+     * helper (see ensureEditorHandleUnoccluded) with this test's annotation
+     * prefix. Per-gesture placement below keeps its own baselines.
      */
     async function ensureResizeHandleUnoccluded(): Promise<{ cx: number; cy: number }> {
-      const container = page.locator('#messages').first()
-      const handle = resizeHandle(editorArea)
-      const frame = outerEditorFrame(editorArea)
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const containerBox = await container.boundingBox()
-        if (!containerBox) throw new Error('#messages has no geometry')
-        const handleBox = await handle.boundingBox()
-        if (!handleBox) throw new Error('resize handle has no geometry')
-        const frameBox = await frame.boundingBox().catch(() => null)
-        const cx = handleBox.x + handleBox.width / 2
-        const cy = handleBox.y + handleBox.height / 2
-        const probe = await probeResizeHandleHit(page, cx, cy)
-        const topEdge = frameBox ? frameBox.y : handleBox.y
-        const topSafe = containerBox.y + 72
-        const bottomSafe = containerBox.y + containerBox.height - 96
-        const frameTopSafe = containerBox.y + 48
-        const centered =
-          cy >= topSafe && cy <= bottomSafe && topEdge >= frameTopSafe && topEdge <= bottomSafe && probe.hit
-        if (centered) {
-          await page.evaluate(
-            () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-          )
-          await page.waitForTimeout(200)
-          const reBox = await handle.boundingBox()
-          if (!reBox) throw new Error('resize handle lost geometry after settle')
-          const rx = reBox.x + reBox.width / 2
-          const ry = reBox.y + reBox.height / 2
-          const reProbe = await probeResizeHandleHit(page, rx, ry)
-          test.info().annotations.push({
-            type: 'cme-resize-placement',
-            description: `handle=(${Math.round(rx)},${Math.round(ry)}) hit=${reProbe.describe} frameTop=${frameBox ? Math.round(frameBox.y) : 'na'} band=[${Math.round(topSafe)}..${Math.round(bottomSafe)}] outerAttempts=${attempt}`
-          })
-          expect(reProbe.hit, `resize handle center must hit-test to the handle (got ${reProbe.describe})`).toBe(true)
-          return { cx: rx, cy: ry }
-        }
-        // Genuine outer wheel only: resolve the live outer-margin point, move
-        // there, and wheel in the correct visual direction.
-        const outer = await findOuterChatGutterWheelPoint(page)
-        test.info().annotations.push({
-          type: 'cme-resize-outer-point',
-          description: `outer=(${Math.round(outer.x)},${Math.round(outer.y)}) hit=${outer.describe} owner=${outer.owner}`
-        })
-        const topBefore: number = await page
-          .evaluate(() => (document.getElementById('messages') as HTMLElement | null)?.scrollTop ?? -9999)
-          .catch(() => -9999)
-        await page.mouse.move(outer.x, outer.y)
-        await page.waitForTimeout(120)
-        if (cy < topSafe + 40 || topEdge < frameTopSafe) {
-          await page.mouse.wheel(0, -160)
-        } else {
-          await page.mouse.wheel(0, 160)
-        }
-        await page.waitForTimeout(260)
-        const topAfter: number = await page
-          .evaluate(() => (document.getElementById('messages') as HTMLElement | null)?.scrollTop ?? -9999)
-          .catch(() => -9999)
-        const afterBox = await handle.boundingBox().catch(() => null)
-        test.info().annotations.push({
-          type: 'cme-resize-outer-wheel',
-          description: `attempt=${attempt} outer=(${Math.round(outer.x)},${Math.round(outer.y)}) topBefore=${topBefore} topAfter=${topAfter} handleY=${afterBox ? Math.round(afterBox.y + afterBox.height / 2) : 'na'}`
-        })
-      }
-      const lastBox = await handle.boundingBox().catch(() => null)
-      throw new Error(
-        `resize handle never reached an unoccluded central hit-test via genuine outer wheels (last=${lastBox ? `${Math.round(lastBox.x + lastBox.width / 2)},${Math.round(lastBox.y + lastBox.height / 2)}` : 'none'})`
-      )
+      return ensureEditorHandleUnoccluded(page, editorArea, 'cme-resize')
     }
 
     async function dragHandle(dy: number): Promise<{ worst: number; pre: number | null; post: number | null }> {
@@ -984,18 +1035,18 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
       expect(worst, `${label}: painted top-drag transition frames never jump`).toBeLessThanOrEqual(TRANSITION_TOL)
     }
 
-    const h0 = await test.step('prove handle contract and read default height', async () => {
+    const h0 = await test.step('prove handle contract and read adaptive open height', async () => {
       const handle = resizeHandle(editorArea)
       await expect(handle, 'resize handle must render').toBeVisible({ timeout: 10000 })
       await expect(handle, 'handle role is separator').toHaveAttribute('role', 'separator')
       await expect(handle, 'handle orientation is horizontal').toHaveAttribute('aria-orientation', 'horizontal')
       await expect(handle, 'handle must be keyboard-focusable (tabIndex 0)').toHaveAttribute('tabindex', '0')
       const h = await surfaceHeight(editorArea)
-      expect(h, 'default surface height is usable').toBeGreaterThan(0)
+      expect(h, 'adaptive open surface height is usable').toBeGreaterThan(0)
       const winH: number = await page.evaluate(() => window.innerHeight)
       test.info().annotations.push({
         type: 'cme-resize-default',
-        description: `default=${Math.round(h)} winH=${Math.round(winH)} max52vh=${Math.round(winH * 0.52)}`
+        description: `adaptive-open=${Math.round(h)} winH=${Math.round(winH)} max52vh=${Math.round(winH * 0.52)}`
       })
       return h
     })
@@ -1049,12 +1100,12 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
     await test.step('real pointer drags grow and shrink the surface', async () => {
       const winH: number = await page.evaluate(() => window.innerHeight)
       const maxAllowed = winH * 0.52
-      // Production display-bounds mirror (messageEditorHeight.ts, read-only
-      // here): max is the floored 52vh cap (floor, >= 160), min stays at/below
-      // 220 on short viewports. Pointer height delta is 1:1 (-dy) with the
-      // committed value Math.round'ed; the displayed surface clamps at use.
-      const prodMax = Math.max(160, Math.floor(winH * 0.52))
-      const prodMin = Math.min(220, prodMax)
+      // Production single-bounds mirror (messageEditorHeight.ts, read-only
+      // here): max is the floored 52vh cap, min is the single one-line floor
+      // (40). Pointer height delta is 1:1 (-dy) with the committed value
+      // Math.round'ed; the displayed surface resolves at use.
+      const prodMax = Math.max(40, Math.floor(winH * 0.52))
+      const prodMin = Math.min(40, prodMax)
       const clampDisplay = (v: number): number => Math.min(prodMax, Math.max(prodMin, v))
       // Gesture-target rounding budget only (1:1 drag + Math.round commit +
       // boundingBox subpixel). Distinctness (30) and REGION/TRANSITION budgets
@@ -1087,9 +1138,10 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
           Math.abs(hRegrown - targetRegrow),
           `regrown height matches the clamped gesture target (target=${targetRegrow.toFixed(1)} actual=${hRegrown.toFixed(1)})`
         ).toBeLessThanOrEqual(CLAMP_TOL)
-        expect(Math.abs(hRegrown - h0), 'regrown height is distinct from the clamped default').toBeGreaterThanOrEqual(
-          30
-        )
+        expect(
+          Math.abs(hRegrown - h0),
+          'regrown height is distinct from the adaptive open height'
+        ).toBeGreaterThanOrEqual(30)
       } else {
         const r1 = await dragHandle(-150)
         const hGrown = await surfaceHeight(editorArea)
@@ -1120,11 +1172,11 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
           Math.abs(hShrunk - targetFinal),
           `final height matches the clamped gesture target (target=${targetFinal.toFixed(1)} actual=${hShrunk.toFixed(1)})`
         ).toBeLessThanOrEqual(CLAMP_TOL)
-        expect(Math.abs(hShrunk - h0), 'final dragged height is distinct from default').toBeGreaterThanOrEqual(30)
+        expect(Math.abs(hShrunk - h0), 'final dragged height is distinct from adaptive open').toBeGreaterThanOrEqual(30)
       }
     })
 
-    const hCommitted = await test.step('keyboard arrows/Home/End adjust height', async () => {
+    await test.step('keyboard arrows/Home/End adjust height', async () => {
       const handle = resizeHandle(editorArea)
       await handle.evaluate((el) => (el as HTMLElement).focus())
       const focused = await page.evaluate(() =>
@@ -1152,19 +1204,19 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         type: 'cme-resize-keyboard',
         description: `kb=${Math.round(hKb)} up=${Math.round(hUp)} down=${Math.round(hDown)} home=${Math.round(hHome)} end=${Math.round(hEnd)}`
       })
-      return hEnd
     })
 
-    await test.step('readonly storage scan (gestures created the value)', async () => {
-      // The exact persistence key stays a private production helper: never
-      // hardcoded, never written here — gestures above created the value.
+    await test.step('no height persistence is written (session-only by design)', async () => {
+      // The editor height is session-only: gestures above must not leave a
+      // persisted height behind. Scan renderer-local storage for any
+      // message-editor height key and require its absence.
       const matchingKeys: string[] = await page
         .evaluate(() => {
           try {
             const out: string[] = []
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i)
-              if (k && /editor|height|resize|message/i.test(k)) out.push(k)
+              if (k && /message-editor|message\.editor/i.test(k)) out.push(k)
             }
             return out
           } catch {
@@ -1174,11 +1226,24 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         .catch(() => [])
       test.info().annotations.push({
         type: 'cme-resize-storage',
-        description: `renderer-local keys matching editor/height/resize/message: ${matchingKeys.join(',') || 'none-visible'}`
+        description: `renderer-local message-editor keys after gestures: ${matchingKeys.join(',') || 'none (session-only)'}`
       })
+      expect(matchingKeys, 'no message-editor height may be persisted').toEqual([])
     })
 
-    await test.step('Cancel keeps content; reopen restores the committed height', async () => {
+    await test.step('Cancel keeps content; reopen resets to the adaptive height', async () => {
+      // Stage a manual height distinct from the adaptive open height: Home
+      // goes to the single one-line floor while the long draft adapts near
+      // the 52vh maximum, so reset is observable (not an accidental equality).
+      const handle = resizeHandle(editorArea)
+      await handle.evaluate((el) => (el as HTMLElement).focus())
+      await page.keyboard.press('Home')
+      await page.waitForTimeout(300)
+      const hManual = await surfaceHeight(editorArea)
+      expect(
+        Math.abs(hManual - h0),
+        `one-line floor (${Math.round(hManual)}) must be distinct from the adaptive open height (${Math.round(h0)})`
+      ).toBeGreaterThanOrEqual(30)
       const actionBar = editorArea.locator('[data-interaction-region="message-controls"]')
       await expect(actionBar, 'editor action bar must render').toBeVisible()
       const cancelBtn = actionBar.locator('button:not(.message-editor-save-btn):not(.message-editor-resend-btn)')
@@ -1197,14 +1262,25 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
       expect(stored, 'resize-only flow must not rewrite stored content').toBe(seeded.originalContent)
       const reopened = await openAssistantEditor(page, seeded.assistantMsgId)
       const hReopened = await surfaceHeight(reopened.editorArea)
-      expect(Math.abs(hReopened - hCommitted), 'reopened editor remembers the committed height').toBeLessThanOrEqual(8)
+      test.info().annotations.push({
+        type: 'cme-resize-reopen',
+        description: `adaptive-open=${Math.round(h0)} manual=${Math.round(hManual)} reopened=${Math.round(hReopened)}`
+      })
+      // Same content reopens adaptive: the closed session leaves nothing
+      // behind, so the reopened height returns to the adaptive open height —
+      // never the staged manual height.
+      expect(Math.abs(hReopened - h0), 'reopened editor resets to the adaptive height').toBeLessThanOrEqual(8)
+      expect(
+        Math.abs(hReopened - hManual),
+        'reopened editor must not restore the closed session manual height'
+      ).toBeGreaterThanOrEqual(30)
       // Close the reopened editor so the relaunch starts from a clean state.
       const reopenBar = reopened.editorArea.locator('[data-interaction-region="message-controls"]')
       await reopenBar.locator('button:not(.message-editor-save-btn):not(.message-editor-resend-btn)').click()
       await expect(reopened.editorArea, 'reopened editor must close after Cancel').not.toBeVisible({ timeout: 10000 })
     })
 
-    await test.step('same-profile relaunch remembers the committed height', async () => {
+    await test.step('same-profile relaunch resets to the adaptive height', async () => {
       await electronApp.close()
       const relaunched = await relaunchSameProfile({ userDataDir, ownedTmpRoot, mockPort })
       try {
@@ -1215,11 +1291,11 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         const hRelaunched = await surfaceHeight(opened2.editorArea)
         test.info().annotations.push({
           type: 'cme-resize-relaunch',
-          description: `committed=${Math.round(hCommitted)} relaunched=${Math.round(hRelaunched)}`
+          description: `adaptive-open=${Math.round(h0)} relaunched=${Math.round(hRelaunched)}`
         })
-        expect(Math.abs(hRelaunched - hCommitted), 'relaunched app remembers the committed height').toBeLessThanOrEqual(
-          16
-        )
+        // No height survives a relaunch: the fresh session measures the same
+        // unchanged content back to the adaptive open height.
+        expect(Math.abs(hRelaunched - h0), 'relaunched app resets to the adaptive height').toBeLessThanOrEqual(16)
       } finally {
         await closeElectronWithExactCleanup(userDataDir, {
           close: () => relaunched.app.close(),
@@ -1228,6 +1304,311 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         })
       }
     })
+  })
+
+  test('short top-of-viewport message opens adaptive and grows/shrinks with edits', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CODEMIRROR ADAPTIVE HEIGHT (INTEGRATED): a short assistant draft at the top of the viewport opens small (1–2 lines plus padding, fully visible — never hidden by the edit-open layout change), grows with real typing up to the 52vh maximum, shrinks back when content is deleted, and keeps the caret usable (appended input saves exactly through Main).'
+    })
+    const page: Page = mainWindow
+    const tag = `cma-${Date.now().toString(36)}`
+    const shortContent = `short answer ${tag}`
+    const seeded = await test.step('seed short assistant draft and activate route', async () =>
+      seedLongAssistantDraft(page, tag, { assistantContent: shortContent }))
+    const { editorArea } = await test.step('open assistant editor and prove CodeMirror mount', async () =>
+      openAssistantEditor(page, seeded.assistantMsgId))
+
+    const hShort = await test.step('short draft opens small and fully visible', async () => {
+      const h = await surfaceHeight(editorArea)
+      const gap = await inputBottomGap(editorArea)
+      const winH: number = await page.evaluate(() => window.innerHeight)
+      test.info().annotations.push({
+        type: 'cme-adaptive-short',
+        description: `short surface=${Math.round(h)} gap=${Number.isFinite(gap) ? gap.toFixed(1) : 'NaN'} winH=${Math.round(winH)} max52vh=${Math.round(winH * 0.52)}`
+      })
+      // Single one-line floor (messageEditorHeight.ts): one rendered text
+      // line plus normal padding/slack — never a large empty input area.
+      expect(h, 'short draft opens at the one-line floor').toBeLessThanOrEqual(64)
+      expect(h, 'short draft surface covers its rendered line').toBeGreaterThanOrEqual(24)
+      // The reported-tall-input oracle: the input-region bottom sits within
+      // normal padding/one-line slack of the rendered text. A ~70px gap like
+      // the reported failure never passes; NaN (unreadable DOM) never passes.
+      expect(Number.isNaN(gap), 'input-region gap must be measurable').toBe(false)
+      expect(gap, 'one-line input keeps only normal slack below the text').toBeLessThanOrEqual(32)
+      // Open visibility: the whole editor surface stays inside the #messages
+      // viewport — short content near the top is never hidden by edit-open.
+      const containerBox = await page.locator('#messages').first().boundingBox()
+      const surfaceBox = await resizeSurface(editorArea).boundingBox()
+      expect(containerBox, '#messages must have geometry').not.toBeNull()
+      expect(surfaceBox, 'resize surface must have geometry').not.toBeNull()
+      expect(surfaceBox!.y, 'surface top stays inside the viewport').toBeGreaterThanOrEqual(containerBox!.y - 4)
+      expect(surfaceBox!.y + surfaceBox!.height, 'surface bottom stays inside the viewport').toBeLessThanOrEqual(
+        containerBox!.y + containerBox!.height + 4
+      )
+      return h
+    })
+
+    await test.step('real typing grows the surface up to the 52vh maximum', async () => {
+      const growth = Array.from({ length: 40 }, (_, i) => `grown body line ${i} ${tag}`).join('\n')
+      await appendEditorText(page, editorArea, `\n${growth}`)
+      await page.waitForFunction(
+        (min: number) => {
+          const el = document.querySelector('[data-testid="message-editor-resize-surface"]') as HTMLElement | null
+          return (el?.getBoundingClientRect().height ?? 0) > min
+        },
+        hShort + 100,
+        { timeout: 10000 }
+      )
+      const hGrown = await surfaceHeight(editorArea)
+      const winH: number = await page.evaluate(() => window.innerHeight)
+      test.info().annotations.push({
+        type: 'cme-adaptive-grown',
+        description: `short=${Math.round(hShort)} grown=${Math.round(hGrown)} max52vh=${Math.round(winH * 0.52)}`
+      })
+      expect(hGrown, 'continuous input growth enlarges the surface').toBeGreaterThan(hShort + 100)
+      expect(hGrown, 'grown surface never exceeds the 52vh maximum').toBeLessThanOrEqual(winH * 0.52 + 2)
+    })
+
+    await test.step('deleting back to a short draft shrinks the surface', async () => {
+      const hGrown = await surfaceHeight(editorArea)
+      await replaceEditorContent(page, editorArea, 'tiny')
+      await page.waitForFunction(
+        (max: number) => {
+          const el = document.querySelector('[data-testid="message-editor-resize-surface"]') as HTMLElement | null
+          return (el?.getBoundingClientRect().height ?? Number.MAX_SAFE_INTEGER) < max
+        },
+        hGrown - 100,
+        { timeout: 10000 }
+      )
+      const hShrunk = await surfaceHeight(editorArea)
+      const shrunkGap = await inputBottomGap(editorArea)
+      test.info().annotations.push({
+        type: 'cme-adaptive-shrunk',
+        description: `grown=${Math.round(hGrown)} shrunk=${Math.round(hShrunk)} gap=${Number.isFinite(shrunkGap) ? shrunkGap.toFixed(1) : 'NaN'}`
+      })
+      expect(hShrunk, 'deleting content shrinks the surface').toBeLessThan(hGrown - 100)
+      expect(hShrunk, 'shrunk surface returns to the one-line floor').toBeLessThanOrEqual(64)
+      expect(Number.isNaN(shrunkGap), 'shrunk input-region gap must be measurable').toBe(false)
+      expect(shrunkGap, 'shrunk one-line input keeps only normal slack below the text').toBeLessThanOrEqual(32)
+    })
+
+    await test.step('caret stays usable after growth: appended input saves exactly', async () => {
+      await replaceEditorContent(page, editorArea, shortContent)
+      await appendEditorText(page, editorArea, '-tail')
+      const saveBtn = editorArea.locator('.message-editor-save-btn')
+      await expect(saveBtn, 'save button must render').toBeVisible()
+      await saveBtn.click()
+      await expect(editorArea, 'editor closes only after persistence succeeds').not.toBeVisible({ timeout: 15000 })
+      const stored = await page.evaluate(
+        ({ msgId }: { msgId: string }) => {
+          const s = (window as unknown as { store: { getState: () => any } }).store.getState()
+          const msg = s.messages?.entities?.[msgId]
+          const blockId: string = msg?.blocks?.[0] ?? ''
+          return blockId ? ((s.messageBlocks?.entities?.[blockId]?.content as string) ?? null) : null
+        },
+        { msgId: seeded.assistantMsgId }
+      )
+      expect(stored, 'appended caret input must save exactly').toBe(`${shortContent}-tail`)
+    })
+
+    await test.step('adaptive short below the old manual floor: pointerdown and first moves do not jump', async () => {
+      // Single-resolver regression: the reopened one-line draft sits far
+      // below any historical manual floor, so pointerdown plus the first
+      // small movements must render continuously from the displayed height —
+      // never jump tall — and the release commits the displayed final
+      // effective height. A no-motion click stays adaptive.
+      const reopened = await openAssistantEditor(page, seeded.assistantMsgId)
+      const area = reopened.editorArea
+      const hAdapt = await surfaceHeight(area)
+      expect(hAdapt, 'reopened one-line draft returns to the one-line floor').toBeLessThanOrEqual(64)
+      const handle = resizeHandle(area)
+      const box = await handle.boundingBox()
+      expect(box, 'resize handle must have geometry').not.toBeNull()
+      const cx = box!.x + box!.width / 2
+      const cy = box!.y + box!.height / 2
+      const gate = await probeResizeHandleHit(page, cx, cy)
+      expect(gate.hit, `pointer gesture must start on the handle (got ${gate.describe})`).toBe(true)
+      await page.mouse.move(cx, cy)
+      // No-motion click: down + up at the same point commits nothing.
+      await page.mouse.down()
+      await page.waitForTimeout(250)
+      const hAtDown = await surfaceHeight(area)
+      expect(
+        Math.abs(hAtDown - hAdapt),
+        'pointerdown alone never jumps (one resolver, same displayed height)'
+      ).toBeLessThanOrEqual(4)
+      await page.mouse.up()
+      await page.waitForTimeout(250)
+      const hClick = await surfaceHeight(area)
+      expect(Math.abs(hClick - hAdapt), 'no-motion click stays adaptive (nothing committed)').toBeLessThanOrEqual(4)
+      // First small movement: continuous from the displayed height.
+      await page.mouse.down()
+      try {
+        await page.waitForTimeout(150)
+        await page.mouse.move(cx, cy - 10, { steps: 3 })
+        await page.waitForTimeout(250)
+        const hFirst = await surfaceHeight(area)
+        test.info().annotations.push({
+          type: 'cme-adaptive-nojump',
+          description: `adapt=${Math.round(hAdapt)} atDown=${Math.round(hAtDown)} click=${Math.round(hClick)} first=${Math.round(hFirst)}`
+        })
+        expect(hFirst - hAdapt, 'first small upward move grows continuously').toBeGreaterThan(2)
+        expect(hFirst - hAdapt, 'first small move never jumps to a manual floor').toBeLessThanOrEqual(20)
+        await page.mouse.up()
+        await page.waitForTimeout(300)
+        const hFinal = await surfaceHeight(area)
+        test.info().annotations.push({
+          type: 'cme-adaptive-njump-final',
+          description: `final=${Math.round(hFinal)}`
+        })
+        expect(
+          Math.abs(hFinal - hFirst),
+          'release commits the displayed final effective height (no snapback)'
+        ).toBeLessThanOrEqual(6)
+        expect(hFinal, 'committed height stays near the one-line floor (no manual-floor jump)').toBeLessThan(120)
+      } finally {
+        await page.mouse.up().catch(() => {})
+      }
+      // Manual is session-only: Cancel + reopen resets to the adaptive height.
+      const actionBar = area.locator('[data-interaction-region="message-controls"]')
+      const cancelBtn = actionBar.locator('button:not(.message-editor-save-btn):not(.message-editor-resend-btn)')
+      await expect(cancelBtn, 'cancel control must render in the action bar').toBeVisible({ timeout: 10000 })
+      await cancelBtn.click()
+      await expect(area, 'editor must close after Cancel').not.toBeVisible({ timeout: 10000 })
+      const again = await openAssistantEditor(page, seeded.assistantMsgId)
+      const hAgain = await surfaceHeight(again.editorArea)
+      test.info().annotations.push({
+        type: 'cme-adaptive-reopen',
+        description: `adapt=${Math.round(hAdapt)} reopened=${Math.round(hAgain)}`
+      })
+      expect(Math.abs(hAgain - hAdapt), 'reopened editor resets to the adaptive height').toBeLessThanOrEqual(8)
+      const againBar = again.editorArea.locator('[data-interaction-region="message-controls"]')
+      await againBar.locator('button:not(.message-editor-save-btn):not(.message-editor-resend-btn)').click()
+      await expect(again.editorArea, 'reopened editor must close after Cancel').not.toBeVisible({ timeout: 10000 })
+    })
+  })
+
+  test('pointer release outside the editor commits the final height with no snapback', async ({ mainWindow }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CODEMIRROR OUTSIDE-RELEASE (INTEGRATED): a real drag from the top-edge handle whose pointerup lands well below/outside the editor surface commits the last displayed height — the surface never snaps back to the pre-drag height.'
+    })
+    const page: Page = mainWindow
+    const tag = `cmo-${Date.now().toString(36)}`
+    const seeded = await test.step('seed long assistant draft and activate route', async () =>
+      seedLongAssistantDraft(page, tag, { fillerPairs: 3 }))
+    const { editorArea } = await test.step('open assistant editor and prove CodeMirror mount', async () =>
+      openAssistantEditor(page, seeded.assistantMsgId))
+
+    const h0 = await surfaceHeight(editorArea)
+    await test.step('genuine-wheel placement onto the unoccluded handle', async () => {
+      await ensureEditorHandleUnoccluded(page, editorArea, 'cme-outside')
+    })
+    // Settle, then recapture every geometry baseline AFTER the intentional
+    // reposition — never gesture from a pre-reposition point.
+    await page.waitForTimeout(200)
+    const handle = resizeHandle(editorArea)
+    const box = await handle.boundingBox()
+    if (!box) throw new Error('resize handle has no geometry')
+    const cx = box.x + box.width / 2
+    const cy = box.y + box.height / 2
+    const gate = await probeResizeHandleHit(page, cx, cy)
+    expect(gate.hit, `pointer gesture must start on the handle (got ${gate.describe})`).toBe(true)
+
+    // Drag toward the side with real room (the long draft opens adaptive near
+    // the 52vh maximum, so upward from there would clamp): the leg stays
+    // honestly unclamped with a 16px margin, then the pointer moves to a
+    // point clearly OUTSIDE the editor surface and releases there. The up
+    // event lands outside the editor, and the committed height must equal the
+    // last displayed height — never the pre-drag height.
+    const winH: number = await page.evaluate(() => window.innerHeight)
+    const prodMax = Math.max(40, Math.floor(winH * 0.52))
+    const prodMin = Math.min(40, prodMax)
+    const roomDown = h0 - prodMin
+    const roomUp = prodMax - h0
+    const dir = roomDown >= roomUp ? 1 : -1
+    const amp = Math.min(120, (dir === 1 ? roomDown : roomUp) - 16)
+    expect(amp, 'the chosen drag direction must keep 16px clamp margins').toBeGreaterThanOrEqual(56)
+    test.info().annotations.push({
+      type: 'cme-outside-leg',
+      description: `start=${Math.round(h0)} winH=${Math.round(winH)} min=${prodMin} max=${prodMax} dir=${dir === 1 ? 'down' : 'up'} amp=${Math.round(amp)}`
+    })
+    await page.mouse.move(cx, cy)
+    await page.mouse.down()
+    try {
+      const steps = 10
+      for (let i = 1; i <= steps; i++) {
+        await page.mouse.move(cx, cy + (dir * amp * i) / steps, { steps: 2 })
+        await page.evaluate(
+          () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+        )
+      }
+      const hLeg = await surfaceHeight(editorArea)
+      expect(Math.abs(hLeg - h0), 'drag leg moves the surface unclamped').toBeGreaterThan(40)
+      // Release point clearly OUTSIDE the post-leg surface but inside the
+      // window: continue the leg direction when that side fits (the proof
+      // never silently clamps), else take whichever side fits and note it.
+      const legBox = await resizeSurface(editorArea).boundingBox()
+      if (!legBox) throw new Error('resize surface lost geometry mid-gesture')
+      const viewport = await viewportSize(page)
+      const belowY = legBox.y + legBox.height + 80
+      const aboveY = legBox.y - 80
+      const belowOk = belowY <= viewport.height - 10
+      const aboveOk = aboveY >= 10
+      let releaseY = 0
+      let continuesDir = true
+      if (dir === 1) {
+        if (belowOk) releaseY = belowY
+        else if (aboveOk) {
+          releaseY = aboveY
+          continuesDir = false
+        } else throw new Error('no in-window outside release point (surface fills the window)')
+      } else {
+        if (aboveOk) releaseY = aboveY
+        else if (belowOk) {
+          releaseY = belowY
+          continuesDir = false
+        } else throw new Error('no in-window outside release point (surface fills the window)')
+      }
+      expect(
+        releaseY < legBox.y || releaseY > legBox.y + legBox.height,
+        'release point must land outside the surface bounds'
+      ).toBe(true)
+      await page.mouse.move(cx, releaseY, { steps: 6 })
+      await page.waitForTimeout(300)
+      const hOutside = await surfaceHeight(editorArea)
+      test.info().annotations.push({
+        type: 'cme-outside-release',
+        description: `start=${Math.round(h0)} leg=${Math.round(hLeg)} outside=${Math.round(hOutside)} releaseY=${Math.round(releaseY)} continuesDir=${continuesDir}`
+      })
+      await page.mouse.up()
+      await page.waitForTimeout(300)
+      const hFinal = await surfaceHeight(editorArea)
+      test.info().annotations.push({
+        type: 'cme-outside-release-final',
+        description: `final=${Math.round(hFinal)}`
+      })
+      expect(
+        Math.abs(hFinal - hOutside),
+        'outside/below-editor release commits the final displayed height (no snapback)'
+      ).toBeLessThanOrEqual(4)
+      // The release move continues the leg direction, so the committed
+      // height stays away from the pre-drag height (fallback side skips this:
+      // the commit proof above is the contract).
+      if (continuesDir) {
+        if (dir === 1) {
+          expect(hFinal, 'committed height differs from the pre-drag height').toBeLessThan(h0 - 20)
+        } else {
+          expect(hFinal, 'committed height differs from the pre-drag height').toBeGreaterThan(h0 + 20)
+        }
+      }
+    } finally {
+      // Release the button if an assertion above threw mid-gesture.
+      await page.mouse.up().catch(() => {})
+    }
   })
 
   test('same-press resize reversal keeps the bottom pinned while the top tracks both legs', async ({ mainWindow }) => {
@@ -1357,8 +1738,8 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
       const handle = resizeHandle(editorArea)
       await handle.evaluate((el) => (el as HTMLElement).focus())
       const winH: number = await page.evaluate(() => window.innerHeight)
-      const prodMax = Math.max(160, Math.floor(winH * 0.52))
-      const prodMin = Math.min(220, prodMax)
+      const prodMax = Math.max(40, Math.floor(winH * 0.52))
+      const prodMin = Math.min(40, prodMax)
       const range = prodMax - prodMin
       expect(
         range,
@@ -2528,6 +2909,40 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         expect(redoBox, 'redo must have geometry').not.toBeNull()
         expect(expandBox!.x, 'expand sits far-right of redo').toBeGreaterThan(redoBox!.x)
         expect(expandBox!.x, 'expand does not overlap redo').toBeGreaterThanOrEqual(redoBox!.x + redoBox!.width - 2)
+        // Markup grouping (never forced positioning): undo/redo + divider live
+        // inside the left scrollable tools group near search; the right end
+        // group owns ONLY expand.
+        const grouping = await editorArea.evaluate((area) => {
+          const q = (tid: string) => area.querySelector(`[data-testid="${tid}"]`) as HTMLElement | null
+          const tools = area.querySelector('[data-testid="message-editor-tools-scroll"]') as HTMLElement | null
+          const has = (el: HTMLElement | null) => !!el
+          const inside = (tid: string) => !!tools && !!q(tid) && tools.contains(q(tid))
+          const expand = q('message-editor-expand-btn')
+          // The toolbar button's direct parent is the end group itself: antd
+          // Tooltip clones the enabled button with no wrapper DOM (and the
+          // component-test mock renders a fragment), so one level up is the
+          // group — two levels up is the shared toolbar root that owns every
+          // control and must never be mistaken for the end group.
+          const endGroup = expand?.parentElement ?? null
+          return {
+            hasTools: has(tools),
+            undoInTools: inside('message-editor-undo-btn'),
+            redoInTools: inside('message-editor-redo-btn'),
+            dividerInTools: inside('message-editor-history-separator'),
+            searchInTools: inside('message-editor-find-btn'),
+            expandInTools: inside('message-editor-expand-btn'),
+            endOwnsUndo: !!endGroup?.querySelector('[data-testid="message-editor-undo-btn"]'),
+            endOwnsRedo: !!endGroup?.querySelector('[data-testid="message-editor-redo-btn"]')
+          }
+        })
+        expect(grouping.hasTools, 'tools scroll group must exist').toBe(true)
+        expect(grouping.searchInTools, 'search stays in the left tools group').toBe(true)
+        expect(grouping.undoInTools, 'undo sits left in the tools group near search').toBe(true)
+        expect(grouping.redoInTools, 'redo sits left in the tools group near search').toBe(true)
+        expect(grouping.dividerInTools, 'history divider sits in the left tools group').toBe(true)
+        expect(grouping.expandInTools, 'expand never joins the tools group').toBe(false)
+        expect(grouping.endOwnsUndo, 'right end group owns no undo').toBe(false)
+        expect(grouping.endOwnsRedo, 'right end group owns no redo').toBe(false)
         const ariaLabels: string[] = await editorArea.evaluate((area) =>
           Array.from(area.querySelectorAll('button')).map((b) => b.getAttribute('aria-label') ?? '')
         )
@@ -3351,6 +3766,55 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
         expect(hit, 'expand still hit-tests after tools scroll').toBe(true)
       })
 
+      await test.step('undo/redo stay left near search with expand alone far-right at 960', async () => {
+        const undoBtn = editorArea.locator('[data-testid="message-editor-undo-btn"]')
+        const redoBtn = editorArea.locator('[data-testid="message-editor-redo-btn"]')
+        const searchBtn = editorArea.locator('[data-testid="message-editor-find-btn"]')
+        for (const [btn, name] of [
+          [undoBtn, 'undo'],
+          [redoBtn, 'redo'],
+          [searchBtn, 'search']
+        ] as const) {
+          await expect(btn, `${name} must render at 960`).toBeVisible({ timeout: 10000 })
+        }
+        const grouping = await editorArea.evaluate((area) => {
+          const q = (tid: string) => area.querySelector(`[data-testid="${tid}"]`) as HTMLElement | null
+          const tools = area.querySelector('[data-testid="message-editor-tools-scroll"]') as HTMLElement | null
+          const inside = (tid: string) => !!tools && !!q(tid) && tools.contains(q(tid))
+          const expand = q('message-editor-expand-btn')
+          // The toolbar button's direct parent is the end group itself: antd
+          // Tooltip clones the enabled button with no wrapper DOM (and the
+          // component-test mock renders a fragment), so one level up is the
+          // group — two levels up is the shared toolbar root that owns every
+          // control and must never be mistaken for the end group.
+          const endGroup = expand?.parentElement ?? null
+          return {
+            undoInTools: inside('message-editor-undo-btn'),
+            redoInTools: inside('message-editor-redo-btn'),
+            expandInTools: inside('message-editor-expand-btn'),
+            endOwnsUndo: !!endGroup?.querySelector('[data-testid="message-editor-undo-btn"]'),
+            endOwnsRedo: !!endGroup?.querySelector('[data-testid="message-editor-redo-btn"]')
+          }
+        })
+        expect(grouping.undoInTools, 'undo stays left in tools at 960').toBe(true)
+        expect(grouping.redoInTools, 'redo stays left in tools at 960').toBe(true)
+        expect(grouping.expandInTools, 'expand never joins tools at 960').toBe(false)
+        expect(grouping.endOwnsUndo, 'right group owns no undo at 960').toBe(false)
+        expect(grouping.endOwnsRedo, 'right group owns no redo at 960').toBe(false)
+        const undoBox = await undoBtn.boundingBox()
+        const redoBox = await redoBtn.boundingBox()
+        const searchBox = await searchBtn.boundingBox()
+        const expandBox = await expandBtn.boundingBox()
+        expect(undoBox && redoBox && searchBox && expandBox, 'toolbar buttons must have geometry at 960').not.toBeNull()
+        expect(undoBox!.x, 'undo sits right of search (near, left group)').toBeGreaterThan(searchBox!.x)
+        expect(redoBox!.x, 'redo sits right of undo (near, left group)').toBeGreaterThan(undoBox!.x)
+        expect(expandBox!.x, 'expand sits far-right of redo at 960').toBeGreaterThan(redoBox!.x)
+        test.info().annotations.push({
+          type: 'cme-narrow-960-grouping',
+          description: `search.x=${Math.round(searchBox!.x)} undo.x=${Math.round(undoBox!.x)} redo.x=${Math.round(redoBox!.x)} expand.x=${Math.round(expandBox!.x)}`
+        })
+      })
+
       await test.step('both toolbar ends answer real keyboard focus and Enter', async () => {
         await expectMode(editorArea, 'source')
         await modeToggle(editorArea).focus()
@@ -3388,5 +3852,160 @@ test.describe('CodeMirror message editor — long assistant draft contract', () 
           .catch(() => {})
       }
     }
+  })
+
+  test('expanded short message fills the fixed window and collapse preserves inline height/text/history', async ({
+    mainWindow
+  }) => {
+    test.info().annotations.push({
+      type: 'evidence-tier',
+      description:
+        'CODEMIRROR EXPANDED SHORT FILL (INTEGRATED): a one-line assistant draft opens compact inline, expands into the independent fixed modal window (never the inline adaptive height — modal fills the original bounded height with internal CodeMirror scrolling even for short text, preview fills too), and collapse returns the approved inline session height with text/history intact. Toolbar keeps undo/redo left near search with expand alone far-right in the modal too. Real UI gestures only.'
+    })
+    const page: Page = mainWindow
+    const tag = `cmf-${Date.now().toString(36)}`
+    const shortContent = `short fill ${tag}`
+    const seeded = await test.step('seed short assistant draft and activate route', async () =>
+      seedLongAssistantDraft(page, tag, { assistantContent: shortContent }))
+    const { editorArea } = await test.step('open assistant editor and prove CodeMirror mount', async () =>
+      openAssistantEditor(page, seeded.assistantMsgId))
+
+    const hInline = await test.step('short draft opens compact inline', async () => {
+      const h = await surfaceHeight(editorArea)
+      const gap = await inputBottomGap(editorArea)
+      test.info().annotations.push({
+        type: 'cme-shortfill-inline',
+        description: `inline=${Math.round(h)} gap=${Number.isFinite(gap) ? gap.toFixed(1) : 'NaN'}`
+      })
+      expect(h, 'one-line draft opens compact at the one-line floor').toBeLessThanOrEqual(64)
+      expect(Number.isNaN(gap), 'inline gap must be measurable').toBe(false)
+      expect(gap, 'compact input keeps only normal slack').toBeLessThanOrEqual(32)
+      return h
+    })
+
+    // Stage a session edit so history preservation is observable after the
+    // expand/collapse round trip (real input enables native undo).
+    await test.step('stage real input to arm native history', async () => {
+      await appendEditorText(page, editorArea, '-tail')
+      await expect(cmContent(editorArea)).toContainText(`${shortContent}-tail`, { timeout: 10000 })
+      await expect(
+        editorArea.locator('[data-testid="message-editor-undo-btn"]'),
+        'undo arms after real input'
+      ).toBeEnabled({ timeout: 10000 })
+    })
+    const hSession = await surfaceHeight(editorArea)
+
+    await test.step('expand fills the fixed window (never the compact adaptive height)', async () => {
+      await editorArea.locator('[data-testid="message-editor-expand-btn"]').click()
+      const modal = page.locator('[data-testid="message-editor-expanded"]')
+      await expect(modal, 'expanded modal root must render').toBeVisible({ timeout: 10000 })
+      const viewport = await viewportSize(page)
+      const modalBox = await modal.boundingBox()
+      expect(modalBox, 'expanded modal must have geometry').not.toBeNull()
+      // Independent meaning: the fixed window holds ~72vh even for one-line
+      // text — never sized down to the compact inline height.
+      expect(modalBox!.height, 'short-text modal still fills the fixed window height').toBeGreaterThanOrEqual(
+        viewport.height * 0.6
+      )
+      expect(modalBox!.height).toBeLessThanOrEqual(viewport.height * 0.95)
+      expect(
+        modalBox!.height,
+        `modal height (${Math.round(modalBox!.height)}) dwarfs the compact inline height (${Math.round(hSession)})`
+      ).toBeGreaterThan(hSession + 150)
+      // Modal body fills with internal scrolling (source): the editing wrapper
+      // spans the body height, the scroller has a real client height.
+      const bodyFill = await modal
+        .evaluate((root) => {
+          const r = root as HTMLElement
+          const editing = r.querySelector('.editing-message') as HTMLElement | null
+          const scroller = r.querySelector('.editing-message .cm-scroller') as HTMLElement | null
+          if (!editing || !scroller) return null
+          const rb = r.getBoundingClientRect()
+          const eb = editing.getBoundingClientRect()
+          return {
+            rootH: rb.height,
+            editingH: eb.height,
+            scrollerCh: scroller.clientHeight,
+            scrollerSh: scroller.scrollHeight,
+            scrollerTop: scroller.scrollTop
+          }
+        })
+        .catch(() => null)
+      expect(bodyFill, 'modal body geometry must be readable').not.toBeNull()
+      expect(bodyFill!.editingH, 'editing wrapper fills the modal body for short text').toBeGreaterThan(
+        bodyFill!.rootH * 0.4
+      )
+      expect(bodyFill!.scrollerCh, 'modal scroller has a real client height for short text').toBeGreaterThan(0)
+      expect(bodyFill!.scrollerSh, 'modal scroller scroll plane exists').toBeGreaterThanOrEqual(bodyFill!.scrollerCh)
+      // Preview fills the modal too.
+      await modeToggle(modal).click()
+      await expect(modeToggle(modal), 'modal preview mode engages').toHaveAttribute('data-mode', 'preview')
+      await expect(modal).toContainText(shortContent, { timeout: 10000 })
+      const previewFill = await modal
+        .evaluate((root) => {
+          const r = root as HTMLElement
+          const md = r.querySelector('p.markdown, div.markdown') as HTMLElement | null
+          const plane = md?.parentElement ?? null
+          if (!plane) return null
+          const rb = r.getBoundingClientRect()
+          const pb = (plane as HTMLElement).getBoundingClientRect()
+          return { rootH: rb.height, planeH: pb.height, planeCh: (plane as HTMLElement).clientHeight }
+        })
+        .catch(() => null)
+      expect(previewFill, 'preview plane geometry must be readable').not.toBeNull()
+      expect(previewFill!.planeH, 'preview fills the modal body for short text').toBeGreaterThan(
+        previewFill!.rootH * 0.4
+      )
+      await modeToggle(modal).click()
+      await expect(modeToggle(modal), 'modal returns to source').toHaveAttribute('data-mode', 'source')
+      // Modal toolbar keeps the same grouping: undo/redo left, collapse alone.
+      const modalGrouping = await modal.evaluate((root) => {
+        const r = root as HTMLElement
+        const q = (tid: string) => r.querySelector(`[data-testid="${tid}"]`) as HTMLElement | null
+        const tools = r.querySelector('[data-testid="message-editor-tools-scroll"]') as HTMLElement | null
+        const inside = (tid: string) => !!tools && !!q(tid) && tools.contains(q(tid))
+        const collapse = q('message-editor-collapse-btn')
+        // Same one-level rule as the inline toolbar: the direct parent is
+        // the modal end group (no Tooltip wrapper DOM around enabled buttons).
+        const endGroup = collapse?.parentElement ?? null
+        const undoBox = q('message-editor-undo-btn')?.getBoundingClientRect() ?? null
+        const collapseBox = collapse?.getBoundingClientRect() ?? null
+        return {
+          undoInTools: inside('message-editor-undo-btn'),
+          collapseInTools: inside('message-editor-collapse-btn'),
+          endOwnsUndo: !!endGroup?.querySelector('[data-testid="message-editor-undo-btn"]'),
+          undoX: undoBox?.x ?? -1,
+          collapseX: collapseBox?.x ?? -1
+        }
+      })
+      expect(modalGrouping.undoInTools, 'modal undo stays left in tools').toBe(true)
+      expect(modalGrouping.collapseInTools, 'collapse never joins tools').toBe(false)
+      expect(modalGrouping.endOwnsUndo, 'modal right group owns no undo').toBe(false)
+      expect(modalGrouping.collapseX, 'modal collapse sits far-right of undo').toBeGreaterThan(modalGrouping.undoX)
+      test.info().annotations.push({
+        type: 'cme-shortfill-modal',
+        description: `modal=${Math.round(modalBox!.width)}x${Math.round(modalBox!.height)} inline=${Math.round(hSession)} editingH=${Math.round(bodyFill!.editingH)} scrollerCh=${Math.round(bodyFill!.scrollerCh)}`
+      })
+    })
+
+    await test.step('collapse preserves the inline session height, text and history', async () => {
+      const modal = page.locator('[data-testid="message-editor-expanded"]')
+      await modal.locator('[data-testid="message-editor-collapse-btn"]').click()
+      await expect(modal, 'collapse closes the expansion').not.toBeVisible({ timeout: 10000 })
+      const cm = cmContent(editorArea)
+      await expect(cm, 'inline editor remounts after collapse').toBeVisible({ timeout: 10000 })
+      await expect(cm).toContainText(`${shortContent}-tail`, { timeout: 10000 })
+      const hAfter = await surfaceHeight(editorArea)
+      test.info().annotations.push({
+        type: 'cme-shortfill-collapse',
+        description: `session=${Math.round(hSession)} after=${Math.round(hAfter)} inline-open=${Math.round(hInline)}`
+      })
+      expect(Math.abs(hAfter - hSession), 'collapsed inline returns the approved session height').toBeLessThanOrEqual(6)
+      await expect(
+        editorArea.locator('[data-testid="message-editor-undo-btn"]'),
+        'history survives expand->collapse'
+      ).toBeEnabled({ timeout: 10000 })
+      expect(hAfter, 'session height owns the collapsed surface').toBeGreaterThanOrEqual(hInline)
+    })
   })
 })

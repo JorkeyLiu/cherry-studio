@@ -271,7 +271,10 @@ const CodeEditorImpl = ({
       initialState={historyInitialState}
       onCreateEditor={(view: EditorView) => {
         editorViewRef.current = view
-        onHeightChange?.(view.scrollDOM?.scrollHeight ?? 0)
+        // Natural content height (see useHeightListener): the scroller
+        // scrollHeight would report the clamped viewport when content is
+        // shorter than the surface, which is useless for adaptive sizing.
+        onHeightChange?.(view.contentHeight ?? 0)
         try {
           // Always sync depths on mount: a restored session remounts with a
           // non-empty history, a fresh mount with an empty one. Either way

@@ -9,10 +9,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { toggleBold } from '../messageEditorFormatting'
 import {
+  estimateMessageEditorAutoHeight,
   getMessageEditorHeightBounds,
-  MESSAGE_EDITOR_HEIGHT_STORAGE_KEY,
-  resolveMessageEditorDisplayHeight,
-  writeMessageEditorHeight
+  MESSAGE_EDITOR_HEIGHT_MIN,
+  resolveMessageEditorHeight
 } from '../messageEditorHeight'
 
 const mocks = vi.hoisted(() => ({
@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
     setScroll: (value: number) => void
     getScroll: () => number
   } | null,
+  autoHeightCallback: null as null | ((height: number) => void),
   commandCalls: [] as { cmd: 'undo' | 'redo' }[]
 }))
 
@@ -217,6 +218,7 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     ref,
     value,
     onChange,
+    onHeightChange,
     onEditorKeyDown,
     onEditorReady,
     onHistoryChange,
@@ -231,12 +233,18 @@ vi.mock('@renderer/components/CodeEditor', () => ({
     } | null>
     value?: string
     onChange?: (value: string) => void
+    onHeightChange?: (height: number) => void
     onEditorKeyDown?: (event: KeyboardEvent) => boolean
     onEditorReady?: () => void
     onHistoryChange?: (depths: { undo: number; redo: number }) => void
     historySnapshot?: { json?: { history?: { done?: string[]; undone?: string[] } } } | null
     editable?: boolean
   }) {
+    // Adaptive-measurement contract: the mock exposes the production
+    // onHeightChange subscription so tests drive it explicitly via
+    // `mocks.autoHeightCallback`. The expanded modal engine mounts with
+    // onHeightChange undefined (production never measures there).
+    mocks.autoHeightCallback = onHeightChange ?? null
     const initial = value ?? ''
     const docRef = useRef(initial)
     const selRef = useRef({ anchor: initial.length, head: initial.length })
@@ -497,6 +505,29 @@ const renderEditor = (role: 'user' | 'assistant' = 'user', onCancel = vi.fn()) =
     />
   )
 
+const renderEditorWithContent = (content: string, role: 'user' | 'assistant' = 'user') => {
+  const block: MessageBlock = { ...mainTextBlock, content }
+  return render(
+    <MessageEditor
+      message={makeMessage(role, [block])}
+      topicId="topic-1"
+      onSave={mocks.onSave}
+      onResend={mocks.onResend}
+      onCancel={vi.fn()}
+    />
+  )
+}
+
+/** Drive the production adaptive-measurement subscription like the live engine would. */
+const fireAutoHeight = (height: number) => {
+  act(() => {
+    mocks.autoHeightCallback?.(height)
+  })
+}
+
+/** Expected first-paint adaptive surface height for the given draft. */
+const expectedAdaptive = (content: string) => `${estimateMessageEditorAutoHeight(content, window.innerHeight)}px`
+
 beforeEach(() => {
   mocks.deleteFile.mockClear()
   mocks.uploadFile.mockReset().mockResolvedValue({ id: 'uploaded-file' })
@@ -509,6 +540,7 @@ beforeEach(() => {
   mocks.liveViewEnabled = false
   mocks.liveView = null
   mocks.commandCalls = []
+  mocks.autoHeightCallback = null
   localStorage.clear()
 })
 
@@ -697,9 +729,28 @@ describe('MessageEditor CodeMirror upgrade', () => {
     expect(value).toContain('DRAFT')
   })
 
-  it('toolbar drops translation: no translate control, link between bold and find with the history divider left of undo/redo', () => {
+  it('toolbar drops translation: no translate control, link between bold and find with undo/redo left near search and expand alone far-right', () => {
     renderEditor()
     expect(document.querySelector('.message-editor-area [aria-label="mock-translate"]')).toBeNull()
+    const toolsScroll = screen.getByTestId('message-editor-tools-scroll')
+    // Markup grouping (never forced positioning): undo/redo live inside the
+    // left scrollable tools group alongside search; the end group owns ONLY
+    // the expand control.
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-bold-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-link-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-find-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-history-separator'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-undo-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-redo-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-expand-btn'))).toBe(false)
+    const expandBtn = screen.getByTestId('message-editor-expand-btn')
+    // Tooltip mock renders a fragment, so the button's direct parent is the
+    // end group itself (never the shared toolbar root).
+    const endGroup = expandBtn.parentElement ?? null
+    expect(endGroup).not.toBeNull()
+    expect(endGroup?.querySelector('[data-testid="message-editor-undo-btn"]')).toBeNull()
+    expect(endGroup?.querySelector('[data-testid="message-editor-redo-btn"]')).toBeNull()
+    expect(endGroup?.querySelector('[data-testid="message-editor-expand-btn"]')).not.toBeNull()
     const ordered = [
       screen.getByTestId('message-editor-mode-btn'),
       screen.getByTestId('message-editor-bold-btn'),
@@ -928,17 +979,28 @@ describe('MessageEditor outer grip, disabled treatment and switch wording contra
     expect(end).toMatch(/margin-left:\s*auto/)
   })
 
-  it('toolbar order keeps find after link with the history divider left of undo/redo and expand last', () => {
+  it('toolbar order keeps find after link with undo/redo left in the tools group and expand last', () => {
     renderEditor()
     const toolsScroll = screen.getByTestId('message-editor-tools-scroll')
     expect(toolsScroll).toBeInTheDocument()
-    // Formatting buttons (bold/link/find) live inside the scrollable tools
-    // group; mode/history/expand stay outside it and pinned.
+    // Formatting buttons (bold/link/find) plus native history (undo/redo)
+    // live inside the scrollable tools group; mode/expand stay outside it
+    // and pinned. The right end group owns ONLY expand.
     expect(toolsScroll.contains(screen.getByTestId('message-editor-bold-btn'))).toBe(true)
     expect(toolsScroll.contains(screen.getByTestId('message-editor-link-btn'))).toBe(true)
     expect(toolsScroll.contains(screen.getByTestId('message-editor-find-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-history-separator'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-undo-btn'))).toBe(true)
+    expect(toolsScroll.contains(screen.getByTestId('message-editor-redo-btn'))).toBe(true)
     expect(toolsScroll.contains(screen.getByTestId('message-editor-expand-btn'))).toBe(false)
     expect(toolsScroll.contains(screen.getByTestId('message-editor-mode-btn'))).toBe(false)
+    const expandBtn = screen.getByTestId('message-editor-expand-btn')
+    // Tooltip mock renders a fragment, so the button's direct parent is the
+    // end group itself (never the shared toolbar root).
+    const endGroup = expandBtn.parentElement ?? null
+    expect(endGroup?.querySelector('[data-testid="message-editor-undo-btn"]')).toBeNull()
+    expect(endGroup?.querySelector('[data-testid="message-editor-redo-btn"]')).toBeNull()
+    expect(endGroup?.querySelector('[data-testid="message-editor-expand-btn"]')).not.toBeNull()
     const ordered = [
       screen.getByTestId('message-editor-mode-btn'),
       screen.getByTestId('message-editor-bold-btn'),
@@ -982,15 +1044,22 @@ describe('MessageEditor outer grip, disabled treatment and switch wording contra
 
 describe('MessageEditor inline resize handle', () => {
   const surfaceHeight = () => screen.getByTestId('message-editor-resize-surface').style.height
-  const storedHeight = () => localStorage.getItem(MESSAGE_EDITOR_HEIGHT_STORAGE_KEY)
+  const storedKeys = () => {
+    const out: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key) out.push(key)
+    }
+    return out
+  }
 
   // jsdom ships no PointerEvent constructor, so testing-library drops
   // pointerId/clientY init props. Build the events explicitly: production
   // reads clientY/pointerId off the native event, which real browsers always
   // provide for pointer events.
   const dispatchPointer = (
-    target: HTMLElement,
-    type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel',
+    target: HTMLElement | Window,
+    type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel' | 'lostpointercapture',
     init: { pointerId?: number; clientY?: number }
   ) => {
     const event = new Event(type, { bubbles: true, cancelable: true, composed: true })
@@ -998,7 +1067,7 @@ describe('MessageEditor inline resize handle', () => {
     fireEvent(target, event)
   }
 
-  it('exposes an accessible top-edge handle and mounts without writing the preference', () => {
+  it('exposes an accessible top-edge handle and mounts adaptive with no persistence', () => {
     renderEditor()
     const handle = screen.getByTestId('message-editor-resize-handle')
     expect(handle).toHaveAttribute('role', 'separator')
@@ -1006,35 +1075,48 @@ describe('MessageEditor inline resize handle', () => {
     expect(handle).toHaveAttribute('tabindex', '0')
     // Trusted layout-control marker: the same-arbiter LAYOUTCONTROL identity.
     expect(handle).toHaveAttribute('data-viewport-layout-control', 'message-editor-resize')
-    expect(surfaceHeight()).toBe(`${resolveMessageEditorDisplayHeight(null, window.innerHeight)}px`)
-    // Mounting only reads: a small window must not erase (or create) storage.
-    expect(storedHeight()).toBeNull()
+    // First paint is the content-adaptive estimate for the long draft — never
+    // a persisted height, never a large flash default.
+    expect(surfaceHeight()).toBe(expectedAdaptive(RAW_MARKDOWN))
+    // Mounting only measures: nothing is written to storage, ever.
+    expect(storedKeys()).toEqual([])
   })
 
-  it('keyboard resize captures the existing hold then commits the exact height', () => {
+  it('renders a short draft at the single one-line floor (no large empty area)', () => {
+    renderEditorWithContent('hi')
+    expect(surfaceHeight()).toBe(`${MESSAGE_EDITOR_HEIGHT_MIN}px`)
+  })
+
+  it('renders a very long draft clamped at the 52vh maximum', () => {
+    const long = Array.from({ length: 80 }, (_, i) => `body line ${i}`).join('\n')
+    renderEditorWithContent(long)
+    expect(surfaceHeight()).toBe(`${getMessageEditorHeightBounds(window.innerHeight).max}px`)
+  })
+
+  it('keyboard resize captures the existing hold then commits a session-only height', () => {
     renderEditor()
     const bounds = getMessageEditorHeightBounds(window.innerHeight)
     const handle = screen.getByTestId('message-editor-resize-handle')
-    const from = resolveMessageEditorDisplayHeight(null, window.innerHeight)
+    const from = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
 
     fireEvent.keyDown(handle, { key: 'ArrowUp' })
     expect(mocks.captureIntent).toHaveBeenCalledTimes(1)
-    expect(storedHeight()).toBe(`${from + 8}`)
     expect(surfaceHeight()).toBe(`${from + 8}px`)
+    expect(storedKeys()).toEqual([])
 
     fireEvent.keyDown(handle, { key: 'ArrowDown', shiftKey: true })
-    expect(storedHeight()).toBe(`${from + 8 - 48}`)
+    expect(surfaceHeight()).toBe(`${from + 8 - 48}px`)
 
     fireEvent.keyDown(handle, { key: 'End' })
-    expect(storedHeight()).toBe(`${bounds.max}`)
+    expect(surfaceHeight()).toBe(`${bounds.max}px`)
 
     fireEvent.keyDown(handle, { key: 'Home' })
-    expect(storedHeight()).toBe(`${bounds.min}`)
+    expect(surfaceHeight()).toBe(`${bounds.min}px`)
   })
 
   it('pointer drag captures the existing hold then resizes exactly, committing only on release', () => {
     renderEditor()
-    const from = resolveMessageEditorDisplayHeight(null, window.innerHeight)
+    const from = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
     const handle = screen.getByTestId('message-editor-resize-handle')
 
     dispatchPointer(handle, 'pointerdown', { pointerId: 7, clientY: 200 })
@@ -1042,34 +1124,150 @@ describe('MessageEditor inline resize handle', () => {
     dispatchPointer(handle, 'pointermove', { pointerId: 7, clientY: 150 })
     // Upward drag grows; nothing is persisted mid-drag.
     expect(surfaceHeight()).toBe(`${from + 50}px`)
-    expect(storedHeight()).toBeNull()
+    expect(storedKeys()).toEqual([])
 
     dispatchPointer(handle, 'pointerup', { pointerId: 7, clientY: 150 })
-    expect(storedHeight()).toBe(`${from + 50}`)
+    expect(storedKeys()).toEqual([])
     expect(surfaceHeight()).toBe(`${from + 50}px`)
   })
 
-  it('pointer cancel discards the drag without committing', () => {
+  it('pointer release outside the handle (window fallback, no capture) still commits with no snapback', () => {
     renderEditor()
-    const from = resolveMessageEditorDisplayHeight(null, window.innerHeight)
+    const from = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
+    const handle = screen.getByTestId('message-editor-resize-handle')
+
+    dispatchPointer(handle, 'pointerdown', { pointerId: 11, clientY: 200 })
+    dispatchPointer(handle, 'pointermove', { pointerId: 11, clientY: 160 })
+    expect(surfaceHeight()).toBe(`${from + 40}px`)
+    // Release below/outside the editor: the event targets the window, never
+    // the handle — the gesture fallback must still commit the final height.
+    dispatchPointer(window, 'pointerup', { pointerId: 11, clientY: 120 })
+    expect(surfaceHeight()).toBe(`${from + 40}px`)
+    expect(storedKeys()).toEqual([])
+  })
+
+  it('capture loss mid-gesture settles at the final displayed height', () => {
+    renderEditor()
+    const from = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
+    const handle = screen.getByTestId('message-editor-resize-handle')
+
+    dispatchPointer(handle, 'pointerdown', { pointerId: 13, clientY: 200 })
+    dispatchPointer(handle, 'pointermove', { pointerId: 13, clientY: 170 })
+    expect(surfaceHeight()).toBe(`${from + 30}px`)
+    dispatchPointer(handle, 'lostpointercapture', { pointerId: 13 })
+    // No snapback: the session keeps the last live height.
+    expect(surfaceHeight()).toBe(`${from + 30}px`)
+  })
+
+  it('pointer cancel discards the drag without committing (truthful cancel)', () => {
+    renderEditor()
+    const from = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
     const handle = screen.getByTestId('message-editor-resize-handle')
 
     dispatchPointer(handle, 'pointerdown', { pointerId: 9, clientY: 200 })
     dispatchPointer(handle, 'pointermove', { pointerId: 9, clientY: 100 })
-    dispatchPointer(handle, 'pointercancel', { pointerId: 9 })
-    expect(storedHeight()).toBeNull()
+    dispatchPointer(window, 'pointercancel', { pointerId: 9 })
+    expect(storedKeys()).toEqual([])
     expect(surfaceHeight()).toBe(`${from}px`)
   })
 
-  it('respects small-window clamps without erasing the saved preference', () => {
-    writeMessageEditorHeight(500)
+  it('a no-move click never pins a manual height (stays adaptive)', () => {
+    renderEditor()
+    const handle = screen.getByTestId('message-editor-resize-handle')
+    dispatchPointer(handle, 'pointerdown', { pointerId: 17, clientY: 200 })
+    dispatchPointer(handle, 'pointerup', { pointerId: 17, clientY: 200 })
+    expect(surfaceHeight()).toBe(expectedAdaptive(RAW_MARKDOWN))
+  })
+
+  it('drag from an adaptive short draft starts at the displayed height with no jump', () => {
+    // Regression for the split-floor jump: an adaptive short draft sits far
+    // below any historical manual minimum, so pointerdown plus the first
+    // small movement must render continuously from the displayed height —
+    // never jump to a taller manual floor.
+    renderEditorWithContent('hi')
+    const floor = getMessageEditorHeightBounds(window.innerHeight).min
+    expect(surfaceHeight()).toBe(`${floor}px`)
+    const handle = screen.getByTestId('message-editor-resize-handle')
+
+    // Pointer down alone renders the same displayed height (no jump).
+    dispatchPointer(handle, 'pointerdown', { pointerId: 21, clientY: 200 })
+    expect(surfaceHeight()).toBe(`${floor}px`)
+
+    // The first small movement changes continuously from the displayed height.
+    dispatchPointer(handle, 'pointermove', { pointerId: 21, clientY: 180 })
+    expect(surfaceHeight()).toBe(`${floor + 20}px`)
+
+    // Release commits the displayed final effective height — far below any
+    // historical manual floor, with nothing persisted.
+    dispatchPointer(handle, 'pointerup', { pointerId: 21, clientY: 180 })
+    expect(surfaceHeight()).toBe(`${floor + 20}px`)
+    expect(Number.parseFloat(surfaceHeight())).toBeLessThan(floor + 100)
+    expect(storedKeys()).toEqual([])
+  })
+
+  it('drag downward from an adaptive short draft clamps at the same one-line floor', () => {
+    // Both drag directions share the single lower bound: shrinking past the
+    // floor holds at the floor instead of jumping or collapsing.
+    renderEditorWithContent('hi')
+    const floor = getMessageEditorHeightBounds(window.innerHeight).min
+    const handle = screen.getByTestId('message-editor-resize-handle')
+
+    dispatchPointer(handle, 'pointerdown', { pointerId: 23, clientY: 200 })
+    dispatchPointer(handle, 'pointermove', { pointerId: 23, clientY: 260 })
+    expect(surfaceHeight()).toBe(`${floor}px`)
+    dispatchPointer(handle, 'pointerup', { pointerId: 23, clientY: 260 })
+    expect(surfaceHeight()).toBe(`${floor}px`)
+  })
+
+  it('manual session height survives text edits; reopen resets to adaptive', () => {
+    const first = renderEditor()
+    const handle = screen.getByTestId('message-editor-resize-handle')
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    const manual = screen.getByTestId('message-editor-resize-surface').style.height
+    expect(manual).not.toBe(expectedAdaptive(RAW_MARKDOWN))
+    // Later text edits never overwrite the session choice.
+    fireEvent.change(screen.getByLabelText('message-editor-source'), { target: { value: `${RAW_MARKDOWN}\nmore` } })
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe(manual)
+    first.unmount()
+    // Reopen starts adaptive again — the closed session leaves nothing behind.
+    renderEditor()
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe(expectedAdaptive(RAW_MARKDOWN))
+    expect(storedKeys()).toEqual([])
+  })
+
+  it('measured content height grows and shrinks the surface within the single bounds', () => {
+    renderEditorWithContent('hi')
+    expect(surfaceHeight()).toBe(`${MESSAGE_EDITOR_HEIGHT_MIN}px`)
+    // Engine reports natural content height (wrapped text at current width):
+    // the surface follows with slack, both directions, through one resolver.
+    fireAutoHeight(200)
+    expect(surfaceHeight()).toBe('204px')
+    fireAutoHeight(60)
+    expect(surfaceHeight()).toBe('64px')
+    fireAutoHeight(30)
+    expect(surfaceHeight()).toBe(`${MESSAGE_EDITOR_HEIGHT_MIN}px`)
+    fireAutoHeight(5000)
+    expect(surfaceHeight()).toBe(`${resolveMessageEditorHeight(5000, window.innerHeight)}px`)
+  })
+
+  it('measurements are ignored once a manual height owns the session', () => {
+    renderEditorWithContent('hi')
+    const handle = screen.getByTestId('message-editor-resize-handle')
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    const manual = surfaceHeight()
+    fireAutoHeight(400)
+    expect(surfaceHeight()).toBe(manual)
+  })
+
+  it('respects small-window clamps with no persistence involved', () => {
     const previous = window.innerHeight
     Object.defineProperty(window, 'innerHeight', { value: 300, configurable: true })
     try {
       renderEditor()
       const bounds = getMessageEditorHeightBounds(300)
+      // Long-draft estimate clamps to the small-window maximum.
       expect(surfaceHeight()).toBe(`${bounds.max}px`)
-      expect(storedHeight()).toBe('500')
+      expect(storedKeys()).toEqual([])
     } finally {
       Object.defineProperty(window, 'innerHeight', { value: previous, configurable: true })
     }
@@ -1087,28 +1285,39 @@ describe('MessageEditor expanded modal correction', () => {
     expect(modal).toHaveAttribute('data-focus-trigger-after-close', 'false')
   })
 
-  it('inline placeholder keeps the current preferred height instead of resetting to 220', async () => {
+  it('inline placeholder keeps the current session height instead of resetting', async () => {
     renderEditor()
-    const expected = resolveMessageEditorDisplayHeight(null, window.innerHeight)
-    expect(expected).toBe(340)
+    const expected = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
     await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
     const placeholder = screen.getByTestId('message-editor-expanded-placeholder')
     expect(placeholder.style.height).toBe(`${expected}px`)
-    expect(placeholder.style.height).not.toBe('220px')
   })
 
-  it('inline placeholder follows a stored preferred height and keeps the find bar mounted', async () => {
-    writeMessageEditorHeight(380)
+  it('inline placeholder follows a manual session height and keeps the find bar mounted', async () => {
     renderEditor()
-    const expected = resolveMessageEditorDisplayHeight(380, window.innerHeight)
-    expect(expected).toBe(380)
+    const handle = screen.getByTestId('message-editor-resize-handle')
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    const manual = screen.getByTestId('message-editor-resize-surface').style.height
+    const from = estimateMessageEditorAutoHeight(RAW_MARKDOWN, window.innerHeight)
+    expect(manual).toBe(`${from + 16}px`)
     await userEvent.click(screen.getByTestId('message-editor-find-btn'))
     await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
     const placeholder = screen.getByTestId('message-editor-expanded-placeholder')
-    expect(placeholder.style.height).toBe(`${expected}px`)
+    expect(placeholder.style.height).toBe(manual)
     // Find stays inline (footprint hold) and duplicates into the modal; the
     // engine itself still mounts once.
     expect(screen.getAllByLabelText('message.edit.find_placeholder').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('preview keeps the session height (auto source stays the source-of-size)', async () => {
+    renderEditor()
+    const before = screen.getByTestId('message-editor-resize-surface').style.height
+    await userEvent.click(screen.getByTestId('message-editor-mode-btn'))
+    expect(screen.getByTestId('message-editor-mode-btn')).toHaveAttribute('data-mode', 'preview')
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe(before)
+    await userEvent.click(screen.getByTestId('message-editor-mode-btn'))
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe(before)
   })
 
   it('expand/collapse retains the source draft and leaves cancel/save wiring unchanged', async () => {
@@ -1123,7 +1332,89 @@ describe('MessageEditor expanded modal correction', () => {
     await waitFor(() => expect(screen.queryByTestId('message-editor-expanded')).toBeNull())
     expect(screen.getByLabelText('message-editor-source')).toHaveValue('modal draft pin')
     expect(onCancel).not.toHaveBeenCalled()
-    const expected = resolveMessageEditorDisplayHeight(null, window.innerHeight)
+    const expected = estimateMessageEditorAutoHeight('modal draft pin', window.innerHeight)
     expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe(`${expected}px`)
+  })
+
+  it('expanded modal keeps the fixed window height for a one-line draft (independent meaning, never adaptive)', async () => {
+    // CSS contract: the modal root carries the original bounded fixed height
+    // (min(72vh, calc(100vh - 120px))), the body flex-fills it with internal
+    // scrolling — a one-line draft must NOT shrink the modal/body to its
+    // short natural content. No viewport-specific compensator: pure CSS.
+    const fs = await import('node:fs')
+    const source = fs.readFileSync('src/renderer/src/pages/home/Messages/MessageEditor.tsx', 'utf-8')
+    const blockOf = (anchor: string): string => {
+      const at = source.indexOf(anchor)
+      expect(at, `${anchor} must exist`).toBeGreaterThanOrEqual(0)
+      const end = source.indexOf('\n`\n', at)
+      expect(end, `${anchor} styled block must terminate`).toBeGreaterThan(at)
+      return source.slice(at, end)
+    }
+    const root = blockOf('const ExpandedRoot = styled.div`')
+    expect(root).toMatch(/height:\s*min\(72vh,\s*calc\(100vh - 120px\)\)/)
+    expect(root).toMatch(/overflow:\s*hidden/)
+    // Fixed window height must win over flex sizing: flex:none (never
+    // flex:1, whose flex-basis overrides height inside the auto-height modal
+    // body and shrinks short drafts to their natural size).
+    expect(root).toMatch(/^\s*flex:\s*none\s*;/m)
+    expect(root).not.toMatch(/^\s*flex:\s*1\s*;/m)
+    const body = blockOf('const ExpandedBody = styled.div`')
+    expect(body).toMatch(/flex:\s*1/)
+    expect(body).toMatch(/min-height:\s*0/)
+    expect(body).toMatch(/overflow:\s*hidden/)
+    expect(body).toMatch(/& > \.code-editor/)
+    expect(body).toMatch(/\.cm-scroller/)
+    expect(body).toMatch(/overflow:\s*auto/)
+    // The modal body carries no inlineHeight binding: only the inline
+    // placeholder does.
+    expect(body).not.toMatch(/inlineHeight/)
+    // Preview fills the modal too with its own internal scroll.
+    expect(body).toMatch(/\$\{PreviewScroll\}/)
+    // Live behavior: a one-line draft expands without touching the inline
+    // adaptive height, and the modal engine never reports measurements.
+    renderEditorWithContent('hi')
+    const inlineBefore = screen.getByTestId('message-editor-resize-surface').style.height
+    expect(inlineBefore).toBe(`${MESSAGE_EDITOR_HEIGHT_MIN}px`)
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    expect(screen.getByTestId('message-editor-expanded')).toBeInTheDocument()
+    expect(screen.getByTestId('message-editor-expanded-placeholder').style.height).toBe(inlineBefore)
+    expect(mocks.autoHeightCallback).toBeNull()
+  })
+
+  it('modal measurements never alter the inline auto state (inline engine only)', async () => {
+    renderEditorWithContent('hi')
+    // Engine reports natural content height: the inline surface follows.
+    fireAutoHeight(200)
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe('204px')
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    // The modal engine mounts with onHeightChange undefined (production never
+    // measures there): the inline auto state is untouched by modal width.
+    expect(mocks.autoHeightCallback).toBeNull()
+    await userEvent.click(screen.getByTestId('message-editor-collapse-btn'))
+    await waitFor(() => expect(screen.queryByTestId('message-editor-expanded')).toBeNull())
+    // Collapse returns the approved adaptive height (measurement kept).
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe('204px')
+  })
+
+  it('collapse preserves the inline session height, text and history (live engine)', async () => {
+    mocks.liveViewEnabled = true
+    renderEditor()
+    act(() => {
+      mocks.liveView?.setSelection(0, 4)
+    })
+    await userEvent.click(screen.getByTestId('message-editor-bold-btn'))
+    const formatted = (screen.getByLabelText('message-editor-source') as HTMLTextAreaElement).value
+    expect(screen.getByTestId('message-editor-undo-btn')).toBeEnabled()
+    const inlineBefore = screen.getByTestId('message-editor-resize-surface').style.height
+    await userEvent.click(screen.getByTestId('message-editor-expand-btn'))
+    expect(screen.getByTestId('message-editor-expanded')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('message-editor-collapse-btn'))
+    await waitFor(() => expect(screen.queryByTestId('message-editor-expanded')).toBeNull())
+    // Collapsed inline returns the approved height with text/history intact.
+    expect(screen.getByTestId('message-editor-resize-surface').style.height).toBe(inlineBefore)
+    expect(screen.getByLabelText('message-editor-source')).toHaveValue(formatted)
+    expect(screen.getByTestId('message-editor-undo-btn')).toBeEnabled()
+    await userEvent.click(screen.getByTestId('message-editor-undo-btn'))
+    expect(screen.getByLabelText('message-editor-source')).toHaveValue(RAW_MARKDOWN)
   })
 })

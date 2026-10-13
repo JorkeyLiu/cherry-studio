@@ -3,37 +3,75 @@ import { loggerService } from '@logger'
 const logger = loggerService.withContext('MessageEditorHeight')
 
 /**
- * Renderer-local inline editor height preference.
+ * Inline editor height geometry (session-only, never persisted).
  *
- * A single numeric localStorage entry (per Electron profile/origin, like all
- * renderer localStorage): it survives editor close/open and application
- * relaunch, but it is deliberately NOT part of any synced settings slice
- * (settings sync across windows; this is private per-window UI geometry) and
- * never touches chat authority (no SQLite/Dexie/sync writes). It must not be
- * renamed: compatibility keys stay stable.
+ * ONE sizing logic and bounds: the inline surface defaults to a
+ * content-adaptive height measured from the live CodeMirror engine
+ * (`contentHeight` at the current width), and an explicit drag/keyboard
+ * adjustment sets a manual height for THIS edit session only. Both paths
+ * are just ways to supply a desired height into the SAME resolver below —
+ * there are no separate auto/manual floors or clamps.
+ *
+ * The single lower bound reflects one actual rendered text line plus normal
+ * vertical padding, not an arbitrary minimum. Measured runtime geometry
+ * (600px viewport, 14px type at 1.6 line-height): one `.cm-line` is 22.4px
+ * tall, `.cm-content` carries 4px + 4px of vertical padding, so one rendered
+ * text line naturally occupies ~30.4px. The 40px floor is that natural line
+ * plus normal slack/rounding — short one-line drafts render with only a
+ * small normal pad below the text, never a large empty area. Two-line and
+ * wrapped short content sizes to its actual natural document height, and
+ * long drafts grow up to the shared 52vh maximum, then scroll internally.
+ * Toolbar and action-bar heights live outside the input surface and are
+ * preserved independently of this floor.
+ *
+ * The manual session override never persists: later text edits never
+ * overwrite it, and close/save/cancel + reopen starts adaptive again.
+ * Nothing here touches chat authority or synced settings; there is no
+ * storage key by design (a stale saved height must never pin a new session).
  */
-export const MESSAGE_EDITOR_HEIGHT_STORAGE_KEY = 'cherry-chat.message-editor.height.v1'
 
-/** Initial inline height in px when no preference is stored. */
-export const MESSAGE_EDITOR_HEIGHT_DEFAULT = 340
-
-/** Absolute lower bound for the displayed inline height in px. */
-export const MESSAGE_EDITOR_HEIGHT_MIN = 220
+/**
+ * Single lower bound for the input surface in px: one rendered text line
+ * plus normal vertical padding/slack (see above). Used by BOTH the adaptive
+ * measurement path and the explicit manual path — dragging an adaptive
+ * short draft starts from the actually displayed height with no jump.
+ */
+export const MESSAGE_EDITOR_HEIGHT_MIN = 40
 
 /** Inline height never exceeds this share of the viewport height. */
 export const MESSAGE_EDITOR_HEIGHT_MAX_VIEWPORT_RATIO = 0.52
 
-/** Hard sanity ceiling for a stored payload (px); display clamps tighter. */
+/** Hard sanity ceiling for a height payload (px); display clamps tighter. */
 export const MESSAGE_EDITOR_HEIGHT_ABSOLUTE_MAX = 1600
+
+/**
+ * Slack added to the live engine's measured natural content height when
+ * sizing the input surface (subpixel rounding + the borderless flex chain
+ * between the surface and the scroller), so the last line is never clipped
+ * by a 1px shortfall.
+ */
+export const MESSAGE_EDITOR_MEASURED_CHROME_PX = 4
+
+/**
+ * Per-line estimate used ONLY for the first paint before the live engine
+ * reports its measured content height (approx 14px type at 1.6 line-height).
+ */
+export const MESSAGE_EDITOR_ESTIMATE_LINE_PX = 22
+
+/**
+ * Fixed chrome in the first-paint estimate (content padding + normal slack):
+ * a single-line draft estimates exactly at the single floor (never a
+ * large-height flash, never a jump when the first measurement lands).
+ */
+export const MESSAGE_EDITOR_ESTIMATE_CHROME_PX = 18
 
 /** Keyboard resize step in px (Shift = coarse step). */
 export const MESSAGE_EDITOR_HEIGHT_KEYBOARD_STEP = 8
 export const MESSAGE_EDITOR_HEIGHT_KEYBOARD_COARSE_STEP = 48
 
 /**
- * Validate a raw storage payload. Accepts finite positive numbers (or numeric
- * strings) only; anything else — missing, corrupt JSON, wrong schema,
- * non-positive, non-finite — is null so the caller falls back to default.
+ * Validate a raw height payload. Accepts finite positive numbers (or numeric
+ * strings) only; anything else is null so the caller keeps its current value.
  */
 export function parseMessageEditorHeight(raw: unknown): number | null {
   try {
@@ -45,79 +83,60 @@ export function parseMessageEditorHeight(raw: unknown): number | null {
   }
 }
 
-/**
- * Read the last user-committed inline height, or null when nothing usable is
- * stored. Never throws: inaccessible storage and corrupt payloads fall back
- * to null (a corrupt entry is dropped so it cannot poison future reads).
- */
-export function readMessageEditorHeight(): number | null {
-  try {
-    if (typeof localStorage === 'undefined') return null
-    const stored = localStorage.getItem(MESSAGE_EDITOR_HEIGHT_STORAGE_KEY)
-    if (stored === null || stored === '') return null
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(stored)
-    } catch {
-      // Corrupt JSON: treated as unusable below, and the entry is dropped.
-      parsed = undefined
-    }
-    const height = parseMessageEditorHeight(parsed)
-    if (height === null) {
-      try {
-        localStorage.removeItem(MESSAGE_EDITOR_HEIGHT_STORAGE_KEY)
-      } catch {}
-    }
-    return height
-  } catch (error) {
-    logger.warn('Failed to read message editor height preference:', error as Error)
-    return null
-  }
-}
-
-/**
- * Persist the last USER-committed height (pointer-up / keyboard commit only —
- * never per-pointermove, never on viewport resize). Validates before writing;
- * invalid input is ignored. Never throws.
- */
-export function writeMessageEditorHeight(height: number): void {
-  try {
-    const validated = parseMessageEditorHeight(height)
-    if (validated === null) return
-    if (typeof localStorage === 'undefined') return
-    localStorage.setItem(MESSAGE_EDITOR_HEIGHT_STORAGE_KEY, JSON.stringify(Math.round(validated)))
-  } catch (error) {
-    logger.warn('Failed to write message editor height preference:', error as Error)
-  }
-}
-
 export interface MessageEditorHeightBounds {
   min: number
   max: number
 }
 
 /**
- * Responsive display bounds for the inline surface. The minimum stays at or
- * below 220px on short viewports so the editor never traps a small window;
- * the maximum mirrors the historical 52vh cap. Guaranteed min <= max.
+ * Responsive display bounds for the inline surface. The single minimum is
+ * the one-line floor above; the maximum mirrors the historical 52vh cap.
+ * Guaranteed min <= max (short viewports clamp the maximum first, then the
+ * minimum yields to it so the editor never traps a small window).
  */
 export function getMessageEditorHeightBounds(viewportHeight?: number): MessageEditorHeightBounds {
   if (typeof viewportHeight !== 'number' || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
     return { min: MESSAGE_EDITOR_HEIGHT_MIN, max: MESSAGE_EDITOR_HEIGHT_ABSOLUTE_MAX }
   }
-  const max = Math.max(160, Math.floor(viewportHeight * MESSAGE_EDITOR_HEIGHT_MAX_VIEWPORT_RATIO))
+  const max = Math.max(MESSAGE_EDITOR_HEIGHT_MIN, Math.floor(viewportHeight * MESSAGE_EDITOR_HEIGHT_MAX_VIEWPORT_RATIO))
   const min = Math.min(MESSAGE_EDITOR_HEIGHT_MIN, max)
   return { min, max }
 }
 
 /**
- * Clamp a preferred height into the displayable range. Small-window clamps
- * apply here at USE time only — the stored preference itself is never
- * rewritten by a clamp, so reopening in a taller window restores the saved
- * size.
+ * THE single height resolver for the inline surface. Every desired height —
+ * whether from the adaptive measurement (engine content height + slack, or
+ * the first-paint estimate) or from an explicit session-manual
+ * drag/keyboard adjustment — passes through here. Desired values below the
+ * one-line floor rise to it, values above the 52vh maximum clamp to it, and
+ * invalid input falls back to the floor so a bad report can never collapse
+ * the surface. Manual commits store this displayed effective height, so what
+ * the user sees is what the session keeps.
  */
-export function resolveMessageEditorDisplayHeight(preferred: number | null, viewportHeight?: number): number {
-  const fallback = parseMessageEditorHeight(preferred) ?? MESSAGE_EDITOR_HEIGHT_DEFAULT
+export function resolveMessageEditorHeight(desired: number, viewportHeight?: number): number {
   const { min, max } = getMessageEditorHeightBounds(viewportHeight)
-  return Math.max(min, Math.min(max, fallback))
+  // Finite numbers clamp silently (an over-drag past zero is just the floor,
+  // never a collapse); only corrupt payloads warn.
+  if (typeof desired === 'number' && Number.isFinite(desired)) {
+    return Math.max(min, Math.min(max, desired))
+  }
+  const valid = parseMessageEditorHeight(desired)
+  if (valid === null) {
+    logger.warn('Ignoring invalid editor height; keeping the one-line floor.')
+    return min
+  }
+  return Math.max(min, Math.min(max, valid))
+}
+
+/**
+ * First-paint estimate before the live engine reports its measured height.
+ * Counts physical lines only (wraps resolve upward after mount, never into a
+ * large-height flash): a single-line draft estimates exactly at the single
+ * floor, long drafts estimate at the 52vh maximum they will measure into.
+ * Clamped through the same single resolver as every other path.
+ */
+export function estimateMessageEditorAutoHeight(content: string, viewportHeight?: number): number {
+  const lines = typeof content === 'string' && content.length > 0 ? content.split('\n').length : 1
+  const raw = MESSAGE_EDITOR_ESTIMATE_CHROME_PX + Math.max(1, lines) * MESSAGE_EDITOR_ESTIMATE_LINE_PX
+  return resolveMessageEditorHeight(raw, viewportHeight)
 }

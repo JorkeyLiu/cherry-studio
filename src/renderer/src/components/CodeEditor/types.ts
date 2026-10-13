@@ -61,8 +61,8 @@ export interface CodeEditorProps {
   onChange?: (newContent: string) => void
   /** Fired when the editor loses focus. */
   onBlur?: (newContent: string) => void
-  /** Fired when the editor height changes. */
-  onHeightChange?: (scrollHeight: number) => void
+  /** Fired when the editor content height changes (natural wrapped content height at the current width). */
+  onHeightChange?: (contentHeight: number) => void
   /**
    * Native spellcheck for the editable surface. Undefined preserves the
    * previous behavior (no content-attributes extension).

@@ -70,13 +70,12 @@ import {
   toggleQuote
 } from './messageEditorFormatting'
 import {
+  estimateMessageEditorAutoHeight,
   getMessageEditorHeightBounds,
-  MESSAGE_EDITOR_HEIGHT_DEFAULT,
   MESSAGE_EDITOR_HEIGHT_KEYBOARD_COARSE_STEP,
   MESSAGE_EDITOR_HEIGHT_KEYBOARD_STEP,
-  readMessageEditorHeight,
-  resolveMessageEditorDisplayHeight,
-  writeMessageEditorHeight
+  MESSAGE_EDITOR_MEASURED_CHROME_PX,
+  resolveMessageEditorHeight
 } from './messageEditorHeight'
 import { captureInteractionIntent, INTERACTION_REGION_CONTROLS, useOptionalRouteViewport } from './routeViewportContext'
 
@@ -592,26 +591,34 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   const undoDisabled = formatDisabled || historyDepths.undo === 0
   const redoDisabled = formatDisabled || historyDepths.redo === 0
 
-  // Inline surface height: the last USER-committed value is restored from a
-  // renderer-local localStorage preference (per profile, survives editor
-  // close/open and relaunch); viewport clamps apply at USE time only and are
-  // never written back, so a small window cannot erase the saved size.
-  const [preferredHeight, setPreferredHeight] = useState<number>(() => {
-    const stored = readMessageEditorHeight()
-    return stored ?? MESSAGE_EDITOR_HEIGHT_DEFAULT
-  })
+  // Inline surface height: content-adaptive by default, session-manual on
+  // explicit adjust — ONE sizing logic and bounds for both. `autoHeight` is
+  // the raw measured engine content height + slack (clamped at USE time only,
+  // so viewport resizes never rewrite it); `manualHeight` is the displayed
+  // effective height committed by drag release / keyboard for THIS edit
+  // session — later text edits never overwrite it, and close/save/cancel +
+  // reopen starts adaptive again. No persistence by design: a stale saved
+  // height must never pin a new session.
+  const [manualHeight, setManualHeight] = useState<number | null>(null)
+  const [autoHeight, setAutoHeight] = useState<number | null>(null)
   const [viewportHeight, setViewportHeight] = useState<number | undefined>(() =>
     typeof window !== 'undefined' ? window.innerHeight : undefined
   )
-  // Live drag value (intended, unclamped): committed to storage on pointer-up
-  // / keyboard only — never per-pointermove, never on viewport resize.
+  const manualHeightRef = useRef<number | null>(null)
+  const viewportHeightRef = useRef<number | undefined>(typeof window !== 'undefined' ? window.innerHeight : undefined)
+  // Live drag value (intended, unclamped): committed to the session on
+  // pointer-up / keyboard only — never per-pointermove, never on resize.
   const [dragHeight, setDragHeight] = useState<number | null>(null)
   const dragStateRef = useRef<{ startY: number; startHeight: number; pointerId: number } | null>(null)
   const liveHeightRef = useRef<number | null>(null)
+  const detachWindowDragListenersRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const onResize = () => setViewportHeight(window.innerHeight)
+    const onResize = () => {
+      setViewportHeight(window.innerHeight)
+      viewportHeightRef.current = window.innerHeight
+    }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
@@ -620,23 +627,132 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
     return () => {
       dragStateRef.current = null
       liveHeightRef.current = null
+      try {
+        detachWindowDragListenersRef.current?.()
+      } catch {}
+      detachWindowDragListenersRef.current = null
     }
   }, [])
 
+  // First-paint estimate before the live engine reports its measured height:
+  // physical-line based, clamped to the adaptive range — short drafts start
+  // near the adaptive floor (never a large-height flash), long drafts start
+  // at the maximum they will measure into.
+  const estimatedAutoHeight = useMemo(
+    () => estimateMessageEditorAutoHeight(content, viewportHeight),
+    [content, viewportHeight]
+  )
+
+  const commitManualHeight = useCallback((intended: number) => {
+    if (!Number.isFinite(intended) || intended <= 0) return
+    // The session keeps the displayed effective height through the single
+    // resolver — what the user sees is what the session keeps, including
+    // releases outside the editor. No snapback, no separate manual clamp.
+    const effective = resolveMessageEditorHeight(intended, viewportHeightRef.current)
+    const rounded = Math.round(effective)
+    manualHeightRef.current = rounded
+    setManualHeight(rounded)
+  }, [])
+
+  /**
+   * Adaptive measurement from the INLINE source engine only. Ignored while a
+   * manual height owns this session, while the expanded modal engine reports
+   * (modal width would mis-size the inline surface), and for invalid reports.
+   * Converges without a feedback loop: engine content height depends on width
+   * only, never on the surface height it sizes. Preview keeps the retained
+   * session height — the auto source content remains the source-of-size.
+   */
+  const handleAutoContentHeight = useCallback((contentHeight: number) => {
+    try {
+      if (expandedRef.current) return
+      if (manualHeightRef.current !== null) return
+      if (!Number.isFinite(contentHeight) || contentHeight <= 0) return
+      const next = contentHeight + MESSAGE_EDITOR_MEASURED_CHROME_PX
+      setAutoHeight((prev) => (prev !== null && Math.abs(prev - next) < 1 ? prev : next))
+    } catch {}
+  }, [])
+
   const heightBounds = getMessageEditorHeightBounds(viewportHeight)
-  // Live drag renders clamped (never traps a small window mid-drag); the
-  // committed preference keeps the raw user intent and clamps at next use.
+  // Displayed height through the SINGLE resolver: live drag renders the
+  // current gesture height, otherwise the session manual height wins, else
+  // the measured (or estimated pre-measure) adaptive height. Because every
+  // path shares one floor and one maximum, starting a drag from an adaptive
+  // short draft renders the actually displayed height with no jump, and a
+  // click with no motion commits nothing (stays adaptive).
   const inlineHeight =
     dragHeight === null
-      ? resolveMessageEditorDisplayHeight(preferredHeight, viewportHeight)
-      : Math.max(heightBounds.min, Math.min(heightBounds.max, dragHeight))
+      ? manualHeight !== null
+        ? resolveMessageEditorHeight(manualHeight, viewportHeight)
+        : resolveMessageEditorHeight(autoHeight ?? estimatedAutoHeight, viewportHeight)
+      : resolveMessageEditorHeight(dragHeight, viewportHeight)
 
-  const commitHeight = useCallback((intended: number) => {
-    if (!Number.isFinite(intended) || intended <= 0) return
-    const rounded = Math.round(intended)
-    setPreferredHeight(rounded)
-    writeMessageEditorHeight(rounded)
+  const detachWindowDragListeners = useCallback(() => {
+    const detach = detachWindowDragListenersRef.current
+    detachWindowDragListenersRef.current = null
+    try {
+      detach?.()
+    } catch {}
   }, [])
+
+  const updateDragHeight = useCallback((pointerId: number, clientY: number) => {
+    const drag = dragStateRef.current
+    if (!drag || drag.pointerId !== pointerId) return
+    // Upward drag grows: the top edge moves away from the content.
+    const next = drag.startHeight + drag.startY - clientY
+    liveHeightRef.current = next
+    setDragHeight(next)
+  }, [])
+
+  const finishDragHeight = useCallback(
+    (pointerId: number, commit: boolean) => {
+      const drag = dragStateRef.current
+      if (!drag || drag.pointerId !== pointerId) return
+      dragStateRef.current = null
+      detachWindowDragListeners()
+      const live = liveHeightRef.current
+      liveHeightRef.current = null
+      setDragHeight(null)
+      // A truthful cancel (pointercancel) discards; every normal release path
+      // commits the final displayed effective height with no snapback.
+      // No viewport release here: the keeper's quiet validation adopts the
+      // below-row handoff on the final committed height by itself. No re-arm
+      // per move, no timers, no scroll writes here.
+      if (commit && live !== null) commitManualHeight(live)
+    },
+    [commitManualHeight, detachWindowDragListeners]
+  )
+
+  const attachWindowDragListeners = useCallback(
+    (pointerId: number) => {
+      // Fallback for releases outside the handle when pointer capture is
+      // unavailable or lost: the window still observes the same gesture by
+      // pointer id. Added per gesture, removed when it ends — cleanup stays
+      // contained to this gesture, with unmount as the only outer backstop.
+      detachWindowDragListeners()
+      if (typeof window === 'undefined') return
+      const onMove = (event: PointerEvent) => {
+        if (event.pointerId !== pointerId) return
+        updateDragHeight(event.pointerId, event.clientY)
+      }
+      const onUp = (event: PointerEvent) => {
+        if (event.pointerId !== pointerId) return
+        finishDragHeight(event.pointerId, true)
+      }
+      const onCancel = (event: PointerEvent) => {
+        if (event.pointerId !== pointerId) return
+        finishDragHeight(event.pointerId, false)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onCancel)
+      detachWindowDragListenersRef.current = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onCancel)
+      }
+    },
+    [detachWindowDragListeners, finishDragHeight, updateDragHeight]
+  )
 
   const handleResizePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -661,49 +777,43 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
       } catch {}
       dragStateRef.current = { startY: event.clientY, startHeight: inlineHeight, pointerId: event.pointerId }
       setDragHeight(inlineHeight)
+      attachWindowDragListeners(event.pointerId)
     },
-    [routeViewport, messageId, inlineHeight]
+    [routeViewport, messageId, inlineHeight, attachWindowDragListeners]
   )
 
-  const handleResizePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const drag = dragStateRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
-    // Upward drag grows: the top edge moves away from the content.
-    const next = drag.startHeight + drag.startY - event.clientY
-    liveHeightRef.current = next
-    setDragHeight(next)
-  }, [])
-
-  const endResizeDrag = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>, commit: boolean) => {
-      const drag = dragStateRef.current
-      if (!drag || drag.pointerId !== event.pointerId) return
-      dragStateRef.current = null
-      try {
-        if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId)
-        }
-      } catch {}
-      // Display clamps at use; the stored value keeps the user's intent.
-      const live = liveHeightRef.current
-      liveHeightRef.current = null
-      setDragHeight(null)
-      if (commit && live !== null) commitHeight(live)
-      // No viewport release here: the keeper's quiet validation adopts the
-      // below-row handoff on the final committed height by itself. No re-arm
-      // per move, no timers, no scroll writes here.
+  const handleResizePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      updateDragHeight(event.pointerId, event.clientY)
     },
-    [commitHeight]
+    [updateDragHeight]
   )
 
   const handleResizePointerUp = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => endResizeDrag(event, true),
-    [endResizeDrag]
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      finishDragHeight(event.pointerId, true)
+    },
+    [finishDragHeight]
   )
 
   const handleResizePointerCancel = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => endResizeDrag(event, false),
-    [endResizeDrag]
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      finishDragHeight(event.pointerId, false)
+    },
+    [finishDragHeight]
+  )
+
+  const handleResizeLostPointerCapture = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      // Capture revoked mid-gesture without an explicit end: the gesture is
+      // over at the last live position, so settle it like a normal release.
+      // After a real pointerup/pointercancel the drag is already null and
+      // this is a no-op — cancel keeps its truthful discard semantics.
+      const drag = dragStateRef.current
+      if (!drag || drag.pointerId !== event.pointerId) return
+      finishDragHeight(event.pointerId, true)
+    },
+    [finishDragHeight]
   )
 
   const handleResizeKeyDown = useCallback(
@@ -719,20 +829,35 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
       if (next === null) return
       // Keyboard resizes change layout: hold first, synchronously. No outer
       // scroll default — the handle keeps focus and the viewport stays put.
+      // The adjustment is session-only: it never persists and later text
+      // edits never overwrite it.
       event.preventDefault()
       captureControlsIntent()
-      commitHeight(next)
+      commitManualHeight(next)
     },
-    [captureControlsIntent, commitHeight, heightBounds.max, heightBounds.min, inlineHeight]
+    [captureControlsIntent, commitManualHeight, heightBounds.max, heightBounds.min, inlineHeight]
   )
 
-  const renderSourceEditor = () => (
+  const renderSourceEditor = (reportContentHeight: boolean) => (
+    // Independent expanded meaning: the inline engine (reportContentHeight
+    // true) feeds the session-adaptive measurement; the expanded modal engine
+    // (false, different width) never reports, so the inline footprint stays
+    // put. Both engines use the same fixed-fill mount (expanded={false} with
+    // height 100% through the bounded flex chain) — the modal body fills the
+    // original bounded modal fixed height with internal CodeMirror scrolling
+    // even for one-line text, never sizing to short natural content. No
+    // viewport-specific compensator: the modal height is pure CSS.
     <div className="editing-message">
       <CodeEditor
         ref={editorRef}
         value={content}
         language="markdown"
         onChange={handleChange}
+        // Inline engine only: feeds the session-adaptive measurement. The
+        // expanded modal engine (different width) and preview (no engine)
+        // never report, so the inline footprint stays put. Modal measurements
+        // must not alter the inline auto state.
+        onHeightChange={reportContentHeight ? handleAutoContentHeight : undefined}
         spellcheck={spellcheck}
         onEditorKeyDown={handleEditorKeyDown}
         onEditorPaste={handleEditorPaste}
@@ -752,6 +877,11 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
   )
 
   const renderToolbar = (inExpanded: boolean) => (
+    // Toolbar grouping (markup, never forced positioning): the mode toggle
+    // pins left, the scrollable tools group owns formatting + find + native
+    // history (undo/redo left alongside search), and the end group owns ONLY
+    // the expand/collapse control far-right. Narrow windows scroll the tools
+    // group internally; the end group never shrinks away.
     <EditorToolbar>
       <ToolbarGroup>
         <Tooltip title={isPreview ? t('message.edit.show_source') : t('message.edit.show_preview')} mouseLeaveDelay={0}>
@@ -828,9 +958,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
             <Search size={15} />
           </ActionIconButton>
         </Tooltip>
-      </ToolbarToolsGroup>
-      <ToolbarSeparator data-testid="message-editor-history-separator" />
-      <ToolbarGroup>
+        <ToolbarSeparator data-testid="message-editor-history-separator" />
         <Tooltip title={t('message.edit.undo')} mouseLeaveDelay={0}>
           <ActionIconButton
             data-testid="message-editor-undo-btn"
@@ -849,7 +977,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
             <Redo2 size={15} />
           </ActionIconButton>
         </Tooltip>
-      </ToolbarGroup>
+      </ToolbarToolsGroup>
       <ToolbarEndGroup>
         {inExpanded ? (
           <Tooltip title={t('message.edit.collapse')} mouseLeaveDelay={0}>
@@ -972,6 +1100,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
       onPointerMove={handleResizePointerMove}
       onPointerUp={handleResizePointerUp}
       onPointerCancel={handleResizePointerCancel}
+      onLostPointerCapture={handleResizeLostPointerCapture}
       onKeyDown={handleResizeKeyDown}>
       <ResizeGrip aria-hidden="true" />
     </ResizeHandle>
@@ -995,7 +1124,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
         <InlineResizeContainer>
           {renderResizeHandle()}
           <ResizeSurface data-testid="message-editor-resize-surface" style={{ height: inlineHeight }}>
-            {isPreview ? renderPreview() : renderSourceEditor()}
+            {isPreview ? renderPreview() : renderSourceEditor(true)}
           </ResizeSurface>
         </InlineResizeContainer>
       )}
@@ -1033,7 +1162,7 @@ const MessageMainTextEditor: FC<MainTextEditorProps> = ({
             </ExpandedHeader>
             {renderToolbar(true)}
             {findOpen && renderFindBar()}
-            <ExpandedBody>{isPreview ? renderPreview() : renderSourceEditor()}</ExpandedBody>
+            <ExpandedBody>{isPreview ? renderPreview() : renderSourceEditor(false)}</ExpandedBody>
             <ExpandedFooter>
               <Tooltip title={t('common.cancel')}>
                 <ActionIconButton onClick={onCancelKey} disabled={disabled} aria-label={t('common.cancel')}>
@@ -1851,7 +1980,10 @@ const ResizeGrip = styled.span`
 `
 
 const ResizeSurface = styled.div`
-  min-height: 120px;
+  // Single one-line floor mirrors the JS resolver (one rendered text line
+  // plus normal padding/slack): short drafts render with only a small normal
+  // pad below the text. The CSS maximum is the same 52vh backstop.
+  min-height: 40px;
   max-height: 52vh;
   overflow: hidden;
   display: flex;
@@ -1886,10 +2018,15 @@ const ExpandedPlaceholder = styled.div`
 const ExpandedRoot = styled.div`
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  max-height: 100%;
+  // Fixed window height wins over flex sizing: the modal root is a flex item
+  // of the auto-height antd body, where flex-basis (from flex:1) overrides
+  // height and shrinks short content to its natural size. flex:none keeps the
+  // original bounded height min(72vh, calc(100vh - 120px)) for every draft
+  // length; the body below flex-fills it with internal scrolling.
+  flex: none;
   height: min(72vh, calc(100vh - 120px));
+  max-height: 100%;
+  min-height: 0;
   overflow: hidden;
   color: var(--color-text);
 `
@@ -1964,7 +2101,11 @@ const ExpandedBody = styled.div`
   }
 
   ${PreviewScroll} {
+    // Preview fills the modal too: flex-sized to the fixed modal body height
+    // with its own internal scroll, never sized to short natural content.
+    flex: 1;
     min-height: 0;
+    height: auto;
   }
 `
 
