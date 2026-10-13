@@ -20,9 +20,14 @@
  *   edge, production app-owned trigger → around → precommit-anchored merge +
  *   keeper hold → Redux/DOM growth. No synthetic dispatch, no scrollTop
  *   write, no fake scroll event, no spacer, no instrumentation.
- * - R-04 whole-topic snapshot via real copy-as-Markdown — INTEGRATED snapshot
+ * - R-04 whole-topic snapshot via real export-as-Markdown — INTEGRATED snapshot
  *   action with independent fetchWholeTopicSnapshot oracle; loaded window
- *   unchanged (snapshot never publishes).
+ *   unchanged (snapshot never publishes). The removed copy-as-Markdown menu
+ *   path is NOT used: the whole-topic read goes through the production
+ *   export submenu (Export → Export as markdown) with the file-save dialog
+ *   captured in-page. The same case also asserts the topic-menu contract
+ *   (no prompt item, no copy submenu, no top-level notes item; Save nests
+ *   notes + knowledge) and the Save → notes click behavior.
  * - R-05 conversation-navigation whole-route user list — INTEGRATED UI
  *   evidence: enable messageNavigation via existing settings action,
  *   cold-activate the same 50/20 seed, assert the LEFT conversation list
@@ -46,6 +51,9 @@
  *   `conversation-navigation` / `conversation-nav-item-*` testids are the
  *   approved list contract (owned by the redesign).
  */
+
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 
 import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
 
@@ -952,11 +960,14 @@ test.describe('windowed reads: latest and around', () => {
     }
   })
 
-  test('R-04 whole-topic snapshot via real copy-as-Markdown — bounded window preserved', async ({ mainWindow }) => {
+  test('R-04 whole-topic snapshot via real export-as-Markdown + save-submenu contract — bounded window preserved', async ({
+    mainWindow,
+    ownedTmpRoot
+  }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-04 INTEGRATED: real topic-item context menu → copy-as-Markdown (whole-topic Main snapshot) → clipboard holds head+tail; independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
+        'R-04 INTEGRATED: real topic-item context menu contract (no prompt item, no copy submenu, no top-level notes item; Save nests notes + knowledge) → real Save → notes click (toast + captured file write holds head+tail) → real Export → Export-as-markdown with captured file-save payload (whole-topic Main snapshot holds head+tail); independent fetchWholeTopicSnapshot IPC oracle; loaded Redux/DOM window unchanged (snapshot never publishes).'
     })
 
     const page = mainWindow
@@ -1005,65 +1016,167 @@ test.describe('windowed reads: latest and around', () => {
     expect(pre.blockIdsInOrder.length).toBe(DISPLAY_LIMIT)
     console.log(`[E2E] R-04 pre window ids=${pre.ids.length} dom=${pre.domCount} blocks=${pre.blockIdsInOrder.length}`)
 
-    // Real user-visible action: topic-item context menu → Copy submenu → Copy as markdown.
-    // Locale-robust (app locale zh-CN per trace): parent `chat.topics.copy.title` (复制|Copy),
-    // child `chat.topics.copy.md` (复制为 Markdown|Copy as markdown); no direct formatter call.
+    // Real user-visible menu contract: topic-item context menu must NOT offer
+    // the removed prompt/copy entries, must NOT offer top-level notes, and
+    // must nest notes + knowledge under Save. Locale-robust (zh-CN per
+    // trace): prompt `chat.topics.prompt.label` (话题提示词|Topic Prompts),
+    // copy parent `chat.topics.copy.title` (复制|Copy), copy child
+    // `chat.topics.copy.md` (复制为 Markdown|Copy as markdown), notes
+    // `notes.save` (保存到笔记|Save to Notes), save parent
+    // `chat.save.label` (保存|Save), knowledge
+    // `chat.save.topic.knowledge.title` (保存话题到知识库|Save Topic to
+    // Knowledge Base).
     const topicItem = page.locator(`[data-testid="topic-item"][data-topic-id="${topicId}"]`)
     await topicItem.scrollIntoViewIfNeeded()
     await topicItem.click({ button: 'right' })
-    const copyParent = page
+    await expect(page.locator('.ant-dropdown-menu')).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('menuitem', { name: /^(话题提示词|Topic Prompts)$/ })).toHaveCount(0)
+    await expect(page.locator('.ant-dropdown-menu-submenu').filter({ hasText: /^(复制|Copy)$/ })).toHaveCount(0)
+    await expect(page.getByRole('menuitem', { name: /^(复制为 Markdown|Copy as markdown)$/ })).toHaveCount(0)
+    // Top-level notes entry is gone: with every submenu still closed the
+    // nested notes item is not rendered, so the count is exactly zero here.
+    await expect(page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ })).toHaveCount(0)
+    const saveParent = page
       .locator('.ant-dropdown-menu-submenu')
-      .filter({ hasText: /^(复制|Copy)$/ })
+      .filter({ hasText: /^(保存|Save)$/ })
       .first()
-    await copyParent.waitFor({ state: 'visible', timeout: 10000 })
-    await copyParent.hover()
-    const mdItem = page.getByRole('menuitem', { name: /^(复制为 Markdown|Copy as markdown)$/ }).first()
+    await saveParent.waitFor({ state: 'visible', timeout: 10000 })
+    await saveParent.hover()
+    const notesItem = page.getByRole('menuitem', { name: /^(保存到笔记|Save to Notes)$/ }).first()
+    const knowledgeItem = page
+      .getByRole('menuitem', { name: /^(保存话题到知识库|Save Topic to Knowledge Base)$/ })
+      .first()
+    await notesItem.waitFor({ state: 'visible', timeout: 10000 })
+    await knowledgeItem.waitFor({ state: 'visible', timeout: 10000 })
+    console.log('[E2E] R-04 menu contract ok (no prompt/copy/top-notes; Save nests notes+knowledge)')
+
+    // Real Save → notes click: the production path writes a real markdown
+    // file under the disposable-profile notes dir (no personal files).
+    // Snapshot the candidate notes dirs first, then assert the user-visible
+    // success toast plus a newly written payload holding heading +
+    // authority head + tail in order.
+    const notesInfo = await page.evaluate(async () => {
+      const s = (window as any).store.getState()
+      const info = await (window as any).api.getAppInfo()
+      return { storeNotesPath: (s.note?.notesPath ?? '') as string, defaultNotesPath: info.notesPath as string }
+    })
+    expect(notesInfo.defaultNotesPath, 'runtime default notes path must be known').toBeTruthy()
+    console.log(
+      `[E2E] R-04 notes dirs store=${notesInfo.storeNotesPath || '(empty)'} default=${notesInfo.defaultNotesPath}`
+    )
+    const notesDirs = [notesInfo.storeNotesPath, notesInfo.defaultNotesPath].filter(
+      (p): p is string => typeof p === 'string' && p.length > 0
+    )
+    const notesBefore = new Map<string, Set<string>>()
+    for (const dir of notesDirs) {
+      try {
+        notesBefore.set(dir, new Set(fs.existsSync(dir) ? fs.readdirSync(dir) : []))
+      } catch {
+        notesBefore.set(dir, new Set())
+      }
+    }
+    await notesItem.click()
+
+    // User-visible notes success toast (`message.success.notes.export`: zh-CN 成功导出到笔记 / en-US Successfully exported to notes).
+    await expect(page.locator('.ant-message')).toContainText(/(成功导出到笔记|Successfully exported to notes)/, {
+      timeout: 15000
+    })
+    console.log('[E2E] R-04 notes success toast visible')
+    const findFreshNoteFile = (): string | null => {
+      for (const dir of notesDirs) {
+        let entries: string[] = []
+        try {
+          entries = fs.existsSync(dir) ? fs.readdirSync(dir) : []
+        } catch {
+          continue
+        }
+        const before = notesBefore.get(dir) ?? new Set<string>()
+        const fresh = entries.filter((e) => !before.has(e) && e.endsWith('.md'))
+        if (fresh.length > 0) {
+          return path.join(dir, fresh[0])
+        }
+      }
+      return null
+    }
+    await expect.poll(() => findFreshNoteFile() !== null, { timeout: 15000 }).toBe(true)
+    const noteFile = findFreshNoteFile()
+    if (noteFile === null || noteFile.length === 0) {
+      throw new Error('a new markdown note file must appear under the disposable notes dir')
+    }
+    const noteContent = fs.readFileSync(noteFile, 'utf-8')
+    expect(noteContent.includes(heading), 'notes payload must contain the topic heading').toBe(true)
+    expect(noteContent.includes(headContent), 'notes payload must contain authority head content').toBe(true)
+    expect(noteContent.includes(tailContent), 'notes payload must contain the tail content (no truncation)').toBe(true)
+    expect(noteContent.indexOf(headContent)).toBeGreaterThan(noteContent.indexOf(heading))
+    expect(noteContent.indexOf(tailContent)).toBeGreaterThan(noteContent.indexOf(headContent))
+    console.log(`[E2E] R-04 notes write ok file=${noteFile} len=${noteContent.length}`)
+
+    // Real user-visible action: topic-item context menu → Export submenu →
+    // Export as markdown. The production preconfigured-path branch is used:
+    // `settings/markdownExportPath` points at a spec-local dir under the
+    // fixture-owned root (no personal files, no native save dialog), so the
+    // written file is the whole-topic evidence. Locale-robust: parent
+    // `chat.topics.export.title` (导出|Export), child
+    // `chat.topics.export.md.label` (导出为 Markdown|Export as markdown).
+    const exportDir = path.join(ownedTmpRoot, 'r04-export')
+    fs.mkdirSync(exportDir, { recursive: true })
+    await page.evaluate((dir: string) => {
+      ;(window as any).store.dispatch({ type: 'settings/setmarkdownExportPath', payload: dir })
+    }, exportDir)
+    const exportPathOk = await page.evaluate(() => (window as any).store.getState().settings?.markdownExportPath)
+    expect(exportPathOk).toBe(exportDir)
+    await topicItem.scrollIntoViewIfNeeded()
+    await topicItem.click({ button: 'right' })
+    const exportParent = page
+      .locator('.ant-dropdown-menu-submenu')
+      .filter({ hasText: /^(导出|Export)$/ })
+      .first()
+    await exportParent.waitFor({ state: 'visible', timeout: 10000 })
+    await exportParent.hover()
+    const mdItem = page.getByRole('menuitem', { name: /^(导出为 Markdown|Export as markdown)$/ }).first()
     await mdItem.waitFor({ state: 'visible', timeout: 10000 })
     await mdItem.click()
 
-    // User-visible copy success toast (antd message from `message.copy.success`: zh-CN 复制成功 / en-US Copied!).
-    await expect(page.locator('.ant-message')).toContainText(/(复制成功|Copied!)/, { timeout: 10000 })
-    console.log('[E2E] R-04 copy success toast visible')
-
-    // Repository clipboard pattern: window.api.clipboard.readText fallback navigator.clipboard; poll until
-    // heading + authority head (outside loaded window) + tail are all present in order (no truncation).
-    let clipboard: string | null = null
-    const MAX_POLL_ATTEMPTS = 30
-    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-      clipboard = await page.evaluate(async () => {
-        try {
-          if ((window as any).api?.clipboard?.readText) {
-            return await (window as any).api.clipboard.readText()
-          }
-          return await navigator.clipboard.readText()
-        } catch {
-          return null
-        }
-      })
-      if (
-        clipboard &&
-        clipboard.includes(heading) &&
-        clipboard.includes(headContent) &&
-        clipboard.includes(tailContent)
-      ) {
-        break
+    // User-visible export success toast for the preconfigured-path branch
+    // (`message.success.markdown.export.preconf`: zh-CN 成功导出 Markdown 文件到预先设定的路径).
+    await expect(page.locator('.ant-message')).toContainText(
+      /(成功导出 Markdown 文件到预先设定的路径|Successfully exported the Markdown file to the preconfigured path)/,
+      {
+        timeout: 15000
       }
-      await page.waitForTimeout(200)
-    }
-    expect(clipboard, 'clipboard must be readable after real copy action').not.toBeNull()
-    const text = clipboard as string
-    expect(text.includes(heading), 'clipboard must contain the topic heading').toBe(true)
-    expect(text.includes(headContent), 'clipboard must contain authority head content outside the loaded window').toBe(
-      true
     )
-    expect(text.includes(tailContent), 'clipboard must contain the tail content (no truncation)').toBe(true)
+    console.log('[E2E] R-04 export success toast visible')
+
+    // Written file payload: markdown holding heading + authority head
+    // (outside loaded window) + tail in order (no truncation) — the same
+    // strength as the migrated clipboard assertions.
+    const findExportFile = (): string | null => {
+      const entries = fs.existsSync(exportDir) ? fs.readdirSync(exportDir) : []
+      const md = entries.filter((e) => e.endsWith('.md'))
+      if (md.length > 0) {
+        return path.join(exportDir, md[0])
+      }
+      return null
+    }
+    await expect.poll(() => findExportFile() !== null, { timeout: 15000 }).toBe(true)
+    const exportFile = findExportFile()
+    if (exportFile === null || exportFile.length === 0) {
+      throw new Error('exported markdown file must appear in the preconfigured dir')
+    }
+    const text = fs.readFileSync(exportFile, 'utf-8')
+    expect(text.includes(heading), 'export payload must contain the topic heading').toBe(true)
+    expect(
+      text.includes(headContent),
+      'export payload must contain authority head content outside the loaded window'
+    ).toBe(true)
+    expect(text.includes(tailContent), 'export payload must contain the tail content (no truncation)').toBe(true)
     const headingIdx = text.indexOf(heading)
     const headIdx = text.indexOf(headContent)
     const tailIdx = text.indexOf(tailContent)
     expect(headingIdx).toBeGreaterThanOrEqual(0)
     expect(headIdx).toBeGreaterThan(headingIdx)
     expect(tailIdx).toBeGreaterThan(headIdx)
-    console.log(`[E2E] R-04 clipboard len=${text.length} heading@${headingIdx} head@${headIdx} tail@${tailIdx}`)
+    console.log(`[E2E] R-04 export len=${text.length} heading@${headingIdx} head@${headIdx} tail@${tailIdx}`)
 
     // Independent real IPC oracle: whole-topic snapshot straight from Main authority.
     const snap: any = await page.evaluate(

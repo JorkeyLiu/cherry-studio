@@ -3,7 +3,7 @@ import AddButton from '@renderer/components/AddButton'
 import AssistantAvatar from '@renderer/components/Avatar/AssistantAvatar'
 import type { DraggableVirtualListRef } from '@renderer/components/DraggableList'
 import { DraggableVirtualList } from '@renderer/components/DraggableList'
-import { CopyIcon, DeleteIcon, EditIcon } from '@renderer/components/Icons'
+import { DeleteIcon, EditIcon } from '@renderer/components/Icons'
 import ObsidianExportPopup from '@renderer/components/Popups/ObsidianExportPopup'
 import PromptPopup from '@renderer/components/Popups/PromptPopup'
 import SaveToKnowledgePopup from '@renderer/components/Popups/SaveToKnowledgePopup'
@@ -31,7 +31,6 @@ import { newMessagesActions } from '@renderer/store/newMessage'
 import type { Assistant, Topic } from '@renderer/types'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import { classNames, removeSpecialCharactersForFileName } from '@renderer/utils'
-import { copyTopicAsMarkdown, copyTopicAsPlainText } from '@renderer/utils/copy'
 import {
   exportMarkdownToJoplin,
   exportMarkdownToSiyuan,
@@ -51,10 +50,8 @@ import { findIndex } from 'lodash'
 import {
   CheckSquare,
   FolderOpen,
-  HelpCircle,
   ListChecks,
   NotebookPen,
-  PackagePlus,
   PinIcon,
   PinOffIcon,
   Save,
@@ -452,42 +449,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       },
       {
-        label: t('chat.topics.prompt.label'),
-        key: 'topic-prompt',
-        icon: <PackagePlus size={14} />,
-        extra: (
-          <Tooltip title={t('chat.topics.prompt.tips')}>
-            <HelpCircle size={14} />
-          </Tooltip>
-        ),
-        async onClick() {
-          const prompt = await PromptPopup.show({
-            title: t('chat.topics.prompt.edit.title'),
-            message: '',
-            defaultValue: topic?.prompt || '',
-            inputProps: {
-              rows: 8,
-              allowClear: true
-            }
-          })
-
-          if (prompt !== null) {
-            void (async () => {
-              const updatedTopic = { ...topic, prompt: prompt.trim() }
-              try {
-                // Phase 5.2B: SQLite persists before Redux (LOCK-528).
-                await updateTopic(updatedTopic)
-                if (topic.id === activeTopic.id) {
-                  setActiveTopic(updatedTopic)
-                }
-              } catch (err) {
-                logger.error('Failed to persist topic prompt', err as Error)
-              }
-            })()
-          }
-        }
-      },
-      {
         label: topic.pinned ? t('chat.topics.unpin') : t('chat.topics.pin'),
         key: 'pin',
         icon: topic.pinned ? <PinOffIcon size={14} /> : <PinIcon size={14} />,
@@ -496,40 +457,18 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         }
       },
       {
-        label: t('notes.save'),
-        key: 'notes',
-        icon: <NotebookPen size={14} />,
-        onClick: async () => {
-          void exportTopicToNotes(topic, notesPath)
-        }
-      },
-      {
-        label: t('chat.topics.copy.title'),
-        key: 'copy',
-        icon: <CopyIcon size={14} />,
-        children: [
-          {
-            label: t('chat.topics.copy.image'),
-            key: 'img',
-            onClick: () => EventEmitter.emit(EVENT_NAMES.COPY_TOPIC_IMAGE, topic)
-          },
-          {
-            label: t('chat.topics.copy.md'),
-            key: 'md',
-            onClick: () => copyTopicAsMarkdown(topic)
-          },
-          {
-            label: t('chat.topics.copy.plain_text'),
-            key: 'plain_text',
-            onClick: () => copyTopicAsPlainText(topic)
-          }
-        ]
-      },
-      {
         label: t('chat.save.label'),
         key: 'save',
         icon: <Save size={14} />,
         children: [
+          {
+            label: t('notes.save'),
+            key: 'notes',
+            icon: <NotebookPen size={14} />,
+            onClick: async () => {
+              void exportTopicToNotes(topic, notesPath)
+            }
+          },
           {
             label: t('chat.save.topic.knowledge.title'),
             key: 'knowledge',
@@ -664,8 +603,6 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     notesPath,
     assistant,
     updateTopic,
-    activeTopic.id,
-    setActiveTopic,
     onPinTopic,
     onMoveTopic,
     onDeleteTopic
