@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Assistant",
-      "click_to_navigate": "Cliquez pour accéder au message correspondant",
-      "coming_soon": "Le diagramme du flux de chat sera bientôt disponible",
-      "no_messages": "Aucun message trouvé",
-      "start_conversation": "Commencez une conversation pour visualiser le diagramme du flux de chat",
-      "title": "Historique des chats",
-      "user_node": "Utilisateur",
-      "view_full_content": "Voir le contenu complet"
-    },
     "input": {
       "auto_resize": "Ajustement automatique de la hauteur",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "Retour en bas",
-      "close": "Fermer",
       "first": "Déjà premier message",
-      "history": "Historique des discussions",
-      "last": "Déjà dernier message",
-      "next": "Prochain message",
-      "prev": "Précédent message",
-      "top": "Retour en haut"
+      "last": "Déjà dernier message"
     },
     "resend": "Réenvoyer",
     "save": {

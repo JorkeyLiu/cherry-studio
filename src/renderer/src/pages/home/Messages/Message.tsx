@@ -26,7 +26,6 @@ import MessageEditor from './MessageEditor'
 import MessageErrorBoundary from './MessageErrorBoundary'
 import MessageHeader from './MessageHeader'
 import MessageMenubar from './MessageMenubar'
-import MessageOutline from './MessageOutline'
 import { areProjectedMessagesEqual, areTopicsViewportEqual, isSameViewportPosition } from './messageViewportProjection'
 import { captureInteractionIntent, INTERACTION_REGION_CONTROLS, useOptionalRouteViewport } from './routeViewportContext'
 
@@ -86,7 +85,7 @@ const MessageItem: FC<Props> = ({
   const { assistant, setModel } = useMessageAssistant(message.assistantId)
   const { isMultiSelectMode } = useChatContext(topic)
   const model = useModel(getMessageModelId(message), message.model?.provider) || message.model
-  const { fontSize, showMessageOutline } = useSettings()
+  const { fontSize } = useSettings()
   const { editSave, resendWithEdit } = useMessageActionController()
   const messageContainerRef = useRef<HTMLDivElement>(null)
   const { editingMessageId, startEditing, stopEditing } = useMessageEditing()
@@ -288,9 +287,6 @@ const MessageItem: FC<Props> = ({
         )}
         {!isEditing && (
           <>
-            {!isMultiSelectMode && message.role === 'assistant' && showMessageOutline && (
-              <MessageOutline message={message} snapshotBlocksById={snapshotBlocksById} />
-            )}
             <MessageContentContainer
               className="message-content-container"
               style={{

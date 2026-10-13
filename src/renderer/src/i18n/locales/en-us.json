@@ -1008,16 +1008,6 @@
       "undoAction": "Undo",
       "undone": "Undone"
     },
-    "history": {
-      "assistant_node": "Assistant",
-      "click_to_navigate": "Click to navigate to the message",
-      "coming_soon": "Chat workflow diagram coming soon",
-      "no_messages": "No Messages Found",
-      "start_conversation": "Start a conversation to see the chat flow diagram",
-      "title": "Chat History",
-      "user_node": "User",
-      "view_full_content": "View Full Content"
-    },
     "input": {
       "auto_resize": "Auto resize height",
       "context_count": {
@@ -1118,13 +1108,18 @@
     },
     "navigation": {
       "bottom": "Back to bottom",
-      "close": "Close",
+      "conversation_list": "Conversation",
       "first": "Already at the first message",
-      "history": "Chat History",
       "last": "Already at the last message",
-      "next": "Next Message",
-      "prev": "Previous Message",
-      "top": "Back to top"
+      "user_attachment_count_one": "{{count}} attachment",
+      "user_attachment_count_other": "{{count}} attachments",
+      "user_attachment_fallback": "Attachment",
+      "user_attachment_file": "{{name}}",
+      "user_attachment_file_more_one": "{{name}} +{{count}} attachment",
+      "user_attachment_file_more_other": "{{name}} +{{count}} attachments",
+      "user_attachment_image_one": "{{count}} image",
+      "user_attachment_image_other": "{{count}} images",
+      "user_message_fallback": "Quoted message"
     },
     "resend": "Resend",
     "save": {
@@ -4586,10 +4581,9 @@
       "metrics": "{{time_first_token_millsec}}ms to first token | {{token_speed}} tok/sec",
       "model": {},
       "navigation": {
-        "label": "Navigation bar"
+        "label": "Conversation navigation"
       },
-      "prompt": "Show prompt",
-      "show_message_outline": "Show message outline"
+      "prompt": "Show prompt"
     },
     "miniapps": {
       "cache_change_notice": "Changes will take effect when the number of open mini apps reaches the set value",

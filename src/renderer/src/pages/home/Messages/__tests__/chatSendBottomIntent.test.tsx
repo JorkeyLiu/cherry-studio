@@ -458,12 +458,15 @@ describe('runSendBottomIntent handler guards (actual sequence path)', () => {
     expect(controller.userIntentPending).toBe(false)
   })
 
-  it('a real transaction rejects a stale scroll across awaits: route swap skips the DOM write', async () => {
+  it('a real transaction rejects a stale scroll across awaits: route swap cancels without finish/save', async () => {
     // Real transaction awaits (applyWindow + settle) with a route swap in
     // between: the scroll callback rechecks currency immediately before the
-    // DOM mutation and skips the stale write to the new container.
+    // DOM mutation and reports cancelled so the transaction cancels without
+    // finish/savePosition (no false success).
     let liveRoute: string | null = null
     const scrollSpy = vi.fn()
+    const finish = vi.fn()
+    const cancel = vi.fn()
     const result = await runMessageNavigationTransaction(
       { kind: 'bottom', source: 'imperative' },
       {
@@ -481,18 +484,21 @@ describe('runSendBottomIntent handler guards (actual sequence path)', () => {
         settleDom: async () => {},
         beginProgrammaticScroll: async () => true,
         scroll: (resolved) => {
-          if (liveRoute !== null) return
+          if (liveRoute !== null) return 'cancelled' as const
           scrollSpy(resolved)
+          return 'success' as const
         },
-        finish: () => {},
-        cancel: () => {}
+        finish,
+        cancel
       }
     )
-    expect(result).toBe('success')
+    expect(result).toBe('cancelled')
     expect(scrollSpy).not.toHaveBeenCalled()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(finish).not.toHaveBeenCalled()
 
     // Control: without a swap the same transaction scrolls exactly once.
-    const scrollOk = vi.fn()
+    const scrollOk = vi.fn((_resolved: unknown) => 'success' as const)
     const ok = await runMessageNavigationTransaction(
       { kind: 'bottom', source: 'imperative' },
       {
@@ -508,6 +514,7 @@ describe('runSendBottomIntent handler guards (actual sequence path)', () => {
         beginProgrammaticScroll: async () => true,
         scroll: (resolved) => {
           scrollOk(resolved)
+          return 'success' as const
         },
         finish: () => {},
         cancel: () => {}

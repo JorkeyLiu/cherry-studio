@@ -182,7 +182,6 @@ vi.mock('../MessageErrorBoundary', () => ({
 }))
 vi.mock('../MessageHeader', () => ({ default: () => <div>header</div> }))
 vi.mock('../MessageMenubar', () => ({ default: () => <div>menubar</div> }))
-vi.mock('../MessageOutline', () => ({ default: () => null }))
 
 // ── Import real MessageItem (after mocks) ──────────────────────────────────
 

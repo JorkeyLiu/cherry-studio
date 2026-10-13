@@ -14,6 +14,7 @@ import { useTimer } from '@renderer/hooks/useTimer'
 import { autoRenameTopic } from '@renderer/hooks/useTopic'
 import { useTopicSegments } from '@renderer/hooks/useTopicSegments'
 import { useTopicTransition } from '@renderer/hooks/useTopicTransition'
+import BackToBottomButton from '@renderer/pages/home/Messages/BackToBottomButton'
 import {
   COLUMN_REVERSE_BOTTOM_THRESHOLD_PX,
   COLUMN_REVERSE_NEWER_PREFETCH_PX,
@@ -35,6 +36,7 @@ import {
   type BootstrapPhase,
   canHandleUserViewportScroll,
   chooseNavigationWindow,
+  computeColumnReverseMessageScrollTop,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
   type MessageNavigationResult,
@@ -105,7 +107,6 @@ import {
   captureScrollableAsDataURL,
   removeSpecialCharactersForFileName
 } from '@renderer/utils'
-import { scrollIntoView } from '@renderer/utils/dom'
 import { updateCodeBlock } from '@renderer/utils/markdown'
 import { getMainTextContent } from '@renderer/utils/messageUtils/find'
 import { isTextLikeBlock } from '@renderer/utils/messageUtils/is'
@@ -503,6 +504,15 @@ interface MessagesContentProps {
   onStabilizerKeyDown?: (e: React.KeyboardEvent) => void
   /** Atomic viewport transition phase (diagnostic `data-viewport-phase`; hidden while positioning). */
   viewportPhase: ViewportTransitionPhase
+  /** Canonical explicit bottom navigation (independent back-to-bottom button). */
+  onScrollToBottom: () => void
+  /**
+   * Authoritative newer completeness for the current projection
+   * (`viewportState.window.hasMoreNewer`, validated Main `hasMoreAfter` +
+   * bounded-trim derivation). Forwarded to the back-to-bottom button so a
+   * historical window parked at scrollTop 0 with newer beyond stays visible.
+   */
+  hasMoreNewer?: boolean
 }
 
 const MessagesContent: React.FC<MessagesContentProps> = ({
@@ -521,7 +531,9 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
   onStabilizerUserInput,
   onStabilizerWheel,
   onStabilizerKeyDown,
-  viewportPhase
+  viewportPhase,
+  onScrollToBottom,
+  hasMoreNewer
 }) => {
   const { t } = useTranslation()
 
@@ -721,6 +733,11 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           <Prompt assistant={assistant} key={assistant.prompt} topic={topic} />
         </div>
       </MessagesContainer>
+      <BackToBottomButton
+        onScrollToBottom={onScrollToBottom}
+        containerRef={scrollContainerRef}
+        hasMoreNewer={hasMoreNewer}
+      />
     </MessagesWrapper>
   )
 }
@@ -2148,10 +2165,16 @@ const Messages = ({
       const routeAtStart = routeRef.current
       const ctrlEpochAtStart = controller.currentEpoch
       let interactionAtStart: number | null = null
+      let interactionGenAtStart: number | null = null
       try {
         interactionAtStart = controller.activeInteractionToken?.interactionId ?? null
       } catch {
         interactionAtStart = null
+      }
+      try {
+        interactionGenAtStart = controller.activeInteractionDeclareGeneration ?? null
+      } catch {
+        interactionGenAtStart = null
       }
       return runMessageNavigationTransaction(intent, {
         begin: (token, targetId, source, alignment) => {
@@ -2186,36 +2209,188 @@ const Messages = ({
           // (topic/route/epoch/unmounted), detached container, or a new
           // genuine interaction since entry all skip the programmatic write
           // so the user's actual geometry wins and no stale scrollTo lands
-          // on the new container.
+          // on the new container. Skips return truthful outcomes so the
+          // transaction cancels without finish/savePosition (no false success).
           try {
-            if (unmountedRef.current) return
-          } catch {}
-          try {
-            if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return
+            if (unmountedRef.current) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
           }
           try {
-            if (controller.currentEpoch !== ctrlEpochAtStart) return
+            if (topicIdRef.current !== topicAtStart || routeRef.current !== routeAtStart) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
+          }
+          try {
+            if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
+          } catch {
+            return 'cancelled' as const
           }
           try {
             const cur = controller.activeInteractionToken?.interactionId ?? null
-            if (cur !== interactionAtStart) return
+            if (cur !== interactionAtStart) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
+          }
+          try {
+            const curGen = controller.activeInteractionDeclareGeneration ?? null
+            if (curGen !== interactionGenAtStart) return 'cancelled' as const
+          } catch {
+            return 'cancelled' as const
           }
           const live = scrollContainerRef.current
           try {
-            if (!live || !live.isConnected) return
+            if (!live || !live.isConnected) return 'cancelled' as const
           } catch {
-            return
+            return 'cancelled' as const
           }
-          applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
+          const scrollOutcome = applyColumnReverseScroll(resolved, live, (targetId, alignment) => {
+            // Explicit-container row scroll (column-reverse fundamental):
+            // native scrollIntoView({ block: 'start' }) is a verified no-op
+            // for resident rows in this layout, so position the known
+            // `#messages` container arithmetically from live rects. No new
+            // controller, no global duplicate mechanism — the same canonical
+            // transaction scroll callback, same element lookup.
+            // Missing/hidden/unmeasurable physical target -> not-found.
             const target = document.getElementById(`message-${targetId}`)
-            if (target) scrollIntoView(target, { behavior: 'auto', block: alignment, container: 'nearest' })
+            if (!target) return 'not-found' as const
+            let containerRect: { top: number }
+            let elRect: { top: number; height: number }
+            try {
+              containerRect = live.getBoundingClientRect()
+              elRect = target.getBoundingClientRect()
+            } catch {
+              return 'not-found' as const
+            }
+            const elementTopWithinContainer = elRect.top - containerRect.top + live.scrollTop
+            const minScrollTop = -(live.scrollHeight - live.clientHeight)
+            const top = computeColumnReverseMessageScrollTop({
+              elementTopWithinContainer,
+              containerClientHeight: live.clientHeight,
+              elementHeight: elRect.height,
+              alignment,
+              minScrollTop
+            })
+            if (top === null) return 'not-found' as const
+            try {
+              live.scrollTo({ top })
+            } catch {
+              return 'cancelled' as const
+            }
+            return 'success' as const
           })
+          if (scrollOutcome !== 'success') return scrollOutcome
+          // Same-route message navigation live-anchor handoff (existing
+          // authoritative path only): the transaction scroll above moves the
+          // viewport but never installs the post-scroll row anchor, so the
+          // keeper would keep holding the old live anchor (bottom null or a
+          // stale row) and pull back on the next Resize/Mutation. Install the
+          // actual navigated row synchronously here — before any keeper
+          // observer can repin — through the existing gesture-free row keeper
+          // (`adoptInteractionViewport`, which keeps the row even in bottom
+          // vicinity, unlike the send/bottom programmatic path). Navigation
+          // to a user ID is a reading row, never an auto-resume follow.
+          // Fail-closed: currency skips above already returned without
+          // touching the DOM, so reaching here proves entry currency; a
+          // missing/unmeasurable physical target or a controller refusal
+          // (owned/dirty/route/epoch/phase) adopts nothing and commits
+          // nothing — never a false success. Bottom/top kinds keep their
+          // existing semantics (explicit bottom suspends via beginSendBottom
+          // elsewhere); no new scroll owner/controller/lifecycle/state.
+          if (resolved.kind === 'message') {
+            try {
+              const targetEl = document.getElementById(`message-${resolved.targetId}`)
+              if (!targetEl || !(targetEl instanceof HTMLElement)) return 'not-found' as const
+              if (!targetEl.isConnected) return 'not-found' as const
+              try {
+                if (!live.contains(targetEl)) return 'not-found' as const
+              } catch {
+                return 'not-found' as const
+              }
+              try {
+                if (window.getComputedStyle(targetEl).display === 'none') return 'not-found' as const
+              } catch {
+                return 'not-found' as const
+              }
+              let containerTop = NaN
+              let targetTop = NaN
+              try {
+                containerTop = live.getBoundingClientRect().top
+                targetTop = targetEl.getBoundingClientRect().top
+              } catch {
+                return 'not-found' as const
+              }
+              if (!Number.isFinite(containerTop) || !Number.isFinite(targetTop)) return 'not-found' as const
+              const intraRowOffset = targetTop - containerTop
+              if (!Number.isFinite(intraRowOffset)) return 'not-found' as const
+              const postScrollTop = live.scrollTop
+              if (typeof postScrollTop !== 'number' || !Number.isFinite(postScrollTop)) return 'not-found' as const
+              let atBottom = false
+              try {
+                atBottom = isColumnReverseAtBottom(postScrollTop, COLUMN_REVERSE_BOTTOM_THRESHOLD_PX)
+              } catch {
+                atBottom = false
+              }
+              try {
+                if (controller.currentEpoch !== ctrlEpochAtStart) return 'cancelled' as const
+              } catch {
+                return 'cancelled' as const
+              }
+              try {
+                const curId = controller.activeInteractionToken?.interactionId ?? null
+                if (curId !== interactionAtStart) return 'cancelled' as const
+                const curGen = controller.activeInteractionDeclareGeneration ?? null
+                if (curGen !== interactionGenAtStart) return 'cancelled' as const
+              } catch {
+                return 'cancelled' as const
+              }
+              const out = controller.adoptInteractionViewport(
+                { topicId: topicAtStart, route: routeAtStart },
+                {
+                  messageId: resolved.targetId,
+                  intraRowOffset,
+                  scrollTop: postScrollTop,
+                  isAtBottom: atBottom
+                },
+                { expectedEpoch: ctrlEpochAtStart }
+              )
+              if (!out || (out as { taken?: unknown }).taken !== true) return 'cancelled' as const
+              const taken = out as {
+                taken: true
+                routeKey: string
+                snapshot: {
+                  scrollTop: number
+                  messageId: string | null
+                  intraRowOffset: number | null
+                  isAtBottom: boolean
+                }
+              }
+              try {
+                commitSnapshotForRoute(taken.routeKey, {
+                  scrollTop: taken.snapshot.scrollTop,
+                  anchorId: taken.snapshot.messageId,
+                  messageId: taken.snapshot.messageId,
+                  intraRowOffset: taken.snapshot.intraRowOffset,
+                  rawScrollTop: taken.snapshot.scrollTop,
+                  isAtBottom: taken.snapshot.isAtBottom
+                })
+              } catch {
+                // fail-closed: controller state already advanced above
+              }
+              try {
+                notifyViewport()
+              } catch {
+                // fail-closed: keeper reads the live anchor on its next trigger
+              }
+              // Actually positioned + row adopted (clamped already-visible still
+              // counts — no arbitrary delta required).
+              return 'success' as const
+            } catch {
+              return 'cancelled' as const
+            }
+          }
+          // Explicit top/bottom/scrollTop canonical: success when written above.
+          return 'success' as const
         },
         finish: (token) => viewportDispatch({ type: 'navigation/finish', token }),
         cancel: (token) => viewportDispatch({ type: 'navigation/cancel', token })
@@ -2228,6 +2403,7 @@ const Messages = ({
       controller,
       displayCount,
       isCurrentNavigation,
+      notifyViewport,
       scrollContainerRef,
       selectMessageForFold,
       settleNavigationDom,
@@ -7356,6 +7532,8 @@ const Messages = ({
           onStabilizerWheel={handleStabilizerWheel}
           onStabilizerKeyDown={handleStabilizerKeyDown}
           viewportPhase={viewportPhaseAttr}
+          onScrollToBottom={scrollToBottom}
+          hasMoreNewer={hasMoreNewer}
         />
         <SelectionBox
           isMultiSelectMode={isMultiSelectMode}

@@ -364,7 +364,7 @@ describe('messageNavigationLoader', () => {
         revealTarget: async () => {},
         settleDom: async () => {},
         beginProgrammaticScroll: async () => true,
-        scroll: () => {},
+        scroll: () => 'success' as const,
         finish: () => {},
         cancel: () => {}
       }

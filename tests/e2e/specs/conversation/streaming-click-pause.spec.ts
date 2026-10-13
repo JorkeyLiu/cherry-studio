@@ -12,7 +12,7 @@
  *   controls (copy button and, by unit-covered gate, links/buttons/tabs)
  *   keep their normal native action AND pause — the pause never prevents,
  *   stops, or rewrites the action.
- * - Resume via the existing bottom navigation restores follow; a genuine
+ * - Resume via the independent back-to-bottom button restores follow; a genuine
  *   real-wheel return to the exact physical bottom during an active stream
  *   also resumes follow (no navigation control needed). A subsequent
  *   send/new stream follows again. Presses outside #messages are out of
@@ -1209,44 +1209,20 @@ test.describe('Streaming click-to-pause follow', () => {
       ANCHOR_TOL
     )
 
-    // ── Existing bottom navigation resumes follow. ──
-    // The navigation rail is settings-gated (default off): enable it through
-    // the settings seam (same state as a user toggle), then drive the real
-    // bottom button. The reveal trigger shifts left when the topic list is
-    // shown, so probe both the narrow and wide trigger spots.
-    await page.evaluate(() => {
-      ;(window as any).store.dispatch({ type: 'settings/setMessageNavigation', payload: true })
-    })
-    await page.waitForFunction(() => !!document.querySelector('button[aria-label="Back to bottom"]'), undefined, {
-      timeout: 15000
-    })
-    const winSize = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }))
-    const bottomBtn = page.getByRole('button', { name: 'Back to bottom' })
-    await page.mouse.move(winSize.w - 28, winSize.h * 0.5)
-    await page.waitForTimeout(500)
-    let navVisible = await bottomBtn.isVisible().catch(() => false)
-    if (!navVisible) {
-      await page.mouse.move(winSize.w - 320, winSize.h * 0.5)
-      await page.waitForTimeout(500)
-      navVisible = await bottomBtn.isVisible().catch(() => false)
-    }
-    expect(navVisible, 'bottom navigation must reveal on trigger hover').toBe(true)
-    // DOM click on the real rail button: a hover tooltip overlay covers the
-    // button center for synthetic pointer clicks, while the pause-relevant
-    // pointer path (inside #messages) is already proven with the real mouse
-    // above. This still exercises the full production resume chain
-    // (rail onClick → scrollToBottom suspension → bottom navigate → keeper
+    // ── Independent back-to-bottom button resumes follow. ──
+    // The button is always available (no settings gate, no hover trigger):
+    // it renders whenever the viewport is away from the genuine bottom.
+    const bottomBtn = page.getByTestId('conversation-back-to-bottom')
+    await expect(bottomBtn, 'independent back-to-bottom must reveal while away').toBeVisible({ timeout: 15000 })
+    // Real click on the production button exercises the full resume chain
+    // (button onClick → scrollToBottom suspension → bottom navigate → keeper
     // bottom-hold → follow).
     const resumeDiag = await page.evaluate(() => {
       const el = document.getElementById('messages') as HTMLElement | null
       return { top: el?.scrollTop ?? NaN, h: el?.scrollHeight ?? NaN }
     })
     console.log(`[E2E] resume pre-click: scrollTop=${Math.round(resumeDiag.top)} h=${resumeDiag.h}`)
-    await page.evaluate(() => {
-      const btn = document.querySelector('button[aria-label="Back to bottom"]') as HTMLElement | null
-      if (!btn) throw new Error('bottom button missing at click time')
-      btn.click()
-    })
+    await bottomBtn.click({ timeout: 10000 })
     for (let i = 0; i < 6; i++) {
       await page.waitForTimeout(500)
       const sample = await page.evaluate(() => {
@@ -1606,7 +1582,7 @@ test.describe('Streaming click-to-pause follow', () => {
 
     // Genuine wheel return: real wheel events over #messages only (the mouse
     // stays inside the viewport; positive deltaY drives toward the
-    // column-reverse bottom). Never clicks the Back-to-bottom rail, never
+    // column-reverse bottom). Never clicks the back-to-bottom button, never
     // writes scrollTop, never calls scrollIntoView, never forces adoption.
     // Driver targets the exact physical bottom (product gate <= 1): the old
     // <= 100 break stopped at e.g. -81 and later growth carried the viewport

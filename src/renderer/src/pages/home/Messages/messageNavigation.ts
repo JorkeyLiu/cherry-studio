@@ -44,8 +44,61 @@ export const resolveColumnReverseScrollTarget = (
  */
 export interface ColumnReverseScrollContainer {
   readonly scrollHeight: number
+  readonly clientHeight: number
+  readonly scrollTop: number
   scrollTo(options: { top: number }): void
 }
+
+/**
+ * Pure geometry for positioning a message row inside a column-reverse
+ * container (`#messages`: scrollTop 0 is the newest bottom, negative values
+ * read toward the oldest top).
+ *
+ * `elementTopWithinContainer` is the row's content offset
+ * (`elRect.top - containerRect.top + container.scrollTop`); `minScrollTop`
+ * is the clamped oldest edge (`-(scrollHeight - clientHeight)`, `<= 0`).
+ * Returns the finite clamped `scrollTo` top for the requested alignment, or
+ * `null` when any input is non-finite (fail-closed: caller skips the write).
+ *
+ * Native `scrollIntoView({ block: 'start' })` is a no-op for resident rows in
+ * this layout (verified: unchanged far-negative target offsets, scrollTop
+ * pinned at 0), so navigation scrolls the explicit container arithmetically.
+ */
+export const computeColumnReverseMessageScrollTop = (args: {
+  elementTopWithinContainer: number
+  containerClientHeight: number
+  elementHeight: number
+  alignment: MessageNavigationAlignment
+  minScrollTop: number
+}): number | null => {
+  const { elementTopWithinContainer, containerClientHeight, elementHeight, alignment, minScrollTop } = args
+  for (const value of [elementTopWithinContainer, containerClientHeight, elementHeight, minScrollTop]) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  }
+  const freeSpace = Math.max(0, containerClientHeight - elementHeight)
+  const desired =
+    alignment === 'center'
+      ? elementTopWithinContainer - freeSpace / 2
+      : alignment === 'end'
+        ? elementTopWithinContainer - freeSpace
+        : elementTopWithinContainer
+  if (!Number.isFinite(desired)) return null
+  const lower = Math.min(0, minScrollTop)
+  return Math.max(lower, Math.min(0, desired))
+}
+
+/**
+ * Truthful scroll outcome for the existing transaction `scroll` callback.
+ * Reuses the navigation result contract — no new lifecycle or state:
+ * - `cancelled`: currency/topic/route/epoch/new-interaction/unmounted/
+ *   owned/controller-refusal skipped the write (preserve pending).
+ * - `not-found`: physical target missing/hidden/unmeasurable (authoritative
+ *   missing clears pending).
+ * - `success`: actually positioned (top/bottom/scrollTop written, or message
+ *   row arithmetically positioned). A clamped already-visible target is still
+ *   success — no arbitrary delta is required.
+ */
+export type MessageNavigationScrollOutcome = MessageNavigationResult
 
 /**
  * Applies the concrete scroll for a resolved navigation intent in a column-reverse container.
@@ -53,20 +106,38 @@ export interface ColumnReverseScrollContainer {
  * - top/bottom/scrollTop: delegates to `container.scrollTo`.
  * - message: delegates to the `scrollElementIntoView` callback (DOM element lookup).
  *
+ * Returns the truthful outcome so the transaction can cancel without
+ * finish/savePosition on skipped writes. A `void` callback return is treated
+ * as `success` for focused legacy mocks; production callbacks return explicit
+ * outcomes.
+ *
  * This is the single call-site for navigation scroll execution — Messages.tsx's
  * transaction `scroll` callback calls this rather than duplicating the switch.
  */
 export const applyColumnReverseScroll = (
   resolved: ResolvedMessageNavigation,
   container: ColumnReverseScrollContainer | null | undefined,
-  scrollElementIntoView: (targetId: string, alignment: MessageNavigationAlignment) => void
-): void => {
+  scrollElementIntoView: (
+    targetId: string,
+    alignment: MessageNavigationAlignment
+  ) => MessageNavigationScrollOutcome | void
+): MessageNavigationScrollOutcome => {
   const scrollTarget = resolveColumnReverseScrollTarget(resolved, container?.scrollHeight ?? 0)
   if (scrollTarget) {
-    container?.scrollTo(scrollTarget)
-  } else if (resolved.kind === 'message') {
-    scrollElementIntoView(resolved.targetId, resolved.alignment)
+    if (!container) return 'cancelled'
+    try {
+      container.scrollTo(scrollTarget)
+    } catch {
+      return 'cancelled'
+    }
+    return 'success'
   }
+  if (resolved.kind === 'message') {
+    const outcome = scrollElementIntoView(resolved.targetId, resolved.alignment)
+    if (outcome === 'cancelled' || outcome === 'not-found' || outcome === 'success') return outcome
+    return 'success'
+  }
+  return 'cancelled'
 }
 
 export type MessageNavigationIntent =
@@ -181,7 +252,8 @@ export const resolveBootstrapDecision = (input: BootstrapDecisionInput): Bootstr
  * Returns the target user message ID, or `null` when the baseline is already
  * at the true topic boundary (first/last user message in the full sequence).
  *
- * Used by Messages→ChatNavigation to navigate beyond the rendered viewport window.
+ * Used by Messages (stable-ID navigation callbacks) to navigate beyond
+ * the rendered viewport window.
  * Pure function — no DOM, no side-effects.
  */
 export const resolveAdjacentUserMessage = (
@@ -266,7 +338,7 @@ interface MessageNavigationTransactionDependencies {
   revealTarget: (targetId: string) => Promise<void>
   settleDom: () => Promise<void>
   beginProgrammaticScroll: (token: MessageViewportNavigationToken) => Promise<boolean>
-  scroll: (resolved: ResolvedMessageNavigation) => void
+  scroll: (resolved: ResolvedMessageNavigation) => MessageNavigationScrollOutcome | void
   finish: (token: MessageViewportNavigationToken) => void
   cancel: (token: MessageViewportNavigationToken) => void
 }
@@ -381,7 +453,11 @@ export const runMessageNavigationTransaction = async (
 
   if (!(await dependencies.beginProgrammaticScroll(token))) return 'cancelled'
   if (!dependencies.isCurrent(token)) return 'cancelled'
-  dependencies.scroll(resolved)
+  const scrollOutcome = dependencies.scroll(resolved)
+  if (scrollOutcome === 'cancelled' || scrollOutcome === 'not-found') {
+    dependencies.cancel(token)
+    return scrollOutcome
+  }
   await dependencies.settleDom()
   if (!dependencies.isCurrent(token)) return 'cancelled'
   dependencies.finish(token)

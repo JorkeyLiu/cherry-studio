@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Asistent",
-      "click_to_navigate": "Fă clic pentru a naviga la mesaj",
-      "coming_soon": "Diagrama fluxului de chat va fi disponibilă în curând",
-      "no_messages": "Nu au fost găsite mesaje",
-      "start_conversation": "Începe o conversație pentru a vedea diagrama fluxului de chat",
-      "title": "Istoric chat",
-      "user_node": "Utilizator",
-      "view_full_content": "Vezi conținutul complet"
-    },
     "input": {
       "auto_resize": "Redimensionare automată înălțime",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "Înapoi jos",
-      "close": "Închide",
       "first": "Deja la primul mesaj",
-      "history": "Istoric chat",
-      "last": "Deja la ultimul mesaj",
-      "next": "Mesajul următor",
-      "prev": "Mesajul anterior",
-      "top": "Înapoi sus"
+      "last": "Deja la ultimul mesaj"
     },
     "resend": "Retrimite",
     "save": {

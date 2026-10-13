@@ -7,6 +7,7 @@ import {
   type BootstrapDecisionInput,
   canHandleUserViewportScroll,
   chooseNavigationWindow,
+  computeColumnReverseMessageScrollTop,
   type MessageNavigationIntent,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
@@ -41,6 +42,7 @@ const transaction = (intent: MessageNavigationIntent, options: { hidden?: boolea
   const scroll = vi.fn((resolved) => {
     const scrollTarget = resolveColumnReverseScrollTarget(resolved, 5000)
     scrollCalls.push({ resolved, top: scrollTarget?.top })
+    return 'success' as const
   })
   const cancelLoadsAndTimers = vi.fn()
   const revealTarget = vi.fn(async () => {
@@ -263,70 +265,103 @@ describe('resolveColumnReverseScrollTarget', () => {
 describe('applyColumnReverseScroll — production scroll adapter', () => {
   const makeContainer = (scrollHeight = 4000) => ({
     scrollHeight,
+    clientHeight: 800,
+    scrollTop: 0,
     scrollTo: vi.fn()
   })
 
   it('top: calls container.scrollTo with negative scrollHeight', () => {
     const container = makeContainer(5000)
-    applyColumnReverseScroll({ kind: 'top' }, container, vi.fn())
+    expect(applyColumnReverseScroll({ kind: 'top' }, container, vi.fn())).toBe('success')
     expect(container.scrollTo).toHaveBeenCalledOnce()
     expect(container.scrollTo).toHaveBeenCalledWith({ top: -5000 })
   })
 
   it('bottom: calls container.scrollTo with 0', () => {
     const container = makeContainer(5000)
-    applyColumnReverseScroll({ kind: 'bottom' }, container, vi.fn())
+    expect(applyColumnReverseScroll({ kind: 'bottom' }, container, vi.fn())).toBe('success')
     expect(container.scrollTo).toHaveBeenCalledOnce()
     expect(container.scrollTo).toHaveBeenCalledWith({ top: 0 })
   })
 
   it('scrollTop: passes through the scrollTop value to container.scrollTo', () => {
     const container = makeContainer(5000)
-    applyColumnReverseScroll({ kind: 'scrollTop', scrollTop: -1800 }, container, vi.fn())
+    expect(applyColumnReverseScroll({ kind: 'scrollTop', scrollTop: -1800 }, container, vi.fn())).toBe('success')
     expect(container.scrollTo).toHaveBeenCalledOnce()
     expect(container.scrollTo).toHaveBeenCalledWith({ top: -1800 })
   })
 
   it('message: delegates to scrollElementIntoView callback with targetId and alignment', () => {
     const container = makeContainer()
-    const scrollIntoView = vi.fn()
-    applyColumnReverseScroll({ kind: 'message', targetId: 'msg-42', alignment: 'center' }, container, scrollIntoView)
+    const scrollIntoView = vi.fn(() => 'success' as const)
+    expect(
+      applyColumnReverseScroll({ kind: 'message', targetId: 'msg-42', alignment: 'center' }, container, scrollIntoView)
+    ).toBe('success')
     expect(container.scrollTo).not.toHaveBeenCalled()
     expect(scrollIntoView).toHaveBeenCalledOnce()
     expect(scrollIntoView).toHaveBeenCalledWith('msg-42', 'center')
   })
 
   it('message: default alignment is start when not specified in resolved', () => {
-    const scrollIntoView = vi.fn()
-    applyColumnReverseScroll(
-      { kind: 'message', targetId: 'msg-10', alignment: 'start' },
-      makeContainer(),
-      scrollIntoView
-    )
+    const scrollIntoView = vi.fn(() => 'success' as const)
+    expect(
+      applyColumnReverseScroll(
+        { kind: 'message', targetId: 'msg-10', alignment: 'start' },
+        makeContainer(),
+        scrollIntoView
+      )
+    ).toBe('success')
     expect(scrollIntoView).toHaveBeenCalledWith('msg-10', 'start')
   })
 
-  it('null container: no-op for top (no scrollTo, no scrollIntoView)', () => {
+  it('message: propagates not-found when the row callback reports missing target', () => {
+    const container = makeContainer()
+    const scrollIntoView = vi.fn(() => 'not-found' as const)
+    expect(
+      applyColumnReverseScroll(
+        { kind: 'message', targetId: 'msg-missing', alignment: 'start' },
+        container,
+        scrollIntoView
+      )
+    ).toBe('not-found')
+    expect(container.scrollTo).not.toHaveBeenCalled()
+  })
+
+  it('message: propagates cancelled when the row callback reports currency refusal', () => {
+    const container = makeContainer()
+    const scrollIntoView = vi.fn(() => 'cancelled' as const)
+    expect(
+      applyColumnReverseScroll(
+        { kind: 'message', targetId: 'msg-stale', alignment: 'start' },
+        container,
+        scrollIntoView
+      )
+    ).toBe('cancelled')
+  })
+
+  it('null container: cancelled for top (no scrollTo, no scrollIntoView)', () => {
     const scrollIntoView = vi.fn()
-    applyColumnReverseScroll({ kind: 'top' }, null, scrollIntoView)
+    expect(applyColumnReverseScroll({ kind: 'top' }, null, scrollIntoView)).toBe('cancelled')
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
-  it('undefined container: no-op for bottom', () => {
+  it('undefined container: cancelled for bottom', () => {
     const scrollIntoView = vi.fn()
-    applyColumnReverseScroll({ kind: 'bottom' }, undefined, scrollIntoView)
+    expect(applyColumnReverseScroll({ kind: 'bottom' }, undefined, scrollIntoView)).toBe('cancelled')
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
   it('null container with message kind: still calls scrollElementIntoView', () => {
-    const scrollIntoView = vi.fn()
-    applyColumnReverseScroll({ kind: 'message', targetId: 'msg-5', alignment: 'end' }, null, scrollIntoView)
+    const scrollIntoView = vi.fn(() => 'success' as const)
+    expect(
+      applyColumnReverseScroll({ kind: 'message', targetId: 'msg-5', alignment: 'end' }, null, scrollIntoView)
+    ).toBe('success')
     expect(scrollIntoView).toHaveBeenCalledWith('msg-5', 'end')
   })
 
   it('top with zero scrollHeight: calls scrollTo with -0', () => {
     const container = makeContainer(0)
-    applyColumnReverseScroll({ kind: 'top' }, container, vi.fn())
+    expect(applyColumnReverseScroll({ kind: 'top' }, container, vi.fn())).toBe('success')
     expect(container.scrollTo).toHaveBeenCalledWith({ top: -0 })
   })
 
@@ -351,6 +386,85 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
         expect(scrollIntoView).not.toHaveBeenCalled()
       }
     }
+  })
+})
+
+describe('computeColumnReverseMessageScrollTop — explicit resident-row geometry', () => {
+  // Reproduces the verified delivery defect: a resident oldest row far above
+  // the viewport (elementTop -12073, container 802px, scroll range
+  // [-12142, 0]) must scroll to the clamped oldest edge — never stay at 0.
+  const OLDEST = {
+    elementTopWithinContainer: -12073,
+    containerClientHeight: 802,
+    elementHeight: 120,
+    minScrollTop: -12142
+  }
+
+  it('start: oldest resident row scrolls to its exact content offset (finite, negative, moved)', () => {
+    const top = computeColumnReverseMessageScrollTop({ ...OLDEST, alignment: 'start' })
+    expect(top).not.toBeNull()
+    expect(Number.isFinite(top!)).toBe(true)
+    expect(top!).toBeLessThan(0)
+    expect(top!).toBe(OLDEST.elementTopWithinContainer)
+  })
+
+  it('start: unreachable-beyond-edge offset clamps to the oldest edge', () => {
+    const top = computeColumnReverseMessageScrollTop({
+      ...OLDEST,
+      alignment: 'start',
+      elementTopWithinContainer: -13000
+    })
+    expect(top).toBe(OLDEST.minScrollTop)
+  })
+
+  it('start: mid-list row lands exactly at its content offset', () => {
+    const top = computeColumnReverseMessageScrollTop({
+      elementTopWithinContainer: -5546,
+      containerClientHeight: 802,
+      elementHeight: 120,
+      alignment: 'start',
+      minScrollTop: -12142
+    })
+    expect(top).toBe(-5546)
+  })
+
+  it('center/end: offset by the free space around the row', () => {
+    const base = {
+      elementTopWithinContainer: -5546,
+      containerClientHeight: 802,
+      elementHeight: 120,
+      minScrollTop: -12142
+    }
+    expect(computeColumnReverseMessageScrollTop({ ...base, alignment: 'center' })).toBe(-5546 - (802 - 120) / 2)
+    expect(computeColumnReverseMessageScrollTop({ ...base, alignment: 'end' })).toBe(-5546 - (802 - 120))
+  })
+
+  it('newest row at the bottom clamps to 0 (never positive)', () => {
+    const top = computeColumnReverseMessageScrollTop({
+      elementTopWithinContainer: -50,
+      containerClientHeight: 802,
+      elementHeight: 120,
+      alignment: 'start',
+      minScrollTop: -12142
+    })
+    expect(top).toBe(-50)
+    const belowBottom = computeColumnReverseMessageScrollTop({
+      elementTopWithinContainer: 30,
+      containerClientHeight: 802,
+      elementHeight: 120,
+      alignment: 'start',
+      minScrollTop: -12142
+    })
+    expect(belowBottom).toBe(0)
+  })
+
+  it('non-finite input fails closed with null (caller skips the write)', () => {
+    expect(
+      computeColumnReverseMessageScrollTop({ ...OLDEST, alignment: 'start', elementTopWithinContainer: NaN })
+    ).toBeNull()
+    expect(
+      computeColumnReverseMessageScrollTop({ ...OLDEST, alignment: 'start', minScrollTop: Number.POSITIVE_INFINITY })
+    ).toBeNull()
   })
 })
 
@@ -654,5 +768,73 @@ describe('shouldPersistNavigationResult', () => {
 
   it('returns false for not-found', () => {
     expect(shouldPersistNavigationResult('not-found')).toBe(false)
+  })
+})
+
+describe('transaction scroll outcome — production no-op skip contract', () => {
+  const baseDeps = () => {
+    const effectiveWindow = createTargetMessageWindow(messages, 'm10', 10, 19)
+    return {
+      begin: vi.fn(async () => true),
+      isCurrent: () => true,
+      cancelLoadsAndTimers: vi.fn(),
+      resolve: (requested: MessageNavigationIntent) => resolveMessageNavigation(messages, requested),
+      prepareWindow: (resolved: Parameters<typeof chooseNavigationWindow>[2]) =>
+        chooseNavigationWindow(messages, effectiveWindow, resolved, 10),
+      applyWindow: vi.fn(async () => true),
+      getTargetStatus: () => 'visible' as const,
+      revealTarget: vi.fn(async () => {}),
+      settleDom: vi.fn(async () => {}),
+      beginProgrammaticScroll: vi.fn(async () => true),
+      finish: vi.fn(),
+      cancel: vi.fn()
+    }
+  }
+
+  it('cancelled scroll skips finish, cancels, and never persists (currency refusal)', async () => {
+    const deps = baseDeps()
+    const result = await runMessageNavigationTransaction(
+      { kind: 'message', targetId: 'm15', source: 'event' },
+      { ...deps, scroll: vi.fn(() => 'cancelled' as const) }
+    )
+    expect(result).toBe('cancelled')
+    expect(deps.cancel).toHaveBeenCalledOnce()
+    expect(deps.finish).not.toHaveBeenCalled()
+    expect(shouldPersistNavigationResult(result)).toBe(false)
+  })
+
+  it('not-found scroll skips finish, cancels, and never persists (missing physical target)', async () => {
+    const deps = baseDeps()
+    const result = await runMessageNavigationTransaction(
+      { kind: 'message', targetId: 'm15', source: 'pending' },
+      { ...deps, scroll: vi.fn(() => 'not-found' as const) }
+    )
+    expect(result).toBe('not-found')
+    expect(deps.cancel).toHaveBeenCalledOnce()
+    expect(deps.finish).not.toHaveBeenCalled()
+    expect(shouldPersistNavigationResult(result)).toBe(false)
+  })
+
+  it('explicit bottom scroll success still finishes and persists', async () => {
+    const deps = baseDeps()
+    const result = await runMessageNavigationTransaction(
+      { kind: 'bottom', source: 'imperative' },
+      { ...deps, scroll: vi.fn(() => 'success' as const) }
+    )
+    expect(result).toBe('success')
+    expect(deps.finish).toHaveBeenCalledOnce()
+    expect(deps.cancel).not.toHaveBeenCalled()
+    expect(shouldPersistNavigationResult(result)).toBe(true)
+  })
+
+  it('void scroll (focused legacy mock) stays success for compatibility', async () => {
+    const deps = baseDeps()
+    const result = await runMessageNavigationTransaction(
+      { kind: 'message', targetId: 'm15', source: 'event' },
+
+      { ...deps, scroll: vi.fn(() => undefined as any) }
+    )
+    expect(result).toBe('success')
+    expect(deps.finish).toHaveBeenCalledOnce()
   })
 })

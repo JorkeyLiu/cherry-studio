@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "アシスタント",
-      "click_to_navigate": "メッセージに移動",
-      "coming_soon": "チャットワークフロー図がすぐに登場します",
-      "no_messages": "メッセージが見つかりませんでした",
-      "start_conversation": "チャットを開始してチャットワークフロー図を確認してください",
-      "title": "チャット履歴",
-      "user_node": "ユーザー",
-      "view_full_content": "完全な内容を表示"
-    },
     "input": {
       "auto_resize": "高さを自動調整",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "下部に戻る",
-      "close": "閉じる",
       "first": "最初のメッセージです",
-      "history": "チャット履歴",
-      "last": "最後のメッセージです",
-      "next": "次のメッセージ",
-      "prev": "前のメッセージ",
-      "top": "トップに戻る"
+      "last": "最後のメッセージです"
     },
     "resend": "再送信",
     "save": {

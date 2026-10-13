@@ -37,7 +37,7 @@ import styled from 'styled-components'
 
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
-import ChatNavigation from './Messages/ChatNavigation'
+import ConversationNavigation from './Messages/ConversationNavigation'
 import Messages, { type MessagesHandle } from './Messages/Messages'
 import { RouteViewportProvider } from './Messages/routeViewportContext'
 import Tabs from './Tabs'
@@ -55,7 +55,7 @@ const Chat: FC<Props> = (props) => {
   const { assistant, updateAssistant, updateTopic } = useAssistant(props.assistant.id)
   const { t } = useTranslation()
   // LOCK-105: message style is always bubble; messageNavigation is a boolean
-  // off/on toggle for the conversation navigation buttons.
+  // off/on toggle for the conversation navigation list.
   const { messageNavigation } = useSettings()
   const { showTopics } = useShowTopics()
   const dispatch = useAppDispatch()
@@ -355,15 +355,23 @@ const Chat: FC<Props> = (props) => {
               <div
                 className="flex flex-1 flex-col justify-between"
                 style={{ height: `calc(${mainHeight} - var(--navbar-height))` }}>
-                <Messages
-                  ref={messagesRef}
-                  assistant={assistant}
-                  topic={props.activeTopic}
-                  setActiveTopic={props.setActiveTopic}
-                  onComponentUpdate={messagesComponentUpdateHandler}
-                  onFirstUpdate={messagesComponentFirstUpdateHandler}
-                  sharedContextInfo={sharedContextInfo}
-                />
+                <div style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
+                  {messageNavigation && (
+                    <ConversationNavigation
+                      topicId={props.activeTopic.id}
+                      onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
+                    />
+                  )}
+                  <Messages
+                    ref={messagesRef}
+                    assistant={assistant}
+                    topic={props.activeTopic}
+                    setActiveTopic={props.setActiveTopic}
+                    onComponentUpdate={messagesComponentUpdateHandler}
+                    onFirstUpdate={messagesComponentFirstUpdateHandler}
+                    sharedContextInfo={sharedContextInfo}
+                  />
+                </div>
                 {isContentSearchActive && (
                   <ContentSearch
                     ref={contentSearchRef}
@@ -373,17 +381,6 @@ const Chat: FC<Props> = (props) => {
                     onIncludeUserChange={userOutlinedItemClickHandler}
                     initialText={pendingSearchText}
                     onClose={disableContentSearch}
-                  />
-                )}
-                {messageNavigation && (
-                  <ChatNavigation
-                    containerId="messages"
-                    scrollToMessageById={(id) => messagesRef.current?.scrollToMessageById(id)}
-                    scrollToTop={() => messagesRef.current?.scrollToTop()}
-                    scrollToContextBoundary={() => messagesRef.current?.scrollToContextBoundary()}
-                    scrollToBottom={() => messagesRef.current?.scrollToBottom()}
-                    previousUserMessage={(id) => messagesRef.current?.previousUserMessage(id)}
-                    nextUserMessage={(id) => messagesRef.current?.nextUserMessage(id)}
                   />
                 )}
                 <Inputbar

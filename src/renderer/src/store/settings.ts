@@ -241,6 +241,8 @@ export interface SettingsState {
   // API Server
   apiServer: ApiServerConfig
   showMessageOutline: boolean
+  /** @deprecated per-message heading outline retired; the persisted
+   *  `showMessageOutline` key stays inert for data compatibility. */
   // Sidebar widths (resizable)
   assistantsWidth: number
   topicListWidth: number

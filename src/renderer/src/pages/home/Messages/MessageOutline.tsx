@@ -1,118 +1,52 @@
 import Scrollbar from '@renderer/components/Scrollbar'
-import type { RootState } from '@renderer/store'
-import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import type { Message, MessageBlock } from '@renderer/types/newMessage'
-import { MessageBlockType } from '@renderer/types/newMessage'
-import { scrollIntoView } from '@renderer/utils/dom'
-import type { SnapshotBlockMap } from '@renderer/utils/messageUtils/snapshotBlocks'
-import type { FC } from 'react'
-import React, { useMemo, useRef } from 'react'
-import { shallowEqual, useSelector } from 'react-redux'
-import remarkParse from 'remark-parse'
+import type { FC, KeyboardEvent } from 'react'
+import React from 'react'
 import styled from 'styled-components'
-import { unified } from 'unified'
-import { visit } from 'unist-util-visit'
 
-import { createSlugger, extractTextFromNode } from '../Markdown/plugins/rehypeHeadingIds'
-
-interface MessageOutlineProps {
-  message: Message
-  /**
-   * Optional caller-local snapshot block map for history rendering.
-   * When provided, headings resolve from the snapshot instead of Redux.
-   */
-  snapshotBlocksById?: SnapshotBlockMap
-}
-
-interface HeadingItem {
+export interface MessageOutlineEntry {
   id: string
-  level: number
   text: string
 }
 
-const MessageOutline: FC<MessageOutlineProps> = ({ message, snapshotBlocksById }) => {
-  // LOCK-003: Subscribe only to this message's blocks instead of the whole
-  // entity map; `shallowEqual` prevents re-renders when unrelated streaming
-  // blocks commit, so heading re-parsing is scoped to this message's own
-  // main-text content changes. The selector stays mounted for hook stability;
-  // its result is ignored when a snapshot map is provided.
-  const reduxBlocks = useSelector((state: RootState) => selectMessageBlocksByIds(state, message.blocks), shallowEqual)
-  const snapshotBlocks = useMemo(() => {
-    if (!snapshotBlocksById) return undefined
-    const resolved: MessageBlock[] = []
-    for (const blockId of message.blocks) {
-      const block = snapshotBlocksById.get(blockId)
-      if (block) {
-        resolved.push(block)
-      }
-    }
-    return resolved
-  }, [snapshotBlocksById, message.blocks])
-  const messageBlocks = snapshotBlocksById ? (snapshotBlocks ?? []) : reduxBlocks
+interface MessageOutlineProps {
+  entries: MessageOutlineEntry[]
+  onNavigate: (id: string) => void
+}
 
-  const headings: HeadingItem[] = useMemo(() => {
-    const mainTextBlocks = messageBlocks.filter((b) => b?.type === MessageBlockType.MAIN_TEXT)
+/**
+ * Restored original MessageOutline presentation (styles verbatim from
+ * f2b83d806c). Only the data input / locate target changed: heading entries
+ * derived from assistant markdown became caller-supplied ordered USER-message
+ * summary entries with stable IDs, and the DOM heading scroll became
+ * onNavigate(id). Single-level list, so indicator/text levels are constant 1.
+ */
+const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate }) => {
+  if (!entries.length) return null
 
-    if (!mainTextBlocks?.length) return []
-
-    const result: HeadingItem[] = []
-    mainTextBlocks.forEach((mainTextBlock) => {
-      const tree = unified().use(remarkParse).parse(mainTextBlock?.content)
-      const slugger = createSlugger()
-      visit(tree, ['heading', 'html'], (node) => {
-        if (node.type === 'heading') {
-          const level = node.depth ?? 0
-          if (!level || level < 1 || level > 6) return
-          const text = extractTextFromNode(node)
-          if (!text) return
-          const id = `heading-${mainTextBlock.id}--` + slugger.slug(text || '')
-          result.push({ id, level, text: text })
-        } else if (node.type === 'html') {
-          // 匹配 <h1>...</h1> 到 <h6>...</h6>
-          const match = node.value.match(/<h([1-6])[^>]*>(.*?)<\/h\1>/i)
-          if (match) {
-            const level = parseInt(match[1], 10)
-            const text = match[2].replace(/<[^>]*>/g, '').trim() // 移除内部的HTML标签
-            if (text) {
-              const id = `heading-${mainTextBlock.id}--${slugger.slug(text || '')}`
-              result.push({ id, level, text })
-            }
-          }
-        }
-      })
-    })
-
-    return result
-  }, [messageBlocks])
-
-  const miniLevel = useMemo(() => {
-    return headings.length ? Math.min(...headings.map((heading) => heading.level)) : 1
-  }, [headings])
-
-  const messageOutlineContainerRef = useRef<HTMLDivElement>(null)
-  const scrollToHeading = (id: string) => {
-    const parent = messageOutlineContainerRef.current?.parentElement
-    const messageContentContainer = parent?.querySelector('.message-content-container')
-    if (messageContentContainer) {
-      const headingElement = messageContentContainer.querySelector<HTMLElement>(`#${id}`)
-      if (headingElement) {
-        // LOCK-105: multi-model messages always render in fold/tag mode, so
-        // headings always scroll to the start of the target element.
-        scrollIntoView(headingElement, { behavior: 'smooth', block: 'start', container: 'nearest' })
-      }
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>, id: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      onNavigate(id)
     }
   }
 
-  if (!headings.length) return null
-
   return (
-    <MessageOutlineContainer ref={messageOutlineContainerRef}>
-      <MessageOutlineBody $count={headings.length}>
-        {headings.map((heading, index) => (
-          <MessageOutlineItem key={index} onClick={() => scrollToHeading(heading.id)}>
-            <MessageOutlineItemDot $level={heading.level} />
-            <MessageOutlineItemText $level={heading.level} $miniLevel={miniLevel}>
-              {heading.text}
+    <MessageOutlineContainer data-testid="conversation-navigation">
+      <MessageOutlineBody $count={entries.length}>
+        {entries.map((entry) => (
+          <MessageOutlineItem
+            key={entry.id}
+            onClick={() => onNavigate(entry.id)}
+            onKeyDown={(event) => handleKeyDown(event, entry.id)}
+            tabIndex={0}
+            role="button"
+            aria-label={entry.text}
+            data-testid={`conversation-nav-item-${entry.id}`}
+            data-message-id={entry.id}
+            title={entry.text}>
+            <MessageOutlineItemDot $level={1} />
+            <MessageOutlineItemText $level={1} $miniLevel={1}>
+              {entry.text}
             </MessageOutlineItemText>
           </MessageOutlineItem>
         ))}

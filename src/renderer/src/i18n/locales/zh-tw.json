@@ -1008,16 +1008,6 @@
       "undoAction": "復原",
       "undone": "已復原"
     },
-    "history": {
-      "assistant_node": "助手",
-      "click_to_navigate": "點選以前往對應訊息",
-      "coming_soon": "聊天工作流圖表即將上線",
-      "no_messages": "沒有找到訊息",
-      "start_conversation": "開始對話以檢視聊天流程圖",
-      "title": "聊天歷史",
-      "user_node": "使用者",
-      "view_full_content": "檢視完整內容"
-    },
     "input": {
       "auto_resize": "自動調整高度",
       "context_count": {
@@ -1118,13 +1108,18 @@
     },
     "navigation": {
       "bottom": "回到底端",
-      "close": "關閉",
+      "conversation_list": "對話列表",
       "first": "已經是第一條訊息",
-      "history": "聊天歷史",
       "last": "已經是最後一條訊息",
-      "next": "下一條訊息",
-      "prev": "上一條訊息",
-      "top": "回到頂端"
+      "user_attachment_count_one": "{{count}} 個附件",
+      "user_attachment_count_other": "{{count}} 個附件",
+      "user_attachment_fallback": "附件",
+      "user_attachment_file": "{{name}}",
+      "user_attachment_file_more_one": "{{name}} +{{count}} 個附件",
+      "user_attachment_file_more_other": "{{name}} +{{count}} 個附件",
+      "user_attachment_image_one": "{{count}} 張圖片",
+      "user_attachment_image_other": "{{count}} 張圖片",
+      "user_message_fallback": "引用訊息"
     },
     "resend": "重新傳送",
     "save": {
@@ -4586,10 +4581,9 @@
       "metrics": "首字延遲 {{time_first_token_millsec}} ms | 每秒 {{token_speed}} tokens",
       "model": {},
       "navigation": {
-        "label": "訊息導覽"
+        "label": "對話導覽"
       },
-      "prompt": "提示詞顯示",
-      "show_message_outline": "顯示訊息大綱"
+      "prompt": "提示詞顯示"
     },
     "miniapps": {
       "cache_change_notice": "變更會在開啟的小程式數量調整至設定值後生效",

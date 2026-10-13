@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Trợ lý",
-      "click_to_navigate": "Nhấp để điều hướng đến tin nhắn",
-      "coming_soon": "Sơ đồ quy trình làm việc trò chuyện sắp ra mắt",
-      "no_messages": "Không tìm thấy tin nhắn nào",
-      "start_conversation": "Bắt đầu một cuộc trò chuyện để xem sơ đồ luồng chat",
-      "title": "Lịch sử trò chuyện",
-      "user_node": "Người dùng",
-      "view_full_content": "Xem Toàn Bộ Nội Dung"
-    },
     "input": {
       "auto_resize": "Tự động điều chỉnh chiều cao",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "Quay lại đầu trang",
-      "close": "Đóng",
       "first": "Đã ngay từ tin nhắn đầu tiên",
-      "history": "Lịch sử trò chuyện",
-      "last": "Đã ở tin nhắn cuối cùng",
-      "next": "Tin nhắn tiếp theo",
-      "prev": "Tin nhắn trước",
-      "top": "Quay lại đầu trang"
+      "last": "Đã ở tin nhắn cuối cùng"
     },
     "resend": "Gửi lại",
     "save": {

@@ -23,15 +23,13 @@
  * - R-04 whole-topic snapshot via real copy-as-Markdown — INTEGRATED snapshot
  *   action with independent fetchWholeTopicSnapshot oracle; loaded window
  *   unchanged (snapshot never publishes).
- * - R-05 ChatFlowHistory whole-topic graph — INTEGRATED UI evidence: enable
- *   messageNavigation via existing settings action, cold-activate the same
- *   50/20 seed, open Chat History through the hover-gated navigation button
- *   (accessible role/name, locale-robust), assert the ReactFlow drawer holds
- *   deterministic head/window-outside + tail content with node count 50 > 20
- *   against the fetchWholeTopicSnapshot oracle, loaded Redux/DOM unchanged,
- *   then real-send a marker with the drawer open and assert the coalesced
- *   MESSAGE_COMPLETE/updatedAt refetch grows the graph (marker + reply +
- *   retained head, no empty state).
+ * - R-05 conversation-navigation whole-route user list — INTEGRATED UI
+ *   evidence: enable messageNavigation via existing settings action,
+ *   cold-activate the same 50/20 seed, assert the LEFT conversation list
+ *   holds all 25 effective-route user messages (head + tail) against the
+ *   fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged, then
+ *   real-send a marker and assert the coalesced MESSAGE_COMPLETE/updatedAt
+ *   refetch grows the list (marker + retained head, no empty state).
  *
  * Governing constraints:
  * - Uses standard fixture (fresh production build, disposable profile, mock provider).
@@ -44,7 +42,9 @@
  *   from ineffective wrappers; no synthetic Redux publication. UI scroll uses the
  *   real container and bubbling Event('scroll'); only the throttle wait uses a
  *   bounded waitForTimeout(350).
- * - No production source/docs edits, no fixture-global edits, no new selectors.
+ * - No production source/docs edits, no fixture-global edits. The
+ *   `conversation-navigation` / `conversation-nav-item-*` testids are the
+ *   approved list contract (owned by the redesign).
  */
 
 import { expect, findProductRequestAfter, getRequestSequence, test } from '../../fixtures/electron.fixture'
@@ -226,39 +226,6 @@ async function uiSendMessage(page: any, text: string): Promise<void> {
 }
 
 /**
- * R-05 drawer-open send (spec-local only — never a fixture-global helper).
- * The ReactFlow drawer pane overlays `.inputbar textarea`, so Playwright
- * pointer actionability (click / locator.press) cannot pass while the drawer
- * stays open. This helper keeps the drawer open and still exercises the
- * production input event + Enter send path: DOM focus (no click), native
- * HTMLTextAreaElement value setter + bubbling `input` event for React state,
- * value assertion, then global Enter while the textarea is focused. No Redux
- * thunk/service dispatch, no production formatter calls.
- */
-async function uiSendMessageWithDrawerOpen(page: any, text: string): Promise<void> {
-  const textarea = page.locator('.inputbar textarea, textarea[placeholder]').first()
-  await textarea.waitFor({ state: 'attached', timeout: 15000 })
-  await expect(textarea).toBeEnabled({ timeout: 10000 })
-  await textarea.evaluate((el: HTMLTextAreaElement) => el.focus())
-
-  await page.evaluate(
-    ({ selector, text }: { selector: string; text: string }) => {
-      const el = document.querySelector(selector) as HTMLTextAreaElement
-      if (!el) throw new Error('Textarea not found')
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-      if (!nativeSetter) throw new Error('No native textarea setter')
-      nativeSetter.call(el, text)
-      el.dispatchEvent(new Event('input', { bubbles: true }))
-      el.dispatchEvent(new Event('change', { bubbles: true }))
-    },
-    { selector: '.inputbar textarea, textarea[placeholder]', text }
-  )
-
-  await expect(textarea).toHaveValue(text, { timeout: 5000 })
-  await page.keyboard.press('Enter')
-}
-
-/**
  * Assistant-completion wait copied from ordinary-chat.spec.ts (spec-local
  * only). Resolves when a new assistant message reaches terminal status with
  * terminal blocks and the topic queue drained.
@@ -325,58 +292,6 @@ async function waitForAssistantResponseComplete(
     }
     return count
   }, topicId)
-}
-
-const HISTORY_ACCESSIBLE_NAME = '^(Chat History|聊天历史)$'
-
-/**
- * Opens the Chat History drawer through the real hover-gated navigation bar
- * (ChatNavigation.tsx, spec-local only). The bar is pointer-events:none until
- * the cursor enters the trigger band (RIGHT_GAP=16, width=60, vertical
- * 35%..65% of viewport, right offset +275 when right topics are shown). The
- * trigger point is derived from that production geometry plus the live
- * store/viewport — never arbitrary coordinates — and delivered as a real
- * mouse move through the production window-mousemove path. Up to four
- * derived vertical candidates are probed (elementFromPoint actionability) to
- * tolerate an excluded-area landing (e.g. code-toolbar under the cursor).
- */
-async function openChatHistoryDrawer(page: any): Promise<void> {
-  const candidates = await page.evaluate(() => {
-    const s = (window as any).store.getState()
-    const showRightTopics = s.settings?.showTopics !== false
-    const rightOffset = 16 + (showRightTopics ? 275 : 0)
-    const x = Math.round(window.innerWidth - rightOffset - 60 / 2)
-    const ys = [0.5, 0.42, 0.58, 0.38].map((f) => Math.round(window.innerHeight * f))
-    return { x, ys }
-  })
-
-  let exposed = false
-  for (const y of candidates.ys) {
-    await page.mouse.move(candidates.x, y)
-    // Bounded settle for the 50ms production mousemove throttle + React flush.
-    await page.waitForTimeout(300)
-    const probe = await page.evaluate((pattern: string) => {
-      const re = new RegExp(pattern)
-      const btn =
-        Array.from(document.querySelectorAll('button')).find((b) =>
-          re.test((b.getAttribute('aria-label') || '').trim())
-        ) ?? null
-      if (!btn) return { found: false, hit: false }
-      const r = btn.getBoundingClientRect()
-      if (r.width === 0 && r.height === 0) return { found: true, hit: false }
-      const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
-      return { found: true, hit: !!el && (el === btn || btn.contains(el)) }
-    }, HISTORY_ACCESSIBLE_NAME)
-    if (probe.hit) {
-      exposed = true
-      break
-    }
-  }
-  expect(exposed, 'hover trigger band never exposed the history navigation button').toBe(true)
-
-  const historyBtn = page.getByRole('button', { name: new RegExp(HISTORY_ACCESSIBLE_NAME) })
-  await historyBtn.hover({ timeout: 10000 })
-  await historyBtn.click({ timeout: 10000 })
 }
 
 test.describe('windowed reads: latest and around', () => {
@@ -1207,13 +1122,13 @@ test.describe('windowed reads: latest and around', () => {
     console.log('[E2E] R-04 post window unchanged (Redux blocks/DOM stable, no publish)')
   })
 
-  test('R-05 ChatFlowHistory whole-topic graph — bounded window preserved + live marker refetch', async ({
+  test('R-05 conversation-navigation whole-route user list — bounded window preserved + live marker refetch', async ({
     mainWindow
   }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'R-05 INTEGRATED UI: settings/setMessageNavigation enable → cold activate 50-msg topic (20 loaded) → hover-gated Chat History drawer shows whole-topic ReactFlow graph (head + tail, 50 nodes) against fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged → real-send marker with drawer open → coalesced MESSAGE_COMPLETE/updatedAt refetch grows graph to 52 (marker + reply + retained head, no empty state). Deterministic mocked provider; no direct formatter/component calls.'
+        'R-05 INTEGRATED UI: settings/setMessageNavigation enable → cold activate 50-msg topic (20 loaded) → LEFT conversation list shows all 25 whole-route user messages (head + tail) against fetchWholeTopicSnapshot oracle with loaded Redux/DOM unchanged → real-send marker → coalesced MESSAGE_COMPLETE/updatedAt refetch grows list to 26 (marker + retained head, no empty state). Deterministic mocked provider; no direct formatter/component calls.'
     })
 
     const page = mainWindow
@@ -1264,26 +1179,16 @@ test.describe('windowed reads: latest and around', () => {
     await expect(page.locator('#messages')).toContainText(tailContent, { timeout: 10000 })
     console.log(`[E2E] R-05 pre window ids=${pre.ids.length} dom=${pre.domCount} head absent`)
 
-    // 3) Open Chat History via the hover-gated navigation button (accessible role/name, locale-robust).
-    await openChatHistoryDrawer(page)
-    const drawer = page.locator('.ant-drawer.ant-drawer-open')
-    await expect(drawer).toBeVisible({ timeout: 15000 })
-    await expect(drawer.locator('.ant-drawer-title')).toHaveText(/^(Chat History|聊天历史)$/, { timeout: 10000 })
-    await expect(drawer.locator('.react-flow')).toBeVisible({ timeout: 20000 })
-    console.log('[E2E] R-05 drawer + ReactFlow visible')
-
-    // 4) Graph holds deterministic head/window-outside + tail content; node
-    // count exact 50 (25 user + 25 assistant incl. equal-stamp orphans) > 20;
-    // independent whole-topic snapshot oracle for count/order.
-    await expect(drawer).toContainText(headContent, { timeout: 20000 })
-    await expect(drawer).toContainText(tailContent, { timeout: 10000 })
-    await expect
-      .poll(async () => await drawer.locator('.react-flow__node').count(), { timeout: 20000 })
-      .toBe(SYNTHETIC_TOTAL)
-    const nodeCount = await drawer.locator('.react-flow__node').count()
-    expect(nodeCount).toBeGreaterThan(pre.ids.length)
-    console.log(`[E2E] R-05 graph nodes=${nodeCount} loaded=${pre.ids.length}`)
-
+    // 3) The LEFT conversation list shows the whole-route user messages:
+    // deterministic head/window-outside + tail USER content; item count exact 25
+    // (user messages only) > 20 loaded; same whole-topic oracle for order.
+    // Approved USER-ONLY navigation list: seeded tail index 49 is assistant,
+    // so first/last USER content comes from the same authoritative
+    // whole-route oracle via role (not the whole-topic assistant tail).
+    const expectedUserIds: string[] = []
+    for (let i = 0; i < SYNTHETIC_TOTAL; i += 2) {
+      expectedUserIds.push(`${topicId}-msg-${pad(i, 5)}`)
+    }
     const snap: any = await page.evaluate(
       async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
       topicId
@@ -1298,8 +1203,45 @@ test.describe('windowed reads: latest and around', () => {
     expect(sval.messages.map((m: any) => m.id)).toEqual(expectedFullIds)
     expect(new Set(sval.messages.map((m: any) => m.id)).size).toBe(sval.messages.length)
     console.log(`[E2E] R-05 snapshot oracle count=${sval.snapshot.returnedCount}`)
+    const userOracleMsgs: any[] = (sval.messages as any[]).filter((m: any) => m?.role === 'user')
+    expect(userOracleMsgs.map((m: any) => m.id)).toEqual(expectedUserIds)
+    const blockById = new Map((sval.blocks as any[]).map((b: any) => [b.id, b]))
+    const userHeadMsg = userOracleMsgs[0]
+    const userTailMsg = userOracleMsgs[userOracleMsgs.length - 1]
+    const userHeadContent = (blockById.get(userHeadMsg.blocks?.[0]) as any)?.content
+    const userTailContent = (blockById.get(userTailMsg.blocks?.[0]) as any)?.content
+    expect(userHeadMsg.id).toBe(expectedUserIds[0])
+    expect(userTailMsg.id).toBe(expectedUserIds[expectedUserIds.length - 1])
+    expect(typeof userHeadContent).toBe('string')
+    expect(typeof userTailContent).toBe('string')
+    expect(userHeadContent).toBe(headContent)
+    console.log(
+      `[E2E] R-05 oracle user list count=${userOracleMsgs.length} head=${userHeadMsg.id} tail=${userTailMsg.id}`
+    )
+    const nav = page.getByTestId('conversation-navigation')
+    await expect(nav).toBeVisible({ timeout: 20000 })
+    await expect(nav).toContainText(userHeadContent, { timeout: 20000 })
+    await expect(nav).toContainText(userTailContent, { timeout: 10000 })
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => document.querySelectorAll('[data-testid^="conversation-nav-item-"]').length,
+            undefined
+          ),
+        { timeout: 20000 }
+      )
+      .toBe(expectedUserIds.length)
+    const navIds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid^="conversation-nav-item-"]')).map(
+        (el) => (el as HTMLElement).getAttribute('data-testid') || ''
+      )
+    )
+    expect(navIds).toEqual(expectedUserIds.map((id) => `conversation-nav-item-${id}`))
+    expect(navIds.length).toBeGreaterThan(pre.ids.length)
+    console.log(`[E2E] R-05 list items=${navIds.length} loaded=${pre.ids.length}`)
 
-    // 5) Loaded Redux IDs and normal message DOM remain unchanged/bounded after opening the drawer.
+    // 4) Loaded Redux IDs and normal message DOM remain unchanged/bounded with the list open.
     const post = await page.evaluate((topicId: string) => {
       const s = (window as any).store.getState()
       const ids: string[] = [...(s.messages?.messageIdsByTopic?.[topicId] ?? [])]
@@ -1321,10 +1263,10 @@ test.describe('windowed reads: latest and around', () => {
         { timeout: 1500 }
       )
       .toBe(DISPLAY_LIMIT)
-    console.log('[E2E] R-05 post-drawer window unchanged (Redux/DOM stable, no publish)')
+    console.log('[E2E] R-05 post-list window unchanged (Redux/DOM stable, no publish)')
 
-    // 6) While the drawer remains open, real-send a marker through the input
-    // UI and wait for assistant completion (terminal Redux state).
+    // 5) Real-send a marker through the input UI and wait for assistant
+    // completion (terminal Redux state).
     const prevAssistantCount = await page.evaluate((topicId: string) => {
       const s = (window as any).store.getState()
       const ids: string[] = s.messages?.messageIdsByTopic?.[topicId] ?? []
@@ -1336,26 +1278,29 @@ test.describe('windowed reads: latest and around', () => {
     }, topicId)
     const marker = `R05 history marker ${Date.now()}`
     const seq = getRequestSequence()
-    await uiSendMessageWithDrawerOpen(page, marker)
+    await uiSendMessage(page, marker)
     await waitForAssistantResponseComplete(page, topicId, prevAssistantCount)
     const productReq = findProductRequestAfter(seq)
     expect(productReq).not.toBeNull()
     expect(JSON.stringify((productReq as any).parsed?.messages ?? '')).toContain(marker)
-    const expectedReply = `[Mock mock-model] You said: "${marker.slice(0, 100)}"`
     console.log(`[E2E] R-05 marker sent+completed seq=${(productReq as any)?.sequence}`)
 
-    // After terminal MESSAGE_COMPLETE/coalesced refetch: drawer contains the
-    // new user marker (and deterministic assistant reply) while the old head
-    // remains; graph is fresh (52 nodes), never stale/empty.
-    await expect(drawer).toContainText(marker, { timeout: 20000 })
-    await expect(drawer).toContainText(expectedReply, { timeout: 20000 })
-    await expect(drawer).toContainText(headContent, { timeout: 10000 })
-    await expect(drawer.locator('.react-flow')).toBeVisible({ timeout: 10000 })
-    await expect(drawer.getByText(/^(No Messages Found|没有找到消息)$/)).toHaveCount(0)
+    // After terminal MESSAGE_COMPLETE/coalesced refetch: the list contains
+    // the new user marker while the old head remains; list is fresh
+    // (26 user items), never stale/empty.
+    await expect(nav).toContainText(marker, { timeout: 20000 })
+    await expect(nav).toContainText(headContent, { timeout: 10000 })
     await expect
-      .poll(async () => await drawer.locator('.react-flow__node').count(), { timeout: 20000 })
-      .toBe(SYNTHETIC_TOTAL + 2)
-    console.log('[E2E] R-05 drawer refetched: marker + reply + head present, nodes=52')
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => document.querySelectorAll('[data-testid^="conversation-nav-item-"]').length,
+            undefined
+          ),
+        { timeout: 20000 }
+      )
+      .toBe(expectedUserIds.length + 1)
+    console.log('[E2E] R-05 list refetched: marker + head present, items=26')
 
     const snap2: any = await page.evaluate(
       async (topicId: string) => await (window as any).api.chatDb.fetchWholeTopicSnapshot({ topicId }),
@@ -1377,12 +1322,5 @@ test.describe('windowed reads: latest and around', () => {
       expect(seededNums[i]).toBeGreaterThan(seededNums[i - 1])
     }
     console.log(`[E2E] R-05 post-send snapshot oracle count=${sval2.snapshot.returnedCount}`)
-
-    // 7) Close via visible drawer's own close button; drawer hidden, no global cleanup.
-    const drawerCloseButton = drawer.locator('.ant-drawer-close')
-    await expect(drawerCloseButton).toBeVisible({ timeout: 10000 })
-    await drawerCloseButton.click()
-    await expect(page.locator('.ant-drawer.ant-drawer-open')).toHaveCount(0, { timeout: 10000 })
-    console.log('[E2E] R-05 drawer closed via close button')
   })
 })

@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Assistent",
-      "click_to_navigate": "Klicken Sie, um zur entsprechenden Nachricht zu springen",
-      "coming_soon": "Chat-Workflow-Diagramm kommt bald",
-      "no_messages": "Keine Nachrichten gefunden",
-      "start_conversation": "Starten Sie ein Gespräch, um das Chat-Flussdiagramm anzuzeigen",
-      "title": "Chat-Verlauf",
-      "user_node": "Benutzer",
-      "view_full_content": "Vollständigen Inhalt anzeigen"
-    },
     "input": {
       "auto_resize": "Höhe automatisch anpassen",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "Zum Boden scrollen",
-      "close": "Schließen",
       "first": "Bereits die erste Nachricht",
-      "history": "Chat-Verlauf",
-      "last": "Bereits die letzte Nachricht",
-      "next": "Nächste Nachricht",
-      "prev": "Vorherige Nachricht",
-      "top": "Nach oben scrollen"
+      "last": "Bereits die letzte Nachricht"
     },
     "resend": "Erneut senden",
     "save": {

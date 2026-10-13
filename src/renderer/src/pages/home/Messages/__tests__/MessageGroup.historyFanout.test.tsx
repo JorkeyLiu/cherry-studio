@@ -55,8 +55,7 @@ const mocks = vi.hoisted(() => ({
   MessageEditor: vi.fn(() => <div>editor</div>),
   MessageErrorBoundary: vi.fn(({ children }: { children: ReactNode }) => <>{children}</>),
   MessageHeader: vi.fn(() => <div className="message-header">header</div>),
-  MessageMenubar: vi.fn(() => <div className="message-menubar">menubar</div>),
-  MessageOutline: vi.fn(() => null)
+  MessageMenubar: vi.fn(() => <div className="message-menubar">menubar</div>)
 }))
 
 const fakeGroupState = vi.hoisted(() => {
@@ -249,10 +248,6 @@ vi.mock('../MessageHeader', () => ({
 
 vi.mock('../MessageMenubar', () => ({
   default: mocks.MessageMenubar
-}))
-
-vi.mock('../MessageOutline', () => ({
-  default: mocks.MessageOutline
 }))
 
 const { default: MessageGroup } = await import('../MessageGroup')

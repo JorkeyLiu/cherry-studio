@@ -6,8 +6,7 @@ import {
   setConfirmRegenerateMessage,
   setFontSize,
   setInjectContextTimestamp,
-  setMessageNavigation,
-  setShowMessageOutline
+  setMessageNavigation
 } from '@renderer/store/settings'
 import { Switch } from 'antd'
 import { Minus, Plus } from 'lucide-react'
@@ -18,28 +17,22 @@ import styled from 'styled-components'
 /**
  * Compact arrowless message-settings popover (≈272px wide, owned by the Popover
  * root), opened from the navbar Settings2 button. Row order:
- *   1. show message outline
- *   2. conversation navigation (boolean off/on)
- *   3. inject context timestamp
- *   4. confirm delete
- *   5. confirm regenerate
- *   6. message font size (stepper 12-22, step 1; clicking the value resets to 14)
+ *   1. conversation navigation (boolean off/on)
+ *   2. inject context timestamp
+ *   3. confirm delete
+ *   4. confirm regenerate
+ *   5. message font size (stepper 12-22, step 1; clicking the value resets to 14)
  * Boolean rows use small switches and changes apply immediately. The show-prompt
  * row is removed; the persisted `showPrompt` setting stays inert for data
- * compatibility.
+ * compatibility. The per-message heading-outline toggle is retired; the
+ * persisted `showMessageOutline` setting stays inert for data compatibility.
  */
 const MessageSettings: FC = () => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
 
-  const {
-    fontSize,
-    showMessageOutline,
-    messageNavigation,
-    injectContextTimestamp,
-    confirmDeleteMessage,
-    confirmRegenerateMessage
-  } = useSettings()
+  const { fontSize, messageNavigation, injectContextTimestamp, confirmDeleteMessage, confirmRegenerateMessage } =
+    useSettings()
 
   const decreaseFontSize = () => dispatch(setFontSize(Math.max(12, fontSize - 1)))
   const increaseFontSize = () => dispatch(setFontSize(Math.min(22, fontSize + 1)))
@@ -47,15 +40,6 @@ const MessageSettings: FC = () => {
 
   return (
     <Container>
-      <SettingRow>
-        <RowTitle>{t('settings.messages.show_message_outline')}</RowTitle>
-        <Switch
-          size="small"
-          checked={showMessageOutline}
-          onChange={(checked) => dispatch(setShowMessageOutline(checked))}
-        />
-      </SettingRow>
-      <SettingDivider />
       <SettingRow>
         <RowTitle>{t('settings.messages.navigation.label')}</RowTitle>
         <Switch

@@ -164,7 +164,7 @@ vi.mock('./Inputbar/Inputbar', () => ({
   default: () => <div data-testid="inputbar-stub" />
 }))
 
-vi.mock('./Messages/ChatNavigation', () => ({
+vi.mock('./Messages/ConversationNavigation', () => ({
   default: () => null
 }))
 

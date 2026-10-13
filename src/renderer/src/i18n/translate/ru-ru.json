@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Ассистент",
-      "click_to_navigate": "Перейти к сообщению",
-      "coming_soon": "График работы чата скоро появится",
-      "no_messages": "Сообщения не найдены",
-      "start_conversation": "Начните диалог, чтобы просмотреть график работы чата",
-      "title": "История чата",
-      "user_node": "Пользователь",
-      "view_full_content": "Показать полное содержимое"
-    },
     "input": {
       "auto_resize": "Автоматическая высота",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "Вернуться вниз",
-      "close": "Закрыть",
       "first": "Уже первое сообщение",
-      "history": "История чата",
-      "last": "Уже последнее сообщение",
-      "next": "Следующее сообщение",
-      "prev": "Предыдущее сообщение",
-      "top": "Вернуться наверх"
+      "last": "Уже последнее сообщение"
     },
     "resend": "Переотправить",
     "save": {

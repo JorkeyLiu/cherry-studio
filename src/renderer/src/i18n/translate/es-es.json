@@ -1008,16 +1008,6 @@
       "undoAction": "[to be translated]:Undo",
       "undone": "[to be translated]:Undone"
     },
-    "history": {
-      "assistant_node": "Asistente",
-      "click_to_navigate": "Haga clic para ir al mensaje correspondiente",
-      "coming_soon": "Próximamente: gráfico del flujo de chat",
-      "no_messages": "No se encontraron mensajes",
-      "start_conversation": "Inicie una conversación para ver el gráfico del flujo de chat",
-      "title": "Historial de chat",
-      "user_node": "Usuario",
-      "view_full_content": "Ver contenido completo"
-    },
     "input": {
       "auto_resize": "Ajuste automático de altura",
       "context_count": {
@@ -1118,13 +1108,8 @@
     },
     "navigation": {
       "bottom": "Volver abajo",
-      "close": "Cerrar",
       "first": "Ya es el primer mensaje",
-      "history": "Historial de chat",
-      "last": "Ya es el último mensaje",
-      "next": "Siguiente mensaje",
-      "prev": "Mensaje anterior",
-      "top": "Volver arriba"
+      "last": "Ya es el último mensaje"
     },
     "resend": "Reenviar",
     "save": {

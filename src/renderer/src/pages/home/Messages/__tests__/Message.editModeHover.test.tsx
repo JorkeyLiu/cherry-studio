@@ -193,8 +193,6 @@ vi.mock('../MessageMenubar', () => ({
     </div>
   )
 }))
-vi.mock('../MessageOutline', () => ({ default: () => null }))
-
 const { default: MessageItem } = await import('../Message')
 
 const makeMessage = (overrides?: Partial<Message>): Message =>
