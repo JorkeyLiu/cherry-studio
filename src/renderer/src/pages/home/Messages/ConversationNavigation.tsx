@@ -38,17 +38,19 @@ interface ConversationNavigationProps {
  * caller-local whole-topic snapshot (effective active-branch route order).
  * Pure entry for focused tests; production passes the loaded snapshot.
  *
- * Display rules: a filtered nonempty body always wins with no attachment
- * clutter; a no-body (or quote-only) message with attachments keeps a
- * navigable stable-ID row with a meaningful attachment label; quote-only
- * without attachments keeps the localized fallback.
+ * Display rules: a filtered nonempty body shows WITH its attachment kind
+ * prefix (sequential labels in original block order, joined directly with
+ * the body — no added space/dot/count); a no-body (or quote-only) message
+ * with attachments keeps a navigable stable-ID row with a meaningful
+ * attachment label; quote-only without attachments keeps the localized
+ * fallback.
  */
 export const buildConversationNavItems = (
   messages: Message[],
   blocksById: SnapshotBlockMap,
   fallback: string,
   attachment?: string | AttachmentLabelFormatters,
-  options?: { maxLength?: number }
+  options?: { maxLength?: number; linkLabel?: string }
 ): ConversationNavItem[] => {
   const items: ConversationNavItem[] = []
   for (const message of messages) {
@@ -56,12 +58,19 @@ export const buildConversationNavItems = (
     const preview = summarizeUserMessage(message, blocksById, options)
     const hasAttachment = hasNavigableAttachment(message, blocksById)
     if (preview) {
+      if (hasAttachment && attachment && typeof attachment === 'object') {
+        const prefix = buildAttachmentLabel(message, blocksById, attachment)
+        if (prefix) {
+          items.push({ id: message.id, preview: `${prefix}${preview}`, hasAttachment })
+          continue
+        }
+      }
       items.push({ id: message.id, preview, hasAttachment })
       continue
     }
     if (hasAttachment) {
       if (attachment && typeof attachment === 'object') {
-        const label = buildAttachmentLabel(message, blocksById, attachment, options)
+        const label = buildAttachmentLabel(message, blocksById, attachment)
         items.push({ id: message.id, preview: label || attachment.genericFallback, hasAttachment })
       } else {
         items.push({ id: message.id, preview: attachment ?? fallback, hasAttachment })
@@ -76,17 +85,20 @@ export const buildConversationNavItems = (
 const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, onNavigate }) => {
   const { t } = useTranslation()
   const fallback = t('chat.navigation.user_message_fallback')
+  // Localized link word for in-place external-link replacement in body
+  // previews (the pure preview module interpolates nothing itself).
+  const linkLabel = t('chat.navigation.user_message_link')
   // Attachment label builders bound to i18n plural semantics; the pure
   // preview module interpolates nothing itself.
   const attachmentFormatters = useMemo<AttachmentLabelFormatters>(
     () => ({
       genericFallback: t('chat.navigation.user_attachment_fallback'),
-      formatSingleNamed: (name: string) => t('chat.navigation.user_attachment_file', { name }),
-      formatNamedWithMore: (name: string, count: number) =>
-        t('chat.navigation.user_attachment_file_more', { name, count }),
-      formatImageCount: (count: number) => t('chat.navigation.user_attachment_image', { count }),
-      formatAttachmentCount: (count: number) => t('chat.navigation.user_attachment_count', { count }),
-      pastedImageLabel: t('message.attachments.pasted_image')
+      typeImage: t('chat.navigation.user_attachment_type_image'),
+      typeVideo: t('chat.navigation.user_attachment_type_video'),
+      typeAudio: t('chat.navigation.user_attachment_type_audio'),
+      typeText: t('chat.navigation.user_attachment_type_text'),
+      typeDocument: t('chat.navigation.user_attachment_type_document'),
+      typeCode: t('chat.navigation.user_attachment_type_code')
     }),
     [t]
   )
@@ -234,8 +246,11 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, onNa
   // the clearing effect runs.
   const isSnapshotCurrent = snapshotKey === activeRouteKey
   const items = useMemo(
-    () => (isSnapshotCurrent ? buildConversationNavItems(messages, blocksById, fallback, attachmentFormatters) : []),
-    [isSnapshotCurrent, messages, blocksById, fallback, attachmentFormatters]
+    () =>
+      isSnapshotCurrent
+        ? buildConversationNavItems(messages, blocksById, fallback, attachmentFormatters, { linkLabel })
+        : [],
+    [isSnapshotCurrent, messages, blocksById, fallback, attachmentFormatters, linkLabel]
   )
 
   // Stable-ID clicks are honored only within the matching route. A click

@@ -14,11 +14,17 @@ interface MessageOutlineProps {
 }
 
 /**
- * Restored original MessageOutline presentation (styles verbatim from
- * f2b83d806c). Only the data input / locate target changed: heading entries
- * derived from assistant markdown became caller-supplied ordered USER-message
- * summary entries with stable IDs, and the DOM heading scroll became
- * onNavigate(id). Single-level list, so indicator/text levels are constant 1.
+ * MessageOutline presentation restored from f2b83d806c with an approved
+ * compact size fix: text is a fixed 13px (was $level-derived 15px at
+ * level 1) and the body is capped at max-width min(320px, calc(100% - 24px))
+ * / max-height min(100%, 45vh, 420px) (was 50% / min(100%, 70vh)).
+ * The body is vertically centered in the chat reading area by pure CSS flex
+ * layout on the container (align-items center over the full reading height),
+ * never by a per-count estimated top offset, JS measurement, ResizeObserver,
+ * or transform. Row height (24px), gaps (body 4px, dot-text 8px), DOM,
+ * positioning, hover expand, single-line ellipsis, trigger area and
+ * navigation behavior stay unchanged. $level props stay because dot
+ * size/padding still use them.
  */
 const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate }) => {
   if (!entries.length) return null
@@ -32,7 +38,7 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate }) => {
 
   return (
     <MessageOutlineContainer data-testid="conversation-navigation">
-      <MessageOutlineBody $count={entries.length}>
+      <MessageOutlineBody>
         {entries.map((entry) => (
           <MessageOutlineItem
             key={entry.id}
@@ -57,10 +63,13 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate }) => {
 
 const MessageOutlineContainer = styled.div`
   position: absolute;
-  inset: 63px 0 36px 10px;
+  inset: 0 0 0 10px;
   z-index: 999;
   pointer-events: none;
   user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
   & ~ .message-content-container {
     padding-left: 46px !important;
   }
@@ -87,7 +96,7 @@ const MessageOutlineItemText = styled.div<{ $level: number; $miniLevel: number }
   transition: opacity 0.2s ease;
   padding: 2px 8px;
   padding-left: ${({ $level, $miniLevel }) => ($level - $miniLevel) * 8}px;
-  font-size: ${({ $level }) => 16 - $level}px;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -110,12 +119,11 @@ const MessageOutlineItem = styled.div`
   }
 `
 
-const MessageOutlineBody = styled(Scrollbar)<{ $count: number }>`
-  max-width: 50%;
-  max-height: min(100%, 70vh);
-  position: sticky;
-  top: max(calc(50% - ${({ $count }) => ($count * 24) / 2 + 10}px), 20px);
-  bottom: 0;
+const MessageOutlineBody = styled(Scrollbar)`
+  max-width: min(320px, calc(100% - 24px));
+  max-height: min(100%, 45vh, 420px);
+  align-self: center;
+  flex: 0 1 auto;
   overflow-x: hidden;
   overflow-y: hidden;
   display: inline-flex;

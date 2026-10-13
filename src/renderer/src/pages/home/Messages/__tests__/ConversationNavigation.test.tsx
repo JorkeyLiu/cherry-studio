@@ -60,15 +60,26 @@ vi.mock('react-i18next', () => ({
         case 'chat.navigation.user_attachment_fallback':
           return 'Attachment'
         case 'chat.navigation.user_attachment_file':
-          return `${name}`
         case 'chat.navigation.user_attachment_file_more':
+        case 'chat.navigation.user_attachment_file_one':
+        case 'chat.navigation.user_attachment_file_other':
+          // Legacy name+more formatters: the sequential label rule no longer
+          // calls them; kept only so older bindings would still resolve.
           return `${name} +${count} ${count === 1 ? 'attachment' : 'attachments'}`
-        case 'chat.navigation.user_attachment_image':
-          return `${count} ${count === 1 ? 'image' : 'images'}`
-        case 'chat.navigation.user_attachment_count':
-          return `${count} ${count === 1 ? 'attachment' : 'attachments'}`
-        case 'message.attachments.pasted_image':
-          return 'Pasted Image'
+        case 'chat.navigation.user_attachment_type_image':
+          return 'Image'
+        case 'chat.navigation.user_attachment_type_video':
+          return 'Video'
+        case 'chat.navigation.user_attachment_type_audio':
+          return 'Audio'
+        case 'chat.navigation.user_attachment_type_text':
+          return 'Text'
+        case 'chat.navigation.user_attachment_type_document':
+          return 'Document'
+        case 'chat.navigation.user_attachment_type_code':
+          return 'Code'
+        case 'chat.navigation.user_message_link':
+          return 'Link'
         default:
           return key
       }
@@ -229,9 +240,11 @@ describe('ConversationNavigation whole-route user list', () => {
     const quoteItem = await screen.findByTestId('conversation-nav-item-uq')
     const attachItem = await screen.findByTestId('conversation-nav-item-ua')
     // Quote-only without attachments keeps the localized message fallback;
-    // a file-only row shows its safe display name instead of generic clutter.
+    // a typeless file-only row with no classifiable ext reads the generic
+    // fallback — filenames are never shown.
     expect(quoteItem.textContent).toContain('Quoted message')
-    expect(attachItem.textContent).toContain('doc.pdf')
+    expect(attachItem.textContent).toContain('[Attachment]')
+    expect(attachItem.textContent).not.toContain('doc.pdf')
 
     fireEvent.click(attachItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('ua')
@@ -264,35 +277,94 @@ describe('ConversationNavigation whole-route user list', () => {
 
     render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
 
-    // Filtered body wins: no attachment clutter appended.
+    // Filtered body shows WITH its attachment kind prefix (no clutter
+    // hiding, no added space/dot/count): the document row reads first.
     const bodyItem = await screen.findByTestId('conversation-nav-item-ub')
-    expect(bodyItem.textContent).toContain('Please review the attached report.')
+    expect(bodyItem.textContent).toBe('[Document]Please review the attached report.')
     expect(bodyItem.textContent).not.toContain('report.pdf')
 
-    // First named file plus the total remaining count, bounded to one name.
+    // Sequential rule: every attachment contributes its kind label in order,
+    // duplicates preserved, no counts/merging, no filenames.
     const multiItem = await screen.findByTestId('conversation-nav-item-u1')
-    expect(multiItem.textContent).toContain('alpha.pdf +2 attachments')
+    expect(multiItem.textContent).toContain('[Document][Document][Document]')
+    expect(multiItem.textContent).not.toContain('alpha.pdf')
     expect(multiItem.textContent).not.toContain('beta.pdf')
 
-    // Image-only rows use the localized image count.
-    expect((await screen.findByTestId('conversation-nav-item-u2')).textContent).toContain('2 images')
+    // Two unnamed images keep both labels.
+    expect((await screen.findByTestId('conversation-nav-item-u2')).textContent).toContain('[Image][Image]')
 
-    // Nameless video rows use the generic attachment count, never the path.
+    // Nameless video rows use the bracketed video kind, never the path or a bare count.
     const videoItem = await screen.findByTestId('conversation-nav-item-u3')
-    expect(videoItem.textContent).toContain('1 attachment')
+    expect(videoItem.textContent).toContain('[Video]')
+    expect(videoItem.textContent).not.toContain('1 video')
     expect(videoItem.textContent).not.toContain('clip.mp4')
 
-    // Long names stay bounded (280) inside the original single-line
-    // ellipsis row: the restored outline keeps `white-space: nowrap` +
-    // `text-overflow: ellipsis`, so overflow truncates on one line rather
-    // than the prior rail's two-line clamp.
+    // A very long stored filename never surfaces: the typed document row
+    // reads [Document], and the complete label stays intact in `title`
+    // while the single-line ellipsis row (`white-space: nowrap` +
+    // `text-overflow: ellipsis`) controls visible overflow.
     const longItem = await screen.findByTestId('conversation-nav-item-ul')
-    expect((longItem.textContent ?? '').length).toBeLessThanOrEqual(280)
+    expect(longItem.textContent).toContain('[Document]')
+    expect(longItem.textContent).not.toContain('n'.repeat(10))
     expect(longItem.querySelector('div')).not.toBeNull()
     expect(longItem.getAttribute('title')).toBe(longItem.textContent)
 
     fireEvent.click(multiItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('u1')
+  })
+
+  it('shows body text with its attachment prefix and replaces links in place', async () => {
+    const audioFile = {
+      id: 'fa',
+      messageId: 'um',
+      type: MessageBlockType.FILE,
+      file: { id: 'file-fa', name: '', origin_name: '', ext: '.mp3', type: 'audio' },
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    } as never
+    const blocks = [
+      textBlock('bm', 'um', 'Test'),
+      imageBlock('im', 'um'),
+      audioFile,
+      textBlock('bl', 'ul', 'https://example.com\nTest')
+    ]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [userMsg('um', ['bm', 'im', 'fa']), userMsg('ul', ['bl'])],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+
+    // Attachment prefix in original block order joined directly with the
+    // body: no added space, dot, count, or merge.
+    const mixed = await screen.findByTestId('conversation-nav-item-um')
+    expect(mixed.textContent).toBe('[Image][Audio]Test')
+    // External links are replaced in place at their original position; the
+    // boundary newline after the bare URL joins (`URL\nTest` → `[Link]Test`).
+    const linkItem = await screen.findByTestId('conversation-nav-item-ul')
+    expect(linkItem.textContent).toBe('[Link]Test')
+
+    fireEvent.click(mixed)
+    expect(mocks.onNavigate).toHaveBeenCalledWith('um')
+  })
+
+  it('lists image plus document attachments sequentially in block order, never filenames', async () => {
+    const blocks = [imageBlock('i1', 'um'), namedFileBlock('f9', 'um', 'later-report.pdf')]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [userMsg('um', ['i1', 'f9'])],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+
+    const item = await screen.findByTestId('conversation-nav-item-um')
+    expect(item.textContent).toContain('[Image][Document]')
+    expect(item.textContent).not.toContain('later-report.pdf')
+
+    fireEvent.click(item)
+    expect(mocks.onNavigate).toHaveBeenCalledWith('um')
   })
 
   it('maps clipboard pasted-image rows to the meaningful app label without leaking IDs', async () => {
@@ -307,11 +379,69 @@ describe('ConversationNavigation whole-route user list', () => {
     render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
 
     const pastedItem = await screen.findByTestId('conversation-nav-item-up')
-    expect(pastedItem.textContent).toContain('Pasted Image')
+    expect(pastedItem.textContent).toContain('[Image]')
     expect(pastedItem.textContent).not.toContain('45285c9c')
 
     fireEvent.click(pastedItem)
     expect(mocks.onNavigate).toHaveBeenCalledWith('up')
+  })
+
+  it('labels FILE audio/text/document and legacy video/code rows through the bound formatters', async () => {
+    const audioBlock = {
+      id: 'fa',
+      messageId: 'ua',
+      type: MessageBlockType.FILE,
+      file: { id: 'file-fa', name: '', origin_name: '', ext: '.mp3', type: 'audio' },
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    } as never
+    const textBlockFile = {
+      id: 'ft',
+      messageId: 'ut',
+      type: MessageBlockType.FILE,
+      file: { id: 'file-ft', name: '', origin_name: '', ext: '.md', type: 'text' },
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    } as never
+    const docBlock = {
+      id: 'fd',
+      messageId: 'ud',
+      type: MessageBlockType.FILE,
+      file: { id: 'file-fd', name: '', origin_name: '', ext: '.pdf', type: 'document' },
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    } as never
+    const codeBlock = {
+      id: 'cc',
+      messageId: 'uc',
+      type: MessageBlockType.CODE,
+      content: 'print(1)',
+      language: 'python',
+      status: 'success',
+      createdAt: '2026-01-01T00:00:00.000Z'
+    } as never
+    const blocks = [audioBlock, textBlockFile, docBlock, videoBlock('v1', 'uv'), codeBlock]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [
+        userMsg('ua', ['fa']),
+        userMsg('ut', ['ft']),
+        userMsg('ud', ['fd']),
+        userMsg('uv', ['v1']),
+        userMsg('uc', ['cc'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+
+    render(<ConversationNavigation topicId="topic-1" onNavigate={mocks.onNavigate} />)
+
+    expect((await screen.findByTestId('conversation-nav-item-ua')).textContent).toContain('[Audio]')
+    expect((await screen.findByTestId('conversation-nav-item-ut')).textContent).toContain('[Text]')
+    expect((await screen.findByTestId('conversation-nav-item-ud')).textContent).toContain('[Document]')
+    const videoItem = await screen.findByTestId('conversation-nav-item-uv')
+    expect(videoItem.textContent).toContain('[Video]')
+    expect(videoItem.textContent).not.toContain('clip.mp4')
+    expect((await screen.findByTestId('conversation-nav-item-uc')).textContent).toContain('[Code]')
   })
 
   it('drops the stale route list on topic switch and loads the new route', async () => {

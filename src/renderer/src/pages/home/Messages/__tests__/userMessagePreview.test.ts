@@ -6,10 +6,7 @@ import {
   type AttachmentLabelFormatters,
   buildAttachmentLabel,
   collapsePreviewWhitespace,
-  collectAttachmentSummary,
   hasNavigableAttachment,
-  isGeneratedAttachmentName,
-  safeBasename,
   stripHtmlBlockquotes,
   stripMarkdownQuotes,
   stripRemainingHtml,
@@ -271,9 +268,6 @@ describe('userMessagePreview quote stripping', () => {
 const fileMeta = (overrides: Record<string, unknown>) =>
   ({
     id: 'file-1',
-    name: 'doc.pdf',
-    origin_name: 'doc.pdf',
-    path: '/tmp/doc.pdf',
     size: 10,
     ext: '.pdf',
     type: 'document',
@@ -281,12 +275,12 @@ const fileMeta = (overrides: Record<string, unknown>) =>
     ...overrides
   }) as never
 
-const namedFileBlock = (id: string, messageId: string, originName: string, extra?: Record<string, unknown>) =>
+const typedFileBlock = (id: string, messageId: string, type: string | null, ext: string) =>
   ({
     id,
     messageId,
     type: MessageBlockType.FILE,
-    file: fileMeta({ origin_name: originName, name: originName, ...extra }),
+    file: fileMeta({ type, ext }),
     status: 'success',
     createdAt: '2026-01-01T00:00:00.000Z'
   }) as never
@@ -311,56 +305,123 @@ const videoBlock = (id: string, messageId: string) =>
     createdAt: '2026-01-01T00:00:00.000Z'
   }) as never
 
-const testFormatters = (overrides?: Partial<AttachmentLabelFormatters>): AttachmentLabelFormatters => ({
+const codeBlock = (id: string, messageId: string) =>
+  ({
+    id,
+    messageId,
+    type: MessageBlockType.CODE,
+    content: 'print(1)',
+    language: 'python',
+    status: 'success',
+    createdAt: '2026-01-01T00:00:00.000Z'
+  }) as never
+
+const testFormatters = (): AttachmentLabelFormatters => ({
   genericFallback: 'Attachment',
-  formatSingleNamed: (name) => name,
-  formatNamedWithMore: (name, remaining) => `${name} +${remaining} attachments`,
-  formatImageCount: (count) => (count === 1 ? '1 image' : `${count} images`),
-  formatAttachmentCount: (count) => (count === 1 ? '1 attachment' : `${count} attachments`),
-  pastedImageLabel: 'Pasted Image',
-  ...overrides
+  typeImage: 'Image',
+  typeVideo: 'Video',
+  typeAudio: 'Audio',
+  typeText: 'Text',
+  typeDocument: 'Document',
+  typeCode: 'Code'
 })
 
 describe('userMessagePreview attachment labels', () => {
-  it('labels a single named file with its safe basename', () => {
-    const blocksById = mapOf([namedFileBlock('f1', 'u1', 'report.pdf')])
-    expect(buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())).toBe('report.pdf')
-  })
-
-  it('labels multiple named files with the first name plus remaining count only', () => {
+  it('lists IMAGE, audio FILE, IMAGE, document FILE in exact order with no merging', () => {
     const blocksById = mapOf([
-      namedFileBlock('f1', 'u1', 'report.pdf'),
-      namedFileBlock('f2', 'u1', 'a-very-long-second-filename-that-must-not-appear.csv'),
-      namedFileBlock('f3', 'u1', 'third-workbook.xlsx')
+      imageBlock('i1', 'u1'),
+      typedFileBlock('f1', 'u1', 'audio', '.mp3'),
+      imageBlock('i2', 'u1'),
+      typedFileBlock('f2', 'u1', 'document', '.pdf')
     ])
-    const label = buildAttachmentLabel(userMessage(['f1', 'f2', 'f3']), blocksById, testFormatters())
-    expect(label).toBe('report.pdf +2 attachments')
-    expect(label).not.toContain('second-filename')
-    expect(label).not.toContain('third-workbook')
-  })
-
-  it('labels image-only attachments with localized image counts', () => {
-    expect(buildAttachmentLabel(userMessage(['i1']), mapOf([imageBlock('i1', 'u1')]), testFormatters())).toBe('1 image')
-    const blocksById = mapOf([imageBlock('i1', 'u1'), imageBlock('i2', 'u1'), imageBlock('i3', 'u1')])
-    expect(buildAttachmentLabel(userMessage(['i1', 'i2', 'i3']), blocksById, testFormatters())).toBe('3 images')
-  })
-
-  it('labels mixed named plus unnamed attachments with first name plus total remaining', () => {
-    const blocksById = mapOf([namedFileBlock('f1', 'u1', 'notes.md'), imageBlock('i1', 'u1'), videoBlock('v1', 'u1')])
-    expect(buildAttachmentLabel(userMessage(['f1', 'i1', 'v1']), blocksById, testFormatters())).toBe(
-      'notes.md +2 attachments'
+    expect(buildAttachmentLabel(userMessage(['i1', 'f1', 'i2', 'f2']), blocksById, testFormatters())).toBe(
+      '[Image][Audio][Image][Document]'
     )
   })
 
-  it('labels mixed unnamed attachments with a generic total count', () => {
-    const blocksById = mapOf([imageBlock('i1', 'u1'), videoBlock('v1', 'u1')])
-    expect(buildAttachmentLabel(userMessage(['i1', 'v1']), blocksById, testFormatters())).toBe('2 attachments')
+  it('preserves duplicate images without merging or counting', () => {
+    const blocksById = mapOf([imageBlock('i1', 'u1'), imageBlock('i2', 'u1')])
+    expect(buildAttachmentLabel(userMessage(['i1', 'i2']), blocksById, testFormatters())).toBe('[Image][Image]')
   })
 
-  it('labels quote-only plus attachment messages with the attachment label', () => {
-    const blocksById = mapOf([mainText('b1', '> only a quote'), namedFileBlock('f1', 'u1', 'quoted-context.pdf')])
+  it('never shows filenames: a named report.pdf typed as document reads [Document]', () => {
+    const blocksById = mapOf([
+      {
+        id: 'f1',
+        messageId: 'u1',
+        type: MessageBlockType.FILE,
+        file: { id: 'x', ext: '.pdf', type: 'document' },
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z'
+      } as never
+    ])
+    const label = buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())
+    expect(label).toBe('[Document]')
+    expect(label).not.toContain('report')
+  })
+
+  it('maps a named song.mp3 to [Audio] and example.py typed text to [Text] without names', () => {
+    const song = mapOf([
+      {
+        id: 'f1',
+        messageId: 'u1',
+        type: MessageBlockType.FILE,
+        file: { id: 'x', ext: '.mp3', type: 'audio' },
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z'
+      } as never
+    ])
+    const songLabel = buildAttachmentLabel(userMessage(['f1']), song, testFormatters())
+    expect(songLabel).toBe('[Audio]')
+    expect(songLabel).not.toContain('song')
+    const py = mapOf([
+      {
+        id: 'f1',
+        messageId: 'u1',
+        type: MessageBlockType.FILE,
+        file: { id: 'x', ext: '.py', type: 'text' },
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z'
+      } as never
+    ])
+    const pyLabel = buildAttachmentLabel(userMessage(['f1']), py, testFormatters())
+    // A .py suffix never maps to Code: type=text wins, explicit CODE blocks alone read Code.
+    expect(pyLabel).toBe('[Text]')
+    expect(pyLabel).not.toContain('example')
+  })
+
+  it('keeps heterogeneous repeated order exactly, duplicates preserved', () => {
+    const blocksById = mapOf([
+      videoBlock('v1', 'u1'),
+      codeBlock('c1', 'u1'),
+      typedFileBlock('f1', 'u1', 'audio', '.mp3'),
+      typedFileBlock('f2', 'u1', 'text', '.md'),
+      typedFileBlock('f3', 'u1', 'document', '.pdf'),
+      imageBlock('i1', 'u1'),
+      typedFileBlock('f4', 'u1', 'audio', '.mp3')
+    ])
+    expect(
+      buildAttachmentLabel(userMessage(['v1', 'c1', 'f1', 'f2', 'f3', 'i1', 'f4']), blocksById, testFormatters())
+    ).toBe('[Video][Code][Audio][Text][Document][Image][Audio]')
+  })
+
+  it('labels single video and code blocks by kind without reading private paths', () => {
+    const videoOnly = mapOf([videoBlock('v1', 'u1')])
+    const videoLabel = buildAttachmentLabel(userMessage(['v1']), videoOnly, testFormatters())
+    expect(videoLabel).toBe('[Video]')
+    expect(videoLabel).not.toBe('1 video')
+    expect(videoLabel).not.toContain('clip.mp4')
+    expect(buildAttachmentLabel(userMessage(['c1']), mapOf([codeBlock('c1', 'u1')]), testFormatters())).toBe('[Code]')
+  })
+
+  it('labels quote-only plus attachment messages with the sequential attachment labels', () => {
+    const blocksById = mapOf([
+      mainText('b1', '> only a quote'),
+      imageBlock('i1', 'u1'),
+      typedFileBlock('f1', 'u1', 'audio', '.mp3')
+    ])
     expect(summarizeUserMessage(userMessage(['b1']), blocksById)).toBe('')
-    expect(buildAttachmentLabel(userMessage(['b1', 'f1']), blocksById, testFormatters())).toBe('quoted-context.pdf')
+    expect(buildAttachmentLabel(userMessage(['b1', 'i1', 'f1']), blocksById, testFormatters())).toBe('[Image][Audio]')
   })
 
   it('returns empty for quote-only messages without attachments', () => {
@@ -368,64 +429,268 @@ describe('userMessagePreview attachment labels', () => {
     expect(buildAttachmentLabel(userMessage(['b1']), blocksById, testFormatters())).toBe('')
   })
 
-  it('never exposes filesystem paths, URL secrets, or internal IDs', () => {
+  it('never exposes filesystem paths, URL secrets, filenames, or internal IDs', () => {
     const blocksById = mapOf([
-      namedFileBlock('f1', 'u1', '/Users/someone/secret/report.pdf?token=abc123'),
+      typedFileBlock('f1', 'u1', 'document', '.pdf'),
       imageBlock('i1', 'u1'),
       videoBlock('v1', 'u1')
     ])
-    const single = buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())
-    expect(single).toBe('report.pdf')
-    expect(single).not.toContain('/')
-    expect(single).not.toContain('token')
-    expect(single).not.toContain('Users')
-    const mixed = buildAttachmentLabel(userMessage(['f1', 'i1', 'v1']), blocksById, testFormatters())
-    expect(mixed).toBe('report.pdf +2 attachments')
-    expect(mixed).not.toContain('secret')
-    expect(mixed).not.toContain('abc123')
-    expect(mixed).not.toContain('clip.mp4')
-    // Nameless image/video rows never surface raw block IDs either.
-    const nameless = buildAttachmentLabel(userMessage(['i1', 'v1']), blocksById, testFormatters())
-    expect(nameless).toBe('2 attachments')
-    expect(nameless).not.toContain('i1')
-    expect(nameless).not.toContain('v1')
+    const label = buildAttachmentLabel(userMessage(['f1', 'i1', 'v1']), blocksById, testFormatters())
+    expect(label).toBe('[Document][Image][Video]')
+    expect(label).not.toContain('/')
+    expect(label).not.toContain('token')
+    expect(label).not.toContain('Users')
+    expect(label).not.toContain('secret')
+    expect(label).not.toContain('abc123')
+    expect(label).not.toContain('clip.mp4')
+    expect(label).not.toContain('f1')
+    expect(label).not.toContain('i1')
+    expect(label).not.toContain('v1')
+    expect(label).not.toContain('report')
   })
 
-  it('uses the safe basename when the stored name contains path segments', () => {
-    expect(safeBasename('C:\\Users\\someone\\docs\\plan.docx')).toBe('plan.docx')
-    expect(safeBasename('https://example.com/files/slide.pdf?sig=secret#frag')).toBe('slide.pdf')
-    expect(safeBasename('  plain.txt  ')).toBe('plain.txt')
-    expect(safeBasename('')).toBe('')
-  })
-
-  it('maps clipboard pasted-image internal names to the meaningful app label, never the raw ID', () => {
-    const pasted = 'pasted_image_45285c9c-a7cd-4c3d-a9b6-6854c3bbe479.png'
-    expect(isGeneratedAttachmentName(pasted)).toBe(true)
-    const blocksById = mapOf([imageBlock('i1', 'u1', { origin_name: pasted, name: pasted })])
-    const label = buildAttachmentLabel(userMessage(['i1']), blocksById, testFormatters())
-    expect(label).toBe('Pasted Image')
-    expect(label).not.toContain('45285c9c')
-    // Without a pasted-image convention available, fall back to the type count.
-    const typeLabel = buildAttachmentLabel(
-      userMessage(['i1']),
-      blocksById,
-      testFormatters({ pastedImageLabel: undefined })
-    )
-    expect(typeLabel).toBe('1 image')
-  })
-
-  it('treats temp/pasted-text generated names as nameless', () => {
-    expect(isGeneratedAttachmentName('temp_file_foo_image.png')).toBe(true)
-    expect(isGeneratedAttachmentName('pasted_text_abc123.txt')).toBe(true)
-    const blocksById = mapOf([namedFileBlock('f1', 'u1', 'pasted_text_abc123.txt', { type: 'text' })])
-    expect(buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())).toBe('1 attachment')
-  })
-
-  it('bounds long attachment labels at maxLength', () => {
-    const longName = `${'a'.repeat(500)}.pdf`
-    const blocksById = mapOf([namedFileBlock('f1', 'u1', longName)])
+  it('reads pasted-text rows by their upstream type metadata, never the raw name', () => {
+    // Upstream metadata type=text is authoritative: no filename is ever shown.
+    const blocksById = mapOf([typedFileBlock('f1', 'u1', 'text', '.txt')])
     const label = buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())
-    expect(label.length).toBeLessThanOrEqual(280)
-    expect(collectAttachmentSummary(userMessage(['f1']), blocksById).firstNamed).toBe(longName)
+    expect(label).toBe('[Text]')
+    expect(label).not.toContain('pasted')
+  })
+
+  it('falls back honestly to [Attachment] when type and ext cannot classify', () => {
+    const unknownExt = mapOf([typedFileBlock('f1', 'u1', null, '.unknownext')])
+    expect(buildAttachmentLabel(userMessage(['f1']), unknownExt, testFormatters())).toBe('[Attachment]')
+    const noMeta = mapOf([
+      {
+        id: 'f2',
+        messageId: 'u1',
+        type: MessageBlockType.FILE,
+        file: { id: 'x' },
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z'
+      } as never
+    ])
+    expect(buildAttachmentLabel(userMessage(['f2']), noMeta, testFormatters())).toBe('[Attachment]')
+  })
+
+  it('emits the full typed sequence without truncation; the UI ellipsis controls visibility', () => {
+    const ids: string[] = []
+    const blocks: never[] = []
+    const kinds: Array<'image' | 'audio' | 'text' | 'document' | 'video'> = ['image', 'audio', 'text', 'document']
+    for (let i = 0; i < 40; i++) {
+      const kind = kinds[i % kinds.length]
+      const id = `f${i}`
+      ids.push(id)
+      const ext = kind === 'image' ? '.png' : kind === 'audio' ? '.mp3' : kind === 'text' ? '.md' : '.pdf'
+      blocks.push(typedFileBlock(id, 'u1', kind, ext))
+    }
+    const blocksById = mapOf(blocks)
+    const label = buildAttachmentLabel(userMessage(ids), blocksById, testFormatters())
+    const expected = Array.from({ length: 40 }, (_, i) => `[${['Image', 'Audio', 'Text', 'Document'][i % 4]}]`).join('')
+    expect(label).toBe(expected)
+    // Deliberately longer than the old 280 cap: no slicing here.
+    expect(label.length).toBeGreaterThan(280)
+  })
+
+  it('maps every FILE type to its own kind label', () => {
+    const cases: Array<[string, string]> = [
+      ['image', '[Image]'],
+      ['video', '[Video]'],
+      ['audio', '[Audio]'],
+      ['text', '[Text]'],
+      ['document', '[Document]'],
+      ['other', '[Attachment]']
+    ]
+    for (const [type, expected] of cases) {
+      const blocksById = mapOf([
+        {
+          id: 'f1',
+          messageId: 'u1',
+          type: MessageBlockType.FILE,
+          file: { id: 'x', ext: '.bin', type },
+          status: 'success',
+          createdAt: '2026-01-01T00:00:00.000Z'
+        } as never
+      ])
+      expect(buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())).toBe(expected)
+    }
+  })
+
+  it('classifies null-type audio via ext case-insensitively and with/without dot', () => {
+    const upper = mapOf([
+      {
+        id: 'f1',
+        messageId: 'u1',
+        type: MessageBlockType.FILE,
+        file: { id: 'x', ext: '.MP3', type: null },
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z'
+      } as never
+    ])
+    expect(buildAttachmentLabel(userMessage(['f1']), upper, testFormatters())).toBe('[Audio]')
+    const noDot = mapOf([
+      {
+        id: 'f1',
+        messageId: 'u1',
+        type: MessageBlockType.FILE,
+        file: { id: 'x', ext: 'mp3', type: null },
+        status: 'success',
+        createdAt: '2026-01-01T00:00:00.000Z'
+      } as never
+    ])
+    expect(buildAttachmentLabel(userMessage(['f1']), noDot, testFormatters())).toBe('[Audio]')
+  })
+
+  it('separates text from document via type authority and ordinary ext fallback', () => {
+    const textTyped = mapOf([typedFileBlock('f1', 'u1', 'text', '.txt')])
+    expect(buildAttachmentLabel(userMessage(['f1']), textTyped, testFormatters())).toBe('[Text]')
+    const docTyped = mapOf([typedFileBlock('f1', 'u1', 'document', '.pdf')])
+    expect(buildAttachmentLabel(userMessage(['f1']), docTyped, testFormatters())).toBe('[Document]')
+    const nullMd = mapOf([typedFileBlock('f1', 'u1', null, '.md')])
+    expect(buildAttachmentLabel(userMessage(['f1']), nullMd, testFormatters())).toBe('[Text]')
+    const nullPy = mapOf([typedFileBlock('f1', 'u1', null, '.py')])
+    expect(buildAttachmentLabel(userMessage(['f1']), nullPy, testFormatters())).toBe('[Text]')
+  })
+
+  it('classifies shared accepted video (.wmv) missing from the old hand list', () => {
+    const blocksById = mapOf([typedFileBlock('f1', 'u1', null, '.wmv')])
+    expect(buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())).toBe('[Video]')
+  })
+
+  it('keeps audio and document order across messages without names', () => {
+    const blocksById = mapOf([
+      typedFileBlock('f1', 'u1', 'audio', '.mp3'),
+      typedFileBlock('f2', 'u1', 'document', '.pdf')
+    ])
+    const label = buildAttachmentLabel(userMessage(['f1', 'f2']), blocksById, testFormatters())
+    expect(label).toBe('[Audio][Document]')
+    expect(label).not.toContain('later-report')
+  })
+
+  it('falls back unknown rows to attachment, never document', () => {
+    const blocksById = mapOf([typedFileBlock('f1', 'u1', 'other', '.bin')])
+    expect(buildAttachmentLabel(userMessage(['f1']), blocksById, testFormatters())).toBe('[Attachment]')
+    const noExtUnknown = mapOf([typedFileBlock('f1', 'u1', 'other', '')])
+    expect(buildAttachmentLabel(userMessage(['f1']), noExtUnknown, testFormatters())).toBe('[Attachment]')
+  })
+
+  it('shows images as image even when the stored ext has no dot', () => {
+    const blocksById = mapOf([imageBlock('i1', 'u1', { ext: 'png', type: 'image' })])
+    expect(buildAttachmentLabel(userMessage(['i1']), blocksById, testFormatters())).toBe('[Image]')
+  })
+
+  it('prefers body text over attachment clutter', () => {
+    const blocksById = mapOf([
+      mainText('b1', 'Please review the attached report.'),
+      typedFileBlock('f1', 'u1', 'document', '.pdf')
+    ])
+    expect(summarizeUserMessage(userMessage(['b1']), blocksById)).toContain('Please review the attached report.')
+    expect(hasNavigableAttachment(userMessage(['b1', 'f1']), blocksById)).toBe(true)
+  })
+})
+
+describe('userMessagePreview external link labels', () => {
+  const linkOpts = { linkLabel: 'Link' }
+  const summarizeLink = (content: string, opts: { linkLabel?: string; maxLength?: number } = linkOpts): string =>
+    summarizeUserMessage(userMessage(['b1']), mapOf([mainText('b1', content)]), opts)
+
+  it('replaces a bare URL in place, keeping surrounding words and spaces', () => {
+    expect(summarizeLink('look https://example.com test')).toBe('look [Link] test')
+  })
+
+  it('replaces a bare URL before a newline; the boundary linebreak joins without adding content', () => {
+    // Link-boundary rule: whitespace immediately after a replaced link joins
+    // only when it contains a newline (`URL\nTest` → `[Link]Test`); ordinary
+    // inline spaces stay (`look URL test` → `look [Link] test`).
+    expect(summarizeLink('https://example.com\nTest')).toBe('[Link]Test')
+  })
+
+  it('replaces a Markdown inline link before a newline with the same boundary join', () => {
+    expect(summarizeLink('[Example](https://example.com)\nTest')).toBe('[Link]Test')
+  })
+
+  it('replaces a Markdown inline link label and destination together', () => {
+    const summary = summarizeLink('[Example](https://example.com) test')
+    expect(summary).toBe('[Link] test')
+    expect(summary).not.toContain('Example')
+    expect(summary).not.toContain('example.com')
+  })
+
+  it('replaces reference links and drops their definitions', () => {
+    const summary = summarizeLink(['See [Example][ref] today.', '', '[ref]: https://example.com'].join('\n'))
+    expect(summary).toContain('[Link]')
+    expect(summary).not.toContain('Example')
+    expect(summary).not.toContain('example.com')
+    expect(summary).not.toContain('[ref]')
+  })
+
+  it('replaces angle autolinks without leaking the URL', () => {
+    expect(summarizeLink('<https://example.com> test')).toBe('[Link] test')
+  })
+
+  it('keeps trailing punctuation outside the replaced link', () => {
+    expect(summarizeLink('See https://example.com.')).toBe('See [Link].')
+  })
+
+  it('replaces each of multiple links at its own position without merging', () => {
+    expect(summarizeLink('a https://a.com b https://b.com c')).toBe('a [Link] b [Link] c')
+  })
+
+  it('replaces mailto and obsidian Markdown links as legal external links', () => {
+    expect(summarizeLink('[Contact](mailto:foo@example.com)')).toBe('[Link]')
+    expect(summarizeLink('[Note](obsidian://open?vault=main)')).toBe('[Link]')
+  })
+
+  it('keeps the visible label of internal anchor links', () => {
+    const summary = summarizeLink('[label](#section) end')
+    expect(summary).toContain('label')
+    expect(summary).toContain('end')
+    expect(summary).not.toContain('[Link]')
+  })
+
+  it('never treats Markdown images as links', () => {
+    const summary = summarizeLink('See ![alt](https://example.com/img.png) here')
+    expect(summary).not.toContain('[Link]')
+    expect(summary).toContain('alt')
+  })
+
+  it('removes quote-only links with the quote so callers see the fallback', () => {
+    expect(summarizeLink('> https://example.com')).toBe('')
+  })
+
+  it('keeps fenced code URLs literal', () => {
+    const summary = summarizeLink(['Before', '```', 'https://example.com', '```', 'After'].join('\n'))
+    expect(summary).toContain('https://example.com')
+    expect(summary).not.toContain('[Link]')
+  })
+
+  it('keeps inline code URLs literal', () => {
+    const summary = summarizeLink('See `https://example.com` done.')
+    expect(summary).toContain('https://example.com')
+    expect(summary).not.toContain('[Link]')
+  })
+
+  it('replaces HTML anchors with safe external hrefs in place', () => {
+    expect(summarizeLink('look <a href="https://example.com">click here</a> test')).toBe('look [Link] test')
+  })
+
+  it('keeps the inner text of internal HTML anchors', () => {
+    const summary = summarizeLink('see <a href="#sec">label</a> end')
+    expect(summary).toContain('label')
+    expect(summary).toContain('end')
+    expect(summary).not.toContain('[Link]')
+  })
+
+  it('leaves link syntax untouched when no localized label is supplied', () => {
+    const summary = summarizeUserMessage(userMessage(['b1']), mapOf([mainText('b1', 'look https://example.com test')]))
+    expect(summary).toContain('https://example.com')
+    expect(summary).not.toContain('[Link]')
+  })
+
+  it('keeps multi-block body order with link replacement', () => {
+    const blocksById = mapOf([mainText('b1', 'Hello https://example.com'), mainText('b2', 'World')])
+    // Link-boundary join applies uniformly: the block-join delimiter after a
+    // trailing link contains newlines, so it joins like any boundary linebreak.
+    expect(summarizeUserMessage(userMessage(['b1', 'b2']), blocksById, linkOpts)).toBe('Hello [Link]World')
   })
 })

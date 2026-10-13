@@ -1119,7 +1119,14 @@
       "user_attachment_file_more_other": "{{name}} +{{count}} attachments",
       "user_attachment_image_one": "{{count}} image",
       "user_attachment_image_other": "{{count}} images",
-      "user_message_fallback": "Quoted message"
+      "user_attachment_type_audio": "Audio",
+      "user_attachment_type_code": "Code",
+      "user_attachment_type_document": "Document",
+      "user_attachment_type_image": "Image",
+      "user_attachment_type_text": "Text",
+      "user_attachment_type_video": "Video",
+      "user_message_fallback": "Quoted message",
+      "user_message_link": "Link"
     },
     "resend": "Resend",
     "save": {

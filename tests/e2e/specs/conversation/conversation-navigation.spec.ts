@@ -9,11 +9,12 @@
  *   head) in chronological order against the fetchWholeTopicSnapshot oracle,
  *   with loaded Redux/DOM still bounded; clicking the head item navigates by
  *   stable ID (around-target positioning proves the head message renders).
- * - T2 previews + branch switch: quote/long-text user messages render
- *   body-only previews (no quoted content, no raw HTML, bounded length) with
- *   localized fallbacks for quote-only items; one authority-seeded
- *   attachment-only user row keeps a navigable stable-ID row with its file
- *   label and stable-ID click positions it; the list is internally
+ * - T2 previews + branch switch: quote/long-text/link user messages render
+ *   body-only previews (no quoted content, no raw HTML, bounded length, links
+ *   replaced in place by the localized label) with localized fallbacks for
+ *   quote-only items; one authority-seeded attachment+body user row keeps a
+ *   navigable stable-ID row with its attachment prefix plus body, and
+ *   stable-ID click positions it; the list is internally
  *   scrollable with bounded height; forking L1 through the real toolbar
  *   button switches the list to the new effective route (route isolation).
  * - T3 independent back-to-bottom button: hidden at the genuine physical
@@ -44,7 +45,7 @@ import {
   getRequestSequence,
   test
 } from '../../fixtures/electron.fixture'
-import { SLOW_STREAM_MARKER } from '../../fixtures/mock-openai-server'
+import { EXTENDED_SLOW_STREAM_MARKER, getExtendedSlowStreamReply } from '../../fixtures/mock-openai-server'
 import { activateTopic, clickToolbarBranch } from '../../utils/branch-route-setup'
 
 // Runner-cwd anchored repo root (same CJS-safe pattern as
@@ -242,6 +243,13 @@ async function uiSendMessage(page: Page, text: string): Promise<void> {
     { selector: '.inputbar textarea, textarea[placeholder]', value: text }
   )
   await expect(textarea).toHaveValue(text, { timeout: 5000 })
+  // Send readiness (source: InputbarCore handleKeyDown gates Enter on
+  // isSendDisabled = noContent||isLoading||searching; SendMessageButton
+  // mirrors it via aria-disabled). After fill noContent is false, so enabled
+  // proves the loading/searching flags are idle. Enter while disabled is
+  // swallowed — waiting here is a helper precondition, not a prod change.
+  const sendBtn = page.locator('.inputbar .icon-ic_send')
+  await expect(sendBtn).toHaveAttribute('aria-disabled', 'false', { timeout: 30000 })
   await textarea.press('Enter')
 }
 
@@ -310,7 +318,7 @@ async function readScrollTop(page: any): Promise<number> {
 }
 
 /**
- * Clamped-geometry wait for near-bottom targets (e.g. T2 attachment-only row
+ * Clamped-geometry wait for near-bottom targets (e.g. T2 attachment+body row
  * near the newest edge): top-alignment is geometrically impossible without
  * positive overscroll (finite clamped scroll delta only), so the contract is
  * genuine viewport intersection + stability, never a mandatory top offset 0.
@@ -358,6 +366,104 @@ async function hoverOriginalOutline(page: any): Promise<void> {
   )
 }
 
+/** Production-cap geometry of the hover-expanded outline body (real rects only). */
+interface OutlineMetrics {
+  overflowY: string
+  landmarkPosition: string
+  fontSize: string | null
+  width: number
+  height: number
+  left: number
+  right: number
+  landmarkWidth: number
+  landmarkLeft: number
+  landmarkRight: number
+  parentWidth: number | null
+  parentHeight: number | null
+  parentLeft: number | null
+  parentRight: number | null
+  scrollHeight: number
+  clientHeight: number
+  viewportWidth: number
+  viewportHeight: number
+}
+
+async function readOutlineMetrics(page: any): Promise<OutlineMetrics | null> {
+  return page.evaluate(() => {
+    const landmark = document.querySelector('[data-testid="conversation-navigation"]')
+    const list = landmark?.firstElementChild as HTMLElement | null
+    if (!list || !landmark) return null
+    const parent = landmark.parentElement as HTMLElement | null
+    const text = list.querySelector('[data-testid^="conversation-nav-item-"] > div:last-child') as HTMLElement | null
+    const style = getComputedStyle(list as HTMLElement)
+    const landmarkStyle = getComputedStyle(landmark as HTMLElement)
+    const rect = (list as HTMLElement).getBoundingClientRect()
+    const landmarkRect = (landmark as HTMLElement).getBoundingClientRect()
+    const parentRect = parent ? parent.getBoundingClientRect() : null
+    return {
+      overflowY: style.overflowY,
+      landmarkPosition: landmarkStyle.position,
+      fontSize: text ? getComputedStyle(text).fontSize : null,
+      width: rect.width,
+      height: rect.height,
+      left: rect.left,
+      right: rect.right,
+      landmarkWidth: landmarkRect.width,
+      landmarkLeft: landmarkRect.left,
+      landmarkRight: landmarkRect.right,
+      parentWidth: parentRect ? parentRect.width : null,
+      parentHeight: parentRect ? parentRect.height : null,
+      parentLeft: parentRect ? parentRect.left : null,
+      parentRight: parentRect ? parentRect.right : null,
+      scrollHeight: (list as HTMLElement).scrollHeight,
+      clientHeight: (list as HTMLElement).clientHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight
+    }
+  })
+}
+
+/** Vertical-centering geometry: outline body center vs reading-area centers (real rects only). */
+interface OutlineCentering {
+  bodyCenterY: number
+  parentCenterY: number
+  messagesCenterY: number
+  bodyHeight: number
+  parentHeight: number
+}
+
+async function readOutlineCentering(page: any): Promise<OutlineCentering | null> {
+  return page.evaluate(() => {
+    const landmark = document.querySelector('[data-testid="conversation-navigation"]')
+    const body = landmark?.firstElementChild as HTMLElement | null
+    const parent = landmark?.parentElement as HTMLElement | null
+    const messages = document.getElementById('messages')
+    if (!body || !landmark || !parent || !messages) return null
+    const b = body.getBoundingClientRect()
+    const p = parent.getBoundingClientRect()
+    const m = messages.getBoundingClientRect()
+    return {
+      bodyCenterY: b.top + b.height / 2,
+      parentCenterY: p.top + p.height / 2,
+      messagesCenterY: m.top + m.height / 2,
+      bodyHeight: b.height,
+      parentHeight: p.height
+    }
+  })
+}
+
+/**
+ * Strict centering contract (pure-CSS flex): the body center matches the
+ * reading-area (positioned parent) center within 3px in both collapsed and
+ * expanded states, for short and max-height-clamped long lists. The
+ * #messages box fills the same positioned parent, so its center agrees
+ * within a small box-offset tolerance (8px) rather than the exact 3px.
+ */
+function expectOutlineCentered(c: OutlineCentering, label: string): void {
+  expect(Math.abs(c.bodyCenterY - c.parentCenterY), `${label} body centered in reading area`).toBeLessThanOrEqual(3)
+  expect(Math.abs(c.bodyCenterY - c.messagesCenterY), `${label} body centered vs #messages`).toBeLessThanOrEqual(8)
+}
+
 /** Stable viewport: scrollTop unchanged across samples (no drift, no keeper pull-back). */
 async function expectStableScrollTop(page: any, samples = 3, gapMs = 250, tol = 2): Promise<number> {
   const tops: number[] = []
@@ -375,6 +481,11 @@ async function expectStableScrollTop(page: any, samples = 3, gapMs = 250, tol = 
 const ANCHOR_TOL = 12
 const HOLD_GROWTH = 500
 const PAUSED_MIN = 200
+
+/** Extended slow-stream budget from the real fixture (same 60ms pacing, ~18120ms, ~8200 chars). */
+function extendedSlowStreamTotalLength(): number {
+  return getExtendedSlowStreamReply('mock-model').length
+}
 
 /** Length/status of one streaming main-text block (spec-local, same pattern as pause legs). */
 async function streamBlockState(page: any, blockId: string): Promise<{ status: string; length: number } | null> {
@@ -520,11 +631,18 @@ async function waitForQuietReadingAnchor(page: any, lastWheelTime: number): Prom
 }
 
 /**
- * Spec-local authority seed for one attachment-only user message plus its
- * assistant reply (real IPC/SQLite, no live files: only block metadata is
+ * Spec-local authority seed for one mixed attachment + body user message plus
+ * its assistant reply (real IPC/SQLite, no live files: only block metadata is
  * persisted and read back through the snapshot — never file I/O).
+ *
+ * The user message carries one MAIN_TEXT block (`Test`) plus four attachment
+ * blocks in order — IMAGE, FILE audio, IMAGE, FILE document (the last one
+ * keeps a real stored filename to prove names never surface) — so the
+ * navigation row must read the attachment prefix joined directly with the
+ * body (`[Image][Audio][Image][Document]Test`) with no counts, merging,
+ * spaces, or filenames.
  */
-async function seedAttachmentOnlyPair(
+async function seedMixedAttachmentSequence(
   page: any,
   liveAssistantId: string,
   topicId: string,
@@ -536,7 +654,11 @@ async function seedAttachmentOnlyPair(
   const asstIdx = startIndex + 1
   const userId = `${topicId}-msg-${pad(userIdx, 5)}`
   const asstId = `${topicId}-msg-${pad(asstIdx, 5)}`
-  const userBlockId = `${topicId}-block-${pad(userIdx, 5)}`
+  const imageBlockA = `${topicId}-block-${pad(userIdx, 5)}-img-a`
+  const audioBlockB = `${topicId}-block-${pad(userIdx, 5)}-aud-b`
+  const imageBlockC = `${topicId}-block-${pad(userIdx, 5)}-img-c`
+  const docBlockD = `${topicId}-block-${pad(userIdx, 5)}-doc-d`
+  const textBlockT = `${topicId}-block-${pad(userIdx, 5)}-txt-t`
   const asstBlockId = `${topicId}-block-${pad(asstIdx, 5)}`
   const stamp = '2026-01-01T00:00:00.000Z'
   const entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = [
@@ -549,12 +671,54 @@ async function seedAttachmentOnlyPair(
         createdAt: stamp,
         updatedAt: stamp,
         status: 'success',
-        blocks: [userBlockId],
+        blocks: [textBlockT, imageBlockA, audioBlockB, imageBlockC, docBlockD],
         sortOrder: userIdx
       },
       blocks: [
         {
-          id: userBlockId,
+          id: textBlockT,
+          messageId: userId,
+          type: 'main_text',
+          content: 'Test',
+          status: 'success',
+          createdAt: stamp,
+          updatedAt: stamp
+        },
+        {
+          id: imageBlockA,
+          messageId: userId,
+          type: 'image',
+          status: 'success',
+          createdAt: stamp,
+          updatedAt: stamp
+        },
+        {
+          id: audioBlockB,
+          messageId: userId,
+          type: 'file',
+          file: {
+            id: `${topicId}-file-mixed-audio`,
+            name: '',
+            origin_name: '',
+            path: '/tmp/seed-song.mp3',
+            size: 512,
+            ext: '.mp3',
+            type: 'audio'
+          },
+          status: 'success',
+          createdAt: stamp,
+          updatedAt: stamp
+        },
+        {
+          id: imageBlockC,
+          messageId: userId,
+          type: 'image',
+          status: 'success',
+          createdAt: stamp,
+          updatedAt: stamp
+        },
+        {
+          id: docBlockD,
           messageId: userId,
           type: 'file',
           file: {
@@ -633,7 +797,7 @@ async function seedAttachmentOnlyPair(
 test.describe('conversation navigation redesign', () => {
   test.setTimeout(180000)
 
-  test('T1 whole-route user list + stable-ID around navigation', async ({ mainWindow }) => {
+  test('T1 whole-route user list + stable-ID around navigation', async ({ mainWindow, electronApp }) => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
@@ -682,30 +846,85 @@ test.describe('conversation navigation redesign', () => {
 
     // Restored original outline: hovering the collapsed strip expands the
     // body (narrow indicators -> text). The 25-row body is bounded
-    // (max-height min(100%, 70vh)) and internally scrollable on hover —
+    // (max-height min(100%, 45vh, 420px), max-width min(320px, 100% - 24px))
+    // and internally scrollable on hover —
     // never grows with content, never shifts the chat layout.
     await hoverOriginalOutline(page)
-    const listMetrics = await page.evaluate(() => {
-      const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const list = landmark?.firstElementChild as HTMLElement | null
-      if (!list || !landmark) return null
-      const style = getComputedStyle(list as HTMLElement)
-      const landmarkStyle = getComputedStyle(landmark as HTMLElement)
-      const rect = (list as HTMLElement).getBoundingClientRect()
-      return {
-        overflowY: style.overflowY,
-        landmarkPosition: landmarkStyle.position,
-        height: rect.height,
-        scrollHeight: (list as HTMLElement).scrollHeight,
-        clientHeight: (list as HTMLElement).clientHeight,
-        viewportHeight: window.innerHeight
-      }
-    })
+    const listMetrics = await readOutlineMetrics(page)
     expect(listMetrics).not.toBeNull()
     expect(['auto', 'scroll']).toContain(listMetrics!.overflowY)
     expect(listMetrics!.landmarkPosition).toBe('absolute')
+    expect(listMetrics!.fontSize).toBe('13px')
     expect(listMetrics!.scrollHeight).toBeGreaterThan(listMetrics!.clientHeight)
-    expect(listMetrics!.height).toBeLessThanOrEqual(listMetrics!.viewportHeight * 0.6 + 1)
+    // Production caps via real geometry (never CSS string matching).
+    expect(listMetrics!.height).toBeLessThanOrEqual(420 + 1)
+    expect(listMetrics!.height).toBeLessThanOrEqual(listMetrics!.viewportHeight * 0.45 + 1)
+    expect(listMetrics!.parentHeight).not.toBeNull()
+    expect(listMetrics!.height).toBeLessThanOrEqual(listMetrics!.parentHeight! + 1)
+    expect(listMetrics!.width).toBeLessThanOrEqual(320 + 1)
+    expect(listMetrics!.landmarkWidth).toBeGreaterThan(0)
+    expect(listMetrics!.width).toBeLessThanOrEqual(listMetrics!.landmarkWidth - 24 + 2)
+    expect(listMetrics!.parentWidth).not.toBeNull()
+    expect(listMetrics!.width).toBeLessThanOrEqual(listMetrics!.parentWidth! - 24 + 1)
+    // No horizontal overflow outside the positioning parent.
+    expect(listMetrics!.left).toBeGreaterThanOrEqual(listMetrics!.parentLeft! - 1)
+    expect(listMetrics!.right).toBeLessThanOrEqual(listMetrics!.parentRight! + 1)
+    // Long clamped list stays vertically centered while hover-expanded
+    // (max-height clamp does not pull the body toward the top).
+    const longCentered = await readOutlineCentering(page)
+    expect(longCentered).not.toBeNull()
+    expectOutlineCentered(longCentered!, 'T1 long expanded')
+
+    // Wide-window proof on the same long list (default window is narrow
+    // ~960px): briefly widen the owned window via the existing BrowserWindow
+    // handle (same profile/app, no new fixture), re-hover (resize drops
+    // hover), re-assert the identical caps, then restore the owned size.
+    const initialSize = await electronApp.evaluate(({ BrowserWindow }) => {
+      const win = (BrowserWindow as any).getAllWindows()[0]
+      return win.getSize() as [number, number]
+    })
+    const initialInnerWidth = await page.evaluate(() => window.innerWidth)
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const win = (BrowserWindow as any).getAllWindows()[0]
+      win.setSize(1280, 800)
+    })
+    try {
+      await page.waitForFunction((prev: number) => window.innerWidth !== prev, initialInnerWidth, {
+        timeout: 10000
+      })
+      await hoverOriginalOutline(page)
+      const wideMetrics = await readOutlineMetrics(page)
+      expect(wideMetrics).not.toBeNull()
+      expect(['auto', 'scroll']).toContain(wideMetrics!.overflowY)
+      expect(wideMetrics!.fontSize).toBe('13px')
+      expect(wideMetrics!.scrollHeight).toBeGreaterThan(wideMetrics!.clientHeight)
+      expect(wideMetrics!.height).toBeLessThanOrEqual(420 + 1)
+      expect(wideMetrics!.height).toBeLessThanOrEqual(wideMetrics!.viewportHeight * 0.45 + 1)
+      expect(wideMetrics!.parentHeight).not.toBeNull()
+      expect(wideMetrics!.height).toBeLessThanOrEqual(wideMetrics!.parentHeight! + 1)
+      expect(wideMetrics!.width).toBeLessThanOrEqual(320 + 1)
+      expect(wideMetrics!.width).toBeLessThanOrEqual(wideMetrics!.landmarkWidth - 24 + 2)
+      expect(wideMetrics!.parentWidth).not.toBeNull()
+      expect(wideMetrics!.width).toBeLessThanOrEqual(wideMetrics!.parentWidth! - 24 + 1)
+      expect(wideMetrics!.left).toBeGreaterThanOrEqual(wideMetrics!.parentLeft! - 1)
+      expect(wideMetrics!.right).toBeLessThanOrEqual(wideMetrics!.parentRight! + 1)
+      console.log(
+        `[E2E] T1 outline caps narrow=${Math.round(listMetrics!.width)}x${Math.round(listMetrics!.height)} wide=${Math.round(wideMetrics!.width)}x${Math.round(wideMetrics!.height)}`
+      )
+    } finally {
+      await electronApp.evaluate(({ BrowserWindow }, size: [number, number]) => {
+        const win = (BrowserWindow as any).getAllWindows()[0]
+        try {
+          win.setSize(size[0], size[1])
+        } catch {}
+      }, initialSize)
+      try {
+        await page.waitForFunction((prev: number) => Math.abs(window.innerWidth - prev) <= 2, initialInnerWidth, {
+          timeout: 10000
+        })
+      } catch {}
+    }
+    // Re-establish hover after the restore for the stable-ID click below.
 
     // Click the window-outside head item: stable-ID navigation positions it.
     // Real mouse click on the original item (role=button div with dot+text),
@@ -742,7 +961,7 @@ test.describe('conversation navigation redesign', () => {
     test.info().annotations.push({
       type: 'evidence-tier',
       description:
-        'T2 INTEGRATED UI: seed markdown/HTML-quote + long + quote-only + attachment-only user messages → list shows body-only previews (quoted content absent, no raw HTML, bounded length) with localized fallback for the quote-only item and the file label for the attachment-only row (stable-ID click positions it); list is internally scrollable with bounded height → real toolbar fork switches the list to the L1 effective route. Deterministic mocked provider.'
+        'T2 INTEGRATED UI: seed markdown/HTML-quote + long + quote-only + link+body + attachment+body user messages → list shows body-only previews (quoted content absent, no raw HTML, bounded length) with localized fallback for the quote-only item, the in-place localized link label for the link+body row, and the attachment prefix plus body for the mixed attachment+body row (stable-ID click positions it); list is internally scrollable with bounded height → real toolbar fork switches the list to the L1 effective route. Deterministic mocked provider.'
     })
     const page = mainWindow
     const liveAssistantId = await prepareDisplayCountAndAssistant(page)
@@ -757,13 +976,13 @@ test.describe('conversation navigation redesign', () => {
       `Please explain this snippet:\n<blockquote><p>quoted html that must not preview</p></blockquote>\nKeep this explanation request.`,
       longBody,
       `> only a quote, nothing else`,
-      'Final follow-up question here.'
+      `https://example.com\nTest`
     ]
     await seedNavTopic(page, liveAssistantId, topicId, contents.length * 2, (i) =>
       i % 2 === 0 ? contents[i / 2] : `assistant reply ${i}`
     )
     const attachFileName = 'nav-attachment-report.pdf'
-    const attachUserId = await seedAttachmentOnlyPair(
+    const attachUserId = await seedMixedAttachmentSequence(
       page,
       liveAssistantId,
       topicId,
@@ -771,12 +990,213 @@ test.describe('conversation navigation redesign', () => {
       contents.length * 2,
       attachFileName
     )
-    await activateTopicAndWaitForBootstrap(page, topicId, contents.length * 2 + 2)
+    // Unnamed first-attachment rows through the real IPC/SQLite pipeline
+    // (no live files: block metadata only): image without a file object,
+    // video by private filePath, a code block, and FILE audio/text/document
+    // rows with typed metadata but no readable name — covering the
+    // many-unnamed screenshot case with first-kind labels.
+    const extraBase = contents.length * 2 + 2
+    const extraEntries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }> = []
+    const extraDefs: Array<{
+      kind: 'image' | 'video' | 'code' | 'file-audio' | 'file-text' | 'file-document'
+      userIdx: number
+    }> = [
+      { kind: 'image', userIdx: extraBase },
+      { kind: 'video', userIdx: extraBase + 2 },
+      { kind: 'code', userIdx: extraBase + 4 },
+      { kind: 'file-audio', userIdx: extraBase + 6 },
+      { kind: 'file-text', userIdx: extraBase + 8 },
+      { kind: 'file-document', userIdx: extraBase + 10 }
+    ]
+    const fileMetaFor = (kind: 'file-audio' | 'file-text' | 'file-document'): Record<string, unknown> => {
+      if (kind === 'file-audio')
+        return {
+          id: `${topicId}-file-audio`,
+          name: '',
+          origin_name: '',
+          path: '/tmp/seed-sound.mp3',
+          size: 128,
+          ext: '.mp3',
+          type: 'audio'
+        }
+      if (kind === 'file-text')
+        return {
+          id: `${topicId}-file-text`,
+          name: '',
+          origin_name: '',
+          path: '/tmp/seed-note.md',
+          size: 128,
+          ext: '.md',
+          type: 'text'
+        }
+      return {
+        id: `${topicId}-file-doc`,
+        name: '',
+        origin_name: '',
+        path: '/tmp/seed-doc.pdf',
+        size: 128,
+        ext: '.pdf',
+        type: 'document'
+      }
+    }
+    for (const def of extraDefs) {
+      const userId = `${topicId}-msg-${pad(def.userIdx, 5)}`
+      const asstId = `${topicId}-msg-${pad(def.userIdx + 1, 5)}`
+      const userBlockId = `${topicId}-block-${pad(def.userIdx, 5)}`
+      const asstBlockId = `${topicId}-block-${pad(def.userIdx + 1, 5)}`
+      const stamp = '2026-01-01T00:00:00.000Z'
+      // Long-sequence regression within the existing single-FILE document-only
+      // pair shape (no new message count): the file-document row carries 40
+      // document blocks in order so the nav row must read the exact 40-repeat
+      // sequential kind labels with single-line ellipsis overflow. Other pairs
+      // keep their single-block shape (mixed pair already proves typed docs).
+      const isLongDocSequence = def.kind === 'file-document'
+      const LONG_DOC_BLOCKS = 40
+      const userBlockIds: string[] =
+        isLongDocSequence === true
+          ? Array.from({ length: LONG_DOC_BLOCKS }, (_, k) => `${userBlockId}-long-${pad(k, 2)}`)
+          : [userBlockId]
+      const userBlocks: Array<Record<string, unknown>> =
+        isLongDocSequence === true
+          ? userBlockIds.map((bid, k) => ({
+              id: bid,
+              messageId: userId,
+              type: 'file',
+              file: {
+                id: `${topicId}-file-doc-long-${pad(k, 2)}`,
+                name: '',
+                origin_name: '',
+                path: '/tmp/seed-doc-long.pdf',
+                size: 128,
+                ext: '.pdf',
+                type: 'document'
+              },
+              status: 'success',
+              createdAt: stamp,
+              updatedAt: stamp
+            }))
+          : [
+              def.kind === 'image'
+                ? {
+                    id: userBlockId,
+                    messageId: userId,
+                    type: 'image',
+                    status: 'success',
+                    createdAt: stamp,
+                    updatedAt: stamp
+                  }
+                : def.kind === 'video'
+                  ? {
+                      id: userBlockId,
+                      messageId: userId,
+                      type: 'video',
+                      filePath: '/tmp/seed-clip.mp4',
+                      status: 'success',
+                      createdAt: stamp,
+                      updatedAt: stamp
+                    }
+                  : def.kind === 'code'
+                    ? {
+                        id: userBlockId,
+                        messageId: userId,
+                        type: 'code',
+                        content: 'print("hello")',
+                        language: 'python',
+                        status: 'success',
+                        createdAt: stamp,
+                        updatedAt: stamp
+                      }
+                    : {
+                        id: userBlockId,
+                        messageId: userId,
+                        type: 'file',
+                        file: fileMetaFor(def.kind),
+                        status: 'success',
+                        createdAt: stamp,
+                        updatedAt: stamp
+                      }
+            ]
+      extraEntries.push(
+        {
+          message: {
+            id: userId,
+            topicId,
+            role: 'user',
+            assistantId: liveAssistantId,
+            createdAt: stamp,
+            updatedAt: stamp,
+            status: 'success',
+            blocks: userBlockIds,
+            sortOrder: def.userIdx
+          },
+          blocks: userBlocks
+        },
+        {
+          message: {
+            id: asstId,
+            topicId,
+            role: 'assistant',
+            assistantId: liveAssistantId,
+            createdAt: stamp,
+            updatedAt: stamp,
+            status: 'success',
+            blocks: [asstBlockId],
+            sortOrder: def.userIdx + 1
+          },
+          blocks: [
+            {
+              id: asstBlockId,
+              messageId: asstId,
+              type: 'main_text',
+              content: 'assistant reply after unnamed attachment',
+              status: 'success',
+              createdAt: stamp,
+              updatedAt: stamp
+            }
+          ]
+        }
+      )
+    }
+    const extraPersist = await page.evaluate(
+      async ({
+        topicId,
+        assistantId,
+        name,
+        entries
+      }: {
+        topicId: string
+        assistantId: string
+        name: string
+        entries: Array<{ message: Record<string, unknown>; blocks: Array<Record<string, unknown>> }>
+      }) => {
+        try {
+          const api = (window as any).api as any
+          const pasted = await api.chatDb.pasteMessagesToTopic({ topicId, entries })
+          if (!pasted || pasted.ok !== true) return { ok: false, err: `paste failed ${JSON.stringify(pasted)}` }
+          return { ok: true }
+        } catch (e) {
+          return { ok: false, err: e instanceof Error ? e.message : String(e) }
+        }
+      },
+      { topicId, assistantId: liveAssistantId, name: `Nav Test ${topicId}`, entries: extraEntries }
+    )
+    expect(extraPersist.ok, `unnamed attachment persist failed: ${(extraPersist as any).err}`).toBe(true)
+    const unnamedImageId = `${topicId}-msg-${pad(extraBase, 5)}`
+    const unnamedVideoId = `${topicId}-msg-${pad(extraBase + 2, 5)}`
+    const codeAttachId = `${topicId}-msg-${pad(extraBase + 4, 5)}`
+    const fileAudioId = `${topicId}-msg-${pad(extraBase + 6, 5)}`
+    const fileTextId = `${topicId}-msg-${pad(extraBase + 8, 5)}`
+    const fileDocId = `${topicId}-msg-${pad(extraBase + 10, 5)}`
+    // Bootstrap stays bounded by DISPLAY_LIMIT (20): T2 now seeds 26 total
+    // (12 contents + 2 attachment pair + 12 unnamed/code/FILE rows), so the
+    // loaded window holds the newest 20, not the whole topic. The nav list
+    // below asserts the whole-route oracle separately.
+    await activateTopicAndWaitForBootstrap(page, topicId)
     await enableConversationNavigation(page)
 
     const nav = page.getByTestId('conversation-navigation')
     await expect(nav).toBeVisible({ timeout: 20000 })
-    await expect.poll(async () => (await navItemIds(page)).length, { timeout: 20000 }).toBe(contents.length + 1)
+    await expect.poll(async () => (await navItemIds(page)).length, { timeout: 20000 }).toBe(contents.length + 7)
 
     // Body-only previews: quoted content absent, body present, no raw HTML.
     await expect(nav).toContainText('How do I configure retries', { timeout: 10000 })
@@ -788,31 +1208,108 @@ test.describe('conversation navigation redesign', () => {
     const longItemText = await page.getByTestId(`conversation-nav-item-${topicId}-msg-${pad(6, 5)}`).textContent()
     expect(longItemText ?? '').toContain('long body segment')
     expect((longItemText ?? '').length).toBeLessThanOrEqual(280)
+    // Link+body row reuses the last contents entry: the bare URL is replaced
+    // in place by the localized link label at its original position (all
+    // locales), with the boundary newline joined (no added space), and no
+    // leaked URL.
+    const linkBodyItem = page.getByTestId(`conversation-nav-item-${topicId}-msg-${pad(10, 5)}`)
+    await expect(linkBodyItem).toHaveText(/\[(Link|链接|連結)\]Test/)
+    expect((await linkBodyItem.textContent()) ?? '').not.toContain('example.com')
     // Quote-only item stays navigable with a localized fallback.
     const quoteOnlyItem = page.getByTestId(`conversation-nav-item-${topicId}-msg-${pad(8, 5)}`)
     await expect(quoteOnlyItem).toContainText(/Quoted message|引用消息|引用訊息/)
-    // Attachment-only item stays navigable with its meaningful file label
-    // (metadata only — no path, query, or internal ID leaks into the row).
+    // Mixed attachment+body item stays navigable with the attachment prefix
+    // joined directly with the body in block order (IMAGE, FILE audio,
+    // IMAGE, FILE document, then `Test`): no counts/merging/spaces, and the
+    // stored filename never surfaces
+    // (metadata only — no path, query, filename, or internal ID leaks).
     const attachItem = page.getByTestId(`conversation-nav-item-${attachUserId}`)
-    await expect(attachItem).toContainText(attachFileName)
+    await expect(attachItem).toHaveText(
+      /^\[(Image|图片|圖片)\]\[(Audio|音频|音訊)\]\[(Image|图片|圖片)\]\[(Document|文档|文件)\]Test$/
+    )
     const attachText = (await attachItem.textContent()) ?? ''
+    expect(attachText).not.toContain(attachFileName)
+    expect(attachText).not.toContain('nav-attachment')
+    expect(attachText).not.toContain('seed-song')
     expect(attachText).not.toContain('/tmp/')
-    // Stable-ID click positions the attachment-only message in the viewport.
+    // Unnamed first attachments show their exact bracketed localized kind
+    // (never a bare total/count, never a private path): image / video /
+    // code / FILE audio / FILE text / FILE document via the real pipeline.
+    const unnamedImageItem = page.getByTestId(`conversation-nav-item-${unnamedImageId}`)
+    await expect(unnamedImageItem).toHaveText(/\[(Image|图片|圖片)\]/)
+    expect(((await unnamedImageItem.textContent()) ?? '').toLowerCase()).not.toContain('tmp')
+    const unnamedVideoItem = page.getByTestId(`conversation-nav-item-${unnamedVideoId}`)
+    await expect(unnamedVideoItem).toHaveText(/\[(Video|视频|影片)\]/)
+    const unnamedVideoText = (await unnamedVideoItem.textContent()) ?? ''
+    expect(unnamedVideoText).not.toContain('/tmp/')
+    expect(unnamedVideoText).not.toContain('seed-clip')
+    expect(unnamedVideoText).not.toMatch(/(^|\s)1 video/i)
+    const codeAttachItem = page.getByTestId(`conversation-nav-item-${codeAttachId}`)
+    await expect(codeAttachItem).toHaveText(/\[(Code|代码|程式碼)\]/)
+    const fileAudioItem = page.getByTestId(`conversation-nav-item-${fileAudioId}`)
+    await expect(fileAudioItem).toHaveText(/\[(Audio|音频|音訊)\]/)
+    expect(((await fileAudioItem.textContent()) ?? '').toLowerCase()).not.toContain('tmp')
+    const fileTextItem = page.getByTestId(`conversation-nav-item-${fileTextId}`)
+    await expect(fileTextItem).toHaveText(/\[(Text|文本|文字)\]/)
+    const fileDocItem = page.getByTestId(`conversation-nav-item-${fileDocId}`)
+    const fileDocText = (await fileDocItem.textContent()) ?? ''
+    // Long-sequence regression within the same single-FILE document-only pair:
+    // 40 document blocks in order read as the exact 40-repeat sequential kind
+    // labels (same locale case repeated, no counts/merging/spaces/dots) with
+    // no filenames/paths; the native title carries the full sequence while
+    // single-line ellipsis overflows (scrollWidth > clientWidth).
+    expect(['[Document]'.repeat(40), '[文档]'.repeat(40), '[文件]'.repeat(40)]).toContain(fileDocText)
+    expect(fileDocText).not.toContain('/tmp/')
+    expect(fileDocText).not.toContain('seed-doc')
+    // Collapsed strip keeps text display:none (0 widths): expand via the
+    // existing outline hover, then confirm this row's text is displayed.
+    await hoverOriginalOutline(page)
+    await expect(fileDocItem.locator('div:last-child')).toBeVisible({ timeout: 10000 })
+    await page.waitForFunction(
+      (id: string) => {
+        const text = document.querySelector(
+          `[data-testid="conversation-nav-item-${id}"] > div:last-child`
+        ) as HTMLElement | null
+        if (!text) return false
+        const style = getComputedStyle(text)
+        return style.display !== 'none' && Number.parseFloat(style.opacity) > 0.5
+      },
+      fileDocId,
+      { timeout: 10000 }
+    )
+    const fileDocBox = await fileDocItem.evaluate((el) => {
+      const text = el.querySelector('div:last-child') as HTMLElement | null
+      if (!text) return null
+      const style = getComputedStyle(text)
+      return {
+        title: (el as HTMLElement).getAttribute('title') ?? null,
+        whiteSpace: style.whiteSpace,
+        textOverflow: style.textOverflow,
+        scrollWidth: (text as HTMLElement).scrollWidth,
+        clientWidth: (text as HTMLElement).clientWidth
+      }
+    })
+    expect(fileDocBox).not.toBeNull()
+    expect(fileDocBox!.title).toBe(fileDocText)
+    expect(fileDocBox!.whiteSpace).toBe('nowrap')
+    expect(fileDocBox!.textOverflow).toBe('ellipsis')
+    expect(fileDocBox!.scrollWidth).toBeGreaterThan(fileDocBox!.clientWidth)
+    // Stable-ID click positions the attachment+body message in the viewport.
     // Restored original gesture: hover the collapsed strip (narrow dot rail)
     // to expand the body, then a real mouse click on the original item
     // (role=button div with dot+text, title=full text), never forced/JS.
+    const attachBefore = await targetGeometry(page, attachUserId)
+    expect(attachBefore, 'target resolves before click').not.toBeNull()
     await hoverOriginalOutline(page)
     await attachItem.click({ timeout: 10000 })
-    // Physical proof: the near-newest attachment row genuinely intersects the
-    // #messages viewport after the real click, then holds. Top-alignment is
-    // NOT required here — the row sits ~566px from the top at the bottom with
-    // only ~132px below, so a finite clamped position (intersection + stable)
-    // is the optimum without positive overscroll. No blank filler is added.
-    const attachScrollBefore = await readScrollTop(page)
-    const attachGeo = await waitForViewportIntersection(page, attachUserId)
+    // Physical proof: the attachment row top-aligns at the viewport start
+    // after the real click (default start alignment; clamp only out of
+    // range), then holds. The 26-row seed keeps 13 newer rows below the
+    // attachment target inside the newest 20-row window, so top alignment
+    // is geometrically possible — intersection alone understates the
+    // contract. No blank filler is added.
+    const attachGeo = await waitForTopAlignment(page, attachUserId)
     expect(intersectsViewport(attachGeo)).toBe(true)
-    expect(Number.isFinite(attachGeo.scrollTop)).toBe(true)
-    expect(Math.abs(attachGeo.scrollTop)).toBeLessThanOrEqual(Math.abs(attachScrollBefore) + 1)
     await expectStableScrollTop(page)
     // Restored original CSS identity (verbatim, no styling alterations):
     // single-line ellipsis rows (white-space nowrap + ellipsis, 24px row),
@@ -825,6 +1322,7 @@ test.describe('conversation navigation redesign', () => {
         rowHeight: rowStyle.height,
         whiteSpace: textStyle?.whiteSpace ?? null,
         textOverflow: textStyle?.textOverflow ?? null,
+        fontSize: textStyle?.fontSize ?? null,
         title: (el as HTMLElement).getAttribute('title') ?? null,
         role: (el as HTMLElement).getAttribute('role') ?? null
       }
@@ -833,30 +1331,42 @@ test.describe('conversation navigation redesign', () => {
     expect(originalStyle.rowHeight).toBe('24px')
     expect(originalStyle.whiteSpace).toBe('nowrap')
     expect(originalStyle.textOverflow).toBe('ellipsis')
+    expect(originalStyle.fontSize).toBe('13px')
     expect(typeof originalStyle.title === 'string' && originalStyle.title.length > 0).toBe(true)
 
     // Internally scrollable with bounded height (never grows with content).
-    // Original body: hover reveals overflow-y auto within max-height.
+    // Original body: hover reveals overflow-y auto within max-height
+    // min(100%, 45vh, 420px) and max-width min(320px, 100% - 24px).
     await hoverOriginalOutline(page)
-    const listMetrics = await page.evaluate(() => {
-      const landmark = document.querySelector('[data-testid="conversation-navigation"]')
-      const list = landmark?.firstElementChild as HTMLElement | null
-      if (!list) return null
-      const style = getComputedStyle(list as HTMLElement)
-      const rect = (list as HTMLElement).getBoundingClientRect()
-      return {
-        overflowY: style.overflowY,
-        height: rect.height,
-        viewportHeight: window.innerHeight
-      }
-    })
+    const listMetrics = await readOutlineMetrics(page)
     expect(listMetrics).not.toBeNull()
     expect(['auto', 'scroll']).toContain(listMetrics!.overflowY)
-    expect(listMetrics!.height).toBeLessThanOrEqual(listMetrics!.viewportHeight * 0.6 + 1)
+    expect(listMetrics!.fontSize).toBe('13px')
+    expect(listMetrics!.height).toBeLessThanOrEqual(420 + 1)
+    expect(listMetrics!.height).toBeLessThanOrEqual(listMetrics!.viewportHeight * 0.45 + 1)
+    expect(listMetrics!.parentHeight).not.toBeNull()
+    expect(listMetrics!.height).toBeLessThanOrEqual(listMetrics!.parentHeight! + 1)
+    // The 600-char long row wants full width: the cap (not the content)
+    // decides, so the wide-window bound is exercised here.
+    expect(listMetrics!.width).toBeLessThanOrEqual(320 + 1)
+    expect(listMetrics!.width).toBeLessThanOrEqual(listMetrics!.landmarkWidth - 24 + 2)
+    expect(listMetrics!.parentWidth).not.toBeNull()
+    expect(listMetrics!.width).toBeLessThanOrEqual(listMetrics!.parentWidth! - 24 + 1)
+    expect(listMetrics!.left).toBeGreaterThanOrEqual(listMetrics!.parentLeft! - 1)
+    expect(listMetrics!.right).toBeLessThanOrEqual(listMetrics!.parentRight! + 1)
 
     // Branch switch: fork L1 at a mid anchor through the real toolbar button;
     // the list follows the new effective route (route isolation).
+    // Loaded projection after the 26-row bootstrap holds the newest 20
+    // (idx6..25), so the idx5 assistant anchor is outside. Navigate first via
+    // the existing outline stable-ID to its preceding user idx4 (real UI
+    // click; around-read makes idx5 resident/visible), then fork.
     const anchorAssistantId = `${topicId}-msg-${pad(5, 5)}`
+    const anchorUserId = `${topicId}-msg-${pad(4, 5)}`
+    await hoverOriginalOutline(page)
+    await page.getByTestId(`conversation-nav-item-${anchorUserId}`).click({ timeout: 10000 })
+    await waitForTopAlignment(page, anchorUserId)
+    await expectStableScrollTop(page)
     await clickToolbarBranch(page, anchorAssistantId)
     // Fork activation commits asynchronously (toolbar click dispatches an
     // async IPC round-trip); poll the Redux activation instead of racing a
@@ -905,7 +1415,7 @@ test.describe('conversation navigation redesign', () => {
     // Hidden at the genuine physical bottom.
     await expect(page.getByTestId('conversation-back-to-bottom')).toHaveCount(0)
 
-    const needle = `convnav button stream ${SLOW_STREAM_MARKER}`
+    const needle = `convnav button stream ${EXTENDED_SLOW_STREAM_MARKER}`
     const seq = getRequestSequence()
     await uiSendMessage(page, needle)
     // Bounded T3 synchronization: the mock request arrives asynchronously
@@ -972,21 +1482,29 @@ test.describe('conversation navigation redesign', () => {
       `[E2E] T3 hold entry settled: anchor=${quiet.id} offset=${quiet.offset.toFixed(1)} visibleH=${Math.round(quiet.visibleHeight)} quietMs=${Math.round(quiet.quietMs)}`
     )
 
-    // ── Focused hold contract (single-route, slow marker with plenty remaining). ──
-    // The away pause happens early (~500 chars of the finite ~4145-char mock),
-    // so lenAtPause + HOLD_GROWTH stays arithmetically reachable. While the
-    // user reads away, streaming MAIN_TEXT must grow by that reachable amount
-    // and the first visible reading anchor (row-stable per viewport ADR, not
-    // raw scrollTop under column-reverse growth) must not drift; generation
-    // continues after the hold.
+    // ── Focused hold contract (single-route, extended slow marker with plenty remaining). ──
+    // The extended budget (≈8200 chars at the same 60ms pacing, ~18120ms total)
+    // keeps the stream live through wheel-quiet (500ms) + 8x150ms input +
+    // 8000ms settle + hold growth, so lenAtPause + HOLD_GROWTH stays
+    // arithmetically reachable. While the user reads away, streaming MAIN_TEXT
+    // must grow by that reachable amount and the first visible reading anchor
+    // (row-stable per viewport ADR, not raw scrollTop under column-reverse
+    // growth) must not drift; generation continues after the hold.
     const holdBlockId = await findStreamingBlockId(page)
     expect(holdBlockId, 'active streaming block must exist while reading away').not.toBeNull()
     const holdPre = await streamBlockState(page, holdBlockId!)
     expect(holdPre?.status, 'stream still active at hold entry (remaining budget for proof)').toBe('streaming')
     const lenAtPause = holdPre?.length ?? -1
+    const extendedTotal = extendedSlowStreamTotalLength()
+    expect(
+      lenAtPause + HOLD_GROWTH <= extendedTotal,
+      `hold growth must fit the extended budget (lenAtPause=${lenAtPause} + ${HOLD_GROWTH} <= total=${extendedTotal})`
+    ).toBe(true)
     const preAnchor = await readAnchor(page)
     expect(preAnchor, 'anchor must resolve while reading away').not.toBeNull()
-    console.log(`[E2E] T3 hold entry: lenAtPause=${lenAtPause} anchor=${preAnchor!.id} status=${holdPre?.status}`)
+    console.log(
+      `[E2E] T3 hold entry: lenAtPause=${lenAtPause} total=${extendedTotal} remaining=${extendedTotal - lenAtPause} anchor=${preAnchor!.id} status=${holdPre?.status}`
+    )
     await waitForBlockGrowth(page, holdBlockId!, lenAtPause + HOLD_GROWTH)
     const pausedTop = await page.locator('#messages').evaluate((el) => el.scrollTop)
     expect(Math.abs(pausedTop), 'continued growth while away never pulls to bottom').toBeGreaterThan(PAUSED_MIN)
@@ -1124,23 +1642,65 @@ test.describe('conversation navigation redesign', () => {
 
     // Three normal real sends; long user bodies guarantee a scrollable
     // viewport so every navigation is a genuine move (no paging: 6 « 20).
+    // Request-sequence capture (same T3 pattern): clear once, then per-send
+    // seq for arrival diagnostics. No prompt/content logging — counts only.
+    clearRequestLog()
     const sentUserIds: string[] = []
     for (let i = 0; i < 3; i++) {
       const expected = (i + 1) * 2
+      const seq = getRequestSequence()
       await uiSendMessage(page, `T4 resident journey ${i} ${'x'.repeat(1500)}`)
-      await page.waitForFunction(
-        ({ id, expected }: { id: string; expected: number }) => {
+      try {
+        await page.waitForFunction(
+          ({ id, expected }: { id: string; expected: number }) => {
+            const s = (window as any).store?.getState()
+            const ids = s?.messages?.messageIdsByTopic?.[id] ?? []
+            if (!Array.isArray(ids) || ids.length !== expected) return false
+            for (const block of Object.values(s?.messageBlocks?.entities ?? {}) as any[]) {
+              if (block && ids.includes(block.messageId) && block.status === 'streaming') return false
+            }
+            return true
+          },
+          { id: topicId, expected },
+          { timeout: 90000 }
+        )
+      } catch (waitErr) {
+        const diag = await page.evaluate((id: string) => {
           const s = (window as any).store?.getState()
-          const ids = s?.messages?.messageIdsByTopic?.[id] ?? []
-          if (!Array.isArray(ids) || ids.length !== expected) return false
-          for (const block of Object.values(s?.messageBlocks?.entities ?? {}) as any[]) {
-            if (block && ids.includes(block.messageId) && block.status === 'streaming') return false
+          const ids = (s?.messages?.messageIdsByTopic?.[id] ?? []) as string[]
+          const entities = s?.messages?.entities ?? {}
+          const blocks = (s?.messageBlocks?.entities ?? {}) as Record<string, any>
+          const msgStatus: Record<string, number> = {}
+          for (const mid of ids) {
+            const st = ((entities as any)[mid]?.status as string) ?? 'missing'
+            msgStatus[st] = (msgStatus[st] ?? 0) + 1
           }
-          return true
-        },
-        { id: topicId, expected },
-        { timeout: 90000 }
-      )
+          const blockStatus: Record<string, number> = {}
+          for (const b of Object.values(blocks) as any[]) {
+            if (b && ids.includes(b.messageId)) {
+              const st = (b.status as string) ?? 'missing'
+              blockStatus[st] = (blockStatus[st] ?? 0) + 1
+            }
+          }
+          return {
+            count: ids.length,
+            loading: s?.messages?.loadingByTopic?.[id] ?? null,
+            activeMatch: (s?.runtime?.chat?.activeTopic?.id ?? null) === id,
+            msgStatus,
+            blockStatus
+          }
+        }, topicId)
+        const req = findProductRequestAfter(seq)
+        const curSeq = getRequestSequence()
+        const textareaPresent = ((await page.locator('.inputbar textarea').count()) ?? 0) > 0
+        const sendDisabled = await page.locator('.inputbar .icon-ic_send').getAttribute('aria-disabled')
+        console.log(
+          `[E2E] T4 send ${i} wait failed: expected=${expected} current=${diag.count} activeMatch=${diag.activeMatch} loading=${diag.loading} msgStatus=${JSON.stringify(diag.msgStatus)} blockStatus=${JSON.stringify(diag.blockStatus)} reqArrived=${req !== null} seq=${seq} curSeq=${curSeq} textareaPresent=${textareaPresent} sendDisabled=${sendDisabled}`
+        )
+        throw waitErr
+      }
+      const reqAfter = findProductRequestAfter(seq)
+      console.log(`[E2E] T4 send ${i} settled: expected=${expected} reqArrived=${reqAfter !== null} seq=${seq}`)
       const userId = await page.evaluate((id: string) => {
         const s = (window as any).store?.getState()
         const ids = (s?.messages?.messageIdsByTopic?.[id] ?? []) as string[]
@@ -1200,10 +1760,11 @@ test.describe('conversation navigation redesign', () => {
     expect(collapsed!.w, 'collapsed original strip stays discreet').toBeLessThan(80)
     expect(collapsed!.h, 'three short original rows fit with no large void').toBeLessThan(200)
     expect(collapsed!.h).toBeLessThanOrEqual(collapsed!.viewportHeight * 0.6 + 1)
-    expect(
-      Math.abs(collapsed!.railCenterY - collapsed!.msgCenterY),
-      'original rail vertically centered within the chat viewport'
-    ).toBeLessThanOrEqual(60)
+    // Strict vertical centering: collapsed dot rail matches the reading
+    // area center (pure-CSS flex, no count-estimated top).
+    const shortCollapsed = await readOutlineCentering(page)
+    expect(shortCollapsed).not.toBeNull()
+    expectOutlineCentered(shortCollapsed!, 'T4 short collapsed')
 
     // Original hover: the collapsed strip intrinsically expands to the text
     // (text display block + opacity 1, width grows vs collapsed, never a fixed
@@ -1218,6 +1779,10 @@ test.describe('conversation navigation redesign', () => {
     })
     expect(expandedW).not.toBeNull()
     expect(expandedW!, 'original hover intrinsically expands past the collapsed strip').toBeGreaterThan(collapsedW)
+    // Expanded body (same intrinsic height, wider) stays centered too.
+    const shortExpanded = await readOutlineCentering(page)
+    expect(shortExpanded).not.toBeNull()
+    expectOutlineCentered(shortExpanded!, 'T4 short expanded')
     const firstItem = page.getByTestId(`conversation-nav-item-${sentUserIds[0]}`)
     await firstItem.focus()
     await expect

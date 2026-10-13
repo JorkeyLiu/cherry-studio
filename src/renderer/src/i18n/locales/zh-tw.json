@@ -1119,7 +1119,14 @@
       "user_attachment_file_more_other": "{{name}} +{{count}} 個附件",
       "user_attachment_image_one": "{{count}} 張圖片",
       "user_attachment_image_other": "{{count}} 張圖片",
-      "user_message_fallback": "引用訊息"
+      "user_attachment_type_audio": "音訊",
+      "user_attachment_type_code": "程式碼",
+      "user_attachment_type_document": "文件",
+      "user_attachment_type_image": "圖片",
+      "user_attachment_type_text": "文字",
+      "user_attachment_type_video": "影片",
+      "user_message_fallback": "引用訊息",
+      "user_message_link": "連結"
     },
     "resend": "重新傳送",
     "save": {
