@@ -759,6 +759,9 @@ importers:
       epub:
         specifier: 2.1.1
         version: 2.1.1
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
       eslint:
         specifier: ^9.22.0
         version: 9.39.2(jiti@2.6.1)

@@ -207,7 +207,8 @@ vi.mock('@renderer/hooks/useTopic', () => ({
   autoRenameTopic: vi.fn()
 }))
 
-vi.mock('@renderer/store/assistants', () => {
+vi.mock('@renderer/store/assistants', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
   const mockAssistantsSlice = {
     name: 'assistants',
     reducer: vi.fn((state = { entities: {}, ids: [] }) => state),
@@ -217,6 +218,7 @@ vi.mock('@renderer/store/assistants', () => {
   }
 
   return {
+    ...actual,
     default: mockAssistantsSlice.reducer,
     updateTopicUpdatedAt: vi.fn(() => ({ type: 'UPDATE_TOPIC_UPDATED_AT' })),
     assistantsSlice: mockAssistantsSlice

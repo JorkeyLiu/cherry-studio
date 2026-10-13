@@ -37,7 +37,7 @@ import {
 import { applyPendingImportProjection } from '../services/importProjection'
 import { runReduxStoreBoot } from '../services/importProjectionReadiness'
 import storeSyncService from '../services/StoreSyncService'
-import assistants from './assistants'
+import assistants, { assistantsPersistTransform } from './assistants'
 import backup from './backup'
 import clipboard from './clipboard'
 import { getClosureTopicIds } from './closureOwnership'
@@ -480,7 +480,7 @@ const persistedReducer = persistReducer<RootState>(
     key: 'cherry-studio',
     storage,
     version: 225,
-    transforms: [topicBranchPersistTransform],
+    transforms: [topicBranchPersistTransform, assistantsPersistTransform],
     blacklist: [
       'runtime',
       'messages',

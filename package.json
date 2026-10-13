@@ -328,6 +328,7 @@
     "emoji-picker-element": "^1.22.1",
     "emoji-picker-element-data": "1",
     "epub": "2.1.1",
+    "esbuild": "0.25.12",
     "eslint": "^9.22.0",
     "eslint-plugin-import-zod": "^1.2.0",
     "eslint-plugin-oxlint": "^1.15.0",
