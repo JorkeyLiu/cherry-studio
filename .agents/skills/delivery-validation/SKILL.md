@@ -160,6 +160,21 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
   unavoidable, use `pipefail` and preserve the producer's status correctly.
 - If the execution tool truncates output and saves it to a path, read/search
   that saved file instead of rerunning. Never rerun merely to re-see the tail.
+- **Foreground for finite gates; background only for persistent services:** run every finite validation command whose result is needed
+  before the next step in the foreground, with an adequate documented budget
+  and its trustworthy original exit code. Reserve background execution for
+  processes that must keep running to support later tasks (dev servers,
+  watchers, services) — never merely because a gate is long, produces much
+  output, or might exceed an execution timeout. Duration and execution mode
+  are independent; all existing gate non-duplication, runtime,
+  minimum-budget, retry, progress, output-capture, cleanup, and exit
+  semantics still apply. Genuinely independent work may run as parallel
+  foreground invocations — do not block independent work needlessly.
+- **Inadequate foreground budget is not a reason to background a gate:** use
+  the tool's supported continuation/polling for the same foreground
+  invocation without restarting. Never invent a background-lifecycle
+  workaround; if no continuation mechanism exists, report the concrete
+  limitation and the run as unverified — never as success.
 
 ## Interpreting outcomes
 
