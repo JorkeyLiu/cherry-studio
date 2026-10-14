@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} 個のファイルはサポートされていません",
       "generate_image": "画像を生成する",
       "generate_image_not_supported": "モデルは画像の生成をサポートしていません。",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "ナレッジベース",
       "new_topic": "新しいトピック {{Command}}",
       "paste_text_file_confirm": "入力欄に貼り付けますか？",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "下部に戻る",
       "first": "最初のメッセージです",
-      "last": "最後のメッセージです"
+      "last": "最後のメッセージです",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "再送信",
     "save": {

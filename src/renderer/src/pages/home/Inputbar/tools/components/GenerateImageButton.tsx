@@ -1,4 +1,4 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import { isGenerateImageModel } from '@renderer/config/models'
 import type { Assistant, Model } from '@renderer/types'
 import { Tooltip } from 'antd'
@@ -21,14 +21,14 @@ const GenerateImageButton: FC<Props> = ({ model, assistant, onEnableGenerateImag
 
   return (
     <Tooltip placement="top" title={ariaLabel} mouseLeaveDelay={0} arrow>
-      <ActionIconButton
+      <ComposerIconButton
         onClick={onEnableGenerateImage}
         active={assistant.enableGenerateImage}
         disabled={!isGenerateImageModel(model)}
         aria-label={ariaLabel}
         aria-pressed={assistant.enableGenerateImage}>
-        <Image size={18} />
-      </ActionIconButton>
+        <Image size={16} />
+      </ComposerIconButton>
     </Tooltip>
   )
 }

@@ -103,16 +103,9 @@ const Handle = styled.div<{ $isActive: boolean; $side: 'left' | 'right' }>`
   align-self: stretch;
   background: transparent;
   transition: background-color 0.15s ease;
-
-  &::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -4px;
-    right: -4px;
-    background: transparent;
-  }
+  /* Bounded hit region: pointer events are restricted to this handle's own
+     allocated 6px box. No expanded/overflowing pseudo-element may extend
+     hit-testing over the neighboring chat scrollbar (width 6, z-index 1). */
 
   &::after {
     content: '';

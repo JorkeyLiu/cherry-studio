@@ -50,16 +50,16 @@ import dayjs from 'dayjs'
 import { findIndex } from 'lodash'
 import {
   CheckSquare,
-  FileInput,
-  FileOutput,
-  FolderOpen,
-  ListChecks,
+  FolderOutput,
+  ListTodo,
   NotebookPen,
   PinIcon,
   PinOffIcon,
   Save,
   Sparkles,
   Square,
+  SquareArrowOutDownRight,
+  SquareArrowOutUpLeft,
   XIcon
 } from 'lucide-react'
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
@@ -68,6 +68,31 @@ import { useDispatch, useSelector } from 'react-redux'
 import styled from 'styled-components'
 
 import { deleteTopicFlow } from './topicDeletionFlow'
+
+// Local book-search icon: exact official lucide `book-search` nodes.
+// Installed lucide-react@0.525.0 has no BookSearch export (verified
+// `typeof BookSearch === 'undefined'`), so this local SVG carries the
+// requested shape without a dependency upgrade.
+function BookSearchIcon({ size = 24 }: { size?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="lucide lucide-book-search">
+      <path d="M11 22H5.5a1 1 0 0 1 0-5h4.501" />
+      <path d="m21 22-1.879-1.878" />
+      <path d="M3 19.5v-15A2.5 2.5 0 0 1 5.5 2H18a1 1 0 0 1 1 1v8" />
+      <circle cx="17" cy="18" r="3" />
+    </svg>
+  )
+}
 import { TopicManagePanel, useTopicManageMode } from './TopicManageMode'
 import { TopicTrashPanel } from './TopicTrashPanel'
 
@@ -104,6 +129,28 @@ export function resolveManualAutoRenameProjection(
   } as Topic
 }
 
+// Header + manage-mode topic filter: case-insensitive, space-separated
+// keywords (all must match). Shared by the ordinary list and multi-select so
+// a single header search filters both without a dual bottom search UI.
+export function filterTopicsBySearch<T extends { name: string }>(topics: T[], searchText: string): T[] {
+  if (!searchText.trim()) {
+    return topics
+  }
+  // Split by spaces and filter out empty strings
+  const keywords = searchText
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((k) => k.length > 0)
+  if (keywords.length === 0) {
+    return topics
+  }
+  // All keywords must match (AND logic)
+  return topics.filter((topic) => {
+    const lowerName = topic.name.toLowerCase()
+    return keywords.every((keyword) => lowerName.includes(keyword))
+  })
+}
+
 // LOCK-002: topics always render on the right; topic time is always shown and
 // pinned topics always sort/stay at the top.
 export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, setActiveTopic }) => {
@@ -127,9 +174,29 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   const [trashRefreshVersion, setTrashRefreshVersion] = useState(0)
   const listRef = useRef<DraggableVirtualListRef>(null)
 
-  // 管理模式状态
+  // 管理模式状态 (searchText is shared: header search filters both the
+  // ordinary list and multi-select; no separate bottom search state)
   const manageState = useTopicManageMode()
-  const { isManageMode, selectedIds, searchText, enterManageMode, exitManageMode, toggleSelectTopic } = manageState
+  const { isManageMode, selectedIds, searchText, setSearchText, enterManageMode, exitManageMode, toggleSelectTopic } =
+    manageState
+
+  // Header search: replaces New Topic + search button with a focused input.
+  // Live-filters on change (Enter not required); Escape/X closes + clears.
+  const [isHeaderSearchOpen, setIsHeaderSearchOpen] = useState(false)
+  const headerSearchInputRef = useRef<HTMLInputElement>(null)
+  const openHeaderSearch = useCallback(() => {
+    setIsHeaderSearchOpen(true)
+  }, [])
+  const closeHeaderSearch = useCallback(() => {
+    setIsHeaderSearchOpen(false)
+    setSearchText('')
+  }, [setSearchText])
+
+  useEffect(() => {
+    if (isHeaderSearchOpen) {
+      headerSearchInputRef.current?.focus()
+    }
+  }, [isHeaderSearchOpen])
 
   const { startEdit, isEditing, inputProps } = useInPlaceEdit({
     onSave: async (name: string) => {
@@ -505,7 +572,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       {
         label: t('chat.topics.export.title'),
         key: 'export',
-        icon: <FileOutput size={14} />,
+        icon: <SquareArrowOutUpLeft size={14} />,
         children: [
           exportMenuOptions.image && {
             label: t('chat.topics.export.image'),
@@ -587,7 +654,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       menus.push({
         label: t('chat.topics.move_to'),
         key: 'move',
-        icon: <FolderOpen size={14} />,
+        icon: <FolderOutput size={14} />,
         popupClassName: 'move-to-submenu',
         children: assistants
           .filter((a) => a.id !== assistant.id)
@@ -638,27 +705,14 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
   // LOCK-002: pinned topics always sort to the top.
   const sortedTopics = useMemo(() => sortTopicsPinnedFirst(assistant.topics), [assistant.topics])
 
-  // Filter topics based on search text (only in manage mode)
-  // Supports: case-insensitive, space-separated keywords (all must match)
+  // Filter topics based on header search text (ordinary list + manage mode).
+  // Supports: case-insensitive, space-separated keywords (all must match).
+  // Live-filtered via deferred value — Enter is not required.
   const deferredSearchText = useDeferredValue(searchText)
-  const filteredTopics = useMemo(() => {
-    if (!isManageMode || !deferredSearchText.trim()) {
-      return sortedTopics
-    }
-    // Split by spaces and filter out empty strings
-    const keywords = deferredSearchText
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((k) => k.length > 0)
-    if (keywords.length === 0) {
-      return sortedTopics
-    }
-    // All keywords must match (AND logic)
-    return sortedTopics.filter((topic) => {
-      const lowerName = topic.name.toLowerCase()
-      return keywords.every((keyword) => lowerName.includes(keyword))
-    })
-  }, [sortedTopics, deferredSearchText, isManageMode])
+  const filteredTopics = useMemo(
+    () => filterTopicsBySearch(sortedTopics, deferredSearchText),
+    [sortedTopics, deferredSearchText]
+  )
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
@@ -671,15 +725,70 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
           flex: '1 1 auto',
           minHeight: 0,
           height: 'auto',
-          padding: '8px 0 10px 10px',
-          paddingBottom: isManageMode ? 70 : 10
+          padding: '8px 0 10px 10px'
         }}
         itemContainerStyle={{ paddingBottom: '8px' }}
         header={
           <HeaderRow>
-            <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
-              {t('chat.add.topic.title')}
-            </AddButton>
+            {isHeaderSearchOpen ? (
+              <>
+                <HeaderSearchInputWrapper>
+                  <HeaderSearchInput
+                    ref={headerSearchInputRef}
+                    type="text"
+                    placeholder={t('chat.topics.search.placeholder')}
+                    aria-label={t('chat.topics.search.title')}
+                    data-testid="topic-search-input"
+                    value={searchText}
+                    onChange={(e) => setSearchText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault()
+                        closeHeaderSearch()
+                      }
+                    }}
+                  />
+                </HeaderSearchInputWrapper>
+                <Tooltip title={t('common.close')} mouseEnterDelay={0.5}>
+                  <HeaderIconButton
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('common.close')}
+                    data-testid="topic-search-close"
+                    onClick={closeHeaderSearch}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        closeHeaderSearch()
+                      }
+                    }}>
+                    <XIcon size={14} />
+                  </HeaderIconButton>
+                </Tooltip>
+              </>
+            ) : (
+              <>
+                <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
+                  {t('chat.add.topic.title')}
+                </AddButton>
+                <Tooltip title={t('chat.topics.search.title')} mouseEnterDelay={0.5}>
+                  <HeaderIconButton
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('chat.topics.search.title')}
+                    data-testid="topic-search-btn"
+                    onClick={openHeaderSearch}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        openHeaderSearch()
+                      }
+                    }}>
+                    <BookSearchIcon size={14} />
+                  </HeaderIconButton>
+                </Tooltip>
+              </>
+            )}
             <Tooltip title={t('chat.topics.import.action')} mouseEnterDelay={0.5}>
               <HeaderIconButton
                 role="button"
@@ -693,7 +802,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                     void onImportTopicData()
                   }
                 }}>
-                <FileInput size={14} />
+                <SquareArrowOutDownRight size={14} />
               </HeaderIconButton>
             </Tooltip>
             <Tooltip title={t('chat.topics.manage.title')} mouseEnterDelay={0.5}>
@@ -714,7 +823,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                   }
                 }}
                 className={isManageMode ? 'active' : ''}>
-                <ListChecks size={14} />
+                <ListTodo size={14} />
               </HeaderIconButton>
             </Tooltip>
           </HeaderRow>
@@ -856,29 +965,33 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         onTrashChanged={refreshTrashTopics}
       />
 
-      {/* 回收站面板 */}
-      <TopicTrashPanel
-        assistantId={assistant.id}
-        refreshVersion={trashRefreshVersion}
-        onRestore={handleRestoreTopic}
-        onPermanentDelete={async (topicId) => {
-          // Phase 5.2B: ordinary hard delete commits in SQLite first, then the
-          // cleanup result is consumed (LOCK-525).
-          await hardDeleteOrdinaryTopic(topicId)
-          refreshTrashTopics()
-        }}
-        onEmptyTrash={async () => {
-          try {
-            // Phase 5.2B: ordinary trash is emptied in ONE atomic Main SQLite
-            // transaction with one aggregate cleanup result (LOCK-531).
-            await emptyOrdinaryTrash(assistant.id)
-          } finally {
-            // Reconcile the panel with the persisted state even when a
-            // mutation failed part-way (LOCK-528).
+      {/* 回收站面板: hidden while management is active to prevent stacked
+          border/occlusion with the normal-flow management toolbar. Normal
+          recycle-bin behavior is unchanged outside management. */}
+      {!isManageMode && (
+        <TopicTrashPanel
+          assistantId={assistant.id}
+          refreshVersion={trashRefreshVersion}
+          onRestore={handleRestoreTopic}
+          onPermanentDelete={async (topicId) => {
+            // Phase 5.2B: ordinary hard delete commits in SQLite first, then the
+            // cleanup result is consumed (LOCK-525).
+            await hardDeleteOrdinaryTopic(topicId)
             refreshTrashTopics()
-          }
-        }}
-      />
+          }}
+          onEmptyTrash={async () => {
+            try {
+              // Phase 5.2B: ordinary trash is emptied in ONE atomic Main SQLite
+              // transaction with one aggregate cleanup result (LOCK-531).
+              await emptyOrdinaryTrash(assistant.id)
+            } finally {
+              // Reconcile the panel with the persisted state even when a
+              // mutation failed part-way (LOCK-528).
+              refreshTrashTopics()
+            }
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1020,6 +1133,8 @@ const MenuButton = styled.div`
   }
 `
 
+// Reason: AddButton is 36px tall while the previous 32px search controls
+// collapsed the header by 4px when search opened. Keep both modes at 36px.
 const HeaderRow = styled.div`
   display: flex;
   flex-direction: row;
@@ -1028,16 +1143,19 @@ const HeaderRow = styled.div`
   padding-right: 10px;
   margin-bottom: 8px;
   margin-top: 2px;
+  min-height: 36px;
+  box-sizing: border-box;
 `
 
 const HeaderIconButton = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  box-sizing: border-box;
   border-radius: var(--list-item-border-radius);
   cursor: pointer;
   color: var(--color-text-2);
@@ -1054,6 +1172,33 @@ const HeaderIconButton = styled.div`
     &:hover {
       background-color: var(--color-background-mute);
     }
+  }
+`
+
+const HeaderSearchInputWrapper = styled.div`
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  min-height: 36px;
+  box-sizing: border-box;
+`
+
+const HeaderSearchInput = styled.input`
+  height: 36px;
+  min-width: 0;
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 0 4px;
+  font-size: 13px;
+  line-height: 36px;
+  color: var(--color-text-1);
+  outline: none;
+  box-sizing: border-box;
+
+  &::placeholder {
+    color: var(--color-text-3);
   }
 `
 

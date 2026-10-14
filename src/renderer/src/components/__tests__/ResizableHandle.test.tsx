@@ -61,14 +61,21 @@ describe('ResizableHandle — sidebar separator and fixed 6px geometry', () => {
     expect(src).not.toMatch(/\$\{.*\$side.*right: -2px/)
   })
 
-  it('enlarges draggable hit target without layout reflow via absolute ::before', () => {
+  it('restricts pointer hit region to the allocated 6px box — no overflow pseudo-element', () => {
     const src = readHandleSource()
-    expect(src).toContain('&::before')
-    expect(src).toContain('position: absolute')
-    expect(src).toContain('left: -4px')
-    expect(src).toContain('right: -4px')
-    // ::before must not affect flex geometry — handle stays 6px
+    // No interactive overflow expansion may steal neighboring chat scrollbar clicks.
+    // The 6px handle (z-index 10) sits beside the 6px chat scrollbar (z-index 1),
+    // so any -4px/+4px (14px) ::before would overlay the scrollbar.
+    expect(src).not.toContain('left: -4px')
+    expect(src).not.toContain('right: -4px')
+    expect(src).not.toMatch(/&::before\s*\{[^}]*left:\s*-/)
+    expect(src).not.toMatch(/&::before\s*\{[^}]*right:\s*-/)
+    // No other negative-offset hit expansion on the handle either.
+    expect(src).not.toMatch(/margin-(left|right):\s*-/)
+    // Handle keeps its own 6px flex geometry without overflow helpers.
     expect(src).toContain('flex-shrink: 0')
+    expect(src).toContain('width: ${HANDLE_WIDTH}px')
+    expect(src).toContain('min-width: ${HANDLE_WIDTH}px')
   })
 
   it('renders with cursor col-resize and 6px width style', () => {

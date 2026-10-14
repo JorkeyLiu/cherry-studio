@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} tệp không được hỗ trợ",
       "generate_image": "Tạo hình ảnh",
       "generate_image_not_supported": "Mô hình không hỗ trợ tạo hình ảnh.",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Cơ sở tri thức",
       "new_topic": "Chủ đề mới {{Command}}",
       "paste_text_file_confirm": "Dán vào thanh nhập liệu?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Quay lại đầu trang",
       "first": "Đã ngay từ tin nhắn đầu tiên",
-      "last": "Đã ở tin nhắn cuối cùng"
+      "last": "Đã ở tin nhắn cuối cùng",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Gửi lại",
     "save": {

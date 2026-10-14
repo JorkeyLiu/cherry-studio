@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} files are not supported",
       "generate_image": "Generate image",
       "generate_image_not_supported": "The model does not support generating images.",
+      "input_settings": "Input Settings",
       "knowledge_base": "Knowledge Base",
       "new_topic": "New Topic {{Command}}",
       "paste_text_file_confirm": "Paste into input bar?",
@@ -1111,6 +1112,7 @@
       "conversation_list": "Conversation",
       "first": "Already at the first message",
       "last": "Already at the last message",
+      "settings": "Chat Settings",
       "user_attachment_count_one": "{{count}} attachment",
       "user_attachment_count_other": "{{count}} attachments",
       "user_attachment_fallback": "Attachment",
@@ -1400,7 +1402,7 @@
       },
       "search": {
         "placeholder": "Search topics...",
-        "title": "Search"
+        "title": "Search topics"
       },
       "title": "Topics",
       "trash": {

@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} fichiers non pris en charge",
       "generate_image": "Générer une image",
       "generate_image_not_supported": "Le modèle ne supporte pas la génération d'images",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Base de connaissances",
       "new_topic": "Nouveau sujet {{Command}}",
       "paste_text_file_confirm": "Coller dans la zone de saisie ?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Retour en bas",
       "first": "Déjà premier message",
-      "last": "Déjà dernier message"
+      "last": "Déjà dernier message",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Réenvoyer",
     "save": {

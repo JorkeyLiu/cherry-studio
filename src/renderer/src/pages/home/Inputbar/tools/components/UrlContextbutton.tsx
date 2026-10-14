@@ -1,4 +1,4 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import { useAssistant } from '@renderer/hooks/useAssistant'
 import { useTimer } from '@renderer/hooks/useTimer'
 import { Tooltip } from 'antd'
@@ -30,13 +30,13 @@ const UrlContextButton: FC<Props> = ({ assistantId }) => {
 
   return (
     <Tooltip placement="top" title={t('chat.input.url_context')} arrow>
-      <ActionIconButton
+      <ComposerIconButton
         onClick={handleToggle}
         active={assistant.enableUrlContext}
         aria-label={t('chat.input.url_context')}
         aria-pressed={assistant.enableUrlContext}>
-        <Link size={18} />
-      </ActionIconButton>
+        <Link size={16} />
+      </ComposerIconButton>
     </Tooltip>
   )
 }

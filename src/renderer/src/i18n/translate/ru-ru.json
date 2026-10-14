@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} файлов не поддерживаются",
       "generate_image": "Сгенерировать изображение",
       "generate_image_not_supported": "Модель не поддерживает генерацию изображений.",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "База знаний",
       "new_topic": "Новый топик {{Command}}",
       "paste_text_file_confirm": "Вставить в поле ввода?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Вернуться вниз",
       "first": "Уже первое сообщение",
-      "last": "Уже последнее сообщение"
+      "last": "Уже последнее сообщение",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Переотправить",
     "save": {

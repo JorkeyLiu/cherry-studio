@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} fișiere nu sunt acceptate",
       "generate_image": "Generează imagine",
       "generate_image_not_supported": "Modelul nu acceptă generarea de imagini.",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Bază de cunoștințe",
       "new_topic": "Subiect nou {{Command}}",
       "paste_text_file_confirm": "Lipești în bara de introducere?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Înapoi jos",
       "first": "Deja la primul mesaj",
-      "last": "Deja la ultimul mesaj"
+      "last": "Deja la ultimul mesaj",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Retrimite",
     "save": {

@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} αρχεία δεν υποστηρίζονται",
       "generate_image": "Δημιουργία εικόνας",
       "generate_image_not_supported": "Το μοντέλο δεν υποστηρίζει τη δημιουργία εικόνων",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Βάση γνώσεων",
       "new_topic": "Νέο θέμα {{Command}}",
       "paste_text_file_confirm": "Επικόλληση στο πεδίο εισαγωγής;",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Επιστροφή στο κάτω μέρος",
       "first": "Ήδη το πρώτο μήνυμα",
-      "last": "Ήδη το τελευταίο μήνυμα"
+      "last": "Ήδη το τελευταίο μήνυμα",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Ξαναστείλε",
     "save": {

@@ -1,4 +1,4 @@
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import { useShortcutDisplay } from '@renderer/hooks/useShortcuts'
 import { defineTool, registerTool, TopicType } from '@renderer/pages/home/Inputbar/types'
 import { Tooltip } from 'antd'
@@ -24,9 +24,9 @@ const newTopicTool = defineTool({
         title={t('chat.input.new_topic', { Command: newTopicShortcut })}
         mouseLeaveDelay={0}
         arrow>
-        <ActionIconButton onClick={actions.addNewTopic}>
-          <MessageSquareDiff size={19} />
-        </ActionIconButton>
+        <ComposerIconButton onClick={actions.addNewTopic}>
+          <MessageSquareDiff size={16} />
+        </ComposerIconButton>
       </Tooltip>
     )
   }

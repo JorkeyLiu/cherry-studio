@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} 個檔案不被支援",
       "generate_image": "產生圖片",
       "generate_image_not_supported": "模型不支援產生圖片",
+      "input_settings": "輸入設定",
       "knowledge_base": "知識庫",
       "new_topic": "新話題 {{Command}}",
       "paste_text_file_confirm": "貼到輸入框？",
@@ -1111,6 +1112,7 @@
       "conversation_list": "對話列表",
       "first": "已經是第一條訊息",
       "last": "已經是最後一條訊息",
+      "settings": "聊天設定",
       "user_attachment_count_one": "{{count}} 個附件",
       "user_attachment_count_other": "{{count}} 個附件",
       "user_attachment_fallback": "附件",
@@ -1400,7 +1402,7 @@
       },
       "search": {
         "placeholder": "搜尋話題...",
-        "title": "搜尋"
+        "title": "搜尋話題"
       },
       "title": "話題",
       "trash": {

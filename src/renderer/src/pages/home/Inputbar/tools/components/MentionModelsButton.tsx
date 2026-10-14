@@ -1,5 +1,5 @@
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import ModelTagsWithLabel from '@renderer/components/ModelTagsWithLabel'
 import { isEmbeddingModel, isRerankModel } from '@renderer/config/models'
 import { useProviders } from '@renderer/hooks/useProvider'
@@ -110,12 +110,12 @@ const MentionModelsButton: FC<Props> = ({ mentionedModels, setMentionedModels })
         mouseLeaveDelay={0}
         arrow
         open={open ? false : undefined}>
-        <ActionIconButton
+        <ComposerIconButton
           data-testid="mention-models-button"
           active={mentionedModels.length > 0}
           aria-label={t('assistants.presets.edit.model.select.title')}>
-          <AtSign size={18} />
-        </ActionIconButton>
+          <AtSign size={16} />
+        </ComposerIconButton>
       </Tooltip>
     </ToolPopover>
   )

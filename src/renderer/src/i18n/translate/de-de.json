@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} Dateien werden nicht unterstützt",
       "generate_image": "Bild generieren",
       "generate_image_not_supported": "Modell unterstützt keine Bildgenerierung",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Wissensdatenbank",
       "new_topic": "Neues Thema {{Command}}",
       "paste_text_file_confirm": "In Eingabefeld einfügen?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Zum Boden scrollen",
       "first": "Bereits die erste Nachricht",
-      "last": "Bereits die letzte Nachricht"
+      "last": "Bereits die letzte Nachricht",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Erneut senden",
     "save": {

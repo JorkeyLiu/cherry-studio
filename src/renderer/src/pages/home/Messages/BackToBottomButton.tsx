@@ -1,4 +1,4 @@
-import { VerticalAlignBottomOutlined } from '@ant-design/icons'
+import { ChevronDown } from 'lucide-react'
 import type { FC, RefObject } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -123,7 +123,7 @@ const BackToBottomButton: FC<BackToBottomButtonProps> = ({ onScrollToBottom, con
       aria-label={t('chat.navigation.bottom')}
       title={t('chat.navigation.bottom')}
       onClick={onScrollToBottom}>
-      <VerticalAlignBottomOutlined />
+      <ChevronDown size={16} />
     </BottomButton>
   )
 }

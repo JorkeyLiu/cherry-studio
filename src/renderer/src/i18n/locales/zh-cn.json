@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} 个文件不被支持",
       "generate_image": "生成图片",
       "generate_image_not_supported": "模型不支持生成图片",
+      "input_settings": "输入设置",
       "knowledge_base": "知识库",
       "new_topic": "新话题 {{Command}}",
       "paste_text_file_confirm": "粘贴到输入框？",
@@ -1111,6 +1112,7 @@
       "conversation_list": "对话列表",
       "first": "已经是第一条消息",
       "last": "已经是最后一条消息",
+      "settings": "聊天设置",
       "user_attachment_count_one": "{{count}} 个附件",
       "user_attachment_count_other": "{{count}} 个附件",
       "user_attachment_fallback": "附件",
@@ -1400,7 +1402,7 @@
       },
       "search": {
         "placeholder": "搜索话题...",
-        "title": "搜索"
+        "title": "搜索话题"
       },
       "title": "话题",
       "trash": {

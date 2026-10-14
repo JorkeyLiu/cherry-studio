@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} arquivos não suportados",
       "generate_image": "Gerar imagem",
       "generate_image_not_supported": "Modelo não suporta geração de imagem",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Base de conhecimento",
       "new_topic": "Novo tópico {{Command}}",
       "paste_text_file_confirm": "Colar na caixa de entrada?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Voltar ao fundo",
       "first": "Esta é a primeira mensagem",
-      "last": "Esta é a última mensagem"
+      "last": "Esta é a última mensagem",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Reenviar",
     "save": {

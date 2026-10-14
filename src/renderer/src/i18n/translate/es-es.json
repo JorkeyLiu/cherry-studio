@@ -1021,6 +1021,7 @@
       "file_not_supported_count": "{{count}} archivos no soportados",
       "generate_image": "Generar imagen",
       "generate_image_not_supported": "El modelo no soporta la generación de imágenes",
+      "input_settings": "[to be translated]:Input Settings",
       "knowledge_base": "Base de conocimientos",
       "new_topic": "Nuevo tema {{Command}}",
       "paste_text_file_confirm": "¿Pegar en el cuadro de entrada?",
@@ -1109,7 +1110,8 @@
     "navigation": {
       "bottom": "Volver abajo",
       "first": "Ya es el primer mensaje",
-      "last": "Ya es el último mensaje"
+      "last": "Ya es el último mensaje",
+      "settings": "[to be translated]:Chat Settings"
     },
     "resend": "Reenviar",
     "save": {

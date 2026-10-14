@@ -43,6 +43,11 @@ vi.mock('@renderer/components/Buttons', () => ({
     <button data-testid="kb-button" onClick={onClick} {...props}>
       {children}
     </button>
+  ),
+  ComposerIconButton: ({ children, onClick, ...props }: any) => (
+    <button data-testid="kb-button" onClick={onClick} {...props}>
+      {children}
+    </button>
   )
 }))
 

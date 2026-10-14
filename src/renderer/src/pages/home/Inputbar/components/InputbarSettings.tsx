@@ -1,3 +1,4 @@
+import ComposerIconButton from '@renderer/components/Buttons/ComposerIconButton'
 import EditableNumber from '@renderer/components/EditableNumber'
 import Selector from '@renderer/components/Selector'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -10,7 +11,7 @@ import {
   setRenderInputMessageAsMarkdown
 } from '@renderer/store/settings'
 import { getSendMessageShortcutLabel } from '@renderer/utils/input'
-import { Popover, Switch } from 'antd'
+import { Popover, Switch, Tooltip } from 'antd'
 import { Settings2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -92,9 +93,11 @@ const InputbarSettings: FC = () => {
       styles={{
         root: { width: 297 }
       }}>
-      <SettingsIconButton aria-label={t('settings.title')}>
-        <Settings2 size={15} />
-      </SettingsIconButton>
+      <Tooltip placement="top" title={t('chat.input.input_settings')} mouseLeaveDelay={0} arrow>
+        <ComposerIconButton aria-label={t('chat.input.input_settings')} data-testid="inputbar-settings-button">
+          <Settings2 size={16} />
+        </ComposerIconButton>
+      </Tooltip>
     </Popover>
   )
 }
@@ -107,26 +110,6 @@ const PopoverContent = styled.div`
 
   .ant-divider {
     margin: 8px 0;
-  }
-`
-
-const SettingsIconButton = styled.button`
-  width: 30px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--color-icon);
-  cursor: pointer;
-  padding: 0;
-  transition: all 0.3s ease;
-
-  &:hover {
-    background-color: var(--color-background-soft);
-    color: var(--color-text-1);
   }
 `
 

@@ -10,8 +10,8 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key })
 }))
 
-vi.mock('@ant-design/icons', () => ({
-  VerticalAlignBottomOutlined: () => <span data-testid="bottom-icon" />
+vi.mock('lucide-react', () => ({
+  ChevronDown: () => <span data-testid="bottom-icon" />
 }))
 
 import BackToBottomButton from '../BackToBottomButton'

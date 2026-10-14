@@ -24,9 +24,10 @@ const mocks = vi.hoisted(() => {
   return { dispatch, useSettings, t, defaultSettings }
 })
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: mocks.t })
-}))
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<any>()
+  return { ...actual, useTranslation: () => ({ t: mocks.t }) }
+})
 
 vi.mock('@renderer/store', () => ({
   useAppDispatch: () => mocks.dispatch
@@ -44,17 +45,26 @@ vi.mock('@renderer/pages/settings', () => ({
   )
 }))
 
-vi.mock('antd', () => ({
-  Popover: ({ children, content }: any) => (
-    <div data-testid="popover-trigger">
-      <div data-testid="popover-content">{content}</div>
-      {children}
-    </div>
-  ),
-  Switch: ({ checked, onChange }: any) => (
-    <button type="button" data-testid="switch" data-checked={String(checked)} onClick={() => onChange?.(!checked)} />
-  )
-}))
+vi.mock('antd', async (importOriginal) => {
+  const actual = await importOriginal<any>()
+  return {
+    ...actual,
+    Popover: ({ children, content }: any) => (
+      <div data-testid="popover-trigger">
+        <div data-testid="popover-content">{content}</div>
+        {children}
+      </div>
+    ),
+    Switch: ({ checked, onChange }: any) => (
+      <button type="button" data-testid="switch" data-checked={String(checked)} onClick={() => onChange?.(!checked)} />
+    ),
+    Tooltip: ({ children, title }: any) => (
+      <div data-testid="settings-tooltip" data-title={typeof title === 'string' ? title : ''}>
+        {children}
+      </div>
+    )
+  }
+})
 
 vi.mock('lucide-react', () => ({
   Settings2: () => <span data-testid="settings-icon" />
@@ -114,5 +124,20 @@ describe('InputbarSettings', () => {
 
     fireEvent.click(screen.getAllByTestId('switch')[1])
     expect(mocks.dispatch).toHaveBeenCalledWith({ type: 'settings/setRenderInputMessageAsMarkdown', payload: true })
+  })
+
+  it('uses the shared composer button contract (28px geometry, same hover as other tools)', () => {
+    render(<InputbarSettings />)
+
+    const trigger = screen.getByTestId('inputbar-settings-button')
+    expect(trigger.tagName).toBe('BUTTON')
+    expect(trigger).toHaveAttribute('data-tone', 'default')
+    expect(trigger).toHaveAttribute('aria-label', 'chat.input.input_settings')
+  })
+
+  it('shows the input-settings tooltip on hover like the other tool buttons', () => {
+    render(<InputbarSettings />)
+
+    expect(screen.getByTestId('settings-tooltip')).toHaveAttribute('data-title', 'chat.input.input_settings')
   })
 })

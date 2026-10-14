@@ -1,6 +1,6 @@
 import { HolderOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
-import { ActionIconButton } from '@renderer/components/Buttons'
+import { ComposerIconButton } from '@renderer/components/Buttons'
 import TranslateButton from '@renderer/components/TranslateButton'
 import { useRuntime } from '@renderer/hooks/useRuntime'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -338,9 +338,11 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
     if (isLoading) {
       extras.push(
         <Tooltip key="pause" placement="top" title={t('chat.input.pause')} mouseLeaveDelay={0} arrow>
-          <ActionIconButton onClick={onPause} style={{ marginRight: -2 }}>
-            <CirclePause size={20} color="var(--color-error)" />
-          </ActionIconButton>
+          <ComposerIconButton onClick={onPause} style={{ marginRight: -2 }}>
+            {/* Inline style (not the `color` prop): the wrapper pins glyph color via stylesheet,
+                which beats lucide presentation attributes but loses to inline style. */}
+            <CirclePause size={16} style={{ color: 'var(--color-error)' }} />
+          </ComposerIconButton>
         </Tooltip>
       )
     }
