@@ -1306,6 +1306,11 @@
         "image": "匯出為圖片",
         "image_saved": "圖片儲存成功",
         "joplin": "匯出到 Joplin",
+        "json": {
+          "error": "匯出話題資料失敗",
+          "label": "匯出為 JSON",
+          "success": "話題資料已匯出"
+        },
         "md": {
           "label": "匯出為 Markdown",
           "reason": "匯出為 Markdown (包含思考)"
@@ -1350,6 +1355,12 @@
         "wait_for_title_naming": "正在產生標題...",
         "word": "匯出為 Word",
         "yuque": "匯出到語雀"
+      },
+      "import": {
+        "action": "從 JSON 匯入話題",
+        "error": "匯入話題檔案失敗",
+        "invalid": "無效的話題資料檔案",
+        "success": "話題已匯入"
       },
       "list": "話題列表",
       "manage": {

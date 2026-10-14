@@ -40,11 +40,20 @@ import type {
   FileReferenceData,
   MessageBlockData,
   MessageData,
+  TopicBranchData,
   TopicData,
   TopicSegmentData,
   TopicSegmentMessageData
 } from '../domain/types'
-import { fileReferences, messageBlocks, messages, topics, topicSegmentMessages, topicSegments } from '../schema'
+import {
+  fileReferences,
+  messageBlocks,
+  messages,
+  topicBranches,
+  topics,
+  topicSegmentMessages,
+  topicSegments
+} from '../schema'
 import { toInsertValues } from './helpers'
 
 /**
@@ -114,6 +123,26 @@ export class ChatImportWriter {
       const values = toInsertValues(item)
       this.tx
         .insert(messageBlocks)
+        .values(values as any)
+        .run()
+    }
+    return items.length
+  }
+
+  /**
+   * Insert topic-internal branch rows exactly as supplied.
+   *
+   * No ancestry validation is performed here — the caller validates parent
+   * links, cycles, and anchor ownership before the write transaction.
+   * Missing parent branches surface as FK violations on the self reference.
+   *
+   * @returns Number of rows inserted.
+   */
+  insertBranches(items: TopicBranchData[]): number {
+    for (const item of items) {
+      const values = toInsertValues(item)
+      this.tx
+        .insert(topicBranches)
         .values(values as any)
         .run()
     }

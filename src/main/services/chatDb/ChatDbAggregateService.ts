@@ -27,6 +27,8 @@ import type {
   DeleteMessagesWithDependentsResponse,
   DeleteMessagesWithDependentsRestoreGroup,
   EmptyTrashTopicsResponse,
+  ExportTopicDataRequest,
+  ExportTopicDataResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -44,6 +46,8 @@ import type {
   FileCleanupResult,
   FileReferenceWire,
   HardDeleteTopicResponse,
+  ImportTopicDataRequest,
+  ImportTopicDataResponse,
   InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
   JsonObject,
@@ -88,8 +92,10 @@ import type { FileReferenceData, MessageBlockData, MessageData, TopicBranchData,
 import { ChatDbConflictError, ChatDbNotFoundError, ChatDbValidationError, wrapResult } from './errors'
 import type { ChatDbRepositories } from './repository/factory'
 import { createRepositories } from './repository/factory'
+import { createImportWriter } from './repository/ImportWriter'
 import { SearchRepository } from './repository/SearchRepository'
 import * as schema from './schema'
+import { buildTopicDataExport, planTopicDataImport, validateTopicDataImport } from './topicDataExchange'
 import { computeTrashRetentionDecision, parseStrictCanonicalIsoMs } from './trashRetention'
 import {
   blocksToWire,
@@ -2104,6 +2110,209 @@ export class ChatDbAggregateService {
         }
       })
     }, `fetchWholeTopicSnapshot(${request.topicId})`)
+  }
+
+  /**
+   * Standalone JSON export READ — snapshot ONE ENTIRE logical topic.
+   *
+   * One authoritative SQLite transaction:
+   * - Validates the topic exists; missing topic → NOT_FOUND.
+   * - Reads ALL owned rows across ALL branches (main + every nested/sibling
+   *   branch via listAllByTopic — never one effective route, never the
+   *   renderer loaded projection), with complete block relations, the full
+   *   branch catalog, segments plus ordered memberships, and file-reference
+   *   index rows.
+   * - Builds the versioned payload via the shared exchange serializers, so
+   *   wire values never contradict stored rows. Identity/scope columns,
+   *   attachment payloads, the file catalog, and credentials are excluded.
+   * - Empty topic (exists, no messages) → valid payload with empty arrays.
+   * - Pure read: never creates/mutates rows, never logs content.
+   */
+  exportTopicData(request: ExportTopicDataRequest): ChatDbResult<ExportTopicDataResponse> {
+    return wrapResult(() => {
+      if (!request || typeof request.topicId !== 'string' || request.topicId.length === 0) {
+        throw new ChatDbValidationError('topicId must be a non-empty string')
+      }
+      return this.db.transaction((tx) => {
+        const repos = createRepositories(tx)
+        const topic = repos.topics.getById(request.topicId)
+        if (!topic.found) {
+          throw new ChatDbNotFoundError(`Topic ${request.topicId} does not exist`)
+        }
+        const messages = repos.messages.listAllByTopic(request.topicId)
+        const messageIds = messages.map((m) => m.id)
+        const blockDataMap = repos.blocks.listByMessages(messageIds)
+        const branches = repos.branches.listByTopic(request.topicId)
+        const segments = repos.segments.listByTopic(request.topicId).map((segment) => ({
+          segment,
+          messageIds: repos.segments.getMessageIds(segment.id)
+        }))
+        const fileReferences = repos.fileRefs.listByMessages(messageIds)
+        return {
+          payload: buildTopicDataExport({
+            topic: topic.data,
+            messages,
+            blocksByMessage: blockDataMap,
+            branches,
+            segments,
+            fileReferences,
+            exportedAt: new Date().toISOString()
+          })
+        }
+      })
+    }, `exportTopicData(${request?.topicId})`)
+  }
+
+  /**
+   * Standalone JSON import WRITE — create a new topic from an untrusted
+   * payload under the target assistant.
+   *
+   * - Deep-validates the payload (format marker, schema version, unique
+   *   IDs, referential links, branch parent cycles, anchor owner
+   *   relationships) BEFORE any write; unsupported versions and every
+   *   structural defect fail with zero rows written.
+   * - One atomic transaction inserts the new topic (rebound to the target
+   *   assistant), fresh-ID messages (assistant rebound, askId remapped),
+   *   blocks, branches (parents/anchors remapped), segments plus ordered
+   *   memberships, and file references (attachment identities preserved,
+   *   catalog untouched). Dangling branch anchors preserve missing-anchor
+   *   state without repair.
+   * - No dedup/merge/overwrite: every call mints a new topic id, so
+   *   repeated imports intentionally duplicate.
+   * - Sync intent mirrors the cross-topic clone path for main-route rows
+   *   (branch-owned rows stay local-only, per BRANCH-10).
+   */
+  importTopicData(request: ImportTopicDataRequest): ChatDbResult<ImportTopicDataResponse> {
+    return wrapResult(() => {
+      if (!request || typeof request.assistantId !== 'string' || request.assistantId.length === 0) {
+        throw new ChatDbValidationError('assistantId must be a non-empty string')
+      }
+      const validated = validateTopicDataImport(request.payload)
+      const plan = planTopicDataImport(validated, request.assistantId, new Date().toISOString())
+      const ctx = this.syncCtxForTopic('importTopicData', plan.topic.id)
+      let syncNotify = false
+      const unsupportedBlockIds: string[] = []
+      let result: ImportTopicDataResponse
+      try {
+        result = this.db.transaction((tx) => {
+          const repos = createRepositories(tx)
+          const stx = tx as unknown as SyncTxExecutor
+          const writer = createImportWriter(tx as BetterSQLite3Database<typeof schema>)
+
+          writer.insertTopics([plan.topic])
+          writer.insertBranches(plan.branches)
+          writer.insertMessages(plan.messages)
+          writer.insertBlocks(plan.blocks)
+          writer.insertSegments(plan.segments)
+          for (const membership of plan.memberships) {
+            writer.insertSegmentMembership(membership.segmentId, membership.messageIds)
+          }
+          writer.insertFileReferences(plan.fileReferences)
+
+          // Transaction-bound sync intent (same atomic boundary as the
+          // cross-topic clone): fresh main-route messages/blocks enqueue
+          // full-state upserts with true-create-only membership;
+          // branch-owned rows emit nothing (local-only); transient /
+          // unsupported rows emit nothing so frames invalidate truthfully.
+          if (ctx) {
+            let tsOffset = 0
+            const nextTs = (): number => ctx.ts + tsOffset++
+            const created = repos.topics.getById(plan.topic.id)
+            if (!created.found) throw new Error(`importTopicData topic ${plan.topic.id} missing after insert`)
+            syncService.enqueueUpsertInTx(
+              stx,
+              'topic',
+              plan.topic.id,
+              this.syncTopicPayload(created.data),
+              Math.max(0, ctx.ts - 2),
+              ctx.deviceId
+            )
+            syncNotify = true
+            let hasNewInclusion = false
+            for (const m of plan.messages) {
+              if (m.branchId !== null) continue
+              const postRow = repos.messages.getById(m.id)
+              if (!postRow.found) throw new Error(`importTopicData message ${m.id} missing in transaction`)
+              if (!isStableMessageStatus(postRow.data.status)) continue
+              hasNewInclusion = true
+              if (!this.shouldCaptureMessageCreate(postRow.data)) continue
+              const opTs = nextTs()
+              this.ensureTopicClosureInTx(stx, plan.topic.id, opTs, ctx.deviceId)
+              const full = this.syncMessagePayloadFull(postRow.data)
+              delete full.sortOrder
+              const opId = syncService.enqueueUpsertInTx(stx, 'message', m.id, full, opTs, ctx.deviceId)
+              syncService.setMembershipClockInTx(stx, 'message', m.id, postRow.data.topicId, opTs, opId)
+              syncNotify = true
+            }
+            for (const blk of plan.blocks) {
+              const postBlk = repos.blocks.getById(blk.id)
+              if (!postBlk.found) throw new Error(`importTopicData block ${blk.id} missing in transaction`)
+              const parentMsg = repos.messages.getById(postBlk.data.messageId)
+              if (!parentMsg.found || !isStableMessageStatus(parentMsg.data.status)) continue
+              if ((parentMsg.data.branchId ?? null) !== null) continue
+              if (!isStableBlockStatus(postBlk.data.status)) continue
+              if (this.isUnsupportedBlock(postBlk.data)) {
+                unsupportedBlockIds.push(blk.id)
+                continue
+              }
+              const opTs = nextTs()
+              this.ensureBlockParentClosureInTx(stx, blk.id, opTs, ctx.deviceId)
+              const full = this.syncBlockPayloadFull(postBlk.data)
+              delete full.sortOrder
+              const opId = syncService.enqueueUpsertInTx(stx, 'message_block', blk.id, full, opTs, ctx.deviceId)
+              syncService.setMembershipClockInTx(stx, 'message_block', blk.id, postBlk.data.messageId, opTs, opId)
+              syncNotify = true
+            }
+            if (hasNewInclusion) {
+              if (
+                syncService.tryRefreshTopicMessageFrameAndEnqueueInTx(stx, plan.topic.id, ctx.deviceId) === 'refreshed'
+              ) {
+                syncNotify = true
+              }
+            }
+            for (const m of plan.messages) {
+              if (m.branchId !== null) continue
+              const postMsg = repos.messages.getById(m.id)
+              if (!postMsg.found) continue
+              if (!isStableMessageStatus(postMsg.data.status)) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', m.id)
+                continue
+              }
+              if (syncService.tryRefreshMessageBlockFrameAndEnqueueInTx(stx, m.id, ctx.deviceId) === 'refreshed') {
+                syncNotify = true
+              }
+            }
+          } else {
+            // Capture disabled: preserve existing truthful invalidation, no ops.
+            syncService.invalidateParentFrameInTx(stx, 'topicMessage', plan.topic.id)
+            {
+              const mids = new Set<string>()
+              for (const blk of plan.blocks) mids.add(blk.messageId)
+              for (const mid of mids) {
+                syncService.invalidateParentFrameInTx(stx, 'messageBlock', mid)
+              }
+            }
+          }
+
+          const created = repos.topics.getById(plan.topic.id)
+          if (!created.found) throw new Error(`importTopicData topic ${plan.topic.id} missing in transaction`)
+          return {
+            topic: topicToWireFull(created.data) as unknown as TopicWire,
+            messageCount: plan.messages.length,
+            blockCount: plan.blocks.length,
+            branchCount: plan.branches.length,
+            segmentCount: plan.segments.length,
+            fileReferenceCount: plan.fileReferences.length
+          }
+        })
+      } catch (e) {
+        this.recordSyncTxFailure('importTopicData', ctx, e)
+        throw e
+      }
+      if (syncNotify) syncService.notifyEnqueued()
+      this.recordUnsupportedBlocksAfterCommit('importTopicData', unsupportedBlockIds)
+      return result
+    }, `importTopicData(assistant=${request?.assistantId})`)
   }
 
   /**

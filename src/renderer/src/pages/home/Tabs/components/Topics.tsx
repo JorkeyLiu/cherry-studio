@@ -24,6 +24,7 @@ import {
   restoreOrdinaryTopic
 } from '@renderer/services/db/topicTrashLifecycle'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
+import { exportTopicDataToFile, importTopicDataFromFile } from '@renderer/services/topicDataJson'
 import type { RootState } from '@renderer/store'
 import store from '@renderer/store'
 import { updateTopic as updateTopicAction } from '@renderer/store/assistants'
@@ -49,6 +50,8 @@ import dayjs from 'dayjs'
 import { findIndex } from 'lodash'
 import {
   CheckSquare,
+  FileInput,
+  FileOutput,
   FolderOpen,
   ListChecks,
   NotebookPen,
@@ -57,7 +60,6 @@ import {
   Save,
   Sparkles,
   Square,
-  UploadIcon,
   XIcon
 } from 'lucide-react'
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
@@ -332,6 +334,21 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
     [setActiveTopic]
   )
 
+  // Standalone topic JSON import: Main creates the new topic under the
+  // current assistant first; only the returned wire is projected to Redux
+  // and selected. Cancellation returns null silently (no toast).
+  const onImportTopicData = useCallback(async () => {
+    try {
+      const imported = await importTopicDataFromFile(assistant.id)
+      if (imported) {
+        addTopic(imported)
+        setActiveTopic(imported)
+      }
+    } catch (error) {
+      logger.error('Failed to import topic data', error as Error)
+    }
+  }, [assistant.id, addTopic, setActiveTopic, logger])
+
   const exportMenuOptions = useSelector((state: RootState) => state.settings.exportMenuOptions)
 
   const [_targetTopic, setTargetTopic] = useState<Topic | null>(null)
@@ -488,7 +505,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
       {
         label: t('chat.topics.export.title'),
         key: 'export',
-        icon: <UploadIcon size={14} />,
+        icon: <FileOutput size={14} />,
         children: [
           exportMenuOptions.image && {
             label: t('chat.topics.export.image'),
@@ -550,6 +567,16 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
             onClick: async () => {
               const markdown = await topicToMarkdown(topic)
               void exportMarkdownToSiyuan(topic.name, markdown)
+            }
+          },
+          // Standalone topic JSON data (whole logical topic incl. all
+          // branches). Always available — no ExportMenuSettings toggle.
+          // No icon by request: this item renders as bare text.
+          {
+            label: t('chat.topics.export.json.label'),
+            key: 'json',
+            onClick: () => {
+              void exportTopicDataToFile(topic)
             }
           }
         ].filter(Boolean) as ItemType<MenuItemType>[]
@@ -653,9 +680,39 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
             <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
               {t('chat.add.topic.title')}
             </AddButton>
+            <Tooltip title={t('chat.topics.import.action')} mouseEnterDelay={0.5}>
+              <HeaderIconButton
+                role="button"
+                tabIndex={0}
+                aria-label={t('chat.topics.import.action')}
+                data-testid="topic-import-btn"
+                onClick={() => void onImportTopicData()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    void onImportTopicData()
+                  }
+                }}>
+                <FileInput size={14} />
+              </HeaderIconButton>
+            </Tooltip>
             <Tooltip title={t('chat.topics.manage.title')} mouseEnterDelay={0.5}>
               <HeaderIconButton
+                role="button"
+                tabIndex={0}
+                aria-label={t('chat.topics.manage.title')}
+                data-testid="topic-manage-btn"
                 onClick={isManageMode ? exitManageMode : enterManageMode}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    if (isManageMode) {
+                      exitManageMode()
+                    } else {
+                      enterManageMode()
+                    }
+                  }
+                }}
                 className={isManageMode ? 'active' : ''}>
                 <ListChecks size={14} />
               </HeaderIconButton>

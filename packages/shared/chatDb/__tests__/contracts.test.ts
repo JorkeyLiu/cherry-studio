@@ -90,7 +90,10 @@ describe('chatDbContracts', () => {
     'chatdb:fetch-clipboard-groups',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
-    'chatdb:fetch-topic-activity'
+    'chatdb:fetch-topic-activity',
+    // Standalone topic JSON data exchange (whole-logical-topic export/import)
+    'chatdb:export-topic-data',
+    'chatdb:import-topic-data'
   ]
 
   it('has entries for all expected channels', () => {
@@ -3825,6 +3828,136 @@ describe('fetch-whole-topic-snapshot contract (one-shot exports/knowledge)', () 
   })
 })
 
+describe('topic-data JSON exchange contracts (whole-logical-topic export/import)', () => {
+  const emptyPayload = {
+    format: 'cherry-chat-topic-data',
+    version: 1,
+    exportedAt: '2026-10-13T00:00:00.000Z',
+    topic: { name: 'T' },
+    messages: [],
+    blocks: [],
+    branches: [],
+    segments: [],
+    fileReferences: []
+  }
+
+  it('export-topic-data: accepts minimal valid request', () => {
+    expect(() => validateChatDbRequest('chatdb:export-topic-data', { topicId: 't1' })).not.toThrow()
+  })
+
+  it('export-topic-data: rejects missing/empty topicId and unknown keys', () => {
+    expect(() => validateChatDbRequest('chatdb:export-topic-data', {} as any)).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:export-topic-data', { topicId: '' })).toThrow(ValidationError)
+    expect(() => validateChatDbRequest('chatdb:export-topic-data', { topicId: 't1', extra: 1 } as any)).toThrow(
+      ValidationError
+    )
+  })
+
+  it('export-topic-data: accepts a valid payload result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:export-topic-data', { ok: true, value: { payload: emptyPayload } })
+    ).not.toThrow()
+  })
+
+  it('export-topic-data: rejects wrong format/version and unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:export-topic-data', {
+        ok: true,
+        value: { payload: { ...emptyPayload, format: 'other' } }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:export-topic-data', {
+        ok: true,
+        value: { payload: { ...emptyPayload, version: 2 } }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:export-topic-data', {
+        ok: true,
+        value: { payload: { ...emptyPayload, extra: 1 } }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:export-topic-data', { ok: true, value: { payload: emptyPayload, extra: 1 } })
+    ).toThrow(ValidationError)
+  })
+
+  it('import-topic-data: accepts minimal valid request', () => {
+    expect(() =>
+      validateChatDbRequest('chatdb:import-topic-data', { payload: emptyPayload, assistantId: 'a1' })
+    ).not.toThrow()
+  })
+
+  it('import-topic-data: rejects missing assistantId and unknown keys', () => {
+    expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload: emptyPayload } as any)).toThrow(
+      ValidationError
+    )
+    expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload: emptyPayload, assistantId: '' })).toThrow(
+      ValidationError
+    )
+    expect(() =>
+      validateChatDbRequest('chatdb:import-topic-data', { payload: emptyPayload, assistantId: 'a1', extra: 1 } as any)
+    ).toThrow(ValidationError)
+  })
+
+  it('import-topic-data: accepts a valid counts result', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:import-topic-data', {
+        ok: true,
+        value: {
+          topic: { id: 't-new' },
+          messageCount: 2,
+          blockCount: 2,
+          branchCount: 1,
+          segmentCount: 0,
+          fileReferenceCount: 0
+        }
+      })
+    ).not.toThrow()
+  })
+
+  it('import-topic-data: rejects negative counts and unknown keys', () => {
+    expect(() =>
+      validateChatDbResult('chatdb:import-topic-data', {
+        ok: true,
+        value: {
+          topic: { id: 't-new' },
+          messageCount: -1,
+          blockCount: 0,
+          branchCount: 0,
+          segmentCount: 0,
+          fileReferenceCount: 0
+        }
+      })
+    ).toThrow(ValidationError)
+    expect(() =>
+      validateChatDbResult('chatdb:import-topic-data', {
+        ok: true,
+        value: {
+          topic: { id: 't-new' },
+          messageCount: 0,
+          blockCount: 0,
+          branchCount: 0,
+          segmentCount: 0,
+          fileReferenceCount: 0,
+          extra: 1
+        } as any
+      })
+    ).toThrow(ValidationError)
+  })
+
+  it('topic-data: large block content uses the block profile (not the generic 1 MiB cap)', () => {
+    const largeContent = 'x'.repeat(1_048_576 + 16)
+    const payload = {
+      ...emptyPayload,
+      blocks: [{ id: 'b1', messageId: 'm1', content: largeContent, sortOrder: 0 }]
+    }
+    expect(() => validateChatDbResult('chatdb:export-topic-data', { ok: true, value: { payload } })).not.toThrow()
+    expect(() => validateChatDbRequest('chatdb:import-topic-data', { payload, assistantId: 'a1' })).not.toThrow()
+  })
+})
+
 describe('fetch-clipboard-groups contract (group-scoped copy/cut)', () => {
   it('fetch-clipboard-groups: accepts minimal valid request', () => {
     expect(() =>
@@ -4010,7 +4143,10 @@ describe('coverage consistency', () => {
     'chatdb:fetch-clipboard-groups',
     // Bounded naming/activity authority reads (naming + rate-limit; never whole-topic)
     'chatdb:fetch-topic-naming-context',
-    'chatdb:fetch-topic-activity'
+    'chatdb:fetch-topic-activity',
+    // Standalone topic JSON data exchange (whole-logical-topic export/import)
+    'chatdb:export-topic-data',
+    'chatdb:import-topic-data'
   ] as const
 
   it('every contract has validateResult (cannot silently omit result validation)', () => {

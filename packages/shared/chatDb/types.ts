@@ -795,6 +795,161 @@ export interface FetchTopicActivityResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Standalone topic JSON data exchange (whole-logical-topic export/import)
+// ---------------------------------------------------------------------------
+
+/**
+ * Standalone topic JSON export payload — ONE ENTIRE logical topic including
+ * the main route plus ALL nested/sibling branches, messages/blocks,
+ * segments/memberships, and file-reference index data.
+ *
+ * Deliberately excluded: attachment payloads (file bytes stay in the local
+ * file catalog and are never copied), Dexie file-catalog rows, and
+ * assistant/settings/provider credentials (topic/message assistant bindings
+ * are stripped; the importer rebinds them to the target assistant).
+ *
+ * IDs below are source-stable references used only to preserve relationships
+ * inside this payload (askId, anchorMessageId, branch parents, segment
+ * membership, block parents). The importer allocates fresh IDs for the new
+ * topic/messages/blocks/branches/segments/file references and remaps every
+ * internal reference, so repeated imports stay fully disjoint.
+ *
+ * Entities carry their known fields plus opaque overflow keys (spread from
+ * the stored `extra` JSON), preserved verbatim through the exchange.
+ */
+export interface TopicDataExportPayload extends JsonObject {
+  /** Format marker — always 'cherry-chat-topic-data'. Never renamed. */
+  format: 'cherry-chat-topic-data'
+  /** Schema version — currently 1. Unsupported versions fail before writes. */
+  version: 1
+  /** Export timestamp (ISO 8601). Informational only. */
+  exportedAt: string
+  /** Source topic metadata (identity/scope stripped; rebound on import). */
+  topic: TopicDataExportTopic
+  /** ALL owned messages across main + every branch (authority order). */
+  messages: TopicDataExportMessage[]
+  /** Blocks owned by the exported messages (authority order). */
+  blocks: TopicDataExportBlock[]
+  /** ALL branch nodes of the logical topic. */
+  branches: TopicDataExportBranch[]
+  /** Segments with ordered membership. */
+  segments: TopicDataExportSegment[]
+  /** File-reference index rows (identities/metadata only, no payloads). */
+  fileReferences: TopicDataExportFileReference[]
+}
+
+/** Source topic metadata in a topic-data payload (no identity, no scope). */
+export interface TopicDataExportTopic extends JsonObject {
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/**
+ * Source message in a topic-data payload.
+ * `id`/`branchId`/`askId` are source-stable references for remapping.
+ */
+export interface TopicDataExportMessage extends JsonObject {
+  id: string
+  /** Owner route: null = main route, otherwise the source branch id. */
+  branchId: string | null
+  role: string | null
+  content: string | null
+  status: string | null
+  /** Source-stable reference to a message id (remapped) or an opaque key (kept). */
+  askId: string | null
+  /** Scalar model name or a structured model object (overflow round-trip). */
+  model: JsonValue
+  modelId: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+}
+
+/** Source block in a topic-data payload (`messageId` is remapped on import). */
+export interface TopicDataExportBlock extends JsonObject {
+  id: string
+  messageId: string
+  type: string | null
+  /** Scalar content, or structured content (e.g. tool results) as an object. */
+  content: JsonValue
+  status: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+}
+
+/** Source branch node in a topic-data payload (ids remapped on import). */
+export interface TopicDataExportBranch extends JsonObject {
+  id: string
+  /** Null = forked from the main route, otherwise the source parent id. */
+  parentBranchId: string | null
+  /** Source-stable anchor reference; a dangling anchor preserves missing-anchor state. */
+  anchorMessageId: string
+  name: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** Source segment in a topic-data payload (`messageIds` remapped on import). */
+export interface TopicDataExportSegment extends JsonObject {
+  id: string
+  name: string | null
+  messageIds: string[]
+  createdAt: string | null
+  updatedAt: string | null
+  sortOrder: number
+}
+
+/**
+ * Source file reference in a topic-data payload.
+ * `blockId` is remapped on import; `fileId` is preserved verbatim as the
+ * attachment identity (the file catalog itself is never copied).
+ */
+export interface TopicDataExportFileReference extends JsonObject {
+  id: string
+  blockId: string
+  fileId: string
+  fileName: string | null
+  filePath: string | null
+  fileType: string | null
+  count: number | null
+}
+
+/** @see IpcChannel.ChatDb_ExportTopicData — snapshot ONE ENTIRE topic for standalone JSON export. */
+export interface ExportTopicDataRequest {
+  topicId: string
+}
+
+/** @see IpcChannel.ChatDb_ExportTopicData */
+export interface ExportTopicDataResponse {
+  payload: TopicDataExportPayload
+}
+
+/**
+ * @see IpcChannel.ChatDb_ImportTopicData — create a new topic from a
+ * standalone JSON payload under the target assistant. Always allocates fresh
+ * IDs (no dedup/merge/overwrite); repeated imports intentionally duplicate.
+ */
+export interface ImportTopicDataRequest {
+  /** Untrusted standalone payload (deep-validated in Main before any write). */
+  payload: TopicDataExportPayload
+  /** Target assistant that will own the new topic (rebinds topic/messages). */
+  assistantId: string
+}
+
+/** @see IpcChannel.ChatDb_ImportTopicData */
+export interface ImportTopicDataResponse {
+  /** The newly created topic wire for the renderer projection. */
+  topic: TopicWire
+  messageCount: number
+  blockCount: number
+  branchCount: number
+  segmentCount: number
+  fileReferenceCount: number
+}
+
+// ---------------------------------------------------------------------------
 // Command response DTOs
 // ---------------------------------------------------------------------------
 
@@ -1887,6 +2042,9 @@ export interface ChatDbCommands extends ChatDbCommandMap {
     response: FetchTopicNamingContextResponse
   }
   'chatdb:fetch-topic-activity': { request: FetchTopicActivityRequest; response: FetchTopicActivityResponse }
+  // Standalone topic JSON data exchange (whole-logical-topic export/import)
+  'chatdb:export-topic-data': { request: ExportTopicDataRequest; response: ExportTopicDataResponse }
+  'chatdb:import-topic-data': { request: ImportTopicDataRequest; response: ImportTopicDataResponse }
 }
 
 // ---------------------------------------------------------------------------

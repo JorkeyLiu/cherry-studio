@@ -58,6 +58,8 @@ export default defineConfig([
       'dist/**',
       'out/**',
       'local/**',
+      'playwright-report/**',
+      'test-results/**',
       'tests/**',
       '.yarn/**',
       '.gitignore',

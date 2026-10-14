@@ -18,6 +18,7 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
@@ -28,6 +29,7 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  ImportTopicDataRequest,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
@@ -621,6 +623,10 @@ const api = {
       ipcRenderer.invoke(IpcChannel.ChatDb_ResolveContextClosure, request),
     fetchWholeTopicSnapshot: (request: FetchWholeTopicSnapshotRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchWholeTopicSnapshot, request),
+    exportTopicData: (request: ExportTopicDataRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ExportTopicData, request),
+    importTopicData: (request: ImportTopicDataRequest) =>
+      ipcRenderer.invoke(IpcChannel.ChatDb_ImportTopicData, request),
     fetchClipboardGroups: (request: FetchClipboardGroupsRequest) =>
       ipcRenderer.invoke(IpcChannel.ChatDb_FetchClipboardGroups, request),
     fetchTopicNamingContext: (request: FetchTopicNamingContextRequest) =>

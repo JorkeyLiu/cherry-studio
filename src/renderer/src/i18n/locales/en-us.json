@@ -1306,6 +1306,11 @@
         "image": "Export as image",
         "image_saved": "Image saved successfully",
         "joplin": "Export to Joplin",
+        "json": {
+          "error": "Failed to export topic data",
+          "label": "Export as JSON",
+          "success": "Topic data exported"
+        },
         "md": {
           "label": "Export as markdown",
           "reason": "Export as Markdown (with reasoning)"
@@ -1350,6 +1355,12 @@
         "wait_for_title_naming": "Generating title...",
         "word": "Export as Word",
         "yuque": "Export to Yuque"
+      },
+      "import": {
+        "action": "Import topic from JSON",
+        "error": "Failed to import topic file",
+        "invalid": "Invalid topic data file",
+        "success": "Topic imported"
       },
       "list": "Topic List",
       "manage": {

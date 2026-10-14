@@ -14,6 +14,7 @@ import type {
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
+  ImportTopicDataResponse,
   InsertMessageGroup,
   InsertMessageGroupsResponse,
   InsertMessagesAfterAnchorResponse,
@@ -30,7 +31,8 @@ import type {
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
   StreamWriteDiagnostics,
-  TopicBranchWire
+  TopicBranchWire,
+  TopicDataExportPayload
 } from '@shared/chatDb'
 
 import type { SendDiagnosticsContext } from './sendTimingDiagnostics'
@@ -456,6 +458,22 @@ export interface MessageDataSource {
    * Missing topic → throws ChatDbResultError (NOT_FOUND).
    */
   fetchTopicActivity?(topicId: string, branchId?: BranchRoute): Promise<FetchTopicActivityResponse>
+
+  /**
+   * Standalone JSON export READ — ONE ENTIRE logical topic.
+   * Returns the versioned topic-data payload covering the main route plus
+   * ALL branches (never one effective route, never the loaded projection).
+   * Missing topic → throws ChatDbResultError (NOT_FOUND).
+   */
+  exportTopicData?(topicId: string): Promise<TopicDataExportPayload>
+
+  /**
+   * Standalone JSON import WRITE — creates a new topic from an untrusted
+   * payload under the target assistant. Always allocates fresh IDs
+   * (no dedup/merge/overwrite). Dispatches `updateTopicUpdatedAt` exactly
+   * once after success for the new topic.
+   */
+  importTopicData?(payload: TopicDataExportPayload, assistantId: string): Promise<ImportTopicDataResponse>
 
   // ============ File Operations (Optional) ============
 

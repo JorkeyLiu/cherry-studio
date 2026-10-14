@@ -1107,6 +1107,7 @@ export function handleChatDbSuccessForSync(channel: string, request: any, result
       case IpcChannel.ChatDb_PasteMessagesToTopic:
       case IpcChannel.ChatDb_CloneMessagesToTopic:
       case IpcChannel.ChatDb_BranchMessagesToTopic:
+      case IpcChannel.ChatDb_ImportTopicData:
       case IpcChannel.ChatDb_CreateBranch:
       case IpcChannel.ChatDb_ListBranches:
       case IpcChannel.ChatDb_RenameBranch:

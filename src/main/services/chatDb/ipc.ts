@@ -42,6 +42,7 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
@@ -52,6 +53,7 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  ImportTopicDataRequest,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
   ListBlocksByFileRequest,
@@ -374,6 +376,16 @@ export function registerChatDbIpc(): () => void {
   // 1e. fetch-whole-topic-snapshot (one-shot whole-topic snapshot for exports/knowledge)
   handleCommand(IpcChannel.ChatDb_FetchWholeTopicSnapshot, (agg, req: FetchWholeTopicSnapshotRequest) => {
     return agg.fetchWholeTopicSnapshot(req)
+  })
+
+  // 1e3. export-topic-data (standalone JSON export: ONE ENTIRE topic incl. all branches)
+  handleCommand(IpcChannel.ChatDb_ExportTopicData, (agg, req: ExportTopicDataRequest) => {
+    return agg.exportTopicData(req)
+  })
+
+  // 1e4. import-topic-data (standalone JSON import: new topic under the target assistant)
+  handleCommand(IpcChannel.ChatDb_ImportTopicData, (agg, req: ImportTopicDataRequest) => {
+    return agg.importTopicData(req)
   })
 
   // 1e2. fetch-clipboard-groups (group-scoped copy/cut; selected groups only, never whole-topic)

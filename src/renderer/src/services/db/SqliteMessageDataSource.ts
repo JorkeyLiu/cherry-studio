@@ -50,6 +50,8 @@ import type {
   EmptyTrashTopicsRequest,
   EmptyTrashTopicsResponse,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
+  ExportTopicDataResponse,
   FetchAnswerGroupRequest,
   FetchAnswerGroupResponse,
   FetchClipboardGroupsRequest,
@@ -71,6 +73,8 @@ import type {
   GetRawTopicResponse,
   HardDeleteTopicRequest,
   HardDeleteTopicResponse,
+  ImportTopicDataRequest,
+  ImportTopicDataResponse,
   InsertMessageGroup,
   InsertMessageGroupsRequest,
   InsertMessageGroupsResponse,
@@ -122,6 +126,7 @@ import type {
   SoftDeleteTopicRequest,
   StreamWriteDiagnostics,
   TopicBranchWire,
+  TopicDataExportPayload,
   TopicExistsRequest,
   TopicWire,
   UpdateBlocksRequest,
@@ -161,6 +166,8 @@ export interface ChatDbApi {
     request: FetchTopicNamingContextRequest
   ): Promise<ChatDbResult<FetchTopicNamingContextResponse>>
   fetchTopicActivity?(request: FetchTopicActivityRequest): Promise<ChatDbResult<FetchTopicActivityResponse>>
+  exportTopicData?(request: ExportTopicDataRequest): Promise<ChatDbResult<ExportTopicDataResponse>>
+  importTopicData?(request: ImportTopicDataRequest): Promise<ChatDbResult<ImportTopicDataResponse>>
   branchMessagesToTopic?(request: BranchMessagesToTopicRequest): Promise<ChatDbResult<BranchMessagesToTopicResponse>>
   createBranch?(request: CreateBranchRequest): Promise<ChatDbResult<CreateBranchResponse>>
   listBranches?(request: ListBranchesRequest): Promise<ChatDbResult<ListBranchesResponse>>
@@ -1204,6 +1211,45 @@ export class SqliteMessageDataSource implements MessageDataSource {
       groups: result.groups,
       clipboard: result.clipboard
     } as unknown as FetchClipboardGroupsResponse
+  }
+
+  // ============ Standalone topic JSON data exchange (whole-topic export/import) ============
+  /**
+   * Snapshot ONE ENTIRE logical topic for standalone JSON export.
+   *
+   * One Main SQLite transaction returns the versioned topic-data payload
+   * covering the main route plus ALL branches (never one effective route,
+   * never the loaded projection). Caller-local only, dispatches nothing.
+   * Missing topic throws ChatDbResultError (NOT_FOUND); transport rejection
+   * propagates unchanged.
+   */
+  async exportTopicData(topicId: string): Promise<TopicDataExportPayload> {
+    if (!this.api.exportTopicData) {
+      throw new Error('ChatDb API unavailable: topic-data export not exposed')
+    }
+    const request: ExportTopicDataRequest = cloneForWire({ topicId })
+    const result = unwrap(await this.api.exportTopicData(request))
+    return result.payload as unknown as TopicDataExportPayload
+  }
+
+  /**
+   * Create a new topic from a standalone JSON payload under the target
+   * assistant. Main allocates fresh IDs (no dedup/merge/overwrite) in one
+   * atomic transaction. Dispatches `updateTopicUpdatedAt` exactly once for
+   * the new topic after success. Structured failure throws
+   * ChatDbResultError; transport rejection propagates unchanged.
+   */
+  async importTopicData(payload: TopicDataExportPayload, assistantId: string): Promise<ImportTopicDataResponse> {
+    if (!this.api.importTopicData) {
+      throw new Error('ChatDb API unavailable: topic-data import not exposed')
+    }
+    const request: ImportTopicDataRequest = cloneForWire({
+      payload,
+      assistantId
+    })
+    const result = unwrap(await this.api.importTopicData(request))
+    dispatchTopicUpdatedAt(result.topic.id)
+    return result
   }
 
   // ============ Bounded naming/activity reads (naming + rate-limit, read-only) ============

@@ -1306,6 +1306,11 @@
         "image": "导出为图片",
         "image_saved": "图片保存成功",
         "joplin": "导出到 Joplin",
+        "json": {
+          "error": "导出话题数据失败",
+          "label": "导出为 JSON",
+          "success": "话题数据已导出"
+        },
         "md": {
           "label": "导出为 Markdown",
           "reason": "导出为 Markdown (包含思考)"
@@ -1350,6 +1355,12 @@
         "wait_for_title_naming": "正在生成标题...",
         "word": "导出为 Word",
         "yuque": "导出到语雀"
+      },
+      "import": {
+        "action": "从 JSON 导入话题",
+        "error": "导入话题文件失败",
+        "invalid": "无效的话题数据文件",
+        "success": "话题已导入"
       },
       "list": "话题列表",
       "manage": {

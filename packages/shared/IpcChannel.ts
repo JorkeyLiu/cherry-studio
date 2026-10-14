@@ -372,6 +372,10 @@ export enum IpcChannel {
   ChatDb_FetchTopicNamingContext = 'chatdb:fetch-topic-naming-context',
   ChatDb_FetchTopicActivity = 'chatdb:fetch-topic-activity',
 
+  // Standalone topic JSON data exchange (whole-logical-topic export/import)
+  ChatDb_ExportTopicData = 'chatdb:export-topic-data',
+  ChatDb_ImportTopicData = 'chatdb:import-topic-data',
+
   // Phase 5 authoritative deletion propagation — Main → all renderers
   ChatDb_TopicDeleted = 'chatdb:topic-deleted',
 

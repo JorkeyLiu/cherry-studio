@@ -30,6 +30,7 @@ import type {
   DeleteSegmentRequest,
   EmptyTrashTopicsRequest,
   EnsureTopicRequest,
+  ExportTopicDataRequest,
   FetchAnswerGroupRequest,
   FetchClipboardGroupsRequest,
   FetchContextClosureRequest,
@@ -40,6 +41,7 @@ import type {
   FetchWholeTopicSnapshotRequest,
   GetRawTopicRequest,
   HardDeleteTopicRequest,
+  ImportTopicDataRequest,
   InsertMessageGroupIntent,
   InsertMessageGroupsRequest,
   InsertMessagesAfterAnchorRequest,
@@ -4660,6 +4662,169 @@ const insertMessagesAfterAnchorContract: ChatDbContract = {
 }
 
 // ---------------------------------------------------------------------------
+// Standalone topic JSON data exchange (whole-logical-topic export/import)
+// ---------------------------------------------------------------------------
+
+const TOPIC_DATA_FORMAT_MARKER = 'cherry-chat-topic-data'
+const TOPIC_DATA_VERSION = 1
+const TOPIC_DATA_PAYLOAD_KEYS = new Set([
+  'format',
+  'version',
+  'exportedAt',
+  'topic',
+  'messages',
+  'blocks',
+  'branches',
+  'segments',
+  'fileReferences'
+])
+
+/**
+ * Structural check of a topic-data payload at the IPC contract boundary.
+ * Deep semantic validation (unique IDs, referential links, parent cycles,
+ * owner relationships) runs in Main before any write; this only proves the
+ * envelope carries the versioned format with array/object slots.
+ */
+function validateTopicDataPayloadShape(value: unknown, path: string, channel: string): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(path, `[${channel}] Expected topic-data payload object`)
+  }
+  const proto = Object.getPrototypeOf(value)
+  if (proto !== Object.prototype && proto !== null) {
+    throw new ValidationError(path, `[${channel}] Topic-data payload must be a plain object`)
+  }
+  const payload = value as Record<string, unknown>
+  for (const key of Object.keys(payload)) {
+    if (!TOPIC_DATA_PAYLOAD_KEYS.has(key)) {
+      throw new ValidationError(`${path}.${key}`, `[${channel}] Unknown key in topic-data payload: "${key}"`)
+    }
+  }
+  if (payload.format !== TOPIC_DATA_FORMAT_MARKER) {
+    throw new ValidationError(`${path}.format`, `[${channel}] Expected format "${TOPIC_DATA_FORMAT_MARKER}"`)
+  }
+  if (payload.version !== TOPIC_DATA_VERSION) {
+    throw new ValidationError(
+      `${path}.version`,
+      `[${channel}] Unsupported topic-data version (expected ${TOPIC_DATA_VERSION})`
+    )
+  }
+  validateJsonObject(payload.topic, `${path}.topic`)
+  validateJsonObjectArray(payload.messages, `${path}.messages`)
+  // Blocks carry the same large-content budgets as every other block wire
+  // (LOCK-LB-1/4/5): a persisted block above the generic 1 MiB string cap is
+  // valid storage and must export/import, so the block profile applies here.
+  // Messages stay on the generic caps, matching fetch-messages (LOCK-LB-5).
+  validateJsonObjectArrayBlock(payload.blocks, `${path}.blocks`, BLOCK_JSON_PROFILE)
+  validateJsonObjectArray(payload.branches, `${path}.branches`)
+  validateJsonObjectArray(payload.segments, `${path}.segments`)
+  validateJsonObjectArray(payload.fileReferences, `${path}.fileReferences`)
+}
+
+const exportTopicDataContract: ChatDbContract = {
+  allowedKeys: keySet('topicId'),
+  validate(value: unknown): void {
+    validateRequest(value, exportTopicDataContract.allowedKeys)
+    const req = value as ExportTopicDataRequest
+    validateNonEmptyString(req.topicId, 'request.topicId')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:export-topic-data', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:export-topic-data] Expected object with payload')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:export-topic-data] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (key !== 'payload') {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:export-topic-data] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateTopicDataPayloadShape(v.payload, 'result.value.payload', 'chatdb:export-topic-data')
+    }
+  }
+}
+
+const IMPORT_TOPIC_DATA_VALUE_KEYS = new Set([
+  'topic',
+  'messageCount',
+  'blockCount',
+  'branchCount',
+  'segmentCount',
+  'fileReferenceCount'
+])
+
+function validateImportCount(value: unknown, path: string, channel: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new ValidationError(path, `[${channel}] Expected non-negative integer count`)
+  }
+}
+
+const importTopicDataContract: ChatDbContract = {
+  allowedKeys: keySet('payload', 'assistantId'),
+  validate(value: unknown): void {
+    // Narrow request envelope check (no generic full-walk): blocks carry the
+    // block-profile budgets, so a generic `validateRequest` walk would reject
+    // a valid >1 MiB block before the shape check below. The shape validator
+    // enforces JSON safety per slot (generic for topic/messages/branches/
+    // segments/fileRefs, block profile for blocks), so no non-JSON value
+    // escapes validation.
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new ValidationError('request', 'Request must be a plain object')
+    }
+    const requestProto = Object.getPrototypeOf(value)
+    if (requestProto !== Object.prototype && requestProto !== null) {
+      throw new ValidationError('request', 'Request must be a plain object')
+    }
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      if (!importTopicDataContract.allowedKeys.has(key)) {
+        throw new ValidationError(`request.${key}`, `Unknown property '${key}'`)
+      }
+    }
+    const req = value as ImportTopicDataRequest
+    validateNonEmptyString(req.assistantId, 'request.assistantId')
+    validateTopicDataPayloadShape(req.payload, 'request.payload', 'chatdb:import-topic-data')
+  },
+  validateResult(result: unknown): void {
+    validateResultEnvelope(result, 'chatdb:import-topic-data', { skipValueValidation: true })
+    const obj = result as Record<string, unknown>
+    if (obj.ok === true) {
+      const value = obj.value
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('result.value', '[chatdb:import-topic-data] Expected object with topic and counts')
+      }
+      const proto = Object.getPrototypeOf(value)
+      if (proto !== Object.prototype && proto !== null) {
+        throw new ValidationError('result.value', '[chatdb:import-topic-data] Success value must be a plain object')
+      }
+      const v = value as Record<string, unknown>
+      for (const key of Object.keys(v)) {
+        if (!IMPORT_TOPIC_DATA_VALUE_KEYS.has(key)) {
+          throw new ValidationError(
+            `result.value.${key}`,
+            `[chatdb:import-topic-data] Unknown key in success value: "${key}"`
+          )
+        }
+      }
+      validateJsonObject(v.topic, 'result.value.topic')
+      validateImportCount(v.messageCount, 'result.value.messageCount', 'chatdb:import-topic-data')
+      validateImportCount(v.blockCount, 'result.value.blockCount', 'chatdb:import-topic-data')
+      validateImportCount(v.branchCount, 'result.value.branchCount', 'chatdb:import-topic-data')
+      validateImportCount(v.segmentCount, 'result.value.segmentCount', 'chatdb:import-topic-data')
+      validateImportCount(v.fileReferenceCount, 'result.value.fileReferenceCount', 'chatdb:import-topic-data')
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Contract registry — exact channel → contract mapping
 // ---------------------------------------------------------------------------
 
@@ -4746,7 +4911,10 @@ export const chatDbContracts: Readonly<Record<ChatDbChannel, ChatDbContract>> = 
   'chatdb:fetch-topic-activity': fetchTopicActivityContract,
   // S6.2c-2: Main-authoritative insert after stable anchor
   'chatdb:insert-messages-after-anchor': insertMessagesAfterAnchorContract,
-  'chatdb:insert-message-groups': insertMessageGroupsContract
+  'chatdb:insert-message-groups': insertMessageGroupsContract,
+  // Standalone topic JSON data exchange (whole-logical-topic export/import)
+  'chatdb:export-topic-data': exportTopicDataContract,
+  'chatdb:import-topic-data': importTopicDataContract
 })
 
 /**

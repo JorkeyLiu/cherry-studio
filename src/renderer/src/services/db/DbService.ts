@@ -13,6 +13,7 @@ import type {
   FetchTopicNamingContextResponse,
   FetchWholeTopicSnapshotResponse,
   FileCleanupResult,
+  ImportTopicDataResponse,
   InsertMessageGroup,
   MessageBlockEntry,
   RegenerateAssistantMessageRequest,
@@ -24,7 +25,8 @@ import type {
   SelectAnswerMessageResponse,
   SelectUsefulAnswerResponse,
   SemanticResendResponse,
-  StreamWriteDiagnostics
+  StreamWriteDiagnostics,
+  TopicDataExportPayload
 } from '@shared/chatDb'
 
 import { fileLock } from '../FileLock'
@@ -127,6 +129,14 @@ class DbService implements MessageDataSource {
   fetchTopicActivity(topicId: string, branchId?: string | null): Promise<FetchTopicActivityResponse> {
     if (!this.ordinarySource.fetchTopicActivity) throw new Error('fetchTopicActivity unavailable')
     return this.ordinarySource.fetchTopicActivity(topicId, branchId)
+  }
+  exportTopicData(topicId: string): Promise<TopicDataExportPayload> {
+    if (!this.ordinarySource.exportTopicData) throw new Error('exportTopicData unavailable')
+    return this.ordinarySource.exportTopicData(topicId)
+  }
+  importTopicData(payload: TopicDataExportPayload, assistantId: string): Promise<ImportTopicDataResponse> {
+    if (!this.ordinarySource.importTopicData) throw new Error('importTopicData unavailable')
+    return this.ordinarySource.importTopicData(payload, assistantId)
   }
   getRawTopic(topicId: string) {
     return this.ordinarySource.getRawTopic(topicId)
