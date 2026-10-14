@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next'
 import { useSelector } from 'react-redux'
 
 import MessageOutline from './MessageOutline'
+import type { ReadingAnchorReport } from './Messages'
 import {
   type AttachmentLabelFormatters,
   buildAttachmentLabel,
@@ -30,6 +31,7 @@ export interface ConversationNavItem {
 
 interface ConversationNavigationProps {
   topicId: string
+  readingAnchor?: ReadingAnchorReport | null
   onNavigate: (messageId: string) => void
 }
 
@@ -81,8 +83,7 @@ export const buildConversationNavItems = (
   }
   return items
 }
-
-const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, onNavigate }) => {
+const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, readingAnchor, onNavigate }) => {
   const { t } = useTranslation()
   const fallback = t('chat.navigation.user_message_fallback')
   // Localized link word for in-place external-link replacement in body
@@ -253,6 +254,36 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, onNa
     [isSnapshotCurrent, messages, blocksById, fallback, attachmentFormatters, linkLabel]
   )
 
+  // Caller-local chronological map: each message id resolves to the nearest
+  // preceding user message id in the current whole-topic snapshot (route
+  // order). Non-user anchor reports highlight their user turn instead.
+  const memoMap = useMemo(() => {
+    const map = new Map<string, string>()
+    let lastUserId: string | null = null
+    if (isSnapshotCurrent) {
+      for (const message of messages) {
+        if (!message) continue
+        if (message.role === 'user') lastUserId = message.id
+        else if (lastUserId) map.set(message.id, lastUserId)
+      }
+    }
+    return map
+  }, [isSnapshotCurrent, messages])
+
+  // Active highlight: only when the report matches the current topic, the
+  // current branch route and the loaded snapshot key. navigationTargetId
+  // wins over messageId; a resolved non-user id maps to its preceding user
+  // id; an unresolvable id never steals the highlight.
+  const activeId = useMemo(() => {
+    if (!readingAnchor || !isSnapshotCurrent) return undefined
+    if (readingAnchor.topicId !== topicId) return undefined
+    if ((readingAnchor.route ?? 'main') !== (activeBranchId ?? 'main')) return undefined
+    const target = readingAnchor.navigationTargetId ?? readingAnchor.messageId
+    if (!target) return undefined
+    if (items.some((item) => item.id === target)) return target
+    return memoMap.get(target)
+  }, [readingAnchor, isSnapshotCurrent, topicId, activeBranchId, items, memoMap])
+
   // Stable-ID clicks are honored only within the matching route. A click
   // landing after a route switch (stale closure or queued event) is dropped
   // instead of navigating the new route to an old-route ID.
@@ -270,7 +301,7 @@ const ConversationNavigation: FC<ConversationNavigationProps> = ({ topicId, onNa
   // Presentation is the restored original MessageOutline (verbatim styles);
   // this module stays a caller-local data controller only.
   const entries = items.map((item) => ({ id: item.id, text: item.preview }))
-  return <MessageOutline entries={entries} onNavigate={handleNavigate} />
+  return <MessageOutline entries={entries} onNavigate={handleNavigate} activeId={activeId} />
 }
 
 export default ConversationNavigation

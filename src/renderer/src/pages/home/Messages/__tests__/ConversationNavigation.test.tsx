@@ -92,6 +92,7 @@ vi.mock('@renderer/utils/topicSnapshot', () => ({
 }))
 
 import ConversationNavigation from '../ConversationNavigation'
+import type { ReadingAnchorReport } from '../Messages'
 
 const textBlock = (id: string, messageId: string, content: string) =>
   ({
@@ -657,5 +658,182 @@ describe('ConversationNavigation whole-route user list', () => {
     }
     const buttons = screen.getAllByTestId(/^conversation-nav-item-/)
     expect(buttons.map((el) => el.getAttribute('data-message-id'))).toEqual(['u1', 'u2', 'u3'])
+  })
+})
+
+describe('ConversationNavigation reading-anchor highlight', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.setActiveBranchId(null)
+    mocks.setUpdatedAt('t0')
+  })
+
+  const seedThread = () => {
+    const blocks = [
+      textBlock('b1', 'u1', 'First question about rivers'),
+      textBlock('ba1', 'a1', 'First assistant answer'),
+      textBlock('ba1b', 'a1b', 'First assistant follow-up'),
+      textBlock('b2', 'u2', 'Second question about mountains'),
+      textBlock('ba2', 'a2', 'Second assistant answer')
+    ]
+    mocks.loadWholeTopicSnapshot.mockResolvedValue({
+      messages: [
+        userMsg('u1', ['b1']),
+        assistantMsg('a1', ['ba1']),
+        assistantMsg('a1b', ['ba1b']),
+        userMsg('u2', ['b2']),
+        assistantMsg('a2', ['ba2'])
+      ],
+      blocks,
+      blocksById: new Map(blocks.map((b) => [(b as { id: string }).id, b]))
+    })
+  }
+
+  const anchor = (over: Partial<ReadingAnchorReport>): ReadingAnchorReport => ({
+    topicId: 'topic-1',
+    route: null,
+    messageId: null,
+    navigationTargetId: null,
+    ...over
+  })
+
+  const renderNav = (readingAnchor: ReadingAnchorReport) =>
+    render(<ConversationNavigation topicId="topic-1" readingAnchor={readingAnchor} onNavigate={mocks.onNavigate} />)
+
+  const activeRowId = () =>
+    screen
+      .getAllByTestId(/^conversation-nav-item-/)
+      .find((el) => el.getAttribute('aria-current') === 'true')
+      ?.getAttribute('data-message-id') ?? null
+
+  it('maps an answer report to its preceding user turn, including consecutive answers', async () => {
+    seedThread()
+    const { rerender } = renderNav(anchor({ messageId: 'a1', navigationTargetId: 'a1' }))
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(activeRowId()).toBe('u1')
+
+    // A consecutive second answer still belongs to the same user turn.
+    rerender(
+      <ConversationNavigation
+        topicId="topic-1"
+        readingAnchor={anchor({ messageId: 'a1b', navigationTargetId: 'a1b' })}
+        onNavigate={mocks.onNavigate}
+      />
+    )
+    expect(activeRowId()).toBe('u1')
+
+    rerender(
+      <ConversationNavigation
+        topicId="topic-1"
+        readingAnchor={anchor({ messageId: 'a2', navigationTargetId: 'a2' })}
+        onNavigate={mocks.onNavigate}
+      />
+    )
+    expect(activeRowId()).toBe('u2')
+  })
+
+  it('prefers navigationTargetId over a stale messageId', async () => {
+    seedThread()
+    renderNav(anchor({ messageId: 'u1', navigationTargetId: 'a2' }))
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(activeRowId()).toBe('u2')
+  })
+
+  it('highlights a user report directly — user ids never resolve through the map', async () => {
+    seedThread()
+    renderNav(anchor({ messageId: 'u2', navigationTargetId: 'u2' }))
+    await screen.findByTestId('conversation-nav-item-u2')
+    // Direct hit on u2, never remapped to the earlier u1.
+    expect(activeRowId()).toBe('u2')
+  })
+
+  it('leaves every row unhighlighted for an unresolvable report id', async () => {
+    seedThread()
+    renderNav(anchor({ messageId: 'ghost', navigationTargetId: 'ghost' }))
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(activeRowId()).toBeNull()
+  })
+
+  it('drops the highlight for stale topic or branch reports', async () => {
+    seedThread()
+    const { rerender } = renderNav(anchor({ messageId: 'u1', navigationTargetId: 'u1' }))
+    await screen.findByTestId('conversation-nav-item-u2')
+    expect(activeRowId()).toBe('u1')
+
+    // A report for another topic never highlights under this topic.
+    rerender(
+      <ConversationNavigation
+        topicId="topic-1"
+        readingAnchor={anchor({ topicId: 'topic-2', messageId: 'u1', navigationTargetId: 'u1' })}
+        onNavigate={mocks.onNavigate}
+      />
+    )
+    expect(activeRowId()).toBeNull()
+
+    // A report for another branch never highlights under the main route.
+    rerender(
+      <ConversationNavigation
+        topicId="topic-1"
+        readingAnchor={anchor({ route: 'b1', messageId: 'u1', navigationTargetId: 'u1' })}
+        onNavigate={mocks.onNavigate}
+      />
+    )
+    expect(activeRowId()).toBeNull()
+  })
+
+  it('never shows the old route highlight while the new snapshot is pending', async () => {
+    const blocks1 = [textBlock('b1', 'u1', 'Old topic question')]
+    let resolveNew!: (v: never) => void
+    const newPending = new Promise<never>((resolve) => {
+      resolveNew = resolve
+    })
+    mocks.loadWholeTopicSnapshot.mockImplementation(async (topicId: string) => {
+      if (topicId === 'topic-1') {
+        return {
+          messages: [userMsg('u1', ['b1'])],
+          blocks: blocks1,
+          blocksById: new Map(blocks1.map((b) => [(b as { id: string }).id, b]))
+        } as never
+      }
+      return newPending
+    })
+
+    const { rerender } = render(
+      <ConversationNavigation
+        topicId="topic-1"
+        readingAnchor={anchor({ messageId: 'u1', navigationTargetId: 'u1' })}
+        onNavigate={mocks.onNavigate}
+      />
+    )
+    await screen.findByTestId('conversation-nav-item-u1')
+    expect(activeRowId()).toBe('u1')
+
+    // Route switch with the new fetch still pending: no stale rows at all.
+    rerender(
+      <ConversationNavigation
+        topicId="topic-2"
+        readingAnchor={anchor({ topicId: 'topic-2', messageId: 'u9', navigationTargetId: 'u9' })}
+        onNavigate={mocks.onNavigate}
+      />
+    )
+    expect(screen.queryByTestId('conversation-nav-item-u1')).toBeNull()
+
+    const blocks2 = [textBlock('b9', 'u9', 'New topic question')]
+    resolveNew({
+      messages: [{ ...(userMsg('u9', ['b9']) as unknown as Record<string, unknown>), topicId: 'topic-2' }] as never[],
+      blocks: blocks2,
+      blocksById: new Map(blocks2.map((b) => [(b as { id: string }).id, b]))
+    } as never)
+    expect(await screen.findByTestId('conversation-nav-item-u9')).toBeTruthy()
+    expect(activeRowId()).toBe('u9')
+  })
+
+  it('highlights under the matching branch route once its snapshot loads', async () => {
+    seedThread()
+    mocks.setActiveBranchId('b1')
+    renderNav(anchor({ route: 'b1', messageId: 'u2', navigationTargetId: 'u2' }))
+    expect(mocks.loadWholeTopicSnapshot).toHaveBeenCalledWith('topic-1', 'b1')
+    expect(await screen.findByTestId('conversation-nav-item-u2')).toBeTruthy()
+    expect(activeRowId()).toBe('u2')
   })
 })

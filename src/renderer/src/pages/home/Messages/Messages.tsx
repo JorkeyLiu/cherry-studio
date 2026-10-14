@@ -27,7 +27,8 @@ import {
   createVisibleAnchorCache,
   findFirstVisibleMessage,
   findViewportTopAnchorWithOffset,
-  getMessageRowById
+  getMessageRowById,
+  isElementVisibleInViewport
 } from '@renderer/pages/home/Messages/domVisibility'
 import { branchFromAnchorMessage } from '@renderer/pages/home/Messages/messageBranch'
 import type { MessageViewportGroup } from '@renderer/pages/home/Messages/messageGroups'
@@ -206,6 +207,17 @@ import {
   type ViewportTransitionPhase
 } from './viewportTransition'
 
+/**
+ * Read-only reading-anchor report (renderer-local, no persistence): the
+ * current viewport-top anchor message id with its topic/branch route.
+ * `messageId` null = no measurable row anchor. Never drives scrolling.
+ */
+export interface ReadingAnchorReport {
+  topicId: string
+  route: string | null
+  messageId: string | null
+  navigationTargetId: string | null
+}
 interface MessagesProps {
   assistant: Assistant
   topic: Topic
@@ -215,6 +227,8 @@ interface MessagesProps {
   /** Shared context projection computed once at Chat level (Phase 2B).
    *  Messages consumes boundaryMessageId and anchorGroupKey from this result. */
   sharedContextInfo: ReturnType<typeof computeContextInfo>
+  /** Read-only viewport-top anchor report for the navigation highlight (Chat forwards it). */
+  onReadingAnchor?: (report: ReadingAnchorReport) => void
 }
 
 export interface MessagesHandle {
@@ -749,7 +763,8 @@ const Messages = ({
   setActiveTopic,
   onComponentUpdate,
   onFirstUpdate,
-  sharedContextInfo
+  sharedContextInfo,
+  onReadingAnchor
 }: MessagesProps & { ref?: React.RefObject<MessagesHandle | null> }) => {
   // Active route of this logical topic (null = main route). Switching
   // branches never changes the active topic, sidebar selection, or topic
@@ -1994,7 +2009,10 @@ const Messages = ({
   const foldSigRef = useRef('')
   const foldVersionRef = useRef(0)
   const visualAnchorCacheRef = useRef(createVisibleAnchorCache())
-
+  // Forward declaration: the reading-anchor scheduler is assigned below (it
+  // needs the ordered-row/measurement refs). Registry callbacks invoked
+  // before assignment are no-ops; the window/displayed effects re-measure.
+  const scheduleReadingAnchorRef = useRef<() => void>(() => undefined)
   const registerMessageElement = useCallback((id: string, element: HTMLElement | null) => {
     if (element) {
       const prev = messageElements.current.get(id)
@@ -2006,6 +2024,12 @@ const Messages = ({
       messageElements.current.delete(id)
       registryVersionRef.current += 1
     }
+    // Reading-anchor observe-only: registry mount/unmount changes the ordered
+    // row membership. Coalesced next-frame re-measure only (no scroll, no
+    // persist); the RAF dedup absorbs mount storms.
+    try {
+      scheduleReadingAnchorRef.current()
+    } catch {}
   }, [])
 
   // Fold-selection signature commit (runs only on projection commits, never
@@ -2057,6 +2081,217 @@ const Messages = ({
     }
   }, [])
   getOrderedAnchorRowsRef.current = getOrderedAnchorRows
+  // Read-only reading-anchor report (navigation highlight): observes the
+  // viewport-top anchor only, never scrolls/persists. RAF coalescing + four
+  // field ref dedup; stale-topic/foreign-route reports are dropped and old
+  // pending-target reports are forbidden. `reportRoute` is the DISPLAYED
+  // route (`branchId`, main = null). Callback via latest ref (no dep cycle).
+  const onReadingAnchorRef = useRef(onReadingAnchor)
+  onReadingAnchorRef.current = onReadingAnchor
+  const readingAnchorLastRef = useRef<ReadingAnchorReport | null>(null)
+  const readingAnchorRafRef = useRef<number | null>(null)
+  const readingAnchorPendingTargetRef = useRef<{ navigateToken: number; targetId: string | null } | null>(null)
+  const readingAnchorNavigateTokenRef = useRef(0)
+  const measureReadingAnchor = useCallback((): ReadingAnchorReport | null => {
+    let displayedTopicId: string
+    let displayedRoute: string | null
+    try {
+      const displayed = controller.displayedRoute
+      displayedTopicId = displayed.topicId
+      displayedRoute = displayed.route
+    } catch {
+      return null
+    }
+    const selectedTopicId = topicIdRef.current
+    const selectedRoute = routeRef.current
+    if (displayedTopicId !== selectedTopicId || displayedRoute !== selectedRoute) return null
+    // Actual scroll container: the `useScrollPosition` container ref is the
+    // `#messages` host (MessagesContainer -> Scrollbar -> div). In isolated
+    // mounts the mocked hook owns that ref; fall back to the live host by id
+    // (mirror of BackToBottomButton's resolveContainer) so observe-only
+    // measurement still reads real geometry.
+    let container: HTMLElement | null = null
+    try {
+      container = scrollContainerRef.current
+    } catch {
+      container = null
+    }
+    if (!container || !container.isConnected) {
+      try {
+        const byId = document.getElementById('messages')
+        if (byId instanceof HTMLElement && byId.isConnected) container = byId
+        else if (!container?.isConnected) container = null
+      } catch {
+        if (!container?.isConnected) container = null
+      }
+    }
+    if (!container)
+      return { topicId: displayedTopicId, route: displayedRoute, messageId: null, navigationTargetId: null }
+    let rows: readonly HTMLElement[] = []
+    try {
+      rows = getOrderedAnchorRowsRef.current()
+    } catch {
+      rows = []
+    }
+    let anchor: { messageId: string } | null = null
+    try {
+      anchor = findViewportTopAnchorWithOffset(container, { orderedRows: rows })
+    } catch {
+      anchor = null
+    }
+    // Click-settle sliver guard (reading-only, renderer-local): the scroll
+    // lands the clicked row exactly at the viewport top, so the previous
+    // answer keeps at most a 1px rounding sliver below the edge. The exact
+    // crossing-first core truthfully reports that sliver, but visual reading
+    // already belongs to the target below it. When the crossing row shows 1px
+    // or less and the next visible row starts at/below the edge, prefer the
+    // next row. Genuine residency (previous row still occupies depth) keeps
+    // the crossing row, so natural cross-turn reading is unchanged.
+    try {
+      if (anchor) {
+        const containerRect = container.getBoundingClientRect()
+        const containerTop = containerRect.top
+        const crossingId = anchor.messageId
+        let crossingBottom = NaN
+        try {
+          const crossing = document.getElementById(`message-${crossingId}`)
+          if (crossing instanceof HTMLElement) crossingBottom = crossing.getBoundingClientRect().bottom
+        } catch {
+          crossingBottom = NaN
+        }
+        const sliver = crossingBottom - containerTop
+        if (Number.isFinite(sliver) && sliver > 0 && sliver <= 1) {
+          // Next-row search over the ordered cache; when it is empty (rows
+          // not yet registered) fall back to the same DOM membership the
+          // exact scan uses. Same-id duplicates of the crossing row are
+          // skipped by id, not by node identity.
+          let candidates: readonly HTMLElement[] = rows
+          if (candidates.length === 0) {
+            try {
+              const found: HTMLElement[] = []
+              const list = container.querySelectorAll('[id^="message-"]:not([id^="message-group-"])')
+              for (const el of list) {
+                if (el instanceof HTMLElement) found.push(el)
+              }
+              candidates = found
+            } catch {
+              candidates = []
+            }
+          }
+          let nextId: string | null = null
+          let nextTop = Number.POSITIVE_INFINITY
+          for (const row of candidates) {
+            if (!(row instanceof HTMLElement)) continue
+            const rawId = typeof row.id === 'string' ? row.id : ''
+            const id = rawId.startsWith('message-') ? rawId.slice('message-'.length) : null
+            if (!id || id === crossingId) continue
+            let top = NaN
+            let bottom = NaN
+            try {
+              const rect = row.getBoundingClientRect()
+              top = rect.top
+              bottom = rect.bottom
+            } catch {
+              continue
+            }
+            if (!Number.isFinite(top) || !Number.isFinite(bottom)) continue
+            if (!(bottom - top > 0)) continue
+            try {
+              if (!isElementVisibleInViewport(row, containerRect)) continue
+            } catch {
+              continue
+            }
+            if (top >= containerTop && top < nextTop) {
+              nextTop = top
+              nextId = id
+            }
+          }
+          if (nextId) anchor = { messageId: nextId }
+        }
+      }
+    } catch {
+      // fail-closed: keep the exact crossing anchor above
+    }
+    if (!anchor) {
+      try {
+        const fallback = findFirstVisibleMessage(container, messageElements.current, rows)
+        if (fallback) {
+          const rawId = typeof fallback.element.id === 'string' ? fallback.element.id : ''
+          const messageId = rawId.startsWith('message-') ? rawId.slice('message-'.length) : null
+          anchor = messageId ? { messageId } : null
+        }
+      } catch {
+        anchor = null
+      }
+    }
+    const pending = readingAnchorPendingTargetRef.current
+    // Pending target is only valid while selected still equals displayed:
+    // topic/route switches clear pending elsewhere, but re-gate here so a
+    // stale in-flight navigate can never surface under the new identity.
+    const navigationTargetId = pending && pending.targetId !== undefined ? (pending.targetId ?? null) : null
+    return {
+      topicId: displayedTopicId,
+      route: displayedRoute,
+      messageId: anchor?.messageId ?? null,
+      navigationTargetId
+    }
+  }, [controller])
+  const emitReadingAnchor = useCallback(() => {
+    const report = measureReadingAnchor()
+    if (!report) return
+    const last = readingAnchorLastRef.current
+    if (
+      last &&
+      last.topicId === report.topicId &&
+      last.route === report.route &&
+      last.messageId === report.messageId &&
+      last.navigationTargetId === report.navigationTargetId
+    ) {
+      return
+    }
+    readingAnchorLastRef.current = report
+    try {
+      onReadingAnchorRef.current?.(report)
+    } catch {}
+  }, [measureReadingAnchor])
+  const scheduleReadingAnchor = useCallback(() => {
+    if (readingAnchorRafRef.current !== null) return
+    try {
+      readingAnchorRafRef.current = requestAnimationFrame(() => {
+        readingAnchorRafRef.current = null
+        emitReadingAnchor()
+      })
+    } catch {
+      readingAnchorRafRef.current = null
+    }
+  }, [emitReadingAnchor])
+  scheduleReadingAnchorRef.current = scheduleReadingAnchor
+  const clearReadingAnchorPendingTarget = useCallback(
+    (navigateToken: number | null) => {
+      const pending = readingAnchorPendingTargetRef.current
+      if (!pending) return
+      if (navigateToken !== null && pending.navigateToken !== navigateToken) return
+      readingAnchorPendingTargetRef.current = null
+      scheduleReadingAnchor()
+    },
+    [scheduleReadingAnchor]
+  )
+  const cancelReadingAnchorPendingTargetForUser = useCallback(() => {
+    if (!readingAnchorPendingTargetRef.current) return
+    readingAnchorPendingTargetRef.current = null
+    scheduleReadingAnchor()
+  }, [scheduleReadingAnchor])
+  useEffect(() => {
+    return () => {
+      const handle = readingAnchorRafRef.current
+      readingAnchorRafRef.current = null
+      if (handle !== null) {
+        try {
+          cancelAnimationFrame(handle)
+        } catch {}
+      }
+    }
+  }, [])
 
   /**
    * Switch foldSelected for the message group containing the target message.
@@ -2575,14 +2810,22 @@ const Messages = ({
       // Without this, savePosition would write to the new topic's scroll key,
       // overwriting its position with stale data from the previous topic.
       const saveEpoch = transitionEpochRef.current
-      void navigate(intent).then((result) => {
+      const readingToken = ++readingAnchorNavigateTokenRef.current
+      readingAnchorPendingTargetRef.current =
+        intent.kind === 'message' ? { navigateToken: readingToken, targetId: intent.targetId } : null
+      scheduleReadingAnchor()
+      const pending = navigate(intent)
+      void Promise.resolve(pending).then((result) => {
         if (transitionEpochRef.current !== saveEpoch) return
         // Same-route user navigation: the resulting viewport is stable, so
         // persist it under the current (displayed) route key.
         if (shouldPersistNavigationResult(result)) savePosition()
       })
+      void Promise.resolve(pending).finally(() => {
+        clearReadingAnchorPendingTarget(readingToken)
+      })
     },
-    [navigate, savePosition]
+    [navigate, savePosition, clearReadingAnchorPendingTarget, scheduleReadingAnchor]
   )
 
   // 滚动到指定消息组
@@ -4054,11 +4297,15 @@ const Messages = ({
   // terminates/releases the transition; multi-scroll gestures stay in one
   // session (each scroll updates the stable snapshot).
   const cancelActiveStabilizerForUser = useCallback(() => {
+    // Real user input cancels a pending navigation target first (observe-only
+    // reading-anchor reporting; the declare below is unchanged).
+    cancelReadingAnchorPendingTargetForUser()
+    scheduleReadingAnchor()
     try {
       controller.declareUserIntent()
     } catch {}
     notifyViewport()
-  }, [controller, notifyViewport])
+  }, [controller, notifyViewport, cancelReadingAnchorPendingTargetForUser, scheduleReadingAnchor])
 
   // Shared single-writer user-takeover commit (scroll path + streaming
   // click-to-pause path). ONLY the returned
@@ -4138,9 +4385,14 @@ const Messages = ({
         endViewportScrollToken()
       }
       notifyViewport()
+      // Genuine userTakeover terminates a pending navigation target (real
+      // user scroll/pause wins over the in-flight navigate; observe-only
+      // re-measure follows, no scroll/persist change here).
+      cancelReadingAnchorPendingTargetForUser()
+      scheduleReadingAnchor()
       return out
     },
-    [controller, endViewportScrollToken, notifyViewport]
+    [controller, endViewportScrollToken, notifyViewport, cancelReadingAnchorPendingTargetForUser, scheduleReadingAnchor]
   )
 
   // Bounded click-to-pause streaming follow: ANY primary mouse press bubbled
@@ -4311,8 +4563,15 @@ const Messages = ({
   // session the trigger requires), then page only for upward wheels parked at
   // the exact edge. Downward/away wheels declare only; their paging — if any
   // — is decided post-scroll.
+  // Direction-confirmed wheel path: declare first (opens/refreshes the live
+  // session the trigger requires), then page only for upward wheels parked at
+  // the exact edge. Downward/away wheels declare only; their paging — if any
+  // — is decided post-scroll. Real user wheel cancels the pending navigation
+  // target, then re-measures (observe-only; paging behavior unchanged).
   const handleStabilizerWheel = useCallback(
     (e: React.WheelEvent) => {
+      cancelReadingAnchorPendingTargetForUser()
+      scheduleReadingAnchor()
       cancelActiveStabilizerForUser()
       let deltaY = 0
       try {
@@ -4323,7 +4582,12 @@ const Messages = ({
       if (!isTowardOlderClampedInput({ kind: 'wheel', deltaY })) return
       maybeLoadOlderOnClampedEdge()
     },
-    [cancelActiveStabilizerForUser, maybeLoadOlderOnClampedEdge]
+    [
+      cancelActiveStabilizerForUser,
+      cancelReadingAnchorPendingTargetForUser,
+      maybeLoadOlderOnClampedEdge,
+      scheduleReadingAnchor
+    ]
   )
 
   // Keyboard scroll pre-cancel: ArrowUp/Down, PageUp/Down, Home/End, Space.
@@ -4395,7 +4659,15 @@ const Messages = ({
   // takeovers write the outgoing route; selected Redux intent is untouched).
   // Pagination detection below only reads scroll geometry (never authorizes
   // a snapshot) and the hook throttled writer is never called here.
+  // Reading-anchor report: observe-only scroll trigger (no scroll mutation).
+  // Real user input cancels a pending navigation target, then re-measures.
+  // The existing takeover scroll body below is unchanged.
   const handleScroll = useCallback(() => {
+    // Observe-only re-measure on every scroll (programmatic scrolls included:
+    // viewport-top may move under navigation restores). Pending-target clear
+    // is genuine-user-only (live interaction session): programmatic scrolls
+    // carry no live token and must keep the target until Promise settle.
+    scheduleReadingAnchor()
     if (!suppressUserWriteRef.current) {
       const liveToken = controller.activeInteractionToken
       if (liveToken !== null) {
@@ -4448,6 +4720,7 @@ const Messages = ({
     maybeLoadOlderAtEdge()
   }, [
     adoptTakeoverSnapshot,
+    cancelReadingAnchorPendingTargetForUser,
     captureSnapshot,
     controller,
     hasMoreNewer,
@@ -4455,6 +4728,7 @@ const Messages = ({
     isLoadingMore,
     loadNewerMessages,
     maybeLoadOlderAtEdge,
+    scheduleReadingAnchor,
     scrollContainerRef
   ])
 
@@ -4478,6 +4752,55 @@ const Messages = ({
       onComponentUpdate?.()
     })
   }, [onComponentUpdate])
+  // Reading-anchor observe-only triggers: DOM registry/window/route commit or
+  // restore changes re-measure on the next frame (no scroll, no persistence).
+  // Topic/route mismatch clears the last report (never emits a stale route)
+  // and forbids an old pending target.
+  useEffect(() => {
+    readingAnchorPendingTargetRef.current = null
+    readingAnchorLastRef.current = null
+    scheduleReadingAnchor()
+  }, [topic.id, activeBranchId, scheduleReadingAnchor])
+  const readingAnchorDisplayedTopicId = controller.displayedRoute.topicId
+  const readingAnchorDisplayedRoute = controller.displayedRoute.route
+  // Displayed-route restore (commit or restore landing on the same selected
+  // identity): old anchor rows may be unmounted, so drop the last report and
+  // re-measure instead of retaining a stale row id.
+  useEffect(() => {
+    readingAnchorLastRef.current = null
+    scheduleReadingAnchor()
+  }, [viewportState.window, readingAnchorDisplayedTopicId, readingAnchorDisplayedRoute, scheduleReadingAnchor])
+  // Reading-anchor observe-only resize/content trigger (project pattern:
+  // ResizeObserver on the container + content wrapper, MutationObserver on
+  // the container, both disconnected on cleanup). Never scrolls/persists.
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    let resizeObserver: ResizeObserver | null = null
+    try {
+      resizeObserver = new ResizeObserver(() => scheduleReadingAnchor())
+      resizeObserver.observe(container)
+      const content = container.firstElementChild
+      if (content instanceof HTMLElement) resizeObserver.observe(content)
+    } catch {
+      resizeObserver = null
+    }
+    let mutationObserver: MutationObserver | null = null
+    try {
+      mutationObserver = new MutationObserver(() => scheduleReadingAnchor())
+      mutationObserver.observe(container, { childList: true, subtree: true, characterData: true })
+    } catch {
+      mutationObserver = null
+    }
+    return () => {
+      try {
+        resizeObserver?.disconnect()
+      } catch {}
+      try {
+        mutationObserver?.disconnect()
+      } catch {}
+    }
+  }, [scheduleReadingAnchor, scrollContainerRef, viewportState.window])
 
   // Divider restore search driver (binding invariant, single owner).
   // Exactly one action per invocation, decided purely from the committed

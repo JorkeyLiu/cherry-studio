@@ -38,7 +38,7 @@ import styled from 'styled-components'
 import ChatNavbar from './components/ChatNavBar'
 import Inputbar from './Inputbar/Inputbar'
 import ConversationNavigation from './Messages/ConversationNavigation'
-import Messages, { type MessagesHandle } from './Messages/Messages'
+import Messages, { type MessagesHandle, type ReadingAnchorReport } from './Messages/Messages'
 import { RouteViewportProvider } from './Messages/routeViewportContext'
 import Tabs from './Tabs'
 
@@ -64,6 +64,7 @@ const Chat: FC<Props> = (props) => {
   const contentSearchRef = React.useRef<ContentSearchRef>(null)
   const messagesRef = React.useRef<MessagesHandle>(null)
   const [filterIncludeUser, setFilterIncludeUser] = useState(false)
+  const [readingAnchor, setReadingAnchor] = useState<ReadingAnchorReport | null>(null)
   // S3.5: ContentSearch is parent-owned lazy activation — zero instance before invocation.
   const [isContentSearchActive, setIsContentSearchActive] = useState(false)
   const [pendingSearchText, setPendingSearchText] = useState<string | undefined>(undefined)
@@ -359,6 +360,7 @@ const Chat: FC<Props> = (props) => {
                   {messageNavigation && (
                     <ConversationNavigation
                       topicId={props.activeTopic.id}
+                      readingAnchor={readingAnchor}
                       onNavigate={(id) => messagesRef.current?.scrollToMessageById(id)}
                     />
                   )}
@@ -370,6 +372,7 @@ const Chat: FC<Props> = (props) => {
                     onComponentUpdate={messagesComponentUpdateHandler}
                     onFirstUpdate={messagesComponentFirstUpdateHandler}
                     sharedContextInfo={sharedContextInfo}
+                    onReadingAnchor={setReadingAnchor}
                   />
                 </div>
                 {isContentSearchActive && (
