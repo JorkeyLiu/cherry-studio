@@ -17,18 +17,29 @@ Do not report full-suite CI E2E results.
 ## 1. When to write E2E vs. unit/component tests
 
 E2E is expensive: it boots the real Electron app, exercises real IPC, real persistence and
-real rendering. Use it deliberately.
+real rendering. An E2E spec is a durable reusable asset — a frozen UI operation sequence
+plus expected results guarding a coherent business behavior model against silent future
+regression. Canonical asset-admission and current-change verification decisions live in the
+`ui-verify-change` skill; this README keeps the technical authoring and harness contract.
 
-| Concern | Prefer |
+| Concern | Harness capable of executing it |
 |---|---|
 | Isolated logic, reducers, selectors, pure utils, component behavior | Vitest unit/component tests (`src/main/**`, `src/renderer/**`, `packages/**`, `scripts/**` — see `vitest.config.ts`) |
-| Full app boot, real IPC round-trips, main-process behavior | E2E |
-| Filesystem / database persistence (Dexie, SQLite via ChatDb), relaunch survival | E2E |
-| Native integrations, multiple windows, app lifecycle | E2E |
-| Long user journeys spanning real UI | E2E |
+| Full app boot, real IPC round-trips, main-process behavior | E2E harness |
+| Filesystem / database persistence (Dexie, SQLite via ChatDb), relaunch survival | E2E harness |
+| Native integrations, multiple windows, app lifecycle | E2E harness |
+| Long user journeys spanning real UI | E2E harness |
 
-Write an E2E spec only when the behavior cannot be proven at a lower level. Features
-without tests are not complete — but the cheapest sufficient test level wins.
+Needing the E2E harness to execute a behavior does not by itself warrant a new durable
+asset. Admit a new E2E asset only for lasting protection/reuse value of the workflow and
+its interrelated business constraints/transitions — not for needing Electron/UI as such,
+component count, a single bug occurrence, or lower-level inability to prove the current
+visual. Complexity supports value but sets no module-count threshold; a genuinely valuable
+simple workflow may qualify. Assertions and scenarios bound coverage and never promise
+absolute no-regressions. Prefer reusing an existing spec (run it where relevant) before
+creating one; proving the current change and creating an asset are separate decisions.
+Product features without tests are not complete — but pure-presentation, low-impact tweaks
+need no new tests mirroring implementation detail.
 
 ## 2. Repository layout (committed harness)
 
