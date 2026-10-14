@@ -1,6 +1,5 @@
 import { HolderOutlined } from '@ant-design/icons'
 import { loggerService } from '@logger'
-import { ComposerIconButton } from '@renderer/components/Buttons'
 import TranslateButton from '@renderer/components/TranslateButton'
 import { useRuntime } from '@renderer/hooks/useRuntime'
 import { useSettings } from '@renderer/hooks/useSettings'
@@ -13,10 +12,9 @@ import { classNames } from '@renderer/utils'
 import { formatQuotedText } from '@renderer/utils/formats'
 import { isSendMessageKeyPressed } from '@renderer/utils/input'
 import { IpcChannel } from '@shared/IpcChannel'
-import { Divider, Tooltip } from 'antd'
+import { Divider } from 'antd'
 import TextArea from 'antd/es/input/TextArea'
 import type { TextAreaRef } from 'antd/lib/input/TextArea'
-import { CirclePause } from 'lucide-react'
 import type { CSSProperties, FC } from 'react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -32,6 +30,7 @@ import { useFileDragDrop } from '../hooks/useFileDragDrop'
 import { usePasteHandler } from '../hooks/usePasteHandler'
 import { getInputbarConfig } from '../registry'
 import SendMessageButton from '../SendMessageButton'
+import StopGenerationButton from '../StopGenerationButton'
 import type { InputbarScope } from '../types'
 import InputbarSettings from './InputbarSettings'
 
@@ -334,20 +333,15 @@ export const InputbarCore: FC<InputbarCoreProps> = ({
         isLoading={isTranslating}
       />
     )
-    extras.push(<SendMessageButton key="send-message" sendMessage={handleSendMessage} disabled={isSendDisabled} />)
+    // Mutually exclusive composer action at a single slot: idle renders send,
+    // generation renders stop. The two never coexist.
     if (isLoading) {
-      extras.push(
-        <Tooltip key="pause" placement="top" title={t('chat.input.pause')} mouseLeaveDelay={0} arrow>
-          <ComposerIconButton onClick={onPause} style={{ marginRight: -2 }}>
-            {/* Inline style (not the `color` prop): the wrapper pins glyph color via stylesheet,
-                which beats lucide presentation attributes but loses to inline style. */}
-            <CirclePause size={16} style={{ color: 'var(--color-error)' }} />
-          </ComposerIconButton>
-        </Tooltip>
-      )
+      extras.push(<StopGenerationButton key="stop-generation" onStop={onPause} />)
+    } else {
+      extras.push(<SendMessageButton key="send-message" sendMessage={handleSendMessage} disabled={isSendDisabled} />)
     }
     return <>{extras}</>
-  }, [text, onTranslated, isTranslating, handleSendMessage, isSendDisabled, isLoading, t, onPause])
+  }, [text, onTranslated, isTranslating, handleSendMessage, isSendDisabled, isLoading, onPause])
 
   return (
     <div style={{ width: '100%' }}>
