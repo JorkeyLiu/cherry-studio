@@ -32,7 +32,10 @@ import {
 } from '../server'
 
 const SERVER_ENTRY = resolve(process.cwd(), 'scripts/sync-relay/server.ts')
-const TSX_ENTRY = resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs')
+// Direct Node loader for the same TS entrypoint: `node --import tsx <entry>`
+// executes the identical server file in the owned child without the tsx CLI
+// supervisor, whose signal relay + 128+signo exit can race graceful shutdown.
+const TSX_LOADER_PREFIX = ['--import', 'tsx'] as const
 const TOKEN = 'user-entrypoint-token-1'
 const READINESS_RE = /\[sync-relay\] listening on http:\/\/127\.0\.0\.1:(\d+)/
 const START_TIMEOUT_MS = 15000
@@ -149,7 +152,7 @@ describe('relay user-entrypoint CLI contract', () => {
   })
 
   it('--help exits 0 with usage on stdout', () => {
-    const res = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--help'], {
+    const res = spawnSync(process.execPath, [...TSX_LOADER_PREFIX, SERVER_ENTRY, '--help'], {
       timeout: 30000,
       encoding: 'utf8'
     })
@@ -168,7 +171,7 @@ describe('relay user-entrypoint CLI contract', () => {
       const res = spawnSync(
         process.execPath,
         [
-          TSX_ENTRY,
+          ...TSX_LOADER_PREFIX,
           SERVER_ENTRY,
           '--host',
           '0.0.0.0',
@@ -194,7 +197,7 @@ describe('relay user-entrypoint CLI contract', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-cli-'))
     const dbPath = join(root, 'should-not-exist.db')
     try {
-      const res = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--port', 'abc', '--db', dbPath], {
+      const res = spawnSync(process.execPath, [...TSX_LOADER_PREFIX, SERVER_ENTRY, '--port', 'abc', '--db', dbPath], {
         timeout: 30000,
         encoding: 'utf8'
       })
@@ -209,7 +212,7 @@ describe('relay user-entrypoint CLI contract', () => {
     const root = mkdtempSync(join(tmpdir(), 'sync-relay-cli-'))
     const dbPath = join(root, 'should-not-exist.db')
     try {
-      const res = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--port', '0', '--db', dbPath], {
+      const res = spawnSync(process.execPath, [...TSX_LOADER_PREFIX, SERVER_ENTRY, '--port', '0', '--db', dbPath], {
         timeout: 30000,
         encoding: 'utf8',
         env: { ...process.env, SYNC_RELAY_TOKEN: '' }
@@ -229,12 +232,12 @@ describe('relay user-entrypoint CLI contract', () => {
     try {
       const unknown = spawnSync(
         process.execPath,
-        [TSX_ENTRY, SERVER_ENTRY, '--nope', '--db', dbPath, '--token', TOKEN],
+        [...TSX_LOADER_PREFIX, SERVER_ENTRY, '--nope', '--db', dbPath, '--token', TOKEN],
         { timeout: 30000, encoding: 'utf8' }
       )
       expect(unknown.status).toBe(2)
       expect(`${String(unknown.stderr)}${String(unknown.stdout)}`).toMatch(/unknown option/)
-      const missing = spawnSync(process.execPath, [TSX_ENTRY, SERVER_ENTRY, '--port'], {
+      const missing = spawnSync(process.execPath, [...TSX_LOADER_PREFIX, SERVER_ENTRY, '--port'], {
         timeout: 30000,
         encoding: 'utf8'
       })
@@ -349,7 +352,7 @@ describe('relay user-entrypoint graceful shutdown', () => {
       new Promise((resolveStart, rejectStart) => {
         const child = spawn(
           process.execPath,
-          [TSX_ENTRY, SERVER_ENTRY, '--port', port, '--db', dbPath, '--token', TOKEN],
+          [...TSX_LOADER_PREFIX, SERVER_ENTRY, '--port', port, '--db', dbPath, '--token', TOKEN],
           {
             stdio: ['ignore', 'pipe', 'pipe']
           }
