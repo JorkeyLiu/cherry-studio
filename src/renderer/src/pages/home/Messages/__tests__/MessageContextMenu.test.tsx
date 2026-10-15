@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -25,7 +25,13 @@ const mocks = vi.hoisted(() => ({
     handleRedo: vi.fn(),
     clearSelection: vi.fn()
   },
-  dropdownProps: { current: null as unknown as { menu: { items: any[] }; onOpenChange: (open: boolean) => void } },
+  dropdownProps: {
+    current: null as unknown as {
+      menu: { items: any[] }
+      onOpenChange: (open: boolean) => void
+      open: boolean
+    }
+  },
   getSegmentsForTopic: vi.fn(() => []),
   createSegment: vi.fn(),
   updateSegmentMessageIds: vi.fn(),
@@ -77,12 +83,14 @@ vi.mock('react-i18next', () => ({
 vi.mock('antd', () => ({
   Dropdown: (props: {
     children: React.ReactNode
+    open?: boolean
     menu?: { items?: Array<{ key?: string; type?: string; disabled?: boolean; label?: string; onClick?: () => void }> }
     onOpenChange?: (open: boolean) => void
   }) => {
     mocks.dropdownProps.current = {
       menu: { items: props.menu?.items ?? [] },
-      onOpenChange: props.onOpenChange ?? (() => {})
+      onOpenChange: props.onOpenChange ?? (() => {}),
+      open: props.open ?? false
     }
     return <div data-testid="dropdown-host">{props.children}</div>
   }
@@ -378,6 +386,102 @@ describe('MessageContextMenu (stable host, PERF-100)', () => {
         .map((item) => item.key)
       expect(keys).not.toEqual(['copy', 'quote'])
       expect(keys).toContain('cut')
+    })
+  })
+
+  describe('controlled open lifecycle (blank-click dismiss + edit-mode flip)', () => {
+    const renderBlankHost = () => {
+      const { rerender } = renderHost(
+        <div data-testid="host-blank">
+          <span data-testid="host-blank-inner">blank</span>
+        </div>
+      )
+      return { rerender }
+    }
+
+    const openMenu = () => {
+      act(() => {
+        mocks.dropdownProps.current.onOpenChange(true)
+      })
+      expect(mocks.dropdownProps.current.open).toBe(true)
+    }
+
+    it('starts closed and opens on right-click in edit mode', () => {
+      mocks.editMode.isEnabled = true
+      renderBlankHost()
+
+      expect(mocks.dropdownProps.current.open).toBe(false)
+      openMenu()
+    })
+
+    it('closes on blank left-click inside the host via capture (edit mode)', () => {
+      mocks.editMode.isEnabled = true
+      renderBlankHost()
+      openMenu()
+
+      // Capture runs outer-first on the trigger child, before the inner
+      // turn-level click capture that stopPropagation()s for selection.
+      fireEvent.click(screen.getByTestId('host-blank-inner'))
+
+      expect(mocks.dropdownProps.current.open).toBe(false)
+    })
+
+    it('closes on blank left-click inside the host in normal mode without breaking selection capture', () => {
+      mocks.editMode.isEnabled = false
+      renderHost(<p data-testid="target">hello selection</p>)
+
+      selectTextIn(screen.getByTestId('target'))
+      openMenu()
+
+      // Selection items are still offered on open ...
+      expect(mocks.dropdownProps.current.menu.items.map((item) => item.key)).toEqual(['copy', 'quote'])
+
+      fireEvent.click(screen.getByTestId('target'))
+
+      // ... and a blank left-click dismisses.
+      expect(mocks.dropdownProps.current.open).toBe(false)
+    })
+
+    it('dismisses the residual menu on edit-mode exit (shortcut path) and keeps it closed on re-enter', () => {
+      mocks.editMode.isEnabled = true
+      // Fresh elements per render: memo(MessageContextMenu) bails out on
+      // identical props, while production re-renders via the EditMode
+      // context subscription on every isEnabled flip.
+      const renderFlipTree = () => (
+        <MessageContextMenu topicId="t1">
+          <div data-testid="host-blank">
+            <span data-testid="host-blank-inner">blank</span>
+          </div>
+        </MessageContextMenu>
+      )
+      const { rerender } = render(renderFlipTree())
+      openMenu()
+
+      // Shortcut exit dispatches toggleEditMode(false): same isEnabled flip.
+      mocks.editMode.isEnabled = false
+      rerender(renderFlipTree())
+      expect(mocks.dropdownProps.current.open).toBe(false)
+
+      // Re-enter without a fresh right-click: no residual menu.
+      mocks.editMode.isEnabled = true
+      rerender(renderFlipTree())
+      expect(mocks.dropdownProps.current.open).toBe(false)
+
+      // A fresh right-click reopens.
+      openMenu()
+    })
+
+    it('menu items still execute after reopen', () => {
+      mocks.editMode.isEnabled = true
+      mocks.editMode.selectedGroupIds = ['ask-1']
+      mocks.editMode.groups = [{ askId: 'ask-1', messages: [{ id: 'm1' }] }]
+      renderBlankHost()
+      openMenu()
+
+      act(() => {
+        mocks.dropdownProps.current.menu.items.find((item) => item.key === 'copy')!.onClick()
+      })
+      expect(mocks.editMode.handleCopy).toHaveBeenCalled()
     })
   })
 
