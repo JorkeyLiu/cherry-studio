@@ -10,8 +10,8 @@
  *    selection of filtered non-pinned topics
  *  - normal-flow footer: no 70px overlay clearance; trash hidden while
  *    management is active, normal otherwise
- *  - icon/layout source contract (SquareArrowOutUpLeft import,
- *    SquareArrowOutDownRight export, FolderOutput move, no Download identifier)
+ *  - icon/layout source contract (SquareArrowOutUpLeft export,
+ *    FileDown import, FolderOutput move, no Download identifier)
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -279,7 +279,7 @@ describe('Topics header search', () => {
     // Immediately left: import follows search with no topic header button between.
     expect(searchBtn.compareDocumentPosition(importBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(header.querySelector('svg.lucide-book-search')).not.toBeNull()
-    expect(header.querySelector('svg.lucide-square-arrow-out-down-right')).not.toBeNull()
+    expect(header.querySelector('svg.lucide-file-down')).not.toBeNull()
   })
 
   it('open replaces New Topic + search button with a focused input + X, keeps import/manage', () => {
@@ -370,13 +370,7 @@ describe('Topics icon/layout source contract', () => {
   const manageSource = readFileSync(managePath, 'utf8')
 
   it('uses the specified lucide icons and no removed ones', () => {
-    for (const icon of [
-      'SquareArrowOutUpLeft',
-      'SquareArrowOutDownRight',
-      'FolderOutput',
-      'BookSearchIcon',
-      'ListTodo'
-    ]) {
+    for (const icon of ['SquareArrowOutUpLeft', 'FileDown', 'FolderOutput', 'BookSearchIcon', 'ListTodo']) {
       expect(topicsSource).toContain(icon)
     }
     expect(topicsSource).toContain('lucide-book-search')

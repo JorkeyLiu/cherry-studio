@@ -42,6 +42,22 @@ import type { RemoteSyncState } from './backup'
 
 export type SendMessageShortcut = 'Enter' | 'Shift+Enter' | 'Ctrl+Enter' | 'Command+Enter' | 'Alt+Enter'
 
+// Canonical resizable sidebar width bounds (single source of truth — do not
+// scatter width literals elsewhere; import these instead).
+// Both home sidebars share one 220px minimum: the topic header carries
+// 新建话题 plus three 28px icon slots beside a flexible add button, and the
+// left assistants pane is unified to the same floor. Default and maximum are
+// shared as well.
+export const SIDEBAR_DEFAULT_WIDTH = 275
+export const SIDEBAR_MAX_WIDTH = 600
+export const SIDEBAR_MIN_WIDTH = 220
+
+/** Normalize any home sidebar width (persisted load or resize dispatch). */
+export const normalizeSidebarWidth = (width: unknown): number => {
+  if (typeof width !== 'number' || !Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width))
+}
+
 // Re-export for backward compatibility
 export { DEFAULT_SIDEBAR_ICONS }
 
@@ -416,8 +432,8 @@ export const initialState: SettingsState = {
     apiKey: `cs-sk-${uuid()}`
   },
   showMessageOutline: false,
-  assistantsWidth: 275,
-  topicListWidth: 275
+  assistantsWidth: SIDEBAR_DEFAULT_WIDTH,
+  topicListWidth: SIDEBAR_DEFAULT_WIDTH
 }
 
 const settingsSlice = createSlice({
@@ -743,10 +759,10 @@ const settingsSlice = createSlice({
       state.showMessageOutline = action.payload
     },
     setAssistantsWidth: (state, action: PayloadAction<number>) => {
-      state.assistantsWidth = action.payload
+      state.assistantsWidth = normalizeSidebarWidth(action.payload)
     },
     setTopicListWidth: (state, action: PayloadAction<number>) => {
-      state.topicListWidth = action.payload
+      state.topicListWidth = normalizeSidebarWidth(action.payload)
     }
   }
 })

@@ -50,6 +50,7 @@ import dayjs from 'dayjs'
 import { findIndex } from 'lodash'
 import {
   CheckSquare,
+  FileDown,
   FolderOutput,
   ListTodo,
   NotebookPen,
@@ -58,7 +59,6 @@ import {
   Save,
   Sparkles,
   Square,
-  SquareArrowOutDownRight,
   SquareArrowOutUpLeft,
   XIcon
 } from 'lucide-react'
@@ -731,24 +731,30 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
         header={
           <HeaderRow>
             {isHeaderSearchOpen ? (
-              <>
-                <HeaderSearchInputWrapper>
-                  <HeaderSearchInput
-                    ref={headerSearchInputRef}
-                    type="text"
-                    placeholder={t('chat.topics.search.placeholder')}
-                    aria-label={t('chat.topics.search.title')}
-                    data-testid="topic-search-input"
-                    value={searchText}
-                    onChange={(e) => setSearchText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Escape') {
-                        e.preventDefault()
-                        closeHeaderSearch()
-                      }
-                    }}
-                  />
-                </HeaderSearchInputWrapper>
+              <HeaderSearchInputWrapper>
+                <HeaderSearchInput
+                  ref={headerSearchInputRef}
+                  type="text"
+                  placeholder={t('chat.topics.search.placeholder')}
+                  aria-label={t('chat.topics.search.title')}
+                  data-testid="topic-search-input"
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      closeHeaderSearch()
+                    }
+                  }}
+                />
+              </HeaderSearchInputWrapper>
+            ) : (
+              <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
+                {t('chat.add.topic.title')}
+              </AddButton>
+            )}
+            <HeaderIconGroup>
+              {isHeaderSearchOpen ? (
                 <Tooltip title={t('common.close')} mouseEnterDelay={0.5}>
                   <HeaderIconButton
                     role="button"
@@ -765,12 +771,7 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                     <XIcon size={14} />
                   </HeaderIconButton>
                 </Tooltip>
-              </>
-            ) : (
-              <>
-                <AddButton onClick={() => EventEmitter.emit(EVENT_NAMES.ADD_NEW_TOPIC)}>
-                  {t('chat.add.topic.title')}
-                </AddButton>
+              ) : (
                 <Tooltip title={t('chat.topics.search.title')} mouseEnterDelay={0.5}>
                   <HeaderIconButton
                     role="button"
@@ -787,45 +788,45 @@ export const Topics: React.FC<Props> = ({ assistant: _assistant, activeTopic, se
                     <BookSearchIcon size={14} />
                   </HeaderIconButton>
                 </Tooltip>
-              </>
-            )}
-            <Tooltip title={t('chat.topics.import.action')} mouseEnterDelay={0.5}>
-              <HeaderIconButton
-                role="button"
-                tabIndex={0}
-                aria-label={t('chat.topics.import.action')}
-                data-testid="topic-import-btn"
-                onClick={() => void onImportTopicData()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    void onImportTopicData()
-                  }
-                }}>
-                <SquareArrowOutDownRight size={14} />
-              </HeaderIconButton>
-            </Tooltip>
-            <Tooltip title={t('chat.topics.manage.title')} mouseEnterDelay={0.5}>
-              <HeaderIconButton
-                role="button"
-                tabIndex={0}
-                aria-label={t('chat.topics.manage.title')}
-                data-testid="topic-manage-btn"
-                onClick={isManageMode ? exitManageMode : enterManageMode}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    if (isManageMode) {
-                      exitManageMode()
-                    } else {
-                      enterManageMode()
+              )}
+              <Tooltip title={t('chat.topics.import.action')} mouseEnterDelay={0.5}>
+                <HeaderIconButton
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t('chat.topics.import.action')}
+                  data-testid="topic-import-btn"
+                  onClick={() => void onImportTopicData()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      void onImportTopicData()
                     }
-                  }
-                }}
-                className={isManageMode ? 'active' : ''}>
-                <ListTodo size={14} />
-              </HeaderIconButton>
-            </Tooltip>
+                  }}>
+                  <FileDown size={14} />
+                </HeaderIconButton>
+              </Tooltip>
+              <Tooltip title={t('chat.topics.manage.title')} mouseEnterDelay={0.5}>
+                <HeaderIconButton
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t('chat.topics.manage.title')}
+                  data-testid="topic-manage-btn"
+                  onClick={isManageMode ? exitManageMode : enterManageMode}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      if (isManageMode) {
+                        exitManageMode()
+                      } else {
+                        enterManageMode()
+                      }
+                    }
+                  }}
+                  className={isManageMode ? 'active' : ''}>
+                  <ListTodo size={14} />
+                </HeaderIconButton>
+              </Tooltip>
+            </HeaderIconGroup>
           </HeaderRow>
         }
         disabled={isManageMode}>
@@ -1147,14 +1148,26 @@ const HeaderRow = styled.div`
   box-sizing: border-box;
 `
 
+const HeaderIconGroup = styled.div`
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+  flex: none;
+  flex-shrink: 0;
+  margin-left: 0;
+  width: auto;
+`
+
 const HeaderIconButton = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
+  width: 28px;
   height: 36px;
-  min-width: 36px;
+  min-width: 28px;
   min-height: 36px;
+  flex: none;
   box-sizing: border-box;
   border-radius: var(--list-item-border-radius);
   cursor: pointer;

@@ -22,7 +22,7 @@ import { resolveSharedContextInfo } from '@renderer/services/contextInfoService'
 import { EVENT_NAMES, EventEmitter } from '@renderer/services/EventService'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { selectMessageBlocksByIds } from '@renderer/store/messageBlock'
-import { setTopicListWidth } from '@renderer/store/settings'
+import { setTopicListWidth, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Model, Topic } from '@renderer/types'
 import { Flex } from 'antd'
@@ -399,6 +399,7 @@ const Chat: FC<Props> = (props) => {
         {showTopics && (
           <ResizableHandle
             cssVar="--topic-list-width"
+            minWidth={SIDEBAR_MIN_WIDTH}
             onResizeEnd={(width) => dispatch(setTopicListWidth(width))}
             side="right"
           />

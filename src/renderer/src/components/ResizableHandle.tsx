@@ -1,3 +1,4 @@
+import { SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH } from '@renderer/store/settings'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { styled } from 'styled-components'
 
@@ -8,9 +9,9 @@ interface ResizableHandleProps {
   onResizeEnd: (width: number) => void
   /** Optional: called continuously during drag with current width */
   onResizing?: (width: number) => void
-  /** Minimum width in px (default: 180) */
+  /** Minimum width in px (default: canonical SIDEBAR_MIN_WIDTH) */
   minWidth?: number
-  /** Maximum width in px (default: 600) */
+  /** Maximum width in px (default: canonical SIDEBAR_MAX_WIDTH) */
   maxWidth?: number
   /** Side of the panel: 'left' means handle is on the right edge of a left panel; 'right' means handle is on the left edge of a right panel */
   side: 'left' | 'right'
@@ -22,8 +23,8 @@ const ResizableHandle = ({
   cssVar,
   onResizeEnd,
   onResizing,
-  minWidth = 180,
-  maxWidth = 600,
+  minWidth = SIDEBAR_MIN_WIDTH,
+  maxWidth = SIDEBAR_MAX_WIDTH,
   side
 }: ResizableHandleProps) => {
   const isDragging = useRef(false)

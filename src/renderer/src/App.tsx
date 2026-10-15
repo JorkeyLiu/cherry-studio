@@ -17,21 +17,11 @@ import StyleSheetManager from './context/StyleSheetManager'
 import { ThemeProvider } from './context/ThemeProvider'
 import Router from './Router'
 import { isCatalogRecoverySurface, registerCatalogRecoveryHandler } from './services/catalogRecoveryService'
+import { normalizeSidebarWidth } from './store/settings'
 
 const logger = loggerService.withContext('App.tsx')
 
-const DEFAULT_SIDEBAR_WIDTH = 275
-const MIN_SIDEBAR_WIDTH = 180
-const MAX_SIDEBAR_WIDTH = 600
-
-const formatSidebarWidth = (width: unknown) => {
-  const normalized =
-    typeof width === 'number' && Number.isFinite(width)
-      ? Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width))
-      : DEFAULT_SIDEBAR_WIDTH
-
-  return `${normalized}px`
-}
+const formatSidebarWidth = (width: unknown) => `${normalizeSidebarWidth(width)}px`
 
 // 创建 React Query 客户端
 const queryClient = new QueryClient({
