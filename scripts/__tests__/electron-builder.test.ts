@@ -239,7 +239,6 @@ describe('package contract — migration-portable stable assertions (REPO-MIGRAT
   const REQUIRED_SCRIPTS = [
     'dev',
     'build',
-    'build:check',
     'build:mac:arm64',
     'build:unpack',
     'test',

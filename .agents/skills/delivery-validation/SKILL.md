@@ -1,55 +1,47 @@
 ---
 name: delivery-validation
-description: Reliable execution and reporting of long-running validation gates in this repository. Use when running completion gates (pnpm format/lint/test), pre-commit validation (pnpm build:check), full tests, lint/format/typecheck, E2E/build/packaging, or any other long-running validation command — and when classifying validation failures or deciding whether prior gate evidence can be reused for the current worktree state.
+description: Reliable execution and reporting of long-running validation commands in this repository. Use when running full tests, lint/format/typecheck/openapi/build, E2E, packaging, or any other long-running validation command — and when classifying validation failures or deciding whether prior command results can still be reused for the current worktree state.
 ---
 
 # Delivery Validation
 
-This skill defines how to run the repository's mandatory validation gates
+This skill defines how to run the repository's long-running validation commands
 reliably, prove trustworthy success, retry only when a cause actually changed,
-and report results honestly. It is the execution companion to the gate policy
-stated in the root `AGENTS.md`: the root guide says *which* gates are required
-and *what counts as success*; this skill covers *how* to run them, including
-native runtime mechanics, budgets, logging, retry, evidence reuse, cleanup, and
-failure classification.
+and report results honestly. It is the execution companion to the validation
+policy stated in the root `AGENTS.md`: the root guide states that the commands
+are independent and that verification scope follows the impact of the change;
+this skill covers *how* to run them, including native runtime mechanics,
+budgets, logging, retry, evidence reuse, cleanup, and failure classification.
 
 ## When to use
 
-- Running completion gates (`pnpm format`, `pnpm lint`, `pnpm test`) before
-  declaring a coding task complete.
-- Running the pre-commit gate `pnpm build:check` (`pnpm lint && pnpm
-  openapi:check && pnpm test`).
+- Running validation commands (`pnpm lint`, `pnpm test`, `pnpm typecheck`,
+  `pnpm openapi:check`, `pnpm format`, `pnpm build`) for a change.
 - Running any long-running validation command: full tests, lint, format,
   typecheck, E2E, fresh production builds, or packaging.
 - Classifying a validation failure (new vs. known-baseline vs. environmental vs.
   unrelated).
-- Deciding whether prior validation evidence is still fresh for the current
+- Deciding whether prior command results are still fresh for the current
   worktree state.
 
-## Determine the required gates
+## Choose the commands to run
 
-- The root `AGENTS.md` is canonical. Read it to determine which gates are
-  mandatory and how success is defined. Never silently waive a gate the
-  repository declares.
-- `package.json` scripts define exactly what each gate runs (for example,
-  `pnpm build:check` is lint + openapi:check + full test; `pnpm test` runs all
-  Vitest suites under Node).
-- Focused suites supplement, but never replace, the aggregate gates.
-- **Non-duplication (LOCK-VG-001):** `pnpm build:check` already runs lint +
-  openapi:check + full test for the exact worktree state. Do **not** run
-  `pnpm format`, `pnpm lint`, and `pnpm test` separately before
-  `pnpm build:check` — run `build:check` **once** per exact worktree state.
-  A passing `pnpm build:check` is sufficient aggregate evidence and proves its
-  nested gates, so do not immediately repeat those nested gates.
-- **Fast-feedback boundary (LOCK-VG-002/003):** `pnpm verify:changed` is
-  renderer-only local feedback, **never a completion gate, never a substitute
-  for `pnpm build:check`, and never CI proof**. It is strict renderer-only:
-  any Main/preload/shared/package/config/scripts/unknown path must fail closed
-  with instruction to run `pnpm build:check`; no partial green result. It runs
-  via `pnpm native:run node -- ...` and includes
-  untracked renderer files; docs-only/no-renderer-change sets exit 0 as a
-  no-op without claiming validation proof. CI's path-filter matrix and full
-  jobs remain unchanged.
+- The root `AGENTS.md` is canonical. It declares no single mandatory aggregate
+  gate: `pnpm lint`, `pnpm test`, `pnpm typecheck`, `pnpm openapi:check`,
+  `pnpm format`, and `pnpm build` are independent. Read the change and run the
+  set it actually affects, at the scope its impact requires.
+- `package.json` scripts define exactly what each command runs (for example,
+  `pnpm test` runs all Vitest suites under Node; `pnpm lint` runs oxlint +
+  eslint + typecheck + i18n check + format check).
+- Focused suites are a way to get fast feedback for a narrow change; when the
+  change reaches further, run the broader command as well.
+- `pnpm verify:changed` is renderer-only local feedback, **never a completion
+  gate and never CI proof**. It is strict renderer-only: any
+  Main/preload/shared/package/config/scripts/unknown path must fail closed with
+  instruction to run the affected standalone commands; no partial green result.
+  It runs via `pnpm native:run node -- ...` and includes untracked renderer
+  files; docs-only/no-renderer-change sets exit 0 as a no-op without claiming
+  validation proof. CI's path-filter matrix and full jobs remain unchanged.
 
 ## Establish the environment first
 
@@ -61,14 +53,14 @@ failure classification.
 
 better-sqlite3 13.0.3 uses a Node-API prebuilt: the same packaged file
 loads under both Node 24.11.1 and Electron 41.2.1. There is no ABI switching,
-rebuilding, restoration, or checkout lock — `node`-runtime gates (`pnpm test`,
-`test:*`, `pnpm build:check`) and `electron`-runtime gates (`pnpm build`,
+rebuilding, restoration, or checkout lock — `node`-runtime commands (`pnpm test`,
+`test:*`) and `electron`-runtime commands (`pnpm build`,
 `pnpm test:e2e`, `pnpm ui:observe`) may run in parallel. Runtime machinery lives
 in `scripts/native-runtime/`; canonical commands are wired through it in
 `package.json`:
 
-- Run the gate's canonical public command directly (`pnpm test`,
-  `pnpm test:e2e`, `pnpm build:check`, …). Public `pnpm native:run
+- Run the command's canonical public command directly (`pnpm test`,
+  `pnpm test:e2e`, …). Public `pnpm native:run
   <node|electron> -- <cmd...>` is a lightweight launcher — readonly SQL runtime
   probe plus sanitized spawn, NOT a lane manager. Probes never recompile,
   switch, or share locked mutable state; package platform/NAPI compatibility is
@@ -80,9 +72,9 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
 - `pnpm native:check:node` / `pnpm native:check:electron` are pure read-only
   diagnostics (`Database(':memory:')` + `select 1 as ok` + close under the
   target runtime). Use them to inspect the current runtime state when
-  classifying a native-related failure; never as a required step before a gate.
-  Only a real runtime SQL probe proves success; `.forge-meta` markers and
-  filenames are never trusted.
+  classifying a native-related failure; never as a required step before a
+  command. Only a real runtime SQL probe proves success; `.forge-meta` markers
+  and filenames are never trusted.
 - `ELECTRON_RUN_AS_NODE=1` must never be exported in a shell or globally, nor
   used to launch Electron. Only controlled Electron probe children (and the
   existing controlled E2E relay children) may set it.
@@ -92,35 +84,31 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
 
 ## Evidence identity and freshness
 
-- Evidence is valid only for the exact worktree state the gate ran against. The
-  gate input surface is what a gate's commands actually consume: source files,
-  test files, config files read by the gate commands, the dependency/lockfile
-  state, package scripts, generated contracts (for example the OpenAPI spec),
-  i18n locale inputs, and API spec definitions — plus the Node/Electron runtime
-  and the exact command invoked. Documentation, skill, and other markdown files are
+- Evidence is valid only for the exact worktree state the command ran against.
+  The input surface is what a command actually consumes: source files, test
+  files, config files read by the commands, the dependency/lockfile state,
+  package scripts, generated contracts (for example the OpenAPI spec), i18n
+  locale inputs, and API spec definitions — plus the Node/Electron runtime and
+  the exact command invoked. Documentation, skill, and other markdown files are
   outside that surface: they are not inputs to oxlint/eslint, typecheck, i18n,
-  openapi, format, or test, so editing them cannot change what those gates
+  openapi, format, or test, so editing them cannot change what those commands
   validate.
-- A code-surface change invalidates evidence. After source, test, config,
+- A code-surface change invalidates prior results. After source, test, config,
   dependency, package-script, or generated-contract changes (including i18n
-  locale inputs and API spec definitions), rerun the affected gates against the
-  new state — a full `pnpm build:check` before the commit.
-- Reuse valid evidence on an unchanged code surface: a passing aggregate command
-  proves its nested gates (a passing `pnpm build:check` proves lint +
-  openapi:check + full test for that exact code surface), so do not immediately
-  repeat the nested gates.
-- Focused tests supplement, but never replace, aggregate gates.
-- Documentation/skill-only changes do not invalidate code gate evidence. Run the
-  directly affected structural checks — for example `pnpm skills:check`,
+  locale inputs and API spec definitions), rerun the affected commands against
+  the new state.
+- Reuse valid results on an unchanged code surface: a command's trustworthy
+  original exit code applies to that exact state, so it does not need to be
+  repeated for the same state.
+- Focused tests supplement the broader run; choose the scope the change's
+  impact requires.
+- Documentation/skill-only changes do not invalidate code-command results. Run
+  the directly affected structural checks — for example `pnpm skills:check`,
   symlink/link or reference checks, CLAUDE synchronization, and marker scans —
-  and reuse the still-valid full-gate evidence, provided that evidence genuinely
-  exists, was recorded completely (trustworthy original exit code, exact
-  worktree code state), and covers the same code surface. Never claim a gate
-  passed without such evidence, and never silently waive a gate the repository
-  declares.
-- If no valid full-gate evidence exists for the current code surface (for
-  example, the first commit on a fresh code state), run the full gate;
-  structural checks do not substitute for it.
+  and reuse the still-valid results for the unchanged code surface, provided
+  those results genuinely exist and were recorded completely (trustworthy
+  original exit code, exact worktree code state). Never claim a command passed
+  without such evidence.
 
 ## Command classes and default minimum budgets
 
@@ -129,7 +117,6 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
 | Ordinary focused Vitest | `test:*` sub-suites (main, renderer, aicore, shared, scripts, e2e-utils) | 10 minutes |
 | Lint | `pnpm lint` (oxlint + eslint + typecheck + i18n check + format check) | 10 minutes |
 | Full test | `pnpm test` (all Vitest suites) | 20 minutes |
-| Pre-commit aggregate | `pnpm build:check` | 30 minutes |
 | E2E / fresh build + E2E / packaging | `pnpm test:e2e`, fresh `pnpm build` followed by E2E, electron-builder packaging | at least 30 minutes |
 
 - These are initial budgets with headroom, not expected durations, and they
@@ -137,7 +124,7 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
 - Ordinary focused Vitest suites are deliberately separated from E2E, fresh
   build + E2E, and packaging: the latter are heavier and require larger budgets.
 - Increase a budget using trustworthy observed history — your own successful
-  runs of the same gate on this machine, or recorded run times from the
+  runs of the same command on this machine, or recorded run times from the
   repository — never an undefined "documented bound" or a guess.
 - The full-test budget covers the whole command, so calibrate it from
   trustworthy observed history of the full run — never hardcode an unsupported
@@ -145,14 +132,10 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
 - This budget table lives here, not in the root `AGENTS.md`; keep the root
   guide free of procedural tables.
 
-## Running a gate
+## Running a command
 
-- Run each aggregate gate once per evidence state. Do not rerun a gate solely
+- Run each command once per evidence state. Do not rerun a command solely
   to inspect its output.
-- **Do not duplicate gates:** a passing `pnpm build:check` already proves lint,
-  openapi:check, and full test for that exact worktree state. Do not run
-  `pnpm format`, `pnpm lint`, or `pnpm test` separately before `pnpm build:check`
-  for the same state — that wastes time without changing evidence.
 - For output-heavy commands, redirect stdout/stderr to a session-owned log in
   the session-designated temp area outside the worktree, and capture the
   producer's numeric exit status in the same shell invocation.
@@ -160,17 +143,17 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
   unavoidable, use `pipefail` and preserve the producer's status correctly.
 - If the execution tool truncates output and saves it to a path, read/search
   that saved file instead of rerunning. Never rerun merely to re-see the tail.
-- **Foreground for finite gates; background only for persistent services:** run every finite validation command whose result is needed
+- **Foreground for finite commands; background only for persistent services:** run every finite validation command whose result is needed
   before the next step in the foreground, with an adequate documented budget
   and its trustworthy original exit code. Reserve background execution for
   processes that must keep running to support later tasks (dev servers,
-  watchers, services) — never merely because a gate is long, produces much
+  watchers, services) — never merely because a command is long, produces much
   output, or might exceed an execution timeout. Duration and execution mode
-  are independent; all existing gate non-duplication, runtime,
-  minimum-budget, retry, progress, output-capture, cleanup, and exit
-  semantics still apply. Genuinely independent work may run as parallel
-  foreground invocations — do not block independent work needlessly.
-- **Inadequate foreground budget is not a reason to background a gate:** use
+  are independent; all existing runtime, minimum-budget, retry, progress,
+  output-capture, cleanup, and exit semantics still apply. Genuinely independent
+  work may run as parallel foreground invocations — do not block independent
+  work needlessly.
+- **Inadequate foreground budget is not a reason to background a command:** use
   the tool's supported continuation/polling for the same foreground
   invocation without restarting. Never invent a background-lifecycle
   workaround; if no continuation mechanism exists, report the concrete
@@ -181,7 +164,7 @@ in `scripts/native-runtime/`; canonical commands are wired through it in
 - Exit 0 = pass. Nonzero = fail. Timeout, killed, or unknown status =
   unverified.
 - Printed sub-suite PASS lines, or the absence of FAIL, are insufficient.
-  Success requires the trustworthy original exit code of the aggregate command.
+  Success requires the trustworthy original exit code of the command.
 - Report timeouts, kills, and unknown statuses honestly as unverified — never
   as success.
 
@@ -191,8 +174,8 @@ A rerun is allowed only after an observed cause changed:
 
 - The command failed before starting (for example, an invocation error) — rerun
   once after fixing the invocation.
-- A tool/session interruption not caused by the gate (session crash, tool
-  failure) left no trustworthy result — rerun the gate against the same
+- A tool/session interruption not caused by the command (session crash, tool
+  failure) left no trustworthy result — rerun the command against the same
   evidence state.
 - The environment was corrected — pinned toolchain restored, or the native
   runtime diagnosed via the readonly `native:check:*` probes after a real
@@ -201,7 +184,7 @@ A rerun is allowed only after an observed cause changed:
   registry, service outage) — rerun once after it clears.
 - The test suite's own retry policy applies — follow the suite's policy.
 - The budget was proved miscalibrated by trustworthy progress/duration evidence
-  (for example, retained logs show the gate was still progressing productively
+  (for example, retained logs show the command was still progressing productively
   past the bound) — one rerun with a corrected budget.
 
 A rerun is forbidden:
@@ -236,11 +219,11 @@ A rerun is forbidden:
 
 ## Failure classification
 
-Classify each failing gate:
+Classify each failing command:
 
-- **new-failure** — the gate fails on a state where it previously passed or is
+- **new-failure** — the command fails on a state where it previously passed or is
   expected to pass; the caller decides next steps.
-- **known-baseline** — the gate fails the same way on the clean baseline state;
+- **known-baseline** — the command fails the same way on the clean baseline state;
   not introduced by the current work.
 - **environmental** — toolchain, native runtime, network, or machine state issue; rerun
   once after the environment is corrected per the retry matrix.
@@ -252,18 +235,19 @@ implementation rights; report the classification and let the caller decide.
 
 ## Reporting
 
-Report, per gate: runtime state (the Node/Electron runtime the gate ran under), command count, the exact command
-with status and duration, the subchecks run, the failure classification (if
-any), evidence freshness (the code surface and worktree state the result
-applies to; when full-gate evidence is reused for a documentation/skill-only
-change, say so and list the structural checks that stand in for a rerun), a
-Cleanup field showing either "cleaned" or "retained (paths + reason)", and the
-verdict (pass / fail / unverified).
+- Report the exact command, the runtime state it ran under, and its trustworthy
+  original exit status.
+- Never present a timeout, kill, or unknown status as success, and never claim a
+  command passed without a recorded result for the exact worktree state.
+- When results for a documentation/skill-only change are reused rather than
+  rerun, say so and name the structural checks that stand in for a rerun.
+- Keep cleanup visible: state whether session-owned temp artifacts were cleaned
+  or retained (with paths and reason).
 
 ## Repository anchors
 
-- Root `AGENTS.md` — mandatory gates, pinned toolchain, native Node-API runtime
+- Root `AGENTS.md` — validation policy, pinned toolchain, native Node-API runtime
   contract, success standard.
-- `package.json` — exact composition of each gate.
+- `package.json` — exact composition of each command.
 - `tests/e2e/README.md` — E2E standards (fresh build, shared fixture, unique
   disposable profile, mocked external providers, deterministic assertions).

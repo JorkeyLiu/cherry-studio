@@ -147,7 +147,7 @@ Docker).
   pre-publish gate is intentionally minimal — the relay init contract
   suite (`scripts/sync-relay/__tests__/dockerRelayInit.test.ts`) plus
   `node --check`/`sh -n` static checks, none requiring a Docker daemon —
-  and is not the full `pnpm build:check` aggregate gate. On success it
+  and is not a full-repository validation gate. On success it
   builds once with Docker Buildx for `linux/amd64,linux/arm64` and pushes
   the same manifest under two tags to
   `docker.io/jorkeyliu/cherry-chat-sync-relay`: one commit-derived

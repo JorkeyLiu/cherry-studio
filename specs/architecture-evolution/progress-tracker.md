@@ -76,10 +76,10 @@ Full four-field contracts, provenance, and decisions in `docs/archived/architect
 
 Execution is batched at the **semantic-risk boundary**, not at file or test granularity.
 
-- **Cadence per batch:** one reconnaissance pass -> one implementation batch within one semantic-risk boundary -> focused feedback during implementation -> one independent audit -> one authoritative `pnpm build:check` for the final exact code worktree state -> one signed-off commit. Audit correction loops only when accepted findings exist; no extra cycles otherwise.
+- **Cadence per batch:** one reconnaissance pass -> one implementation batch within one semantic-risk boundary -> focused feedback during implementation -> one independent audit -> one validation run at the scope the batch's impact requires for the final exact code worktree state -> one signed-off commit. Audit correction loops only when accepted findings exist; no extra cycles otherwise.
 - **Batch sizing:** multi-file batches are allowed and preferred when cohesive (shared semantic and shared risk boundary). Avoid one-test / one-file phases as the default.
 - **Focused verification during implementation:** targeted path/reference/heading/link searches and focused tests for the changed behavior run during implementation. They are local feedback, not the authoritative gate.
-- **One audit / one gate / one commit per completed batch:** the independent audit and `pnpm build:check` each run once for the final exact worktree state, followed by a single commit. No append-only per-run logs are retained.
+- **One audit / one validation pass / one commit per completed batch:** the independent audit and the affected validation commands each run once for the final exact worktree state, followed by a single commit. No append-only per-run logs are retained.
 
 ---
 
@@ -116,7 +116,7 @@ Per completed batch, report:
 - Outcome and semantic boundary (what changed and why it was one batch).
 - Changed files and the shared risk boundary they belong to.
 - Audit verdict (pass/fail with disposition; correction loop only if findings were accepted).
-- Authoritative gate result: `pnpm build:check` for the final exact code worktree state (pass/fail, authoritative evidence).
+- Validation result: the affected commands run for the final exact code worktree state (pass/fail, trustworthy original exit code).
 - Commit subject for the single signed-off commit that closed the batch.
 
 No push unless explicitly authorized. No source/test/config/package/lockfile changes are introduced by this tracker itself.
