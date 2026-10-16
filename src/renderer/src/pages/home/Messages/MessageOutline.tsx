@@ -231,6 +231,12 @@ const MessageOutline: FC<MessageOutlineProps> = ({ entries, onNavigate, activeId
 
 const MessageOutlineContainer = styled.div`
   position: absolute;
+  // Left-edge inset reserves the segment group-label lane: the label pill
+  // (LineContainer left:-12, TabContainer max-width 280, z1000) sits above
+  // the nav layer (z999) and its own contained hit region never enters the
+  // nav body, so label hover cannot expand the nav. The body starts past
+  // the label's left zone; the nav's own collapsed-dot trigger still
+  // expands on direct hover of its uncovered area.
   inset: 0 0 0 10px;
   z-index: 999;
   pointer-events: none;

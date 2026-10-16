@@ -41,7 +41,13 @@ export const MessagesContainer = styled(Scrollbar)<ContainerProps>`
   // for long content. Wrapper stays the flex:1/min-height:0 height boundary.
   flex: 0 1 auto;
   min-height: 0;
-  z-index: 1;
+  // Local layer contract: this scroll host stays position:relative WITHOUT
+  // its own z-index so it never traps descendants in a stacking context.
+  // Sibling overlays (BackToBottom z6, EditModeActionBar z10) still paint
+  // above via their explicit z; the segment label carries its own explicit
+  // z above conversation navigation (nav 999) while ordinary message
+  // bodies (z auto) stay below it. Adding any z-index here would recap the
+  // label and drop it back under the nav.
   position: relative;
   // Atomic route transition: while the target window is positioning, the
   // container stays hidden but measurable (visibility keeps layout so the

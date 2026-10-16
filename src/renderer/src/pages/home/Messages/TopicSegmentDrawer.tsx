@@ -43,7 +43,7 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
     <Popover
       content={popoverContent}
       trigger={['hover', 'click']}
-      placement="topRight"
+      placement="topLeft"
       arrow={false}
       mouseEnterDelay={0.3}
       overlayInnerStyle={{ padding: '4px 0' }}>
@@ -56,7 +56,10 @@ const TopicSegmentDrawer: React.FC<TopicSegmentDrawerProps> = ({ topicId }) => {
 
 const TriggerWrapper = styled.div`
   position: absolute;
-  right: 8px;
+  // Composer-left lane: sits above the LEFT side of the inputbar; the
+  // original simple navigation rows are unchanged (no action buttons).
+  left: 8px;
+  right: auto;
   bottom: calc(100% + 8px);
   top: auto;
   z-index: 3;
