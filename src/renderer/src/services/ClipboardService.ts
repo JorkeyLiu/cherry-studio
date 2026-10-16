@@ -15,7 +15,6 @@ import {
 } from '@renderer/store/thunk/messageThunk'
 import { deleteSegmentsBySnapshots, syncSegmentsAfterMessageDeletion } from '@renderer/store/thunk/topicSegmentThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import { addSegment } from '@renderer/store/topicSegment'
 import { pushUndoAction } from '@renderer/store/undoStack'
 import type {
   ClipboardItem,
@@ -24,7 +23,8 @@ import type {
   DeleteUndoAction,
   GroupAnchor,
   PasteUndoAction,
-  SegmentSnapshot
+  SegmentSnapshot,
+  StagedCutSourceProjection
 } from '@renderer/types/editMode'
 import type { FileMessageBlock, ImageMessageBlock, Message, MessageBlock } from '@renderer/types/newMessage'
 import { MessageBlockType } from '@renderer/types/newMessage'
@@ -270,17 +270,33 @@ export async function cutMessages(
   }
 
   // Staged-cut authority provenance: the addressed source route plus the
-  // complete authority member IDs (in `payload.items`) are captured only after
-  // the cut selection precheck above. Paste addresses the Main source delete
-  // with this staged route without rerequiring projection capability.
+  // cut-time SOURCE projection eligibility are captured only after the cut
+  // selection precheck above. The gate proves the selection writable through
+  // the active loaded route, so the staged route must equal that active route
+  // and the loaded ID list is the source eligibility snapshot. Paste addresses
+  // the Main source delete with this staged route + eligibility without
+  // rerequiring projection capability and without reading the (possibly
+  // retargeted) live projection.
   const stagedBranchId = typeof branchId === 'string' && branchId.length > 0 ? branchId : null
+  let activeSourceRoute: string | null = null
+  try {
+    activeSourceRoute = selectActiveBranchId(getState(), topicId)
+  } catch {
+    activeSourceRoute = null
+  }
+  if (stagedBranchId !== activeSourceRoute) {
+    logger.warn('[cutMessages] Staged source route differs from the active loaded route; cut refused')
+    return 0
+  }
+  const sourceLoadedIds = [...(getState().messages.messageIdsByTopic?.[topicId] ?? [])]
   dispatch(
     setClipboard({
       mode: 'cut',
       items: payload.items,
       sourceTopicId: topicId,
       sourceBranchId: stagedBranchId,
-      segmentSnapshots: payload.segmentSnapshots
+      segmentSnapshots: payload.segmentSnapshots,
+      sourceProjection: { sourceTopicId: topicId, sourceBranchId: stagedBranchId, loadedMessageIds: sourceLoadedIds }
     })
   )
 
@@ -293,7 +309,7 @@ export async function cutMessages(
 
 /**
  * Paste clipboard content into the target topic with a stable insertion intent.
- * Returns the number of message groups pasted.
+ * Returns the number of messages pasted (actual successfully inserted count).
  *
  * Authority: the renderer derives exactly one stable intent from target
  * semantics (selected target group → after-group-tail with that stable ID;
@@ -346,15 +362,24 @@ export async function pasteMessages(
   const state = getState()
   const { items: rawItems, mode, sourceTopicId, segmentSnapshots: clipboardSegmentSnapshots } = state.clipboard
   const stagedSourceBranchId = (state.clipboard as { sourceBranchId?: string | null }).sourceBranchId
+  const stagedSourceProjection = (state.clipboard as { sourceProjection?: unknown }).sourceProjection as
+    | StagedCutSourceProjection
+    | null
+    | undefined
 
   if (rawItems.length === 0) {
     logger.warn('[pasteMessages] Clipboard is empty')
     return 0
   }
 
-  // Staged-cut route fail-closed BEFORE any paste write: the captured source
-  // route must still match the current source route. Missing legacy
-  // provenance (undefined) also rejects. Ordinary copy paste skips this gate.
+  // Staged-cut provenance fail-closed BEFORE any paste write: the explicitly
+  // staged source route + cut-time source projection eligibility address the
+  // Main source delete independent of the current UI route, so a same-topic
+  // branch switch (source branch != live route) must not refuse before
+  // insertion. Missing legacy provenance (undefined), invalid route shapes,
+  // and missing/mismatched source eligibility all reject with zero writes.
+  // Ordinary copy paste skips this gate. Main owner guards stay final for
+  // the staged addressed route.
   if (mode === 'cut' && sourceTopicId) {
     if (typeof stagedSourceBranchId === 'undefined') {
       logger.error('[pasteMessages] Missing staged cut route; refusing paste before any write')
@@ -367,18 +392,18 @@ export async function pasteMessages(
       logger.error('[pasteMessages] Invalid staged cut route; refusing paste before any write')
       throw new Error('[pasteMessages] Invalid staged cut route provenance')
     }
-    let currentSourceRoute: string | null = null
-    try {
-      currentSourceRoute = selectActiveBranchId(getState(), sourceTopicId)
-    } catch (error) {
-      logger.error('[pasteMessages] Unknown source route; refusing paste before any write', error as Error)
-      throw new Error(`[pasteMessages] Unknown source route for topic ${sourceTopicId}`)
+    if (typeof stagedSourceProjection === 'undefined' || stagedSourceProjection === null) {
+      logger.error('[pasteMessages] Missing staged cut source projection; refusing paste before any write')
+      throw new Error('[pasteMessages] Missing staged cut source projection provenance')
     }
-    if (currentSourceRoute !== stagedSourceBranchId) {
-      logger.error(
-        `[pasteMessages] Source route changed (staged ${String(stagedSourceBranchId)}, current ${String(currentSourceRoute)}); refusing paste before any write`
-      )
-      throw new Error(`[pasteMessages] Source route changed for topic ${sourceTopicId}`)
+    if (
+      typeof stagedSourceProjection !== 'object' ||
+      stagedSourceProjection.sourceTopicId !== sourceTopicId ||
+      stagedSourceProjection.sourceBranchId !== stagedSourceBranchId ||
+      !Array.isArray(stagedSourceProjection.loadedMessageIds)
+    ) {
+      logger.error('[pasteMessages] Mismatched staged cut source projection; refusing paste before any write')
+      throw new Error('[pasteMessages] Mismatched staged cut source projection provenance')
     }
   }
 
@@ -521,63 +546,80 @@ export async function pasteMessages(
     }
   }
 
-  // Reconstruct segments from clipboard snapshots
+  // Reconstruct segments from clipboard snapshots.
+  // Post-commit bookkeeping coherence: the target insert above already
+  // committed in Main. A convergence/upsert failure below must still retain
+  // a usable undo entry for the persisted copies (no untracked commit), and
+  // in cut mode the source must remain un-deleted when the target stage did
+  // not fully complete. No new recovery subsystem: natural stage handling
+  // with the existing postcommit-convergence conventions.
   const targetSegmentSnapshots: TopicSegment[] = []
+  let targetStageError: unknown = null
   if (clipboardSegmentSnapshots && clipboardSegmentSnapshots.length > 0) {
-    for (const clipSnap of clipboardSegmentSnapshots) {
-      // Map original message IDs to new message IDs
-      const newMessageIds: string[] = []
-      let allMapped = true
-      for (const origId of clipSnap.originalMessageIds) {
-        const mappedId = idMapping.get(origId)
-        if (mappedId) {
-          newMessageIds.push(mappedId)
-        } else {
-          allMapped = false
-          break
+    try {
+      for (const clipSnap of clipboardSegmentSnapshots) {
+        // Map original message IDs to new message IDs
+        const newMessageIds: string[] = []
+        let allMapped = true
+        for (const origId of clipSnap.originalMessageIds) {
+          const mappedId = idMapping.get(origId)
+          if (mappedId) {
+            newMessageIds.push(mappedId)
+          } else {
+            allMapped = false
+            break
+          }
         }
-      }
 
-      // Skip if mapping is incomplete (some original IDs were not part of the paste)
-      if (!allMapped || newMessageIds.length === 0) {
-        logger.warn(
-          `[pasteMessages] Skipping segment "${clipSnap.name}" — incomplete ID mapping (${newMessageIds.length}/${clipSnap.originalMessageIds.length})`
+        // Skip if mapping is incomplete (some original IDs were not part of the paste)
+        if (!allMapped || newMessageIds.length === 0) {
+          logger.warn(
+            `[pasteMessages] Skipping segment "${clipSnap.name}" — incomplete ID mapping (${newMessageIds.length}/${clipSnap.originalMessageIds.length})`
+          )
+          continue
+        }
+
+        // Create new segment with new ID in target topic.
+        // DB-first: collect the Main wire mapping; Redux convergence happens
+        // once below via a single list+replace so shifted siblings converge.
+        const newId = uuidv4()
+        const wire = await dbService.upsertSegment(
+          newId,
+          targetTopicId,
+          clipSnap.name,
+          newMessageIds,
+          clipSnap.color,
+          targetBranchId
         )
-        continue
+        const newSegment = mapSegmentWireToTopicSegment(wire)
+        if (wire.name == null) newSegment.name = clipSnap.name
+        targetSegmentSnapshots.push(newSegment)
       }
 
-      // Create new segment with new ID in target topic.
-      // DB-first: collect the Main wire mapping; Redux convergence happens
-      // once below via a single list+replace so shifted siblings converge.
-      const newId = uuidv4()
-      const wire = await dbService.upsertSegment(
-        newId,
-        targetTopicId,
-        clipSnap.name,
-        newMessageIds,
-        clipSnap.color,
-        targetBranchId
+      // Batch convergence through the ONE preserving catalog publication:
+      // exactly one authority list + atomic install with the resident target
+      // window preserved (no transient blank). Superseded reads discard
+      // silently inside converge (no throw); a real list failure throws and is
+      // captured below for coherent undo bookkeeping.
+      if (targetSegmentSnapshots.length > 0) {
+        await convergeTopicSegmentCatalog(dispatch, targetTopicId, getState)
+      }
+
+      logger.info(
+        `[pasteMessages] Reconstructed ${targetSegmentSnapshots.length} segments from ${clipboardSegmentSnapshots.length} clipboard snapshots`
       )
-      const newSegment = mapSegmentWireToTopicSegment(wire)
-      if (wire.name == null) newSegment.name = clipSnap.name
-      targetSegmentSnapshots.push(newSegment)
+    } catch (error) {
+      // Target stage did not fully complete: retain the wire snapshots
+      // collected so far for undo (copies + committed segments stay tracked),
+      // skip the source delete below, still push undo, then surface
+      // truthfully. Never silently corrupt on retry: the pushed undo removes
+      // exactly these copies/segments.
+      targetStageError = error
+      logger.error(
+        '[pasteMessages] Target segment stage failed after insert commit; preserving copies with undo, source remains',
+        error as Error
+      )
     }
-
-    // Batch convergence: exactly one list+replace for the target topic.
-    // No per-item stale adds. listSegments failure never rolls back the
-    // successful Main upserts: keep per-wire adds so pasted segments stay visible.
-    if (targetSegmentSnapshots.length > 0) {
-      try {
-        await convergeTopicSegmentCatalog(dispatch, targetTopicId)
-      } catch (error) {
-        logger.warn('[pasteMessages] segment catalog convergence failed, keeping per-wire fallback', error as Error)
-        for (const seg of targetSegmentSnapshots) dispatch(addSegment(seg))
-      }
-    }
-
-    logger.info(
-      `[pasteMessages] Reconstructed ${targetSegmentSnapshots.length} segments from ${clipboardSegmentSnapshots.length} clipboard snapshots`
-    )
   }
 
   // If cut mode: remove COMPLETE stable source members through the staged-cut
@@ -600,7 +642,11 @@ export async function pasteMessages(
   // surfaced truthfully only after that bookkeeping.
   let sourceRootIds: string[] = []
   let pendingPostCommitError: unknown = null
-  if (mode === 'cut' && sourceTopicId) {
+  // A failed target segment stage gates the cut source delete: the source
+  // remains un-deleted and the staged clipboard is retained for retry. The
+  // undo pushed below still tracks the persisted copies.
+  const targetStageComplete = targetStageError === null
+  if (mode === 'cut' && sourceTopicId && targetStageComplete) {
     const stableRoots = [
       ...new Set(
         items.flatMap((item) => item.messages.map((m) => m.id)).filter((id) => typeof id === 'string' && id.length > 0)
@@ -612,7 +658,8 @@ export async function pasteMessages(
         const result = await executeStagedCutSourceDelete(dispatch, getState, {
           sourceTopicId,
           sourceBranchId: stagedSourceBranchId as string | null,
-          rootIds: stableRoots
+          rootIds: stableRoots,
+          sourceProjection: stagedSourceProjection as StagedCutSourceProjection
         })
         sourceGroupAnchors = result.undoParts.groupAnchors
         sourceSegmentSnapshots = result.undoParts.segmentSnapshots
@@ -659,7 +706,17 @@ export async function pasteMessages(
     // file cleanup via FileManager.deleteFile which decrements Dexie
     // files.count.
 
-    dispatch(clearClipboard())
+    // Clipboard clears only when the cut movement fully completed (target
+    // stage complete + source delete attempted). A failed target stage
+    // retains the staged clipboard for retry; a pre-commit source failure
+    // above already threw after rollback with the clipboard retained.
+    if (targetStageComplete) {
+      dispatch(clearClipboard())
+    }
+  } else if (mode === 'cut' && sourceTopicId && !targetStageComplete) {
+    // Target stage failed before any source write: source remains un-deleted
+    // by construction (no delete attempted above); clipboard retained.
+    logger.warn('[pasteMessages] Target stage incomplete; cut source untouched, clipboard retained')
   }
 
   // Create undo action
@@ -697,6 +754,7 @@ export async function pasteMessages(
       sourceBranchId: stagedSourceBranchId as string | null,
       targetBranchId,
       sourceRootIds,
+      sourceProjection: stagedSourceProjection as StagedCutSourceProjection,
       sourceGroupAnchors,
       sourceSegmentSnapshots,
       targetSegmentSnapshots,
@@ -731,8 +789,20 @@ export async function pasteMessages(
     )
   }
 
-  logger.info(`[pasteMessages] Pasted ${items.length} groups with stable intent ${stableIntent.kind}`)
-  return items.length
+  // Target segment stage failed AFTER the insert commit: the undo above
+  // already tracks the persisted copies (+ committed wire snapshots), the cut
+  // source remains un-deleted, and the clipboard is retained. Surface
+  // truthfully so retry/undo stays explicit (never swallowed as success).
+  if (targetStageError !== null) {
+    throw new Error(
+      `[pasteMessages] Target segment convergence failed after insert commit (copies preserved with undo): ${(targetStageError as Error)?.message ?? String(targetStageError)}`
+    )
+  }
+
+  logger.info(
+    `[pasteMessages] Pasted ${insertedMessageIds.length} messages from ${items.length} groups with stable intent ${stableIntent.kind}`
+  )
+  return insertedMessageIds.length
 }
 
 /**

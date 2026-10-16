@@ -186,7 +186,13 @@ describe('ClipboardService.cutMessages service-level depth gate', () => {
     const { cutMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
 
-    const count = await cutMessages(dispatch, () => gateState() as never, 'topic-1', ['u1'], 'b1')
+    const count = await cutMessages(
+      dispatch,
+      () => gateState({ activeRoute: 'b1', mutableRoute: 'b1' }) as never,
+      'topic-1',
+      ['u1'],
+      'b1'
+    )
 
     expect(count).toBe(2)
     expect(mocks.fetchClipboardGroups).toHaveBeenCalledExactlyOnceWith({
@@ -200,6 +206,12 @@ describe('ClipboardService.cutMessages service-level depth gate', () => {
     expect(action.payload.mode).toBe('cut')
     expect(action.payload.sourceTopicId).toBe('topic-1')
     expect(action.payload.sourceBranchId).toBe('b1')
+    // Cut-time source eligibility is captured with the staged route.
+    expect(action.payload.sourceProjection).toEqual({
+      sourceTopicId: 'topic-1',
+      sourceBranchId: 'b1',
+      loadedMessageIds: LOADED_IDS
+    })
   })
 
   it.each([

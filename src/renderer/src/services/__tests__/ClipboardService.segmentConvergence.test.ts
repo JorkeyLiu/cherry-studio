@@ -199,7 +199,7 @@ describe('ClipboardService segment batch convergence', () => {
     mockInsertAck()
   })
 
-  it('multi-segment rebuild converges with exactly one list+replace, no per-item stale adds', async () => {
+  it('multi-segment rebuild converges with exactly one preserving publication, no per-item stale adds', async () => {
     const origA = makeMsg('orig-a')
     const origB = makeMsg('orig-b')
     const state = baseState(
@@ -227,7 +227,7 @@ describe('ClipboardService segment batch convergence', () => {
     expect(mocks.upsertSegment).toHaveBeenCalledTimes(2)
     expect(mocks.listSegments).toHaveBeenCalledTimes(1)
     expect(mocks.listSegments).toHaveBeenCalledWith('topic-1')
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'topicSegment/replaceSegmentsForTopic')
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'resident/segmentCatalogPublishComplete')
     expect(replaces).toHaveLength(1)
     expect(replaces[0][0].payload.topicId).toBe('topic-1')
     // No per-item stale catalog adds on the success path.
@@ -251,7 +251,7 @@ describe('ClipboardService segment batch convergence', () => {
     expect(mocks.listSegments).not.toHaveBeenCalled()
   })
 
-  it('list failure fallback keeps per-wire adds so pasted segments stay visible', async () => {
+  it('list failure surfaces without fabricating per-wire catalog (fail closed)', async () => {
     const origA = makeMsg('orig-a')
     const state = baseState(
       [{ originalAskId: 'orig-a', messages: [origA], blocks: [] as MessageBlock[], positionIndex: 0 }],
@@ -265,14 +265,15 @@ describe('ClipboardService segment batch convergence', () => {
 
     const { pasteMessages } = await import('../ClipboardService')
     const dispatch = vi.fn()
-    await pasteMessages(dispatch, () => state as any, 'topic-1', 'm1')
+    await expect(pasteMessages(dispatch, () => state as any, 'topic-1', 'm1')).rejects.toThrow('list failed')
 
     expect(mocks.upsertSegment).toHaveBeenCalledTimes(1)
     expect(mocks.listSegments).toHaveBeenCalledTimes(1)
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'topicSegment/replaceSegmentsForTopic')
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === 'resident/segmentCatalogPublishComplete')
     expect(replaces).toHaveLength(0)
+    // No fabricated per-wire success on list failure.
     const adds = dispatch.mock.calls.filter((c) => c[0]?.type === 'topicSegment/addSegment')
-    expect(adds).toHaveLength(1)
-    expect(adds[0][0].payload.messageIds).toHaveLength(1)
+    expect(adds).toHaveLength(0)
+    expect(mocks.addSegment).not.toHaveBeenCalled()
   })
 })

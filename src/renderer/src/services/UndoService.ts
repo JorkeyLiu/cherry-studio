@@ -10,7 +10,8 @@ import { requireMutableForActiveRoute } from '@renderer/store/routeAnswerGroup'
 import {
   deleteMessagesFromDB,
   executeDeleteMessagesWithDependents,
-  executeStagedCutSourceDelete
+  executeStagedCutSourceDelete,
+  publishDeleteAuthorityCatalog
 } from '@renderer/store/thunk/messageThunk'
 import {
   deleteSegmentsBySnapshots,
@@ -19,7 +20,6 @@ import {
   syncSegmentsAfterMessageDeletion
 } from '@renderer/store/thunk/topicSegmentThunk'
 import { selectActiveBranchId } from '@renderer/store/topicBranch'
-import { replaceSegmentsForTopic } from '@renderer/store/topicSegment'
 import { prepareRedo, prepareUndo } from '@renderer/store/undoStack'
 import type {
   CutPasteUndoAction,
@@ -29,9 +29,35 @@ import type {
   UndoAction
 } from '@renderer/types/editMode'
 import { MessageBlockType } from '@renderer/types/newMessage'
+import { isSegmentCatalogConvergenceError } from '@renderer/utils/topicSegmentCatalog'
 import type { InsertMessageGroup, InsertMessageGroupIntent, MessageBlockEntry } from '@shared/chatDb'
 
 const logger = loggerService.withContext('UndoService')
+
+/**
+ * Committed-convergence marker: Main authority already committed but a
+ * renderer post-commit projection step failed. History must stay advanced
+ * (never roll back to re-insert already-restored IDs) and the failure must
+ * surface truthfully via the committed log path. Covers both the typed
+ * segment-catalog read failure and the existing typed delete post-commit
+ * marker. Pre-commit rejections and actual Main segment upsert/replace
+ * failures are never matched here and stay fail-closed (history rolls back).
+ *
+ * Local duck-typing (no import from messageThunk) so unit mocks of that
+ * module stay intact: matches `committed === true` with both `response` and
+ * `undoParts` objects, same shape as `isDeletePostCommitConvergenceError`.
+ */
+function isCommittedDeleteConvergenceError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const candidate = error as { committed?: unknown; response?: unknown; undoParts?: unknown }
+  return (
+    candidate.committed === true && typeof candidate.response === 'object' && typeof candidate.undoParts === 'object'
+  )
+}
+
+function isCommittedConvergenceError(error: unknown): boolean {
+  return isSegmentCatalogConvergenceError(error) || isCommittedDeleteConvergenceError(error)
+}
 
 /**
  * Resolve the stable redo intent for paste/cut-paste.
@@ -154,6 +180,18 @@ export async function executeUndo(dispatch: AppDispatch, getState: () => RootSta
       }
     }
   } catch (error) {
+    // Committed convergence: Main authority stands (messages restored or
+    // copies deleted) but the segment catalog read failed. History stays
+    // advanced — rolling back would retry the already-committed insert and
+    // hit CONFLICT. Log the committed distinction truthfully and return the
+    // action (authority success); never fabricate a catalog.
+    if (isCommittedConvergenceError(error)) {
+      logger.error(
+        '[undo] Authority committed but segment convergence failed; history advanced, projection invalidated',
+        error as Error
+      )
+      return action
+    }
     logger.error('[undo] Failed:', error as Error)
     // Move back from redo to undo on failure
     dispatch(prepareRedo())
@@ -197,6 +235,13 @@ export async function executeRedo(dispatch: AppDispatch, getState: () => RootSta
       }
     }
   } catch (error) {
+    if (isCommittedConvergenceError(error)) {
+      logger.error(
+        '[redo] Authority committed but segment convergence failed; history advanced, projection invalidated',
+        error as Error
+      )
+      return action
+    }
     logger.error('[redo] Failed:', error as Error)
     // Move back from undo to redo on failure
     dispatch(prepareUndo())
@@ -287,19 +332,50 @@ async function undoPaste(
 
   // Delete target segments that were created during paste BEFORE syncing,
   // so syncSegmentsAfterMessageDeletion won't find (and double-delete) them.
+  // Typed catalog-read failures are projection-only (Main segment deletes
+  // already committed): record and continue to the sync phase instead of
+  // skipping required target cleanup. Main segment-write failures stay
+  // fail-closed.
+  let pendingConvergence: unknown = null
   if (targetSegmentSnapshots.length > 0) {
-    await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots)
+    try {
+      await deleteSegmentsBySnapshots(dispatch, targetSegmentSnapshots, getState)
+    } catch (error) {
+      if (isSegmentCatalogConvergenceError(error)) {
+        pendingConvergence = error
+        logger.error(
+          '[undoPaste] Target segment delete committed but catalog convergence failed; continuing cleanup',
+          error as Error
+        )
+      } else {
+        throw error
+      }
+    }
   }
 
   // Sync segments after message deletion (only non-target segments remain).
   // Cut_paste callers pass the staged target route explicitly so a live route
   // switch mid-cleanup cannot retarget the membership write; ordinary paste
   // omits the route and retains the existing live-route behavior.
-  if (typeof addressedTargetRoute === 'undefined') {
-    await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
-  } else {
-    await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds, targetRoute)
+  try {
+    if (typeof addressedTargetRoute === 'undefined') {
+      await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds)
+    } else {
+      await syncSegmentsAfterMessageDeletion(dispatch, getState, targetTopicId, insertedMessageIds, targetRoute)
+    }
+  } catch (error) {
+    if (isSegmentCatalogConvergenceError(error)) {
+      pendingConvergence = pendingConvergence ?? error
+      logger.error(
+        '[undoPaste] Target cleanup committed but catalog convergence failed; authority stands',
+        error as Error
+      )
+    } else {
+      throw error
+    }
   }
+
+  if (pendingConvergence) throw pendingConvergence
 
   // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
   // consumeFileCleanupResult above already handled physical file cleanup
@@ -323,11 +399,20 @@ async function undoPaste(
  * equally correct there (behavior preserved).
  *
  * Failure semantics (explicit, no data loss):
- * - source restore failure → throw BEFORE touching paste copies; the copies
- *   remain and history does not advance (executeUndo moves the action back).
- * - paste-copy removal failure AFTER a successful source restore → throw and
- *   retain the duplicate (restored source + remaining copies) rather than
- *   losing the source. History likewise does not advance.
+ * - pre-commit source restore failure (missing/cross-topic anchors, Main
+ *   insert rejection, actual Main segment upsert/replace failure) → throw
+ *   BEFORE touching paste copies; the copies remain and history does not
+ *   advance (executeUndo moves the action back).
+ * - committed catalog-read failure after a Main write (typed
+ *   SegmentCatalogConvergenceError: source segments or target cleanup list
+ *   failed) → continue all REQUIRED Main phases (source restore → target
+ *   cleanup), then throw the typed marker so executeUndo keeps history
+ *   advanced instead of retrying the committed insert into CONFLICT.
+ * - paste-copy Main removal failure AFTER a successful source restore →
+ *   throw and retain the duplicate (restored source + remaining copies)
+ *   rather than losing the source. History likewise does not advance
+ *   (generic operation failure, documented unresolved without a recovery
+ *   subsystem).
  */
 async function undoCutPaste(
   dispatch: AppDispatch,
@@ -335,8 +420,12 @@ async function undoCutPaste(
   action: CutPasteUndoAction
 ): Promise<void> {
   const { sourceTopicId, sourceGroupAnchors, sourceSegmentSnapshots = [] } = action
-  // Route-bound staged provenance (new actions only). Legacy actions without
+  // Staged-addressed provenance (new actions only). Legacy actions without
   // recorded routes retain the previous live-route behavior below.
+  // The explicitly staged routes address the Main restores/deletes
+  // independent of the current UI route: a branch switch after paste must not
+  // refuse undo, and must never retarget writes to the live route.
+  // Missing staged routes still fail closed before any write.
   const hasStagedRoutes = typeof action.sourceBranchId !== 'undefined' || typeof action.targetBranchId !== 'undefined'
   let stagedSourceRoute: string | null | undefined
   let stagedTargetRoute: string | null | undefined
@@ -346,17 +435,6 @@ async function undoCutPaste(
     }
     stagedSourceRoute = action.sourceBranchId
     stagedTargetRoute = action.targetBranchId
-    let liveSource: string | null = null
-    let liveTarget: string | null = null
-    try {
-      liveSource = selectActiveBranchId(getState(), sourceTopicId)
-      liveTarget = selectActiveBranchId(getState(), action.targetTopicId)
-    } catch (error) {
-      throw new Error('[undoCutPaste] Unknown route; refusing undo before any write')
-    }
-    if (liveSource !== stagedSourceRoute || liveTarget !== stagedTargetRoute) {
-      throw new Error('[undoCutPaste] Route changed; refusing undo before any write')
-    }
   }
 
   if (sourceGroupAnchors.length === 0) {
@@ -390,15 +468,46 @@ async function undoCutPaste(
   await restoreGroupsByStableAnchors(dispatch, getState, sourceTopicId, sourceGroupAnchors, stagedSourceRoute)
 
   // Restore source segment membership before removing the copies.
-  await restoreSegmentsAfterUndo(dispatch, getState, sourceSegmentSnapshots)
+  // Staged cut_paste undo addresses the source route explicitly so the Main
+  // owner guard sees member owner == addressed route even after a live route
+  // switch; legacy actions (undefined) retain the live-route behavior.
+  // Typed catalog-read failure is projection-only (source messages already
+  // restored in Main): record and continue to REQUIRED target cleanup.
+  // Actual Main upsert/replace failures stay fail-closed and abort.
+  let pendingConvergence: unknown = null
+  try {
+    await restoreSegmentsAfterUndo(dispatch, getState, sourceSegmentSnapshots, stagedSourceRoute)
+  } catch (error) {
+    if (isSegmentCatalogConvergenceError(error)) {
+      pendingConvergence = error
+      logger.error(
+        '[undoCutPaste] Source restored but segment catalog convergence failed; continuing to target cleanup',
+        error as Error
+      )
+    } else {
+      throw error
+    }
+  }
 
   const totalMessages = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(`[undoCutPaste] Restored ${totalMessages} source messages to ${sourceTopicId}`)
 
   // Phase 2: remove the pasted copies from the target topic (plus the target
-  // segments created at paste time). A throw here retains the duplicate
-  // (restored source + remaining copies) rather than losing the source.
-  await undoPaste(dispatch, getState, action, stagedTargetRoute)
+  // segments created at paste time). A Main-write throw here retains the
+  // duplicate (restored source + remaining copies) rather than losing the
+  // source. A typed catalog failure after committed cleanup is recorded and
+  // rethrown so history stays advanced.
+  try {
+    await undoPaste(dispatch, getState, action, stagedTargetRoute)
+  } catch (error) {
+    if (isCommittedConvergenceError(error)) {
+      pendingConvergence = pendingConvergence ?? error
+    } else {
+      throw error
+    }
+  }
+
+  if (pendingConvergence) throw pendingConvergence
 }
 
 // ==================== Redo Implementations ====================
@@ -447,21 +556,10 @@ async function redoDelete(dispatch: AppDispatch, getState: () => RootState, acti
   // Consume file cleanup exactly once after commit
   await consumeFileCleanupResult(response)
 
-  // Remove messages from Redux only after DB delete succeeds (authority-expanded set)
-  dispatch(newMessagesActions.removeMessages({ topicId: targetTopicId, messageIds: response.deletedMessageIds }))
-
-  // Remove blocks from Redux (authority-owned set, no loaded lookup)
-  if (response.deletedBlockIds.length > 0) {
-    dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), targetTopicId))
-  }
-
-  // Converge segments from the authority post-delete catalog (no loaded sync read)
-  dispatch(
-    replaceSegmentsForTopic({
-      topicId: targetTopicId,
-      segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
-    })
-  )
+  // ONE shared authoritative delete acknowledgment on the already-returned
+  // complete catalog (no extra list): preserves the valid loaded projection
+  // like the unified delete path instead of a bare replace that blanks.
+  publishDeleteAuthorityCatalog(dispatch, targetTopicId, response as any)
 
   // LOCK-P5.3-1: No separate updateFileReferenceCounts here.
   // consumeFileCleanupResult above already handled physical file cleanup
@@ -514,9 +612,19 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
     await updateFileReferenceCounts(fileReferenceDeltas, true)
   }
 
-  // Restore target segments that were created during original paste
+  // Restore target segments that were created during original paste.
+  // Typed catalog-read failure is projection-only (copies already committed):
+  // rethrow so executeRedo keeps history advanced. Main upsert failures stay
+  // fail-closed.
   if (targetSegmentSnapshots.length > 0) {
-    await restoreTargetSegments(dispatch, targetSegmentSnapshots)
+    try {
+      await restoreTargetSegments(dispatch, targetSegmentSnapshots, undefined, getState)
+    } catch (error) {
+      if (isSegmentCatalogConvergenceError(error)) {
+        logger.error('[redoPaste] Copies re-inserted but catalog convergence failed; authority stands', error as Error)
+      }
+      throw error
+    }
   }
 
   logger.info(
@@ -528,12 +636,14 @@ async function redoPaste(dispatch: AppDispatch, getState: () => RootState, actio
  * Redo cut_paste = re-execute the cut+paste using snapshots.
  *
  * Source deletion uses the staged-cut authority helper with the stored stable
- * member roots and staged source route (no projection capability rerequire
- * for complete outside-loaded source members). The helper owns Main segment
- * catalog convergence, authority anchor transfer, file cleanup, and
+ * member roots, staged source route, and cut-time source eligibility (no
+ * projection capability rerequire for complete outside-loaded source members
+ * and no live-projection read). The helper owns Main segment catalog
+ * convergence, authority anchor transfer, file cleanup, and
  * loaded-intersection projection. Legacy actions without staged routes retain
  * the previous guarded live-route helper. Fail-closed: missing `sourceRootIds`
- * or missing staged routes for new actions throw before any DB mutation.
+ * or missing staged routes/projection for new actions throw before any DB
+ * mutation.
  */
 async function redoCutPaste(
   dispatch: AppDispatch,
@@ -558,19 +668,9 @@ async function redoCutPaste(
     }
     stagedSourceRoute = action.sourceBranchId
     stagedTargetRoute = action.targetBranchId
-    let liveSource: string | null = null
-    let liveTarget: string | null = null
-    try {
-      liveSource = selectActiveBranchId(getState(), sourceTopicId)
-      liveTarget = selectActiveBranchId(getState(), targetTopicId)
-    } catch {
-      throw new Error('[redoCutPaste] Unknown route; refusing redo before any write')
-    }
-    if (liveSource !== stagedSourceRoute || liveTarget !== stagedTargetRoute) {
-      throw new Error('[redoCutPaste] Route changed; refusing redo before any write')
-    }
   }
 
+  let pendingConvergence: unknown = null
   // Step 1: Re-delete the source via the staged (or legacy guarded) helper.
   if (sourceGroupAnchors.length > 0) {
     const roots = Array.isArray(action.sourceRootIds)
@@ -583,17 +683,32 @@ async function redoCutPaste(
 
     try {
       if (hasStagedRoutes) {
+        if (typeof action.sourceProjection === 'undefined' || action.sourceProjection === null) {
+          throw new Error('[redoCutPaste] Missing staged cut source projection; refusing redo before any write')
+        }
         await executeStagedCutSourceDelete(dispatch, getState, {
           sourceTopicId,
           sourceBranchId: stagedSourceRoute as string | null,
-          rootIds: roots
+          rootIds: roots,
+          sourceProjection: action.sourceProjection
         })
       } else {
         await executeDeleteMessagesWithDependents(dispatch, getState, sourceTopicId, roots)
       }
     } catch (error) {
-      logger.error('[redoCutPaste] Failed to delete source messages (semantic redo delete)', error as Error)
-      throw error
+      // Committed convergence (typed delete post-commit or catalog read):
+      // source rows are gone in Main — continue to REQUIRED target re-insert
+      // and keep history advanced. Pre-commit failures stay fail-closed.
+      if (isCommittedConvergenceError(error)) {
+        logger.error(
+          '[redoCutPaste] Source deleted but convergence failed; continuing to target re-insert',
+          error as Error
+        )
+        pendingConvergence = error
+      } else {
+        logger.error('[redoCutPaste] Failed to delete source messages (semantic redo delete)', error as Error)
+        throw error
+      }
     }
 
     // LOCK-P5.3-1: No separate updateFileReferenceCounts / segment sync here.
@@ -628,10 +743,28 @@ async function redoCutPaste(
     }
   }
 
-  // Step 3: Restore target segments that were created during original paste
+  // Step 3: Restore target segments that were created during original paste.
+  // Staged cut_paste redo addresses the target route explicitly (legacy
+  // undefined retains the live-route behavior). Typed catalog failure is
+  // projection-only (all Main writes committed): record and rethrow so
+  // history stays advanced.
   if (targetSegmentSnapshots.length > 0) {
-    await restoreTargetSegments(dispatch, targetSegmentSnapshots)
+    try {
+      await restoreTargetSegments(dispatch, targetSegmentSnapshots, stagedTargetRoute, getState)
+    } catch (error) {
+      if (isSegmentCatalogConvergenceError(error)) {
+        pendingConvergence = pendingConvergence ?? error
+        logger.error(
+          '[redoCutPaste] Target re-insert committed but catalog convergence failed; authority stands',
+          error as Error
+        )
+      } else {
+        throw error
+      }
+    }
   }
+
+  if (pendingConvergence) throw pendingConvergence
 
   const sourceCount = sourceGroupAnchors.reduce((sum, a) => sum + a.messages.length, 0)
   logger.info(

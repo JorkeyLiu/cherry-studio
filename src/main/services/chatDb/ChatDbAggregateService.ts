@@ -3284,10 +3284,17 @@ export class ChatDbAggregateService {
           }
 
           // Route-owner start order: intent anchors resolve inside the
-          // addressed route (inherited anchors valid); insertion indexes are
-          // planned against the owner's rows — never across owners. An
-          // inherited anchor lands at the owner tail.
-          const routeStart = this.resolveRouteMessagesInTx(repos, topicId, route).messages
+          // addressed route. Owned anchors plan against the owner's rows —
+          // never across owners. An inherited after-group-tail anchor is
+          // bounded: only the group containing the addressed branch's final
+          // inherited boundary (fork anchor) inserts, at the owner head
+          // (first group after the fork, before any existing suffix). Older
+          // or missing non-boundary inherited anchors fail closed with zero
+          // writes; inherited rows are never moved or modified. Main-route
+          // inherited anchors reject (read-only through main).
+          const resolvedRoute = this.resolveRouteMessagesInTx(repos, topicId, route)
+          const routeStart = resolvedRoute.messages
+          const forkBoundaryIndex = resolvedRoute.forkBoundaryIndex
           const ownerStart = repos.messages.listByTopic(topicId, route)
           const ownerIndexById = new Map<string, number>()
           for (let i = 0; i < ownerStart.length; i++) ownerIndexById.set(ownerStart[i].id, i)
@@ -3336,8 +3343,39 @@ export class ChatDbAggregateService {
                 throw new ChatDbNotFoundError(`Anchor message ${messageId} does not belong to topic ${topicId}`)
               }
               if ((anchor.branchId ?? null) !== route) {
-                // Inherited anchor: land at the owner tail (suffix append).
-                baseIndex = ownerStart.length
+                // Inherited anchor: after-group-tail is bounded to the fork
+                // boundary (owner head); before-message keeps legacy owner-tail
+                // semantics. The UI selection is a GROUP anchor (stable askId,
+                // usually the user id), so exact-ID equality with the branch
+                // fork anchor is insufficient: resolve the anchor's group tail
+                // in the effective addressed route and require it to be the
+                // final inherited boundary (the addressed branch's immutable
+                // anchorMessageId).
+                if (route === null) {
+                  throw new ChatDbValidationError(
+                    `Anchor message ${messageId} is not owned by this route and insertion is read-only`
+                  )
+                }
+                if (kind !== 'after-group-tail') {
+                  // before-message restoration keeps legacy semantics (owner
+                  // tail) — no expansion or contraction here.
+                  baseIndex = ownerStart.length
+                } else {
+                  const addressedBranch = repos.branches.getById(route)
+                  if (!addressedBranch.found || addressedBranch.data.topicId !== topicId) {
+                    throw new ChatDbNotFoundError(`Branch ${route} does not exist in topic ${topicId}`)
+                  }
+                  const forkId = addressedBranch.data.anchorMessageId
+                  const effectiveTailPlusOne = this.resolveAfterGroupTailFullIndex(routeStart, anchor)
+                  const effectiveTailIdx = effectiveTailPlusOne - 1
+                  const tailId = routeStart[effectiveTailIdx]?.id ?? null
+                  if (tailId !== forkId || effectiveTailIdx !== forkBoundaryIndex - 1) {
+                    throw new ChatDbValidationError(
+                      `Anchor message ${messageId} is an ancestor reference and is read-only through this route`
+                    )
+                  }
+                  baseIndex = 0
+                }
               } else if (kind === 'before-message') {
                 baseIndex = ownerIndexById.get(messageId) as number
               } else {

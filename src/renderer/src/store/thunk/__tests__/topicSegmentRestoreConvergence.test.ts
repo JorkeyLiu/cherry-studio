@@ -23,7 +23,7 @@ vi.mock('@renderer/utils/topicSegmentColor', () => ({
   getSegmentColor: (id: string) => `color-${id}`
 }))
 
-import { replaceSegmentsForTopic } from '@renderer/store/topicSegment'
+import { SEGMENT_CATALOG_PUBLISH_COMPLETE } from '@renderer/store/residentRegistry'
 
 import { restoreSegmentsAfterUndo, restoreTargetSegments } from '../topicSegmentThunk'
 
@@ -48,7 +48,7 @@ describe('segment restore batch convergence', () => {
     vi.clearAllMocks()
   })
 
-  it('restoreSegmentsAfterUndo batches same-topic restores into exactly one list+replace', async () => {
+  it('restoreSegmentsAfterUndo batches same-topic restores into exactly one preserving publication', async () => {
     const snapA = {
       id: 'seg-a',
       topicId: 't1',
@@ -90,7 +90,7 @@ describe('segment restore batch convergence', () => {
     expect(mockUpsert).toHaveBeenCalledTimes(1)
     expect(mockList).toHaveBeenCalledTimes(1)
     expect(mockList).toHaveBeenCalledWith('t1')
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === replaceSegmentsForTopic.type)
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE)
     expect(replaces).toHaveLength(1)
     expect(replaces[0][0].payload.topicId).toBe('t1')
     expect(replaces[0][0].payload.segments.map((s: any) => s.id)).toEqual(['seg-b', 'seg-a'])
@@ -133,11 +133,11 @@ describe('segment restore batch convergence', () => {
     expect(mockList).toHaveBeenCalledTimes(2)
     expect(mockList).toHaveBeenCalledWith('t1')
     expect(mockList).toHaveBeenCalledWith('t2')
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === replaceSegmentsForTopic.type)
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE)
     expect(replaces).toHaveLength(2)
   })
 
-  it('restore list failure keeps per-wire fallback without forging catalog', async () => {
+  it('restore list failure surfaces without fabricating per-wire catalog (fail closed)', async () => {
     const snapB = {
       id: 'seg-b',
       topicId: 't1',
@@ -156,22 +156,21 @@ describe('segment restore batch convergence', () => {
     mockList.mockRejectedValue(new Error('list failed'))
 
     const dispatch = vi.fn()
-    await restoreSegmentsAfterUndo(dispatch, getState, [snapB] as any)
+    await expect(restoreSegmentsAfterUndo(dispatch, getState, [snapB] as any)).rejects.toThrow('list failed')
 
     expect(mockUpsert).toHaveBeenCalledTimes(1)
     expect(mockList).toHaveBeenCalledTimes(1)
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === replaceSegmentsForTopic.type)
-    expect(replaces).toHaveLength(0)
-    // Fallback keeps the restored wire visible (add), never an empty forge.
+    // No fabricated catalog: neither preserving publication nor per-wire
+    // fallback is dispatched on list failure.
+    const publishes = dispatch.mock.calls.filter((c) => c[0]?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE)
+    expect(publishes).toHaveLength(0)
     const flatTypes = dispatch.mock.calls.map((c) => c[0]?.type as string)
-    expect(flatTypes.some((t) => t.includes('addSegment'))).toBe(true)
-    const addedCall = dispatch.mock.calls.find((c) => (c[0]?.type as string).includes('addSegment'))
-    const added = (addedCall as unknown as [{ payload: { id: string; messageIds: string[] } }])[0].payload
-    expect(added.id).toBe('seg-b')
-    expect(added.messageIds).toEqual(['m-b'])
+    expect(flatTypes.some((t) => t.includes('addSegment'))).toBe(false)
+    expect(flatTypes.some((t) => t.includes('updateSegment'))).toBe(false)
+    expect(flatTypes.some((t) => t.includes('removeSegment'))).toBe(false)
   })
 
-  it('restoreTargetSegments batches same-topic upserts into exactly one list+replace', async () => {
+  it('restoreTargetSegments batches same-topic upserts into exactly one preserving publication', async () => {
     const snapA = {
       id: 'seg-a',
       topicId: 't1',
@@ -207,7 +206,152 @@ describe('segment restore batch convergence', () => {
     expect(mockUpsert).toHaveBeenCalledTimes(2)
     expect(mockList).toHaveBeenCalledTimes(1)
     expect(mockList).toHaveBeenCalledWith('t1')
-    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === replaceSegmentsForTopic.type)
+    const replaces = dispatch.mock.calls.filter((c) => c[0]?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE)
     expect(replaces).toHaveLength(1)
+  })
+
+  it('restoreSegmentsAfterUndo pins the staged sibling route for replace+upsert while live differs', async () => {
+    const snapA = {
+      id: 'seg-a',
+      topicId: 't1',
+      name: 'A',
+      messageIds: ['m-a'],
+      color: 'color-seg-a',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-a',
+      lastMessageId: 'm-a',
+      messageCount: 1
+    }
+    const snapB = {
+      id: 'seg-b',
+      topicId: 't1',
+      name: 'B',
+      messageIds: ['m-b'],
+      color: 'color-seg-b',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 1,
+      firstMessageId: 'm-b',
+      lastMessageId: 'm-b',
+      messageCount: 1
+    }
+    // Live route switched away from the staged cut route after paste.
+    const getState = () =>
+      ({
+        topicBranch: { activeBranchIdByTopic: { t1: 'branch-live' } },
+        topicSegments: { segments: { entities: { 'seg-a': { ...snapA } } }, segmentsByTopic: { t1: ['seg-a'] } }
+      }) as any
+    mockReplace.mockResolvedValue(wire('seg-a', 't1', 1, ['m-a']))
+    mockUpsert.mockResolvedValue(wire('seg-b', 't1', 0, ['m-b']))
+    mockList.mockResolvedValue([wire('seg-b', 't1', 0, ['m-b']), wire('seg-a', 't1', 1, ['m-a'])])
+
+    const dispatch = vi.fn()
+    await restoreSegmentsAfterUndo(dispatch, getState, [snapA, snapB] as any, 'branch-staged')
+
+    expect(mockReplace).toHaveBeenCalledTimes(1)
+    expect(mockReplace).toHaveBeenCalledWith('seg-a', ['m-a'], 'branch-staged')
+    expect(mockUpsert).toHaveBeenCalledTimes(1)
+    expect(mockUpsert.mock.calls[0][5]).toBe('branch-staged')
+    for (const call of [...mockReplace.mock.calls, ...mockUpsert.mock.calls]) {
+      expect(call[call.length - 1]).not.toBe('branch-live')
+    }
+  })
+
+  it('restoreSegmentsAfterUndo pins explicit main (null) while live is a sibling', async () => {
+    const snapA = {
+      id: 'seg-a',
+      topicId: 't1',
+      name: 'A',
+      messageIds: ['m-a'],
+      color: 'color-seg-a',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-a',
+      lastMessageId: 'm-a',
+      messageCount: 1
+    }
+    const getState = () =>
+      ({
+        topicBranch: { activeBranchIdByTopic: { t1: 'branch-live' } },
+        topicSegments: { segments: { entities: { 'seg-a': { ...snapA } } }, segmentsByTopic: { t1: ['seg-a'] } }
+      }) as any
+    mockReplace.mockResolvedValue(wire('seg-a', 't1', 1, ['m-a']))
+    mockList.mockResolvedValue([wire('seg-a', 't1', 1, ['m-a'])])
+
+    const dispatch = vi.fn()
+    await restoreSegmentsAfterUndo(dispatch, getState, [snapA] as any, null)
+
+    expect(mockReplace).toHaveBeenCalledExactlyOnceWith('seg-a', ['m-a'], null)
+  })
+
+  it('restoreSegmentsAfterUndo without a pinned route retains the live-route behavior', async () => {
+    const snapA = {
+      id: 'seg-a',
+      topicId: 't1',
+      name: 'A',
+      messageIds: ['m-a'],
+      color: 'color-seg-a',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-a',
+      lastMessageId: 'm-a',
+      messageCount: 1
+    }
+    const getState = () =>
+      ({
+        topicBranch: { activeBranchIdByTopic: { t1: 'branch-live' } },
+        topicSegments: { segments: { entities: { 'seg-a': { ...snapA } } }, segmentsByTopic: { t1: ['seg-a'] } }
+      }) as any
+    mockReplace.mockResolvedValue(wire('seg-a', 't1', 1, ['m-a']))
+    mockList.mockResolvedValue([wire('seg-a', 't1', 1, ['m-a'])])
+
+    const dispatch = vi.fn()
+    await restoreSegmentsAfterUndo(dispatch, getState, [snapA] as any)
+
+    expect(mockReplace).toHaveBeenCalledExactlyOnceWith('seg-a', ['m-a'], 'branch-live')
+  })
+
+  it('restoreTargetSegments pins the staged target route; explicit null pins main; omitted keeps live resolution', async () => {
+    const snap = {
+      id: 'seg-t',
+      topicId: 't1',
+      name: 'T',
+      messageIds: ['m-t'],
+      color: 'color-seg-t',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'm-t',
+      lastMessageId: 'm-t',
+      messageCount: 1
+    }
+    mockList.mockResolvedValue([wire('seg-t', 't1', 0, ['m-t'])])
+
+    // restoreTargetSegments resolves the live route via the store fallback;
+    // the pinned cases below must not depend on it, the omitted case asserts it.
+    const dispatch = vi.fn()
+
+    mockUpsert.mockResolvedValue(wire('seg-t', 't1', 0, ['m-t']))
+    await restoreTargetSegments(dispatch, [snap] as any, 'branch-tgt')
+    expect(mockUpsert.mock.calls[0][5]).toBe('branch-tgt')
+
+    vi.clearAllMocks()
+    mockUpsert.mockResolvedValue(wire('seg-t', 't1', 0, ['m-t']))
+    mockList.mockResolvedValue([wire('seg-t', 't1', 0, ['m-t'])])
+    await restoreTargetSegments(dispatch, [snap] as any, null)
+    expect(mockUpsert.mock.calls[0][5]).toBe(null)
+
+    // Omitted keeps the existing live-route resolution (store fallback here).
+    vi.clearAllMocks()
+    mockUpsert.mockResolvedValue(wire('seg-t', 't1', 0, ['m-t']))
+    mockList.mockResolvedValue([wire('seg-t', 't1', 0, ['m-t'])])
+    await restoreTargetSegments(dispatch, [snap] as any)
+    expect(mockUpsert).toHaveBeenCalledTimes(1)
+    // Omitted resolves live (store fallback) — never the previously pinned route.
+    expect(mockUpsert.mock.calls[0][5]).not.toBe('branch-tgt')
   })
 })

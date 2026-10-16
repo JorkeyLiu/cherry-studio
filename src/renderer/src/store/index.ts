@@ -54,7 +54,9 @@ import preprocess from './preprocess'
 import residentRegistryReducer, {
   JOINT_PUBLISH_COMPLETE,
   RETENTION_EVICT,
-  shouldDiscardJointPublish
+  SEGMENT_CATALOG_PUBLISH_COMPLETE,
+  shouldDiscardJointPublish,
+  shouldDiscardSegmentCatalogPublish
 } from './residentRegistry'
 import runtime from './runtime'
 import settings from './settings'
@@ -236,6 +238,16 @@ export const rootReducer: typeof appReducer = (state, action: any) => {
       }
     } catch {
       // best-effort window completeness; never break dispatch
+    }
+  }
+
+  // Segment-only catalog publication: atomic authority install that preserves
+  // the resident message window. Stale/evicted/switched/mismatched payloads
+  // discard with no catalog install and no residency restore (fail closed).
+  // Raw unpaired/fromSync structural actions below keep invalidating.
+  if (action?.type === SEGMENT_CATALOG_PUBLISH_COMPLETE) {
+    if (shouldDiscardSegmentCatalogPublish(state, action.payload)) {
+      return state as any
     }
   }
 
@@ -558,6 +570,7 @@ export const closureInvalidationMiddleware: Middleware = () => (next) => (action
     if (isClosureReadOnly(action)) return result
     if (
       type === 'resident/jointPublishComplete' ||
+      type === SEGMENT_CATALOG_PUBLISH_COMPLETE ||
       type.startsWith('residentRegistry/') ||
       type.startsWith('retention/')
     ) {

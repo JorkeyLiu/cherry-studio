@@ -30,6 +30,25 @@ export interface ClipboardSegmentSnapshot {
 }
 
 // 剪贴板 state
+/**
+ * Cut-time source projection eligibility for a staged cut.
+ *
+ * Captured once at `cutMessages` time AFTER the edit-selection gate proves
+ * the source selection writable through the active loaded route. It records
+ * WHICH source rows were loaded (eligible for immediate Redux visibility on
+ * undo) — never the authority restore payload itself. Main remains the
+ * source of full messages/blocks/anchors at deletion time.
+ *
+ * `sourceBranchId` uses the same null = main encoding as the staged route and
+ * must exactly equal the staged `sourceBranchId` (null vs undefined stays
+ * distinct; undefined is legacy/missing and must fail closed).
+ */
+export interface StagedCutSourceProjection {
+  sourceTopicId: string
+  sourceBranchId: string | null
+  loadedMessageIds: string[]
+}
+
 export interface ClipboardState {
   mode: ClipboardMode | null
   items: ClipboardItem[]
@@ -44,6 +63,13 @@ export interface ClipboardState {
   timestamp: number
   /** Snapshots of fully-selected segments for segment reconstruction on paste */
   segmentSnapshots: ClipboardSegmentSnapshot[]
+  /**
+   * Cut-time source projection eligibility (cut mode only). Undefined is
+   * legacy/missing provenance and must fail closed before any paste write;
+   * null is never used (copy mode leaves this undefined). The object route
+   * must match `sourceBranchId` exactly when present.
+   */
+  sourceProjection?: StagedCutSourceProjection | null
 }
 
 // 编辑模式 state
@@ -149,6 +175,13 @@ export interface CutPasteUndoAction extends BaseUndoAction {
    * redo fails closed when source restoration is needed but roots are absent.
    */
   sourceRootIds?: string[]
+  /**
+   * Cut-time source projection eligibility propagated from the clipboard
+   * lifecycle into the undo payload. Redo re-issues the staged source delete
+   * with this eligibility (never the live target projection). Undefined is
+   * legacy/missing; new staged actions must carry it or fail closed.
+   */
+  sourceProjection?: StagedCutSourceProjection | null
   /** Per-group anchors for restoring source groups to their original positions */
   sourceGroupAnchors: GroupAnchor[]
   /** Snapshots of affected source segments before deletion (for undo source segment restoration) */

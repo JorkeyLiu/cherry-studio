@@ -129,17 +129,19 @@ describe('staged-cut authority execution after capability invalidation', () => {
     ).rejects.toThrow()
     expect(mocks.deleteMessagesWithDependents).not.toHaveBeenCalled()
 
-    // Staged-cut authority uses the captured main route without the guard.
+    // Staged-cut authority uses the captured main route without the guard,
+    // with the cut-time source eligibility (live projection is never read).
     const result = await executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
       sourceTopicId: topicId,
       sourceBranchId: null,
-      rootIds: ['u1', 'a1', 'a2']
+      rootIds: ['u1', 'a1', 'a2'],
+      sourceProjection: { sourceTopicId: topicId, sourceBranchId: null, loadedMessageIds: ['u1', 'a1', 'a2'] }
     })
     expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(topicId, ['u1', 'a1', 'a2'], null)
     expect(result.response.deletedMessageIds).toEqual(['u1', 'a1', 'a2'])
   })
 
-  it('staged delete fails closed on route mismatch and missing provenance with zero Main calls', async () => {
+  it('staged delete addresses the staged source independent of the live route; missing provenance still fails closed', async () => {
     const topicId = 't-staged-route'
     const store = configureStore({ reducer: rootReducer })
     store.dispatch(bumpGeneration(topicId))
@@ -154,13 +156,39 @@ describe('staged-cut authority execution after capability invalidation', () => {
     )
     const { executeStagedCutSourceDelete } = await import('../messageThunk')
 
-    await expect(
-      executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
-        sourceTopicId: topicId,
-        sourceBranchId: 'branch-staged',
-        rootIds: ['u1']
-      })
-    ).rejects.toThrow('Source route changed')
+    // Same-topic branch switch: staged branch differs from the live main
+    // route, but the helper still addresses Main with the staged route.
+    // Main owner guards stay final; no live-route equality refusal.
+    mocks.deleteMessagesWithDependents.mockResolvedValue({
+      affectedFileIds: [],
+      remainingReferenceCounts: {},
+      deletedMessageIds: ['u1'],
+      deletedBlockIds: [],
+      previousUserMessageIds: [],
+      remainingUserMessageIds: [],
+      segments: [],
+      restoreGroups: [
+        {
+          messages: [],
+          blocks: [],
+          entries: [],
+          positionIndex: 0,
+          anchorMessageId: null
+        }
+      ],
+      segmentSnapshots: []
+    })
+    const result = await executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
+      sourceTopicId: topicId,
+      sourceBranchId: 'branch-staged',
+      rootIds: ['u1'],
+      sourceProjection: { sourceTopicId: topicId, sourceBranchId: 'branch-staged', loadedMessageIds: ['u1'] }
+    })
+    expect(mocks.deleteMessagesWithDependents).toHaveBeenCalledExactlyOnceWith(topicId, ['u1'], 'branch-staged')
+    expect(result.response.deletedMessageIds).toEqual(['u1'])
+
+    // Missing legacy provenance still fails closed with zero Main calls.
+    mocks.deleteMessagesWithDependents.mockClear()
     await expect(
       executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
         sourceTopicId: topicId,
@@ -168,6 +196,38 @@ describe('staged-cut authority execution after capability invalidation', () => {
         rootIds: ['u1']
       })
     ).rejects.toThrow('Missing staged source route')
+    await expect(
+      executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
+        sourceTopicId: topicId,
+        sourceBranchId: '' as unknown as string,
+        rootIds: ['u1']
+      })
+    ).rejects.toThrow('Invalid staged source route')
+    // Missing/mismatched source projection fails closed before any Main call,
+    // even when the staged route itself is well-formed.
+    await expect(
+      executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
+        sourceTopicId: topicId,
+        sourceBranchId: 'branch-staged',
+        rootIds: ['u1']
+      })
+    ).rejects.toThrow('Missing staged source projection')
+    await expect(
+      executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
+        sourceTopicId: topicId,
+        sourceBranchId: 'branch-staged',
+        rootIds: ['u1'],
+        sourceProjection: { sourceTopicId: topicId, sourceBranchId: null, loadedMessageIds: ['u1'] }
+      })
+    ).rejects.toThrow('route mismatch')
+    await expect(
+      executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
+        sourceTopicId: topicId,
+        sourceBranchId: 'branch-staged',
+        rootIds: ['u1'],
+        sourceProjection: { sourceTopicId: 'other-topic', sourceBranchId: 'branch-staged', loadedMessageIds: ['u1'] }
+      })
+    ).rejects.toThrow('topic mismatch')
     expect(mocks.deleteMessagesWithDependents).not.toHaveBeenCalled()
   })
 
@@ -228,7 +288,8 @@ describe('staged-cut authority execution after capability invalidation', () => {
       await executeStagedCutSourceDelete(store.dispatch, store.getState as any, {
         sourceTopicId: topicId,
         sourceBranchId: null,
-        rootIds: ['u1', 'a1']
+        rootIds: ['u1', 'a1'],
+        sourceProjection: { sourceTopicId: topicId, sourceBranchId: null, loadedMessageIds: ['u1', 'a1'] }
       })
     } catch (error) {
       caught = error

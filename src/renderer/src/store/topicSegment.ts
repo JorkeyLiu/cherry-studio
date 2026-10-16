@@ -1,7 +1,7 @@
 import { createEntityAdapter, createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { TopicSegment } from '@renderer/types/topicSegment'
 
-import { publishResidentComplete, retentionEvict } from './residentRegistry'
+import { publishResidentComplete, publishSegmentCatalogComplete, retentionEvict } from './residentRegistry'
 
 const topicSegmentAdapter = createEntityAdapter<TopicSegment>()
 
@@ -110,6 +110,19 @@ const topicSegmentSlice = createSlice({
   extraReducers: (builder) => {
     builder.addCase(publishResidentComplete, (state, action) => {
       const { topicId, segments } = action.payload
+      const oldIds = state.segmentsByTopic[topicId] || []
+      topicSegmentAdapter.removeMany(state.segments, oldIds)
+      const incoming = segments.filter((s) => !isEmptySegment(s))
+      topicSegmentAdapter.upsertMany(state.segments, incoming)
+      state.segmentsByTopic[topicId] = [...incoming].sort(compareAuthority).map((s) => s.id)
+    })
+    builder.addCase(publishSegmentCatalogComplete, (state, action) => {
+      // Authority catalog install for the segment-only publication path.
+      // Root guard already discarded stale/mismatched payloads; the message
+      // window is preserved by leaving messages untouched (no transient
+      // resident=false frame — single atomic dispatch with the registry).
+      const { topicId, segments } = action.payload
+      if (typeof topicId !== 'string' || !Array.isArray(segments)) return
       const oldIds = state.segmentsByTopic[topicId] || []
       topicSegmentAdapter.removeMany(state.segments, oldIds)
       const incoming = segments.filter((s) => !isEmptySegment(s))

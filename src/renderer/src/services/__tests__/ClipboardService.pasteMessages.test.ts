@@ -220,6 +220,11 @@ interface StoreState {
     }>
     sourceTopicId: string | null
     sourceBranchId?: string | null
+    sourceProjection?: {
+      sourceTopicId: string
+      sourceBranchId: string | null
+      loadedMessageIds: string[]
+    }
     segmentSnapshots: Array<{
       originalSegmentId: string
       name: string
@@ -547,6 +552,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       items: [makeClipboardItem(cutMsg, [cutBlock], 0)],
       sourceTopicId: 'topic-2',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: null, loadedMessageIds: ['cut-0'] },
       segmentSnapshots: []
     }
     storeState.messages.entities['cut-0'] = cutMsg
@@ -583,7 +589,12 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      { sourceTopicId: 'topic-2', sourceBranchId: null, rootIds: ['cut-0'] }
+      expect.objectContaining({
+        sourceTopicId: 'topic-2',
+        sourceBranchId: null,
+        rootIds: ['cut-0'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-2', sourceBranchId: null })
+      })
     )
     expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
     expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
@@ -626,6 +637,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       ],
       sourceTopicId: 'topic-2',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: null, loadedMessageIds: ['u1', 'a1', 'a2'] },
       segmentSnapshots: []
     }
     mocks.executeStagedCutSourceDelete.mockResolvedValue({
@@ -646,7 +658,12 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      { sourceTopicId: 'topic-2', sourceBranchId: null, rootIds: ['u1', 'a1', 'a2'] }
+      expect.objectContaining({
+        sourceTopicId: 'topic-2',
+        sourceBranchId: null,
+        rootIds: ['u1', 'a1', 'a2'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-2', sourceBranchId: null })
+      })
     )
     const undoAction = mocks.pushUndoAction.mock.calls[0][0]
     expect(undoAction.type).toBe('cut_paste')
@@ -674,6 +691,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       ],
       sourceTopicId: 'topic-2',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: null, loadedMessageIds: ['a1', 'a2'] },
       segmentSnapshots: []
     }
     mocks.executeStagedCutSourceDelete.mockResolvedValue({
@@ -693,7 +711,12 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      { sourceTopicId: 'topic-2', sourceBranchId: null, rootIds: ['a1', 'a2'] }
+      expect.objectContaining({
+        sourceTopicId: 'topic-2',
+        sourceBranchId: null,
+        rootIds: ['a1', 'a2'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-2', sourceBranchId: null })
+      })
     )
     const undoAction = mocks.pushUndoAction.mock.calls[0][0]
     expect(undoAction.type).toBe('cut_paste')
@@ -710,6 +733,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       items: [makeClipboardItem(cutMsg, [], 0)],
       sourceTopicId: 'topic-2',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: null, loadedMessageIds: ['cut-0'] },
       segmentSnapshots: []
     }
     storeState.messages.entities['cut-0'] = cutMsg
@@ -728,7 +752,12 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      { sourceTopicId: 'topic-2', sourceBranchId: null, rootIds: ['cut-0'] }
+      expect.objectContaining({
+        sourceTopicId: 'topic-2',
+        sourceBranchId: null,
+        rootIds: ['cut-0'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-2', sourceBranchId: null })
+      })
     )
     // Transactional rollback: fresh copies removed via the plain authority
     // path on the same addressed target route; original source untouched.
@@ -749,6 +778,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       items: [makeClipboardItem(cutMsg, [], 0)],
       sourceTopicId: 'topic-2',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: null, loadedMessageIds: ['cut-0'] },
       segmentSnapshots: []
     }
     mocks.executeStagedCutSourceDelete.mockRejectedValue(new Error('NOT_OWNED'))
@@ -763,13 +793,18 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.pushUndoAction).not.toHaveBeenCalled()
   })
 
-  it('cut paste rejects before any write when the staged source route no longer matches', async () => {
+  it('cut paste uses the staged source route independent of the live source route (branch switch completes)', async () => {
+    // Staged source branch differs from the live source route (same-topic
+    // branch switch before paste): paste must still insert first, then
+    // address the Main source delete with the staged route. No live-route
+    // equality refusal; Main owner guards stay final.
     const cutMsg = createUserMessage({ id: 'cut-0', topicId: 'topic-2' })
     storeState.clipboard = {
       mode: 'cut',
       items: [makeClipboardItem(cutMsg, [], 0)],
       sourceTopicId: 'topic-2',
       sourceBranchId: 'branch-staged',
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: 'branch-staged', loadedMessageIds: ['cut-0'] },
       segmentSnapshots: []
     }
     storeState.topicBranch = {
@@ -777,17 +812,149 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       activeBranchIdByTopic: { 'topic-2': 'branch-live' },
       routeGenerationByTopic: {}
     }
+    mocks.executeStagedCutSourceDelete.mockResolvedValue({
+      response: { deletedMessageIds: ['cut-0'] },
+      undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }
+    })
 
     const { pasteMessages } = await import('../ClipboardService')
-    await expect(pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')).rejects.toThrow(
-      'Source route changed'
+    const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    expect(count).toBe(1)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.applyInsertedMessageGroups).toHaveBeenCalledTimes(1)
+    expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      expect.any(Function),
+      expect.objectContaining({
+        sourceTopicId: 'topic-2',
+        sourceBranchId: 'branch-staged',
+        rootIds: ['cut-0'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-2', sourceBranchId: 'branch-staged' })
+      })
     )
-    expect(mocks.insertMessageGroups).not.toHaveBeenCalled()
-    expect(mocks.executeStagedCutSourceDelete).not.toHaveBeenCalled()
-    expect(mocks.applyInsertedMessageGroups).not.toHaveBeenCalled()
-    expect(mocks.messagesReceived).not.toHaveBeenCalled()
-    expect(mocks.clearClipboard).not.toHaveBeenCalled()
-    expect(mocks.pushUndoAction).not.toHaveBeenCalled()
+    expect(mocks.clearClipboard).toHaveBeenCalledTimes(1)
+    expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0]
+    expect(undoAction.type).toBe('cut_paste')
+    expect(undoAction.sourceBranchId).toBe('branch-staged')
+  })
+
+  it('same-topic cut branch→main completes with staged source address and pinned main target', async () => {
+    // Same logical topic: cut staged on branch-src, live route switched to
+    // main (null) before paste to main. Insert addresses main, source delete
+    // addresses the staged branch — no route-match refusal, no silent fallback.
+    const cutMsg = createUserMessage({ id: 'cut-0', topicId: 'topic-1' })
+    storeState.clipboard = {
+      mode: 'cut',
+      items: [makeClipboardItem(cutMsg, [], 0)],
+      sourceTopicId: 'topic-1',
+      sourceBranchId: 'branch-src',
+      sourceProjection: { sourceTopicId: 'topic-1', sourceBranchId: 'branch-src', loadedMessageIds: ['cut-0'] },
+      segmentSnapshots: []
+    }
+    storeState.topicBranch = {
+      branchesByTopic: {},
+      activeBranchIdByTopic: {},
+      routeGenerationByTopic: {}
+    }
+    mocks.executeStagedCutSourceDelete.mockResolvedValue({
+      response: { deletedMessageIds: ['cut-0'] },
+      undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }
+    })
+
+    const { pasteMessages } = await import('../ClipboardService')
+    const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    expect(count).toBe(1)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', expect.any(Array), null)
+    expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      expect.any(Function),
+      expect.objectContaining({
+        sourceTopicId: 'topic-1',
+        sourceBranchId: 'branch-src',
+        rootIds: ['cut-0'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-1', sourceBranchId: 'branch-src' })
+      })
+    )
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0]
+    expect(undoAction.sourceBranchId).toBe('branch-src')
+    expect(undoAction.targetBranchId).toBe(null)
+  })
+
+  it('same-topic cut branch→sibling completes with staged source and sibling target addresses', async () => {
+    // Same logical topic: cut staged on branch-src, live route is sibling
+    // branch-sib (paste target). Both addresses stay explicit and distinct.
+    const cutMsg = createUserMessage({ id: 'cut-0', topicId: 'topic-1' })
+    storeState.clipboard = {
+      mode: 'cut',
+      items: [makeClipboardItem(cutMsg, [], 0)],
+      sourceTopicId: 'topic-1',
+      sourceBranchId: 'branch-src',
+      sourceProjection: { sourceTopicId: 'topic-1', sourceBranchId: 'branch-src', loadedMessageIds: ['cut-0'] },
+      segmentSnapshots: []
+    }
+    storeState.topicBranch = {
+      branchesByTopic: {},
+      activeBranchIdByTopic: { 'topic-1': 'branch-sib' },
+      routeGenerationByTopic: {}
+    }
+    mocks.executeStagedCutSourceDelete.mockResolvedValue({
+      response: { deletedMessageIds: ['cut-0'] },
+      undoParts: { groupAnchors: [], segmentSnapshots: [], fileReferenceDeltas: [] }
+    })
+
+    const { pasteMessages } = await import('../ClipboardService')
+    const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    expect(count).toBe(1)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledExactlyOnceWith('topic-1', expect.any(Array), 'branch-sib')
+    expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      expect.any(Function),
+      expect.objectContaining({
+        sourceTopicId: 'topic-1',
+        sourceBranchId: 'branch-src',
+        rootIds: ['cut-0'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-1', sourceBranchId: 'branch-src' })
+      })
+    )
+    const undoAction = mocks.pushUndoAction.mock.calls[0][0]
+    expect(undoAction.sourceBranchId).toBe('branch-src')
+    expect(undoAction.targetBranchId).toBe('branch-sib')
+  })
+
+  it('paste returns the actual inserted message count across multiple groups (3-message group + single)', async () => {
+    // One group with 3 messages (u1 + a1/a2) plus a second single-message
+    // group: toast count must be 4 messages, not 2 groups.
+    const u1 = createUserMessage({ id: 'u1' })
+    const a1 = createAssistantMessage('a1', 'u1')
+    const a2 = createAssistantMessage('a2', 'u1')
+    const solo = createUserMessage({ id: 'solo' })
+    storeState.clipboard = {
+      mode: 'copy',
+      items: [
+        { originalAskId: 'u1', messages: [u1, a1, a2], blocks: [], positionIndex: 0 },
+        { originalAskId: 'solo', messages: [solo], blocks: [], positionIndex: 1 }
+      ],
+      sourceTopicId: null,
+      sourceBranchId: null,
+      segmentSnapshots: []
+    }
+
+    const { pasteMessages } = await import('../ClipboardService')
+    const count = await pasteMessages(vi.fn(), () => storeState as any, 'topic-1', 'm1')
+
+    expect(count).toBe(4)
+    expect(mocks.insertMessageGroups).toHaveBeenCalledTimes(1)
+    const [, groups] = mocks.insertMessageGroups.mock.calls[0] as unknown as [
+      string,
+      Array<{ entries: Array<unknown> }>
+    ]
+    expect(groups[0].entries).toHaveLength(4)
+    expect(mocks.pushUndoAction).toHaveBeenCalledTimes(1)
+    expect(mocks.pushUndoAction.mock.calls[0][0].insertedMessageIds).toHaveLength(4)
   })
 
   it('cut paste rejects before any write on missing legacy cut-route provenance', async () => {
@@ -827,6 +994,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       items: [{ originalAskId: 'u1', messages: [cutMsg, a1, a2], blocks: [], positionIndex: 0 }],
       sourceTopicId: 'topic-1',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-1', sourceBranchId: null, loadedMessageIds: ['u1', 'a1', 'a2'] },
       segmentSnapshots: []
     }
     mocks.executeStagedCutSourceDelete.mockResolvedValue({
@@ -848,7 +1016,12 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      { sourceTopicId: 'topic-1', sourceBranchId: null, rootIds: ['u1', 'a1', 'a2'] }
+      expect.objectContaining({
+        sourceTopicId: 'topic-1',
+        sourceBranchId: null,
+        rootIds: ['u1', 'a1', 'a2'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-1', sourceBranchId: null })
+      })
     )
     expect(mocks.executeDeleteMessagesWithDependents).not.toHaveBeenCalled()
     const undoAction = mocks.pushUndoAction.mock.calls[0][0]
@@ -979,6 +1152,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       items: [makeClipboardItem(cutMsg, [cutBlock], 0)],
       sourceTopicId: 'topic-2',
       sourceBranchId: null,
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: null, loadedMessageIds: ['cut-0'] },
       segmentSnapshots: []
     }
     storeState.messages.entities['cut-0'] = cutMsg
@@ -1015,7 +1189,12 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
     expect(mocks.executeStagedCutSourceDelete).toHaveBeenCalledExactlyOnceWith(
       expect.anything(),
       expect.any(Function),
-      { sourceTopicId: 'topic-2', sourceBranchId: null, rootIds: ['cut-0'] }
+      expect.objectContaining({
+        sourceTopicId: 'topic-2',
+        sourceBranchId: null,
+        rootIds: ['cut-0'],
+        sourceProjection: expect.objectContaining({ sourceTopicId: 'topic-2', sourceBranchId: null })
+      })
     )
     // Committed: rollback of the surviving pasted copies never runs.
     expect(mocks.deleteMessagesFromDB).not.toHaveBeenCalled()
@@ -1041,6 +1220,7 @@ describe('ClipboardService.pasteMessages (stable insert-message-groups)', () => 
       items: [makeClipboardItem(cutMsg, [], 0)],
       sourceTopicId: 'topic-2',
       sourceBranchId: 'branch-src',
+      sourceProjection: { sourceTopicId: 'topic-2', sourceBranchId: 'branch-src', loadedMessageIds: ['cut-0'] },
       segmentSnapshots: []
     }
     // Pinned paste target route at paste time.

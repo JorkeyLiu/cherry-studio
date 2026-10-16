@@ -211,7 +211,7 @@ describe('useTopicSegments authority catalog', () => {
     expect(state.segmentsByTopic['t1']).toEqual([capturedId, 'seg-late'])
   })
 
-  it('list failure fallback keeps the new wire visible without fabricating siblings', async () => {
+  it('list failure surfaces without fabricating a single-wire catalog (fail closed)', async () => {
     const store = configureStore({
       reducer: { topicSegments: topicSegmentReducer, messages: messagesReducer as any }
     })
@@ -244,16 +244,14 @@ describe('useTopicSegments authority catalog', () => {
 
     const wrapper = ({ children }: { children: React.ReactNode }) => createElement(Provider, { store, children } as any)
     const { result } = renderHook(() => useTopicSegments('t1'), { wrapper })
-    const created = await result.current.createSegment('t1', 'New', ['m-new'])
+    await expect(result.current.createSegment('t1', 'New', ['m-new'])).rejects.toThrow('list failed')
 
     expect(dbService.upsertSegment).toHaveBeenCalledTimes(1)
     expect(dbService.listSegments).toHaveBeenCalledTimes(1)
-    // Main mutation succeeded so the new wire stays visible; stale sibling is
-    // kept as-is, never fabricated or rolled back.
+    // No fabricated single-wire success: the authority catalog is unchanged
+    // (stale sibling kept, new wire not installed as a complete catalog).
     const state = (store.getState() as any).topicSegments
-    expect(created.messageIds).toEqual(['m-new'])
-    expect(state.segments.entities[created.id]).toBeTruthy()
-    expect(state.segments.entities[created.id].messageIds).toEqual(['m-new'])
+    expect(state.segmentsByTopic['t1']).toEqual(['seg-late'])
     expect(state.segments.entities['seg-late'].sortOrder).toBe(0)
   })
 })

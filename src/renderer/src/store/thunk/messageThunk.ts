@@ -48,7 +48,7 @@ import store from '@renderer/store'
 import { updateTopicUpdatedAt } from '@renderer/store/assistants'
 import { type Assistant, type FileMetadata, type Model, type Topic } from '@renderer/types'
 import { ChunkType } from '@renderer/types/chunk'
-import type { GroupAnchor } from '@renderer/types/editMode'
+import type { GroupAnchor, StagedCutSourceProjection } from '@renderer/types/editMode'
 import type { Message, MessageBlock } from '@renderer/types/newMessage'
 import {
   AssistantMessageStatus,
@@ -1196,17 +1196,49 @@ export function isDeletePostCommitConvergenceError(error: unknown): error is Del
   )
 }
 
+/**
+ * ONE shared authoritative delete acknowledgment: message/block removal plus
+ * the complete Main segment catalog from an already-returned
+ * `deleteMessagesWithDependents` response. No extra list (the response is
+ * already the complete catalog per PROJ-10/I-5); the paired
+ * `isDeletePairedFollowUp` flag keeps the single atomic commit preserving
+ * the valid loaded projection (raw/fromSync invalidation unchanged).
+ */
+export function publishDeleteAuthorityCatalog(
+  dispatch: AppDispatch,
+  topicId: string,
+  response: DeleteMessagesWithDependentsResponse
+): void {
+  dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
+  if (response.deletedBlockIds.length > 0) {
+    dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
+  }
+  dispatch({
+    ...replaceSegmentsForTopic({
+      topicId,
+      segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
+    }),
+    meta: { isDeletePairedFollowUp: true }
+  } as any)
+}
+
 async function executeDeleteCore(
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
   rootIds: string[],
-  addressedRoute: string | null
+  addressedRoute: string | null,
+  eligibleLoadedIds?: Iterable<string>
 ): Promise<{ response: DeleteMessagesWithDependentsResponse; undoParts: DeleteDependentsUndoParts }> {
-  // Capture the pre-delete loaded projection BEFORE any persistence. The
-  // intersection below bounds the Redux undo projection; Main always keeps
-  // the full authority restore groups.
-  const preDeleteLoadedIds = new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
+  // Ordinary deletes capture the pre-delete loaded projection BEFORE any
+  // persistence. Staged-cut callers pass the cut-time source eligibility
+  // explicitly and must never read the (possibly retargeted) live projection
+  // here. The intersection below bounds the Redux undo projection only; Main
+  // always keeps the full authority restore groups.
+  const preDeleteLoadedIds =
+    typeof eligibleLoadedIds !== 'undefined'
+      ? new Set<string>(eligibleLoadedIds)
+      : new Set<string>(getState().messages.messageIdsByTopic?.[topicId] ?? [])
   // DB commit first (LOCK-001): Main resolves the full expansion + undo snapshot.
   // A throw here is a PRE-COMMIT failure: Main never committed, no typed marker.
   const response = await dbService.deleteMessagesWithDependents(topicId, rootIds, addressedRoute)
@@ -1228,17 +1260,8 @@ async function executeDeleteCore(
 
     // Redux mutations AFTER successful SQLite commit — reducers naturally
     // affect only the loaded intersection, never injecting window-outside entities.
-    dispatch(newMessagesActions.removeMessages({ topicId, messageIds: response.deletedMessageIds }))
-    if (response.deletedBlockIds.length > 0) {
-      dispatch(withClosureTopics(removeManyBlocks(response.deletedBlockIds), topicId))
-    }
-    dispatch({
-      ...replaceSegmentsForTopic({
-        topicId,
-        segments: response.segments as unknown as Parameters<typeof replaceSegmentsForTopic>[0]['segments']
-      }),
-      meta: { isDeletePairedFollowUp: true }
-    } as any)
+    // ONE shared delete acknowledgment (no duplicate flags, no extra list).
+    publishDeleteAuthorityCatalog(dispatch, topicId, response)
 
     // Renderer-owned anchor transfer from authoritative group keys (route-scoped).
     transferAnchorsWithAuthorityGroupKeys(
@@ -1279,23 +1302,66 @@ export const executeDeleteMessagesWithDependents = async (
  * Staged-cut authority execution for cut-paste source deletion only.
  *
  * A cut stages its authority at cut time (after the edit-selection precheck):
- * the addressed source route plus the complete authority member IDs. Paste
- * reuses that staged authority without rerequiring projection capability,
- * because a straddling source may include complete outside-loaded members.
- * Batch insertion now publishes its own Main capability atomically (no
- * projection clear), so this helper covers only the source side. Main
+ * the addressed source route plus the complete authority member IDs, plus the
+ * cut-time SOURCE projection eligibility (which source rows were loaded and
+ * therefore eligible for immediate Redux visibility on undo). Paste/redo
+ * reuse that staged authority without rerequiring projection capability,
+ * because a straddling source may include complete outside-loaded members,
+ * and without rerequiring the current UI route, because a same-topic branch
+ * switch (staged source branch != live route) must still complete. The
+ * eligibility intersection uses the cut-time snapshot ONLY — never the live
+ * (possibly retargeted) projection — so a paste after switching to another
+ * window/branch cannot poison `loadedMessageIds` with the target's IDs. Main
  * remains the final owner guard (every root owner == addressed route, user
- * dependents all-owned, atomic).
+ * dependents all-owned, atomic) and the source of full restore payloads.
  *
  * Fail-closed before any Main call when the staged route is missing (legacy
- * provenance) or no longer matches the current source route. Ordinary delete
- * paths stay per-root guarded; this helper is cut-specific and takes no
- * generic skip flag.
+ * provenance), invalid, or when the source projection provenance is missing,
+ * mismatched (topic/route), or malformed. Ordinary delete paths stay
+ * per-root guarded with a live pre-delete snapshot; this helper is
+ * cut-specific and takes no generic skip flag.
  */
 export interface StagedCutAuthority {
   sourceTopicId: string
   sourceBranchId: string | null
   rootIds: string[]
+  /**
+   * Cut-time source projection eligibility. Required (undefined/null fail
+   * closed); `sourceTopicId`/`sourceBranchId` must exactly match the staged
+   * authority above (null = main, undefined never equals null).
+   */
+  sourceProjection?: StagedCutSourceProjection | null
+}
+
+function requireStagedCutSourceEligibility(authority: StagedCutAuthority): ReadonlyArray<string> {
+  const { sourceTopicId, sourceBranchId, sourceProjection } = authority
+  if (typeof sourceProjection === 'undefined' || sourceProjection === null) {
+    throw new Error(`[stagedCutDelete] Missing staged source projection for topic ${sourceTopicId}`)
+  }
+  if (typeof sourceProjection !== 'object') {
+    throw new Error(`[stagedCutDelete] Invalid staged source projection for topic ${sourceTopicId}`)
+  }
+  if (sourceProjection.sourceTopicId !== sourceTopicId) {
+    throw new Error(`[stagedCutDelete] Staged source projection topic mismatch for topic ${sourceTopicId}`)
+  }
+  // Strict route identity: null (main) vs string vs undefined stay distinct.
+  if (
+    typeof (sourceProjection as { sourceBranchId?: unknown }).sourceBranchId === 'undefined' ||
+    sourceProjection.sourceBranchId !== sourceBranchId
+  ) {
+    throw new Error(`[stagedCutDelete] Staged source projection route mismatch for topic ${sourceTopicId}`)
+  }
+  if (!Array.isArray(sourceProjection.loadedMessageIds)) {
+    throw new Error(`[stagedCutDelete] Invalid staged source projection ids for topic ${sourceTopicId}`)
+  }
+  const eligible: string[] = []
+  const seen = new Set<string>()
+  for (const id of sourceProjection.loadedMessageIds) {
+    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    eligible.push(id)
+  }
+  return eligible
 }
 
 export const executeStagedCutSourceDelete = async (
@@ -1307,19 +1373,20 @@ export const executeStagedCutSourceDelete = async (
   if (typeof sourceBranchId === 'undefined') {
     throw new Error(`[stagedCutDelete] Missing staged source route for topic ${sourceTopicId}`)
   }
+  if (sourceBranchId !== null && !(typeof sourceBranchId === 'string' && sourceBranchId.length > 0)) {
+    throw new Error(`[stagedCutDelete] Invalid staged source route for topic ${sourceTopicId}`)
+  }
   if (!Array.isArray(rootIds) || rootIds.length === 0) {
     throw new Error(`[stagedCutDelete] Missing staged source roots for topic ${sourceTopicId}`)
   }
-  let currentRoute: string | null = null
-  try {
-    currentRoute = activeRouteOf(getState, sourceTopicId)
-  } catch {
-    throw new Error(`[stagedCutDelete] Unknown source route for topic ${sourceTopicId}`)
-  }
-  if (currentRoute !== sourceBranchId) {
-    throw new Error(`[stagedCutDelete] Source route changed for topic ${sourceTopicId}`)
-  }
-  return executeDeleteCore(dispatch, getState, sourceTopicId, rootIds, sourceBranchId)
+  // Cut-time eligibility (validated above) drives the undo intersection.
+  // The live projection is intentionally never read here.
+  const eligibleLoadedIds = requireStagedCutSourceEligibility(authority)
+  // Staged-addressed: the explicitly staged source route drives the Main
+  // delete independent of the current UI route. No live-route equality check:
+  // a same-topic branch switch must not refuse, and Main validates every root
+  // owner == staged addressed route with all-owned atomicity.
+  return executeDeleteCore(dispatch, getState, sourceTopicId, rootIds, sourceBranchId, eligibleLoadedIds)
 }
 
 export const deleteMessagesWithDependentsThunk =
