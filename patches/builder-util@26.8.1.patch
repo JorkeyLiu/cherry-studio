@@ -1,0 +1,13 @@
+diff --git a/out/log.js b/out/log.js
+index edefdcc79aad230d15368c86ff053ca9e0e917c0..1dbe52190084da1283433aa2fbb94de823b31440 100644
+--- a/out/log.js
++++ b/out/log.js
+@@ -23,7 +23,7 @@ class Logger {
+     }
+     // noinspection JSMethodCanBeStatic
+     get isDebugEnabled() {
+-        return exports.debug.enabled;
++        return exports.debug.enabled === true;
+     }
+     info(messageOrFields, message) {
+         this.doLog(message, messageOrFields, "info");

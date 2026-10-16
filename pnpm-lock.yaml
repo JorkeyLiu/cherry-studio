@@ -63,6 +63,9 @@ patchedDependencies:
   atomically@1.7.0:
     hash: 657b68ae90d71dfa6230dbf3431a1c2d952f87572cd8e00e635c4f5739f7b671
     path: patches/atomically-npm-1.7.0-e742e5293b.patch
+  builder-util@26.8.1:
+    hash: 29d9a1e5241baba071e17906a11a70bf5801cbfc7fb29c00111a478213e5dfdd
+    path: patches/builder-util@26.8.1.patch
   electron-updater@6.7.0:
     hash: 845dead3509897d7a5aed99b4d271a244449c544b840c21bf149ff6fc907cc85
     path: patches/electron-updater-npm-6.7.0-47b11bb0d4.patch
@@ -18035,7 +18038,7 @@ snapshots:
       '@malept/flatpak-bundler': 0.4.0
       '@types/fs-extra': 9.0.13
       async-exit-hook: 2.0.1
-      builder-util: 26.8.1
+      builder-util: 26.8.1(patch_hash=29d9a1e5241baba071e17906a11a70bf5801cbfc7fb29c00111a478213e5dfdd)
       builder-util-runtime: 9.5.1
       chromium-pickle-js: 0.2.0
       ci-info: 4.3.1
@@ -18381,7 +18384,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  builder-util@26.8.1:
+  builder-util@26.8.1(patch_hash=29d9a1e5241baba071e17906a11a70bf5801cbfc7fb29c00111a478213e5dfdd):
     dependencies:
       7zip-bin: 5.2.0
       '@types/debug': 4.1.12
@@ -19261,7 +19264,7 @@ snapshots:
   dmg-builder@26.8.1(electron-builder-squirrel-windows@26.1.0):
     dependencies:
       app-builder-lib: 26.8.1(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.1.0)
-      builder-util: 26.8.1
+      builder-util: 26.8.1(patch_hash=29d9a1e5241baba071e17906a11a70bf5801cbfc7fb29c00111a478213e5dfdd)
       fs-extra: 10.1.0
       iconv-lite: 0.6.3
       js-yaml: 4.1.1
@@ -19418,7 +19421,7 @@ snapshots:
   electron-builder@26.8.1(electron-builder-squirrel-windows@26.1.0):
     dependencies:
       app-builder-lib: 26.8.1(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.1.0)
-      builder-util: 26.8.1
+      builder-util: 26.8.1(patch_hash=29d9a1e5241baba071e17906a11a70bf5801cbfc7fb29c00111a478213e5dfdd)
       builder-util-runtime: 9.5.1
       chalk: 4.1.2
       ci-info: 4.3.1
@@ -19454,7 +19457,7 @@ snapshots:
   electron-publish@26.8.1:
     dependencies:
       '@types/fs-extra': 9.0.13
-      builder-util: 26.8.1
+      builder-util: 26.8.1(patch_hash=29d9a1e5241baba071e17906a11a70bf5801cbfc7fb29c00111a478213e5dfdd)
       builder-util-runtime: 9.5.1
       chalk: 4.1.2
       form-data: 4.0.5
