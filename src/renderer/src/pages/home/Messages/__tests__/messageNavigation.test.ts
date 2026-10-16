@@ -8,6 +8,7 @@ import {
   canHandleUserViewportScroll,
   chooseNavigationWindow,
   computeColumnReverseMessageScrollTop,
+  computeRestoreMessageScrollTop,
   type MessageNavigationIntent,
   resolveAdjacentUserMessage,
   resolveBootstrapDecision,
@@ -389,6 +390,75 @@ describe('applyColumnReverseScroll — production scroll adapter', () => {
   })
 })
 
+describe('computeRestoreMessageScrollTop — saved-offset restore geometry', () => {
+  // Topic away/back regression shape: elementTop -561 (row content offset at
+  // scrollTop -470 with the row at -91), saved offset -91 → scrollTo -470.
+  const RESTORE = {
+    elementTopWithinContainer: -561,
+    restoreOffset: -91,
+    minScrollTop: -9426
+  }
+
+  it('lands the row exactly at its saved negative offset', () => {
+    expect(computeRestoreMessageScrollTop(RESTORE)).toBe(-470)
+  })
+
+  it('already-placed geometry is the identity (caller skips the write within 1px)', () => {
+    const top = computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: -561 })
+    expect(top).not.toBeNull()
+    // scrollTop -470 already holds offset -91: |(-470) - (-470)| = 0, no write.
+    expect(Math.abs(-470 - top!)).toBeLessThanOrEqual(1)
+  })
+
+  it('clamps beyond-edge targets to the oldest edge', () => {
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: -20000 })).toBe(RESTORE.minScrollTop)
+  })
+
+  it('clamps above-bottom targets to 0', () => {
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: 50, restoreOffset: -91 })).toBe(0)
+  })
+
+  it('returns null for a missing offset (caller keeps its alignment path)', () => {
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, restoreOffset: null })).toBeNull()
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, restoreOffset: undefined })).toBeNull()
+  })
+
+  it('returns null for a non-finite offset or geometry (fail-closed)', () => {
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, restoreOffset: NaN })).toBeNull()
+    expect(
+      computeRestoreMessageScrollTop({ ...RESTORE, elementTopWithinContainer: Number.POSITIVE_INFINITY })
+    ).toBeNull()
+    expect(computeRestoreMessageScrollTop({ ...RESTORE, minScrollTop: NaN })).toBeNull()
+  })
+})
+
+describe('resolveMessageNavigation restore offset pass-through', () => {
+  it('carries a finite restoreOffset to the resolved navigation', () => {
+    const resolved = resolveMessageNavigation(messages, {
+      kind: 'message',
+      targetId: 'm10',
+      source: 'restore',
+      restoreOffset: -91
+    })
+    expect(resolved).toEqual({ kind: 'message', targetId: 'm10', alignment: 'start', restoreOffset: -91 })
+  })
+
+  it('normalizes a missing offset to null (explicit path unchanged)', () => {
+    const resolved = resolveMessageNavigation(messages, { kind: 'message', targetId: 'm10', source: 'event' })
+    expect(resolved).toEqual({ kind: 'message', targetId: 'm10', alignment: 'start', restoreOffset: null })
+  })
+
+  it('drops a non-finite offset to null (fail-closed, never NaN geometry)', () => {
+    const resolved = resolveMessageNavigation(messages, {
+      kind: 'message',
+      targetId: 'm10',
+      source: 'restore',
+      restoreOffset: NaN
+    })
+    expect(resolved).toEqual({ kind: 'message', targetId: 'm10', alignment: 'start', restoreOffset: null })
+  })
+})
+
 describe('computeColumnReverseMessageScrollTop — explicit resident-row geometry', () => {
   // Reproduces the verified delivery defect: a resident oldest row far above
   // the viewport (elementTop -12073, container 802px, scroll range
@@ -512,8 +582,29 @@ describe('resolveBootstrapDecision', () => {
 
     expect(decision.action).toBe('restore')
     if (decision.action === 'restore') {
-      expect(decision.intent).toEqual({ kind: 'message', targetId: 'msg-5', source: 'restore' })
+      expect(decision.intent).toEqual({ kind: 'message', targetId: 'msg-5', source: 'restore', restoreOffset: null })
     }
+  })
+
+  it('passes the saved negative intra-row offset through the restore intent (no start pin)', () => {
+    // Regression shape of the topic away/back duplicate write: savedOff -91
+    // must ride the intent so the transaction scroll converges on the stable
+    // offset instead of start-aligning the row at 0.
+    const decision = resolveBootstrapDecision({
+      ...baseInput,
+      savedPosition: {
+        scrollTop: -470,
+        anchorId: 'msg-10',
+        messageId: 'msg-10',
+        intraRowOffset: -91,
+        isAtBottom: false
+      }
+    })
+
+    expect(decision).toEqual({
+      action: 'restore',
+      intent: { kind: 'message', targetId: 'msg-10', source: 'restore', restoreOffset: -91 }
+    })
   })
 
   it('selects saved restore when no matching pending exists', () => {
@@ -524,7 +615,7 @@ describe('resolveBootstrapDecision', () => {
 
     expect(decision).toEqual({
       action: 'restore',
-      intent: { kind: 'message', targetId: 'msg-10', source: 'restore' }
+      intent: { kind: 'message', targetId: 'msg-10', source: 'restore', restoreOffset: null }
     })
   })
 
@@ -596,17 +687,17 @@ describe('resolveBootstrapDecision', () => {
     expect(decision).toEqual({ action: 'done' })
   })
 
-  it('pending with wrong topicId is ignored and falls through to saved restore', () => {
+  it('pending with wrong topicId is ignored and falls through to a restore with the saved offset', () => {
     const decision = resolveBootstrapDecision({
       ...baseInput,
       pending: { messageId: 'msg-42', topicId: 'wrong-topic' },
-      savedPosition: { scrollTop: 200, anchorId: 'msg-10', isAtBottom: false }
+      savedPosition: { scrollTop: 200, anchorId: 'msg-10', intraRowOffset: -40, isAtBottom: false }
     })
 
-    expect(decision.action).toBe('restore')
-    if (decision.action === 'restore') {
-      expect(decision.intent).toEqual({ kind: 'message', targetId: 'msg-10', source: 'restore' })
-    }
+    expect(decision).toEqual({
+      action: 'restore',
+      intent: { kind: 'message', targetId: 'msg-10', source: 'restore', restoreOffset: -40 }
+    })
   })
 
   it('loading completion allows pending to proceed (wait → pending on next run)', () => {

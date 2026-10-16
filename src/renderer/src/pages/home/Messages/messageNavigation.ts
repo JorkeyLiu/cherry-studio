@@ -88,6 +88,31 @@ export const computeColumnReverseMessageScrollTop = (args: {
 }
 
 /**
+ * Pure geometry for a saved-offset restore inside a column-reverse container.
+ *
+ * `elementTopWithinContainer` is the row's content offset
+ * (`elRect.top - containerRect.top + container.scrollTop`, i.e. the scrollTop
+ * at which the row would sit at offset 0); `restoreOffset` is the saved
+ * stable intra-row offset (row top minus container top, negative above the
+ * fold). Returns the finite clamped `scrollTo` top that lands the row exactly
+ * at its saved offset, or `null` when the offset is not a finite number
+ * (fail-closed: the caller keeps its alignment path).
+ */
+export const computeRestoreMessageScrollTop = (args: {
+  elementTopWithinContainer: number
+  restoreOffset: number | null | undefined
+  minScrollTop: number
+}): number | null => {
+  const { elementTopWithinContainer, restoreOffset, minScrollTop } = args
+  if (typeof restoreOffset !== 'number' || !Number.isFinite(restoreOffset)) return null
+  if (!Number.isFinite(elementTopWithinContainer) || !Number.isFinite(minScrollTop)) return null
+  const desired = elementTopWithinContainer - restoreOffset
+  if (!Number.isFinite(desired)) return null
+  const lower = Math.min(0, minScrollTop)
+  return Math.max(lower, Math.min(0, desired))
+}
+
+/**
  * Truthful scroll outcome for the existing transaction `scroll` callback.
  * Reuses the navigation result contract — no new lifecycle or state:
  * - `cancelled`: currency/topic/route/epoch/new-interaction/unmounted/
@@ -146,6 +171,14 @@ export type MessageNavigationIntent =
       targetId: string
       source: MessageViewportNavigationSource
       alignment?: MessageNavigationAlignment
+      /**
+       * Saved stable intra-row offset (row top minus container top) carried
+       * ONLY by bootstrap restore intents. The transaction scroll lands the
+       * row at this offset and skips the write when the pre-paint first
+       * placement already holds it — so no second (start-aligned) write can
+       * cover the correct position. Explicit navigations never set it.
+       */
+      restoreOffset?: number | null
     }
   | {
       kind: 'group'
@@ -158,7 +191,7 @@ export type MessageNavigationIntent =
   | { kind: 'scrollTop'; scrollTop: number; source: 'restore' }
 
 export type ResolvedMessageNavigation =
-  | { kind: 'message'; targetId: string; alignment: MessageNavigationAlignment }
+  | { kind: 'message'; targetId: string; alignment: MessageNavigationAlignment; restoreOffset?: number | null }
   | { kind: 'bottom' }
   | { kind: 'top' }
   | { kind: 'scrollTop'; scrollTop: number }
@@ -212,6 +245,14 @@ export type BootstrapDecision =
 /**
  * Pure decision function for topic-mount navigation bootstrap.
  * Priority: matching pending > saved restore > default (latest).
+ *
+ * Lifecycle responsibility (single transaction recovery): topic-mount
+ * restores run as ONE bootstrap transaction — the armed plan carries the
+ * saved offset for the pre-paint first placement, and the SAME transaction's
+ * scroll below converges on the passed-through `restoreOffset` (skipping its
+ * write when first placement already holds it). The transaction never falls
+ * back to `start` alignment for a restore with a finite saved offset, so no
+ * wrong frame can land after first placement. No new owner or subsystem.
  * Returns the action the caller should take.
  */
 export const resolveBootstrapDecision = (input: BootstrapDecisionInput): BootstrapDecision => {
@@ -221,19 +262,25 @@ export const resolveBootstrapDecision = (input: BootstrapDecisionInput): Bootstr
   if (phase === 'done') return { action: 'done' }
   if (phase === 'pending-in-flight') return { action: 'wait' }
 
-  // Priority 1: matching pending
+  // Priority 1: matching pending (explicit navigation, never a restore).
   if (pending && pending.topicId === topicId) {
     return { action: 'pending', intent: { kind: 'message', targetId: pending.messageId, source: 'pending' } }
   }
 
   // Priority 2: saved restore (only when no matching pending exists).
   // Route-saved-row-anchor: messageId canonical, anchorId legacy alias.
+  // The finite saved intra-row offset rides on the intent so the transaction
+  // scroll restores the stable offset instead of start-aligning the row.
   if (!savedRestoreHandled && savedPosition) {
     const rowAnchor = savedPosition.messageId ?? savedPosition.anchorId
+    const restoreOffset =
+      typeof savedPosition.intraRowOffset === 'number' && Number.isFinite(savedPosition.intraRowOffset)
+        ? savedPosition.intraRowOffset
+        : null
     const intent: MessageNavigationIntent | null = savedPosition.isAtBottom
       ? { kind: 'bottom', source: 'restore' }
       : rowAnchor
-        ? { kind: 'message', targetId: rowAnchor, source: 'restore' }
+        ? { kind: 'message', targetId: rowAnchor, source: 'restore', restoreOffset }
         : savedPosition.scrollTop !== undefined
           ? { kind: 'scrollTop', scrollTop: savedPosition.scrollTop, source: 'restore' }
           : null
@@ -290,7 +337,15 @@ export const resolveMessageNavigation = (
 
   if (intent.kind === 'message') {
     return messages.some((message) => message.id === intent.targetId)
-      ? { kind: 'message', targetId: intent.targetId, alignment: intent.alignment ?? 'start' }
+      ? {
+          kind: 'message',
+          targetId: intent.targetId,
+          alignment: intent.alignment ?? 'start',
+          restoreOffset:
+            typeof intent.restoreOffset === 'number' && Number.isFinite(intent.restoreOffset)
+              ? intent.restoreOffset
+              : null
+        }
       : null
   }
 

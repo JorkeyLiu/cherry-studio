@@ -38,6 +38,7 @@ import {
   canHandleUserViewportScroll,
   chooseNavigationWindow,
   computeColumnReverseMessageScrollTop,
+  computeRestoreMessageScrollTop,
   handlePendingNavigateEvent,
   type MessageNavigationIntent,
   type MessageNavigationResult,
@@ -2499,6 +2500,28 @@ const Messages = ({
             }
             const elementTopWithinContainer = elRect.top - containerRect.top + live.scrollTop
             const minScrollTop = -(live.scrollHeight - live.clientHeight)
+            // Saved-offset restore (bootstrap topic-mount recovery only): the
+            // SAME transaction that armed the pre-paint first placement
+            // converges on the passed-through stable offset — never `start`
+            // alignment. When first placement already holds the offset, the
+            // write is skipped (no second write after first placement); late
+            // layout drift gets exactly one convergent correction here.
+            // Explicit navigations carry no offset and keep the path below.
+            if (resolved.kind === 'message' && typeof resolved.restoreOffset === 'number') {
+              const restoreTop = computeRestoreMessageScrollTop({
+                elementTopWithinContainer,
+                restoreOffset: resolved.restoreOffset,
+                minScrollTop
+              })
+              if (restoreTop === null) return 'not-found' as const
+              if (Math.abs(live.scrollTop - restoreTop) <= 1) return 'success' as const
+              try {
+                live.scrollTo({ top: restoreTop })
+              } catch {
+                return 'cancelled' as const
+              }
+              return 'success' as const
+            }
             const top = computeColumnReverseMessageScrollTop({
               elementTopWithinContainer,
               containerClientHeight: live.clientHeight,

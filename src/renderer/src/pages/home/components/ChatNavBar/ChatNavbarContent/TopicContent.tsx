@@ -10,7 +10,7 @@ import { selectActiveBranchId } from '@renderer/store/topicBranch'
 import type { Assistant, Topic } from '@renderer/types'
 import { Button, Popover } from 'antd'
 import { ChevronDown, ChevronRight, GitFork } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import SelectModelButton from '../../SelectModelButton'
@@ -71,6 +71,82 @@ interface CascaderOption {
   hasChildren: boolean
 }
 
+/**
+ * Tail-first breadcrumb overflow at whole-segment granularity: the box holds
+ * one wrap span per segment in logical order, each carrying its own leading
+ * " / " separator (except the first). While it overflows, leading wraps are
+ * hidden front-to-back — the remainder always starts at a segment boundary,
+ * never a mid-word cut. If even the lone last segment overflows, its head is
+ * trimmed character-wise behind an in-text "…" (whole glyphs only, never a
+ * sliced glyph). A static "…" marker shows whenever leading wraps are hidden
+ * without a trimmed tail. Direct DOM only (no React state), so scroll/resize
+ * sync never re-renders.
+ */
+function syncCrumbTail(
+  el: HTMLSpanElement | null,
+  lead: HTMLSpanElement | null,
+  showTail: boolean,
+  fullText: string
+): void {
+  if (!el) return
+  const kids = Array.from(el.children) as HTMLElement[]
+  // Reset: restore wraps and the original tail text.
+  kids.forEach((kid) => {
+    kid.style.display = ''
+    if (kid.dataset.origSeg !== undefined) {
+      const textNode = Array.from(kid.childNodes).find((node) => node.nodeType === 3)
+      if (textNode) textNode.textContent = kid.dataset.origSeg
+      delete kid.dataset.origSeg
+      const sep = kid.firstElementChild as HTMLElement | null
+      if (sep) sep.style.display = ''
+    }
+  })
+  el.style.textOverflow = 'ellipsis'
+  el.scrollLeft = 0
+  el.removeAttribute('aria-label')
+  if (!showTail || el.scrollWidth <= el.clientWidth + 1) {
+    if (lead) lead.style.display = 'none'
+    return
+  }
+  let guard = kids.length + 1
+  while (guard-- > 0) {
+    if (el.scrollWidth <= el.clientWidth + 1) break
+    const visible = (Array.from(el.children) as HTMLElement[]).filter((kid) => kid.style.display !== 'none')
+    // The last segment is never hidden.
+    if (visible.length <= 1) break
+    visible[0].style.display = 'none'
+  }
+  const visible = (Array.from(el.children) as HTMLElement[]).filter((kid) => kid.style.display !== 'none')
+  const hiddenCount = kids.length - visible.length
+  const last = visible[visible.length - 1]
+  let trimmed = false
+  if (last && el.scrollWidth > el.clientWidth + 1) {
+    // Lone overlong tail: trim its head behind an in-text "…", whole glyphs.
+    const textNode = Array.from(last.childNodes).find((node) => node.nodeType === 3)
+    if (textNode && textNode.textContent) {
+      const orig = textNode.textContent
+      last.dataset.origSeg = orig
+      let chars = Array.from(orig)
+      textNode.textContent = `…${chars.join('')}`
+      while (chars.length > 1 && el.scrollWidth > el.clientWidth + 1) {
+        chars = chars.slice(1)
+        textNode.textContent = `…${chars.join('')}`
+      }
+      trimmed = true
+      const sep = last.firstElementChild as HTMLElement | null
+      if (sep) sep.style.display = 'none'
+      el.setAttribute('aria-label', fullText)
+    }
+  }
+  if (!trimmed && el.scrollWidth > el.clientWidth + 1) {
+    // Last-resort residual (should not normally happen): scroll to the end.
+    // Clip while scrolled: Chromium does not paint scrolled ellipsis text.
+    el.style.textOverflow = 'clip'
+    el.scrollLeft = el.scrollWidth
+  }
+  if (lead) lead.style.display = hiddenCount > 0 && !trimmed ? '' : 'none'
+}
+
 const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
   const { t } = useTranslation()
   const dispatch = useAppDispatch()
@@ -107,10 +183,38 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
   const byId = useMemo(() => new Map(branches.map((b) => [b.id, b])), [branches])
 
   const topicName = activeTopic.name && activeTopic.name.length > 0 ? activeTopic.name : activeTopic.id
-  const breadcrumb =
-    path.length === 0
-      ? topicName
-      : `${topicName} / ${path.map((b) => (b.name && b.name.length > 0 ? b.name : b.id)).join(' / ')}`
+  const branchNames = path.map((b) => (b.name && b.name.length > 0 ? b.name : b.id))
+  const breadcrumb = path.length === 0 ? topicName : `${topicName} / ${branchNames.join(' / ')}`
+  // Segments mirror the breadcrumb string exactly (separators carry their own
+  // spans), so textContent/order stay identical while overflow can hide whole
+  // leading segments. Rendered via array (no inter-element whitespace) to
+  // keep the " / " separators exact.
+  const breadcrumbSegments = path.length === 0 ? [topicName] : [topicName, ...branchNames]
+
+  // Tail-first overflow: the breadcrumb keeps logical (root-first) order in a
+  // single line; when it overflows, whole leading segments hide front-to-back
+  // and the current branch stays visible. No direction or ordering tricks, so
+  // text order and the popover navigation are untouched. A lone title keeps
+  // the classic head-visible tail ellipsis. A static "…" prefix (sibling of
+  // the scroll box, never overlaid) marks the hidden front.
+  const crumbRef = useRef<HTMLSpanElement>(null)
+  const leadRef = useRef<HTMLSpanElement>(null)
+  const hasBranchPath = path.length > 0
+  useEffect(() => {
+    syncCrumbTail(crumbRef.current, leadRef.current, hasBranchPath, breadcrumb)
+  }, [hasBranchPath, breadcrumb])
+  useEffect(() => {
+    const el = crumbRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const keepTailVisible = (): void => syncCrumbTail(crumbRef.current, leadRef.current, hasBranchPath, breadcrumb)
+    const observer = new ResizeObserver(keepTailVisible)
+    observer.observe(el)
+    el.addEventListener('scroll', keepTailVisible, { passive: true })
+    return () => {
+      observer.disconnect()
+      el.removeEventListener('scroll', keepTailVisible)
+    }
+  }, [hasBranchPath, breadcrumb])
 
   // Default expansion: ancestors of the current node (excluding the current
   // node itself) — exactly the columns needed to place the current branch in
@@ -273,7 +377,7 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
   return (
     <>
       {/* Separator */}
-      <ChevronRight className="h-4 w-4 text-gray-400" />
+      <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
       <Popover
         content={content}
         trigger="click"
@@ -295,13 +399,56 @@ const BranchSelectorEntry = ({ activeTopic }: BranchSelectorEntryProps) => {
           size="small"
           autoInsertSpace={false}
           icon={<GitFork size={14} />}
-          style={{ display: 'flex', alignItems: 'center', gap: 4, maxWidth: 320 }}>
+          // Cap against the toolbar budget (320px) and the live navbar column
+          // (100cqw of the navbar scroll container): in a narrow window the
+          // entry shrinks instead of overflowing the navbar, so the crumb's
+          // own tail-first hiding stays user-visible and the tools stay pinned.
+          // Plain % won't do: ancestors are content-sized in the scroll
+          // context, so % never reflects the visible column width.
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            maxWidth: 'min(320px, 100cqw)',
+            minWidth: 0,
+            overflow: 'hidden'
+          }}>
           <span
-            data-testid="branch-selector-breadcrumb"
-            style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>
-            {breadcrumb}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              flex: '1 1 auto',
+              minWidth: 0,
+              maxWidth: '100%',
+              overflow: 'hidden',
+              fontSize: 12
+            }}>
+            {/* Leading overflow marker: in normal flow (never overlaid), so no
+              theme background matching is needed; shown only while scrolled. */}
+            <span ref={leadRef} aria-hidden="true" style={{ display: 'none', flex: '0 0 auto', marginRight: 2 }}>
+              …
+            </span>
+            <span
+              ref={crumbRef}
+              data-testid="branch-selector-breadcrumb"
+              title={breadcrumb}
+              style={{
+                display: 'block',
+                flex: '1 1 auto',
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}>
+              {breadcrumbSegments.map((segment, index) => (
+                <span key={index}>
+                  {index > 0 && <span>{' / '}</span>}
+                  {segment}
+                </span>
+              ))}
+            </span>
           </span>
-          <ChevronDown size={13} />
+          <ChevronDown size={13} className="shrink-0" />
         </Button>
       </Popover>
     </>

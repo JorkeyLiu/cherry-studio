@@ -112,8 +112,15 @@ const BackToBottomButton: FC<BackToBottomButtonProps> = ({ onScrollToBottom, con
   // messages beyond the projection (`hasMoreNewer === true`), so the button
   // stays visible there. Hidden only when physically at the bottom AND the
   // current projection is complete through newest.
+  //
+  // Stable-mount contract (keyboard-paging root fix): the button node is
+  // ALWAYS mounted. First scroll away from the bottom previously inserted
+  // this sibling of `#messages`, rebuilding the layout tree mid-gesture and
+  // aborting the in-flight native smooth paging (~79px truncation instead of
+  // the full ~729px page on 1706x967 / ch769 / sh5360). Visibility, hit-test,
+  // and assistive exposure are gated here; no DOM insert/remove ever occurs.
   const hasNewerBeyondProjection = hasMoreNewer === true
-  if (isAtBottom && !hasNewerBeyondProjection) return null
+  const hidden = isAtBottom && !hasNewerBeyondProjection
 
   return (
     <BottomButton
@@ -122,13 +129,23 @@ const BackToBottomButton: FC<BackToBottomButtonProps> = ({ onScrollToBottom, con
       data-testid="conversation-back-to-bottom"
       aria-label={t('chat.navigation.bottom')}
       title={t('chat.navigation.bottom')}
-      onClick={onScrollToBottom}>
+      onClick={(e) => {
+        if (hidden) {
+          e.preventDefault()
+          return
+        }
+        onScrollToBottom()
+      }}
+      disabled={hidden}
+      tabIndex={hidden ? -1 : 0}
+      aria-hidden={hidden}
+      $hidden={hidden}>
       <ChevronDown size={16} />
     </BottomButton>
   )
 }
 
-const BottomButton = styled.button`
+const BottomButton = styled.button<{ $hidden?: boolean }>`
   position: absolute;
   right: 16px;
   bottom: 12px;
@@ -138,6 +155,9 @@ const BottomButton = styled.button`
   display: flex;
   align-items: center;
   justify-content: center;
+  visibility: ${(props) => (props.$hidden ? 'hidden' : 'visible')};
+  opacity: ${(props) => (props.$hidden ? 0 : 1)};
+  pointer-events: ${(props) => (props.$hidden ? 'none' : 'auto')};
   border-radius: 50%;
   border: 1px solid var(--color-border);
   background: var(--color-background);
