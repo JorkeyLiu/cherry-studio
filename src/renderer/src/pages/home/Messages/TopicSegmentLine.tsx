@@ -63,13 +63,13 @@ const TopicSegmentLine: React.FC<TopicSegmentLineProps> = ({ segment, isFirst, i
   )
 
   return (
-    <LineContainer $isFirst={isFirst} $isLast={isLast}>
+    <LineContainer $isFirst={isFirst} $isLast={isLast} data-testid="topic-segment-line">
       {/* 竖线 */}
       <Line $isFirst={isFirst} $isLast={isLast} $color={color} />
 
       {/* 首条消息处渲染标签卡 */}
       {isFirst && (
-        <TabContainer $color={color} onClick={stopRowNavigation}>
+        <TabContainer $color={color} onClick={stopRowNavigation} data-testid="topic-segment-label">
           <TabContent>
             <ColorDot $color={color} />
             {isEditing ? (

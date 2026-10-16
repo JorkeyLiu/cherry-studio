@@ -1,5 +1,20 @@
+import type { TopicSegment } from '@renderer/types/topicSegment'
 import { Fragment, memo, type MouseEvent as ReactMouseEvent, type ReactNode, useCallback } from 'react'
 import styled from 'styled-components'
+
+/**
+ * Segment/group chrome host: the positioned wrapper that owns ONLY the
+ * topic-segment chrome (the vertical rule + the segment label pill) as a
+ * sibling of the interactive turn. It contains no message content, carries
+ * no capture, no `inert`, and no cover, so the chrome is hit-testable on its
+ * own layer in both modes while the turn subtree keeps its entire actual
+ * content (including message toolbars) and all edit-selection semantics
+ * untouched. `position: relative` adds no box offset — chrome anchoring and
+ * the turn's own layout are unchanged.
+ */
+export const RunHost = styled.div`
+  position: relative;
+`
 
 /**
  * Selected-group outline. Boundary dividers (fork / context) render as
@@ -212,6 +227,17 @@ export interface FlowBodyEntry {
   kind: string
   /** This group's own layer run id (liveness stays on the child). */
   layerRunId: string
+  /**
+   * Owning topic-segment for this group, if any. Segment chrome is the
+   * group/segment's own visual identity, not message-turn content, so it is
+   * rendered by the run chrome host (sibling of the turn) rather than inside
+   * the turn subtree.
+   */
+  segment?: TopicSegment
+  /** This group's first message is the owning segment's authority first message. */
+  segmentIsFirst?: boolean
+  /** This group's last message is the owning segment's authority last message. */
+  segmentIsLast?: boolean
   /** The group wrapper (group div only — never a divider). */
   bodyNode: ReactNode
 }
@@ -233,10 +259,35 @@ export type OrderedFlowItem =
   | { kind: 'boundary'; entry: FlowBoundaryEntry }
 
 /**
+ * Topic-segment membership identity used for run grouping: the owning
+ * segment id, or `null` when the group is unsegmented. Two adjacent
+ * same-askId groups join only while this identity matches, so a run is
+ * always segment-homogeneous (all members share one segment, or all are
+ * unsegmented). `segmentIsFirst` / `segmentIsLast` are position flags
+ * *within* one segment and never split a homogeneous run; only a real
+ * membership transition does — unsegmented↔segmented, or segment↔other
+ * segment.
+ */
+function runSegmentMembership(entry: FlowBodyEntry): string | null {
+  return entry.segment ? entry.segment.id : null
+}
+
+/**
  * Group adjacent turn entries into contiguous EditTurn runs. A boundary
  * node always flushes/closes the current run: even identical askIds on
  * both sides of a divider yield distinct turn DOM containers; a turn
  * wrapper never spans a boundary.
+ *
+ * Adjacency also requires segment homogeneity: a segment-membership
+ * transition (unsegmented↔segmented, or segment↔other segment) flushes the
+ * run even for a shared askId. Normal whole-turn segmentation keeps one
+ * askId's user + assistant groups inside one segment, so a normal turn
+ * still yields a single run; the split only surfaces the partial-turn /
+ * disjoint membership that import and the segment API can already produce,
+ * guaranteeing every run owns exactly one segment's chrome (no label or
+ * color bound is silently dropped). The run keeps its original
+ * `turnAskId`, so selection identity and interaction semantics are
+ * untouched, and `deriveTurnKey` stays the sole unique/stable run id.
  *
  * A viewport-partial turn wraps only its mounted members; non-consecutive
  * groups with the same askId (intervening content between them) form
@@ -259,7 +310,12 @@ export function buildOrderedFlowItems(nodes: readonly FlowNode[]): OrderedFlowIt
     }
     const entry = node.entry
     const last = current[current.length - 1]
-    if (last && last.turnAskId !== '' && last.turnAskId === entry.turnAskId) {
+    if (
+      last &&
+      last.turnAskId !== '' &&
+      last.turnAskId === entry.turnAskId &&
+      runSegmentMembership(last) === runSegmentMembership(entry)
+    ) {
       current.push(entry)
     } else {
       flush()
@@ -297,6 +353,55 @@ interface RenderEditFlowNodesOptions {
   nodes: FlowNode[]
   isEditMode: boolean
   onTurnClick?: (askId: string, isCtrl: boolean, isShift: boolean) => void
+  /**
+   * Renders the owning topic-segment chrome (vertical rule + label) for one
+   * turn run. It is invoked at the run chrome host — a sibling of the
+   * interactive turn, outside its `inert` content and its click-capture
+   * cover — so segment controls stay independently hit-testable while turn
+   * selection is unaffected. Omit to render no chrome (tests/probes).
+   */
+  renderSegmentChrome?: (chrome: RunSegmentChrome) => ReactNode
+}
+
+/** Resolved per-run segment chrome feeding the chrome renderer. */
+export interface RunSegmentChrome {
+  segment: TopicSegment
+  isFirst: boolean
+  isLast: boolean
+  messageCount?: number
+}
+
+/**
+ * Resolve the segment chrome for one turn run from its member groups.
+ * `buildOrderedFlowItems` enforces a segment-homogeneous run (every member
+ * shares one segment, or every member is unsegmented), so this never has to
+ * choose between segments: a run either yields its single owning segment's
+ * chrome or none. The label anchors on the run member that is the owning
+ * segment's authority first message, falling back to the first segmented
+ * member when that anchor message lies outside the mounted window
+ * (viewport-partial run); the rule spans the whole run, trimming its top on
+ * the segment-first member and its bottom on the segment-last member —
+ * matching the character of the per-group rule it replaces, aggregated to
+ * the run that actually owns the content.
+ */
+export function deriveRunSegmentChrome(run: readonly FlowBodyEntry[]): RunSegmentChrome | null {
+  let anchor: FlowBodyEntry | undefined
+  for (const g of run) {
+    if (g.segment && g.segmentIsFirst) {
+      anchor = g
+      break
+    }
+  }
+  if (!anchor) anchor = run.find((g) => g.segment)
+  if (!anchor?.segment) return null
+  const isFirst = !!anchor.segmentIsFirst
+  const isLast = run.some((g) => g.segmentIsLast)
+  return {
+    segment: anchor.segment,
+    isFirst,
+    isLast,
+    messageCount: isFirst ? anchor.segment.messageCount : undefined
+  }
 }
 
 /**
@@ -324,22 +429,32 @@ interface RenderEditFlowNodesOptions {
  *   boundary naturally inside the single unbroken outline — no split
  *   outlines, no duplicated IDs, no divider-specific visual hacks.
  */
-export function renderEditFlowNodes({ nodes, isEditMode, onTurnClick }: RenderEditFlowNodesOptions): ReactNode[] {
+export function renderEditFlowNodes({
+  nodes,
+  isEditMode,
+  onTurnClick,
+  renderSegmentChrome
+}: RenderEditFlowNodesOptions): ReactNode[] {
   const ordered = buildOrderedFlowItems(nodes)
   const out: ReactNode[] = []
 
-  const renderTurnRun = (run: FlowBodyEntry[], isSelected: boolean) => (
-    <EditTurn
-      key={deriveTurnKey(run)}
-      turnAskId={run[0]?.turnAskId ?? ''}
-      isEditMode={isEditMode}
-      isSelected={isSelected}
-      onTurnClick={onTurnClick}>
-      {run.map((g) => (
-        <Fragment key={g.groupKey}>{g.bodyNode}</Fragment>
-      ))}
-    </EditTurn>
-  )
+  const renderTurnRun = (run: FlowBodyEntry[], isSelected: boolean) => {
+    const chrome = renderSegmentChrome ? deriveRunSegmentChrome(run) : null
+    return (
+      <RunHost key={deriveTurnKey(run)}>
+        {chrome && renderSegmentChrome ? renderSegmentChrome(chrome) : null}
+        <EditTurn
+          turnAskId={run[0]?.turnAskId ?? ''}
+          isEditMode={isEditMode}
+          isSelected={isSelected}
+          onTurnClick={onTurnClick}>
+          {run.map((g) => (
+            <Fragment key={g.groupKey}>{g.bodyNode}</Fragment>
+          ))}
+        </EditTurn>
+      </RunHost>
+    )
+  }
 
   let index = 0
   while (index < ordered.length) {
@@ -407,19 +522,7 @@ export function renderEditFlowNodes({ nodes, isEditMode, onTurnClick }: RenderEd
           if (c.kind === 'boundary') {
             return <Fragment key={c.entry.boundaryKey}>{c.entry.node}</Fragment>
           }
-          const run = c.run
-          return (
-            <EditTurn
-              key={deriveTurnKey(run)}
-              turnAskId={run[0]?.turnAskId ?? ''}
-              isEditMode={isEditMode}
-              isSelected
-              onTurnClick={onTurnClick}>
-              {run.map((g) => (
-                <Fragment key={g.groupKey}>{g.bodyNode}</Fragment>
-              ))}
-            </EditTurn>
-          )
+          return renderTurnRun(c.run, true)
         })}
       </SelectionBlock>
     )

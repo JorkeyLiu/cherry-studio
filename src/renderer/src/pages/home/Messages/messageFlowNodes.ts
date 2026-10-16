@@ -209,6 +209,9 @@ export function buildMessageFlowNodes(input: BuildMessageFlowNodesInput): FlowNo
             segmentIsLive: seg.isLive,
             kind,
             layerRunId: layer.stableLayerId,
+            segment,
+            segmentIsFirst: isFirst,
+            segmentIsLast: isLast,
             bodyNode
           }
         })

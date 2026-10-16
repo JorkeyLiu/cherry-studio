@@ -648,20 +648,12 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
           onSelectRoute={onSelectRoute}
         />
       ),
-      renderBody: ({ kind, stableGroupId, layerRunId, segment, isFirst, isLast, groupMessages }) => (
+      renderBody: ({ kind, stableGroupId, layerRunId, groupMessages }) => (
         <div
           style={{ position: 'relative' }}
           data-layer-kind={kind}
           data-stable-group-id={stableGroupId}
           data-layer-run-id={layerRunId}>
-          {segment && (
-            <TopicSegmentLine
-              segment={segment}
-              isFirst={isFirst}
-              isLast={isLast}
-              messageCount={isFirst ? segment.messageCount : undefined}
-            />
-          )}
           <MessageGroup
             messages={groupMessages}
             topic={topic}
@@ -683,8 +675,22 @@ const MessagesContent: React.FC<MessagesContentProps> = ({
     // Turn runs group adjacent mounted bodies of one Q&A turn under a
     // single interaction container with boundary flush; selected
     // contiguous ranges keep one atomic outline that wraps interior
-    // boundaries — see renderEditFlowNodes.
-    return renderEditFlowNodes({ nodes, isEditMode, onTurnClick: handleGroupClick })
+    // boundaries — see renderEditFlowNodes. Segment chrome (vertical rule +
+    // label) is group/segment identity, not turn content, so it renders on
+    // the run chrome host as a sibling of the interactive turn.
+    return renderEditFlowNodes({
+      nodes,
+      isEditMode,
+      onTurnClick: handleGroupClick,
+      renderSegmentChrome: ({ segment, isFirst, isLast }) => (
+        <TopicSegmentLine
+          segment={segment}
+          isFirst={isFirst}
+          isLast={isLast}
+          messageCount={isFirst ? segment.messageCount : undefined}
+        />
+      )
+    })
   }
 
   return (

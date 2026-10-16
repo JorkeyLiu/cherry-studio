@@ -24,6 +24,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   buildOrderedFlowItems,
+  deriveRunSegmentChrome,
   deriveSelectionRangeKey,
   deriveTurnAskId,
   deriveTurnKey,
@@ -900,5 +901,309 @@ describe('renderEditFlowNodes', () => {
     expect(turn.classList.contains('edit-turn-interactive')).toBe(false)
     fireEvent.click(turn)
     expect(onTurnClick).not.toHaveBeenCalled()
+  })
+})
+
+describe('segment chrome ownership (group/run host sibling)', () => {
+  const segmentFixture = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['u1'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'u1',
+      lastMessageId: 'u1',
+      messageCount: 7,
+      ...overrides
+    }) as any
+
+  const segmentedTurn = (groupKey: string, opts?: Partial<FlowBodyEntry>): FlowNode => ({
+    kind: 'turn',
+    entry: {
+      groupKey,
+      turnAskId: opts?.turnAskId ?? 'u1',
+      selected: opts?.selected ?? false,
+      segmentId: opts?.segmentId ?? 'seg:edit',
+      segmentIsLive: opts?.segmentIsLive ?? false,
+      kind: opts?.kind ?? 'history',
+      layerRunId: opts?.layerRunId ?? 'layer:x',
+      segment: opts?.segment ?? segmentFixture(),
+      segmentIsFirst: opts?.segmentIsFirst,
+      segmentIsLast: opts?.segmentIsLast,
+      bodyNode: opts?.bodyNode ?? (
+        <div
+          data-layer-kind="history"
+          data-layer-run-id="layer:x"
+          data-stable-group-id={groupKey}
+          data-testid={`body-${groupKey}`}>
+          {groupKey}
+        </div>
+      )
+    }
+  })
+
+  it('renders segment chrome as a sibling of the turn, outside inert content and the click cover', () => {
+    const onTurnClick = vi.fn()
+    const nodes: FlowNode[] = [
+      segmentedTurn('g-assistant', { segmentIsFirst: false, segmentIsLast: true }),
+      segmentedTurn('g-user', { segmentIsFirst: true })
+    ]
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          onTurnClick,
+          renderSegmentChrome: ({ isFirst, isLast, messageCount }) => (
+            <div
+              data-testid="segment-chrome"
+              data-first={String(isFirst)}
+              data-last={String(isLast)}
+              data-count={messageCount}
+            />
+          )
+        })}
+      </>
+    )
+    const chrome = container.querySelector('[data-testid="segment-chrome"]') as HTMLElement
+    const turn = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(chrome).not.toBeNull()
+    // Chrome is a sibling of the turn — never inside its inert content/capture
+    // subtree.
+    expect(turn.contains(chrome)).toBe(false)
+    expect(chrome.closest('[data-testid="edit-turn"]')).toBeNull()
+    const content = container.querySelector('[data-testid="body-g-user"]')!.parentElement as HTMLElement
+    expect(content.hasAttribute('inert')).toBe(true)
+    expect(content.contains(chrome)).toBe(false)
+    // Run-level first/last spans: first from the segment-first member, last
+    // from the segment-last member; count only on first.
+    expect(chrome.getAttribute('data-first')).toBe('true')
+    expect(chrome.getAttribute('data-last')).toBe('true')
+    expect(chrome.getAttribute('data-count')).toBe('7')
+    // Chrome click does not select the turn; original content still does.
+    fireEvent.click(chrome)
+    expect(onTurnClick).not.toHaveBeenCalled()
+    fireEvent.click(container.querySelector('[data-testid="body-g-user"]') as HTMLElement)
+    expect(onTurnClick).toHaveBeenCalledTimes(1)
+    expect(onTurnClick).toHaveBeenCalledWith('u1', false, false)
+  })
+
+  it('keeps chrome in normal mode too (shared rendering, no edit-mode variant)', () => {
+    const nodes: FlowNode[] = [segmentedTurn('g-user', { segmentIsFirst: true, segmentIsLast: true })]
+    const { container, rerender } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: false,
+          renderSegmentChrome: () => <div data-testid="segment-chrome" />
+        })}
+      </>
+    )
+    expect(container.querySelector('[data-testid="segment-chrome"]')).not.toBeNull()
+    const turn = container.querySelector('[data-testid="edit-turn"]') as HTMLElement
+    expect(turn.classList.contains('edit-turn-interactive')).toBe(false)
+    expect(turn.querySelector('[data-testid="edit-turn-cover"]')).toBeNull()
+    // Toggle edit mode keeps the chrome present.
+    rerender(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          renderSegmentChrome: () => <div data-testid="segment-chrome" />
+        })}
+      </>
+    )
+    expect(container.querySelector('[data-testid="segment-chrome"]')).not.toBeNull()
+    expect(
+      (container.querySelector('[data-testid="segment-chrome"]') as Element).closest('[data-testid="edit-turn"]')
+    ).toBeNull()
+  })
+
+  it('renders no chrome when no run member belongs to a segment', () => {
+    const nodes: FlowNode[] = [
+      { kind: 'turn', entry: { ...(segmentedTurn('g-user').entry as FlowBodyEntry), segment: undefined } }
+    ]
+    const renderChrome = vi.fn()
+    render(<>{renderEditFlowNodes({ nodes, isEditMode: true, renderSegmentChrome: renderChrome })}</>)
+    expect(renderChrome).not.toHaveBeenCalled()
+  })
+
+  it('deriveRunSegmentChrome anchors on the segment-first member and spans run-wide last', () => {
+    const run: FlowBodyEntry[] = [
+      { ...(segmentedTurn('g-assistant', { segmentIsLast: true }).entry as FlowBodyEntry) },
+      { ...(segmentedTurn('g-user', { segmentIsFirst: true }).entry as FlowBodyEntry) }
+    ]
+    const chrome = deriveRunSegmentChrome(run)
+    expect(chrome).not.toBeNull()
+    expect(chrome!.isFirst).toBe(true)
+    expect(chrome!.isLast).toBe(true)
+    expect(chrome!.messageCount).toBe(7)
+    expect(chrome!.segment.id).toBe('seg-1')
+
+    const middle: FlowBodyEntry[] = [{ ...(segmentedTurn('g-mid').entry as FlowBodyEntry) }]
+    const mid = deriveRunSegmentChrome(middle)
+    expect(mid!.isFirst).toBe(false)
+    expect(mid!.isLast).toBe(false)
+    expect(mid!.messageCount).toBeUndefined()
+
+    expect(
+      deriveRunSegmentChrome([{ ...(segmentedTurn('g-user').entry as FlowBodyEntry), segment: undefined }])
+    ).toBeNull()
+  })
+})
+
+describe('segment-homogeneous run invariant', () => {
+  const segmentFixture = (overrides: Record<string, unknown> = {}) =>
+    ({
+      id: 'seg-1',
+      topicId: 't1',
+      name: 'Seg',
+      messageIds: ['u1'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortOrder: 0,
+      firstMessageId: 'u1',
+      lastMessageId: 'u1',
+      messageCount: 7,
+      ...overrides
+    }) as any
+
+  const segmentedTurn = (groupKey: string, opts?: Partial<FlowBodyEntry>): FlowNode => ({
+    kind: 'turn',
+    entry: {
+      groupKey,
+      turnAskId: opts?.turnAskId ?? 'u1',
+      selected: opts?.selected ?? false,
+      segmentId: opts?.segmentId ?? 'seg:edit',
+      segmentIsLive: opts?.segmentIsLive ?? false,
+      kind: opts?.kind ?? 'history',
+      layerRunId: opts?.layerRunId ?? 'layer:x',
+      segment: opts?.segment,
+      segmentIsFirst: opts?.segmentIsFirst,
+      segmentIsLast: opts?.segmentIsLast,
+      bodyNode: opts?.bodyNode ?? (
+        <div
+          data-layer-kind="history"
+          data-layer-run-id="layer:x"
+          data-stable-group-id={groupKey}
+          data-testid={`body-${groupKey}`}>
+          {groupKey}
+        </div>
+      )
+    }
+  })
+
+  const runsOf = (nodes: FlowNode[]): FlowBodyEntry[][] =>
+    buildOrderedFlowItems(nodes)
+      .filter((i) => i.kind === 'turn-run')
+      .map((i) => (i as { run: FlowBodyEntry[] }).run)
+
+  it('splits a same-askId turn at an unsegmented↔segment transition at the assistant subgroup', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const runs = runsOf([
+      segmentedTurn('g-assistant-seg', { turnAskId: 'u1', segment: segA, segmentIsFirst: true, segmentIsLast: true }),
+      segmentedTurn('g-user-plain', { turnAskId: 'u1', segment: undefined })
+    ])
+    expect(runs.length).toBe(2)
+    expect(runs[0].map((g) => g.groupKey)).toEqual(['g-assistant-seg'])
+    expect(runs[1].map((g) => g.groupKey)).toEqual(['g-user-plain'])
+    expect(runs[0][0].segment?.id).toBe('seg-a')
+    expect(runs[1][0].segment).toBeUndefined()
+  })
+
+  it('keeps first/last flags of one segment in a single run (flags alone never split)', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const runs = runsOf([
+      segmentedTurn('g-assistant', { turnAskId: 'u1', segment: segA, segmentIsLast: true }),
+      segmentedTurn('g-user', { turnAskId: 'u1', segment: segA, segmentIsFirst: true })
+    ])
+    expect(runs.length).toBe(1)
+    expect(runs[0].map((g) => g.groupKey)).toEqual(['g-assistant', 'g-user'])
+    const chrome = deriveRunSegmentChrome(runs[0])
+    expect(chrome!.isFirst).toBe(true)
+    expect(chrome!.isLast).toBe(true)
+    expect(chrome!.segment.id).toBe('seg-a')
+  })
+
+  it('retains one chrome per segment for adjacent same-askId runs in distinct segments (no bleed); selection stays on the shared askId', () => {
+    const onTurnClick = vi.fn()
+    const segA = segmentFixture({ id: 'seg-a', messageCount: 3 })
+    const segB = segmentFixture({ id: 'seg-b', messageCount: 5 })
+    const nodes: FlowNode[] = [
+      segmentedTurn('g-b', { turnAskId: 'u1', segment: segB, segmentIsLast: true }),
+      segmentedTurn('g-a', { turnAskId: 'u1', segment: segA, segmentIsFirst: true })
+    ]
+    const seen: string[] = []
+    const { container } = render(
+      <>
+        {renderEditFlowNodes({
+          nodes,
+          isEditMode: true,
+          onTurnClick,
+          renderSegmentChrome: ({ segment }) => {
+            seen.push(segment.id)
+            return <div data-testid={`chrome-${segment.id}`} />
+          }
+        })}
+      </>
+    )
+    // One homogeneous run per segment, each with its own chrome, in flow order.
+    expect(seen).toEqual(['seg-b', 'seg-a'])
+    expect(container.querySelectorAll('[data-testid="chrome-seg-a"]').length).toBe(1)
+    expect(container.querySelectorAll('[data-testid="chrome-seg-b"]').length).toBe(1)
+    // No bleed: each chrome sits beside its own turn only.
+    const turns = Array.from(container.querySelectorAll('[data-testid="edit-turn"]')) as HTMLElement[]
+    const turnA = turns.find((t) => t.querySelector('[data-testid="body-g-a"]')) as HTMLElement
+    const turnB = turns.find((t) => t.querySelector('[data-testid="body-g-b"]')) as HTMLElement
+    expect(turnA.querySelector('[data-testid="chrome-seg-a"]')).toBeNull()
+    expect(turnB.querySelector('[data-testid="chrome-seg-b"]')).toBeNull()
+    const hostA = turnA.parentElement as HTMLElement
+    const hostB = turnB.parentElement as HTMLElement
+    expect(hostA.querySelector('[data-testid="chrome-seg-a"]')).not.toBeNull()
+    expect(hostA.querySelector('[data-testid="chrome-seg-b"]')).toBeNull()
+    expect(hostB.querySelector('[data-testid="chrome-seg-b"]')).not.toBeNull()
+    expect(hostB.querySelector('[data-testid="chrome-seg-a"]')).toBeNull()
+    // Selection identity is the shared askId on both runs.
+    expect(turnA.getAttribute('data-turn-ask')).toBe('u1')
+    expect(turnB.getAttribute('data-turn-ask')).toBe('u1')
+    fireEvent.click(container.querySelector('[data-testid="body-g-a"]') as HTMLElement)
+    fireEvent.click(container.querySelector('[data-testid="body-g-b"]') as HTMLElement)
+    expect(onTurnClick).toHaveBeenNthCalledWith(1, 'u1', false, false)
+    expect(onTurnClick).toHaveBeenNthCalledWith(2, 'u1', false, false)
+  })
+
+  it('derives distinct stable run ids for adjacent same-askId runs split by segment membership', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const segB = segmentFixture({ id: 'seg-b' })
+    const runs = runsOf([
+      segmentedTurn('g-b', { turnAskId: 'u1', segment: segB }),
+      segmentedTurn('g-a', { turnAskId: 'u1', segment: segA })
+    ])
+    expect(runs.length).toBe(2)
+    const keys = runs.map((run) => deriveTurnKey(run))
+    expect(new Set(keys).size).toBe(2)
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
+  it('still joins a normal whole-turn run (same segment, same askId) and keeps boundaries split', () => {
+    const segA = segmentFixture({ id: 'seg-a' })
+    const joined = runsOf([
+      segmentedTurn('g-assistant', { turnAskId: 'u1', segment: segA, segmentIsLast: true }),
+      segmentedTurn('g-user', { turnAskId: 'u1', segment: segA, segmentIsFirst: true })
+    ])
+    expect(joined.length).toBe(1)
+    expect(joined[0].map((g) => g.groupKey)).toEqual(['g-assistant', 'g-user'])
+    const split = buildOrderedFlowItems([
+      segmentedTurn('g1', { turnAskId: 'ask-x', segment: segA }),
+      {
+        kind: 'boundary',
+        entry: { boundaryKey: 'b1', boundaryKind: 'fork', node: <div data-testid="div-1" /> }
+      },
+      segmentedTurn('g2', { turnAskId: 'ask-x', segment: segA })
+    ])
+    expect(split.filter((i) => i.kind === 'turn-run').length).toBe(2)
   })
 })
